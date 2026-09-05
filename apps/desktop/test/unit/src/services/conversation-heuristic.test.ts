@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
 import { describe, it, expect } from 'vitest';
 
-import { buildDeterministicConversation } from '../../../../src/services/conversation-heuristic';
+import {
+  buildDeterministicConversation,
+  parseAttribution,
+} from '../../../../src/services/conversation-heuristic';
 
 const email = (over: Partial<any> = {}): any => ({
   id: 'e1',
@@ -102,5 +105,62 @@ describe('buildDeterministicConversation — standalone email passthrough', () =
     const rawBody = `<div><p>Sohum Jadeja wrote:</p><blockquote style="border-left:3px solid #6c5ce7">After investigating the issue, ${tail}</blockquote></div>`;
     const [msg] = buildDeterministicConversation([email({ rawBody })], 'advik.d@sarv.com');
     expect(msg.body).toContain(tail); // full sentence, not cut
+  });
+});
+
+/**
+ * The attribution line is the ONLY record of when a quoted message was sent, so
+ * a misread of it is a message shown at the wrong time AND placed at the wrong
+ * point in the thread — the chat view sorts on exactly this number.
+ */
+describe('parseAttribution — the timestamp', () => {
+  /** Local wall-clock "HH:MM" of an attribution's parsed date. */
+  const timeOf = (line: string): string | undefined => {
+    const parsed = parseAttribution(line);
+    return parsed?.date == null
+      ? undefined
+      : new Date(parsed.date * 1000).toLocaleTimeString('en-GB', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        });
+  };
+
+  // Regression: the name capture excludes digits and colons so the date can
+  // absorb the whole timestamp — but "PM" has neither, so a client that puts no
+  // comma after the time handed the meridiem to the NAME, where the tidy-up
+  // threw it away. "5:06 PM" then parsed as 05:06: the afternoon reply sorted
+  // ABOVE the morning message it was answering and the thread read backwards.
+  it('keeps a meridiem that is not followed by a comma', () => {
+    expect(timeOf('On Wed, Sep 3, 2026 at 5:06 PM Ankur Dubey <ankur.d@sarv.com> wrote:')).toBe('17:06');
+    expect(timeOf('On Wed, Sep 3, 2026 at 5:06 pm Ankur Dubey wrote:')).toBe('17:06');
+  });
+
+  // Regression: a timezone abbreviation has no digits or colons either, so it
+  // rides along in the same capture and takes the meridiem in front of it with
+  // it. Both have to come back, in order.
+  it('keeps a meridiem followed by a timezone', () => {
+    expect(timeOf('On Wed, Sep 3, 2026 at 5:06 PM IST Ankur Dubey <ankur.d@sarv.com> wrote:')).toBe('17:06');
+  });
+
+  // Regression: the punctuated Gmail shape already worked — the fix must not
+  // change it, or every Gmail quote in the store shifts.
+  it('leaves the comma-punctuated forms exactly as they were', () => {
+    expect(timeOf('On Wed, Sep 3, 2026 at 5:06 PM, Ankur Dubey <ankur.d@sarv.com> wrote:')).toBe('17:06');
+    expect(timeOf('On Wed, Sep 3, 2026 at 5:06PM Ankur Dubey <ankur.d@sarv.com> wrote:')).toBe('17:06');
+    expect(timeOf('On Wed, Sep 3, 2026 at 11:06 AM, Ankur Dubey <ankur.d@sarv.com> wrote:')).toBe('11:06');
+  });
+
+  it('reads a 24-hour attribution with no meridiem at all', () => {
+    expect(timeOf('On 3 September 2026 at 17:06 Ankur Dubey <ankur.d@sarv.com> wrote:')).toBe('17:06');
+  });
+
+  // Regression: reattachment must be earned. "PM Sharma" is a person, and a
+  // date with no time on the end of it has nothing for a meridiem to attach to
+  // — appending one turns a date chrono parses into one it does not.
+  it('does not graft a name that merely looks like a meridiem onto a bare date', () => {
+    const parsed = parseAttribution('On 27 April 2026, PM Sharma wrote:');
+    expect(parsed?.date).not.toBeNull();
+    expect(new Date((parsed?.date ?? 0) * 1000).getDate()).toBe(27);
   });
 });
