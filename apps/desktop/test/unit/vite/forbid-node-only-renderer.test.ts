@@ -56,7 +56,7 @@ describe('forbiddenPackageForId — flags Node-only packages in a module id', ()
 describe('forbiddenPackageForId — leaves renderer-safe ids alone', () => {
   it('does NOT flag an application source file', () => {
     // App code lives outside node_modules and must never trip the guard.
-    const id = '/repo/apps/desktop/src/components/ChatView.tsx';
+    const id = '/repo/apps/desktop/src/components/email-detail/ThreadChatView.tsx';
     expect(forbiddenPackageForId(id, forbidden)).toBeNull();
   });
 

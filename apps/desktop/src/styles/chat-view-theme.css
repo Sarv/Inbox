@@ -1,0 +1,90 @@
+/**
+ * `email-chat-view`, wearing sarvinbox's colours.
+ *
+ * The library ships its own stylesheet and reads every colour, size and radius
+ * from a `--sec-*` token, each of which falls back to the sarv design-system
+ * name (`--brand`, `--surface`, `--ink`…). This app does not use those names —
+ * it is on the shadcn set, where a token holds a bare `H S% L%` triplet rather
+ * than a colour — so the fallbacks would never resolve and the view would come
+ * out in its built-in defaults, ignoring the theme.
+ *
+ * Hence this bridge: one declaration per slot, wrapping the app's triplet in
+ * `hsl()`. It is deliberately on `:root` only — `.dark` redeclares the same
+ * app tokens, so every `--sec-*` below follows the theme switch on its own and
+ * a second dark-mode block here would be a copy to keep in sync for nothing.
+ *
+ * This is an app-side override, NOT an edit to the library: other products
+ * share it, and the design-system names are correct for them.
+ */
+
+:root {
+  /* Brand — the reader's own bubble, links inside a framed body, focus rings. */
+  --sec-brand: hsl(var(--primary));
+  --sec-brand-deep: hsl(var(--primary));
+  --sec-brand-soft: hsl(var(--accent));
+
+  /* Surfaces and text. */
+  --sec-surface: hsl(var(--card));
+  --sec-surface-2: hsl(var(--muted));
+  --sec-border: hsl(var(--border));
+  --sec-ink: hsl(var(--foreground));
+  --sec-muted: hsl(var(--muted-foreground));
+
+  /* States. The app has no warning token, so the amber below is a literal —
+     the one value here with nothing to map onto. */
+  --sec-danger: hsl(var(--destructive));
+  --sec-danger-soft: hsl(var(--destructive) / 0.12);
+  --sec-warning-soft: hsl(38 92% 50% / 0.14);
+  --sec-warning-ink: hsl(38 92% 40%);
+
+  /* The reader's own bubble is a TINT, not a fill (the old ChatView's
+     `bg-primary/5 border-primary/15`). Every incoming bubble already carries a
+     per-sender pastel; a solid brand block on the other side would out-shout
+     all of them and turn the thread into one loud column. */
+  --sec-bubble-mine-bg: hsl(var(--primary) / 0.05);
+  --sec-bubble-mine-border: hsl(var(--primary) / 0.15);
+  --sec-bubble-mine-ink: hsl(var(--foreground));
+  /* Follows from the tint: on a 5%-brand ground the brand link colour still has
+     all its contrast, so links read the same on both sides of the thread. */
+  --sec-bubble-mine-link: hsl(var(--primary));
+  --sec-bubble-theirs-bg: hsl(var(--card));
+  --sec-bubble-theirs-ink: hsl(var(--foreground));
+
+  /*
+   * Typography and metrics. Every value here is the Tailwind class the old
+   * hand-rolled ChatView used, resolved: the view is a drop-in replacement for
+   * it, so anything that does not match is a visible regression, not a restyle.
+   *   text-sm/leading-relaxed  -> 14px / 1.625   (body)
+   *   text-xs                  -> 12px           (header, chips, tooltip)
+   *   w-8 / gap-3 / gap-1.5    -> 32px / 12px / 6px
+   *   rounded-xl               -> 12px
+   *   max-w-[80%] / [240px]    -> the column cap and the recipient ellipsis
+   */
+  --sec-font: inherit;
+  --sec-fs-body: 14px;
+  --sec-lh-body: 1.625;
+  --sec-fs-meta: 12px;
+  --sec-fs-tooltip: 12px;
+  --sec-avatar-size: 32px;
+  --sec-gap: 12px;
+  --sec-gap-sm: 6px;
+  --sec-bubble-radius: 12px;
+  --sec-bubble-max-width: 80%;
+  --sec-name-max-width: 240px;
+
+  /*
+   * Tooltips. Deliberately NOT the popover tokens: the app's own Tooltip
+   * (components/Tooltip.tsx) is white-on-gray-900, and a chat tooltip that
+   * came out light while every other tooltip in the window is dark reads as a
+   * different control. Those greys are literals there too — the theme has no
+   * token for them — so matching means repeating them. Dark mode below.
+   */
+  --sec-tooltip-bg: #111827;
+  --sec-tooltip-ink: #ffffff;
+}
+
+/* The one slot the app's own theme does not carry through: Tooltip.tsx lightens
+   to gray-700 in the dark, and only an explicit rule can follow it. */
+.dark {
+  --sec-tooltip-bg: #374151;
+}
