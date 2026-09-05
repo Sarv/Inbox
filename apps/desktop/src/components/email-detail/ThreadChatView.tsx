@@ -1,18 +1,36 @@
+import type { EmailRecord } from '@sarvinbox/core';
 import { Loader2, RefreshCw, Sparkles } from 'lucide-react';
-import { useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { MailChatView, type Attachment, type ChatMessage } from 'email-chat-view';
 
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import { buildDeterministicConversation } from '../../services/conversation-heuristic';
+import type { ConversationMessage } from '../../services/conversation-service';
+import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
-import { ChatView } from '../ChatView';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
 
+import {
+  chatMessagesFromConversation,
+  chatMessagesFromEmails,
+} from './chat-message-adapter';
+import { EmailMenu } from './EmailMenu';
 import type { EmailDetailContext } from './types';
 
 // getCurrentUserEmail used to live here; it moved to ai-service so
 // EmailDetail can share it (priority: IMAP username > profile email > fallback).
+
+/**
+ * How many bubbles are allowed in the DOM at once.
+ *
+ * A 200-message thread is an ordinary support escalation, and every bubble
+ * with a designed body costs a whole sandboxed document. The rest sit behind
+ * the view's own "Show N earlier messages" button — nothing is lost, it is
+ * just not laid out until asked for.
+ */
+const MAX_RENDERED_BUBBLES = 40;
 
 interface ThreadChatViewProps {
   ctx: EmailDetailContext;
@@ -24,7 +42,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     threadEmails,
     conversationMessages,
     conversationLoading,
-    conversationUpdating,
     conversationError,
     conversationPartial,
     conversationProgress,
@@ -59,35 +76,20 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
   // the first bubbles render, but progress stays non-null to the end).
   const extractionInFlight = conversationLoading || conversationProgress != null;
 
-  // The thread-level "needs attention" state (orange reload icon) reflects
-  // whether any message ACTUALLY failed AI cleanup — i.e. a message showing a
-  // per-message "Process with AI" card. This keeps the thread indicator
-  // consistent with the bubbles: no more orange thread icon with no actionable
-  // message. (conversationPartial also flips true for benign truncation, which
-  // isn't a per-message failure, so we deliberately don't colour on that.)
-  // Compute over the SAME draft-filtered set ChatView renders: a draft bubble
-  // is never rendered (ChatView drops sourceEmailIds carrying the |draft| tag),
-  // so a draft whose per-message AI cleanup fell back to heuristic
-  // (extractionFailed:true) must NOT turn the icon orange — there's no visible
-  // failed card to act on. Mirror ChatView's draftIds derivation here.
-  const hasFailedMessage = useMemo(() => {
-    const draftIds = new Set(
-      threadEmails.filter(e => (e.tags || '').includes('|draft|')).map(e => e.id),
-    );
-    return !!conversationMessages?.some(
-      (m: any) => m.extractionFailed && !draftIds.has(m.sourceEmailId),
-    );
-  }, [conversationMessages, threadEmails]);
-
   const currentUserEmail = useMemo(
     () => getCurrentUserEmail(displayEmail?.toAddress || ''),
     [displayEmail?.toAddress],
   );
 
+  const emailsById = useMemo(
+    () => new Map(threadEmails.map((email) => [email.id, email])),
+    [threadEmails],
+  );
+
   // Standard (non-AI) view: split the thread into per-sender chat bubbles
-  // deterministically — no LLM. Feeds the same bubble renderer the AI view
-  // uses, so Standard shows oldest->newest messages with quotes + signatures
-  // stripped instead of one email with the whole history inlined.
+  // deterministically — no LLM. Feeds the same view the AI mode does, so
+  // Standard shows oldest->newest messages with quotes + signatures stripped
+  // instead of one email with the whole history inlined.
   const standardMessages = useMemo(
     () => buildDeterministicConversation(threadEmails, currentUserEmail),
     [threadEmails, currentUserEmail],
@@ -96,7 +98,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
   // Bodies that permanently failed to fetch — so chat bubbles show a Retry
   // affordance instead of an endless "Loading content…" spinner.
   const failedBodies = useEmailStore((s) => s.failedBodies);
-  const retryBody = (emailId: string) => {
+  const retryBody = useCallback((emailId: string) => {
     // fetchEmailBody skips ids already in failedBodies, so clear it first.
     useEmailStore.setState((s) => {
       const next = new Set(s.failedBodies);
@@ -104,14 +106,139 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       return { failedBodies: next };
     });
     useEmailStore.getState().fetchEmailBody(emailId);
-  };
+  }, []);
 
-  // Whole-thread transcript for AI polish of the inline reply. Memoized on
-  // the thread data so it is NOT rebuilt on every keystroke / unrelated
-  // ctx change while the user types their reply.
+  // The turns the active mode wants shown. Both modes produce the same
+  // ConversationMessage shape, which is exactly why the view itself needs no
+  // notion of AI vs Standard: it renders messages, and where they came from is
+  // this adapter's business.
+  const activeMessages: ConversationMessage[] | undefined = showAIView
+    ? conversationMessages || undefined
+    : standardMessages.length > 0
+      ? standardMessages
+      : undefined;
+
+  const chatMessages = useMemo<ChatMessage[]>(() => {
+    const options = {
+      currentUserEmail,
+      emailsById,
+      failedBodies,
+      resolveImages: resolveRefsInHtml,
+    };
+    // No conversation to show — a single email with nothing to split, or an
+    // extraction that has not produced anything yet. Fall back to the thread's
+    // own emails rather than an empty pane.
+    return activeMessages?.length
+      ? chatMessagesFromConversation(activeMessages, options)
+      : chatMessagesFromEmails(threadEmails, options);
+  }, [activeMessages, threadEmails, currentUserEmail, emailsById, failedBodies]);
+
+  // Per-message extraction state, keyed the way the view hands messages back.
+  const conversationById = useMemo(() => {
+    const map = new Map<string, ConversationMessage>();
+    for (const message of activeMessages || []) map.set(message.id, message);
+    return map;
+  }, [activeMessages]);
+
+  // The thread-level "needs attention" state (orange reload icon) reflects
+  // whether any message ACTUALLY failed AI cleanup — i.e. a message showing a
+  // per-message re-extract affordance. Computed over the SAME set the view
+  // renders (drafts already dropped by the adapter), so a draft whose cleanup
+  // fell back to the heuristic cannot turn the icon orange with no visible
+  // message to act on. conversationPartial also flips true for benign
+  // truncation, which isn't a per-message failure, so it deliberately doesn't
+  // colour on that.
+  const hasFailedMessage = useMemo(
+    () => chatMessages.some((message) => conversationById.get(message.id)?.extractionFailed),
+    [chatMessages, conversationById],
+  );
+
+  // AI view with nothing genuinely processed: the raw/heuristic content lives
+  // in Standard, so offer the extraction rather than showing fallback bubbles.
+  const showProcessPrompt =
+    showAIView && !!conversationPartial && !extractionInFlight && chatMessages.length === 0;
+
+  // Whole-thread transcript for AI polish of the inline reply. Memoized on the
+  // thread data so it is NOT rebuilt on every keystroke or unrelated ctx change
+  // while the user types their reply.
   const polishThreadContext = useMemo(
     () => buildPolishThreadContext({ conversationMessages, threadEmails, currentUserEmail }),
     [conversationMessages, threadEmails, currentUserEmail],
+  );
+
+  const emailFor = useCallback(
+    (message: ChatMessage) => emailsById.get(message.sourceId || message.id),
+    [emailsById],
+  );
+
+  const runAttachmentAction = useCallback(
+    async (attachment: Attachment, message: ChatMessage, action: 'preview' | 'download') => {
+      const email = emailFor(message);
+      if (!email) return;
+      try {
+        if (action === 'preview') {
+          await window.electronAPI.emails.previewAttachment(email.id, attachment.filename);
+        } else {
+          await window.electronAPI.emails.downloadAttachment(email.id, attachment.filename);
+        }
+      } catch (err) {
+        // Renderer logs go through console.* on purpose — see
+        // bootstrap/renderer-logging.ts, which forwards them into app.log.
+        console.error(`[ThreadChatView] attachment ${action} failed:`, err);
+      }
+    },
+    [emailFor],
+  );
+
+  const openLink = useCallback((url: string) => {
+    // `#` is an in-document jump with nowhere to go once the body is framed,
+    // and mailto: is the compose window's job, not the browser's.
+    if (!url || url.startsWith('#') || url.startsWith('mailto:')) return;
+    if (window.electronAPI?.app?.openExternal) {
+      window.electronAPI.app.openExternal(url);
+    } else {
+      window.open(url, '_blank');
+    }
+  }, []);
+
+  const renderActions = useCallback(
+    (message: ChatMessage) => {
+      const email = emailFor(message);
+      if (!email) return null;
+      return (
+        <BubbleActions
+          email={email}
+          extractionFailed={!!conversationById.get(message.id)?.extractionFailed}
+          onReExtract={
+            showAIView && handleReExtractMessage
+              ? () => handleReExtractMessage(message.id)
+              : undefined
+          }
+          onReply={() => handleReply(email, false)}
+          onReplyAll={() => handleReplyAll(email, false)}
+          onForward={() => handleInlineForward(email)}
+          onDelete={() => ctx.deleteEmail(email.id)}
+          onArchive={() => ctx.archiveEmail(email.id)}
+          onMarkUnread={async () => {
+            await markAsRead(email.id, false);
+            useEmailStore.getState().clearSelectedEmail();
+          }}
+          onReportSpam={() => handleReportSpam(email.id)}
+          onPrint={() => handlePrintEmail(email)}
+          onDownload={() => handleDownloadEmail(email)}
+          onShowOriginal={() => handleShowOriginal(email)}
+          onFilterLikeThis={() => handleFilterLikeThis(email)}
+          onTranslate={() => handleTranslate(email)}
+          onDetectSignature={() => handleDetectSignature(email)}
+        />
+      );
+    },
+    [
+      emailFor, conversationById, showAIView, handleReExtractMessage, handleReply,
+      handleReplyAll, handleInlineForward, ctx, markAsRead, handleReportSpam,
+      handlePrintEmail, handleDownloadEmail, handleShowOriginal, handleFilterLikeThis,
+      handleTranslate, handleDetectSignature,
+    ],
   );
 
   return (
@@ -202,37 +329,42 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
           </div>
         )}
       </div>
-      <ChatView
-        emails={threadEmails}
-        currentUserEmail={currentUserEmail}
-        conversationMessages={
-          showAIView
-            ? (conversationMessages || undefined)
-            : (standardMessages.length > 0 ? standardMessages : undefined)
+
+      <MailChatView
+        messages={showProcessPrompt ? [] : chatMessages}
+        currentUserAddress={currentUserEmail}
+        loading={showAIView && conversationLoading && chatMessages.length === 0}
+        maxRendered={MAX_RENDERED_BUBBLES}
+        className="px-3 py-4"
+        onOpenLink={openLink}
+        onRetryBody={(message) => {
+          const email = emailFor(message);
+          if (email) retryBody(email.id);
+        }}
+        onPreviewAttachment={(attachment, message) =>
+          runAttachmentAction(attachment, message, 'preview')
         }
-        conversationUpdating={showAIView ? conversationUpdating : false}
-        conversationLoading={showAIView ? conversationLoading : false}
-        conversationProgress={showAIView ? conversationProgress : null}
-        conversationPartial={showAIView ? conversationPartial : false}
-        mode={showAIView ? 'ai' : 'logical'}
-        onReply={(email) => handleReply(email, false)}
-        onReplyAll={(email) => handleReplyAll(email, false)}
-        onForward={(email) => handleInlineForward(email)}
-        onDelete={(emailId) => ctx.deleteEmail(emailId)}
-        onArchive={(emailId) => ctx.archiveEmail(emailId)}
-        onMarkUnread={async (emailId) => { await markAsRead(emailId, false); useEmailStore.getState().clearSelectedEmail(); }}
-        onReportSpam={(emailId) => handleReportSpam(emailId)}
-        onPrint={(email) => handlePrintEmail(email)}
-        onDownload={(email) => handleDownloadEmail(email)}
-        onShowOriginal={(email) => handleShowOriginal(email)}
-        onFilterLikeThis={(email) => handleFilterLikeThis(email)}
-        onTranslate={(email) => handleTranslate(email)}
-        onDetectSignature={(email) => handleDetectSignature(email)}
-        onToggleStar={(emailId, starred) => useEmailStore.getState().markMessageStarred(emailId, starred)}
-        failedBodies={failedBodies}
-        onRetryBody={retryBody}
-        onReExtractMessage={showAIView ? handleReExtractMessage : undefined}
-        onRetryAll={showAIView ? handleRetryConversation : undefined}
+        onDownloadAttachment={(attachment, message) =>
+          runAttachmentAction(attachment, message, 'download')
+        }
+        renderActions={renderActions}
+        emptyState={
+          showProcessPrompt ? (
+            <div className="flex flex-col items-center gap-2 py-8 text-center">
+              <Sparkles className="h-5 w-5 text-violet-500" />
+              <p className="text-xs text-muted-foreground max-w-xs">
+                This thread hasn’t been processed with AI yet. Standard view has the
+                full content in the meantime.
+              </p>
+              <button
+                onClick={handleRetryConversation}
+                className="text-xs font-medium text-primary hover:underline"
+              >
+                Process now
+              </button>
+            </div>
+          ) : undefined
+        }
       />
 
       {/* Inline Reply */}
@@ -260,6 +392,87 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The hover controls at a bubble's outer edge.
+ *
+ * The view reveals `.sec-actions` on row hover and hides it otherwise — but
+ * the menu portals to `<body>`, so once it is open the cursor leaves the row
+ * and the trigger would fade out from under its own open menu. Pinning the
+ * opacity while it is open is the whole reason this needs state.
+ */
+function BubbleActions({
+  email,
+  onReExtract,
+  extractionFailed,
+  ...menu
+}: {
+  email: EmailRecord;
+  onReExtract?: () => void;
+  /** This message's AI cleanup failed → tint the re-extract icon orange (like the
+   *  thread-level reload) so an unprocessed message is visible at a glance. */
+  extractionFailed?: boolean;
+  onReply: () => void;
+  onReplyAll: () => void;
+  onForward: () => void;
+  onDelete: () => void;
+  onArchive: () => void;
+  onMarkUnread: () => void;
+  onReportSpam: () => void;
+  onPrint: () => void;
+  onDownload: () => void;
+  onShowOriginal: () => void;
+  onFilterLikeThis: () => void;
+  onTranslate: () => void;
+  onDetectSignature: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [reExtracting, setReExtracting] = useState(false);
+
+  const runReExtract = async () => {
+    if (!onReExtract || reExtracting) return;
+    setReExtracting(true);
+    try {
+      await onReExtract();
+    } finally {
+      setReExtracting(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-0.5" style={menuOpen ? { opacity: 1 } : undefined}>
+      {onReExtract && (
+        <Tooltip
+          content={
+            reExtracting
+              ? 'Re-extracting with AI…'
+              : extractionFailed
+                ? 'Process this message with AI'
+                : 'Re-extract this message with AI'
+          }
+          delayMs={40}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); void runReExtract(); }}
+            disabled={reExtracting}
+            className="p-1 hover:bg-accent rounded transition-colors"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${
+                reExtracting
+                  ? 'animate-spin text-violet-500'
+                  : extractionFailed
+                    ? 'text-orange-500 hover:text-orange-600'
+                    : 'text-muted-foreground'
+              }`}
+            />
+          </button>
+        </Tooltip>
+      )}
+      <EmailMenu email={email} {...menu} onOpenChange={setMenuOpen} />
     </div>
   );
 }

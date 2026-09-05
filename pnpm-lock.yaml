@@ -108,6 +108,9 @@ importers:
       email-addresses:
         specifier: ^5.0.0
         version: 5.0.0
+      email-chat-view:
+        specifier: ^0.0.1
+        version: 0.0.1(react-dom@18.3.1)(react@18.3.1)
       html-to-text:
         specifier: ^10.0.0
         version: 10.0.0
@@ -5883,6 +5886,24 @@ packages:
 
   /email-addresses@5.0.0:
     resolution: {integrity: sha512-4OIPYlA6JXqtVn8zpHpGiI7vE6EQOAg16aGnDMIAlZVinnoZ8208tW1hAbjWydgN/4PLTT9q+O1K6AH/vALJGw==}
+    dev: false
+
+  /email-chat-view@0.0.1(react-dom@18.3.1)(react@18.3.1):
+    resolution: {integrity: sha512-dz+ToInIY5NU/li5quqvoURCc89+w9RthSKarM8KCrPp6qOLB74ZMY6YXs32vkcfRdhZyZTYvddO6h1bazIIuA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: ^18.2.0 || ^19.0.0
+      react-dom: ^18.2.0 || ^19.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+    dependencies:
+      dompurify: 3.4.12
+      email-addresses: 5.0.0
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
     dev: false
 
   /email-reply-parser@2.3.9:
