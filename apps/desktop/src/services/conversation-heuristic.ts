@@ -113,6 +113,38 @@ function parseLooseDate(raw: string | undefined | null): number | null {
   return parseHumanDateToEpochSec(raw);
 }
 
+/**
+ * The tail of a timestamp — meridiem, timezone, or both — sitting at the START
+ * of a captured name.
+ *
+ * The name captures below exclude digits and colons so the date can absorb the
+ * whole timestamp, but "PM" and "IST" have neither, so a client that puts no
+ * comma after the time (Outlook, several mobile clients) hands them to the name
+ * instead. Anchored and repeated: "5:06 PM IST Ankur Dubey" gives up both.
+ */
+const LEADING_TIME_TAIL =
+  /^(?:(?:[AP]\.?M\.?|GMT|UTC|IST|EST|EDT|PST|PDT|CST|CDT|CET|CEST|BST)\b[\s,]*)+/i;
+
+/**
+ * Parse an attribution date, taking back the time tail the name capture stole.
+ *
+ * Without this a "…at 5:06 PM Ankur Dubey <…>" line parses as 05:06 — the PM is
+ * dropped on the floor with the rest of the name tidy-up — and the message
+ * lands twelve hours early. In a chat view sorted by time that is not a
+ * cosmetic error: an afternoon reply sorts ABOVE the morning message it was
+ * answering, and the thread reads backwards.
+ *
+ * Only reattached to a date that actually ends in a time. "On 27 April 2026, PM
+ * Sharma wrote:" is a person, not a meridiem, and appending it would turn a
+ * date chrono parses into one it does not.
+ */
+function parseAttributionDate(date: string, nameBlob?: string | null): number | null {
+  const trimmedDate = (date || '').trim();
+  if (!/\d$/.test(trimmedDate)) return parseLooseDate(trimmedDate);
+  const tail = (nameBlob || '').match(LEADING_TIME_TAIL)?.[0].replace(/[\s,]+$/, '');
+  return parseLooseDate(tail ? `${trimmedDate} ${tail}` : trimmedDate);
+}
+
 /** First email address found in a blob, trimmed of trailing punctuation. */
 function extractEmail(raw: string | undefined | null): string | null {
   const m = (raw || '').match(/[^\s<>,;:"']+@[^\s<>,;:"']+\.[^\s<>,;:"']+/);
@@ -139,7 +171,7 @@ function deriveNameFromEmail(email: string | null): string | null {
 function cleanAttributionName(raw: string | undefined | null, email: string | null = null): string | null {
   const name = (raw || '')
     .replace(/<[^>]*>/g, ' ')                            // drop "<email>" chunks
-    .replace(/^(?:[AP]\.?M\.?|GMT|UTC|IST|EST|EDT|PST|PDT|CST|CDT|CET|CEST|BST)\b[\s,]*/i, '')
+    .replace(LEADING_TIME_TAIL, '')                      // "PM Ankur" -> "Ankur"; see parseAttributionDate
     .replace(/\s+via\s+.*$/i, '')                        // "Alice via Google Groups"
     .replace(/[\s,]*\b[\w-]+(?:\.[\w-]+)+>?\s*$/i, ' ')  // trailing domain remnant "partner.example>"
     .replace(/["'<>]/g, ' ')
@@ -160,9 +192,10 @@ export function parseAttribution(text: string): ParsedAttribution | null {
   // before <email> that has no digits or colons (dates/times always do, names
   // never do), which lets the date greedily absorb the whole timestamp either
   // way. A stray leading AM/PM (Gmail's "10:52 AM name" with no comma) is
-  // trimmed off the name.
+  // trimmed off the name — and given back to the DATE by parseAttributionDate,
+  // without which "5:06 PM Ankur" reads as 05:06 and sorts half a day early.
   let m = t.match(/^On\s+(.+?)[,\s]+([^<>@,\d:]+?)\s*<([^>\s]+@[^>\s]+)>\s*wrote:?/i);
-  if (m) { const email = m[3].trim(); return { name: cleanAttributionName(m[2], email), email, date: parseLooseDate(m[1]) }; }
+  if (m) { const email = m[3].trim(); return { name: cleanAttributionName(m[2], email), email, date: parseAttributionDate(m[1], m[2]) }; }
 
   // Bare email, no angle brackets: "On 4/17/2026, 2:51:17 PM, arun.iyer3@partner.example wrote:".
   // Handles numeric-date Outlook/mobile lines AND emails containing digits
@@ -173,11 +206,11 @@ export function parseAttribution(text: string): ParsedAttribution | null {
   // Mangled address: "On <date> <name> domain> wrote:" — a client ate the
   // "<local@" of the address, leaving a bare "domain>" before "wrote:".
   m = t.match(/^On\s+(.+?)[,\s]+([^<>@,\d:]+?)\s+[\w.-]+\.\w{2,}>?\s*wrote:?/i);
-  if (m) return { name: cleanAttributionName(m[2]), email: null, date: parseLooseDate(m[1]) };
+  if (m) return { name: cleanAttributionName(m[2]), email: null, date: parseAttributionDate(m[1], m[2]) };
 
   // Name only, no address: "On <date>, <name> wrote:"
   m = t.match(/^On\s+(.+?)[,\s]+([^<>,\d:]+?)\s+wrote:?/i);
-  if (m) return { name: cleanAttributionName(m[2]), email: null, date: parseLooseDate(m[1]) };
+  if (m) return { name: cleanAttributionName(m[2]), email: null, date: parseAttributionDate(m[1], m[2]) };
 
   // Outlook: "From: <name> <email> Sent/Date: <date> To: …". Tolerant of
   // mangled addresses (Outlook can drop the "<local@" leaving "Name domain>"):
@@ -190,7 +223,7 @@ export function parseAttribution(text: string): ParsedAttribution | null {
   // clients): "On <date> <name> <email>". Requires a trailing email so a normal
   // sentence opening with "On …" can't be mistaken for an attribution.
   m = t.match(/^On\s+(.+?)[,\s]+([^<>@,\d:]+?)\s*<?([^\s<>,]+@[^\s<>,]+)>?\s*$/i);
-  if (m) { const email = extractEmail(m[3]); return { name: cleanAttributionName(m[2], email), email, date: parseLooseDate(m[1]) }; }
+  if (m) { const email = extractEmail(m[3]); return { name: cleanAttributionName(m[2], email), email, date: parseAttributionDate(m[1], m[2]) }; }
 
   return null;
 }
