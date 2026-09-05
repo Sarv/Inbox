@@ -7,6 +7,7 @@ import { resolve } from 'path';
 import { copyFileSync, mkdirSync, readFileSync } from 'fs';
 
 import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
+import { linkedDepsToExclude, linkedDepsToWatch } from './vite/linked-packages';
 import { rendererAliases } from './vite/renderer-aliases';
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -205,7 +206,16 @@ export default defineConfig(({ mode }) => ({
     // build output clean.
     chunkSizeWarningLimit: 3000,
   },
+  // Packages installed by `file:` path and edited alongside this app. Without
+  // these two, a rebuild of the library is invisible to a running dev server —
+  // see vite/linked-packages.ts for why, and why it fails silently.
+  optimizeDeps: {
+    exclude: linkedDepsToExclude(),
+  },
   server: {
     port: 5173,
+    watch: {
+      ignored: linkedDepsToWatch(),
+    },
   },
 }));
