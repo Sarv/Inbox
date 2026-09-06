@@ -1,12 +1,13 @@
 import type { EmailRecord } from '@sarvinbox/core';
 import { MailChatView, type Attachment, type ChatMessage } from 'email-chat-view';
-import { Loader2, RefreshCw, Sparkles } from 'lucide-react';
+import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
+import { hasTag } from '../../utils/tags';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
@@ -208,6 +209,8 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       return (
         <BubbleActions
           email={email}
+          isStarred={hasTag(email.tags, 'starred')}
+          onToggleStar={(starred) => useEmailStore.getState().markMessageStarred(email.id, starred)}
           extractionFailed={!!conversationById.get(message.id)?.extractionFailed}
           onReExtract={
             showAIView && handleReExtractMessage
@@ -406,11 +409,17 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
  */
 function BubbleActions({
   email,
+  isStarred,
+  onToggleStar,
   onReExtract,
   extractionFailed,
   ...menu
 }: {
   email: EmailRecord;
+  /** Read off `email.tags` by the caller, so the star reflects the same
+   *  `|starred|` tag the list rows and the folder counts read. */
+  isStarred: boolean;
+  onToggleStar: (starred: boolean) => void;
   onReExtract?: () => void;
   /** This message's AI cleanup failed → tint the re-extract icon orange (like the
    *  thread-level reload) so an unprocessed message is visible at a glance. */
@@ -472,6 +481,21 @@ function BubbleActions({
           </button>
         </Tooltip>
       )}
+      <Tooltip content={isStarred ? 'Unstar' : 'Star'} delayMs={40}>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleStar(!isStarred);
+          }}
+          aria-label={isStarred ? 'Unstar this message' : 'Star this message'}
+          aria-pressed={isStarred}
+          className="p-1 hover:bg-accent rounded transition-colors"
+        >
+          <Star
+            className={`h-3.5 w-3.5 ${isStarred ? 'fill-yellow-400 text-yellow-400' : 'text-muted-foreground'}`}
+          />
+        </button>
+      </Tooltip>
       <EmailMenu email={email} {...menu} onOpenChange={setMenuOpen} />
     </div>
   );
