@@ -60,6 +60,7 @@ import {
   saveSmtpCredentials,
   saveViewMode,
   setupAICategorizationListeners,
+  shouldAutoLoadRemoteImages,
   stripSecrets,
   upsertAccount,
   warmImageAllowedSenders,
@@ -440,6 +441,54 @@ describe('per-sender image allowlist', () => {
     expect(isSenderImagesAllowed('boss@x.com')).toBe(false);
     await vi.waitFor(() => expect(getImageAllowedSenders).toHaveBeenCalledTimes(2));
     expect(isSenderImagesAllowed('boss@x.com')).toBe(false);
+  });
+});
+
+describe('shouldAutoLoadRemoteImages', () => {
+  // This is the ONE answer both renderers use — the classic card and the chat
+  // view. It lived inside SandboxedEmailBody, so the chat view never asked and
+  // kept the library's block-everything default: a reader on 'always' still got
+  // the banner on half the app. Any drift here brings that split back.
+  it('auto-loads everywhere on always, and nowhere on block', () => {
+    writeSettings({ remoteImageMode: 'always' });
+    expect(shouldAutoLoadRemoteImages('anyone@x.com')).toBe(true);
+    // Even a message the AI never categorised: 'always' means always.
+    expect(shouldAutoLoadRemoteImages('anyone@x.com', false)).toBe(true);
+
+    writeSettings({ remoteImageMode: 'block' });
+    expect(shouldAutoLoadRemoteImages('anyone@x.com', true)).toBe(false);
+  });
+
+  // 'safe' is the default mode, so getting this backwards would auto-load
+  // tracking pixels for every new install.
+  it('defers to the category in safe mode', () => {
+    writeSettings({ remoteImageMode: 'safe' });
+    expect(shouldAutoLoadRemoteImages('anyone@x.com', true)).toBe(true);
+    expect(shouldAutoLoadRemoteImages('anyone@x.com', false)).toBe(false);
+  });
+
+  // An allowlisted sender is an explicit per-sender decision by the reader, so
+  // it outranks the global mode — including 'block', which is the whole point
+  // of the "load images from this sender" affordance.
+  it('lets an allowlisted sender beat every mode', async () => {
+    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['boss@x.com'] }) } });
+    await warmImageAllowedSenders();
+
+    for (const mode of ['block', 'safe', 'always'] as const) {
+      writeSettings({ remoteImageMode: mode });
+      expect(shouldAutoLoadRemoteImages('The Boss <BOSS@X.com>')).toBe(true);
+    }
+
+    writeSettings({ remoteImageMode: 'block' });
+    expect(shouldAutoLoadRemoteImages('stranger@x.com')).toBe(false);
+  });
+
+  // A missing sender must not throw or accidentally match the allowlist — a
+  // chat bubble can carry a message whose From never parsed.
+  it('treats a missing sender as not allowlisted', () => {
+    writeSettings({ remoteImageMode: 'block' });
+    expect(shouldAutoLoadRemoteImages(undefined)).toBe(false);
+    expect(shouldAutoLoadRemoteImages(null, true)).toBe(false);
   });
 });
 

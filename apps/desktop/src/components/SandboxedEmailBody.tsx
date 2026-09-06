@@ -1,7 +1,7 @@
 import { ImageOff } from 'lucide-react';
 import { useRef, useEffect, useMemo, useState } from 'react';
 
-import { getRemoteImageMode, isSenderImagesAllowed, rememberSenderImagesAllowed } from '../store/helpers';
+import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
 
 interface SandboxedEmailBodyProps {
@@ -653,13 +653,12 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
   // auto-loads only AI-categorized mail that isn't Promotional/Spam (the caller
   // computes eligibility via safeAutoLoad), 'block' keeps the banner. Re-read
   // per message so navigating to a new email picks up a changed setting/category.
-  const autoLoadImages = useMemo(() => {
-    // A sender the user has previously chosen to always load images from wins
-    // over the global mode/category.
-    if (isSenderImagesAllowed(senderAddress)) return true;
-    const mode = getRemoteImageMode();
-    return mode === 'always' || (mode === 'safe' && safeAutoLoad);
-  }, [html, safeAutoLoad, senderAddress]);
+  // `html` is in the deps on purpose, though the decision does not read it: a
+  // new message must re-ask, because the allowlist cache may have warmed since.
+  const autoLoadImages = useMemo(
+    () => shouldAutoLoadRemoteImages(senderAddress, safeAutoLoad),
+    [html, safeAutoLoad, senderAddress],
+  );
   const effectiveBlock = blockRemoteImages && !autoLoadImages;
   const hasRemoteImages = useMemo(
     () => /<img\b[^>]*\ssrc\s*=\s*["']?\s*https?:/i.test(html) || /url\(\s*["']?\s*https?:/i.test(html),
