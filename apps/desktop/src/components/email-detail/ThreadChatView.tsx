@@ -13,7 +13,7 @@ import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
 
 import { chatMessagesFromConversation, chatMessagesFromThread } from './chat-message-adapter';
-import { chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
+import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
 import { EmailMenu } from './EmailMenu';
 import type { EmailDetailContext } from './types';
 
@@ -339,6 +339,11 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         loading={showAIView && conversationLoading && chatMessages.length === 0}
         maxRendered={MAX_RENDERED_BUBBLES}
         className="px-3 py-4"
+        // The library blocks every remote image unless told otherwise, and it
+        // has no way to know the reader's setting — so the app answers, per
+        // message, with the same rule the classic card uses. Without this a
+        // reader who chose "always load" still saw the banner here.
+        blockRemoteImages={(message) => blockRemoteImagesFor(emailFor(message))}
         onOpenLink={openLink}
         onRetryBody={(message) => {
           const email = emailFor(message);
