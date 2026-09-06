@@ -10,6 +10,12 @@
  */
 import type { EmailRecord } from '@sarvinbox/core';
 import type { Attachment, ChatMessage } from 'email-chat-view';
+import {
+  createSegmentCache,
+  threadToMessages,
+  type Mail,
+  type SegmentCache,
+} from 'email-chat-view/transform';
 
 import type { ConversationMessage } from '../../services/conversation-service';
 
@@ -59,6 +65,18 @@ export function toEpochMs(seconds: number | null | undefined): number {
     : Number.NaN;
 }
 
+/**
+ * The library's MILLISECONDS, back in the SECONDS everything sarv-side stores.
+ *
+ * The mirror of {@link toEpochMs}, for handing a transformed message to
+ * something that reads stored rows — the AI summarizer, an extension. An
+ * unreadable date becomes `0` rather than `NaN`, because `NaN` does not survive
+ * JSON and would reach the other side as `null` in a numeric field.
+ */
+export function toEpochSeconds(millis: number): number {
+  return Number.isFinite(millis) && millis > 0 ? Math.round(millis / 1000) : 0;
+}
+
 /** The stored attachment columns, as the library's attachment shape. */
 export function attachmentsOf(email: EmailRecord | undefined): Attachment[] {
   if (!email) return [];
@@ -71,15 +89,91 @@ export function attachmentsOf(email: EmailRecord | undefined): Attachment[] {
   }));
 }
 
-export interface AdapterOptions {
+/** What the library needs from the app to turn stored rows into bubbles. */
+export interface ThreadOptions {
   /** The reader's own address, for attribution. */
   currentUserEmail: string;
-  /** Every email in the thread, for attachments and body state. */
-  emailsById: ReadonlyMap<string, EmailRecord>;
   /** Ids whose body fetch permanently failed — retry, never an endless spinner. */
   failedBodies?: ReadonlySet<string>;
   /** Resolve `sarv-image:` refs to data URLs. Injected so this module stays pure. */
   resolveImages?: (html: string) => string;
+}
+
+export interface AdapterOptions extends ThreadOptions {
+  /** Every email in the thread, for attachments and body state. */
+  emailsById: ReadonlyMap<string, EmailRecord>;
+}
+
+/**
+ * Stored emails, in the shape the library's transform reads.
+ *
+ * A straight field rename plus the two things the store keeps elsewhere: a
+ * draft is a `|draft|` tag rather than a column, and "the body has not arrived"
+ * is the failed-bodies set rather than a flag. Everything past this function —
+ * splitting, cleaning, attribution, ordering, drafts, attachments — is the
+ * library's, so there is exactly one place where sarvinbox's storage shape is
+ * described to it.
+ */
+export function mailsFromEmails(
+  emails: readonly EmailRecord[],
+  failedBodies?: ReadonlySet<string>,
+): Mail[] {
+  const drafts = draftIdsIn(emails);
+  return emails.map((email) => {
+    const body = email.rawBody || email.cleanBody || '';
+    return {
+      id: email.id,
+      fromAddress: email.fromAddress || '',
+      fromName: email.fromName,
+      toAddress: email.toAddress,
+      toNames: email.toNames,
+      ccAddress: email.ccAddress,
+      ccNames: email.ccNames,
+      // SECONDS, as stored. Declared to the transform as `dateUnit: 's'` — it
+      // converts once, at the boundary, and nothing downstream sees seconds.
+      date: email.date,
+      body,
+      attachments: attachmentsOf(email),
+      isDraft: drafts.has(email.id),
+      ...bodyStateOf(body, email, failedBodies),
+    };
+  });
+}
+
+/**
+ * A shared memo for split bodies.
+ *
+ * Splitting is the expensive half of this — a parse, a boundary sweep and a
+ * clean per segment — and the transform re-runs on every body that arrives,
+ * which for a 200-message thread is 200 times. Keyed on `(id, body)`, so a
+ * message whose body finally lands is the only one re-split.
+ */
+export const threadSegmentCache: SegmentCache = createSegmentCache();
+
+/**
+ * The thread's emails, split into one bubble per MESSAGE.
+ *
+ * This is the whole Standard view: the library recovers the messages that exist
+ * only as quotes inside other mails, strips signatures, banners and quoted
+ * history, and orders the result. sarvinbox contributes two things it alone
+ * knows — how its rows are shaped ({@link mailsFromEmails}) and how to turn a
+ * `sarv-image:` ref into something a browser can render.
+ */
+export function chatMessagesFromThread(
+  emails: readonly EmailRecord[],
+  options: ThreadOptions,
+): ChatMessage[] {
+  const { currentUserEmail, failedBodies, resolveImages } = options;
+  const messages = threadToMessages(mailsFromEmails(emails, failedBodies), {
+    currentUserAddress: currentUserEmail,
+    dateUnit: 's',
+    cache: threadSegmentCache,
+  });
+  // Image refs are resolved AFTER the split, not before: the raw body carries
+  // the whole quoted history, most of which is about to be thrown away, and
+  // inlining every image in it first is work nobody sees.
+  if (!resolveImages) return messages;
+  return messages.map((message) => ({ ...message, body: resolveImages(message.body) }));
 }
 
 /** Chronological, drafts dropped. Progressive extraction appends out of order. */
@@ -88,11 +182,12 @@ function chronological<T extends { date: number }>(messages: readonly T[]): T[] 
 }
 
 /**
- * The AI / deterministic conversation, as chat messages.
+ * The LLM-extracted conversation, as chat messages.
  *
- * Both view modes arrive here: the AI pipeline and
- * `buildDeterministicConversation` produce the same `ConversationMessage`
- * shape, which is exactly why the view needs no mode of its own.
+ * The AI path only. The Standard view no longer passes through
+ * `ConversationMessage` at all — {@link chatMessagesFromThread} hands the
+ * library stored rows and gets bubbles back — so this is the one remaining
+ * adapter for turns a model produced.
  */
 export function chatMessagesFromConversation(
   messages: readonly ConversationMessage[],
@@ -124,42 +219,6 @@ export function chatMessagesFromConversation(
       };
     },
   );
-}
-
-/**
- * The thread's emails, as chat messages.
- *
- * The fallback for a thread the conversation pipeline produced nothing for —
- * one email, no quotes to split, or an extraction that has not run yet. Bodies
- * are passed through untouched: whatever stripping was wanted has already
- * happened upstream, and stripping again here would be a second, drifting copy
- * of that logic.
- */
-export function chatMessagesFromEmails(
-  emails: readonly EmailRecord[],
-  options: AdapterOptions,
-): ChatMessage[] {
-  const { currentUserEmail, failedBodies, resolveImages } = options;
-  const drafts = draftIdsIn(emails);
-
-  return chronological(emails.filter((email) => !drafts.has(email.id))).map((email) => {
-    const body = email.rawBody || email.cleanBody || '';
-    return {
-      id: email.id,
-      sourceId: email.id,
-      fromAddress: email.fromAddress,
-      fromName: email.fromName,
-      toAddress: email.toAddress,
-      toNames: email.toNames,
-      ccAddress: email.ccAddress,
-      ccNames: email.ccNames,
-      date: toEpochMs(email.date),
-      body: resolveImages ? resolveImages(body) : body,
-      attachments: attachmentsOf(email),
-      isFromMe: isFromMe(email.fromAddress, currentUserEmail),
-      ...bodyStateOf(body, email, failedBodies),
-    };
-  });
 }
 
 /**

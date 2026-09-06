@@ -1,10 +1,9 @@
 import type { EmailRecord } from '@sarvinbox/core';
+import { MailChatView, type Attachment, type ChatMessage } from 'email-chat-view';
 import { Loader2, RefreshCw, Sparkles } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
-import { MailChatView, type Attachment, type ChatMessage } from 'email-chat-view';
 
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
-import { buildDeterministicConversation } from '../../services/conversation-heuristic';
 import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
@@ -12,10 +11,8 @@ import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
 
-import {
-  chatMessagesFromConversation,
-  chatMessagesFromEmails,
-} from './chat-message-adapter';
+import { chatMessagesFromConversation, chatMessagesFromThread } from './chat-message-adapter';
+import { chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
 import { EmailMenu } from './EmailMenu';
 import type { EmailDetailContext } from './types';
 
@@ -43,7 +40,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     conversationMessages,
     conversationLoading,
     conversationError,
-    conversationPartial,
     conversationProgress,
     showAIView,
     setShowAIView,
@@ -86,15 +82,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [threadEmails],
   );
 
-  // Standard (non-AI) view: split the thread into per-sender chat bubbles
-  // deterministically — no LLM. Feeds the same view the AI mode does, so
-  // Standard shows oldest->newest messages with quotes + signatures stripped
-  // instead of one email with the whole history inlined.
-  const standardMessages = useMemo(
-    () => buildDeterministicConversation(threadEmails, currentUserEmail),
-    [threadEmails, currentUserEmail],
-  );
-
   // Bodies that permanently failed to fetch — so chat bubbles show a Retry
   // affordance instead of an endless "Loading content…" spinner.
   const failedBodies = useEmailStore((s) => s.failedBodies);
@@ -108,15 +95,12 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     useEmailStore.getState().fetchEmailBody(emailId);
   }, []);
 
-  // The turns the active mode wants shown. Both modes produce the same
-  // ConversationMessage shape, which is exactly why the view itself needs no
-  // notion of AI vs Standard: it renders messages, and where they came from is
-  // this adapter's business.
-  const activeMessages: ConversationMessage[] | undefined = showAIView
+  // The LLM-extracted turns, when the AI view is the one on screen. Standard
+  // has none: it is the library's deterministic split, which produces chat
+  // messages directly and needs no ConversationMessage of its own.
+  const aiMessages: ConversationMessage[] | undefined = showAIView
     ? conversationMessages || undefined
-    : standardMessages.length > 0
-      ? standardMessages
-      : undefined;
+    : undefined;
 
   const chatMessages = useMemo<ChatMessage[]>(() => {
     const options = {
@@ -125,20 +109,29 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       failedBodies,
       resolveImages: resolveRefsInHtml,
     };
-    // No conversation to show — a single email with nothing to split, or an
-    // extraction that has not produced anything yet. Fall back to the thread's
-    // own emails rather than an empty pane.
-    return activeMessages?.length
-      ? chatMessagesFromConversation(activeMessages, options)
-      : chatMessagesFromEmails(threadEmails, options);
-  }, [activeMessages, threadEmails, currentUserEmail, emailsById, failedBodies]);
+    switch (chatSourceFor(showAIView, aiMessages?.length ?? 0)) {
+      // Only what the LLM actually extracted — see `chatSourceFor` for why
+      // there is no fallback to the deterministic split here.
+      case 'ai':
+        return chatMessagesFromConversation(aiMessages!, options);
+      // `email-chat-view` splits the thread's own mails into one bubble per
+      // message — quotes, signatures and banners stripped, and the messages
+      // that exist only as quotes inside other mails recovered. All of that
+      // lives in the library now; the app just hands it stored rows.
+      case 'thread':
+        return chatMessagesFromThread(threadEmails, options);
+      case 'none':
+        return [];
+    }
+  }, [showAIView, aiMessages, threadEmails, currentUserEmail, emailsById, failedBodies]);
 
   // Per-message extraction state, keyed the way the view hands messages back.
+  // AI-only: a deterministic split has no extraction to fail.
   const conversationById = useMemo(() => {
     const map = new Map<string, ConversationMessage>();
-    for (const message of activeMessages || []) map.set(message.id, message);
+    for (const message of aiMessages || []) map.set(message.id, message);
     return map;
-  }, [activeMessages]);
+  }, [aiMessages]);
 
   // The thread-level "needs attention" state (orange reload icon) reflects
   // whether any message ACTUALLY failed AI cleanup — i.e. a message showing a
@@ -153,10 +146,17 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [chatMessages, conversationById],
   );
 
-  // AI view with nothing genuinely processed: the raw/heuristic content lives
-  // in Standard, so offer the extraction rather than showing fallback bubbles.
-  const showProcessPrompt =
-    showAIView && !!conversationPartial && !extractionInFlight && chatMessages.length === 0;
+  // AI view with nothing extracted: offer the extraction rather than bubbles.
+  // Deliberately NOT gated on `conversationPartial` any more — a thread the
+  // pipeline never touched at all is not "partial", and that gate was why the
+  // prompt stayed hidden while the fallback quietly rendered Standard's
+  // bubbles here instead.
+  const showProcessPrompt = shouldShowProcessPrompt({
+    showAIView,
+    extractionInFlight,
+    conversationLoading,
+    renderedCount: chatMessages.length,
+  });
 
   // Whole-thread transcript for AI polish of the inline reply. Memoized on the
   // thread data so it is NOT rebuilt on every keystroke or unrelated ctx change
@@ -331,7 +331,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       </div>
 
       <MailChatView
-        messages={showProcessPrompt ? [] : chatMessages}
+        messages={chatMessages}
         currentUserAddress={currentUserEmail}
         loading={showAIView && conversationLoading && chatMessages.length === 0}
         maxRendered={MAX_RENDERED_BUBBLES}

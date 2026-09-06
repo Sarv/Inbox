@@ -124,7 +124,7 @@ mail. See `packages/storage-node/test/unit/thread-resolver.test.ts` for the patt
 
   DOM **APIs** are available though — `happy-dom` is installed, and a test opts
   in per file with a pragma on line 1 (see `packages/core/test/unit/utils/signatures.test.ts`,
-  `apps/desktop/test/unit/src/services/conversation-heuristic.test.ts`):
+  `apps/desktop/test/unit/src/components/email-detail/chat-message-adapter.test.ts`):
 
   ```ts
   // @vitest-environment happy-dom

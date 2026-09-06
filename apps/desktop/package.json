@@ -41,7 +41,7 @@
     "date-fns": "^3.2.0",
     "dompurify": "^3.1.7",
     "email-addresses": "^5.0.0",
-    "email-chat-view": "^0.0.1",
+    "email-chat-view": "^0.1.0",
     "html-to-text": "^10.0.0",
     "ical.js": "^2.2.1",
     "iconv-lite": "^0.7.0",

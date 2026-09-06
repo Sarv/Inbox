@@ -3,7 +3,8 @@ import { Sparkles, ChevronDown, ChevronUp, Loader2, RefreshCw, CheckCircle, User
 import { useState, useEffect } from 'react';
 
 import { generateThreadSummary as generateThreadSummaryFallback, isThreadSummariesEnabled, getDefaultProvider, getCurrentUserEmail, type ThreadSummary as ThreadSummaryType } from '../services/ai-service';
-import { buildDeterministicConversation } from '../services/conversation-heuristic';
+
+import { chatMessagesFromThread, toEpochSeconds } from './email-detail/chat-message-adapter';
 
 
 interface ThreadSummaryProps {
@@ -67,17 +68,20 @@ export function ThreadSummary({ threadId, emails }: ThreadSummaryProps) {
       // one clean entry per actual message (including history inlined in a
       // single forwarded email) instead of raw bodies full of quoted noise.
       const currentUserEmail = getCurrentUserEmail(emails[0]?.toAddress || '');
-      const splitMessages = buildDeterministicConversation(emails, currentUserEmail);
+      const splitMessages = chatMessagesFromThread(emails, { currentUserEmail });
       const emailById = new Map(emails.map(e => [e.id, e]));
       const emailsForSummary =
         splitMessages.length > 0
           ? splitMessages.map(message => ({
               id: message.id,
-              subject: emailById.get(message.sourceEmailId)?.subject || emails[0]?.subject || '',
+              // A recovered quote has no row of its own, so its subject comes
+              // from the mail that carried it (`sourceId`); a real message IS a
+              // row, keyed by its own id.
+              subject: emailById.get(message.sourceId || message.id)?.subject || emails[0]?.subject || '',
               fromAddress: message.fromAddress || '',
-              fromName: message.fromName,
+              fromName: message.fromName ?? null,
               toAddress: message.toAddress || '',
-              date: message.date,
+              date: toEpochSeconds(message.date),
               body: message.body,
             }))
           : // Fallback: split produced nothing — summarize raw bodies.

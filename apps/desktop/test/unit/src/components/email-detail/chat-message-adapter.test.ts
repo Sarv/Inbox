@@ -1,15 +1,19 @@
+// @vitest-environment happy-dom
+// The library splits bodies with the DOM, so these tests need a real
+// DOMParser. Everything else in this file is a pure function over strings.
 import type { EmailRecord } from '@sarvinbox/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   attachmentsOf,
   chatMessagesFromConversation,
-  chatMessagesFromEmails,
+  chatMessagesFromThread,
   draftIdsIn,
   isFromMe,
+  mailsFromEmails,
   toEpochMs,
+  toEpochSeconds,
 } from '../../../../../src/components/email-detail/chat-message-adapter';
-
 import type { ConversationMessage } from '../../../../../src/services/conversation-service';
 
 const ME = 'me@acme.example';
@@ -94,6 +98,26 @@ describe('toEpochMs', () => {
     ['infinite', Number.POSITIVE_INFINITY],
   ])('yields NaN for %s', (_label, value) => {
     expect(toEpochMs(value as number | null | undefined)).toBeNaN();
+  });
+});
+
+describe('toEpochSeconds', () => {
+  // Regression: the AI summarizer and the extensions read stored rows, so a
+  // transformed message handed to them has to be back in seconds. Off by 1000
+  // and the summary reasons about a thread from 1970.
+  it('converts the view’s milliseconds back to stored seconds', () => {
+    expect(toEpochSeconds(TEN_AM * 1000)).toBe(TEN_AM);
+  });
+
+  // Regression: NaN does not survive JSON — it reaches the summarizer as `null`
+  // in a numeric field. Zero is the value the store already uses for "no date".
+  it.each([
+    ['not a number', Number.NaN],
+    ['infinite', Number.POSITIVE_INFINITY],
+    ['zero', 0],
+    ['negative', -5],
+  ])('yields 0 for %s', (_label, value) => {
+    expect(toEpochSeconds(value)).toBe(0);
   });
 });
 
@@ -279,50 +303,149 @@ describe('chatMessagesFromConversation', () => {
   });
 });
 
-describe('chatMessagesFromEmails', () => {
-  function convert(
-    emails: EmailRecord[],
-    extra: Partial<Parameters<typeof chatMessagesFromEmails>[1]> = {},
-  ) {
-    return chatMessagesFromEmails(emails, {
-      currentUserEmail: ME,
-      emailsById: mapOf(...emails),
-      ...extra,
-    });
-  }
-
-  it('renders the thread’s own emails when there is no conversation to show', () => {
-    const [message] = convert([
+describe('mailsFromEmails', () => {
+  it('describes a stored row in the shape the library reads', () => {
+    const [mail] = mailsFromEmails([
       email({ id: 'e1', rawBody: '<p>Body</p>', toNames: 'Me', ccAddress: 'cc@acme.example' }),
     ]);
-    expect(message).toMatchObject({
+    expect(mail).toMatchObject({
       id: 'e1',
-      sourceId: 'e1',
       fromAddress: 'alice@acme.example',
+      fromName: 'Alice Chen',
+      toAddress: ME,
       toNames: 'Me',
       ccAddress: 'cc@acme.example',
-      date: TEN_AM * 1000,
+      // SECONDS, unconverted: the transform is told the unit and converts once
+      // itself. Converting here as well puts the thread 56,000 years out.
+      date: TEN_AM,
       body: '<p>Body</p>',
+      isDraft: false,
     });
   });
 
   // Regression: cleanBody is stripped Markdown kept for search and list rows;
-  // rendering it in place of the real HTML loses every link and image.
+  // splitting it in place of the real HTML loses every link and image, and the
+  // DOM rules have no markup left to recognise a quote by.
   it('prefers the original HTML over the stripped copy', () => {
-    const [message] = convert([email({ id: 'e1', rawBody: '<p>HTML</p>', cleanBody: 'plain' })]);
-    expect(message!.body).toBe('<p>HTML</p>');
+    const [mail] = mailsFromEmails([
+      email({ id: 'e1', rawBody: '<p>HTML</p>', cleanBody: 'plain' }),
+    ]);
+    expect(mail!.body).toBe('<p>HTML</p>');
   });
 
   it('falls back to the stripped copy when no HTML was fetched', () => {
-    const [message] = convert([email({ id: 'e1', rawBody: '', cleanBody: 'plain' })]);
-    expect(message!.body).toBe('plain');
+    const [mail] = mailsFromEmails([email({ id: 'e1', rawBody: '', cleanBody: 'plain' })]);
+    expect(mail!.body).toBe('plain');
+  });
+
+  // Regression: a draft is a `|draft|` TAG here, not a column — the library
+  // cannot see that, so this is the one place it gets told.
+  it('flags an unsent draft so the library can leave it out', () => {
+    const mails = mailsFromEmails([email({ id: 'e1' }), email({ id: 'e2', tags: '|draft|' })]);
+    expect(mails.map((mail) => mail.isDraft)).toEqual([false, true]);
+  });
+
+  // Regression: "the body has not arrived" is the failed-bodies set here, not a
+  // flag on the row, so a permanent failure has to be handed over explicitly or
+  // the bubble spins forever instead of offering a retry.
+  it('carries the pending and failed body states over', () => {
+    const [pending, failed] = mailsFromEmails(
+      [email({ id: 'e1', rawBody: '' }), email({ id: 'e2', rawBody: '' })],
+      new Set(['e2']),
+    );
+    expect(pending).toMatchObject({ bodyPending: true });
+    expect(failed).toMatchObject({ bodyFailed: true });
+  });
+
+  // Regression: `fromAddress` is typed non-null, but the SQLite column is not,
+  // and a row written before the sender was parsed genuinely carries NULL. The
+  // library requires a string, so the null has to stop here — the cast is the
+  // point of the test, not an oversight.
+  it('never hands the library a null sender', () => {
+    const [mail] = mailsFromEmails([
+      email({ id: 'e1', fromAddress: null as unknown as string }),
+    ]);
+    expect(mail!.fromAddress).toBe('');
+  });
+});
+
+describe('chatMessagesFromThread', () => {
+  /**
+   * A Gmail-style reply: Bob's own line, then the attribution and Alice's
+   * quoted message. Alice's mail is NOT in the thread — the only copy of it is
+   * this quote, which is exactly the case the library exists to recover.
+   */
+  const BOB_REPLY = [
+    '<div dir="ltr">Thanks Alice, that works.</div>',
+    '<div class="gmail_quote">',
+    '<div dir="ltr" class="gmail_attr">',
+    'On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br>',
+    '</div>',
+    '<blockquote class="gmail_quote"><div dir="ltr">Can we move Q3 to Friday?</div></blockquote>',
+    '</div>',
+  ].join('');
+
+  function convert(emails: EmailRecord[], extra: Partial<{ resolveImages: (html: string) => string; failedBodies: ReadonlySet<string> }> = {}) {
+    return chatMessagesFromThread(emails, { currentUserEmail: ME, ...extra });
+  }
+
+  // Regression: the whole point of the Standard view. Render one bubble per
+  // MAIL and Alice's message is invisible — it exists nowhere but inside Bob's
+  // reply, so the conversation reads as if Bob spoke first, unprompted.
+  it('recovers a message that exists only as a quote', () => {
+    const messages = convert([
+      email({
+        id: 'e2',
+        fromAddress: 'bob@acme.example',
+        fromName: 'Bob Ray',
+        date: ELEVEN_AM,
+        rawBody: BOB_REPLY,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ fromAddress: 'alice@acme.example', sourceId: 'e2' });
+    expect(messages[0]!.body).toContain('Q3 to Friday');
+    expect(messages[1]).toMatchObject({ id: 'e2', fromAddress: 'bob@acme.example' });
+    // The quoted history is Alice's bubble now, not part of Bob's.
+    expect(messages[1]!.body).not.toContain('Q3 to Friday');
+  });
+
+  // Regression: the quote's date must be read from its attribution line, not
+  // borrowed from the reply carrying it — otherwise both bubbles land on 11:00
+  // and the thread cannot be read as a sequence.
+  it('dates the recovered message from its own attribution line', () => {
+    const [quoted, own] = convert([
+      email({ id: 'e2', fromAddress: 'bob@acme.example', date: ELEVEN_AM, rawBody: BOB_REPLY }),
+    ]);
+    expect(own!.date).toBe(ELEVEN_AM * 1000);
+    expect(quoted!.date).toBeLessThan(own!.date);
+  });
+
+  // Regression: image refs must be resolved on the SPLIT bodies, not the raw
+  // mail. Resolving first inlines every image in the quoted history — most of
+  // which is about to be thrown away — and the call count is the only thing
+  // that can tell the two orders apart.
+  it('resolves inline image refs on each split body, not on the raw mail', () => {
+    const resolveImages = vi.fn((html: string) => html.replace('sarv-image:ab', 'data:image/png;base64,AA'));
+    const messages = convert(
+      [email({ id: 'e2', fromAddress: 'bob@acme.example', date: ELEVEN_AM, rawBody: BOB_REPLY })],
+      { resolveImages },
+    );
+    expect(resolveImages).toHaveBeenCalledTimes(messages.length);
+    expect(resolveImages).not.toHaveBeenCalledWith(BOB_REPLY);
+  });
+
+  it('leaves bodies untouched when the host resolves no images', () => {
+    const [message] = convert([email({ id: 'e1', rawBody: '<p>Body</p>' })]);
+    expect(message!.body).toContain('Body');
   });
 
   it('drops unsent drafts and orders the rest oldest first', () => {
     const messages = convert([
-      email({ id: 'later', date: ELEVEN_AM, rawBody: 'b' }),
-      email({ id: 'draft', tags: '|draft|', rawBody: 'd' }),
-      email({ id: 'earlier', date: TEN_AM, rawBody: 'a' }),
+      email({ id: 'later', date: ELEVEN_AM, rawBody: '<p>b</p>' }),
+      email({ id: 'draft', tags: '|draft|', rawBody: '<p>d</p>' }),
+      email({ id: 'earlier', date: TEN_AM, rawBody: '<p>a</p>' }),
     ]);
     expect(messages.map((each) => each.id)).toEqual(['earlier', 'later']);
   });
@@ -330,5 +453,21 @@ describe('chatMessagesFromEmails', () => {
   it('marks an email whose body never arrived as pending', () => {
     const [message] = convert([email({ id: 'e1', rawBody: '', cleanBody: '' })]);
     expect(message).toMatchObject({ bodyPending: true });
+  });
+
+  it('offers a retry for an email whose body failed for good', () => {
+    const [message] = convert([email({ id: 'e1', rawBody: '', cleanBody: '' })], {
+      failedBodies: new Set(['e1']),
+    });
+    expect(message).toMatchObject({ bodyFailed: true });
+  });
+
+  it('right-aligns the reader’s own message', () => {
+    const [message] = convert([email({ id: 'e1', fromAddress: ME, rawBody: '<p>Mine</p>' })]);
+    expect(message!.isFromMe).toBe(true);
+  });
+
+  it('has nothing to show for an empty thread', () => {
+    expect(convert([])).toEqual([]);
   });
 });

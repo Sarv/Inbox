@@ -36,9 +36,9 @@ export function trimTrailingWindowed(
  * `<style>` block, layout tables, `role=presentation`, or `bgcolor` — it owns
  * its own bespoke layout. Unwrapping its structure, stripping "signature"/banner
  * blocks, or normalizing fonts turns it into a wireframe / truncates it, so it
- * must be rendered VERBATIM. Shared by the chat bubbles (ChatView) and the
- * deterministic splitter (conversation-heuristic), which both need to leave
- * designed emails untouched. Pure/regex — safe in any renderer context.
+ * must be rendered VERBATIM. Used by the sandboxed body renderer; the same rule
+ * lives in `email-chat-view`, which applies it inside the deterministic split.
+ * Pure/regex — safe in any renderer context.
  */
 export function htmlLooksDesigned(html: string | null | undefined): boolean {
   if (!html) return false;
