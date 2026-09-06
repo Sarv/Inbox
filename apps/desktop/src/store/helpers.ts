@@ -299,6 +299,27 @@ export const isSenderImagesAllowed = (address?: string | null): boolean => {
   return imageAllowedCache.has(a);
 };
 
+/** Does this message's remote content load without the reader asking?
+ *
+ *  The ONE place that answers it, because there are two renderers — the classic
+ *  card (`SandboxedEmailBody`) and the chat view (`MailChatView`) — and the same
+ *  mail must behave the same in both. When this lived inside `SandboxedEmailBody`
+ *  the chat view silently kept the library's block-everything default, so a
+ *  reader who had chosen "always" still saw the banner on half the app.
+ *
+ *  Precedence: a sender the reader has allowlisted beats the global mode; then
+ *  'always'; then 'safe', which defers to the AI category via `safeAutoLoad`
+ *  (the caller computes it with {@link qualifiesForSafeAutoLoad}, since only the
+ *  caller has the message's tags). */
+export const shouldAutoLoadRemoteImages = (
+  senderAddress?: string | null,
+  safeAutoLoad = false,
+): boolean => {
+  if (isSenderImagesAllowed(senderAddress)) return true;
+  const mode = getRemoteImageMode();
+  return mode === 'always' || (mode === 'safe' && safeAutoLoad);
+};
+
 /** Remember this sender so their future mail auto-loads images (write-through:
  *  update the cache immediately, persist to the account DB in the background). */
 export const rememberSenderImagesAllowed = (address?: string | null): void => {
