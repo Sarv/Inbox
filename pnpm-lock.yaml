@@ -109,8 +109,8 @@ importers:
         specifier: ^5.0.0
         version: 5.0.0
       email-chat-view:
-        specifier: ^0.0.1
-        version: 0.0.1(react-dom@18.3.1)(react@18.3.1)
+        specifier: ^0.1.1
+        version: 0.1.1(react-dom@18.3.1)(react@18.3.1)
       html-to-text:
         specifier: ^10.0.0
         version: 10.0.0
@@ -5888,8 +5888,8 @@ packages:
     resolution: {integrity: sha512-4OIPYlA6JXqtVn8zpHpGiI7vE6EQOAg16aGnDMIAlZVinnoZ8208tW1hAbjWydgN/4PLTT9q+O1K6AH/vALJGw==}
     dev: false
 
-  /email-chat-view@0.0.1(react-dom@18.3.1)(react@18.3.1):
-    resolution: {integrity: sha512-dz+ToInIY5NU/li5quqvoURCc89+w9RthSKarM8KCrPp6qOLB74ZMY6YXs32vkcfRdhZyZTYvddO6h1bazIIuA==}
+  /email-chat-view@0.1.1(react-dom@18.3.1)(react@18.3.1):
+    resolution: {integrity: sha512-DPJMl58ogba2zW0Z7zxGWGAlDFUOKdYncMeLt2a3HUZ76V+XE1trpTTLIZ6gmCUw1rYcFOqKqS+PnkPVtOe2vg==}
     engines: {node: '>=18'}
     peerDependencies:
       react: ^18.2.0 || ^19.0.0
@@ -5900,6 +5900,7 @@ packages:
       react-dom:
         optional: true
     dependencies:
+      chrono-node: 2.10.0
       dompurify: 3.4.12
       email-addresses: 5.0.0
       react: 18.3.1
