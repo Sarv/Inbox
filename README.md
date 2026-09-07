@@ -1,12 +1,18 @@
 # Sarv Inbox
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![License: Sarv Community License](https://img.shields.io/badge/license-Sarv%20Community%20License-0b7285.svg)](./LICENSE)
+[![fair-code](https://img.shields.io/badge/fair--code-source%20available-blue.svg)](https://faircode.io)
 [![CI](https://github.com/Sarv/Inbox/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarv/Inbox/actions/workflows/ci.yml)
 
-An open-source, privacy-first email client with AI-powered features — semantic
-search, smart labeling, and a conversation view that turns long threads into a
-readable chat. Your mail stays on your device; nothing leaves it unless you
-configure an AI provider.
+A source-available, privacy-first email client with AI-powered features —
+semantic search, smart labeling, and a conversation view that turns long threads
+into a readable chat. Your mail stays on your device; nothing leaves it unless
+you configure an AI provider.
+
+Free to use and modify, including commercially, for yourself or your
+organisation. Selling it, hosting it for others, bundling it into your own
+product, or removing the Sarv branding needs our written permission — see
+[License](#license).
 
 ## Features
 
@@ -143,11 +149,42 @@ Found a vulnerability? **Do not open a public issue** — see
 
 ## License
 
-[MIT](./LICENSE) © Sarv and Sarv Inbox contributors.
+[Sarv Community License, Version 1.0](./LICENSE) © 2026 Sarv Webs Private
+Limited and Sarv Inbox contributors.
+
+This is a **source-available ([fair-code](https://faircode.io))** licence, not an
+OSI-approved open-source licence — we do not call it open source, because it
+is not.
+
+**Always allowed, no permission needed**
+
+- Use it for anything, including your own commercial work, at any scale
+- Self-host it for your organisation, with no user limit and no fee
+- Read, modify and study the source
+- Redistribute it **free of charge**, with the Sarv branding intact, publishing
+  the source of any changes you made
+
+**Needs our written consent**
+
+- Selling it, or charging any fee for it or a modified version
+- Offering it to third parties as a hosted, managed or white-label service
+- Bundling or embedding it in a product or service you supply to others
+- Rebranding it, or removing/altering the Sarv name, logos and notices
+
+Questions answered in [docs/LICENSING-FAQ.md](./docs/LICENSING-FAQ.md).
+Commercial, OEM, hosting and white-label licences: **licensing@sarv.com** — we
+grant them, and they can include the branding rights the community licence
+withholds.
 
 ### Trademarks
 
-The Sarv name and the Sarv / Sarv Inbox logos are trademarks of Sarv and are
-**not** covered by the MIT licence. You're free to use, modify and redistribute
-the code under MIT, but please don't present a modified build as an official
-Sarv release or use the Sarv marks in a way that suggests endorsement.
+The Sarv name and the Sarv / Sarv Inbox logos are trademarks of Sarv Webs
+Private Limited and are **not** licensed with the code. The licence requires you
+to *keep* them on copies you pass on; it does not let you use them to name or
+promote anything of your own, or to present a modified build as official. See
+[TRADEMARKS.md](./TRADEMARKS.md).
+
+### Third-party components
+
+Dependencies keep their own licences (mostly MIT and Apache-2.0; `ical.js` is
+MPL-2.0) — see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

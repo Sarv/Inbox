@@ -26,3 +26,4 @@ Keep PRs focused; see CONTRIBUTING.md for conventions.
 - [ ] Commits follow Conventional Commits (`<type>(<scope>): <subject>`)
 - [ ] No secrets, credentials, or private email content added (code, tests, or fixtures)
 - [ ] Reused existing helpers instead of duplicating logic where applicable
+- [ ] I agree to the contribution terms in [CONTRIBUTING.md](../CONTRIBUTING.md) (my own work; licensed under the Sarv Community License; Sarv may relicense it)

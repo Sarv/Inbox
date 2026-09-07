@@ -1,21 +1,270 @@
-MIT License
+Sarv Community License
+Version 1.0
 
-Copyright (c) 2026 Sarv and Sarv Inbox contributors
+Copyright (c) 2026 Sarv Webs Private Limited and Sarv Inbox contributors.
+All rights reserved except as expressly granted below.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This is a source-available ("fair-code") licence, not an OSI-approved
+open-source licence. You may read, run, modify and share this software, but
+you may not sell it, offer it as a service, bundle it into something you
+supply to others, or strip the Sarv branding from it, without our written
+permission. Everything below says exactly what that means.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+If these terms do not fit what you want to do, that is what Section 17 is for
+— write to us. We would rather grant a licence than have you guess.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+
+1. ACCEPTANCE
+
+By using, copying, modifying or Distributing the Software, you accept these
+terms. If you do not accept them, you have no licence to the Software and
+must not use it.
+
+
+2. DEFINITIONS
+
+"Licensor", "we", "us", "our" — Sarv Webs Private Limited.
+
+"Software" — Sarv Inbox: the source code, build scripts, documentation and
+other material in this repository, in whole or in part, together with any
+copy or Modification of it.
+
+"You", "your" — the individual or legal entity exercising rights under this
+licence. If you are acting for an organisation, "you" includes that
+organisation and its affiliates.
+
+"Modification" — any change, addition, removal, translation, adaptation,
+derivative work, or combination of the Software with other material.
+
+"Distribute" — to supply, publish, transmit, sell, lease, sublicense, host,
+or otherwise make available, in whole or in part, in source or binary form,
+to anyone other than you. Making functionality of the Software available to
+a third party over a network is Distribution, whether or not a copy of the
+Software changes hands.
+
+"Internal Use" — use by you, your employees and your contractors, for your
+own purposes and on your own behalf, including your own commercial
+operations. Providing the Software or its functionality to your customers or
+to the public is not Internal Use.
+
+"Sarv Branding" — the names "Sarv" and "Sarv Inbox", the Sarv and Sarv Inbox
+logos, icons and wordmarks, and the product name, copyright notices,
+attribution text and links to us as they appear in the user interface, About
+screen, window titles, installers, application metadata and documentation of
+the Software.
+
+
+3. GRANT OF RIGHTS
+
+Subject to the conditions and limitations in Sections 4 to 9, we grant you a
+worldwide, royalty-free, non-exclusive, non-sublicensable, non-transferable,
+revocable licence to:
+
+ (a) use and run the Software;
+ (b) copy the Software;
+ (c) make Modifications; and
+ (d) Distribute the Software and your Modifications, on the conditions in
+     Section 6.
+
+
+4. WHAT YOU MAY ALWAYS DO
+
+No further permission from us is needed to:
+
+ (a) use the Software for Internal Use, commercial or non-commercial, for
+     any number of your own users, with no fee and no user limit;
+ (b) use the Software for personal, family or household purposes;
+ (c) self-host or deploy the Software for your own organisation, including
+     on your own servers and infrastructure;
+ (d) modify the Software for any of the above (Section 7 applies once you
+     Distribute those Modifications);
+ (e) use the Software for evaluation, security research, teaching, academic
+     research or journalism; and
+ (f) contribute Modifications back to us (see CONTRIBUTING.md).
+
+
+5. WHAT YOU MAY NOT DO WITHOUT OUR PRIOR WRITTEN CONSENT
+
+You may not:
+
+ (a) sell, resell, rent, lease, sublicense or otherwise charge any fee for
+     the Software or for a Modification of it;
+ (b) provide the Software, a Modification, or its functionality to third
+     parties as a hosted, managed, white-label or software-as-a-service
+     offering;
+ (c) bundle, embed, integrate or combine the Software or a Modification with
+     any other product, service, appliance or offering that you supply to
+     third parties, whether or not you charge for it;
+ (d) remove, alter, obscure, replace or relocate any part of the Sarv
+     Branding, or present the Software under a different product name or
+     brand ("rebranding"); or
+ (e) circumvent, disable or remove any licence-notice, attribution or
+     integrity mechanism in the Software.
+
+A fee charged solely to recover your own out-of-pocket distribution costs is
+not a fee for the purposes of (a).
+
+Written consent means a signed agreement or an email from an authorised
+representative of the Licensor. Silence is not consent.
+
+
+6. CONDITIONS ON DISTRIBUTION
+
+You may Distribute the Software or a Modification only if every one of the
+following is true, or you have our prior written consent under Section 5:
+
+ (a) you Distribute it free of charge;
+ (b) you do not do any of the things listed in Section 5;
+ (c) the Sarv Branding is preserved intact and remains visible wherever it
+     appeared in the Software you received;
+ (d) if you Distribute a Modification, it carries a clear and prominent
+     notice, shown in the user interface and in the accompanying
+     documentation, stating that it is an unofficial modified build, who
+     modified it, what was changed, and that it is not supplied, supported
+     or endorsed by Sarv;
+ (e) you include a complete, unmodified copy of this licence and of the
+     NOTICE file, and you do not add terms that conflict with this licence
+     or that restrict the recipient's rights under it; and
+ (f) you comply with Section 7.
+
+
+7. YOUR MODIFICATIONS MUST GO BACK TO THE COMMUNITY
+
+This project is shared on the understanding that improvements return to
+everyone who uses it.
+
+If you Distribute a Modification, then within thirty (30) days of first doing
+so you must make the complete corresponding source code of that Modification
+publicly available, free of charge, in a form a competent developer can build
+and use, under this same licence, and you must tell recipients where to find
+it.
+
+Publishing that source in a public repository, or submitting it to us as a
+pull request that we accept, satisfies this obligation.
+
+This obligation is triggered only by Distribution. Modifications you make and
+keep to yourself under Section 4 do not have to be published — though we hope
+you will send them anyway.
+
+
+8. THIRD-PARTY COMPONENTS
+
+The Software includes third-party components licensed by their own authors
+under their own terms. Those terms govern those components and are not
+changed by this licence. See THIRD_PARTY_NOTICES.md.
+
+
+9. TRADEMARKS
+
+Section 5(d) obliges you to keep the Sarv Branding in place. That obligation
+is not a trademark licence: it does not permit you to use the Sarv marks to
+promote, endorse or name your own products or services, to register or claim
+any right in them, or to suggest that we supply or approve a modified build.
+See TRADEMARKS.md.
+
+
+10. CONTRIBUTIONS
+
+Any material you deliberately submit to us for inclusion in the Software is
+licensed to us and to all recipients of the Software on the terms in
+CONTRIBUTING.md. Nothing in this licence obliges us to accept, keep or
+support any contribution.
+
+
+11. PATENTS
+
+We grant you a worldwide, royalty-free, non-exclusive, non-transferable
+patent licence to make, use and run the Software, limited to the patent
+claims we own or control that are necessarily infringed by the Software as we
+supply it. This patent licence does not extend to a Modification, or to a
+combination of the Software with anything else.
+
+If you or your affiliate begin or knowingly assist patent litigation alleging
+that the Software infringes a patent, every licence granted to you here
+terminates immediately.
+
+
+12. RESERVATION OF RIGHTS
+
+We reserve every right not expressly granted. You get no right to any
+trademark, service mark, domain name or other brand asset of ours except as
+Section 5(d) requires, and no right to our confidential information or to
+support, updates or services.
+
+
+13. TERM AND TERMINATION
+
+This licence runs until terminated.
+
+It terminates automatically if you breach it. If the breach can be cured and
+you cure it within thirty (30) days of becoming aware of it, and it is your
+first breach, the licence is reinstated. Otherwise reinstatement requires our
+written notice.
+
+On termination you must stop using and Distributing the Software and destroy
+your copies, except that Sections 8, 9, 12, 14, 15, 16 and 18 survive, and
+copies you already Distributed in compliance with this licence stay licensed
+in the hands of their recipients.
+
+
+14. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS, IMPLIED OR STATUTORY, INCLUDING WITHOUT LIMITATION THE IMPLIED
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, QUIET
+ENJOYMENT, ACCURACY AND NON-INFRINGEMENT. WE DO NOT WARRANT THAT THE SOFTWARE
+WILL BE UNINTERRUPTED, SECURE OR ERROR-FREE, OR THAT IT WILL NOT LOSE, FAIL
+TO DELIVER, OR FAIL TO SYNCHRONISE ELECTRONIC MAIL. YOU ARE RESPONSIBLE FOR
+YOUR OWN BACKUPS.
+
+
+15. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, WE WILL NOT BE LIABLE FOR ANY
+INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY OR PUNITIVE DAMAGES,
+OR FOR ANY LOSS OF PROFITS, REVENUE, GOODWILL, BUSINESS, DATA OR ELECTRONIC
+MAIL, ARISING OUT OF OR RELATING TO THE SOFTWARE OR THIS LICENCE, ON ANY
+THEORY OF LIABILITY, EVEN IF ADVISED OF THE POSSIBILITY. OUR TOTAL AGGREGATE
+LIABILITY WILL NOT EXCEED ONE HUNDRED UNITED STATES DOLLARS (USD 100) OR THE
+AMOUNT YOU PAID US FOR THE SOFTWARE IN THE TWELVE MONTHS BEFORE THE CLAIM,
+WHICHEVER IS GREATER.
+
+Nothing here limits liability that cannot be limited by law.
+
+
+16. GENERAL
+
+Governing law and forum. This licence is governed by the laws of India,
+without regard to conflict-of-laws rules. The courts at Jaipur, Rajasthan,
+India have exclusive jurisdiction, and you consent to that jurisdiction.
+
+Severability. If any provision is held unenforceable, it is modified to the
+minimum extent needed to make it enforceable, and the rest stays in force.
+
+No waiver. Our failure to enforce a provision is not a waiver of it.
+
+Entire agreement. This licence is the entire agreement between you and us
+about the Software, unless we have signed a separate written agreement with
+you, which prevails to the extent of any conflict.
+
+Future versions. We may publish revised versions of this licence. A revision
+applies only to releases of the Software distributed under it; the version
+accompanying a release governs that release, and your rights in copies you
+already hold are not reduced.
+
+
+17. COMMERCIAL AND OTHER LICENCES
+
+Want to resell it, host it for your customers, ship it inside your product,
+or run it under your own brand? Those are all things we are happy to talk
+about, and none of them are available under this licence alone.
+
+Write to licensing@sarv.com with what you want to do. See
+docs/LICENSING-FAQ.md for common cases and how they are usually resolved.
+
+
+18. NOTICES TO US
+
+Legal notices under this licence go to legal@sarv.com and to Sarv Webs
+Private Limited, IT-10, EPIP RIICO Industrial Area, Sitapura, Jaipur,
+Rajasthan 302022, India.

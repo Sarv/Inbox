@@ -110,9 +110,35 @@ Prefer several small, logically-grouped commits over one large commit.
 5. A maintainer will review. CI (type-check, lint, renderer-bundle guard, unit &
    integration tests, dependency audit) must be green before merge.
 
-Contributions are accepted under the repository's [MIT licence](./LICENSE): by
-opening a pull request you agree that your contribution is licensed under the
-same terms as the rest of the project (inbound = outbound).
+## Licensing your contribution
+
+Sarv Inbox is released under the [Sarv Community License](./LICENSE), a
+source-available (fair-code) licence — read it before your first PR, and see
+[docs/LICENSING-FAQ.md](./docs/LICENSING-FAQ.md) if anything is unclear.
+
+By opening a pull request you confirm that:
+
+1. **You wrote it, or you have the right to submit it.** It is your own work, or
+   you have permission from the copyright holder (including your employer, if
+   they own what you write).
+2. **You license it to the project** under the Sarv Community License, on the
+   same terms as the rest of the code, for everyone who receives Sarv Inbox.
+3. **You also grant Sarv Webs Private Limited** a perpetual, worldwide,
+   royalty-free, irrevocable licence to use, modify, sublicense and relicense
+   your contribution, including under different or commercial licence terms.
+   This is what lets us sell the commercial licences that fund the project, and
+   change the licence later without hunting down every past contributor. You
+   keep the copyright in your work.
+4. **You grant a patent licence** covering any of your patent claims that your
+   contribution necessarily infringes.
+5. **Nothing in it is confidential or third-party proprietary**, and any code you
+   adapted from elsewhere is compatible with our licence and is attributed in
+   the PR.
+
+If point 3 is not something you can agree to, say so in the PR — we would rather
+discuss it than have you not contribute.
+
+Sign your commits off (`git commit -s`) to record agreement in the history.
 
 ## Reporting bugs & requesting features
 
