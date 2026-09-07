@@ -1,0 +1,38 @@
+version: 2
+updates:
+  # JavaScript/TypeScript dependencies (pnpm workspace — Dependabot reads the
+  # root pnpm-lock.yaml and updates all workspace packages).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      # Batch low-risk dev/build tooling into a single PR to cut noise.
+      dev-tooling:
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "prettier"
+          - "typescript"
+          - "vite*"
+          - "turbo"
+          - "vitest"
+      # Keep type-check/runtime deps grouped by minor+patch bumps.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions used by the CI workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci

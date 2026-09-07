@@ -1,0 +1,42 @@
+{
+  "name": "nested-outlook-thread",
+  "description": "Outlook email from Varun (account manager) with deeply nested quoted history. The thread is a long API integration follow-up about sandbox credentials and a go-live checklist for helpdesk ticket 400123, with ~12 levels of nested replies/forwards going back to early March 2026. Fully synthetic: the cast is the project's pseudonym set, the customer is Acme (partner.example), and the typos in the customer's nudges are deliberate (bodies must stay verbatim). This is the canonical 'first email of a long Outlook thread' test case. Both gpt-oss-120b and sarv-mati-flash struggled with this shape in production — gpt-oss returned only 1 message, sarv-mati truncated at 256 tokens with garbled output.",
+  "fromAddress": "varun.rathi@sarv.com",
+  "fromName": "Varun Rathi",
+  "toAddress": "arun.iyer@partner.example, support@sarv.com, rohit.c@sarv.com",
+  "date": "2026-04-15T16:26:14.000Z",
+  "expectedSenders": [
+    "varun.rathi@sarv.com",
+    "arun.iyer@partner.example",
+    "support@sarv.com",
+    "sameer.vohra@sarv.com",
+    "hitesh.parekh@sarv.com",
+    "kriti.j@sarv.com"
+  ],
+  "expectedMinMessages": 8,
+  "expectedMaxMessages": 16,
+  "body": "<div>\nGood Evening Rohit Ji,</div>\n\n<div>\nAs discussed, we need your help to get this addressed on priority basis.</div>\n\n<div>\n\n<div>\n<b>From: </b>Arun Iyer &lt;arun.iyer@partner.example&gt;<br>\n<b>Date: </b>Wednesday, 15 April 2026 at 11:47 AM<br>\n<b>To: </b>support@sarv.com &lt;support@sarv.com&gt;<br>\n<b>Cc: </b>Aman Malhotra &lt;aman.malhotra@sarv.com&gt;, Hitesh Parekh &lt;hitesh.parekh@sarv.com&gt;, karan.s &lt;karan.s@sarv.com&gt;, Varun Rathi &lt;varun.rathi@sarv.com&gt;, bhavesh@sarv.com &lt;bhavesh@sarv.com&gt;, Sneha Dias &lt;sneha.dias@sarv.com&gt;, nikhil.r &lt;nikhil.r@sarv.com&gt;,\n kriti.j &lt;kriti.j@sarv.com&gt;, Sameer Vohra &lt;sameer.vohra@sarv.com&gt;<br>\n<b>Subject: </b>Re: [## 400123 ##] Re: RE: API integration follow-up<br>\n<br>\n</div>\n<div>\nHello Varun Sir,</div>\n\n<div>\nWe request you to close this please..we are still not able to log in to the sandbox.</div>\n\n<div>On Mon, 13 Apr, 2026, 14:08 mihir.k, &lt;<a href=\"mailto:support@sarv.com\">support@sarv.com</a>&gt; wrote:</div>\n<blockquote>\n<p><span>Hello Sir,</span></p>\n<p><span>We have received your request and forwarded it to the concerned team. They will review the query and get back to you shortly.</span></p>\n<p><span>If you face any further issues, please feel free to let us know.</span></p>\n\n<div>\n<span>Thanks &amp; Regards,<br>\n</span><span>--</span></div>\n\n<div>\n<br>\n---- on Mon, 13 Apr 2026 13:48:18 +0530 <b>\"Arun Iyer\"&lt;<a href=\"mailto:arun.iyer@partner.example\">arun.iyer@partner.example</a>&gt;\n</b>wrote ----</div>\n<blockquote>\n<div>\nHello Team,</div>\n\n<div>\nRequest you to help confirmation om sandbox credentails and go-live checklist.</div>\n\n<div>\nOn Thu, 9 Apr, 2026, 13:07 Sneha Dias, &lt;<a href=\"mailto:support@sarv.com\">support@sarv.com</a>&gt; wrote:</div>\n<blockquote>\n<div>\nHello Sir,<br>\n<br>\nGreetings Of The Day!<br>\n<br>\nWe have received your request. We will update you at the earliest.<br>\n<br>\nIf there are any questions that need to be answered please feel free to contact us. We are here to help!!</div>\n\n<div>\nThanks &amp; Regards,</div>\n<div>\n<br>\n---- on Thu, 09 Apr 2026 13:04:58 +0530 <b>\"Arun Iyer\"&lt;<a href=\"mailto:arun.iyer@partner.example\">arun.iyer@partner.example</a>&gt;\n</b>wrote ----</div>\n<blockquote>\n<div>\nHello Aman,</div>\n\n<div>\nPlease help here with confirmation if the sandbox credentials are ready?</div>\n\n<div>\nOn Wed, Apr 8, 2026 at 5:48 PM Sameer Vohra &lt;<a href=\"mailto:sameer.vohra@sarv.com\">sameer.vohra@sarv.com</a>&gt; wrote:</div>\n<blockquote>\n<p><span>Hi Aman,</span></p>\n\n<p><span>We need to close this activity. Kindly provide an update on the availability of the sandbox credentials.</span></p>\n\n<p><span>Thanks,</span></p>\n<p><span>Sameer Vohra</span></p>\n\n<p><span><b>From:</b>&nbsp;Arun Iyer &lt;<a href=\"mailto:arun.iyer@partner.example\">arun.iyer@partner.example</a>&gt;<br>\n<b>Sent:</b>&nbsp;Wednesday, April 8, 2026 5:45 PM<br>\n<b>To:</b>&nbsp;Varun Rathi &lt;<a href=\"mailto:varun.rathi@sarv.com\">varun.rathi@sarv.com</a>&gt;<br>\n<b>Subject:</b>&nbsp;Re: [## 400123 ##] Re: RE: API integration follow-up</span></p>\n\n<p><span>Hello Everyone,</span></p>\n\n<p><span>kindly help with update if all go-live checklist items are closed.&nbsp;</span></p>\n\n<p><span>Regards,</span></p>\n<p><span>Arun</span></p>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</div>\n\n<p>On Wed, Mar 11, 2026 at 4:35 PM Arun Iyer &lt;<a href=\"mailto:arun.iyer@partner.example\">arun.iyer@partner.example</a>&gt;\n wrote:</p>\n<blockquote>\n<p>hello Kriti,</p>\n\n<p>waiting for 2 sandbox test accounts</p>\n\n<p>On Wed, Mar 11, 2026 at 1:29PM Kriti Joshi &lt;<a href=\"mailto:kriti.j@sarv.com\">kriti.j@sarv.com</a>&gt;\n wrote:</p>\n<blockquote>\n<p><span>Hello Hitesh&nbsp;Sir,</span></p>\n\n<p><span>Working on sandbox account creation, the details will be shared shortly.&nbsp;</span></p>\n\n<p>On Wed, Mar 11, 2026 at 1:26 PM <span>Hitesh</span>&nbsp;Parekh &lt;<a href=\"mailto:hitesh.parekh@sarv.com\">hitesh.parekh@sarv.com</a>&gt;\n wrote:</p>\n<blockquote>\n<p><span>@karan.s&nbsp;please share sandbox account as asked by the team&nbsp;</span></p>\n\n<p><span>@Arun Iyer&nbsp;please confirm validity for the account&nbsp;</span></p>\n\n<p><span>Hitesh&nbsp;</span></p>\n</blockquote>\n</blockquote>\n</blockquote>",
+  "actualResponseSamples": {
+    "sarv-mati-flash-v1": {
+      "model": "sarv-mati-flash",
+      "finishReason": "length",
+      "completionTokens": 256,
+      "verdict": "BAD",
+      "issues": [
+        "Truncated at 256 tokens — model didn't honor max_completion_tokens=16384",
+        "Returned only 2 messages (out of expected 8+)",
+        "Body content is wrong — pulled fragments from random places",
+        "from_address contains markdown auto-link form: '[arun.iyer@partner.example](mailto:arun.iyer@partner.example)'",
+        "Used class attributes incorrectly: span class=\"@karan.s\" — these are mentions in the email, not class names"
+      ],
+      "rawContent": "{\"messages\":[{\"from_address\":\"[arun.iyer@partner.example](mailto:arun.iyer@partner.example)\",\"from_name\":\"Arun Iyer\",\"to_address\":\"Hitesh Parekh <[hitesh.parekh@sarv.com](mailto:hitesh.parekh@sarv.com)>\",\"date\":\"2026-03-11T13:24:00Z\",\"body\":\"<p><span class=\\\"@Arun Iyer\\\"&nbsp;please confirm validity for the account&nbsp;</span></p>\\n\\n<p><span class=\\\"Hitesh\\\"&nbsp;</span></p>\"},{\"from_address\":\"[hitesh.parekh@sarv.com](mailto:hitesh.parekh@sarv.com)\",\"from_name\":\"Hitesh Parekh\",\"to_address\":\"karan.s <[karan.s@sarv.com](mailto:karan.s@sarv.com)>\",\"date\":\"2026-03-11T13:26:00Z\",\"body\":\"<p><span class=\\\"@karan.s\\\"&nbsp;please share sandbox account as asked by the team&nbsp;</span></p>\\n\\n<p><span class=\\\"@Arun Iyer\\\"&nbsp;please confirm validity for the account&nbsp;</"
+    },
+    "gpt-oss-120b-v1": {
+      "model": "gpt-oss-120b",
+      "verdict": "BAD",
+      "issues": [
+        "Returned single-message JSON (Phase 2 cleanup output) instead of split — possibly because we sent Phase 2 prompt by mistake when bubble was single-source"
+      ]
+    }
+  }
+}

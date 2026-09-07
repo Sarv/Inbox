@@ -1,0 +1,51 @@
+# Changelog
+
+All notable changes to Sarv Inbox are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- Gmail-style "Select" menu in the bulk-action bar — select threads by
+  read / unread / starred / unstarred state.
+
+### Fixed
+- The renderer no longer imports the `@sarvinbox/core` barrel for the folder
+  classifier, which crashed the dev app with "Dynamic require of 'stream' is not
+  supported"; it deep-imports the pure module instead.
+- Bulk selection now operates on the exact threads currently rendered, so
+  "Select unread" (and friends) can no longer tick threads shown as read when
+  DB-backed sections are active.
+- The "Draft" thread badge no longer counts sent copies or trashed drafts that
+  retain a stale `|draft|` tag — a message must live in a Drafts folder.
+
+### Changed
+- Test fixtures, sample data and the demo seed use synthetic identities and
+  example domains (`example.com`, `partner.example`, patterned phone numbers).
+
+## [1.1.0] - 2026-07-09
+
+### Added
+- Section-based inbox (default / important-first / unread-first / priority-first)
+  with customizable filters and per-section pagination.
+- AI conversation view — chat-style reading mode for long quote chains.
+- AI features behind a configurable provider: categorization, semantic search,
+  signature detection, draft assistance, and thread summaries.
+- Full email actions: read/unread, star, important, archive, delete (with undo),
+  spam, snooze, and compose / reply / forward (inline + modal).
+- Snooze with wake-up, optimistic UI with revert-on-failure, and
+  disconnected-account recovery in Settings.
+
+### Changed
+- Rebranded from EmailGPT to **Sarv Inbox** (text and assets).
+- OAuth client secrets moved out of source into environment variables
+  (`.env` / `.env.example`).
+
+### Security
+- TLS verification is **on by default**; insecure TLS is opt-in via
+  `allowInsecureTLS`.
+- `openExternal` restricted to an allowlist of URL schemes.
+
+[1.1.0]: https://github.com/Sarv/Inbox/releases/tag/v1.1.0

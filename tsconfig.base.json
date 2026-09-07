@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "paths": {
+      "@sarvinbox/core": ["./packages/core/src"],
+      "@sarvinbox/storage-node": ["./packages/storage-node/src"],
+      "@sarvinbox/storage-mobile": ["./packages/storage-mobile/src"],
+      "@sarvinbox/ui-shared": ["./packages/ui-shared/src"],
+      "@sarvinbox/ui-primitives": ["./packages/ui-primitives/src"]
+    }
+  },
+  "exclude": ["node_modules", "dist", "build", ".expo", "android", "ios"]
+}

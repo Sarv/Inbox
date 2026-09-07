@@ -1,0 +1,76 @@
+{
+  "name": "sarvinbox",
+  "version": "1.1.1",
+  "private": true,
+  "description": "Sarv Inbox — AI-powered IMAP email client for the desktop",
+  "author": "Sarv",
+  "license": "MIT",
+  "homepage": "https://github.com/Sarv/Inbox#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sarv/Inbox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Sarv/Inbox/issues"
+  },
+  "keywords": [
+    "email",
+    "imap",
+    "smtp",
+    "email-client",
+    "electron",
+    "ai",
+    "desktop"
+  ],
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
+    "dev": "turbo run dev",
+    "dev:core": "pnpm --filter @sarvinbox/core dev",
+    "dev:desktop": "pnpm --filter @sarvinbox/desktop dev",
+    "build": "turbo run build",
+    "build:core": "pnpm --filter @sarvinbox/core build",
+    "build:desktop": "pnpm --filter @sarvinbox/desktop build",
+    "test": "turbo run test",
+    "test:watch": "turbo run test:watch",
+    "test:coverage": "turbo run test:coverage",
+    "test:node-abi": "node scripts/native-abi.mjs node",
+    "lint": "turbo run lint",
+    "lint:fix": "turbo run lint --fix",
+    "type-check": "turbo run type-check",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "clean:db": "node scripts/clean-db.mjs",
+    "clean:logs": "node scripts/clean-logs.mjs",
+    "release": "./scripts/release.sh",
+    "release:patch": "./scripts/release.sh patch",
+    "release:minor": "./scripts/release.sh minor",
+    "release:major": "./scripts/release.sh major"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "@vitest/coverage-v8": "1.6.1",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-import-resolver-typescript": "^3.6.1",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "prettier": "^3.2.4",
+    "turbo": "^1.11.3",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "packageManager": "pnpm@8.15.0",
+  "pnpm": {
+    "overrides": {
+      "node-abi": "^4.33.0",
+      "linkify-it": "^5.0.2"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "pipeline": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "build/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    // `^build` (upstream deps only), NOT `build`: a package's own build must not
+    // be a prerequisite for testing it. With `build`, `pnpm test` ran
+    // electron-builder for @sarvinbox/desktop — packaging and signing the whole
+    // app just to run unit tests. Tests need the LIBRARIES built (desktop tests
+    // resolve `@sarvinbox/core` to its dist), which is exactly what `^build` does.
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    },
+    "test:coverage": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    },
+    "test:watch": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {
+      "outputs": []
+    },
+    "type-check": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "clean": {
+      "cache": false
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    // Vite (+ vite-plugin-electron) emits all build output to dist/ and
+    // dist-electron/. `tsc` here is only a type-check gate — without noEmit
+    // it writes compiled .js next to the .tsx sources, which Vite then
+    // resolves ahead of the .tsx and serves as stale code in dev.
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      // Mirrors the Vite alias — subpath import of the pure contact-enrichment
+      // module, so renderer and main share one implementation.
+      "@sarvinbox/core/contact-enrichment": ["../../packages/core/src/contact-enrichment/index.ts"],
+      // Same: pure folder classifier, deep-imported so the renderer never loads
+      // the core barrel (imapflow/mailparser/nodemailer).
+      "@sarvinbox/core/folder-mapping": ["../../packages/core/src/config/folder-mapping.ts"]
+    }
+  },
+  "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],
+  "exclude": ["node_modules", "dist", "dist-electron"]
+}
