@@ -1,0 +1,60 @@
+{
+  "name": "@sarvinbox/core",
+  "version": "0.1.6",
+  "description": "Platform-agnostic business logic for Sarv Inbox",
+  "license": "MIT",
+  "author": "Sarv",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext .ts",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration"
+  },
+  "dependencies": {
+    "chardet": "^2.2.0",
+    "date-fns": "^3.2.0",
+    "email-addresses": "^5.0.0",
+    "email-reply-parser": "^2.3.9",
+    "html-to-text": "^10.0.0",
+    "iconv-lite": "^0.7.0",
+    "imapflow": "^1.4.2",
+    "libmime": "^5.3.7",
+    "libphonenumber-js": "^1.13.8",
+    "lru-cache": "^7.18.3",
+    "mailparser": "^3.6.5",
+    "nodemailer": "^7.0.12",
+    "p-retry": "^4.6.2",
+    "sanitize-filename": "^1.6.4",
+    "sanitize-html": "^2.13.1",
+    "turndown": "^7.1.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/libmime": "^5.3.0",
+    "@types/mailparser": "^3.4.4",
+    "@types/node": "^20.11.0",
+    "@types/nodemailer": "^7.0.4",
+    "@types/sanitize-html": "^2.13.0",
+    "@types/turndown": "^5.0.4",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

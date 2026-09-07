@@ -1,0 +1,218 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  /* Transparent track (overlay-style) — a solid track drew an ugly persistent
+     grey band down the reading pane. Only the subtle thumb shows now. */
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/30 rounded-md;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/50;
+}
+
+/* Prevent layout shift from scrollbar */
+.overflow-y-auto,
+.overflow-y-scroll {
+  scrollbar-gutter: stable;
+}
+
+/* Electron specific */
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* TipTap Editor Styles */
+.tiptap {
+  outline: none;
+}
+
+.tiptap p {
+  margin: 0 0 0.5em 0;
+}
+
+.tiptap p:last-child {
+  margin-bottom: 0;
+}
+
+/* Tailwind's Preflight reset sets `list-style: none` on ul/ol, so without an
+   explicit list-style-type the bullets/numbers vanish in the editor. */
+.tiptap ul {
+  list-style-type: disc;
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.tiptap ol {
+  list-style-type: decimal;
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.tiptap li {
+  margin: 0.25em 0;
+}
+
+/* TipTap wraps each list item's text in a <p>; zero its block margins so the
+   marker and text sit on one line. */
+.tiptap li > p {
+  margin: 0;
+}
+
+.tiptap blockquote {
+  border-left: 3px solid hsl(var(--border));
+  padding-left: 1em;
+  margin: 0.5em 0;
+  color: hsl(var(--muted-foreground));
+}
+
+.tiptap pre {
+  background: hsl(var(--muted));
+  border-radius: 0.375rem;
+  padding: 0.75em 1em;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+
+.tiptap code {
+  background: hsl(var(--muted));
+  border-radius: 0.25rem;
+  padding: 0.2em 0.4em;
+  font-size: 0.875em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tiptap pre code {
+  background: none;
+  padding: 0;
+}
+
+.tiptap hr {
+  border: none;
+  border-top: 1px solid hsl(var(--border));
+  margin: 1em 0;
+}
+
+.tiptap a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+}
+
+.tiptap img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
+}
+
+/* TipTap Placeholder */
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: hsl(var(--muted-foreground));
+  pointer-events: none;
+  height: 0;
+}
+
+/* Prose reset for editor */
+.tiptap.ProseMirror {
+  min-height: 200px;
+}
+
+.tiptap.ProseMirror:focus {
+  outline: none;
+}
+
+/* Table paste support */
+.tiptap table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  width: 100%;
+}
+
+.tiptap table td,
+.tiptap table th {
+  border: 1px solid hsl(var(--border));
+  padding: 0.5em;
+  text-align: left;
+}
+
+.tiptap table th {
+  background: hsl(var(--muted));
+  font-weight: 600;
+}

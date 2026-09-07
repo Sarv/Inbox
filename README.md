@@ -1,16 +1,12 @@
 # Sarv Inbox
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![CI](https://github.com/Sarv/SarvInbox/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarv/SarvInbox/actions/workflows/ci.yml)
+[![CI](https://github.com/Sarv/Inbox/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarv/Inbox/actions/workflows/ci.yml)
 
 An open-source, privacy-first email client with AI-powered features — semantic
 search, smart labeling, and a conversation view that turns long threads into a
 readable chat. Your mail stays on your device; nothing leaves it unless you
 configure an AI provider.
-
-<p align="center">
-  <img src="docs/screenshots/inbox.webp" alt="Sarv Inbox — section-based, prioritized inbox" width="100%">
-</p>
 
 ## Features
 
@@ -23,18 +19,7 @@ configure an AI provider.
   Invoices, …) with a customizable, section-based inbox.
 - **Privacy-first** — no data leaves your device unless you opt into an AI
   provider; TLS verification is on by default.
-- **Cross-platform** — desktop (Electron) and mobile (React Native).
-
-## Screenshots
-
-| | |
-| :---: | :---: |
-| **AI conversation view** | **Compose, reply &amp; forward** |
-| ![AI conversation view](docs/screenshots/conversation-view.webp) | ![Compose](docs/screenshots/compose.webp) |
-| **Focused reading** | **Fast full-text &amp; semantic search** |
-| ![Reading a message](docs/screenshots/reading.webp) | ![Search](docs/screenshots/search.webp) |
-| **Bulk select by read / star / state** | **Deep customization** |
-| ![Bulk select](docs/screenshots/bulk-select.webp) | ![Settings](docs/screenshots/settings.webp) |
+- **Cross-platform** — macOS, Windows and Linux (Electron).
 
 ## Getting started
 
@@ -47,8 +32,8 @@ configure an AI provider.
 ### Quick start (fresh clone)
 
 ```bash
-git clone https://github.com/Sarv/SarvInbox.git
-cd SarvInbox
+git clone https://github.com/Sarv/Inbox.git
+cd Inbox
 
 # Use the pinned toolchain
 nvm use                                              # reads .nvmrc
@@ -78,7 +63,7 @@ Secrets are never baked into source — supply them via environment variables
 for the full list, and:
 
 - [OAUTH_SETUP.md](./OAUTH_SETUP.md) — Gmail / Google Workspace OAuth
-- [SARV_OAUTH_SETUP.md](./SARV_OAUTH_SETUP.md) — Sarv OAuth + LLM
+- [SARV_OAUTH_SETUP.md](./SARV_OAUTH_SETUP.md) — Sarv OAuth (mailbox + LLM)
 
 Providers you don't configure are simply hidden in the UI.
 
@@ -107,12 +92,11 @@ pnpm + [Turborepo](https://turbo.build) monorepo.
 packages/
   core/            Platform-agnostic business logic (IMAP/SMTP, AI, OAuth, utils)
   storage-node/    Desktop SQLite (better-sqlite3)
-  storage-mobile/  Mobile SQLite (op-sqlite)
+  storage-mobile/  The same storage contract on op-sqlite, for a future mobile app
   ui-shared/       Shared React hooks and logic
   ui-primitives/   Platform-specific UI wrappers
 apps/
   desktop/         Electron + React + Vite
-  mobile/          React Native (Expo)
 ```
 
 **Stack:** TypeScript · Electron · React · Vite · Tailwind · Zustand ·
@@ -131,13 +115,17 @@ processes, data flow, and core subsystems.
 ## Debug logging
 
 In **dev only**, the desktop main-process console is also written to a rolling
-`app.log` (20 MB cap, oldest-half dropped on overflow) next to the database:
+`app.log` (20 MB cap, oldest-half dropped on overflow) in the app's
+[userData directory](docs/userdata-directory.md). The dev build uses its own
+directory, `Sarv Inbox Dev`, so it never mixes with an installed release:
 
-- macOS: `~/Library/Application Support/Sarv Inbox/app.log`
+- macOS: `~/Library/Application Support/Sarv Inbox Dev/app.log`
+- Windows: `%APPDATA%\Sarv Inbox Dev\app.log`
+- Linux: `~/.config/Sarv Inbox Dev/app.log`
 
 ```bash
-tail -f "$HOME/Library/Application Support/Sarv Inbox/app.log"
-pnpm clean:logs     # clear logs only (leaves DB/credentials)
+tail -f "$HOME/Library/Application Support/Sarv Inbox Dev/app.log"   # macOS
+pnpm clean:logs     # clear logs only, on every platform (leaves DB/credentials)
 ```
 
 It's covered by `*.log` in `.gitignore`, so it's never committed.
@@ -155,4 +143,11 @@ Found a vulnerability? **Do not open a public issue** — see
 
 ## License
 
-[MIT](./LICENSE) © Sarv and Sarv Inbox contributors
+[MIT](./LICENSE) © Sarv and Sarv Inbox contributors.
+
+### Trademarks
+
+The Sarv name and the Sarv / Sarv Inbox logos are trademarks of Sarv and are
+**not** covered by the MIT licence. You're free to use, modify and redistribute
+the code under MIT, but please don't present a modified build as an official
+Sarv release or use the Sarv marks in a way that suggests endorsement.

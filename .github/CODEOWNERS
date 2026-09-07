@@ -1,0 +1,28 @@
+# Code owners for Sarv Inbox
+#
+# These owners are automatically requested for review on pull requests that
+# touch the matching paths. See:
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-configuration/customizing-your-repository/about-code-owners
+#
+# NOTE: create the @Sarv/maintainers team (or replace with GitHub usernames)
+# so these owners resolve.
+
+# Default owners for everything in the repo
+*                         @Sarv/maintainers
+
+# Core business logic (IMAP/SMTP, AI, OAuth)
+/packages/core/           @Sarv/maintainers
+
+# Storage layers
+/packages/storage-node/   @Sarv/maintainers
+/packages/storage-mobile/ @Sarv/maintainers
+
+# Desktop app
+/apps/desktop/            @Sarv/maintainers
+
+# Security-sensitive areas — require maintainer review
+/packages/core/src/oauth/            @Sarv/maintainers
+/packages/core/src/smtp/             @Sarv/maintainers
+/apps/desktop/electron/ipc/          @Sarv/maintainers
+/SECURITY.md                         @Sarv/maintainers
+/.github/                            @Sarv/maintainers

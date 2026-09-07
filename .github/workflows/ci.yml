@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Type-check & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm type-check
+
+      - name: Build libraries
+        run: |
+          pnpm --filter @sarvinbox/core build
+          pnpm --filter @sarvinbox/storage-node build
+
+      # Lint gates the build: zero errors required. Warnings (e.g. no-explicit-any)
+      # are allowed and do not fail CI.
+      - name: Lint
+        run: pnpm lint
+
+  # Guard: fail the PR if any Node-only module (mailparser / imapflow / nodemailer
+  # / better-sqlite3 / …) has leaked into the RENDERER bundle. Such a leak crashes
+  # the packaged app on startup with 'Dynamic require of "stream" is not supported'
+  # — a bug that has shipped to a user before. A fast renderer-only build runs the
+  # exact same guard the release build carries, so the crash can never reach a
+  # user. Its own job so it runs independently of the type-check/lint gate.
+  renderer-bundle-guard:
+    name: Renderer bundle guard (no Node-only deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
+
+      - name: Check renderer bundle for Node-only leaks
+        run: pnpm --filter @sarvinbox/desktop check:renderer-bundle
+
+  # The regression gate: every unit + integration suite, on every push and PR.
+  # This is what stops a new feature silently breaking sync, sending or storage —
+  # type-check and lint above cannot catch behavioural regressions.
+  test:
+    name: Unit & integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # better-sqlite3 is a compiled addon valid for ONE ABI at a time, and the
+      # repo's postinstall builds it for Electron (what the desktop app needs).
+      # The suites run in plain Node, so skip that rebuild and keep the Node ABI —
+      # otherwise every SQLite-backed test fails with ERR_DLOPEN_FAILED.
+      # See scripts/lib/native-abi.mjs.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
+
+      - name: Build libraries
+        run: |
+          pnpm --filter @sarvinbox/core build
+          pnpm --filter @sarvinbox/storage-node build
+
+      - name: Run tests with coverage
+        run: pnpm test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage/
+            apps/desktop/coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  audit:
+    name: Dependency vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Fail the build on HIGH or CRITICAL advisories in the dependency tree.
+      # Dependabot keeps versions current; this gate catches a known-vulnerable
+      # package landing between bumps. Moderate/low are reported but non-blocking.
+      - name: pnpm audit (high+)
+        run: pnpm audit --audit-level=high

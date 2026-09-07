@@ -1,0 +1,14 @@
+# Normalize line endings; let git auto-detect text vs binary
+* text=auto
+
+# Binary assets — never diff/merge as text
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.db   binary
+
+# Generated — collapse in diffs / exclude from language stats
+pnpm-lock.yaml linguist-generated=true

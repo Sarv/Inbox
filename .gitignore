@@ -1,0 +1,157 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+.turbo/
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment variables — every .env variant holds local secrets; only the
+# committed template is tracked.
+.env
+.env.*
+!.env.example
+*.local
+
+# IDEs / local tooling state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+.claude/
+.eslintcache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Alternate lockfiles — pnpm-lock.yaml is the only lockfile for this repo
+package-lock.json
+yarn.lock
+
+# TypeScript
+*.tsbuildinfo
+
+# Electron build output (any package)
+dist-electron/
+release/
+releases/
+*.dmg
+*.zip
+*.exe
+*.AppImage
+
+# Compiled JS files in source directories (should not be committed)
+# TypeScript files compile on-the-fly via Vite/tsc
+apps/desktop/src/**/*.js
+apps/desktop/src/**/*.js.map
+apps/desktop/src/**/*.d.ts
+apps/desktop/src/**/*.d.ts.map
+apps/desktop/electron/**/*.js
+apps/desktop/electron/**/*.js.map
+apps/desktop/electron/**/*.d.ts
+apps/desktop/electron/**/*.d.ts.map
+!apps/desktop/electron/preload.js
+!apps/desktop/postcss.config.js
+# Hand-written, not compiler output: brings in Vite's ambient types so
+# `import.meta.env` type-checks (tsc fails on src/sentry.ts without it).
+!apps/desktop/src/vite-env.d.ts
+!apps/desktop/tailwind.config.js
+packages/**/src/**/*.js
+
+# React Native / Expo
+.expo/
+.expo-shared/
+apps/mobile/android/
+apps/mobile/ios/
+
+# Signing material — certificates, private keys, keystores, provisioning
+# profiles and PGP material are never committed. Release signing reads them
+# from the keychain / CSC_LINK (see scripts/release.sh).
+*.jks
+*.p8
+*.p12
+*.key
+*.pem
+*.cer
+*.crt
+*.pfx
+*.der
+*.keystore
+*.provisionprofile
+*.mobileprovision
+*.p7b
+*.asc
+*.gpg
+
+# SQLite databases (local dev) and their journals / backups
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.bak
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# Runtime state the app writes to its userData dir (DB encryption key, account
+# credentials, AI secrets) — never commit a copy of it.
+db-key.bin
+oauth-accounts.json
+imap-account.json
+ai-secrets.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Compiled Python bytecode
+*.py[cod]
+
+# Package files
+*.jar
+*.war
+*.class
+
+# Maven
+target/
+
+# Large media files
+*.mp4
+*.tiff
+*.avi
+*.flv
+*.mov
+*.wmv
+
+
+# The macOS app icon lives under an otherwise-ignored build/ dir (rule above).
+# It's a committed SOURCE asset — electron-builder reads build/icon.icns for
+# release DMGs and postinstall.mjs copies it into the dev bundle — so keep it
+# tracked while still ignoring everything else under build/.
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/icon.icns

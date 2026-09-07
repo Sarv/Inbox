@@ -1,0 +1,39 @@
+{
+  "name": "@sarvinbox/ui-primitives",
+  "version": "0.1.0",
+  "description": "Platform-specific UI primitive wrappers for Sarv Inbox",
+  "license": "MIT",
+  "author": "Sarv",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup",
+    "lint": "eslint src --ext .ts,.tsx",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "react-native": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.48",
+    "react": "^18.2.0",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3"
+  }
+}

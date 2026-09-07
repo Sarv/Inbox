@@ -1,0 +1,211 @@
+import { defineConfig, loadEnv, type PluginOption } from 'vite';
+import react from '@vitejs/plugin-react';
+import electron from 'vite-plugin-electron';
+import renderer from 'vite-plugin-electron-renderer';
+import { sentryVitePlugin } from '@sentry/vite-plugin';
+import { resolve } from 'path';
+import { copyFileSync, mkdirSync, readFileSync } from 'fs';
+
+import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
+import { rendererAliases } from './vite/renderer-aliases';
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+const APP_VERSION: string = JSON.parse(
+  readFileSync(resolve(__dirname, 'package.json'), 'utf-8')
+).version;
+// Sentry groups events by release; keep this string identical in the main and
+// renderer SDK config and in the source-map upload below.
+const SENTRY_RELEASE = `sarvinbox@${APP_VERSION}`;
+
+// Build-time string replacements shared by the main and renderer bundles.
+//  - Google OAuth creds: inlined so a shipped app (which carries no .env) still
+//    has Gmail sign-in. Non-confidential per Google's installed-app docs.
+//  - Sentry DSN: public by design (safe to embed in a client). ALWAYS defined
+//    (empty when unset) so renderer code can read process.env.* without a
+//    ReferenceError in the browser, and Sentry stays inert without a DSN.
+//  - App version: exposed so the renderer can tag the Sentry release.
+// NOT inlined: the Sarv URLs/client, which dev.sh toggles to localhost at
+// runtime and which already have hardcoded production defaults for distribution.
+function buildDefines(mode: string): Record<string, string> {
+  const env = loadEnv(mode, resolve(__dirname, '../..'), 'SARVINBOX');
+  const defines: Record<string, string> = {};
+  for (const key of ['SARVINBOX_GOOGLE_CLIENT_ID', 'SARVINBOX_GOOGLE_CLIENT_SECRET']) {
+    if (env[key]) defines[`process.env.${key}`] = JSON.stringify(env[key]);
+  }
+  defines['process.env.SARVINBOX_SENTRY_DSN'] = JSON.stringify(env.SARVINBOX_SENTRY_DSN ?? '');
+  defines['process.env.SARVINBOX_APP_VERSION'] = JSON.stringify(APP_VERSION);
+  return defines;
+}
+
+// Upload renderer source maps to Sentry so minified stack traces symbolicate.
+// Only runs when SENTRY_AUTH_TOKEN is set (release builds / CI) — a plain local
+// build with no token is a no-op, so contributors aren't forced to configure
+// Sentry. Requires SENTRY_ORG and SENTRY_PROJECT alongside the token. The maps
+// are deleted after upload so they never ship inside the app.
+function sentrySourceMapPlugins(): PluginOption[] {
+  if (!process.env.SENTRY_AUTH_TOKEN) return [];
+  return [
+    sentryVitePlugin({
+      org: process.env.SENTRY_ORG,
+      project: process.env.SENTRY_PROJECT,
+      authToken: process.env.SENTRY_AUTH_TOKEN,
+      release: { name: SENTRY_RELEASE },
+      sourcemaps: { filesToDeleteAfterUpload: ['dist/**/*.map'] },
+    }),
+  ];
+}
+
+// In dev: externalize all deps (fast rebuilds, node_modules accessible)
+// In production: only externalize native/electron modules (bundle everything else into asar)
+const mainExternals = isProduction
+  ? ['electron', 'better-sqlite3']
+  : [
+      'electron',
+      'better-sqlite3',
+      '@sarvinbox/core',
+      '@sarvinbox/storage-node',
+      'imap',
+      'mailparser',
+      'turndown',
+      'zod',
+      'date-fns',
+    ];
+
+export default defineConfig(({ mode }) => ({
+  plugins: [
+    react(),
+    electron([
+      {
+        // Main process entry
+        entry: 'electron/main.ts',
+        onstart(options) {
+          options.startup();
+        },
+        vite: {
+          define: buildDefines(mode),
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: mainExternals,
+            },
+          },
+          plugins: [{
+            name: 'copy-schema-sql',
+            closeBundle() {
+              mkdirSync(resolve(__dirname, 'dist-electron'), { recursive: true });
+              copyFileSync(
+                resolve(__dirname, '../../packages/storage-node/src/schema.sql'),
+                resolve(__dirname, 'dist-electron/schema.sql')
+              );
+            },
+          }],
+        },
+      },
+      {
+        // VACUUM worker. A separate entry because it runs on its own thread and
+        // is loaded by path at runtime (`new Worker('db-compact.worker.js')`),
+        // so it has to exist as its own file beside the main bundle rather than
+        // be inlined into it. Same externals: it loads better-sqlite3's native
+        // binding, which cannot be bundled.
+        entry: 'electron/workers/db-compact.worker.ts',
+        onstart() {
+          // Deliberately no startup()/reload() — a worker entry rebuilding must
+          // not restart the main process or reload the window.
+        },
+        vite: {
+          define: buildDefines(mode),
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: mainExternals,
+            },
+          },
+        },
+      },
+      {
+        // Preload script
+        entry: 'electron/preload.ts',
+        onstart(options) {
+          options.reload();
+        },
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+          },
+        },
+      },
+    ]),
+    renderer(),
+    // HARD guard: fail the build if any Node-only module (mailparser / imapflow /
+    // nodemailer / better-sqlite3 / …) is pulled into the renderer bundle. Top-
+    // level plugins run for the renderer build ONLY, so the Electron main/preload
+    // builds (which legitimately use these) are unaffected. This is what stops the
+    // "Dynamic require of \"stream\" is not supported" startup crash from shipping.
+    forbidNodeOnlyInRenderer(),
+    // Inject a strict Content-Security-Policy into the app document — but ONLY in
+    // a production build. The packaged renderer loads from file:// (so a response
+    // header CSP can't be applied) and ships as static self-hosted bundles, so a
+    // <meta> CSP is the right mechanism. Skipped in dev because Vite HMR / React
+    // Refresh need 'unsafe-eval'/'unsafe-inline' and a ws: connection. This is
+    // defense-in-depth on top of sandbox+contextIsolation; the untrusted-email
+    // iframe has its own separate, stricter CSP.
+    {
+      name: 'inject-csp-meta',
+      transformIndexHtml: {
+        order: 'post' as const,
+        handler(html: string) {
+          if (mode !== 'production') return html;
+          const csp = [
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: blob:",
+            "font-src 'self' data:",
+            "connect-src 'self' https:",
+            "frame-src 'self' data: blob:",
+            "worker-src 'self' blob:",
+            "object-src 'none'",
+            "base-uri 'self'",
+            "form-action 'none'",
+          ].join('; ');
+          return {
+            html,
+            tags: [
+              {
+                tag: 'meta',
+                attrs: { 'http-equiv': 'Content-Security-Policy', content: csp },
+                injectTo: 'head-prepend' as const,
+              },
+            ],
+          };
+        },
+      },
+    },
+    // Keep the Sentry plugin last so it sees the final emitted bundle + maps.
+    ...sentrySourceMapPlugins(),
+  ],
+  define: buildDefines(mode),
+  resolve: {
+    // Deep-import the renderer-safe SUBPATHS, never the '@sarvinbox/core' barrel
+    // (which re-exports imapflow/mailparser/nodemailer and breaks the renderer).
+    // Shared with the vitest run and the CI bundle-guard build — see
+    // vite/renderer-aliases.ts.
+    alias: rendererAliases(__dirname),
+  },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    // Emit renderer source maps so Sentry can symbolicate minified stack
+    // traces. sentrySourceMapPlugins() deletes them after upload, so they only
+    // ship when no upload happens (local builds without a token).
+    sourcemap: true,
+    // This is a desktop app — bundles load from local disk, not the network —
+    // so the default 500 kB "large chunk" hint is noise. Raise it to keep the
+    // build output clean.
+    chunkSizeWarningLimit: 3000,
+  },
+  server: {
+    port: 5173,
+  },
+}));
