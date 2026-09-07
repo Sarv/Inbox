@@ -209,15 +209,49 @@ describe('evaluateLockContention', () => {
 describe('tagMainProcess', () => {
   // The reclaim finds the previous instance by this title; if tagging silently
   // failed the next launch could never reclaim us. Also must never throw at startup.
-  it('sets the given main-process title without throwing', () => {
-    const original = process.title;
+  //
+  // Asserts the ASSIGNMENT rather than reading process.title back: the OS is not
+  // obliged to keep what we set. Linux only retains a title that fits the original
+  // argv buffer, so under the CI runner the read-back returns 'node (vitest)' and a
+  // read-back assertion fails on Linux while passing on macOS. What this module owes
+  // its caller is that it assigns the title and swallows any failure.
+  it('assigns the given main-process title without throwing', () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'title');
+    const assigned: string[] = [];
+    Object.defineProperty(process, 'title', {
+      configurable: true,
+      get: () => assigned[assigned.length - 1] ?? '',
+      set: (value: string) => {
+        assigned.push(value);
+      },
+    });
+
     try {
       expect(() => tagMainProcess(MAIN_PROCESS_TITLE)).not.toThrow();
-      expect(process.title).toBe(MAIN_PROCESS_TITLE);
       tagMainProcess(DEV_MAIN_PROCESS_TITLE);
-      expect(process.title).toBe(DEV_MAIN_PROCESS_TITLE);
     } finally {
-      process.title = original;
+      if (original) Object.defineProperty(process, 'title', original);
+    }
+
+    expect(assigned).toEqual([MAIN_PROCESS_TITLE, DEV_MAIN_PROCESS_TITLE]);
+  });
+
+  // The setter throws on some platforms; startup must survive it, so the catch in
+  // tagMainProcess has to stay. Without it a failed tag would abort app launch.
+  it('swallows a throwing process.title setter', () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'title');
+    Object.defineProperty(process, 'title', {
+      configurable: true,
+      get: () => '',
+      set: () => {
+        throw new Error('EPERM');
+      },
+    });
+
+    try {
+      expect(() => tagMainProcess(MAIN_PROCESS_TITLE)).not.toThrow();
+    } finally {
+      if (original) Object.defineProperty(process, 'title', original);
     }
   });
 });
