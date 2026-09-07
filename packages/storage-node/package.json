@@ -2,7 +2,7 @@
   "name": "@sarvinbox/storage-node",
   "version": "0.1.6",
   "description": "Node.js SQLite storage implementation for Sarv Inbox",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

@@ -2,7 +2,7 @@
   "name": "@sarvinbox/storage-mobile",
   "version": "0.1.0",
   "description": "React Native SQLite storage implementation for Sarv Inbox",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

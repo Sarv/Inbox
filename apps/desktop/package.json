@@ -3,7 +3,7 @@
   "version": "1.1.1",
   "productName": "Sarv Inbox",
   "description": "Sarv Inbox — AI-powered email client by Sarv",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "dist-electron/main.js",
   "scripts": {

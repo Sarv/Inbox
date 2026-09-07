@@ -2,7 +2,7 @@
   "name": "@sarvinbox/core",
   "version": "0.1.6",
   "description": "Platform-agnostic business logic for Sarv Inbox",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

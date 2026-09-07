@@ -22,8 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain a stale `|draft|` tag — a message must live in a Drafts folder.
 
 ### Changed
+- **Licence: MIT → [Sarv Community License, Version 1.0](./LICENSE).** Sarv Inbox
+  is now source-available (fair-code), not OSI open source. Using, modifying and
+  self-hosting it — including commercially, at any scale — stays free and needs
+  no permission. Selling it, offering it to third parties as a hosted or
+  white-label service, bundling it into a product you supply, and removing or
+  replacing the Sarv branding now require written consent. Redistribution must
+  be free of charge, keep the branding, and publish the source of any
+  modifications. Commercial, OEM and hosting licences: licensing@sarv.com.
+  See [docs/LICENSING-FAQ.md](./docs/LICENSING-FAQ.md).
+- Contributions are now accepted under the Sarv Community License, and
+  contributors additionally grant Sarv Webs Private Limited the right to
+  relicense their contribution (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+- Copyright holder recorded as the legal entity, Sarv Webs Private Limited.
 - Test fixtures, sample data and the demo seed use synthetic identities and
   example domains (`example.com`, `partner.example`, patterned phone numbers).
+
+### Added
+- `NOTICE`, [`TRADEMARKS.md`](./TRADEMARKS.md),
+  [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and
+  [`docs/LICENSING-FAQ.md`](./docs/LICENSING-FAQ.md).
 
 ## [1.1.0] - 2026-07-09
 

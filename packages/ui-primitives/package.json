@@ -2,7 +2,7 @@
   "name": "@sarvinbox/ui-primitives",
   "version": "0.1.0",
   "description": "Platform-specific UI primitive wrappers for Sarv Inbox",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
