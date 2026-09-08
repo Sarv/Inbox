@@ -8,6 +8,8 @@
 // isConnectionError, since a quota/throttle error is not a socket failure and
 // must be backed off, not reconnected.
 
+import { isOAuthTokenError, isTerminalOAuthError } from '../oauth/oauth-errors';
+
 type AnyErr = Error & {
   code?: string;
   textCode?: string;
@@ -193,6 +195,18 @@ export function isAuthError(error: unknown): boolean {
   const e = error as AnyErr;
   if (e.textCode === 'AUTHENTICATIONFAILED') return true;
   if (e.source === 'authentication') return true;
+  // A connect that could not MINT a bearer because the OAuth session is
+  // revoked/expired never reaches the server, so none of the substrings below
+  // appear — yet it is terminal in exactly the sense this latch exists for:
+  // retrying re-runs the identical rejection. Without this, a revoked refresh
+  // token left the reconnect ladder dialling forever, replaying a dead token at
+  // the token endpoint hundreds of times a minute (observed 2026-09-08).
+  //
+  // Delegated to isTerminalOAuthError rather than matched on text, because the
+  // distinction that matters is by ERROR CODE: a refresh cut short by a closing
+  // laptop lid or a network blip must NOT latch this, or a sleeping machine
+  // would stop reconnecting until the user signed in again.
+  if (isOAuthTokenError(error)) return isTerminalOAuthError(error);
   const m = haystack(error);
   return (
     m.includes('invalid credentials') ||
