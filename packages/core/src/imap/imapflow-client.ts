@@ -43,12 +43,20 @@ import { withTimeout, isTimeoutError } from '../utils/timeout';
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { isConnectionError, isAuthError } from './imap-errors';
+import { TOKEN_REQUEST_TIMEOUT_MS } from '../oauth/token-refresher';
 
 // Max time to wait for the OAuth bearer resolver (token refresh) during connect.
 // It runs before any socket opens; a hung DNS/OAuth window must fail fast into the
 // reconnect ladder instead of stalling the whole connect. Kept modest so
 // resolveBearer + the connect bound below stays within callers' outer timeouts.
-const RESOLVE_BEARER_TIMEOUT_MS = 10000;
+//
+// DERIVED, not a second magic number: the token POST now aborts ITSELF at
+// TOKEN_REQUEST_TIMEOUT_MS, and this race must stay strictly LARGER or it would
+// fire first — rejecting us while leaving the HTTP request running, which is
+// precisely the orphaned-refresh bug that got a rotating session revoked. This
+// is now only a backstop for a resolver that hangs OUTSIDE the HTTP call (a
+// wedged token-store read/write).
+const RESOLVE_BEARER_TIMEOUT_MS = TOKEN_REQUEST_TIMEOUT_MS + 2_000;
 // Ceiling for the whole-connect bound (socket + greeting + AUTHENTICATE). Caps the
 // derived `connectionTimeout*2` so the inner connect timeout can't be configured
 // above the callers' outer budgets (foreground/background/forceReconnect ~25s+),
