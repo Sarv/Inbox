@@ -13,15 +13,25 @@
  * Prints the ABI the binary currently reports first, so a mismatch is visible
  * before you spend a minute compiling.
  *
- * Run: node scripts/native-abi.mjs [node|electron]   (default: node)
+ * Skips the compile when the addon already reports the target ABI; pass
+ * --force to rebuild regardless.
+ *
+ * Run: node scripts/native-abi.mjs [node|electron] [--force]   (default: node)
  */
 
-import { readBuiltAbi, readElectronVersion, rebuildBetterSqlite3 } from './lib/native-abi.mjs';
+import {
+  isAbiCurrent,
+  readBuiltAbi,
+  readElectronVersion,
+  rebuildBetterSqlite3,
+} from './lib/native-abi.mjs';
 
 const log = (msg) => console.log(`[native-abi] ${msg}`);
 const warn = (msg) => console.warn(`[native-abi] ${msg}`);
 
-const runtime = (process.argv[2] ?? 'node').toLowerCase();
+const args = process.argv.slice(2);
+const force = args.includes('--force');
+const runtime = (args.find((a) => !a.startsWith('--')) ?? 'node').toLowerCase();
 if (!['node', 'electron'].includes(runtime)) {
   console.error(`[native-abi] unknown runtime "${runtime}" — use "node" or "electron"`);
   process.exit(1);
@@ -43,6 +53,13 @@ log(`current better-sqlite3: ${currentAbi()}`);
 const electronVersion = readElectronVersion();
 if (runtime === 'electron' && !electronVersion) {
   warn('electron is not installed — nothing to rebuild against');
+  process.exit(0);
+}
+
+// The addon is already what the caller asked for — skip the ~1min node-gyp run.
+// `sh scripts/dev.sh` calls this on every app start, so this is the hot path.
+if (!force && isAbiCurrent({ runtime, target: electronVersion })) {
+  log(`already built for ${runtime} — nothing to do (use --force to rebuild anyway)`);
   process.exit(0);
 }
 
