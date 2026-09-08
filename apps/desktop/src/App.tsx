@@ -14,6 +14,7 @@ import { GlobalConfirmDialog } from './components/GlobalConfirmDialog';
 import { InAppNotification } from './components/InAppNotification';
 import { NoAccountEmptyState } from './components/NoAccountEmptyState';
 import { Onboarding } from './components/onboarding/Onboarding';
+import { OAuthSessionBanner } from './components/OAuthSessionBanner';
 import { ReauthBanner } from './components/ReauthBanner';
 import { SecurityStatusBanner } from './components/SecurityStatusBanner';
 import { Settings } from './components/settings';
@@ -190,13 +191,14 @@ function App() {
     return () => document.removeEventListener('sarvinbox:open-mail', handler);
   }, []);
 
-  // An OAuth account's token could not be refreshed (session expired / revoked)
-  // — the refresh scheduler fires a native "sign in again" notification and this
-  // event; route the user to Settings → Accounts so they can re-authenticate.
+  // The user CLICKED the "Sign in again" OS notification — an explicit request
+  // to be taken to Settings → Accounts. Deliberately NOT wired to the failure
+  // itself: a refresh that fails while the user is reading mail shows the
+  // OAuthSessionBanner instead of yanking them into Settings.
   useEffect(() => {
-    const api = (window.electronAPI as unknown as { notifications?: { onReauthRequired?: (cb: () => void) => (() => void) } })?.notifications;
-    if (!api?.onReauthRequired) return;
-    const off = api.onReauthRequired(() => {
+    const api = window.electronAPI?.notifications;
+    if (!api?.onReauthOpenSettings) return;
+    const off = api.onReauthOpenSettings(() => {
       setSettingsInitialTab('accounts');
       setActiveSection('settings');
     });
@@ -886,6 +888,13 @@ function App() {
         {/* Non-blocking account re-auth prompt (replaces the old full-screen gate). */}
         <ReauthBanner
           onReconnect={() => setShowReauth(true)}
+          onFix={() => { setSettingsInitialTab('accounts'); setActiveSection('settings'); }}
+        />
+        {/* An OAuth session that could not be refreshed. Separate from the
+            password banner above: the remedy is the provider's sign-in, not a
+            password prompt. Shown regardless of whether the OS notification
+            was ever seen. */}
+        <OAuthSessionBanner
           onFix={() => { setSettingsInitialTab('accounts'); setActiveSection('settings'); }}
         />
         {/* Socket up but mail sync failing — tells the user instead of showing a

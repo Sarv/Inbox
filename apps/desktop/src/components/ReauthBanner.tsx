@@ -1,7 +1,9 @@
-import { AlertTriangle, RefreshCw, Settings, X } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Settings } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { useEmailStore } from '../store/email-store';
+
+import { BannerBar } from './BannerBar';
 
 /**
  * Non-blocking banner shown when the ACTIVE account's IMAP login was rejected
@@ -28,34 +30,32 @@ export function ReauthBanner({ onReconnect, onFix }: { onReconnect: () => void; 
   const label = accounts.find((a) => a.id === activeAccountId)?.email || 'this account';
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2 bg-destructive/10 border-b border-destructive/30 text-sm text-destructive">
-      <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-      <span className="flex-1 min-w-0 truncate">
-        <span className="font-semibold">Sign-in failed for {label}.</span>{' '}
-        <span className="opacity-90">The saved password was rejected — new mail won&apos;t sync until you reconnect. Your existing mail is still available.</span>
-      </span>
-      <button
-        onClick={onReconnect}
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-destructive/15 hover:bg-destructive/25 font-medium transition-colors flex-shrink-0"
-      >
-        <RefreshCw className="h-3.5 w-3.5" />
-        Reconnect
-      </button>
-      <button
-        onClick={onFix}
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md hover:bg-destructive/15 font-medium transition-colors flex-shrink-0"
-      >
-        <Settings className="h-3.5 w-3.5" />
-        Account settings
-      </button>
-      <button
-        onClick={() => setDismissed(true)}
-        className="p-1 rounded hover:bg-destructive/15 transition-colors flex-shrink-0"
-        title="Dismiss (account stays unsynced until reconnected)"
-        aria-label="Dismiss"
-      >
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </div>
+    <BannerBar
+      tone="danger"
+      icon={<AlertTriangle className="h-4 w-4" />}
+      dismissTitle="Dismiss (account stays unsynced until reconnected)"
+      onDismiss={() => setDismissed(true)}
+      actions={
+        <>
+          <button
+            onClick={onReconnect}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-destructive/15 hover:bg-destructive/25 font-medium transition-colors flex-shrink-0"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Reconnect
+          </button>
+          <button
+            onClick={onFix}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md hover:bg-destructive/15 font-medium transition-colors flex-shrink-0"
+          >
+            <Settings className="h-3.5 w-3.5" />
+            Account settings
+          </button>
+        </>
+      }
+    >
+      <span className="font-semibold">Sign-in failed for {label}.</span>{' '}
+      <span className="opacity-90">The saved password was rejected — new mail won&apos;t sync until you reconnect. Your existing mail is still available.</span>
+    </BannerBar>
   );
 }
