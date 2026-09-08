@@ -13,9 +13,9 @@
  * refreshes expiring access tokens before returning them.
  */
 
-import { shell } from 'electron';
 import http from 'http';
 import { AddressInfo } from 'net';
+
 import {
   exchangeCodeForTokens,
   generatePkcePair,
@@ -24,6 +24,7 @@ import {
   isOAuthProviderConfigured,
   OAuthError,
   refreshAccessToken,
+  isTerminalOAuthError,
   SARV_PRODUCTION_CLIENT_ID,
   scopesLost,
   scopesNotGranted,
@@ -37,9 +38,13 @@ import {
   type IMAPConfig,
   createLogger,
 } from '@sarvinbox/core';
-import { getAccount, removeAccount, saveAccount, listAccounts } from './oauth-token-store';
-import { waitForNetworkReady } from './network-readiness';
+import { shell } from 'electron';
+
 import { getSystemSuspended } from '../shared';
+
+import { waitForNetworkReady } from './network-readiness';
+import { getAccount, removeAccount, saveAccount, listAccounts } from './oauth-token-store';
+import { getReauthRequirement } from './reauth-registry';
 const logger = createLogger('oauth-service');
 
 // Sliding-window refresh policy.
@@ -297,6 +302,25 @@ export async function getValidAccessToken(
   // that window cannot finish before the machine sleeps again — and against a
   // rotating provider, an unfinished refresh is what costs the whole session.
   // Waiting for a real wake loses nothing: no user is watching a sleeping Mac.
+  // A session the user must re-authorize will not recover by being asked again:
+  // every refresh is a guaranteed rejection, and replaying a spent token is
+  // exactly what a reuse detector counts against the family. Fail fast, with
+  // the recorded reason, so each connect attempt costs nothing and no request
+  // leaves the machine.
+  //
+  // Placed like the suspend gate below — AFTER the cached-token fast path (a
+  // still-valid access token keeps working) and AFTER the single-flight join (a
+  // refresh already in the air runs to completion). Cleared the moment the user
+  // signs in (`rescheduleOAuthAccount`), and never persisted, so a restart
+  // always gets one fresh attempt.
+  const pendingReauth = getReauthRequirement(providerId, email);
+  if (pendingReauth) {
+    throw new OAuthError(
+      `OAuth session for ${providerId}:${email} needs an interactive sign-in — ${pendingReauth.reason}`,
+      'REAUTH_REQUIRED',
+    );
+  }
+
   if (getSystemSuspended()) {
     throw new OAuthError(
       `Token refresh for ${providerId}:${email} deferred — the system is suspended; it will refresh on the next real wake`,
@@ -425,36 +449,12 @@ export async function getValidAccessToken(
  * token needs refreshing.
  */
 /**
- * Whether an OAuth refresh error is TERMINAL — the refresh token itself is
- * dead/revoked/expired and ONLY interactive re-authentication can fix it — vs a
- * transient failure (network blip, rate-limit, 5xx) that's worth retrying.
- *
- * Terminal signals: a missing/blank stored token, or the token endpoint
- * rejecting the grant (`invalid_grant` / `invalid_client` /
- * `unauthorized_client` / `invalid_token`, or a 400/401 response). Everything
- * else — `TOKEN_REFRESH_NETWORK_ERROR`, 429, 5xx, timeouts — is transient.
+ * Re-exported so existing callers keep one import site. The implementation
+ * lives in core because the IMAP reconnect ladder needs the SAME verdict — see
+ * `isAuthError` in `imap-errors`. Two copies is exactly how the ladder ended up
+ * retrying a revoked session forever.
  */
-export function isTerminalOAuthError(err: unknown): boolean {
-  if (err instanceof OAuthError) {
-    if (err.code === 'EMPTY_STORED_TOKEN' || err.code === 'EMPTY_REFRESH_TOKEN') return true;
-    if (err.code === 'TOKEN_REFRESH_NETWORK_ERROR') return false;
-    // A refresh we cut short (deadline, suspend) or never started (asleep) says
-    // NOTHING about the credentials. Treating these as terminal would sign the
-    // user out over a laptop lid — the opposite of the bug being fixed here.
-    if (
-      err.code === 'TOKEN_REFRESH_TIMEOUT' ||
-      err.code === 'TOKEN_REFRESH_ABORTED' ||
-      err.code === 'REFRESH_DEFERRED_SUSPENDED'
-    ) {
-      return false;
-    }
-  }
-  const e = err as { message?: string; serverResponse?: string };
-  const msg = `${e?.message ?? ''} ${e?.serverResponse ?? ''}`.toLowerCase();
-  if (/invalid_grant|invalid_client|unauthorized_client|invalid_token/.test(msg)) return true;
-  if (/\(400\)|\(401\)/.test(msg)) return true;
-  return false;
-}
+export { isTerminalOAuthError };
 
 /** True when the account no longer exists (removed) — cancel, don't re-auth. */
 export function isAccountGoneError(err: unknown): boolean {

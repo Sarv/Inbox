@@ -6,7 +6,7 @@
 
 import { ipcMain } from 'electron';
 import type { IMAPConfig, SyncEngineOptions } from '@sarvinbox/core';
-import { withTimeout, resolveTlsOptions, accountIdFor, ImapFlowClient, isAuthError, isQuotaError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift } from '@sarvinbox/core';
+import { withTimeout, resolveTlsOptions, accountIdFor, ImapFlowClient, isAuthError, isQuotaError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift } from '@sarvinbox/core';
 
 // Per-account connection back-off after a "too many simultaneous connections"
 // quota error (or a connect timeout, usually the same saturated condition). ONE
@@ -656,6 +656,15 @@ export function registerSyncHandlers(): void {
 
       return { success: true, healedAuthMethod };
     } catch (error) {
+      // A revoked/expired OAuth session is a settled fact, not an incident. The
+      // renderer's focus / online / periodic reconnect paths each land here
+      // until the user signs in again, and one ERROR-with-stack per attempt is
+      // what buried the genuine failures in the log. Say it once per attempt,
+      // in one line, and never as retryable.
+      if (isTerminalOAuthError(error)) {
+        logger.warn(`[Main] connect refused — ${(error as Error).message}; only an interactive sign-in can fix this`);
+        return { success: false, error: (error as Error).message, retryable: false };
+      }
       logger.error('IMAP connect error:', error);
       const quotaKey = accountId ?? getCurrentAccountId();
       // Quota ("too many simultaneous connections"): tear our engine down so a
