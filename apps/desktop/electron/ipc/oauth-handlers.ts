@@ -19,6 +19,7 @@ import {
   startOAuthFlow,
 } from '../services/oauth-service';
 import { rescheduleOAuthAccount, unscheduleOAuthAccount } from '../services/oauth-refresh-scheduler';
+import { listReauthRequired } from '../services/reauth-registry';
 
 export function registerOAuthHandlers(): void {
   ipcMain.handle('oauth:listProviders', async () => {
@@ -97,6 +98,22 @@ export function registerOAuthHandlers(): void {
         updatedAt: a.updatedAt,
       }));
       return { success: true, data: safe };
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /**
+   * Which accounts are waiting for the user to sign in again.
+   *
+   * PULLED by the renderer on mount, because the push (`oauth:reauth-required`)
+   * can be emitted while no window is listening — during startup, after a
+   * renderer reload, or while the app sat in the background. Without this the
+   * banner would depend on having been present at the exact moment of failure.
+   */
+  ipcMain.handle('oauth:listReauthRequired', async () => {
+    try {
+      return { success: true, data: listReauthRequired() };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }

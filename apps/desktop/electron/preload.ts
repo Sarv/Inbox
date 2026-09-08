@@ -537,11 +537,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     // An OAuth account's token could not be refreshed (revoked/expired refresh
     // token, or persistent failures) — the user must sign in again. Fired by the
-    // refresh scheduler so the UI can route to Settings → Accounts.
+    // refresh scheduler the moment it gives up, so the in-app banner appears
+    // even if the OS notification never does. Does NOT navigate on its own.
     onReauthRequired: (cb: (data: { provider: string; email: string; reason: string }) => void) => {
       const handler = (_e: unknown, data: { provider: string; email: string; reason: string }) => cb(data);
       ipcRenderer.on('oauth:reauth-required', handler);
       return () => ipcRenderer.removeListener('oauth:reauth-required', handler);
+    },
+    // The account works again (a refresh succeeded, the user signed back in, or
+    // the account was removed) — take the banner down without a reload.
+    onReauthResolved: (cb: (data: { provider: string; email: string }) => void) => {
+      const handler = (_e: unknown, data: { provider: string; email: string }) => cb(data);
+      ipcRenderer.on('oauth:reauth-resolved', handler);
+      return () => ipcRenderer.removeListener('oauth:reauth-resolved', handler);
+    },
+    // The user CLICKED the "Sign in again" OS notification — an explicit
+    // request to be taken to Settings -> Accounts. Separate from the event
+    // above precisely so the failure itself never navigates.
+    onReauthOpenSettings: (cb: (data: { provider: string; email: string }) => void) => {
+      const handler = (_e: unknown, data: { provider: string; email: string }) => cb(data);
+      ipcRenderer.on('oauth:reauth-open-settings', handler);
+      return () => ipcRenderer.removeListener('oauth:reauth-open-settings', handler);
     },
   },
 
@@ -772,6 +788,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('oauth:startFlow', providerId),
     cancel: () => ipcRenderer.invoke('oauth:cancel'),
     listAccounts: () => ipcRenderer.invoke('oauth:listAccounts'),
+    // Accounts already known to need re-authentication. Pulled on mount so a
+    // window that opened after the failure still shows the banner.
+    listReauthRequired: () => ipcRenderer.invoke('oauth:listReauthRequired'),
     signOut: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
       ipcRenderer.invoke('oauth:signOut', providerId, email),
     getAccessToken: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
@@ -1170,6 +1189,8 @@ export interface ElectronAPI {
     onOpenEmail: (cb: (data: { accountId: string; emailId: string }) => void) => () => void;
     onInApp: (cb: (data: InAppToast) => void) => () => void;
     onReauthRequired: (cb: (data: { provider: string; email: string; reason: string }) => void) => () => void;
+    onReauthResolved: (cb: (data: { provider: string; email: string }) => void) => () => void;
+    onReauthOpenSettings: (cb: (data: { provider: string; email: string }) => void) => () => void;
   };
   aiSecrets: {
     getAll: () => Promise<{ success: boolean; data?: Record<string, string>; encrypted?: boolean; error?: string }>;
@@ -1330,6 +1351,11 @@ export interface ElectronAPI {
     listAccounts: () => Promise<{
       success: boolean;
       data?: Array<{ provider: 'gmail' | 'microsoft' | 'yahoo' | 'sarv'; email: string; displayName?: string; scopes: string[]; createdAt: number; updatedAt: number }>;
+      error?: string;
+    }>;
+    listReauthRequired: () => Promise<{
+      success: boolean;
+      data?: Array<{ provider: 'gmail' | 'microsoft' | 'yahoo' | 'sarv'; email: string; reason: string; since: string }>;
       error?: string;
     }>;
     signOut: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
