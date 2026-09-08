@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Gmail-style "Select" menu in the bulk-action bar — select threads by
   read / unread / starred / unstarred state.
+- An in-app banner when an account's session expires, so a mailbox can no longer
+  stop syncing silently. Previously the only signal was a native "Sign in again"
+  notification, and the app was told about the failure only if that notification
+  was clicked — so a toast suppressed by Focus mode, missed while the app was in
+  the background, or absent entirely (Linux without a notification daemon) left
+  mail quietly not arriving with nothing on screen. The banner names the affected
+  accounts, offers "Sign in" and "Account settings", and clears itself the moment
+  the account works again. It is also pulled on startup rather than only pushed,
+  so a session that broke while the app was closed still surfaces.
 - `NOTICE`, [`TRADEMARKS.md`](./TRADEMARKS.md),
   [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and
   [`docs/LICENSING-FAQ.md`](./docs/LICENSING-FAQ.md).
@@ -39,6 +48,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- An OAuth sign-in you abandon no longer strands the button on "Opening…".
+  Closing the provider's browser tab is invisible to the app — the flow simply
+  never answers — so a button that disabled itself until it did sat there for
+  the full five-minute timeout with no way back. The sign-in buttons now stay
+  clickable and a "Cancel" appears beside them, which releases the loopback
+  port without waiting for the abandoned flow. A late result from a superseded
+  attempt can no longer clear a newer one's spinner.
+- Settings → Accounts now shows "Sign-in required" on an account whose session
+  has expired, in the list and in the account's details, with a "Sign in again"
+  button. It previously read "Connected" — a dead refresh token does not close
+  the connection — so dismissing the expiry banner left the user with no way to
+  find out which account had stopped working. The list and the banner now read
+  the same state, so they cannot disagree.
+- A revoked or expired OAuth session no longer triggers a reconnect storm. Every
+  reconnect path — startup, window focus, account switch, background sync and
+  the IMAP ladder — retried independently, and each retry POSTed the same dead
+  refresh token; a single revoked account produced 140–230 log lines a minute
+  for as long as it stayed broken, and replaying a spent token is exactly what
+  keeps a rotating provider's reuse detector holding the session revoked. Once
+  an account is known to need signing in, the token request now fails locally
+  without reaching the network, and the reconnect ladder stops instead of
+  dialling forever. A refresh interrupted by sleep, a network blip or a timeout
+  is still treated as transient — a closing laptop lid must never demand a new
+  sign-in. Connect failures for a revoked session are also logged as one line
+  rather than an error with a stack per attempt.
 - The renderer no longer imports the `@sarvinbox/core` barrel for the folder
   classifier, which crashed the dev app with "Dynamic require of 'stream' is not
   supported"; it deep-imports the pure module instead.
