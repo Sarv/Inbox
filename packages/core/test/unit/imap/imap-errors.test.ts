@@ -185,6 +185,41 @@ describe('isAuthError', () => {
   it('returns false for non-Error values', () => {
     expect(isAuthError({ textCode: 'AUTHENTICATIONFAILED' })).toBe(false);
   });
+
+  // THE reconnect storm (2026-09-08). A connect that cannot MINT a bearer
+  // because the OAuth session is revoked never reaches the server, so none of
+  // the substrings above appear — and the ladder, seeing no auth error, dialled
+  // forever, replaying a dead refresh token at the token endpoint hundreds of
+  // times a minute. It is terminal in exactly the sense this latch exists for.
+  it('classifies a revoked OAuth session as an auth error', () => {
+    const revoked = Object.assign(
+      new Error('Token refresh failed (400): {"detail":"Refresh token reuse detected. This session has been revoked for security; the user must sign in again."}'),
+      { code: 'TOKEN_REFRESH_FAILED' },
+    );
+    expect(isAuthError(revoked)).toBe(true);
+    expect(isAuthError(Object.assign(new Error('needs sign-in'), { code: 'REAUTH_REQUIRED' }))).toBe(true);
+  });
+
+  // The other half of the same rule, and the one that costs more if it breaks:
+  // a refresh cut short by a closing lid or a network blip says NOTHING about
+  // the credentials. Latching here would stop a sleeping laptop from ever
+  // reconnecting until the user signed in again.
+  it.each([
+    'REFRESH_DEFERRED_SUSPENDED',
+    'TOKEN_REFRESH_ABORTED',
+    'TOKEN_REFRESH_TIMEOUT',
+    'TOKEN_REFRESH_NETWORK_ERROR',
+  ])('does NOT latch on a transient token failure (%s)', (code) => {
+    expect(isAuthError(Object.assign(new Error('refresh did not complete'), { code }))).toBe(false);
+  });
+
+  // The OAuth branch consults a classifier that falls back to matching "(400)"
+  // in the message. Non-OAuth errors must never reach it, or an IMAP command
+  // failure carrying those digits would stop the ladder for good.
+  it('does not read an unrelated error through the OAuth classifier', () => {
+    expect(isAuthError(err('Command failed (400) BAD invalid arguments'))).toBe(false);
+    expect(isAuthError(err('invalid_grant', { code: 'ETHROTTLE' }))).toBe(false);
+  });
 });
 
 describe('isQuotaError', () => {
