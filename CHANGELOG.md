@@ -56,6 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a conversation are no longer loaded unconditionally — they follow the same
   auto-load rule as the standard reading view, which is now a single shared
   helper rather than two copies that could disagree.
+- A token refresh interrupted by sleep no longer signs the account out. The
+  request now carries a real `AbortSignal`, so its timeout cancels the HTTP call
+  instead of leaving it running unattended — against a provider that rotates
+  refresh tokens, an orphaned request could be processed server-side while its
+  reply was lost, after which the next refresh replayed a spent token and the
+  provider revoked the whole session as suspected theft.
+- Refreshes are deferred while the machine is suspended, rather than fired into a
+  sleeping network. Pending refreshes are cancelled on suspend, and on wake the
+  app waits for the link to actually come back before the first request. A
+  deferred refresh is re-checked shortly afterwards and never counts as a
+  failure, so a night of sleep can no longer exhaust the retry budget and leave
+  the account showing as disconnected in the morning.
 
 ## [1.1.0] - 2026-07-09
 
