@@ -1,8 +1,11 @@
-import { Mail, Loader2, Check, X, Trash2, Send, Pencil, Plus, ChevronRight } from 'lucide-react';
+import { Mail, Loader2, Check, X, Trash2, Send, Pencil, Plus, ChevronRight, AlertTriangle, LogIn } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 
+import { useOAuthSignIn } from '../../hooks/useOAuthSignIn';
+import { useReauthSessions } from '../../hooks/useReauthSessions';
 import { useEmailStore } from '../../store/email-store';
 import { accountHost, isAccountEmailDuplicated, effectiveSmtpConfig } from '../../store/helpers';
+import { findReauthSession } from '../../utils/reauth-sessions';
 import { AddAccountModal } from '../AddAccountModal';
 import { SmtpConfigForm } from '../SmtpConfigForm';
 import { Tooltip } from '../Tooltip';
@@ -11,13 +14,18 @@ import { VaultPasswordField } from '../VaultPasswordField';
 import { AliasEditor } from './AliasEditor';
 import type { SettingsTabProps } from './types';
 
-type EmailOAuthProviderId = 'gmail' | 'microsoft' | 'yahoo';
+// Providers whose purpose is 'email' or 'both' — i.e. the ones this tab lists.
+// 'sarv' belongs here: its session authenticates the Sarv mailbox over
+// IMAP/SMTP as well as the AI features, and it is the account whose expiry
+// the sign-in-required state is most often reporting.
+type EmailOAuthProviderId = 'gmail' | 'microsoft' | 'yahoo' | 'sarv';
 
 // Friendly provider names for the "Signed in with …" auth badge.
 const OAUTH_PROVIDER_LABELS: Record<string, string> = {
   gmail: 'Google',
   microsoft: 'Microsoft',
   yahoo: 'Yahoo',
+  sarv: 'Sarv',
 };
 
 export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAccountConsumed }: SettingsTabProps & { openAddAccount?: boolean; onAddAccountConsumed?: () => void }) {
@@ -94,7 +102,14 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
     }
   };
   const [oauthProviders, setOauthProviders] = useState<Array<{ id: EmailOAuthProviderId; label: string; configured: boolean }>>([]);
-  const [oauthLoading, setOauthLoading] = useState<EmailOAuthProviderId | null>(null);
+  // Sign-in state lives in the shared hook: a flow the user abandoned by
+  // closing the browser tab never settles, so the spinner needs a way out that
+  // does not depend on the flow answering. `cancel` is that way out.
+  const { pending: oauthLoading, start: startOAuthSignIn, cancel: cancelOAuthSignIn } = useOAuthSignIn();
+  // Accounts the main process says need an interactive sign-in. Without this
+  // the list happily reported "Connected" for an account whose refresh token
+  // was dead — the state the user had come here to check.
+  const reauthSessions = useReauthSessions();
   // A saved-but-not-connected account (e.g. a wrong port refuses the socket, so
   // `connected` is false). Surfacing it lets the user fix the port + reconnect
   // instead of the panel reading "No account connected" and forcing a re-setup.
@@ -121,9 +136,12 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
 
   const handleOAuthSignIn = async (providerId: EmailOAuthProviderId) => {
     setImapError('');
-    setOauthLoading(providerId);
     try {
-      const res = await window.electronAPI.oauth.startFlow(providerId);
+      const res = await startOAuthSignIn(providerId);
+      // null = the attempt was cancelled or superseded. Reporting an error for
+      // a flow the user deliberately abandoned would be noise over whatever
+      // they did next.
+      if (res === null) return;
       if (!res.success || !res.data) {
         throw new Error(res.error || 'Sign-in failed');
       }
@@ -145,8 +163,6 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
       setTimeout(() => setImapSuccess(false), 3000);
     } catch (err) {
       setImapError((err as Error).message || 'OAuth sign-in failed');
-    } finally {
-      setOauthLoading(null);
     }
   };
 
@@ -270,9 +286,17 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
 
   // The account the popup is showing, and whether we have its LIVE (active +
   // connected) state yet. Until the switch lands we render its stored config.
+  // ONE decision about whether an account needs an interactive sign-in, used by
+  // the row, the detail popup and (via the same hook) the banner — so they can
+  // never disagree, which is exactly what went wrong before: the banner said the
+  // session had expired while this list still read "Connected".
+  const reauthFor = (account: { email?: string | null; imapConfig?: { oauthProvider?: string | null } | null } | null | undefined) =>
+    (account ? findReauthSession(reauthSessions, { provider: account.imapConfig?.oauthProvider ?? null, email: account.email ?? null }) : undefined);
+
   const detailAccount = accounts.find((a) => a.id === detailsAccountId) || null;
   const detailIsActive = !!detailAccount && detailAccount.id === activeAccountId;
   const detailLive = detailIsActive && connected && !!imapConfig;
+  const detailReauth = reauthFor(detailAccount);
   const dImap: any = detailLive ? imapConfig : detailAccount?.imapConfig ?? null;
   // Show the EFFECTIVE sending config: OAuth accounts always resolve to their
   // provider's SMTP (smtp.gmail.com), never a stale/crossed stored password
@@ -365,15 +389,31 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
               <button
                 key={p.id}
                 onClick={() => handleOAuthSignIn(p.id)}
-                disabled={!p.configured || oauthLoading !== null}
+                // Deliberately NOT disabled while a flow is pending: closing the
+                // browser tab never settles the flow, so a button that waits for
+                // it would sit on "Opening…" for the full five-minute timeout.
+                disabled={!p.configured}
                 title={p.configured ? '' : 'Not configured — see OAUTH_SETUP.md'}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-background border border-input rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {oauthLoading === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
-                <span className="text-sm font-medium">Sign in with {p.label}</span>
+                <span className="text-sm font-medium">
+                  {oauthLoading === p.id ? `Opening ${p.label}…` : `Sign in with ${p.label}`}
+                </span>
                 {!p.configured && <span className="text-xs text-muted-foreground">(not configured)</span>}
               </button>
             ))}
+            {oauthLoading !== null && (
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>Finish signing in in your browser.</span>
+                <button
+                  onClick={cancelOAuthSignIn}
+                  className="px-2 py-1 rounded-md hover:bg-accent hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
           {imapError && (
             <div className="max-w-md flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-md text-sm text-destructive">
@@ -403,6 +443,9 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
               // like "still connected, then it vanishes".
               const isDeleting = deletingAccountIds.includes(a.id);
               const removeError = accountActionError?.id === a.id ? accountActionError.message : null;
+              // A dead refresh token does not close the connection, so nothing
+              // else in this row would tell the user the account is broken.
+              const needsSignIn = !isDeleting && !!reauthFor(a);
               return (
                 <button
                   key={a.id}
@@ -423,6 +466,8 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
                       <span className="block truncate text-[11px] text-muted-foreground">Deleting…</span>
                     ) : removeError ? (
                       <span className="block truncate text-[11px] text-destructive">{removeError}</span>
+                    ) : needsSignIn ? (
+                      <span className="block truncate text-[11px] text-destructive">Sign-in required</span>
                     ) : isDupEmail(a) && (
                       <span className="block truncate text-[11px] text-muted-foreground">{hostOf(a)}</span>
                     )}
@@ -430,7 +475,10 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
                   {isDeleting ? (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
                   ) : (
-                    <ChevronRight className={`h-4 w-4 shrink-0 ${isOpen ? 'text-primary' : 'text-muted-foreground'}`} />
+                    <>
+                      {needsSignIn && <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" aria-label="Sign-in required" />}
+                      <ChevronRight className={`h-4 w-4 shrink-0 ${isOpen ? 'text-primary' : 'text-muted-foreground'}`} />
+                    </>
                   )}
                 </button>
               );
@@ -618,11 +666,39 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
                     </div>
                     <div className="flex items-center justify-between py-1">
                       <span className="text-sm text-muted-foreground">Status</span>
-                      <span className={`text-sm font-medium ${detailLive ? 'text-green-500' : 'text-muted-foreground'}`}>
-                        {detailLive ? 'Connected' : 'Connecting…'}
+                      <span className={`text-sm font-medium ${detailReauth ? 'text-destructive' : detailLive ? 'text-green-500' : 'text-muted-foreground'}`}>
+                        {detailReauth ? 'Sign-in required' : detailLive ? 'Connected' : 'Connecting…'}
                       </span>
                     </div>
                   </div>
+                  {detailReauth && (
+                    <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-md">
+                      <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-destructive" />
+                      <div className="flex-1 min-w-0 space-y-2">
+                        <p className="text-xs text-destructive">
+                          {detailReauth.reason || 'The saved sign-in for this account expired. New mail will not arrive until you sign in again.'}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleOAuthSignIn(detailReauth.provider as EmailOAuthProviderId)}
+                            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                          >
+                            {oauthLoading === detailReauth.provider
+                              ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Opening…</>
+                              : <><LogIn className="h-3.5 w-3.5" /> Sign in again</>}
+                          </button>
+                          {oauthLoading !== null && (
+                            <button
+                              onClick={cancelOAuthSignIn}
+                              className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* SMTP (Sending) */}
