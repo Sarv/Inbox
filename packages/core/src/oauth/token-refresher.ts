@@ -22,31 +22,133 @@ function encodeTokenBody(
 }
 
 /**
+ * How long a single token-endpoint POST may run before it is ABORTED.
+ *
+ * This is a real `AbortSignal`, not a `Promise.race`, and the difference is the
+ * entire point. `withTimeout` only rejects the CALLER — the HTTP request keeps
+ * running with nobody listening. Against a provider that ROTATES refresh
+ * tokens that is fatal: the server rotates and marks the presented token
+ * consumed, no response ever reaches us so the new token is never persisted,
+ * and the next refresh replays a spent token. A reuse detector cannot tell that
+ * apart from a stolen token and revokes the whole session.
+ *
+ * Observed 2026-09-08: a refresh issued inside a 2-second macOS dark-wake was
+ * orphaned when the machine slept; the next wake replayed the spent token and
+ * Sarv revoked the session at 05:14 — every refresh for the following nine
+ * hours returned 400 "Refresh token reuse detected".
+ *
+ * 8s is deliberately UNDER the IMAP connect path's outer bearer race (see
+ * `RESOLVE_BEARER_TIMEOUT_MS`, derived from this constant) so this abort always
+ * fires first and the request dies at a moment we chose.
+ *
+ * Aborting does NOT prove the server declined to commit the rotation — nothing
+ * client-side can — so the resulting error says the token state is UNKNOWN
+ * instead of pretending the refresh simply failed. The complete remedy is a
+ * server-side grace window that briefly honours the previous token.
+ */
+export const TOKEN_REQUEST_TIMEOUT_MS = 8_000;
+
+/**
+ * The interactive code-for-token exchange gets a longer leash: a human is
+ * waiting, it runs once, and there is no stored refresh token to lose if it is
+ * cut short — a failed exchange just fails the sign-in.
+ */
+export const TOKEN_EXCHANGE_TIMEOUT_MS = 20_000;
+
+/** Error codes a token POST can fail with, per calling flow. */
+interface TokenRequestCodes {
+  network: string;
+  timeout: string;
+  aborted: string;
+}
+
+/** Caller-supplied cancellation for a token request. */
+export interface TokenRequestControl {
+  /**
+   * Aborts the request from outside — e.g. the desktop app cancelling refreshes
+   * as the machine suspends, so the socket closes at a known moment rather than
+   * being frozen mid-flight by sleep. A string `reason` is surfaced in the error.
+   */
+  signal?: AbortSignal;
+  /** Override the per-request abort deadline (defaults per flow). */
+  timeoutMs?: number;
+}
+
+/**
+ * Why a token POST ended, decided from the SIGNALS rather than the thrown
+ * value. `fetch` rejects with the signal's `reason`, which may be a plain
+ * string (not an Error) and differs across runtimes, so inspecting the signals
+ * is the only stable classification.
+ */
+function abortCause(
+  external: AbortSignal | undefined,
+  timeoutSignal: AbortSignal,
+): 'aborted' | 'timeout' | null {
+  if (external?.aborted) return 'aborted';
+  if (timeoutSignal.aborted) return 'timeout';
+  return null;
+}
+
+/**
  * POST to the token endpoint and return the raw Response, surfacing any
  * network-level failure with enough context (URL, underlying cause code)
  * to diagnose "fetch failed" noise from Node's undici. Without this, an
  * ECONNREFUSED against a dev OAuth server bubbles up as a bare "fetch
  * failed" and the caller has no idea *which* host is unreachable.
+ *
+ * Every request is cancellable and self-limiting: it carries an AbortSignal
+ * combining the caller's (if any) with its own deadline, so it can never
+ * outlive the code that asked for it.
  */
 async function postToTokenEndpoint(
   tokenEndpoint: string,
   init: { headers: Record<string, string>; body: string },
-  errorCode: string,
+  codes: TokenRequestCodes,
+  control: TokenRequestControl = {},
 ): Promise<Response> {
+  const timeoutMs = control.timeoutMs ?? TOKEN_REQUEST_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = control.signal
+    ? AbortSignal.any([control.signal, timeoutSignal])
+    : timeoutSignal;
+
   try {
     return await fetch(tokenEndpoint, {
       method: 'POST',
       headers: init.headers,
       body: init.body,
+      signal,
     });
   } catch (err) {
+    // An abort is not a network fault, and above all not an auth fault: the
+    // request may have been fully processed server-side. Say so, so no caller
+    // treats it as "the refresh definitely did not happen".
+    const cause = abortCause(control.signal, timeoutSignal);
+    if (cause === 'aborted') {
+      const why = typeof control.signal?.reason === 'string'
+        ? control.signal.reason
+        : 'cancelled by the caller';
+      logger.warn('[OAuth] Token request cancelled', tokenEndpoint, `(${why})`);
+      throw new OAuthError(
+        `OAuth token request to ${tokenEndpoint} was cancelled (${why}) — the server may still have processed it, so the token state is unknown`,
+        codes.aborted,
+      );
+    }
+    if (cause === 'timeout') {
+      logger.warn('[OAuth] Token request timed out', tokenEndpoint, `after ${timeoutMs}ms`);
+      throw new OAuthError(
+        `OAuth token request to ${tokenEndpoint} timed out after ${timeoutMs}ms — the server may still have processed it, so the token state is unknown`,
+        codes.timeout,
+      );
+    }
+
     const e = err as Error & { cause?: { code?: string; message?: string } };
     const causeCode = e.cause?.code ? ` [${e.cause.code}]` : '';
     const causeMsg = e.cause?.message ? `: ${e.cause.message}` : '';
     logger.error('[OAuth] Network error reaching', tokenEndpoint, e);
     throw new OAuthError(
       `Cannot reach OAuth server${causeCode} at ${tokenEndpoint}${causeMsg}`,
-      errorCode,
+      codes.network,
     );
   }
 }
@@ -112,7 +214,7 @@ export async function exchangeCodeForTokens(opts: {
   code: string;
   codeVerifier: string;
   redirectUri: string;
-}): Promise<OAuthTokenResponse> {
+} & TokenRequestControl): Promise<OAuthTokenResponse> {
   const params: Record<string, string> = {
     grant_type: 'authorization_code',
     client_id: opts.provider.clientId,
@@ -128,7 +230,12 @@ export async function exchangeCodeForTokens(opts: {
   const res = await postToTokenEndpoint(
     opts.provider.tokenEndpoint,
     { headers, body },
-    'TOKEN_EXCHANGE_NETWORK_ERROR',
+    {
+      network: 'TOKEN_EXCHANGE_NETWORK_ERROR',
+      timeout: 'TOKEN_EXCHANGE_TIMEOUT',
+      aborted: 'TOKEN_EXCHANGE_ABORTED',
+    },
+    { signal: opts.signal, timeoutMs: opts.timeoutMs ?? TOKEN_EXCHANGE_TIMEOUT_MS },
   );
 
   if (!res.ok) {
@@ -161,7 +268,7 @@ export async function exchangeCodeForTokens(opts: {
 export async function refreshAccessToken(opts: {
   provider: OAuthProviderConfig;
   refreshToken: string;
-}): Promise<OAuthTokenResponse> {
+} & TokenRequestControl): Promise<OAuthTokenResponse> {
   const params: Record<string, string> = {
     grant_type: 'refresh_token',
     client_id: opts.provider.clientId,
@@ -175,7 +282,12 @@ export async function refreshAccessToken(opts: {
   const res = await postToTokenEndpoint(
     opts.provider.tokenEndpoint,
     { headers, body },
-    'TOKEN_REFRESH_NETWORK_ERROR',
+    {
+      network: 'TOKEN_REFRESH_NETWORK_ERROR',
+      timeout: 'TOKEN_REFRESH_TIMEOUT',
+      aborted: 'TOKEN_REFRESH_ABORTED',
+    },
+    { signal: opts.signal, timeoutMs: opts.timeoutMs },
   );
 
   if (!res.ok) {

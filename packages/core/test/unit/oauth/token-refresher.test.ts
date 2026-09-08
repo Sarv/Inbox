@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { exchangeCodeForTokens, refreshAccessToken } from '../../../src/oauth/token-refresher';
+import {
+  exchangeCodeForTokens,
+  refreshAccessToken,
+  TOKEN_EXCHANGE_TIMEOUT_MS,
+  TOKEN_REQUEST_TIMEOUT_MS,
+} from '../../../src/oauth/token-refresher';
 import { OAuthError } from '../../../src/oauth/types';
 import type { OAuthProviderConfig } from '../../../src/oauth/types';
 
@@ -469,5 +474,137 @@ describe('exchangeCodeForTokens', () => {
     }).catch((e) => e);
 
     expect(err.message).toBe('Token exchange failed (500): no body');
+  });
+});
+
+/**
+ * Cancellation. THE regression these guard is the one that revoked a live
+ * session on 2026-09-08: a refresh POST left running after its caller gave up.
+ * Against a provider that rotates refresh tokens, an orphaned request can be
+ * processed server-side while we keep the token it just consumed — and the next
+ * refresh looks exactly like a stolen-token replay, so the session is revoked.
+ * The request must therefore be genuinely abortable, and a cancelled refresh
+ * must never be reported as if it had definitely not happened.
+ */
+describe('refreshAccessToken — cancellation', () => {
+  // If no signal reaches fetch, nothing can stop the request: it outlives its
+  // caller and the orphaned-refresh bug is back exactly as it was.
+  it('always passes an AbortSignal to fetch, even with no caller signal', async () => {
+    fetchMock.mockResolvedValue(okJson({ access_token: 'a', expires_in: 900, token_type: 'Bearer' }));
+
+    await refreshAccessToken({ provider: JSON_PROVIDER, refreshToken: 'rt' });
+
+    const { init } = lastCall(fetchMock);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal?.aborted).toBe(false);
+  });
+
+  // The caller's signal must actually reach the socket — this is what the
+  // powerMonitor 'suspend' hook pulls to stop a refresh before sleep freezes it.
+  it("aborts the request when the caller's signal fires, and names the reason", async () => {
+    const controller = new AbortController();
+    // Model undici: reject with the signal's reason the moment it aborts.
+    fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject((init.signal as AbortSignal).reason));
+      }),
+    );
+
+    const pending = refreshAccessToken({
+      provider: JSON_PROVIDER,
+      refreshToken: 'rt',
+      signal: controller.signal,
+    }).catch((e) => e);
+    controller.abort('system suspend');
+    const err = await pending;
+
+    expect(err).toBeInstanceOf(OAuthError);
+    expect(err.code).toBe('TOKEN_REFRESH_ABORTED');
+    expect(err.message).toContain('system suspend');
+    // The whole point: the caller must NOT conclude the refresh didn't happen.
+    expect(err.message).toContain('the server may still have processed it');
+  });
+
+  // A non-string abort reason must not produce "[object Object]" in the log.
+  it('falls back to a readable reason when the caller aborts without a string', async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      }),
+    );
+
+    const pending = refreshAccessToken({
+      provider: FORM_PROVIDER,
+      refreshToken: 'rt',
+      signal: controller.signal,
+    }).catch((e) => e);
+    controller.abort();
+    const err = await pending;
+
+    expect(err.code).toBe('TOKEN_REFRESH_ABORTED');
+    expect(err.message).toContain('cancelled by the caller');
+    expect(err.message).not.toContain('[object Object]');
+  });
+
+  // A hung endpoint must self-cancel rather than wait on an outer race that
+  // would reject the caller while leaving the request running.
+  it('times out on its own deadline and reports the token state as unknown', async () => {
+    fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject((init.signal as AbortSignal).reason));
+      }),
+    );
+
+    const err = await refreshAccessToken({
+      provider: JSON_PROVIDER,
+      refreshToken: 'rt',
+      timeoutMs: 10,
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(OAuthError);
+    expect(err.code).toBe('TOKEN_REFRESH_TIMEOUT');
+    expect(err.message).toContain('timed out after 10ms');
+    expect(err.message).toContain('the server may still have processed it');
+  });
+
+  // Classification must come from the SIGNALS, not the thrown value: a genuine
+  // network fault that happens to look like an abort must stay a network error,
+  // or offline blips would be misreported as cancellations.
+  it('keeps a real network failure classified as a network error', async () => {
+    fetchMock.mockRejectedValue(
+      Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } }),
+    );
+
+    const err = await refreshAccessToken({
+      provider: JSON_PROVIDER,
+      refreshToken: 'rt',
+      signal: new AbortController().signal,
+    }).catch((e) => e);
+
+    expect(err.code).toBe('TOKEN_REFRESH_NETWORK_ERROR');
+    expect(err.message).toContain('[ENOTFOUND]');
+  });
+
+  // The interactive exchange gets its own, longer budget: a human is waiting and
+  // there is no stored refresh token to lose. Sharing the refresh deadline would
+  // cut off slow-but-working sign-ins.
+  it('the code exchange uses the longer interactive deadline, not the refresh one', async () => {
+    fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject((init.signal as AbortSignal).reason));
+      }),
+    );
+
+    const err = await exchangeCodeForTokens({
+      provider: FORM_PROVIDER,
+      code: 'c',
+      codeVerifier: 'v',
+      redirectUri: 'http://localhost:1/cb',
+      timeoutMs: 10,
+    }).catch((e) => e);
+
+    expect(err.code).toBe('TOKEN_EXCHANGE_TIMEOUT');
+    expect(TOKEN_EXCHANGE_TIMEOUT_MS).toBeGreaterThan(TOKEN_REQUEST_TIMEOUT_MS);
   });
 });
