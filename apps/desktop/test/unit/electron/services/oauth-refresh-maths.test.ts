@@ -118,6 +118,17 @@ describe('isTerminalOAuthError', () => {
     expect(isTerminalOAuthError(new OAuthError('socket hang up', 'TOKEN_REFRESH_NETWORK_ERROR'))).toBe(false);
   });
 
+  // A refresh we CANCELLED (sleep, deadline) or never sent (suspended) says
+  // nothing about the grant — the server may even have rotated successfully.
+  // Calling any of these terminal signs the user out over a closed lid.
+  it.each([
+    ['TOKEN_REFRESH_TIMEOUT'],
+    ['TOKEN_REFRESH_ABORTED'],
+    ['REFRESH_DEFERRED_SUSPENDED'],
+  ])('treats a cancelled/deferred refresh (%s) as TRANSIENT', (code) => {
+    expect(isTerminalOAuthError(new OAuthError('unknown outcome', code))).toBe(false);
+  });
+
   it.each([
     ['invalid_grant'],
     ['invalid_client'],

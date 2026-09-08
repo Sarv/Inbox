@@ -41,6 +41,7 @@ import {
   msUntilRefresh,
   isTerminalOAuthError,
   isAccountGoneError,
+  isRefreshDeferredError,
 } from './oauth-service';
 
 const logger = createLogger('oauth-refresh-scheduler');
@@ -54,6 +55,10 @@ const MAX_DELAY_MS = 6 * 60 * 60 * 1000; // 6h
 const RETRY_BASE_MS = 60_000;
 const RETRY_MAX_MS = 10 * 60 * 1000; // 10 min
 const MAX_TRANSIENT_FAILURES = 5;
+// Re-check interval while the machine is asleep. Timers are frozen during
+// sleep, so in practice this fires on the next wake — a dark wake defers again
+// (costing one log line), a real wake refreshes.
+const DEFERRED_RETRY_MS = 60_000;
 
 const timers = new Map<string, NodeJS.Timeout>();
 const failCounts = new Map<string, number>();
@@ -127,6 +132,17 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
     if (isAccountGoneError(err)) {
       clearTimer(key);
       failCounts.delete(key);
+      return;
+    }
+    // Deferred because the system is suspended: NOT a failure. Counting it
+    // would march an asleep laptop toward MAX_TRANSIENT_FAILURES and fire a
+    // "sign in again" notification for a session that is perfectly healthy —
+    // so re-arm and leave the failure count untouched.
+    if (isRefreshDeferredError(err)) {
+      logger.info(
+        `[OAuthRefresh] ${provider}:${email} deferred while suspended — re-checking after wake`,
+      );
+      armTimer(key, DEFERRED_RETRY_MS, () => void runRefresh(provider, email));
       return;
     }
     const terminal = isTerminalOAuthError(err);

@@ -38,6 +38,8 @@ import {
   createLogger,
 } from '@sarvinbox/core';
 import { getAccount, removeAccount, saveAccount, listAccounts } from './oauth-token-store';
+import { waitForNetworkReady } from './network-readiness';
+import { getSystemSuspended } from '../shared';
 const logger = createLogger('oauth-service');
 
 // Sliding-window refresh policy.
@@ -185,6 +187,47 @@ export async function startOAuthFlow(providerId: OAuthProviderId): Promise<OAuth
 const inflightRefresh = new Map<string, Promise<string>>();
 
 /**
+ * Cancels every token refresh currently in flight. Replaced after each abort so
+ * later refreshes get a fresh, un-aborted signal.
+ *
+ * A refresh that is merely ABANDONED (its caller timed out) keeps running, and
+ * if it reaches a rotating provider we never learn the outcome: the server
+ * rotates, our stored token becomes a spent one, and the next refresh reads as
+ * a replay attack. Aborting closes the socket at a moment we chose instead of
+ * letting sleep freeze it mid-flight.
+ */
+let refreshAbort = new AbortController();
+
+/**
+ * Abort in-flight token refreshes — call this as the machine suspends, BEFORE
+ * sleep freezes the sockets.
+ *
+ * Honest about its limits: aborting cannot un-send a request the server already
+ * received, so this narrows the window rather than closing it. What it
+ * guarantees is that we stop waiting on a request that can no longer complete,
+ * and that the failure is reported as "token state unknown" instead of a silent
+ * hang. Pair it with `getSystemSuspended()` gating below, which is what stops
+ * doomed refreshes from STARTING during a dark wake.
+ */
+export function abortInFlightTokenRefreshes(reason = 'system suspend'): void {
+  const pending = inflightRefresh.size;
+  refreshAbort.abort(reason);
+  refreshAbort = new AbortController();
+  if (pending > 0) {
+    logger.info(`[OAuth] aborted ${pending} in-flight token refresh(es) — ${reason}`);
+  }
+}
+
+/**
+ * True when a refresh was deferred because the machine is asleep. Transient by
+ * construction: nothing is wrong with the credentials, so callers must retry
+ * rather than count it as a failure or ask the user to sign in again.
+ */
+export function isRefreshDeferredError(err: unknown): boolean {
+  return err instanceof OAuthError && err.code === 'REFRESH_DEFERRED_SUSPENDED';
+}
+
+/**
  * Return a currently-valid access token. Refreshes proactively using a
  * sliding window that reads the JWT's own `exp`/`iat` claims — no need
  * to wait for a 401 from the API, since JWTs carry their expiry
@@ -242,9 +285,39 @@ export async function getValidAccessToken(
   const existing = inflightRefresh.get(key);
   if (existing) return existing;
 
+  // Refuse to START a refresh while the machine is suspended — deliberately
+  // placed AFTER the cached-token fast path (a still-valid token is still
+  // handed out) and AFTER the single-flight join (a refresh begun while awake
+  // runs to completion), so this rejects exactly one thing: a new token POST
+  // during sleep.
+  //
+  // This is the fix for the dark-wake session kill. macOS Power Nap wakes the
+  // machine for ~2 seconds every ~16 minutes and fires NO 'resume' event, so
+  // `systemSuspended` correctly stays true across the nap. A refresh started in
+  // that window cannot finish before the machine sleeps again — and against a
+  // rotating provider, an unfinished refresh is what costs the whole session.
+  // Waiting for a real wake loses nothing: no user is watching a sleeping Mac.
+  if (getSystemSuspended()) {
+    throw new OAuthError(
+      `Token refresh for ${providerId}:${email} deferred — the system is suspended; it will refresh on the next real wake`,
+      'REFRESH_DEFERRED_SUSPENDED',
+    );
+  }
+
   const refreshPromise = (async () => {
+    // Captured BEFORE the first await: `abortInFlightTokenRefreshes` swaps the
+    // controller, and reading `.signal` later would hand this refresh the fresh
+    // one and quietly miss the abort it was meant to receive.
+    const abortSignal = refreshAbort.signal;
     const provider = getOAuthProvider(providerId);
-    const tokens = await refreshAccessToken({ provider, refreshToken: account.refreshToken });
+    // A wake's first seconds have no DNS. Let the link settle rather than
+    // spending this refresh on a guaranteed ENOTFOUND.
+    await waitForNetworkReady();
+    const tokens = await refreshAccessToken({
+      provider,
+      refreshToken: account.refreshToken,
+      signal: abortSignal,
+    });
     const now = Math.floor(Date.now() / 1000);
 
     // Observability: does this provider ROTATE the refresh token? A rotating
@@ -365,6 +438,16 @@ export function isTerminalOAuthError(err: unknown): boolean {
   if (err instanceof OAuthError) {
     if (err.code === 'EMPTY_STORED_TOKEN' || err.code === 'EMPTY_REFRESH_TOKEN') return true;
     if (err.code === 'TOKEN_REFRESH_NETWORK_ERROR') return false;
+    // A refresh we cut short (deadline, suspend) or never started (asleep) says
+    // NOTHING about the credentials. Treating these as terminal would sign the
+    // user out over a laptop lid — the opposite of the bug being fixed here.
+    if (
+      err.code === 'TOKEN_REFRESH_TIMEOUT' ||
+      err.code === 'TOKEN_REFRESH_ABORTED' ||
+      err.code === 'REFRESH_DEFERRED_SUSPENDED'
+    ) {
+      return false;
+    }
   }
   const e = err as { message?: string; serverResponse?: string };
   const msg = `${e?.message ?? ''} ${e?.serverResponse ?? ''}`.toLowerCase();

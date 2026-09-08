@@ -112,6 +112,7 @@ vi.mock('../../../../electron/services/oauth-service', () => ({
   },
   isTerminalOAuthError: (err: unknown) => !!(err as { terminal?: boolean })?.terminal,
   isAccountGoneError: (err: unknown) => !!(err as { gone?: boolean })?.gone,
+  isRefreshDeferredError: (err: unknown) => !!(err as { deferred?: boolean })?.deferred,
 }));
 
 import {
@@ -129,6 +130,9 @@ const K = key('gmail', EMAIL);
 const transient = (message = 'network blip'): Error => new Error(message);
 const terminal = (): Error => Object.assign(new Error('invalid_grant'), { terminal: true });
 const gone = (): Error => Object.assign(new Error('ACCOUNT_NOT_FOUND'), { gone: true });
+/** The refresh was never sent — the machine was asleep. Not a failure. */
+const deferred = (): Error =>
+  Object.assign(new Error('REFRESH_DEFERRED_SUSPENDED'), { deferred: true });
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -445,5 +449,74 @@ describe('stopOAuthRefreshScheduler', () => {
     await startOAuthRefreshScheduler();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(h.state.refreshCalls).toEqual([`${K}:force`]);
+  });
+});
+
+/**
+ * Sleep deferrals are NOT failures. A laptop closed overnight defers every
+ * scheduled refresh; if those counted against the 5-transient-failure budget,
+ * the user would wake to a false "sign in again" toast for a session that is
+ * perfectly healthy — and the scheduler would have stopped refreshing it.
+ */
+describe('deferred while suspended', () => {
+  // A deferral must re-arm on the short deferred cadence, not stop the loop.
+  it('re-checks after 60s instead of giving up', async () => {
+    h.state.due.set(K, 10_000);
+    h.state.failWith.set(K, deferred());
+    await scheduleAccount(GMAIL, EMAIL);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.state.refreshCalls).toHaveLength(1);
+
+    // Not the transient ladder's 60s-then-120s — a flat 60s re-check.
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(h.state.refreshCalls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.state.refreshCalls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.state.refreshCalls).toHaveLength(3);
+  });
+
+  // THE regression: deferrals must not accumulate into the give-up threshold.
+  it('never counts toward the 5-failure budget, however long the sleep', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, deferred());
+    await scheduleAccount(GMAIL, EMAIL);
+
+    // Well past 5 attempts — an overnight sleep is hours of these.
+    await vi.advanceTimersByTimeAsync(5_000 + 60_000 * 12);
+    expect(h.state.refreshCalls.length).toBeGreaterThan(5);
+    expect(h.state.notifications).toHaveLength(0);
+
+    // And on the real wake it refreshes normally and settles back to the
+    // account's own due-point.
+    h.state.failWith.delete(K);
+    h.state.due.set(K, 30 * 60_000);
+    const before = h.state.refreshCalls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.state.refreshCalls).toHaveLength(before + 1);
+    expect(h.state.notifications).toHaveLength(0);
+  });
+
+  // A deferral must not silently forgive earlier genuine failures either — it
+  // leaves the count exactly as it found it.
+  it('leaves an existing transient failure count untouched', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, transient());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);           // failure 1 -> retry in 60s
+    await vi.advanceTimersByTimeAsync(60_000);          // failure 2 -> retry in 120s
+    await vi.advanceTimersByTimeAsync(120_000);         // failure 3 -> retry in 180s
+
+    // The machine sleeps: one deferral, re-armed on the 60s deferred cadence.
+    h.state.failWith.set(K, deferred());
+    await vi.advanceTimersByTimeAsync(180_000);         // deferral (count still 3)
+
+    // Back to genuine failures — two more reach the threshold, no more.
+    h.state.failWith.set(K, transient());
+    await vi.advanceTimersByTimeAsync(60_000);          // failure 4
+    expect(h.state.notifications).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(240_000);         // failure 5 -> give up
+    expect(h.state.notifications).toHaveLength(1);
   });
 });

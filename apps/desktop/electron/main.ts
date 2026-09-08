@@ -61,7 +61,7 @@ import { startNotificationService, stopNotificationService } from './services/no
 import { loadAgentConfig } from './services/agent-config-store';
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
 import { getAllAiSecrets } from './services/ai-secret-store';
-import { initializeOAuth } from './services/oauth-service';
+import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
 import { initSentryMain, captureFatal } from './sentry';
@@ -855,6 +855,16 @@ app.whenReady().then(async () => {
         // would open a fresh IMAP connection during the nap that immediately
         // freezes into a Gmail-cap zombie when the Mac drops back to sleep.
         setSystemSuspended(true);
+        // Cancel any token refresh already on the wire. Sleep FREEZES an
+        // in-flight request instead of failing it, so without this the POST
+        // outlives the process's attention: a rotating provider can consume the
+        // refresh token, we never see the response that carries its
+        // replacement, and the next wake replays a spent token — which reads as
+        // a stolen-token replay and revokes the entire session. Aborting cannot
+        // un-send a request the server already got, but it ends the wait at a
+        // moment we chose. `setSystemSuspended(true)` above is what stops new
+        // refreshes from starting during a dark wake.
+        abortInFlightTokenRefreshes('system suspend');
         sendToWindow('system:suspend');
         // Close every IMAP socket BEFORE the machine sleeps. Sleep otherwise
         // FREEZES live sockets (no FIN), and the server keeps counting them
