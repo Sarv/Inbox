@@ -122,6 +122,10 @@ import {
   stopOAuthRefreshScheduler,
   unscheduleOAuthAccount,
 } from '../../../../electron/services/oauth-refresh-scheduler';
+import {
+  clearAllReauthRequired,
+  listReauthRequired,
+} from '../../../../electron/services/reauth-registry';
 
 const GMAIL = 'gmail' as never;
 const EMAIL = 'me@gmail.com';
@@ -148,6 +152,7 @@ beforeEach(() => {
   s.notifThrows = false;
   s.notifications.length = 0;
   s.win = h.makeWin();
+  clearAllReauthRequired();
 });
 
 afterEach(() => {
@@ -345,7 +350,12 @@ describe('failure policy', () => {
 });
 
 describe('the re-login prompt', () => {
-  it('focuses/restores the window and routes the reauth event when clicked', async () => {
+  // CHANGED: clicking the toast now sends `oauth:reauth-open-settings`, not
+  // `oauth:reauth-required`. The two were the same channel when the ONLY way to
+  // learn about a dead session was clicking the toast; they had to split once
+  // the failure itself started pushing a banner, because navigating on the
+  // failure would yank the user out of whatever they were reading.
+  it('focuses/restores the window and asks for Settings when clicked', async () => {
     h.state.due.set(K, 0);
     h.state.failWith.set(K, terminal());
     h.state.win!.minimized = true;
@@ -355,8 +365,116 @@ describe('the re-login prompt', () => {
     h.state.notifications[0].handlers.get('click')!();
     expect(h.state.win!.restored).toBe(true);
     expect(h.state.win!.focusCalls).toBe(1);
-    expect(h.state.win!.sent[0]).toMatchObject({ channel: 'oauth:reauth-required' });
-    expect(h.state.win!.sent[0].payload).toMatchObject({ provider: 'gmail', email: EMAIL });
+    const navigation = h.state.win!.sent.filter((m) => m.channel === 'oauth:reauth-open-settings');
+    expect(navigation).toHaveLength(1);
+    expect(navigation[0].payload).toMatchObject({ provider: 'gmail', email: EMAIL });
+  });
+
+  // The whole point of the banner: the user must be told even though nobody
+  // clicked anything. Before this, the renderer only heard about a dead session
+  // if the OS toast was seen AND clicked.
+  it('pushes the reauth event as soon as it gives up, without any click', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const pushed = h.state.win!.sent.filter((m) => m.channel === 'oauth:reauth-required');
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0].payload).toMatchObject({ provider: 'gmail', email: EMAIL, reason: 'invalid_grant' });
+  });
+
+  // A platform with no notification daemon (headless Linux, notifications
+  // disabled) must still surface the problem in-app — otherwise mail stops with
+  // nothing on screen at all.
+  it('still pushes the reauth event when the OS cannot show a toast', async () => {
+    h.state.notifSupported = false;
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(h.state.notifications).toHaveLength(0);
+    expect(h.state.win!.sent.some((m) => m.channel === 'oauth:reauth-required')).toBe(true);
+  });
+
+  // A window that did not exist at the moment of failure has nothing to receive;
+  // the registry is what it asks on mount. Losing this makes the banner depend
+  // on the user happening to be looking at the app.
+  it('records the requirement for a renderer that mounts later', async () => {
+    h.state.win = null;
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(listReauthRequired()).toMatchObject([{ provider: 'gmail', email: EMAIL }]);
+  });
+
+  // Re-auth that fails again would otherwise queue a second toast for a state
+  // already on screen. The push repeats (cheap, idempotent); the toast does not.
+  it('toasts once per episode but keeps pushing', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(h.state.notifications).toHaveLength(1);
+    expect(h.state.win!.sent.filter((m) => m.channel === 'oauth:reauth-required')).toHaveLength(2);
+  });
+
+  // A banner that outlives the problem is its own bug: the user would be told to
+  // sign in to an account that already works.
+  it('resolves the requirement once a refresh succeeds again', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(listReauthRequired()).toHaveLength(1);
+
+    h.state.failWith.delete(K);
+    h.state.due.set(K, 0);
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(listReauthRequired()).toEqual([]);
+    expect(h.state.win!.sent.filter((m) => m.channel === 'oauth:reauth-resolved')).toHaveLength(1);
+  });
+
+  // Signing in from the banner is the expected remedy — the banner must clear
+  // itself off the back of it, with no restart and no scheduler running yet.
+  it('resolves the requirement when the account signs in again', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    rescheduleOAuthAccount(GMAIL, EMAIL);
+    expect(listReauthRequired()).toEqual([]);
+    expect(h.state.win!.sent.some((m) => m.channel === 'oauth:reauth-resolved')).toBe(true);
+  });
+
+  // Removing the account removes the problem. A banner demanding a sign-in for
+  // a mailbox that is no longer configured cannot be acted on at all.
+  it('resolves the requirement when the account is removed', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, terminal());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    unscheduleOAuthAccount(GMAIL, EMAIL);
+    expect(listReauthRequired()).toEqual([]);
+  });
+
+  // A healthy refresh must stay silent — broadcasting on every success would put
+  // a pointless event on the wire every few minutes per account.
+  it('says nothing when a refresh succeeds and nothing was pending', async () => {
+    h.state.due.set(K, 0);
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.state.win!.sent).toEqual([]);
   });
 
   it('is safe with no window to focus', async () => {

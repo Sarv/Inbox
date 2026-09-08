@@ -43,6 +43,11 @@ import {
   isAccountGoneError,
   isRefreshDeferredError,
 } from './oauth-service';
+import {
+  markReauthRequired,
+  clearReauthRequired,
+  clearAllReauthRequired,
+} from './reauth-registry';
 
 const logger = createLogger('oauth-refresh-scheduler');
 
@@ -90,11 +95,37 @@ function armTimer(key: string, delayMs: number, fn: () => void): void {
  * surface a banner / route to Accounts. Fires once per episode (the caller
  * stops the retry loop first), so it never spams.
  */
+function sendToRenderer(channel: string, payload: unknown): void {
+  const win = getMainWindow();
+  if (!win) return; // No window yet — the renderer pulls the state on mount.
+  try {
+    win.webContents.send(channel, payload);
+  } catch (err) {
+    logger.warn(`[OAuthRefresh] could not deliver ${channel} to the renderer:`, err);
+  }
+}
+
 function notifyReauthRequired(provider: OAuthProviderId, email: string, reason: string): void {
   logger.error(`[OAuthRefresh] ${provider}:${email} needs re-login — ${reason}`);
-  // The native notification is the ASK. We route into Settings → Accounts only
-  // when the user CLICKS it (opt-in) — auto-navigating on the failure itself
-  // would yank them out of whatever they're doing.
+
+  // Record it FIRST, and unconditionally. Everything below is a delivery
+  // attempt that can fail silently (no window yet, notifications unsupported,
+  // Focus mode); the registry is what a renderer mounting later can still ask.
+  const isNew = markReauthRequired(provider, email, reason);
+
+  // Push to any window that IS listening so the in-app banner appears at the
+  // moment mail stops syncing. This does NOT navigate — being yanked out of
+  // whatever you were doing is worse than a banner you can act on when ready.
+  sendToRenderer('oauth:reauth-required', { provider, email, reason });
+
+  // Only the first failure of an episode gets a native toast. The retry loop is
+  // stopped by the caller, but an account that fails, is re-authed and fails
+  // again should not queue a second toast for a state already on screen.
+  if (!isNew) return;
+
+  // The native notification is the ASK, and the only channel that works when
+  // the app is in the background. Routing into Settings → Accounts happens
+  // solely when the user CLICKS it — an explicit, opt-in navigation.
   try {
     if (Notification.isSupported()) {
       const n = new Notification({
@@ -107,7 +138,7 @@ function notifyReauthRequired(provider: OAuthProviderId, email: string, reason: 
         if (win) {
           if (win.isMinimized()) win.restore();
           win.focus();
-          try { win.webContents.send('oauth:reauth-required', { provider, email, reason }); } catch { /* ignore */ }
+          sendToRenderer('oauth:reauth-open-settings', { provider, email, reason });
         }
       });
       n.show();
@@ -115,6 +146,17 @@ function notifyReauthRequired(provider: OAuthProviderId, email: string, reason: 
   } catch (err) {
     logger.warn('[OAuthRefresh] failed to show re-login notification:', err);
   }
+}
+
+/**
+ * An account is healthy again — drop the requirement and tell the renderer so
+ * the banner disappears without the user having to reload. Silent when nothing
+ * was pending, which is the overwhelmingly common case.
+ */
+function resolveReauth(provider: OAuthProviderId, email: string): void {
+  if (!clearReauthRequired(provider, email)) return;
+  logger.info(`[OAuthRefresh] ${provider}:${email} no longer needs re-login`);
+  sendToRenderer('oauth:reauth-resolved', { provider, email });
 }
 
 async function runRefresh(provider: OAuthProviderId, email: string): Promise<void> {
@@ -125,6 +167,7 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
     // with any connect refreshing at the same instant.
     await getValidAccessToken(provider, email, true);
     failCounts.delete(key);
+    resolveReauth(provider, email);
     logger.info(`[OAuthRefresh] proactively refreshed ${provider}:${email}`);
     await scheduleAccount(provider, email); // reschedule off the fresh token
   } catch (err) {
@@ -132,6 +175,7 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
     if (isAccountGoneError(err)) {
       clearTimer(key);
       failCounts.delete(key);
+      resolveReauth(provider, email); // nothing left to sign in to
       return;
     }
     // Deferred because the system is suspended: NOT a failure. Counting it
@@ -239,6 +283,7 @@ export function stopOAuthRefreshScheduler(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
   failCounts.clear();
+  clearAllReauthRequired();
   if (resumeHandler) {
     if (typeof powerMonitor?.removeListener === 'function') {
       try {
@@ -254,6 +299,9 @@ export function stopOAuthRefreshScheduler(): void {
 
 /** An account signed in / re-authed → (re)arm its refresh and clear failures. */
 export function rescheduleOAuthAccount(provider: OAuthProviderId, email: string): void {
+  // Clear the requirement even when the scheduler is not running: the sign-in
+  // that just succeeded is exactly what the banner was asking for.
+  resolveReauth(provider, email);
   if (!started) return; // startOAuthRefreshScheduler() will pick it up
   failCounts.delete(keyFor(provider, email));
   void scheduleAccount(provider, email);
@@ -264,4 +312,5 @@ export function unscheduleOAuthAccount(provider: OAuthProviderId, email: string)
   const key = keyFor(provider, email);
   clearTimer(key);
   failCounts.delete(key);
+  resolveReauth(provider, email); // removed account → the banner must go too
 }
