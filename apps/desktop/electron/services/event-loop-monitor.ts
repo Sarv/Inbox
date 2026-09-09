@@ -56,22 +56,81 @@ export function stallDuration(
 }
 
 /**
- * Human-readable stall report. Says how long the UI was frozen and points at the
- * adjacent log lines, because the stall itself can't name its own cause.
+ * What produced a gap between ticks.
+ *
+ * `freeze` — the loop genuinely could not run: the beachball this file exists
+ * to catch. `sleep` — the whole machine was suspended, so no timer could fire
+ * and nothing was frozen; the gap is an artefact of measuring wall-clock time.
  */
-export function describeStall(stallMs: number): string {
-  return `[EventLoop] main process blocked for ${Math.round(stallMs)}ms — the UI was frozen (beachball) for that long; whatever logs immediately after this line is the likely cause`;
+export type GapCause = 'freeze' | 'sleep';
+
+/**
+ * Human-readable gap report. Says what happened and points at the adjacent log
+ * lines, because the gap itself can't name its own cause.
+ */
+export function describeStall(stallMs: number, cause: GapCause = 'freeze'): string {
+  const ms = Math.round(stallMs);
+  if (cause === 'sleep') {
+    return `[EventLoop] ${ms}ms gap while the system was asleep — not a UI freeze, no timer could fire`;
+  }
+  return `[EventLoop] main process blocked for ${ms}ms — the UI was frozen (beachball) for that long; whatever logs immediately after this line is the likely cause`;
+}
+
+/**
+ * Attribute a gap using the suspend flag sampled before it and after it.
+ *
+ * Why attribution and not a duration rule: a gap of minutes looks like sleep,
+ * but this app has produced genuine multi-minute blocks — an iCloud-synced
+ * checkout made `stat()` block for 989 SECONDS, and that report is what
+ * identified the bug. Any "too long to be real" ceiling would have hidden
+ * exactly the freeze the detector earned its keep on. So only a positive signal
+ * counts; everything else stays a freeze.
+ *
+ * Why BOTH samples matter, rather than just asking "are we suspended now":
+ *
+ *  - macOS DarkWake (Power Nap) fires no Electron `resume`, so the flag stays
+ *    true across a whole series of brief wakes. Those gaps are caught by
+ *    `after` (still true) — over one afternoon this app logged 8 suspends, 4
+ *    resumes and 17 long gaps against 69 `pmset` wake events, all inside a few
+ *    suspend→resume pairs.
+ *  - On a real user wake, the resume handler clears the flag, and it races the
+ *    tick that reports the gap — both land in the same second. `before` (true,
+ *    sampled while asleep) is what catches that one.
+ *
+ * The narrow miss: a suspend with no tick at all between it and the machine
+ * sleeping, whose resume also lands before the reporting tick, reads as a
+ * freeze. It needs both races to go the same way inside 500ms while main.ts is
+ * tearing IMAP down, so it is rare, and erring toward "freeze" is the safe
+ * direction — a false freeze warning is noise, a missed one is a hidden bug.
+ */
+export function attributeGap(suspendedBefore: boolean, suspendedAfter: boolean): GapCause {
+  return suspendedBefore || suspendedAfter ? 'sleep' : 'freeze';
 }
 
 export type EventLoopMonitorDeps = {
-  /** Called when a stall ends, with its duration in ms. */
-  onStall: (stallMs: number) => void;
+  /** Called when a gap ends, with its duration and what caused it. */
+  onStall: (stallMs: number, cause: GapCause) => void;
   tickMs?: number;
   thresholdMs?: number;
   /** Monotonic-ish clock; injected for tests. */
   now?: () => number;
   schedule?: (callback: () => void, ms: number) => unknown;
   cancel?: (handle: unknown) => void;
+  /**
+   * Is the machine currently between a suspend and a real user wake?
+   *
+   * main.ts passes `getSystemSuspended` from shared.ts — the flag its existing
+   * powerMonitor handlers already maintain for exactly this window (and for the
+   * same DarkWake reason). Reused rather than subscribing again here: one
+   * listener, one source of truth, and this module stays free of `electron`,
+   * which the main-process unit tests need since they run in a plain node env
+   * where that import is undefined.
+   *
+   * Omitted — or on a platform with no power events at all, such as a headless
+   * Linux box — every gap is reported as a freeze. That is the pre-existing
+   * behaviour: noisier across sleep, but it never hides a real freeze.
+   */
+  isSuspended?: () => boolean;
 };
 
 /**
@@ -87,14 +146,32 @@ export function startEventLoopMonitor(deps: EventLoopMonitorDeps): () => void {
   const schedule = deps.schedule ?? ((callback, ms) => setInterval(callback, ms));
   const cancel = deps.cancel ?? ((handle) => clearInterval(handle as NodeJS.Timeout));
 
+  // Reading the flag must never be the reason a tick throws — the monitor is
+  // diagnostic, never load-bearing. A failed read reads as "awake", which keeps
+  // the old behaviour of reporting the gap as a freeze.
+  const suspendedNow = (): boolean => {
+    try {
+      return deps.isSuspended?.() ?? false;
+    } catch {
+      return false;
+    }
+  };
+
   let last = now();
+  // Sampled every tick so a gap can be judged on the state BEFORE it as well as
+  // after — see attributeGap for why one sample is not enough.
+  let wasSuspended = suspendedNow();
+
   const handle = schedule(() => {
     const current = now();
     const stall = stallDuration(current - last, tickMs, thresholdMs);
     // Advance the baseline BEFORE reporting, so a throw from onStall (or a slow
     // logger write) can't be re-counted as the next tick's stall.
     last = current;
-    if (stall !== null) deps.onStall(stall);
+    const suspended = suspendedNow();
+    const before = wasSuspended;
+    wasSuspended = suspended;
+    if (stall !== null) deps.onStall(stall, attributeGap(before, suspended));
   }, tickMs);
 
   (handle as { unref?: () => void })?.unref?.();

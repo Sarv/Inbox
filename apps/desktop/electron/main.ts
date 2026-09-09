@@ -26,6 +26,7 @@ import {
   getExtensionManager,
   getAICategorizationService,
   getIsQuitting,
+  getSystemSuspended,
   setSystemSuspended,
   sendToWindow,
   setCurrentAccount,
@@ -930,7 +931,20 @@ app.whenReady().then(async () => {
     // BEFORE the first folder sync, which is when the beachball actually shows up.
     // Silent unless the loop genuinely stalls, so it costs one timer tick.
     stopEventLoopMonitor = startEventLoopMonitor({
-      onStall: (stallMs) => logger.warn(describeStall(stallMs)),
+      // A suspended machine cannot fire a timer, so the wall-clock gap across
+      // sleep is not a freeze — it was reported as one, drowning the real
+      // findings: one afternoon of Power Naps produced 21 "the UI was frozen"
+      // warnings of which only 3 were real. `getSystemSuspended` is the flag the
+      // powerMonitor handlers above already keep for that window.
+      isSuspended: getSystemSuspended,
+      onStall: (stallMs, cause) => {
+        const message = describeStall(stallMs, cause);
+        // Sleep gaps are expected and say nothing about app health, so they log
+        // at info: still there for correlating a post-wake symptom, without
+        // claiming a freeze that never happened.
+        if (cause === 'sleep') logger.info(message);
+        else logger.warn(message);
+      },
     });
 
     logger.info('[Main] App initialization complete');

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import {
+  attributeGap,
   describeStall,
   EVENT_LOOP_STALL_THRESHOLD_MS,
   EVENT_LOOP_TICK_MS,
@@ -215,5 +216,160 @@ describe('describeStall', () => {
   // Sub-millisecond precision in a log line is noise; a stall is a coarse thing.
   it('rounds fractional durations', () => {
     expect(describeStall(1234.56)).toContain('1235ms');
+  });
+});
+
+/**
+ * Sleep attribution. A suspended machine cannot fire a timer, so the wall-clock
+ * gap across sleep is not a freeze — but it was reported as one, and it buried
+ * the real findings: one afternoon of macOS Power Naps produced 21 "the UI was
+ * frozen (beachball)" warnings of which only 3 were genuine.
+ *
+ * The rule must not become "long gaps are sleep". An iCloud-synced checkout in
+ * this very app made `stat()` block for 989 SECONDS, and that warning is what
+ * found the bug — a duration ceiling would have hidden it. Hence positive
+ * attribution from the suspend flag only.
+ */
+describe('attributeGap', () => {
+  // The ordinary freeze: awake before and after. Getting this wrong silences
+  // the detector completely.
+  it('calls a gap with no suspension a freeze', () => {
+    expect(attributeGap(false, false)).toBe('freeze');
+  });
+
+  // macOS DarkWake (Power Nap) fires no Electron `resume`, so the flag stays
+  // true across a run of brief wakes. These were the bulk of the false warnings.
+  it('calls a gap a sleep gap while still suspended (the DarkWake case)', () => {
+    expect(attributeGap(true, true)).toBe('sleep');
+  });
+
+  // On a real user wake the resume handler clears the flag and races the tick
+  // that reports the gap; they land in the same second. The "before" sample,
+  // taken while asleep, is the only thing that catches this one.
+  it('calls a gap a sleep gap when resume cleared the flag before the report', () => {
+    expect(attributeGap(true, false)).toBe('sleep');
+  });
+
+  // Suspend observed only after the gap: still sleep, not a freeze.
+  it('calls a gap a sleep gap when the suspend was seen only afterwards', () => {
+    expect(attributeGap(false, true)).toBe('sleep');
+  });
+});
+
+describe('describeStall', () => {
+  // The exact defect being fixed: a sleep gap must NOT claim the UI froze.
+  it('does not claim a freeze or a beachball for a sleep gap', () => {
+    const message = describeStall(900_000, 'sleep');
+    expect(message).not.toMatch(/frozen|beachball|blocked/i);
+    expect(message).toMatch(/asleep/i);
+    expect(message).toContain('900000');
+  });
+
+  // A real freeze keeps the wording that makes it findable in app.log, and the
+  // pointer to the following lines that is its only attribution.
+  it('still names the freeze and points at the next log lines', () => {
+    const message = describeStall(2500, 'freeze');
+    expect(message).toMatch(/blocked for 2500ms/);
+    expect(message).toMatch(/beachball/);
+    expect(message).toMatch(/immediately after/);
+  });
+
+  // main.ts is not the only caller; an omitted cause must stay a freeze so a
+  // future caller can never accidentally downgrade a real one to sleep.
+  it('defaults to freeze when no cause is given', () => {
+    expect(describeStall(2500)).toBe(describeStall(2500, 'freeze'));
+  });
+
+  it('rounds fractional durations in both wordings', () => {
+    expect(describeStall(2500.4, 'freeze')).toContain('2500ms');
+    expect(describeStall(2500.6, 'sleep')).toContain('2501ms');
+  });
+});
+
+describe('startEventLoopMonitor — sleep attribution', () => {
+  /**
+   * Harness with a scripted clock and a scripted suspend flag.
+   *
+   * `suspendedByTick` omitted entirely means no `isSuspended` dep at all — the
+   * no-power-signal platform. `throws` makes the probe blow up instead.
+   */
+  const harness = (
+    times: number[],
+    suspendedByTick?: boolean[],
+    opts: { throws?: boolean } = {},
+  ) => {
+    let timeIndex = 0;
+    let flagIndex = 0;
+    const reports: Array<{ ms: number; cause: string }> = [];
+    const fired: Array<() => void> = [];
+    const isSuspended = opts.throws
+      ? () => { throw new Error('powerMonitor blew up'); }
+      : suspendedByTick
+        ? () => suspendedByTick[Math.min(flagIndex++, suspendedByTick.length - 1)] ?? false
+        : undefined;
+    startEventLoopMonitor({
+      onStall: (ms, cause) => reports.push({ ms, cause }),
+      tickMs: 500,
+      thresholdMs: 250,
+      now: () => times[Math.min(timeIndex++, times.length - 1)],
+      ...(isSuspended ? { isSuspended } : {}),
+      schedule: (callback) => { fired.push(callback); return {}; },
+      cancel: () => {},
+    });
+    return { reports, fire: () => fired.forEach((f) => f()) };
+  };
+
+  // End to end for the DarkWake series: the flag is true at start-up sampling
+  // and at the tick, so the multi-minute gap is a sleep gap.
+  it('attributes a gap during suspension to sleep, not a freeze', () => {
+    const h = harness([0, 900_000], [true, true]);
+    h.fire();
+    expect(h.reports).toEqual([{ ms: 899_500, cause: 'sleep' }]);
+  });
+
+  // The wake race, end to end: suspended when the monitor sampled before sleep,
+  // cleared by the time the reporting tick reads it.
+  it('attributes the wake gap to sleep even though resume already cleared the flag', () => {
+    const h = harness([0, 400_000], [true, false]);
+    h.fire();
+    expect(h.reports).toEqual([{ ms: 399_500, cause: 'sleep' }]);
+  });
+
+  // THE regression that must not come back: a genuine block while awake — the
+  // iCloud stat() case — has to keep reporting as a freeze.
+  it('still reports a real freeze while awake, however long it is', () => {
+    const h = harness([0, 989_000], [false, false]);
+    h.fire();
+    expect(h.reports).toEqual([{ ms: 988_500, cause: 'freeze' }]);
+  });
+
+  // A stale suspend must not shield later freezes. Once a tick has been seen
+  // awake, the next block is attributed to the app again.
+  it('goes back to reporting freezes after the machine wakes', () => {
+    //          sleep gap        awake tick     real freeze
+    const h = harness([0, 900_000, 900_500, 903_500], [true, false, false, false]);
+    h.fire(); // the sleep gap
+    h.fire(); // on time, awake
+    h.fire(); // a real block
+    expect(h.reports).toEqual([
+      { ms: 899_500, cause: 'sleep' },
+      { ms: 2500, cause: 'freeze' },
+    ]);
+  });
+
+  // No power signal at all (headless Linux, or the dep omitted) must behave
+  // exactly as before this change: everything is a freeze, nothing is hidden.
+  it('reports every gap as a freeze when no suspend signal is available', () => {
+    const h = harness([0, 900_000]); // no isSuspended dep at all
+    h.fire();
+    expect(h.reports).toEqual([{ ms: 899_500, cause: 'freeze' }]);
+  });
+
+  // A throwing flag reader must not take the monitor down with it, and must
+  // fail toward "freeze" so a real block is never swallowed by a broken probe.
+  it('survives a throwing suspend probe and treats the gap as a freeze', () => {
+    const h = harness([0, 3000], undefined, { throws: true });
+    expect(() => h.fire()).not.toThrow();
+    expect(h.reports).toEqual([{ ms: 2500, cause: 'freeze' }]);
   });
 });
