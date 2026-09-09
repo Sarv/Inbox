@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- An account no longer opens two IMAP connections at once on startup. Every
+  path that reconnects — first mount, window focus, the network coming back,
+  the reconnect ladder — called connect independently, so a cold start could run
+  two attempts for the same mailbox at the same time; they then fought, one
+  tearing down the socket the other was still opening, and everything the
+  connect path writes (the credential vault, the saved account, the first sync)
+  happened twice. Concurrent attempts for one account are now joined into a
+  single connection, while different accounts still connect in parallel.
 - Large emails download their bodies again. A body fetch had a flat 30-second
   budget, but its duration depends on the size of the message being downloaded —
   so any mail too big to transfer in 30 seconds could never be fetched at all.
