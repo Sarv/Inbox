@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- Large emails download their bodies again. A body fetch had a flat 30-second
+  budget, but its duration depends on the size of the message being downloaded —
+  so any mail too big to transfer in 30 seconds could never be fetched at all.
+  Each retry restarted the download from the beginning and failed at exactly the
+  same point, five times, before the message was retired as un-fetchable, and
+  every attempt abandoned a transfer that was still in flight and cost a
+  discarded IMAP connection. The budget now measures a stall rather than the
+  clock: a connection that has gone silent still fails in 30 seconds, while a
+  transfer that keeps delivering data is allowed to finish, and a download
+  running longer than the pool's stuck-connection limit is no longer evicted
+  mid-transfer.
 - An OAuth sign-in you abandon no longer strands the button on "Opening…".
   Closing the provider's browser tab is invisible to the app — the flow simply
   never answers — so a button that disabled itself until it did sat there for
