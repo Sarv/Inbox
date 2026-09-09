@@ -236,23 +236,41 @@ export class ConnectionManager extends EventEmitter {
    * IMAP commands (e.g. realtime IDLE) that must not run mid-handshake — issuing
    * them while state is 'connecting' throws "Connection not available". Resolves
    * immediately if already connected; otherwise waits for the next 'connected'
-   * (or 'reconnected') event. Never rejects.
+   * (or 'reconnected') event, or for an in-flight connect() to fail. Never
+   * rejects.
    */
   async waitUntilConnected(timeoutMs = 20000): Promise<boolean> {
     if (this.isConnected()) return true;
     // A dead/latched connection will never emit — don't wait pointlessly.
     if (this._state === 'error' || this._authFailed || this._isShuttingDown) return false;
 
+    // Only an explicit connect() occupies 'connecting' — the ladder stays in
+    // 'reconnecting' for the whole of its attempt — so entering here while
+    // connecting means we are waiting on exactly ONE attempt. When it leaves
+    // 'connecting' without reaching 'connected' it has failed, and sitting out
+    // the rest of the timeout only delays the caller's own recovery. A ladder
+    // keeps trying by itself, so this shortcut is deliberately not armed for it.
+    const watchingConnect = this._state === 'connecting';
+
     return new Promise<boolean>((resolve) => {
       const cleanup = () => {
         clearTimeout(timer);
         this.off('connected', onUp);
         this.off('reconnected', onUp);
+        this.off('state-change', onState);
       };
       const onUp = () => {
         cleanup();
         // isConnected() also checks the underlying socket, not just state.
         resolve(this.isConnected());
+      };
+      const onState = (state: ManagerConnectionState) => {
+        // 'connected' arrives as a state-change first and the 'connected' event
+        // right after — onUp owns that case. Anything else means the handshake
+        // ended without a connection.
+        if (!watchingConnect || state === 'connected') return;
+        cleanup();
+        resolve(false);
       };
       const timer = setTimeout(() => {
         cleanup();
@@ -260,6 +278,7 @@ export class ConnectionManager extends EventEmitter {
       }, timeoutMs);
       this.once('connected', onUp);
       this.once('reconnected', onUp);
+      this.on('state-change', onState);
     });
   }
 
@@ -268,6 +287,22 @@ export class ConnectionManager extends EventEmitter {
    */
   isReconnecting(): boolean {
     return this._state === 'reconnecting';
+  }
+
+  /**
+   * True while a connect() handshake is in flight.
+   *
+   * This is the state every "is the connection healthy?" probe reads wrong.
+   * `isConnected()` is false and `verifyConnection()` answers false too — there
+   * is no authenticated socket yet for a NOOP to travel over — so a caller that
+   * takes "not alive" to mean "zombie" tears down the connection that was about
+   * to succeed. A pending connect() is authoritative: it carries its own
+   * timeout, so it always settles, and its outcome decides what happens next.
+   * Callers should wait for it (`waitUntilConnected`) rather than opening a
+   * competing socket.
+   */
+  isConnecting(): boolean {
+    return this._state === 'connecting';
   }
 
   /**
@@ -714,6 +749,13 @@ export class ConnectionManager extends EventEmitter {
     // connect() with new credentials.
     if (this._authFailed) {
       return false;
+    }
+
+    // A connect() is mid-handshake — see isConnecting(). Falling through to the
+    // ladder would build a SECOND client that clobbers the one about to land;
+    // wait for the pending connect's outcome instead.
+    if (this._state === 'connecting') {
+      return this.waitUntilConnected();
     }
 
     // Wait for existing reconnection
