@@ -164,6 +164,12 @@ const ENSURE_CONNECTION_TIMEOUT_MS = 30_000;
 // user is staring at a spinner in the add-account modal while it runs.
 const PROBE_CREDENTIALS_TIMEOUT_MS = 20_000;
 
+// How long imap:resetAndReconnect waits for an already-in-flight connect to
+// settle before answering. Matches ENSURE_CONNECTION_TIMEOUT_MS: one connect
+// attempt (~25s) plus a little slack, so the common case (the connect lands)
+// always resolves here rather than at the timeout.
+const CONNECT_IN_FLIGHT_WAIT_MS = 30_000;
+
 // How often the ACTIVE account re-polls its non-INBOX folders for server-side
 // deletions (see the timer in registerSyncHandlers). 5 min matches the background
 // account cadence; the sweep is cheap (STATUS counts) and only content-syncs a
@@ -810,6 +816,22 @@ export function registerSyncHandlers(): void {
       // believes the network is back, so always clear the backoff counter — a
       // fresh attempt shouldn't be blocked by earlier piled-up failures.
       syncEngine.resetReconnectAttempts();
+
+      // A connect() is already mid-handshake — do not probe it, and do not tear
+      // it down. The liveness probe below only answers "is there a live socket
+      // that replies to a NOOP right now", and a connect that has not finished
+      // authenticating has no such socket, so the probe calls it dead and
+      // forceReconnect() kills the connection that was about to succeed. That is
+      // the cold-start race: the renderer's mount connect is still dialling when
+      // this handler fires ~1.5s later on window focus, and the user sees a
+      // failed auto-connect plus a wasted socket against the server's cap.
+      // The pending connect is authoritative (it carries its own timeout, so it
+      // always settles) — wait for its outcome and report that.
+      if (syncEngine.isConnecting()) {
+        const connected = await syncEngine.waitUntilConnected(CONNECT_IN_FLIGHT_WAIT_MS);
+        logger.info(`[Main] resetAndReconnect deferred — a connect was already in flight (connected=${connected})`);
+        return { success: true, data: { connected } };
+      }
 
       // Liveness probe BEFORE any teardown. An unconditional forceReconnect
       // here was tearing down a perfectly healthy socket on every focus/
