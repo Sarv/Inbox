@@ -700,6 +700,7 @@ describe('ConnectionManager — waitUntilConnected', () => {
 
     expect(await waiting).toBe(false);
     expect(manager.listenerCount('connected')).toBe(1); // only the test's recorder
+    expect(manager.listenerCount('state-change')).toBe(1); // ditto — the fail-fast watcher is detached
   });
 
   it('does not wait at all on a latched/dead connection', async () => {
@@ -712,6 +713,109 @@ describe('ConnectionManager — waitUntilConnected', () => {
     await other.connect(CONFIG);
     await other.disconnect();
     expect(await other.waitUntilConnected()).toBe(false); // shutting down
+  });
+});
+
+// A connect() that is still shaking hands is neither connected nor dead, and
+// nothing else in the manager occupies the 'connecting' state (the ladder stays
+// in 'reconnecting'). Every caller that asks "is this connection healthy?" gets
+// `false` for it, and the ones that read false as "zombie" then tear down the
+// socket that was about to succeed — the cold-start race where the window-focus
+// reconnect killed the mount connect. These pin the third state and the two
+// callers that have to honour it.
+describe('ConnectionManager — an in-flight connect is not a dead connection', () => {
+  // If isConnecting() stops distinguishing a handshake from a dead socket, the
+  // focus-driven resetAndReconnect goes back to force-reconnecting a live dial.
+  it('reports isConnecting() only while the handshake is in flight', async () => {
+    const { manager } = makeManager();
+    expect(manager.isConnecting()).toBe(false);
+
+    connectScript.push('hang');
+    void manager.connect(CONFIG);
+
+    // The three probes a caller might reach for, on a connection that is fine:
+    // only isConnecting() tells the truth about it.
+    expect(manager.isConnecting()).toBe(true);
+    expect(manager.isConnected()).toBe(false);
+    expect(await manager.verifyConnection()).toBe(false);
+  });
+
+  it('clears isConnecting() once the handshake lands', async () => {
+    const { manager } = makeManager();
+    await manager.connect(CONFIG);
+    expect(manager.isConnecting()).toBe(false);
+  });
+
+  // The ladder must keep to 'reconnecting'. waitUntilConnected's fail-fast path
+  // below is armed only for 'connecting', and it relies on that separation.
+  it('is not "connecting" while the reconnect ladder runs', async () => {
+    const { manager } = makeManager();
+    await manager.connect(CONFIG);
+    connectScript.push('hang');
+    clients[0].emitSocketEvent('end');
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(manager.isReconnecting()).toBe(true);
+    expect(manager.isConnecting()).toBe(false);
+  });
+
+  // Regression: ensureConnection() arriving mid-handshake fell through to the
+  // ladder, which builds a SECOND client and clobbers the socket the first
+  // connect was about to hand over.
+  it('ensureConnection waits for an in-flight connect instead of racing it', async () => {
+    const { manager, events } = makeManager();
+    const connecting = manager.connect(CONFIG);
+    const ensuring = manager.ensureConnection(); // fires mid-handshake
+
+    await connecting;
+
+    expect(await ensuring).toBe(true);
+    expect(clients).toHaveLength(1); // no competing socket
+    expect(countOf(events, 'reconnecting')).toBe(0);
+    expect(countOf(events, 'connected')).toBe(1);
+  });
+
+  // The failure path must not hold the caller for the full 20s wait: no timer is
+  // advanced here, so this can only resolve via the leave-'connecting' shortcut.
+  it('ensureConnection reports an in-flight connect that fails, without waiting out the timeout', async () => {
+    const { manager } = makeManager();
+    connectScript.push(socketError());
+    const connecting = manager.connect(CONFIG).catch(() => { /* owned by its caller */ });
+    const ensuring = manager.ensureConnection();
+
+    await connecting;
+
+    expect(await ensuring).toBe(false);
+    expect(clients).toHaveLength(1);
+  });
+
+  // Same shortcut, straight through waitUntilConnected — this is what the
+  // resetAndReconnect IPC awaits, and it must answer as soon as the connect it
+  // is waiting on has failed.
+  it('waitUntilConnected resolves false the moment an in-flight connect fails', async () => {
+    const { manager } = makeManager();
+    connectScript.push(socketError());
+    const connecting = manager.connect(CONFIG).catch(() => { /* owned by its caller */ });
+
+    const waiting = manager.waitUntilConnected(20_000);
+    await connecting;
+
+    expect(await waiting).toBe(false);
+  });
+
+  // ...but a LADDER keeps trying on its own, so the shortcut must not fire for
+  // it: giving up on a failed rung would report "not connected" while the next
+  // rung is about to succeed.
+  it('waitUntilConnected keeps waiting through a failed ladder rung', async () => {
+    const { manager } = makeManager();
+    await manager.connect(CONFIG);
+    connectScript.push(socketError()); // rung 1 fails; rung 2 connects
+    clients[0].emitSocketEvent('end');
+
+    const waiting = manager.waitUntilConnected(20_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(await waiting).toBe(true);
   });
 });
 

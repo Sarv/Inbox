@@ -569,6 +569,23 @@ export class SyncEngine {
   }
 
   /**
+   * True while a connect() handshake is in flight. A pending connect is NOT a
+   * dead connection — `verifyConnection()` reports false for one because there
+   * is no authenticated socket yet. See ConnectionManager.isConnecting.
+   */
+  isConnecting(): boolean {
+    return this.connectionManager.isConnecting();
+  }
+
+  /**
+   * Resolve once the connection is usable, or false on timeout. Never rejects.
+   * Used to wait out an in-flight connect instead of racing it.
+   */
+  async waitUntilConnected(timeoutMs?: number): Promise<boolean> {
+    return this.connectionManager.waitUntilConnected(timeoutMs);
+  }
+
+  /**
    * Get provider
    */
   getProvider(): EmailProvider {
