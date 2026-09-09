@@ -48,6 +48,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- Mail now appears while the first sync is still running, instead of only when
+  the whole of it finishes. The view was refreshed at one point — after INBOX,
+  Sent and Starred had each been pulled to their per-folder cap — so a
+  newly-configured account (or one whose cache is being rebuilt) showed an empty
+  list for minutes, next to a sidebar already counting the mail sitting in the
+  database. Each batch is committed before the sync reports its progress, so the
+  list is now refreshed as those batches land: the first messages are on screen
+  within seconds and the rest fill in behind them. Refreshes are throttled to
+  one every 1.5 seconds and skipped entirely when a pass stored nothing, so a
+  25,000-message first sync fills progressively rather than re-querying the list
+  hundreds of times; and it is the folder ON SCREEN that is refreshed, not
+  whichever folder the parallel sync happens to be working on.
+- A folder view could stop updating during a sync that was creating folders. The
+  check for "is this the folder the user is looking at" resolved the arriving
+  folder by path out of the renderer's cached folder list, which during a first
+  sync predates half the folders being created — so the lookup found nothing,
+  the refresh was dropped, and the list sat empty until a manual refresh. It now
+  resolves the SELECTED folder by id, which is always present, and compares its
+  path.
 - A mailbox database can no longer be deleted because the app failed to open its
   account registry. The startup sweep that removes database files belonging to
   removed accounts asked the registry which accounts still exist, and that read
