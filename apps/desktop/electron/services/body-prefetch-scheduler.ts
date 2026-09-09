@@ -27,7 +27,7 @@
  * when the timer fires, we skip — the existing run will continue.
  */
 
-import { getEventBus, fetchBodyQueued, createLogger } from '@sarvinbox/core';
+import { getEventBus, fetchBodyQueued, createLogger, isTimeoutError, isAuthError, isQuotaError } from '@sarvinbox/core';
 
 import { getStorage, getSyncEngine, getMainWindow, getAllAccountRuntimes } from '../shared';
 
@@ -101,6 +101,51 @@ const strikeKey = (account: string, emailId: string): string => `${account}\u000
  * auth pause or our own timeout while the engine still holds the item queued.
  */
 type FetchStatus = 'fetched' | 'already' | 'transient' | 'unavailable';
+
+/** How many distinct failure classes the per-tick summary names before it
+ *  collapses the tail into "+N more". */
+const FAILURE_CLASSES_LOGGED = 4;
+
+/**
+ * A short, low-cardinality label for WHY one body fetch ended badly.
+ *
+ * Every failure on this path used to be swallowed: the tick reported
+ * "0/18 bodies fetched" and not one line said whether those 18 timed out, were
+ * refused, or came back empty — three problems with three different fixes,
+ * indistinguishable from the log. Labels are aggregated per tick (see
+ * `formatFailureSummary`), never logged per item, because this path runs 200
+ * bodies a tick and a per-item log there is a main-thread stall, not just noise.
+ */
+export function classifyBodyFetchFailure(error: unknown): string {
+  if (isTimeoutError(error)) {
+    // 'queued' = the engine never dequeued us inside the queue window, i.e. the
+    // queue is saturated and the fix is to ask for fewer bodies at once.
+    // 'running' = the FETCH started and then stalled, i.e. the queue is draining
+    // fine and the fix is a bigger run budget. Opposite responses, so they must
+    // never share a bucket.
+    return error.phase ? `timeout-${error.phase}` : 'timeout';
+  }
+  if (isAuthError(error)) return 'auth';
+  if (isQuotaError(error)) return 'rate-limit';
+  const raw = error instanceof Error ? (error.message || error.name) : String(error ?? '');
+  // Digits are the only high-cardinality part of these messages ("No message
+  // found for UID 27290", "connection 4 closed"). One bucket per UID would make
+  // the summary as long as the batch it is supposed to summarise, so normalise
+  // them away — that is what keeps this an aggregate.
+  return raw.replace(/\d+/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 60) || 'unknown';
+}
+
+/**
+ * Render the tick's failure classes, commonest first: `"timeout-running x14,
+ * engine-verdict x4"`. Ties break on the label so the line is deterministic
+ * (a log that reorders itself between ticks can't be diffed).
+ */
+export function formatFailureSummary(failures: ReadonlyMap<string, number>): string {
+  const ranked = [...failures].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = ranked.slice(0, FAILURE_CLASSES_LOGGED).map(([reason, n]) => `${reason} x${n}`);
+  const hidden = ranked.length - shown.length;
+  return hidden > 0 ? `${shown.join(', ')}, +${hidden} more` : shown.join(', ');
+}
 
 /**
  * What one account's prefetch tick actually did. `attempted` is how many bodies
@@ -384,6 +429,10 @@ async function prefetchAccountBodies(
   let downloaded = 0;
   let transient = 0;
   let attempted = 0;
+  // Failure class -> count, for the WHOLE tick. Accumulating here (rather than
+  // logging where the failure happens) is what keeps a 200-body tick to one line.
+  const failures = new Map<string, number>();
+  const startedAt = Date.now();
   const SUB_BATCH = 10;
   const deadline = Date.now() + TICK_BUDGET_MS;
   for (let i = 0; i < ids.length; i += SUB_BATCH) {
@@ -398,15 +447,15 @@ async function prefetchAccountBodies(
     }
     const slice = ids.slice(i, i + SUB_BATCH);
     attempted += slice.length;
-    const results = await Promise.allSettled(slice.map(async (emailId): Promise<{ id: string; status: FetchStatus }> => {
+    const results = await Promise.allSettled(slice.map(async (emailId): Promise<{ id: string; status: FetchStatus; reason?: string }> => {
       try {
         const email = await storage.getEmail(emailId);
         // A row we can't even read, or one whose folder no longer exists, is not
         // evidence that the SERVER lost the message — don't let it accrue strikes.
-        if (!email) return { id: emailId, status: 'transient' };
+        if (!email) return { id: emailId, status: 'transient', reason: 'row-missing' };
         if (email.rawBody) return { id: emailId, status: 'already' };
         const folder = await storage.getFolder(email.folderId);
-        if (!folder) return { id: emailId, status: 'transient' };
+        if (!folder) return { id: emailId, status: 'transient', reason: 'folder-missing' };
         // A row can have NO uid — it was relinked to a new folder (e.g. a Gmail
         // category-label move) and never re-synced there, so its uid was cleared.
         // Do NOT skip it (the old `|| !email.uid` guard re-seeded these ghosts
@@ -420,23 +469,28 @@ async function prefetchAccountBodies(
         // RESOLVED null = the engine reached a verdict ("no message for this UID",
         // unselectable folder, engine-side retries exhausted). That is the only
         // outcome that counts as evidence the body is really unavailable.
-        if (!fetchResult) return { id: emailId, status: 'unavailable' };
+        // Named apart from the throw cases: the engine ANSWERED, it just had no
+        // body to give. This is the only class that walks an email toward the
+        // permanent `|nobody|` tag, so seeing it dominate a tick means something
+        // very different from seeing timeouts dominate one.
+        if (!fetchResult) return { id: emailId, status: 'unavailable', reason: 'engine-verdict' };
         const updated = { ...email, rawBody: fetchResult.rawBody, cleanBody: fetchResult.cleanBody, contentType: fetchResult.contentType };
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('body:fetched', updated);
         return { id: emailId, status: 'fetched' };
-      } catch {
+      } catch (error) {
         // A THROW/TIMEOUT means we never got a verdict: on a connection error or
         // rate-limit the engine re-queues the item and leaves our promise pending
         // until this timeout fires, and an auth pause throws outright. Counting
         // those as strikes is what permanently tagged good mail `|nobody|` after
         // three connection blips — the body then never downloaded again.
-        return { id: emailId, status: 'transient' };
+        return { id: emailId, status: 'transient', reason: classifyBodyFetchFailure(error) };
       }
     }));
     const giveUp: string[] = [];
     for (const r of results) {
       if (r.status !== 'fulfilled') continue;
-      const { id, status } = r.value;
+      const { id, status, reason } = r.value;
+      if (reason) failures.set(reason, (failures.get(reason) ?? 0) + 1);
       const key = strikeKey(label ?? 'account', id);
       if (status === 'unavailable') {
         // Only a verdict accrues a strike, so the give-up tag means what its
@@ -462,9 +516,17 @@ async function prefetchAccountBodies(
   // came from: without it, alternating accounts look like one backlog bouncing
   // up and down (552 → 297 → 494 → …) and reads as "sync going backwards".
   // `retry later` separates "we learned nothing yet" from real failures.
+  // The failure summary is the difference between "0/18 fetched" (which says
+  // nothing) and "0/18 fetched in 57s — timeout-running x18" (which says the
+  // fetches all started and none finished, so the run budget is the thing to
+  // change). Elapsed is on the line for the same reason: it tells which budget
+  // was actually spent.
+  const summary = formatFailureSummary(failures);
   logger.info(
     `[BodyPrefetch] Tick complete${label ? ` [${label}]` : ''}: ${downloaded}/${attempted} bodies fetched`
-    + `${transient > 0 ? `, ${transient} retry later` : ''}; ${remaining} emails still without body`,
+    + ` in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
+    + `${transient > 0 ? `, ${transient} retry later` : ''}; ${remaining} emails still without body`
+    + `${summary ? ` — ${summary}` : ''}`,
   );
   // `nextSeedOffset` is decided here (not by the caller) because only this
   // function knows the window it actually read after any wrap.

@@ -29,6 +29,7 @@ const TICK_BUDGET_MS = 5 * 60_000;
 const RETIRED_RECHECK_MS = 6 * 60 * 60_000;
 
 const h = vi.hoisted(() => ({
+  logs: [] as string[],
   activeStorage: null as unknown,
   activeEngine: null as unknown,
   runtimes: [] as Array<[string, { storage: unknown; syncEngine: unknown; smtpClient: null }]>,
@@ -54,10 +55,25 @@ vi.mock('../../../../electron/shared', () => ({
       : null,
 }));
 
+class FakeTimeoutError extends Error {
+  readonly isTimeout = true;
+  constructor(message: string, readonly phase?: 'queued' | 'running') {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
 vi.mock('@sarvinbox/core', () => ({
   createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
+    // Captured, not discarded: the per-tick failure summary IS the feature under
+    // test in the "tick summary" block below.
+    info: (...args: unknown[]) => { h.logs.push(args.join(' ')); },
+    warn: (...args: unknown[]) => { h.logs.push(args.join(' ')); },
+    error: () => {}, debug: () => {}, trace: () => {},
   }),
+  isTimeoutError: (e: unknown) => (e as { isTimeout?: boolean })?.isTimeout === true,
+  isAuthError: (e: unknown) => /auth|credential/i.test((e as Error)?.message ?? ''),
+  isQuotaError: (e: unknown) => /over quota|rate/i.test((e as Error)?.message ?? ''),
   getEventBus: () => ({
     on: (_event: string, cb: (event: unknown) => void) => {
       if (h.busThrows) throw new Error('bus unavailable');
@@ -101,6 +117,10 @@ interface AccountState {
   connected: boolean;
   /** fetchBody THROWS for these — a connection blip / timeout / auth pause. */
   fetchFails: Set<string>;
+  /** fetchBody throws THIS error for the id, so a test can pin a failure CLASS. */
+  fetchErrors: Map<string, unknown>;
+  /** storage.getEmail returns null for these — a row we cannot even read. */
+  missingRows: Set<string>;
   /**
    * fetchBody RESOLVES null for these — the engine reached a verdict ("no
    * message for this UID", unselectable folder, engine retries exhausted). Only
@@ -130,6 +150,8 @@ const makeAccount = (over: Partial<AccountState> = {}) => {
     remaining: 0,
     connected: true,
     fetchFails: new Set(),
+    fetchErrors: new Map(),
+    missingRows: new Set(),
     fetchNulls: new Set(),
     cleared: [],
     fetchDelayMs: 0,
@@ -148,7 +170,9 @@ const makeAccount = (over: Partial<AccountState> = {}) => {
     state.emails.get(id) ?? { id, folderId: 'INBOX', uid: Number(id.replace(/\D/g, '')) || 1 };
 
   const storage: Record<string, unknown> = {
-    getEmail: async (id: string) => (state.emails.has(id) ? state.emails.get(id) : email(id)),
+    getEmail: async (id: string) => (
+      state.missingRows.has(id) ? null : (state.emails.has(id) ? state.emails.get(id) : email(id))
+    ),
     getFolder: async (folderId: string) => (folderId === 'gone' ? null : { path: folderId }),
     getThreadSiblingsWithoutBody: (seeds: string[], limit: number) => {
       state.siblingCalls.push([seeds, limit]);
@@ -191,6 +215,7 @@ const makeAccount = (over: Partial<AccountState> = {}) => {
       }
       // Resolving null models the engine's VERDICT; throwing models a blip.
       if (state.fetchNulls.has(emailId)) return null;
+      if (state.fetchErrors.has(emailId)) throw state.fetchErrors.get(emailId);
       if (state.fetchFails.has(emailId)) throw new Error(`Connection error (${emailId})`);
       state.fetched.push(emailId);
       return { rawBody: 'raw', cleanBody: 'clean', contentType: 'text/html' };
@@ -204,6 +229,7 @@ const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms);
 
 beforeEach(() => {
   vi.useFakeTimers();
+  h.logs = [];
   vi.setSystemTime(Date.UTC(2026, 5, 15, 12, 0, 0));
   h.activeStorage = null;
   h.activeEngine = null;
@@ -1186,5 +1212,150 @@ describe('the give-up guard — account isolation and second chances', () => {
 
     expect(a.state.cleared).toHaveLength(1);                // start-time sweep only
     svc.stopBodyPrefetchScheduler();
+  });
+});
+
+/**
+ * The tick summary. Regression this whole block guards: a body-prefetch tick
+ * used to swallow every per-item failure, so a mailbox whose bodies never
+ * downloaded logged "0/18 bodies fetched" and nothing else — no way to tell a
+ * saturated queue from a stalled fetch from a server that simply has no body,
+ * which are three different bugs with three different fixes. The summary must
+ * name the classes, must stay ONE line however big the batch (this path runs
+ * 200 bodies a tick — a per-item log here stalls the main thread), and must
+ * stay silent when nothing failed.
+ */
+describe('classifyBodyFetchFailure', () => {
+  let svc: Scheduler;
+  beforeEach(async () => { svc = await load(); });
+
+  // The two phases want OPPOSITE fixes — fetch fewer at once vs. allow longer —
+  // so collapsing them into one "timeout" bucket loses the entire signal.
+  it('separates a fetch that never started from one that started and stalled', () => {
+    expect(svc.classifyBodyFetchFailure(new FakeTimeoutError('Timeout', 'queued'))).toBe('timeout-queued');
+    expect(svc.classifyBodyFetchFailure(new FakeTimeoutError('Timeout', 'running'))).toBe('timeout-running');
+  });
+
+  // A single-budget timeout (or a duck-typed one from an older path) has no
+  // phase; it must still be recognised as a timeout rather than falling through
+  // to its raw message.
+  it('labels a phase-less timeout as a plain timeout', () => {
+    expect(svc.classifyBodyFetchFailure(new FakeTimeoutError('Timeout'))).toBe('timeout');
+    expect(svc.classifyBodyFetchFailure({ isTimeout: true })).toBe('timeout');
+  });
+
+  // Auth and rate-limit are the two failures that are NOT about this message —
+  // seeing either dominate a tick means stop fetching, not retry harder.
+  it('names an auth pause and a rate limit', () => {
+    expect(svc.classifyBodyFetchFailure(new Error('Invalid credentials'))).toBe('auth');
+    expect(svc.classifyBodyFetchFailure(new Error('Server is over quota'))).toBe('rate-limit');
+  });
+
+  // Cardinality guard: without it a 200-body tick of "No message found for UID
+  // <n>" produces 200 buckets and the summary is longer than the batch it
+  // summarises — i.e. a per-item log wearing an aggregate's name.
+  it('collapses the digits out of a message so one fault is one bucket', () => {
+    const first = svc.classifyBodyFetchFailure(new Error('No message found for UID 27290'));
+    const second = svc.classifyBodyFetchFailure(new Error('No message found for UID 4'));
+    expect(first).toBe('No message found for UID N');
+    expect(second).toBe(first);
+  });
+
+  it('truncates a long message and never yields an empty label', () => {
+    expect(svc.classifyBodyFetchFailure(new Error('x'.repeat(200)))).toHaveLength(60);
+    expect(svc.classifyBodyFetchFailure(new Error(''))).toBe('Error');
+    expect(svc.classifyBodyFetchFailure(undefined)).toBe('unknown');
+    expect(svc.classifyBodyFetchFailure('socket hang up')).toBe('socket hang up');
+  });
+});
+
+describe('formatFailureSummary', () => {
+  let svc: Scheduler;
+  beforeEach(async () => { svc = await load(); });
+
+  // A healthy tick must not grow a trailing separator with nothing after it.
+  it('is empty when nothing failed', () => {
+    expect(svc.formatFailureSummary(new Map())).toBe('');
+  });
+
+  // Commonest first: the dominant class is the one worth acting on, and ties
+  // break on the label so consecutive ticks can be diffed against each other.
+  it('ranks by count and breaks ties deterministically', () => {
+    expect(svc.formatFailureSummary(new Map([['b', 2], ['a', 2], ['c', 9]])))
+      .toBe('c x9, a x2, b x2');
+  });
+
+  // The tail is capped so a pathological tick cannot turn one log line into a
+  // hundred — the count still says how much was hidden.
+  it('caps the classes it names and counts the rest', () => {
+    const many = new Map([['a', 6], ['b', 5], ['c', 4], ['d', 3], ['e', 2], ['f', 1]]);
+    expect(svc.formatFailureSummary(many)).toBe('a x6, b x5, c x4, d x3, +2 more');
+  });
+});
+
+describe('the tick summary line', () => {
+  const tickLine = (): string => h.logs.find((line) => line.includes('Tick complete')) ?? '';
+
+  const runOneTick = async (a: ReturnType<typeof makeAccount>): Promise<Scheduler> => {
+    h.activeStorage = a.storage;
+    h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startBodyPrefetchScheduler();
+    await advance(FIRST_DELAY_MS);
+    await advance(5_000);   // let any per-fetch delay inside the tick settle
+    svc.stopBodyPrefetchScheduler();
+    return svc;
+  };
+
+  // The exact case that started this: bodies that never arrive, with the log
+  // saying only "0/N fetched". The class and the elapsed time together say which
+  // budget was spent, which is the difference between a fix and a guess.
+  it('names the dominant failure class and how long the tick took', async () => {
+    const a = makeAccount({ seeds: ['e1', 'e2', 'e3'], remaining: 3, fetchDelayMs: 1000 });
+    for (const id of ['e1', 'e2', 'e3']) a.state.fetchErrors.set(id, new FakeTimeoutError('Timeout', 'running'));
+    await runOneTick(a);
+
+    expect(tickLine()).toContain('0/3 bodies fetched in 1.0s');
+    expect(tickLine()).toContain('timeout-running x3');
+  });
+
+  // Mixed causes in one tick must stay distinguishable — a tick that is half
+  // rate-limited and half genuinely empty reads as neither if they merge.
+  it('keeps distinct causes apart in a single line', async () => {
+    const a = makeAccount({ seeds: ['ok', 'slow', 'ghost', 'norow', 'nofolder'], remaining: 4 });
+    a.state.fetchErrors.set('slow', new FakeTimeoutError('Timeout', 'queued'));
+    a.state.fetchNulls.add('ghost');
+    a.state.missingRows.add('norow');
+    a.state.emails.set('nofolder', { id: 'nofolder', folderId: 'gone', uid: 5 });
+    await runOneTick(a);
+
+    const line = tickLine();
+    expect(line).toContain('1/5 bodies fetched');
+    for (const reason of ['timeout-queued x1', 'engine-verdict x1', 'row-missing x1', 'folder-missing x1']) {
+      expect(line).toContain(reason);
+    }
+  });
+
+  // Silence when healthy: an unconditional summary would put a dangling marker
+  // on every good tick and train everyone to stop reading the line.
+  it('adds nothing to a tick where every body landed', async () => {
+    const a = makeAccount({ seeds: ['e1', 'e2'] });
+    await runOneTick(a);
+
+    expect(tickLine()).toContain('2/2 bodies fetched in 0.0s');
+    expect(tickLine()).not.toContain('—');
+  });
+
+  // One line per tick, not one per body. 200 bodies all failing the same way is
+  // precisely the shape that made per-item logging a main-thread stall.
+  it('stays a single line for a full-size failing tick', async () => {
+    const seeds = Array.from({ length: SEED_PER_TICK }, (_, i) => `s${i}`);
+    const a = makeAccount({ seeds, remaining: SEED_PER_TICK });
+    for (const id of seeds) a.state.fetchErrors.set(id, new Error(`Connection ${id} closed`));
+    await runOneTick(a);
+
+    expect(tickLine()).toContain(`0/${SEED_PER_TICK} bodies fetched`);
+    expect(tickLine()).toContain(`Connection sN closed x${SEED_PER_TICK}`);
+    expect(h.logs.filter((line) => line.includes('Connection sN closed'))).toHaveLength(1);
   });
 });
