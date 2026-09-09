@@ -43,6 +43,16 @@ node scripts/native-abi.mjs electron  # back to the app (sh scripts/dev.sh also 
 rebuilds, so you can check without waiting for a compile. CI sidesteps the flip
 entirely by installing with `SARVINBOX_SKIP_ELECTRON_REBUILD=1`.
 
+Tests that open a database go through `src/test-support/test-db.ts`, which fails
+with a message naming this exact fix rather than trying to carry on. It used to
+fall back to Node's built-in `node:sqlite` behind a better-sqlite3 facade so the
+suite could still run — but that quietly swapped the driver under test, and the
+two disagree: `node:sqlite` rejects a bound parameter the statement does not
+declare, where better-sqlite3 ignores it. A fresh `pnpm install` therefore turned
+passing tests into `Unknown named parameter 'attachmentSizes'`, an error that
+names a column and points at a repository that was never broken. The fallback is
+gone; the ABI is now always named.
+
 Two rebuilds must never run in the same directory at once: `node-gyp rebuild`
 starts by deleting `build/`, so a second run removes what the first is compiling
 into and both die on an ENOENT for a path that should exist
