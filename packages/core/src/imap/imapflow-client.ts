@@ -514,6 +514,21 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     }
   }
 
+  /**
+   * Bytes read off this socket so far, from ImapFlow's own counter. Cumulative
+   * and never reset here, so a caller can sample it to tell a transfer that is
+   * merely slow from one that has hung — see `withStallTimeout`. Returns NaN
+   * (deliberately not 0) when there is no client to ask: a constant would look
+   * like a permanent stall, whereas NaN is read as "no reading available".
+   */
+  bytesReceived(): number {
+    try {
+      return this.client?.stats().received ?? Number.NaN;
+    } catch {
+      return Number.NaN;
+    }
+  }
+
   // ========== Folder Operations ==========
 
   async listFolders(): Promise<IMAPFolder[]> {
