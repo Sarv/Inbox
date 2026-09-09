@@ -55,7 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tearing down the socket the other was still opening, and everything the
   connect path writes (the credential vault, the saved account, the first sync)
   happened twice. Concurrent attempts for one account are now joined into a
-  single connection, while different accounts still connect in parallel.
+  single connection, while different accounts still connect in parallel. The
+  window-focus check reached the same outcome by another route: before deciding
+  whether to reconnect it asks the current connection to answer, and a connect
+  still shaking hands cannot answer — so on every cold start it read the
+  starting connection as a dead socket, tore it down mid-handshake, reported a
+  failed sign-in the user could see, and spent another connection against the
+  server's cap to replace one that was about to work. A connect in progress is
+  now recognised as its own state and waited for rather than replaced.
 - Large emails download their bodies again. A body fetch had a flat 30-second
   budget, but its duration depends on the size of the message being downloaded —
   so any mail too big to transfer in 30 seconds could never be fetched at all.
