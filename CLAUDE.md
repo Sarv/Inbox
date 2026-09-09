@@ -33,8 +33,9 @@ only thing that does.
    explicitly in the test name and comment so the next person can tell a
    deliberate limitation from an accident.
 
-Test layers, the shared IMAP/storage fakes, and the better-sqlite3 ABI gotcha
-(`pnpm test:node-abi`) are documented in [docs/TESTING.md](docs/TESTING.md). CI
+Test layers, the shared IMAP/storage fakes, and the better-sqlite3 ABI split
+(handled for you — see below) are documented in
+[docs/TESTING.md](docs/TESTING.md). CI
 runs every suite on every push and pull request — keep it green.
 
 ## Logging: ALWAYS use the shared logger, NEVER raw `console.*`
@@ -55,6 +56,41 @@ lands in `app.log` consistently:
   `sync-handlers.ts`) over per-item lines.
 - Raw `console.*` reaches `app.log` via the dev tee but UNSTRUCTURED — don't rely
   on it. Migrate any `console.*` you touch to the logger.
+
+## Native modules: better-sqlite3 has TWO ABIs — never flip it by hand
+
+`better-sqlite3` is a compiled addon and is valid for exactly ONE ABI at a time.
+The desktop app runs inside **Electron** (its own `NODE_MODULE_VERSION`, e.g. 148
+for Electron 43); the test suites run in **plain Node** (e.g. 137 for Node 24).
+Whichever it was last built for, the other one fails to load:
+
+```
+was compiled against a different Node.js version using
+NODE_MODULE_VERSION 137. This version of Node.js requires NODE_MODULE_VERSION 148.
+```
+
+**The flip is automatic — don't do it manually.** Every test script rebuilds for
+Node first and the dev scripts rebuild for Electron first (`node
+scripts/native-abi.mjs <node|electron>`, a no-op when the addon already reports
+the target ABI). So `pnpm test` and `pnpm dev:desktop` can be run in any order,
+as often as you like. `sh scripts/dev.sh` does the same.
+
+Do NOT run `node scripts/native-abi.mjs node` (or `pnpm test:node-abi`) on its
+own to "fix" a test run, and never leave the tree on the Node ABI: the next
+launch of the app is then a boot with no database at all. **That is not a
+cosmetic failure — it has destroyed data.** Every core-DB read is wrapped in a
+`try/catch` that returns an empty result, so a broken addon does not look like an
+error to the code that consumes it; it looks like an app with no accounts, no
+folders and no mail. On 2026-09-09 that made the startup orphan-DB sweep read an
+unreadable account registry as "zero accounts exist" and delete both live
+mailbox DBs.
+
+The lesson generalises beyond this module: **an unreadable store and an empty
+store are the same value and opposite facts.** Any code path that DELETES must
+source its keep-set from a read that can fail loudly (`readRegistryAccounts`,
+not the swallowing `listRegistryAccounts`) and must do nothing when it does.
+
+See [docs/TESTING.md](docs/TESTING.md) for the rebuild lock and the ABI probe.
 
 ## Debugging: there IS a log file — read it, don't ask
 

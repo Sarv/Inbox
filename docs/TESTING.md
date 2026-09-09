@@ -29,19 +29,31 @@ and this repo needs two:
 | the desktop app (Electron) | Electron's |
 | the test suites (plain Node) | Node's |
 
-`pnpm install` runs `scripts/postinstall.mjs`, which builds it for **Electron** —
-so straight after an install, every SQLite-backed test fails with
-`ERR_DLOPEN_FAILED` / `NODE_MODULE_VERSION` mismatch. That is a toolchain
-mismatch, not a broken test. Flip it:
+**You should never have to flip it yourself.** Every `test*` script in the
+packages that open a database starts with `node scripts/native-abi.mjs node`, and
+`dev` / `electron:dev` (and `sh scripts/dev.sh`) start with the `electron`
+counterpart. The script probes the ABI the built binary actually reports and
+returns immediately when it already matches, so the guard costs nothing on a
+run that is already on the right side, and `pnpm test` and `pnpm dev:desktop`
+can be alternated freely.
 
-```bash
-pnpm test:node-abi                    # build for Node, then run tests
-node scripts/native-abi.mjs electron  # back to the app (sh scripts/dev.sh also does this)
-```
+That automation exists because the manual flip was dangerous, not merely
+annoying. Leaving the addon on Node's ABI means the *app* can no longer open any
+database — and since every core-DB read is wrapped in a `try/catch` that returns
+an empty result, that boots as an app with no accounts rather than as an error.
+On 2026-09-09 it made the startup orphan-DB sweep read the unreadable account
+registry as "no accounts exist" and delete both live mailbox DBs. So: don't run
+`node scripts/native-abi.mjs node` or `pnpm test:node-abi` on their own to
+"unblock" a test run — run the tests, which do it for you and leave the tree
+consistent either way.
 
-`scripts/native-abi.mjs` prints which ABI the binary currently reports before it
-rebuilds, so you can check without waiting for a compile. CI sidesteps the flip
-entirely by installing with `SARVINBOX_SKIP_ELECTRON_REBUILD=1`.
+`pnpm install` runs `scripts/postinstall.mjs`, which builds it for **Electron**,
+so a fresh install is ready for the app and the first `pnpm test` after it pays
+one rebuild. `scripts/native-abi.mjs` prints which ABI the binary currently
+reports before it rebuilds, so you can check without waiting for a compile;
+`--force` rebuilds regardless. CI sidesteps the flip entirely by installing with
+`SARVINBOX_SKIP_ELECTRON_REBUILD=1`, which leaves the addon on Node's ABI and
+makes the test-time guard a no-op probe.
 
 Tests that open a database go through `src/test-support/test-db.ts`, which fails
 with a message naming this exact fix rather than trying to carry on. It used to
