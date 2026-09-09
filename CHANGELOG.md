@@ -66,7 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clock: a connection that has gone silent still fails in 30 seconds, while a
   transfer that keeps delivering data is allowed to finish, and a download
   running longer than the pool's stuck-connection limit is no longer evicted
-  mid-transfer.
+  mid-transfer. The IMAP client applied a second flat budget of its own — one
+  minute for any command, whatever it was doing — which killed the download and
+  discarded the connection before the new rule could ever apply; the command
+  that streams a message body is now judged on stalls too, while every other
+  command keeps the flat budget that spots a dead socket quickly.
 - An OAuth sign-in you abandon no longer strands the button on "Opening…".
   Closing the provider's browser tab is invisible to the app — the flow simply
   never answers — so a button that disabled itself until it did sat there for
