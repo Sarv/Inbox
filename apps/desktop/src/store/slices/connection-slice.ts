@@ -1,9 +1,28 @@
 import type { SMTPConfig } from '@sarvinbox/core';
+import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
 import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
 import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, clearImageAllowedCache, loadQuotaCache, saveQuotaCache } from '../helpers';
-import type { ConnectionSlice, SliceCreator, StoredAccount } from '../types';
+import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
+
+// Concurrent connects to the SAME account join one run.
+//
+// Mount, window focus, network-online and the reconnect ladder all reach for the
+// connection independently, and React's StrictMode double-invokes the mount
+// effect in development — so two connects to the same account overlapped on
+// every cold start. The second one entered the main process while the first was
+// still opening ("Already connected or connecting"), which force-reconnected the
+// half-open socket out from under it and surfaced as a spurious startup error:
+//
+//   Already connected or connecting
+//   forceReconnect: tearing down current (possibly zombie) connection
+//   IMAP connect error: IMAPError: Unexpected close
+//
+// It also ran this function's side effects twice — a vault write, a credential
+// save, a registry upsert and a background sync per duplicate call. Keyed by
+// ACCOUNT id, so switching accounts still connects both.
+const connectInFlight = createSingleFlight<void>();
 
 const initialAccounts = migrateAccounts();
 const initialActiveAccount =
@@ -23,6 +42,172 @@ const initialSmtpConfig = initialActiveAccount
 // Last-known storage usage per account, so the sidebar bar is populated on the
 // first paint instead of appearing a round-trip later.
 const initialQuotaCache = loadQuotaCache();
+
+/**
+ * One connect attempt for one account — the body of `connect()`, lifted out so
+ * the slice method is just "resolve the identity, then coalesce". It is
+ * deliberately NOT re-entrant per account: it writes the vault, localStorage
+ * credentials, the account registry and the active-account pointer, none of
+ * which tolerates a concurrent second pass over the same account.
+ */
+async function doConnect(
+  acctId: string,
+  config: Parameters<ConnectionSlice['connect']>[0],
+  set: (partial: Partial<EmailStore>) => void,
+  get: () => EmailStore,
+): Promise<void> {
+  console.log('[Store] connect() called with:', { host: config.host, username: config.username });
+  // Rehydrate secrets from the encrypted vault when handed a stripped config
+  // (loaded from localStorage after migration). In-memory only — never re-saved
+  // to disk. If the caller already supplied a secret (login form), use it as-is.
+  let connectConfig = config;
+  const hasSecret = !!(config.password || config.accessToken || config.refreshToken);
+  if (!hasSecret) {
+    // Try the registry id AND the host-derived id — a legacy account's secret
+    // may be vaulted under either (its id can predate host-keying).
+    const secrets = await fetchVaultSecrets([acctId, accountIdFor(config.username, config.host)]);
+    if (secrets?.imap) connectConfig = { ...config, ...secrets.imap };
+  }
+  try {
+    // Pass the account id so main can inject the vault password itself if the
+    // renderer-side rehydration missed it (belt-and-suspenders — main owns the vault).
+    const result = await window.electronAPI.imap.connect(connectConfig, acctId);
+    console.log('[Store] IPC connect result:', result);
+
+    if (result.success) {
+      console.log('[Store] Connection successful, updating state...');
+
+      // Main repaired an account that was marked oauth2 but whose server
+      // rejected the token (it reconnected using the vaulted app password).
+      // Adopt the correction here so every persistence path below — vault,
+      // localStorage credentials, registry — records it and the repair sticks
+      // instead of re-running on every launch.
+      if (result.healedAuthMethod) {
+        console.warn(`[Store] Account auth repaired: oauth2 → ${result.healedAuthMethod}`);
+        connectConfig = {
+          ...connectConfig,
+          authMethod: result.healedAuthMethod,
+          accessToken: undefined,
+          refreshToken: undefined,
+          oauthProvider: undefined,
+        };
+      }
+
+      set({
+        connected: true,
+        imapConfig: connectConfig,
+        connectionStatus: 'connected',
+        showConnectedMessage: true,
+        needsReauth: false,
+      });
+
+      // Hide connected message after 5 seconds
+      setTimeout(() => {
+        set({ showConnectedMessage: false });
+      }, 5000);
+
+      // Persist the secret to the encrypted vault (keyed by account id), then
+      // save the NON-secret config to localStorage (saveCredentials strips).
+      try {
+        await window.electronAPI.secureCreds.set(acctId, { imap: extractSecrets(connectConfig) });
+      } catch (e) {
+        console.warn('[Store] Failed to store IMAP secret in vault:', (e as Error)?.message);
+      }
+      saveCredentials(connectConfig);
+
+      // Register/refresh this account in the multi-account registry and make
+      // it the active one.
+      // Sending config is PER-ACCOUNT: take it from this account's existing
+      // registry entry, NOT from the shared global store field (which may hold
+      // another account's SMTP). An account that hasn't verified SMTP carries
+      // none (null) — connectSmtp/markSmtpConfigured are the only writers of a
+      // real config. This also cleans any earlier cross-account contamination:
+      // an unconfigured account is re-stamped with null here.
+      const existing = get().accounts.find((a) => a.id === acctId);
+      const isReconnectOfActive = !!existing && existing.id === get().activeAccountId;
+      const isOauth = (connectConfig as { authMethod?: string }).authMethod === 'oauth2';
+      // PRESERVE sending (SMTP) across an IMAP (re)connect. Re-authing IMAP —
+      // e.g. after a webmail password change — must NEVER wipe or reset the
+      // account's SMTP. Prefer the account's own stored config; for a reconnect
+      // of the ACTIVE account, fall back to the live store value so an entry
+      // that held SMTP only under the legacy global key isn't dropped. OAuth
+      // accounts still DERIVE their SMTP (immune to the same-email crossing).
+      const preservedConfigured = existing?.smtpConfigured || (isReconnectOfActive && get().smtpConfigured) || false;
+      const preservedConfig = existing?.smtpConfig ?? (isReconnectOfActive ? get().smtpConfig : null) ?? null;
+      const acctSmtpConfig = isOauth
+        ? effectiveSmtpConfig({ ...(existing ?? ({} as StoredAccount)), imapConfig: connectConfig })
+        : (preservedConfigured ? preservedConfig : null);
+      const acctSmtpConfigured = isOauth ? !!acctSmtpConfig : preservedConfigured;
+      const account: StoredAccount = {
+        id: acctId,
+        email: config.username,
+        imapConfig: connectConfig,
+        smtpConfig: acctSmtpConfig,
+        smtpConfigured: acctSmtpConfigured,
+      };
+      // Switching to a different account? Drop the per-account image allowlist
+      // so it re-warms from the new account's DB (harmless no-op on reconnect).
+      if (acctId !== get().activeAccountId) clearImageAllowedCache();
+      saveActiveAccountId(acctId);
+      // Keep the global store fields + legacy localStorage in sync with THIS
+      // account, so the SMTP form and banner read the active account's own
+      // sending config (not a leftover from another account).
+      saveSmtpConfigured(acctSmtpConfigured);
+      if (acctSmtpConfig) saveSmtpCredentials(acctSmtpConfig);
+      // NEVER clear SMTP on an IMAP reconnect — only a brand-new account (never
+      // seen before) starts with a clean SMTP slate. This is what stopped an
+      // IMAP re-auth from wiping a working SMTP config.
+      else if (!existing) clearSmtpCredentials();
+      set({
+        accounts: upsertAccount(get().accounts, account),
+        activeAccountId: acctId,
+        smtpConfig: acctSmtpConfig,
+        smtpConfigured: acctSmtpConfigured,
+      });
+
+      // A successful connection means this account is set up — mark
+      // onboarding complete so a later credential loss surfaces the
+      // lightweight reconnect dialog, NOT the full first-run wizard
+      // (Sign in with Sarv / Connect Email / Shortcuts). Previously the
+      // flag was only set at the END of the wizard, so users who
+      // connected mid-wizard had it stuck false and saw the whole
+      // wizard again whenever creds went missing.
+      try { localStorage.setItem('sarvinbox-onboarding-complete', 'true'); } catch { /* ignore */ }
+
+      // Set up sync progress listener (remove old first to prevent accumulation)
+      window.electronAPI.imap.removeSyncProgressListener();
+      window.electronAPI.imap.onSyncProgress((status) => {
+        get().setSyncStatus(status);
+      });
+
+      console.log('[Store] Loading folders...');
+      await get().loadFolders();
+
+      // Kick the full multi-folder email sync in the BACKGROUND — do NOT await
+      // it. The connection is established and the folder list is loaded, so the
+      // account is usable now; emails stream into the view via the
+      // sync-progress listener above + the per-folder section reloads. Awaiting
+      // it here made EVERY connect path block on a potentially long, contended
+      // sync — the "Sign in with Sarv" / "Verify & Continue" button stayed
+      // spinning long after the account had actually connected, worst while other
+      // accounts were mid background-sync on the shared main thread. A sync
+      // failure is not a connect failure (the socket is up), so it's logged, not
+      // thrown.
+      console.log('[Store] Starting sync of all folders (background)...');
+      void get().syncEmails().catch((e) =>
+        console.warn('[Store] background syncEmails failed:', (e as Error)?.message),
+      );
+    } else {
+      throw new Error(result.error || 'Failed to connect');
+    }
+  } catch (error) {
+    // Transient startup/connection failures self-heal via the main-process
+    // reconnect ladder — log concisely (not a console.error + stack). The
+    // throw still propagates so callers (manual connect) can react.
+    console.warn('[Store] Connect failed (reconnect will retry):', (error as Error)?.message ?? error);
+    throw error;
+  }
+}
 
 export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) => ({
   connected: false,
@@ -111,162 +296,21 @@ export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =
   },
 
   connect: async (config) => {
-    console.log('[Store] connect() called with:', { host: config.host, username: config.username });
     // The account id (also its vault key). Match an existing account by email +
     // IMAP host so a reconnect reuses its stored id + DB, while the SAME address
-    // on a DIFFERENT provider becomes a separate account.
+    // on a DIFFERENT provider becomes a separate account. Resolved BEFORE the
+    // single-flight join because it is this connect's identity — what decides
+    // whether another caller is asking for the same thing.
     const acctId = findAccountByEmailHost(get().accounts, config.username, config.host)?.id
       ?? accountIdFor(config.username, config.host);
-    // Rehydrate secrets from the encrypted vault when handed a stripped config
-    // (loaded from localStorage after migration). In-memory only — never re-saved
-    // to disk. If the caller already supplied a secret (login form), use it as-is.
-    let connectConfig = config;
-    const hasSecret = !!(config.password || config.accessToken || config.refreshToken);
-    if (!hasSecret) {
-      // Try the registry id AND the host-derived id — a legacy account's secret
-      // may be vaulted under either (its id can predate host-keying).
-      const secrets = await fetchVaultSecrets([acctId, accountIdFor(config.username, config.host)]);
-      if (secrets?.imap) connectConfig = { ...config, ...secrets.imap };
+
+    const pending = connectInFlight.pending(acctId);
+    if (pending) {
+      console.log(`[Store] connect() already in flight for ${acctId} — joining it`);
+      return pending;
     }
-    try {
-      // Pass the account id so main can inject the vault password itself if the
-      // renderer-side rehydration missed it (belt-and-suspenders — main owns the vault).
-      const result = await window.electronAPI.imap.connect(connectConfig, acctId);
-      console.log('[Store] IPC connect result:', result);
 
-      if (result.success) {
-        console.log('[Store] Connection successful, updating state...');
-
-        // Main repaired an account that was marked oauth2 but whose server
-        // rejected the token (it reconnected using the vaulted app password).
-        // Adopt the correction here so every persistence path below — vault,
-        // localStorage credentials, registry — records it and the repair sticks
-        // instead of re-running on every launch.
-        if (result.healedAuthMethod) {
-          console.warn(`[Store] Account auth repaired: oauth2 → ${result.healedAuthMethod}`);
-          connectConfig = {
-            ...connectConfig,
-            authMethod: result.healedAuthMethod,
-            accessToken: undefined,
-            refreshToken: undefined,
-            oauthProvider: undefined,
-          };
-        }
-
-        set({
-          connected: true,
-          imapConfig: connectConfig,
-          connectionStatus: 'connected',
-          showConnectedMessage: true,
-          needsReauth: false,
-        });
-
-        // Hide connected message after 5 seconds
-        setTimeout(() => {
-          set({ showConnectedMessage: false });
-        }, 5000);
-
-        // Persist the secret to the encrypted vault (keyed by account id), then
-        // save the NON-secret config to localStorage (saveCredentials strips).
-        try {
-          await window.electronAPI.secureCreds.set(acctId, { imap: extractSecrets(connectConfig) });
-        } catch (e) {
-          console.warn('[Store] Failed to store IMAP secret in vault:', (e as Error)?.message);
-        }
-        saveCredentials(connectConfig);
-
-        // Register/refresh this account in the multi-account registry and make
-        // it the active one.
-        // Sending config is PER-ACCOUNT: take it from this account's existing
-        // registry entry, NOT from the shared global store field (which may hold
-        // another account's SMTP). An account that hasn't verified SMTP carries
-        // none (null) — connectSmtp/markSmtpConfigured are the only writers of a
-        // real config. This also cleans any earlier cross-account contamination:
-        // an unconfigured account is re-stamped with null here.
-        const existing = get().accounts.find((a) => a.id === acctId);
-        const isReconnectOfActive = !!existing && existing.id === get().activeAccountId;
-        const isOauth = (connectConfig as { authMethod?: string }).authMethod === 'oauth2';
-        // PRESERVE sending (SMTP) across an IMAP (re)connect. Re-authing IMAP —
-        // e.g. after a webmail password change — must NEVER wipe or reset the
-        // account's SMTP. Prefer the account's own stored config; for a reconnect
-        // of the ACTIVE account, fall back to the live store value so an entry
-        // that held SMTP only under the legacy global key isn't dropped. OAuth
-        // accounts still DERIVE their SMTP (immune to the same-email crossing).
-        const preservedConfigured = existing?.smtpConfigured || (isReconnectOfActive && get().smtpConfigured) || false;
-        const preservedConfig = existing?.smtpConfig ?? (isReconnectOfActive ? get().smtpConfig : null) ?? null;
-        const acctSmtpConfig = isOauth
-          ? effectiveSmtpConfig({ ...(existing ?? ({} as StoredAccount)), imapConfig: connectConfig })
-          : (preservedConfigured ? preservedConfig : null);
-        const acctSmtpConfigured = isOauth ? !!acctSmtpConfig : preservedConfigured;
-        const account: StoredAccount = {
-          id: acctId,
-          email: config.username,
-          imapConfig: connectConfig,
-          smtpConfig: acctSmtpConfig,
-          smtpConfigured: acctSmtpConfigured,
-        };
-        // Switching to a different account? Drop the per-account image allowlist
-        // so it re-warms from the new account's DB (harmless no-op on reconnect).
-        if (acctId !== get().activeAccountId) clearImageAllowedCache();
-        saveActiveAccountId(acctId);
-        // Keep the global store fields + legacy localStorage in sync with THIS
-        // account, so the SMTP form and banner read the active account's own
-        // sending config (not a leftover from another account).
-        saveSmtpConfigured(acctSmtpConfigured);
-        if (acctSmtpConfig) saveSmtpCredentials(acctSmtpConfig);
-        // NEVER clear SMTP on an IMAP reconnect — only a brand-new account (never
-        // seen before) starts with a clean SMTP slate. This is what stopped an
-        // IMAP re-auth from wiping a working SMTP config.
-        else if (!existing) clearSmtpCredentials();
-        set({
-          accounts: upsertAccount(get().accounts, account),
-          activeAccountId: acctId,
-          smtpConfig: acctSmtpConfig,
-          smtpConfigured: acctSmtpConfigured,
-        });
-
-        // A successful connection means this account is set up — mark
-        // onboarding complete so a later credential loss surfaces the
-        // lightweight reconnect dialog, NOT the full first-run wizard
-        // (Sign in with Sarv / Connect Email / Shortcuts). Previously the
-        // flag was only set at the END of the wizard, so users who
-        // connected mid-wizard had it stuck false and saw the whole
-        // wizard again whenever creds went missing.
-        try { localStorage.setItem('sarvinbox-onboarding-complete', 'true'); } catch { /* ignore */ }
-
-        // Set up sync progress listener (remove old first to prevent accumulation)
-        window.electronAPI.imap.removeSyncProgressListener();
-        window.electronAPI.imap.onSyncProgress((status) => {
-          get().setSyncStatus(status);
-        });
-
-        console.log('[Store] Loading folders...');
-        await get().loadFolders();
-
-        // Kick the full multi-folder email sync in the BACKGROUND — do NOT await
-        // it. The connection is established and the folder list is loaded, so the
-        // account is usable now; emails stream into the view via the
-        // sync-progress listener above + the per-folder section reloads. Awaiting
-        // it here made EVERY connect path block on a potentially long, contended
-        // sync — the "Sign in with Sarv" / "Verify & Continue" button stayed
-        // spinning long after the account had actually connected, worst while other
-        // accounts were mid background-sync on the shared main thread. A sync
-        // failure is not a connect failure (the socket is up), so it's logged, not
-        // thrown.
-        console.log('[Store] Starting sync of all folders (background)...');
-        void get().syncEmails().catch((e) =>
-          console.warn('[Store] background syncEmails failed:', (e as Error)?.message),
-        );
-      } else {
-        throw new Error(result.error || 'Failed to connect');
-      }
-    } catch (error) {
-      // Transient startup/connection failures self-heal via the main-process
-      // reconnect ladder — log concisely (not a console.error + stack). The
-      // throw still propagates so callers (manual connect) can react.
-      console.warn('[Store] Connect failed (reconnect will retry):', (error as Error)?.message ?? error);
-      throw error;
-    }
+    return connectInFlight.run(acctId, () => doConnect(acctId, config, set, get));
   },
 
   disconnect: async () => {
