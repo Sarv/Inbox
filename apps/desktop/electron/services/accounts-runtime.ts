@@ -405,12 +405,19 @@ export async function deleteAccountData(accountId: string): Promise<void> {
  * Meant to run ONCE (see the migration flag in the caller).
  */
 export function cleanupOrphanedAccountDbs(opts?: {
-  /** The account ids that CURRENTLY exist (from the registry). When supplied,
-   *  hashed per-account DBs whose id isn't in this set are treated as orphans and
-   *  removed — but ONLY the stale ones (see `staleAfterMs`), so an actively-synced
-   *  background account we might have momentarily missed is never touched. Omit at
-   *  startup (list may be incomplete) → hashed files are all KEPT. Pass it from the
-   *  removal path, where the post-removal registry is authoritative. */
+  /** The account ids that CURRENTLY exist (from the registry). When supplied and
+   *  NON-EMPTY, hashed per-account DBs whose id isn't in this set are treated as
+   *  orphans and removed — but ONLY the stale ones (see `staleAfterMs`), so an
+   *  actively-synced background account we might have momentarily missed is never
+   *  touched. Omit → hashed files are all KEPT. An EMPTY array is also treated as
+   *  "not authoritative" and keeps every hashed file: a registry reporting zero
+   *  accounts while hashed per-account DBs exist on disk is far more often a
+   *  registry we failed to READ than a user who removed their last mailbox, and
+   *  the two outcomes are not comparable — one leaves a stale file behind, the
+   *  other destroys live mail. (It really happened: a native-module load failure
+   *  emptied the keep-set and both live account DBs were deleted.) Callers must
+   *  still source the ids from `readRegistryAccounts`, which THROWS rather than
+   *  reporting an unreadable registry as empty. */
   keepAccountIds?: string[];
   /** Only remove a hashed orphan that hasn't been written for this long. Guards a
    *  live DB against a stale/racing keep-set. Default 1h. */
@@ -420,7 +427,9 @@ export function cleanupOrphanedAccountDbs(opts?: {
   const removed: string[] = [];
   const HASHED = /^sarvinbox-[0-9a-f]{32}\.db$/;
   const KEEP_EXACT = new Set([PRIMARY_DB_FILE, 'sarvinbox-core.db']);
-  const keepFiles = opts?.keepAccountIds
+  // Non-empty is the authority test — see `keepAccountIds`. `null` here means
+  // "keep every hashed DB", which is always the safe answer.
+  const keepFiles = opts?.keepAccountIds?.length
     ? new Set(opts.keepAccountIds.map((id) => dbFileForAccount(id)))
     : null;
   const staleAfterMs = opts?.staleAfterMs ?? 60 * 60 * 1000;
@@ -456,9 +465,9 @@ export function cleanupOrphanedAccountDbs(opts?: {
       if (KEEP_EXACT.has(name)) continue;
       if (HASHED.test(name)) {
         // A live/background account DB is hashed. Remove ONLY when we have an
-        // authoritative keep-set AND this file isn't in it AND it's stale — the
-        // orphan left by a since-removed/rekeyed account (was never swept because
-        // the old sweep kept ALL hashed files).
+        // authoritative (supplied AND non-empty) keep-set AND this file isn't in
+        // it AND it's stale — the orphan left by a since-removed/rekeyed account
+        // (was never swept because the old sweep kept ALL hashed files).
         if (keepFiles && !keepFiles.has(name) && isStale(name)) {
           deleteDbFiles(join(dir, name));
           removed.push(name);

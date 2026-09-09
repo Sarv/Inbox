@@ -638,7 +638,7 @@ describe('cleanupOrphanedAccountDbs', () => {
   it('never removes a RECENTLY-written hashed DB, even if the keep-set omits it', () => {
     const busy = dbFileForAccount('acct-busy');
     touch(busy);
-    expect(cleanupOrphanedAccountDbs({ keepAccountIds: [] })).toEqual([]);
+    expect(cleanupOrphanedAccountDbs({ keepAccountIds: ['acct-other'] })).toEqual([]);
     expect(existsSync(join(h.userData, busy))).toBe(true);
   });
 
@@ -646,8 +646,42 @@ describe('cleanupOrphanedAccountDbs', () => {
     const orphan = dbFileForAccount('acct-orphan');
     touch(orphan);
     age(orphan, 5_000);
-    expect(cleanupOrphanedAccountDbs({ keepAccountIds: [], staleAfterMs: 60_000 })).toEqual([]);
-    expect(cleanupOrphanedAccountDbs({ keepAccountIds: [], staleAfterMs: 1_000 })).toEqual([orphan]);
+    expect(cleanupOrphanedAccountDbs({ keepAccountIds: ['acct-other'], staleAfterMs: 60_000 })).toEqual([]);
+    expect(cleanupOrphanedAccountDbs({ keepAccountIds: ['acct-other'], staleAfterMs: 1_000 })).toEqual([orphan]);
+  });
+
+  // THE DATA-LOSS REGRESSION. An empty keep-set used to be treated as gospel —
+  // "no accounts exist, so every hashed DB is an orphan" — and a registry read
+  // that FAILED returned exactly that empty list. A native-module load failure
+  // therefore deleted two live mailboxes on startup. A registry claiming zero
+  // accounts while hashed per-account DBs sit on disk is a contradiction, and
+  // the safe reading of a contradiction is "delete nothing".
+  it('KEEPS every hashed DB when the keep-set is EMPTY, however stale', () => {
+    const live = dbFileForAccount('acct-live');
+    const other = dbFileForAccount('acct-other');
+    touch(live);
+    touch(other);
+    age(live, 30 * 24 * 60 * 60 * 1000);
+    age(other, 30 * 24 * 60 * 60 * 1000);
+
+    // staleAfterMs: 0 removes the last-resort mtime guard too — the removal path
+    // passes exactly this, so the keep-set is the ONLY thing standing between an
+    // unreadable registry and every mailbox on the machine.
+    expect(cleanupOrphanedAccountDbs({ keepAccountIds: [], staleAfterMs: 0 })).toEqual([]);
+    expect(existsSync(join(h.userData, live))).toBe(true);
+    expect(existsSync(join(h.userData, other))).toBe(true);
+  });
+
+  // The guard must not turn into "never clean anything": a REAL keep-set still
+  // sweeps a stale orphan, or the leak this function exists to fix comes back.
+  it('still removes a stale orphan once the keep-set is genuinely populated', () => {
+    const kept = dbFileForAccount('acct-kept');
+    const orphan = dbFileForAccount('acct-orphan');
+    touch(kept);
+    touch(orphan);
+    age(orphan, 24 * 60 * 60 * 1000);
+    expect(cleanupOrphanedAccountDbs({ keepAccountIds: ['acct-kept'], staleAfterMs: 0 })).toEqual([orphan]);
+    expect(existsSync(join(h.userData, kept))).toBe(true);
   });
 
   it('removes an oldest-scheme plaintext `acct-*` DB only when it really is SQLite', () => {

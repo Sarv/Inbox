@@ -23,6 +23,7 @@ import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accou
 import { disablePipelineAIIfProviderRemoved } from '../services/unified-pipeline-service';
 import {
   listRegistryAccounts,
+  readRegistryAccounts,
   upsertRegistryAccounts,
   removeRegistryAccount,
   getRegistryActiveAccountId,
@@ -162,15 +163,17 @@ export function registerAccountsHandlers(): void {
       // `sarvinbox-acct-*.db`, oldest plaintext `acct-*`) PLUS historical orphans
       // from since-removed/rekeyed identities. `keepAccountIds` (the remaining
       // registry) is the safety: a live/background account's DB is NEVER touched.
-      // `staleAfterMs: 0` disables the mtime guard — unnecessary here because the
-      // keep-set is authoritative, and it's what makes "delete" a full nuke rather
-      // than leaving a recently-written orphan behind. Best-effort.
+      // `staleAfterMs: 0` disables the mtime guard — deliberate here, and exactly
+      // why the keep-set must be REAL: with no staleness fallback, a registry read
+      // that failed and answered `[]` would nuke every remaining mailbox on the
+      // spot. `readRegistryAccounts` throws instead, and the sweep itself refuses
+      // to act on an empty keep-set. Best-effort.
       try {
-        const keepAccountIds = listRegistryAccounts().map((a) => a.id);
+        const keepAccountIds = readRegistryAccounts().map((a) => a.id);
         const removed = cleanupOrphanedAccountDbs({ keepAccountIds, staleAfterMs: 0 });
         if (removed.length) logger.info(`[Accounts] removal swept ${removed.length} orphan file(s):`, removed.join(', '));
       } catch (e) {
-        logger.warn('[Accounts] orphan sweep after removal failed:', (e as Error).message);
+        logger.warn('[Accounts] orphan sweep after removal SKIPPED (nothing deleted):', (e as Error).message);
       }
 
       // The removed account may have been the OAuth session powering the AI/LLM

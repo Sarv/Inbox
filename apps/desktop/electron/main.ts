@@ -144,7 +144,7 @@ import {
 import {
   seedAccountRegistryFromDurableStores,
   getRegistryActiveAccountId,
-  listRegistryAccounts,
+  readRegistryAccounts,
   cleanupMigratedLegacyFiles,
   resolveAccountEmail,
 } from './services/accounts-registry';
@@ -486,18 +486,20 @@ async function initializeAccountRegistry(): Promise<void> {
 
   // Sweep orphaned per-account DB files EVERY startup — cheap (one readdir), and
   // self-healing (an orphan left by a rekey/removal-crash gets cleaned on the next
-  // launch instead of lingering forever behind a one-time flag). The account
-  // registry is authoritative by this point (seeded above), so we pass it as the
-  // keep-set: a live/background account's DB is NEVER touched. The staleness guard
-  // (default 1h) is a second safety — a hashed DB is only removed if it's BOTH not
-  // a current account AND hasn't been written recently, so even a momentarily
-  // incomplete keep-set can't delete an actively-synced mailbox.
+  // launch instead of lingering forever behind a one-time flag). The keep-set
+  // comes from `readRegistryAccounts`, which THROWS rather than reporting an
+  // unreadable registry as an empty one: this sweep deletes files, so "I could
+  // not read the registry" must abort it, not license it. It once did the
+  // opposite — a native-module load failure made the registry read fail, the
+  // swallowing `listRegistryAccounts` returned [], and the sweep deleted both
+  // live mailbox DBs as orphans. A live account's DB is never touched, and the
+  // staleness guard (default 1h) is only the LAST safety, not the first.
   try {
-    const keepAccountIds = listRegistryAccounts().map((a) => a.id);
+    const keepAccountIds = readRegistryAccounts().map((a) => a.id);
     const removed = cleanupOrphanedAccountDbs({ keepAccountIds });
     if (removed.length) logger.info(`[Main] Cleaned ${removed.length} orphaned DB file(s):`, removed.join(', '));
   } catch (e) {
-    logger.warn('[Main] Orphaned DB cleanup failed:', (e as Error)?.message);
+    logger.error('[Main] Orphaned DB cleanup SKIPPED — the account registry could not be read, so nothing was deleted:', (e as Error)?.message);
   }
 
   // Sweep stale NON-DB leftovers too (a dead debug log, orphaned bundle-id temp
