@@ -89,8 +89,18 @@ else
 fi
 
 echo "=== Killing existing processes ==="
-pkill -f "electron.*sarvinbox" 2>/dev/null || true
-pkill -f "vite.*desktop" 2>/dev/null || true
+# Patterns come from scripts/lib/dev-processes.mjs — see that file for why they
+# are derived from the checkout path rather than written inline here. The pair
+# that used to live on these lines ("electron.*sarvinbox" / "vite.*desktop")
+# matched nothing in any location, so every restart silently left the previous
+# Electron and vite alive: port 5173 already taken and two processes on one
+# SQLite mail database.
+node scripts/lib/dev-processes.mjs "$PWD" | while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    # pkill exits 1 when nothing matches, which is the normal case under `set -e`.
+    pkill -f "$pattern" 2>/dev/null || true
+done
+# Give the old processes a moment to release port 5173 and their file handles.
 sleep 1
 
 echo "=== Cleaning stale JS files ==="
@@ -119,15 +129,15 @@ fi
 # "dataless" files deep in node_modules make that walk block for minutes while
 # iCloud materialises them, which looked like the script hanging after "clean".
 find "$BETTER_SQLITE3_DIR" packages apps/desktop/electron apps/desktop/src -maxdepth 3 -name '* 2' -type d -exec rm -rf {} + 2>/dev/null || true
-# Derive the target from the installed Electron so this never goes stale when
-# Electron is upgraded (a hardcoded target rebuilds for the WRONG ABI and the app
-# then fails to load the native module — "NODE_MODULE_VERSION mismatch").
-ELECTRON_TARGET="$(node -p "require('electron/package.json').version")"
-ELECTRON_ARCH="$(node -p "process.arch")"
-# `node-gyp rebuild` can silently reuse a stale build/config.gypi (e.g. one left by
-# a plain-Node build during `pnpm install`), producing a Node-ABI binary despite
-# --runtime=electron. Nuke the build dir so configure regenerates against Electron.
-( cd "$BETTER_SQLITE3_DIR" && rm -rf build && npx node-gyp rebuild --runtime=electron --target="$ELECTRON_TARGET" --arch="$ELECTRON_ARCH" --dist-url=https://electronjs.org/headers --release 2>&1 | tail -1 )
+# Hand off to the shared rebuild. This used to be an inline `npx node-gyp
+# rebuild …` that duplicated scripts/lib/native-abi.mjs — and duplicated it
+# incompletely: the copy had no build lock (two concurrent runs delete each
+# other's build/ and both die on a confusing ENOENT) and never verified the ABI
+# it produced, so a build that silently reused a stale config.gypi shipped as if
+# it had worked. It also ran unconditionally, costing ~1 minute on every app
+# start; the shared path now returns immediately when the addon already reports
+# Electron's ABI. Pass --force to rebuild regardless.
+node scripts/native-abi.mjs electron
 
 echo "=== Building core package ==="
 pnpm --filter @sarvinbox/core build
