@@ -1,5 +1,5 @@
 /**
- * `email-chat-view`, wearing sarvinbox's colours.
+ * `@sarv-in/email-chat-view`, wearing sarvinbox's colours.
  *
  * The library ships its own stylesheet and reads every colour, size and radius
  * from a `--sec-*` token, each of which falls back to the sarv design-system

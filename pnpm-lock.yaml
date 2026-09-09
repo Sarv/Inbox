@@ -54,6 +54,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@sarv-in/email-chat-view':
+        specifier: ^0.2.0
+        version: 0.2.0(react-dom@18.3.1)(react@18.3.1)
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -108,9 +111,6 @@ importers:
       email-addresses:
         specifier: ^5.0.0
         version: 5.0.0
-      email-chat-view:
-        specifier: ^0.1.1
-        version: 0.1.1(react-dom@18.3.1)(react@18.3.1)
       html-to-text:
         specifier: ^10.0.0
         version: 10.0.0
@@ -2656,6 +2656,25 @@ packages:
   /@rtsao/scc@1.1.0:
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
     dev: true
+
+  /@sarv-in/email-chat-view@0.2.0(react-dom@18.3.1)(react@18.3.1):
+    resolution: {integrity: sha512-igyklIRjloCe/TU6unLo7zjHg1bcz41rhUdHmc5O3gOuv8+JYWguJwn3c02RvUOoihV30FGMi+hVHWxXr6X7kw==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: ^18.2.0 || ^19.0.0
+      react-dom: ^18.2.0 || ^19.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+    dependencies:
+      chrono-node: 2.10.0
+      dompurify: 3.4.12
+      email-addresses: 5.0.0
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
+    dev: false
 
   /@selderee/plugin-htmlparser2@0.11.0:
     resolution: {integrity: sha512-P33hHGdldxGabLFjPPpaTxVolMrzrcegejx+0GxjrIb9Zv48D8yAIA/QTDR2dFl7Uz7urX8aX6+5bCZslr+gWQ==}
@@ -5886,25 +5905,6 @@ packages:
 
   /email-addresses@5.0.0:
     resolution: {integrity: sha512-4OIPYlA6JXqtVn8zpHpGiI7vE6EQOAg16aGnDMIAlZVinnoZ8208tW1hAbjWydgN/4PLTT9q+O1K6AH/vALJGw==}
-    dev: false
-
-  /email-chat-view@0.1.1(react-dom@18.3.1)(react@18.3.1):
-    resolution: {integrity: sha512-DPJMl58ogba2zW0Z7zxGWGAlDFUOKdYncMeLt2a3HUZ76V+XE1trpTTLIZ6gmCUw1rYcFOqKqS+PnkPVtOe2vg==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      react: ^18.2.0 || ^19.0.0
-      react-dom: ^18.2.0 || ^19.0.0
-    peerDependenciesMeta:
-      react:
-        optional: true
-      react-dom:
-        optional: true
-    dependencies:
-      chrono-node: 2.10.0
-      dompurify: 3.4.12
-      email-addresses: 5.0.0
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
     dev: false
 
   /email-reply-parser@2.3.9:

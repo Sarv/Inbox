@@ -23,6 +23,7 @@ import type {
 } from 'imapflow';
 import { ImapFlow } from 'imapflow';
 
+import { TOKEN_REQUEST_TIMEOUT_MS } from '../oauth/token-refresher';
 import type {
   IIMAPClient,
   IMAPConfig,
@@ -43,7 +44,6 @@ import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout'
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { isConnectionError, isAuthError } from './imap-errors';
-import { TOKEN_REQUEST_TIMEOUT_MS } from '../oauth/token-refresher';
 
 // Max time to wait for the OAuth bearer resolver (token refresh) during connect.
 // It runs before any socket opens; a hung DNS/OAuth window must fail fast into the

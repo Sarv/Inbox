@@ -18,7 +18,7 @@ import * as chrono from 'chrono-node';
  *
  * THE single day-first parser on the app side: the AI conversation extractor
  * (conversation-service) reads it. The deterministic split reads the identical
- * rules from `email-chat-view`'s `parseHumanDate`, so the two views can never
+ * rules from `@sarv-in/email-chat-view`'s `parseHumanDate`, so the two views can never
  * disagree on a date again.
  */
 export function parseHumanDateToEpochSec(
