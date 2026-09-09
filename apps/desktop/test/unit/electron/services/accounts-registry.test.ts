@@ -73,6 +73,7 @@ import {
   cleanupMigratedLegacyFiles,
   getRegistryActiveAccountId,
   listRegistryAccounts,
+  readRegistryAccounts,
   removeRegistryAccount,
   resolveAccountEmail,
   resolveAccountIdentity,
@@ -219,6 +220,19 @@ describe('listRegistryAccounts', () => {
   it('returns [] when the query itself fails', () => {
     dbState.fail.add('select');
     expect(listRegistryAccounts()).toEqual([]);
+  });
+
+  // The distinction that cost two live mailbox DBs: a failed read and an empty
+  // registry are the same VALUE but opposite FACTS. Anything that deletes files
+  // must call the throwing read, so "I could not find out" can never be acted on
+  // as "there are no accounts". If this ever stops throwing, the startup sweep
+  // silently regains permission to delete every mailbox on the machine.
+  it('readRegistryAccounts THROWS on a failed read instead of answering "empty"', () => {
+    upsertRegistryAccount(account({ id: 'live', email: 'live@x.com' }));
+    dbState.fail.add('select');
+    expect(() => readRegistryAccounts()).toThrow();
+    dbState.fail.delete('select');
+    expect(readRegistryAccounts().map((a) => a.id)).toEqual(['live']);
   });
 });
 

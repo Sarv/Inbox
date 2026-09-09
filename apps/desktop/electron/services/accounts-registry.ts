@@ -88,11 +88,26 @@ function rowToAccount(row: any): RegistryAccount {
   };
 }
 
-/** All accounts in the registry (secrets already excluded). */
+/**
+ * All accounts in the registry, THROWING if the registry cannot be read.
+ *
+ * Use this — never the swallowing `listRegistryAccounts` — anywhere the answer
+ * decides what to DELETE. An unreadable registry and an empty one are the same
+ * value (`[]`) but opposite facts: "there are no accounts" licenses a cleanup,
+ * "I could not find out" must stop it. Conflating them once deleted two live
+ * mailbox DBs, because a native-module load failure made every account look
+ * like it had been removed.
+ */
+export function readRegistryAccounts(): RegistryAccount[] {
+  const rows = getCoreDb().prepare('SELECT * FROM account_registry ORDER BY created_at ASC').all();
+  return rows.map(rowToAccount);
+}
+
+/** All accounts in the registry (secrets already excluded). `[]` if the read
+ *  fails — only safe for callers that merely DISPLAY or hydrate. */
 export function listRegistryAccounts(): RegistryAccount[] {
   try {
-    const rows = getCoreDb().prepare('SELECT * FROM account_registry ORDER BY created_at ASC').all();
-    return rows.map(rowToAccount);
+    return readRegistryAccounts();
   } catch (e) {
     logger.error('[Registry] list failed:', e);
     return [];
