@@ -134,6 +134,45 @@ export const sectionDataUnchanged = (
 // exceptions to the user's emailsPerPage setting: they're the firehose views, so
 // they always page 100 at a time (fixed full-page pagination). Every other flat
 // view honors the user's setting.
+/**
+ * Is `folderPath` the folder the user is currently looking at?
+ *
+ * Resolves the SELECTED folder by id and compares its path, rather than looking
+ * the ARRIVING folder up by path and comparing ids. The two are equivalent only
+ * while `folders` is complete, and during an initial sync (or a rebuilt cache)
+ * it is not: the sync creates folder rows as it discovers them, so the
+ * renderer's snapshot predates half of them. A `find()` on the arriving path
+ * then returns undefined, the refresh is skipped, and the list sits empty while
+ * mail pours into the DB — visible only as a sidebar count that disagrees with
+ * an empty list, until the user hits refresh by hand.
+ *
+ * The selected folder is always present in the snapshot (it is where
+ * `selectedFolderId` came from), so this lookup cannot go stale the same way.
+ */
+export const isFolderInView = (
+  folders: ReadonlyArray<{ id: string; path: string }> | undefined | null,
+  selectedFolderId: string | null | undefined,
+  folderPath: string | null | undefined,
+): boolean => {
+  if (!folderPath) return false;
+  return findFolderPathById(folders, selectedFolderId) === folderPath;
+};
+
+/**
+ * The path of the folder the user is looking at, or null when none is selected
+ * (a virtual view, or before the first folder loads).
+ *
+ * Shared with `isFolderInView` so the "which folder is on screen" lookup exists
+ * once — the two must never disagree about what counts as the selected folder.
+ */
+export const findFolderPathById = (
+  folders: ReadonlyArray<{ id: string; path: string }> | undefined | null,
+  folderId: string | null | undefined,
+): string | null => {
+  if (!folderId) return null;
+  return (folders ?? []).find((folder) => folder.id === folderId)?.path ?? null;
+};
+
 export const ALL_MAIL_PAGE_SIZE = 100;
 const FIXED_PAGE_VIEWS = new Set(['virtual-all', 'virtual-unified']);
 

@@ -4,7 +4,7 @@ import pLimit from 'p-limit';
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import { findFolderByType } from '../../config/folder-mapping';
 import { buildThreads } from '../../utils/thread-utils';
-import { getMaxEmailsPerFolder, getBodyDownloadLimit } from '../helpers';
+import { getMaxEmailsPerFolder, getBodyDownloadLimit, isFolderInView } from '../helpers';
 import type { SyncSlice, SliceCreator } from '../types';
 
 import { buildEmailReplacementPatch, selectLoadedEmailIds } from './emails-slice';
@@ -127,9 +127,7 @@ async function refreshVisibleViewForFolder(
 ): Promise<void> {
   try {
     const state = get();
-    const eventFolder = (state.folders || []).find((f: any) => f.path === folderPath);
-    const isCurrentFolder =
-      state.selectedFolderId && eventFolder && state.selectedFolderId === eventFolder.id;
+    const isCurrentFolder = isFolderInView(state.folders, state.selectedFolderId, folderPath);
 
     if (state.viewingAICategory && isCurrentFolder) {
       // AI-categorized view (Needs Response, Reminders, etc.).
