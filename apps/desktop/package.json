@@ -23,6 +23,7 @@
     "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"
   },
   "dependencies": {
+    "@sarv-in/email-chat-view": "^0.2.0",
     "@sarvinbox/core": "workspace:*",
     "@sarvinbox/storage-node": "workspace:*",
     "@sentry/electron": "^7.15.0",
@@ -41,7 +42,6 @@
     "date-fns": "^3.2.0",
     "dompurify": "^3.1.7",
     "email-addresses": "^5.0.0",
-    "email-chat-view": "^0.1.1",
     "html-to-text": "^10.0.0",
     "ical.js": "^2.2.1",
     "iconv-lite": "^0.7.0",

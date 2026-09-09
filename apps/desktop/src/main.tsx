@@ -18,7 +18,7 @@ import './index.css';
 // tokens at this app's theme. Order matters: the bridge must win over the
 // library's defaults, and both must come after index.css so `--primary` and
 // friends are already declared for it to reference.
-import 'email-chat-view/style.css';
+import '@sarv-in/email-chat-view/style.css';
 import './styles/chat-view-theme.css';
 
 // Initialize crash/error reporting before rendering anything.
