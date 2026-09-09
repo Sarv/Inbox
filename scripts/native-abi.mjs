@@ -3,18 +3,23 @@
 /*
  * Switch better-sqlite3 between the Node and Electron ABIs.
  *
- * The compiled addon is valid for one ABI at a time (see scripts/lib/native-abi.mjs),
- * so you flip it depending on what you're about to do:
+ * The compiled addon is valid for one ABI at a time (see scripts/lib/native-abi.mjs).
+ * You should not need to run this yourself: it is the first step of every
+ * `test` script in a package that opens a database (→ node) and of `dev` /
+ * `electron:dev` / `sh scripts/dev.sh` (→ electron), so `pnpm test` and
+ * `pnpm dev:desktop` can be alternated in any order.
  *
- *   pnpm test:node-abi     → node      before running the SQLite test suites
- *   node scripts/native-abi.mjs electron  → back to the desktop app
- *   sh scripts/dev.sh                     → also rebuilds for Electron
+ * Running it BY HAND for `node` and then starting the app is the failure this
+ * automation exists to prevent: the app cannot open any database, and because
+ * core-DB reads answer an unreadable database with an empty result, it boots
+ * looking like a fresh install rather than like an error.
  *
  * Prints the ABI the binary currently reports first, so a mismatch is visible
  * before you spend a minute compiling.
  *
  * Skips the compile when the addon already reports the target ABI; pass
- * --force to rebuild regardless.
+ * --force to rebuild regardless. A rebuild already running elsewhere (parallel
+ * `pnpm test` tasks) is waited for rather than treated as a failure.
  *
  * Run: node scripts/native-abi.mjs [node|electron] [--force]   (default: node)
  */
@@ -25,6 +30,15 @@ import {
   readElectronVersion,
   rebuildBetterSqlite3,
 } from './lib/native-abi.mjs';
+
+/**
+ * How long to wait for a rebuild already in progress before giving up.
+ *
+ * A cold node-gyp compile of sqlite3 is around a minute; this is generous
+ * enough for a slow machine and short enough that a genuinely wedged build
+ * still reports itself rather than hanging the command forever.
+ */
+const LOCK_WAIT_MS = 10 * 60_000;
 
 const log = (msg) => console.log(`[native-abi] ${msg}`);
 const warn = (msg) => console.warn(`[native-abi] ${msg}`);
@@ -64,8 +78,7 @@ if (!force && isAbiCurrent({ runtime, target: electronVersion })) {
 }
 
 log(`rebuilding better-sqlite3 for ${runtime}${runtime === 'electron' ? ` ${electronVersion}` : ''}…`);
-const ok = rebuildBetterSqlite3({ runtime, target: electronVersion, log, warn });
+const ok = rebuildBetterSqlite3({ runtime, target: electronVersion, log, warn, force, waitMs: LOCK_WAIT_MS });
 if (!ok) process.exit(1);
 
 log(`done — ${currentAbi()}`);
-if (runtime === 'node') log('remember: run `sh scripts/dev.sh` (or this script with `electron`) before starting the app again');

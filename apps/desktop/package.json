@@ -7,20 +7,20 @@
   "author": "Sarv",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
+    "dev": "node ../../scripts/native-abi.mjs electron && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
     "build": "tsc && vite build && electron-builder",
     "build:electron": "electron-builder",
     "preview": "vite preview",
     "type-check": "tsc --noEmit",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test": "node ../../scripts/native-abi.mjs node && vitest run",
+    "test:coverage": "node ../../scripts/native-abi.mjs node && vitest run --coverage",
     "lint": "eslint src --ext .ts,.tsx",
     "check:renderer-bundle": "vite build --config vite/check-renderer-bundle.config.ts",
     "clean": "rm -rf dist dist-electron node_modules/.vite && node ../../scripts/clean-stale-js.mjs src electron",
-    "electron:dev": "pnpm clean && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
+    "electron:dev": "node ../../scripts/native-abi.mjs electron && pnpm clean && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
     "electron:build": "pnpm clean && vite build && electron-builder",
-    "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration"
+    "test:unit": "node ../../scripts/native-abi.mjs node && vitest run test/unit",
+    "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"
   },
   "dependencies": {
     "@sarvinbox/core": "workspace:*",

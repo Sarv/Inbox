@@ -13,7 +13,9 @@
  * the two paths can't drift:
  *
  *   scripts/postinstall.mjs   → electron (dev default)
- *   scripts/native-abi.mjs    → either, on demand (`pnpm test:node-abi`)
+ *   scripts/native-abi.mjs    → either, on demand — run for you by the `dev`
+ *                               and `test` scripts of every package that opens
+ *                               a database, so nobody has to flip it by hand.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -95,22 +97,51 @@ export function isAbiCurrent({ runtime, target }) {
   return readBuiltAbi() === wanted;
 }
 
+/** How long to sleep between polls while waiting for another rebuild. */
+const LOCK_POLL_MS = 250;
+
+/** Give up on a takeover war rather than spinning forever. */
+const MAX_STALE_TAKEOVERS = 2;
+
+/** Block this (synchronous) script for `ms` without burning a core. */
+function sleepSync(ms) {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 /**
- * Whether another rebuild currently owns the build directory.
+ * Take the build directory, optionally WAITING for whoever currently holds it.
  *
  * Two node-gyp runs in one directory destroy each other. `node-gyp rebuild`
  * begins by deleting `build/`, so the second run removes directories the first
  * has just created and both die on ENOENT for a path that should exist —
  * `build/Release/.deps/…/sqlite3.o.d.raw` or `build/node_gyp_bins`. Those two
  * errors look like a broken toolchain but mean "something else is building".
- * The usual cause is an interrupted flip: the killed shell's node-gyp keeps
- * compiling in the background while the next attempt starts over the top of it.
  *
  * mkdir is atomic, so it doubles as the lock. A lock whose owner is gone is
- * stale (that same interrupted run) and gets taken over.
+ * stale (an interrupted run, a killed shell) and gets taken over — otherwise it
+ * would block every rebuild forever.
+ *
+ * `waitMs > 0` makes a live owner something to wait for rather than a failure.
+ * That is the normal case now that the flip is automatic: `pnpm test` runs the
+ * package suites in PARALLEL under turbo, so several of them ask for the Node
+ * ABI at the same moment and exactly one can build. Refusing the others turned
+ * a working command into a hard failure whose message ("kill it and re-run")
+ * was advice for a situation that wasn't happening. The waiters re-probe once
+ * they get in, so the winner's compile serves all of them.
  */
-export function acquireBuildLock({ warn = () => {}, lockDir = LOCK_DIR } = {}) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+export function acquireBuildLock({
+  warn = () => {},
+  log = () => {},
+  lockDir = LOCK_DIR,
+  waitMs = 0,
+  sleep = sleepSync,
+  now = Date.now,
+} = {}) {
+  const deadline = now() + waitMs;
+  let staleTakeovers = 0;
+  let announced = false;
+
+  for (;;) {
     try {
       mkdirSync(lockDir);
       writeFileSync(join(lockDir, 'pid'), String(process.pid));
@@ -118,19 +149,34 @@ export function acquireBuildLock({ warn = () => {}, lockDir = LOCK_DIR } = {}) {
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
       const owner = readOwnerPid(lockDir);
-      if (isRunning(owner)) {
+
+      if (!isRunning(owner)) {
+        // The owner died mid-build; its half-written tree is exactly what breaks
+        // the next run, so clear the lock and let the clean rebuild below fix it.
+        if (staleTakeovers >= MAX_STALE_TAKEOVERS) {
+          warn(`could not take the better-sqlite3 build lock at ${lockDir} — it keeps being re-taken.`);
+          return false;
+        }
+        staleTakeovers += 1;
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+
+      const remaining = deadline - now();
+      if (remaining <= 0) {
         warn(
           `another better-sqlite3 rebuild is already running (pid ${owner}) — refusing to build `
           + 'on top of it. Wait for it to finish, or kill it and re-run.',
         );
         return false;
       }
-      // The owner died mid-build; its half-written tree is exactly what breaks
-      // the next run, so clear the lock and let the clean rebuild below fix it.
-      rmSync(lockDir, { recursive: true, force: true });
+      if (!announced) {
+        log(`another better-sqlite3 rebuild is running (pid ${owner}) — waiting for it…`);
+        announced = true;
+      }
+      sleep(Math.min(LOCK_POLL_MS, remaining));
     }
   }
-  return false;
 }
 
 export function releaseBuildLock({ lockDir = LOCK_DIR } = {}) {
@@ -184,7 +230,14 @@ export function manualRebuildCommand({ runtime, target }) {
  * no-ops (it prints "Rebuild Complete" while producing nothing, leaving a
  * host-ABI binary that crashes the app).
  */
-export function rebuildBetterSqlite3({ runtime, target, log = () => {}, warn = () => {} }) {
+export function rebuildBetterSqlite3({
+  runtime,
+  target,
+  log = () => {},
+  warn = () => {},
+  waitMs = 0,
+  force = false,
+}) {
   if (!existsSync(BSQ_DIR)) {
     warn('better-sqlite3 not found — skipping rebuild');
     return false;
@@ -195,9 +248,17 @@ export function rebuildBetterSqlite3({ runtime, target, log = () => {}, warn = (
     warn(`node-gyp not found — cannot rebuild better-sqlite3. Run manually:\n  ${manual}`);
     return false;
   }
-  if (!acquireBuildLock({ warn })) return false;
+  if (!acquireBuildLock({ warn, log, waitMs })) return false;
 
   try {
+    // Re-probe now that we hold the lock. When we waited for someone else, they
+    // were very likely building the same ABI we want (parallel `pnpm test`
+    // tasks all ask for Node's), and compiling it a second time would cost
+    // another minute to produce a byte-identical binary.
+    if (!force && isAbiCurrent({ runtime, target })) {
+      log(`better-sqlite3 is already built for ${runtime} — nothing to do`);
+      return true;
+    }
     return rebuildUnderLock({ runtime, target, nodeGyp, manual, log, warn });
   } finally {
     releaseBuildLock();

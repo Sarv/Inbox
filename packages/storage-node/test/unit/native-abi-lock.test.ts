@@ -93,6 +93,63 @@ describe('acquireBuildLock', () => {
     expect(readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(String(process.pid));
   });
 
+  // Breaks: `pnpm test`. Turbo runs the package suites in PARALLEL and each one
+  // now ensures the Node ABI first, so several ask for the lock at the same
+  // moment. Refusing the losers made the ordinary command fail outright.
+  it('waits for a live owner and takes the lock when it is released', () => {
+    seedLock(process.pid);
+    const logs: string[] = [];
+    let clock = 0;
+    let sleeps = 0;
+    // Stand in for the other rebuild finishing: it releases on its third poll.
+    const sleep = (ms: number) => {
+      clock += ms;
+      sleeps += 1;
+      if (sleeps === 3) rmSync(lockDir, { recursive: true, force: true });
+    };
+
+    const took = acquireBuildLock({
+      lockDir, waitMs: 60_000, sleep, now: () => clock, log: (msg: string) => logs.push(msg),
+    });
+
+    expect(took).toBe(true);
+    expect(sleeps).toBe(3);
+    expect(readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(String(process.pid));
+    // Said so once, not once per poll — a 60s wait must not print 240 lines.
+    expect(logs.filter((msg) => msg.includes('waiting'))).toHaveLength(1);
+  });
+
+  // Breaks: a genuinely wedged rebuild hangs the command forever instead of
+  // reporting who is holding it.
+  it('gives up once the wait budget is spent, naming the holder', () => {
+    seedLock(process.pid);
+    const warnings: string[] = [];
+    let clock = 0;
+
+    const took = acquireBuildLock({
+      lockDir,
+      waitMs: 1_000,
+      sleep: (ms: number) => { clock += ms; },
+      now: () => clock,
+      warn: (msg: string) => warnings.push(msg),
+    });
+
+    expect(took).toBe(false);
+    expect(warnings.join('\n')).toContain(String(process.pid));
+    // The live owner's lock must survive being waited on and given up on.
+    expect(existsSync(lockDir)).toBe(true);
+  });
+
+  // Breaks: postinstall (waitMs defaults to 0) blocking a `pnpm install` behind
+  // someone else's compile instead of skipping its best-effort rebuild.
+  it('does not wait at all by default', () => {
+    seedLock(process.pid);
+    let sleeps = 0;
+
+    expect(acquireBuildLock({ lockDir, sleep: () => { sleeps += 1; } })).toBe(false);
+    expect(sleeps).toBe(0);
+  });
+
   // Breaks: an interrupted flip (Ctrl-C, a killed shell) leaves the lock behind
   // and no rebuild can ever run again until someone deletes it by hand.
   it('takes over a lock whose owner has died', () => {

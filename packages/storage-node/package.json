@@ -17,14 +17,14 @@
   "scripts": {
     "dev": "tsup --watch",
     "build": "tsup",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest",
+    "test": "node ../../scripts/native-abi.mjs node && vitest run",
+    "test:coverage": "node ../../scripts/native-abi.mjs node && vitest run --coverage",
+    "test:watch": "node ../../scripts/native-abi.mjs node && vitest",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration"
+    "test:unit": "node ../../scripts/native-abi.mjs node && vitest run test/unit",
+    "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"
   },
   "dependencies": {
     "@sarvinbox/core": "workspace:*",
