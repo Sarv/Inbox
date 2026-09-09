@@ -4,7 +4,13 @@ import pLimit from 'p-limit';
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import { findFolderByType } from '../../config/folder-mapping';
 import { buildThreads } from '../../utils/thread-utils';
-import { getMaxEmailsPerFolder, getBodyDownloadLimit, isFolderInView } from '../helpers';
+import {
+  getMaxEmailsPerFolder,
+  getBodyDownloadLimit,
+  isFolderInView,
+  findFolderPathById,
+  shouldRefreshOnSyncProgress,
+} from '../helpers';
 import type { SyncSlice, SliceCreator } from '../types';
 
 import { buildEmailReplacementPatch, selectLoadedEmailIds } from './emails-slice';
@@ -159,6 +165,11 @@ async function refreshVisibleViewForFolder(
     console.warn(`[Store] refreshVisibleViewForFolder failed for ${folderPath}:`, err);
   }
 }
+
+// ---- Sync-progress refresh gate ----------------------------------------------
+// Transient plumbing like the realtime coalescer below: nothing renders off it,
+// and it must survive across ticks without a `set()` per progress event.
+const syncProgressGate = { lastProcessed: -1, lastRefreshAt: 0 };
 
 // ---- Realtime (IDLE) event coalescer -----------------------------------------
 // Transient plumbing, not UI state — nothing renders off it, and a `set()` per
@@ -396,6 +407,32 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
   lastSyncOkAt: null,
 
   setSyncStatus: (status) => set({ syncStatus: status }),
+
+  // Progressive fill during a sync. `syncEmails` only refreshes the view once
+  // the WHOLE sync resolves (INBOX + Sent + Starred, each to its cap), so a
+  // first-run account — or one whose cache is being rebuilt — showed an empty
+  // list for minutes while the sidebar counted mail that was already stored.
+  // The engine reports progress after each batch is committed, so each tick is
+  // a chance to show what has landed; the gate keeps that to one refresh per
+  // SYNC_PROGRESS_REFRESH_MS and skips ticks that stored nothing.
+  handleSyncProgress: (status) => {
+    set({ syncStatus: status });
+
+    const now = Date.now();
+    if (!shouldRefreshOnSyncProgress(status, syncProgressGate, now)) return;
+    // shouldRefreshOnSyncProgress only says yes for a finite count.
+    syncProgressGate.lastProcessed = status.messagesProcessed;
+    syncProgressGate.lastRefreshAt = now;
+
+    // Refresh the folder ON SCREEN, not the one the engine happens to be
+    // reporting: a parallel sync moves `currentFolder` between folders, so
+    // keying off it would drop the INBOX batches whenever Sent was the one
+    // being named. A virtual view ("All Email" / "Starred") has no selected
+    // folder at all — the empty path matches nothing and the refresh falls
+    // through to its virtual branches, which is exactly right.
+    const state = get();
+    void refreshVisibleViewForFolder(get, findFolderPathById(state.folders, state.selectedFolderId) ?? '');
+  },
 
   // Sync-health signal. A single failure can be a transient blip (a 60s timeout
   // on a busy server), so we only raise the user-facing "trouble" flag after

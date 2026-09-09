@@ -173,6 +173,52 @@ export const findFolderPathById = (
   return (folders ?? []).find((folder) => folder.id === folderId)?.path ?? null;
 };
 
+/**
+ * How long the view must settle between two sync-progress refreshes.
+ *
+ * A batch commit fires progress every ~50 messages, so a first sync of a 25k
+ * mailbox reports ~500 times. Refreshing on each one would re-query and
+ * re-render the list continuously for the whole sync — the progressive fill has
+ * to be visible, not a treadmill. Under a second feels alive; much more and the
+ * list looks stuck again.
+ */
+export const SYNC_PROGRESS_REFRESH_MS = 1_500;
+
+/** What the last sync-progress-driven refresh saw. Caller-owned, so the rule below stays pure. */
+export interface SyncProgressRefreshGate {
+  /** `messagesProcessed` at the last refresh — the engine's cumulative count for this sync. */
+  lastProcessed: number;
+  /** `Date.now()` at the last refresh. */
+  lastRefreshAt: number;
+}
+
+/**
+ * Should this sync-progress tick refresh the visible list?
+ *
+ * Mail used to appear only when the WHOLE sync resolved — INBOX, Sent and
+ * Starred, every one of them to the per-folder cap — because that is where
+ * `syncEmails` calls `_reloadCurrentView`. On a first-run account (or a rebuilt
+ * cache) that is minutes of an empty list next to a sidebar already counting
+ * mail. The engine reports progress after each batch is COMMITTED to the DB, so
+ * every one of those ticks is a point where stored mail could already be shown.
+ *
+ * Refresh when the count has MOVED (a tick that processed nothing stored
+ * nothing — a flags-only pass or a folder that was already up to date — and a
+ * reload would re-query for the same rows), and no more often than
+ * SYNC_PROGRESS_REFRESH_MS. A count that went BACKWARDS is a new sync's reset,
+ * which must refresh rather than be read as "no progress".
+ */
+export const shouldRefreshOnSyncProgress = (
+  status: { messagesProcessed?: number | null } | null | undefined,
+  gate: SyncProgressRefreshGate,
+  now: number,
+): boolean => {
+  const processed = status?.messagesProcessed;
+  if (typeof processed !== 'number' || !Number.isFinite(processed)) return false;
+  if (processed === gate.lastProcessed) return false;
+  return now - gate.lastRefreshAt >= SYNC_PROGRESS_REFRESH_MS;
+};
+
 export const ALL_MAIL_PAGE_SIZE = 100;
 const FIXED_PAGE_VIEWS = new Set(['virtual-all', 'virtual-unified']);
 

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { SYNC_PROGRESS_REFRESH_MS } from '../../../../../src/store/helpers';
+
 // CategoryBadges owns a renderer-only cache the slice clears; stub it so the
 // module graph under test stays free of IPC/DOM side effects.
 vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
@@ -293,5 +295,152 @@ describe('flushRealtimeBatch — external flag changes (webmail read / star)', (
     await runFlush();
     expect(h.state.loadFolders).toHaveBeenCalledTimes(1);
     expect(h.state.mergeNewEmails).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PROGRESSIVE FILL during a sync.
+//
+// `syncEmails` refreshes the view only once the WHOLE sync resolves — INBOX,
+// Sent and Starred, each to the per-folder cap. On a first-run account (or one
+// whose cache is being rebuilt) that is minutes of an empty list sitting next
+// to a sidebar already counting mail that is in the DB. The engine reports
+// progress after each batch is COMMITTED, so every tick is a chance to show
+// what has landed; handleSyncProgress turns those ticks into a throttled
+// refresh of whatever the user is actually looking at.
+// ---------------------------------------------------------------------------
+
+const loadSliceWithSet = async (getState: () => any) => {
+  vi.resetModules();
+  (globalThis as any).window = { electronAPI: {} };
+  const mod = await import('../../../../../src/store/slices/sync-slice');
+  const set = vi.fn();
+  return { slice: mod.createSyncSlice(set, getState, {} as any), set };
+};
+
+/** A flat INBOX view — the refresh lands on mergeNewEmails. */
+const flatInboxState = (overrides: Record<string, unknown> = {}) => {
+  const mergeNewEmails = vi.fn().mockResolvedValue(undefined);
+  const state = {
+    folders: [{ id: 'f-inbox', path: 'INBOX' }, { id: 'f-sent', path: '[Gmail]/Sent Mail' }],
+    selectedFolderId: 'f-inbox',
+    inboxType: 'default',
+    inboxSections: [],
+    mergeNewEmails,
+    ...overrides,
+  };
+  return { state, mergeNewEmails };
+};
+
+describe('handleSyncProgress (progressive fill during a sync)', () => {
+  beforeEach(() => {
+    // The gate compares against Date.now(); pin it so the throttle is exact.
+    vi.setSystemTime(new Date('2026-09-09T12:00:00Z'));
+  });
+
+  // THE REGRESSION: the first committed batch must be on screen at once, not
+  // after the whole multi-folder sync finishes.
+  it('shows the first committed batch immediately', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+
+    expect(mergeNewEmails).toHaveBeenCalledWith('f-inbox');
+  });
+
+  // Breaks: ~500 batch ticks on a 25k first sync each re-query and re-render the
+  // list — the progressive fill becomes a treadmill on the main thread.
+  it('throttles the ticks that follow inside the window', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+    vi.advanceTimersByTime(SYNC_PROGRESS_REFRESH_MS - 1);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 100 } as never);
+
+    expect(mergeNewEmails).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: only the first batch is ever shown and the list stops filling.
+  it('refreshes again once the throttle window has passed', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+    vi.advanceTimersByTime(SYNC_PROGRESS_REFRESH_MS);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 100 } as never);
+
+    expect(mergeNewEmails).toHaveBeenCalledTimes(2);
+  });
+
+  // Breaks: a flags-only pass or an already-current folder ticks progress
+  // without storing a row, and we pay for a reload that returns the same list.
+  it('skips a tick that stored nothing', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+    vi.advanceTimersByTime(SYNC_PROGRESS_REFRESH_MS * 4);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+
+    expect(mergeNewEmails).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: a parallel sync moves `currentFolder` between folders, so keying the
+  // refresh off it drops every INBOX batch that lands while Sent is the folder
+  // being named — the user watches an empty inbox fill nothing.
+  it('refreshes the folder ON SCREEN, not the one the engine is reporting', async () => {
+    const loadAllSections = vi.fn().mockResolvedValue(undefined);
+    const { state } = flatInboxState({
+      inboxType: 'important-first',
+      inboxSections: [{ id: 'important' }],
+      loadAllSections,
+    });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: '[Gmail]/Sent Mail', messagesProcessed: 50 } as never);
+
+    expect(loadAllSections).toHaveBeenCalledWith('INBOX');
+  });
+
+  // Breaks: "All Email" / "Starred" have no selected folder, so a folder-keyed
+  // refresh silently does nothing and those views never fill during a sync.
+  it('fills a virtual view, which has no selected folder', async () => {
+    const mergeNewEmailsVirtualAll = vi.fn().mockResolvedValue(undefined);
+    const { state } = flatInboxState({
+      selectedFolderId: null,
+      selectedVirtualFolder: 'virtual-all',
+      mergeNewEmailsVirtualAll,
+    });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+
+    expect(mergeNewEmailsVirtualAll).toHaveBeenCalled();
+  });
+
+  // Breaks: the progress bar and the sync-status dot stop moving — the status
+  // must be recorded on EVERY tick, including the ones we decline to refresh on.
+  it('records the status even on a tick it does not refresh for', async () => {
+    const { state } = flatInboxState();
+    const { slice, set } = await loadSliceWithSet(() => state);
+    const status = { currentFolder: 'INBOX', messagesProcessed: 50 } as never;
+
+    slice.handleSyncProgress(status);
+    slice.handleSyncProgress(status); // same count -> no refresh
+
+    expect(set).toHaveBeenCalledTimes(2);
+    expect(set).toHaveBeenLastCalledWith({ syncStatus: status });
+  });
+
+  // Breaks: a malformed status from an older main process throws inside the IPC
+  // listener, and every later tick — the whole progressive fill — is lost.
+  it('survives a status with no progress figure', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    expect(() => slice.handleSyncProgress({} as never)).not.toThrow();
+    expect(mergeNewEmails).not.toHaveBeenCalled();
   });
 });
