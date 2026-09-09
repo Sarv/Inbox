@@ -1,5 +1,5 @@
+import { MailChatView, type Attachment, type ChatMessage } from '@sarv-in/email-chat-view';
 import type { EmailRecord } from '@sarvinbox/core';
-import { MailChatView, type Attachment, type ChatMessage } from 'email-chat-view';
 import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 
@@ -115,7 +115,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       // there is no fallback to the deterministic split here.
       case 'ai':
         return chatMessagesFromConversation(aiMessages!, options);
-      // `email-chat-view` splits the thread's own mails into one bubble per
+      // `@sarv-in/email-chat-view` splits the thread's own mails into one bubble per
       // message — quotes, signatures and banners stripped, and the messages
       // that exist only as quotes inside other mails recovered. All of that
       // lives in the library now; the app just hands it stored rows.

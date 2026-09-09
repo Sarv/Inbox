@@ -22,13 +22,13 @@
 /**
  * Packages linked by `file:` path. Add one here and both helpers pick it up.
  *
- * Empty in the normal case, and that is the correct state: `email-chat-view`
+ * Empty in the normal case, and that is the correct state: `@sarv-in/email-chat-view`
  * now installs from the registry, where Vite's default handling — pre-bundle
  * once, never watch — is exactly right for an immutable published tarball.
  * Excluding it would only cost dev-server startup time.
  *
  * The machinery stays because the moment anyone points that dependency back at
- * `file:../../../email-chat-view` to work on the library, adding its name here
+ * `file:../../../@sarv-in/email-chat-view` to work on the library, adding its name here
  * is the difference between seeing their rebuild and silently being served the
  * previous one.
  */
