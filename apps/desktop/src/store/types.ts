@@ -197,6 +197,9 @@ export interface SyncSlice {
   lastSyncOkAt: number | null;
 
   setSyncStatus: (status: SyncStatus) => void;
+  /** Handle one sync-progress tick: record the status AND, throttled, show the
+   *  mail the batch just committed instead of waiting for the whole sync. */
+  handleSyncProgress: (status: SyncStatus) => void;
   /** Record a successful sync — resets the failure streak and clears trouble. */
   noteSyncOk: () => void;
   /** Record a failed sync — bumps the streak and raises trouble past threshold. */

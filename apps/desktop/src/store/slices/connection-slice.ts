@@ -177,7 +177,7 @@ async function doConnect(
       // Set up sync progress listener (remove old first to prevent accumulation)
       window.electronAPI.imap.removeSyncProgressListener();
       window.electronAPI.imap.onSyncProgress((status) => {
-        get().setSyncStatus(status);
+        get().handleSyncProgress(status);
       });
 
       console.log('[Store] Loading folders...');
@@ -281,7 +281,7 @@ export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =
         // Set up sync progress listener if connected (remove old first to prevent accumulation)
         window.electronAPI.imap.removeSyncProgressListener();
         window.electronAPI.imap.onSyncProgress((status) => {
-          get().setSyncStatus(status);
+          get().handleSyncProgress(status);
         });
 
         return true;
@@ -369,7 +369,7 @@ export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =
         // Set up sync progress listener (remove old first to prevent accumulation)
         window.electronAPI.imap.removeSyncProgressListener();
         window.electronAPI.imap.onSyncProgress((status) => {
-          get().setSyncStatus(status);
+          get().handleSyncProgress(status);
         });
 
         // Hide connected message after 5 seconds
