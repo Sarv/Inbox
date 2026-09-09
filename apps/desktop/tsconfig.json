@@ -28,7 +28,10 @@
       "@sarvinbox/core/contact-enrichment": ["../../packages/core/src/contact-enrichment/index.ts"],
       // Same: pure folder classifier, deep-imported so the renderer never loads
       // the core barrel (imapflow/mailparser/nodemailer).
-      "@sarvinbox/core/folder-mapping": ["../../packages/core/src/config/folder-mapping.ts"]
+      "@sarvinbox/core/folder-mapping": ["../../packages/core/src/config/folder-mapping.ts"],
+      // Same: pure request-coalescing helper, one implementation shared with
+      // the main process instead of a renderer copy.
+      "@sarvinbox/core/single-flight": ["../../packages/core/src/utils/single-flight.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],

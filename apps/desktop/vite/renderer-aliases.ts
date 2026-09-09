@@ -28,5 +28,11 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/config/folder-mapping.ts',
     ),
+    // Pure (zero imports) — the renderer coalesces concurrent connects with the
+    // same helper the main process uses, rather than a second copy of it.
+    '@sarvinbox/core/single-flight': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/single-flight.ts',
+    ),
   };
 }
