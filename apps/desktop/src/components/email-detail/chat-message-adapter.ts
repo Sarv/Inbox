@@ -1,5 +1,5 @@
 /**
- * sarvinbox's stored mail, in the shape `email-chat-view` renders.
+ * sarvinbox's stored mail, in the shape `@sarv-in/email-chat-view` renders.
  *
  * The library knows nothing about EmailRecord, ConversationMessage, the AI
  * pipeline or the image cache — it renders `ChatMessage[]` and leaves where
@@ -8,14 +8,14 @@
  * seconds-vs-milliseconds, attribution, the pending/failed states) is directly
  * unit-testable without mounting anything.
  */
-import type { EmailRecord } from '@sarvinbox/core';
-import type { Attachment, ChatMessage } from 'email-chat-view';
+import type { Attachment, ChatMessage } from '@sarv-in/email-chat-view';
 import {
   createSegmentCache,
   threadToMessages,
   type Mail,
   type SegmentCache,
-} from 'email-chat-view/transform';
+} from '@sarv-in/email-chat-view/transform';
+import type { EmailRecord } from '@sarvinbox/core';
 
 import type { ConversationMessage } from '../../services/conversation-service';
 

@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The conversation ("chat") view is now rendered by the published
-  [`email-chat-view`](https://www.npmjs.com/package/email-chat-view) package
+  [`@sarv-in/email-chat-view`](https://www.npmjs.com/package/@sarv-in/email-chat-view) package
   instead of a bundled component. The in-app `ChatView` and the ~1,000-line
   conversation heuristic behind it are replaced by a small adapter that maps
   stored messages onto the package's API, and the AI thread summary no longer

@@ -37,7 +37,7 @@ export function trimTrailingWindowed(
  * its own bespoke layout. Unwrapping its structure, stripping "signature"/banner
  * blocks, or normalizing fonts turns it into a wireframe / truncates it, so it
  * must be rendered VERBATIM. Used by the sandboxed body renderer; the same rule
- * lives in `email-chat-view`, which applies it inside the deterministic split.
+ * lives in `@sarv-in/email-chat-view`, which applies it inside the deterministic split.
  * Pure/regex — safe in any renderer context.
  */
 export function htmlLooksDesigned(html: string | null | undefined): boolean {

@@ -68,7 +68,7 @@ describe('LINKED_PACKAGES', () => {
   // A `file:` dep missing from the list is served stale, which reads as "my fix
   // did not work". A registry dep left in the list is excluded from the
   // pre-bundle and watched for changes it will never have, which just costs
-  // dev-server startup. `email-chat-view` moved from `file:` to the registry in
+  // dev-server startup. `@sarv-in/email-chat-view` moved from `file:` to the registry in
   // Sept 2026, which is why the list is empty rather than naming it.
   it('names exactly the dependencies installed by file: path', () => {
     const manifestPath = path.join(fileURLToPath(new URL('.', import.meta.url)), '../../../package.json');
