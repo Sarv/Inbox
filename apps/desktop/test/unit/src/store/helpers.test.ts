@@ -31,6 +31,8 @@ import {
   getPageSizeForView,
   getRemoteImageMode,
   isAccountEmailDuplicated,
+  isFolderInView,
+  findFolderPathById,
   isPromoOrSpam,
   isSenderImagesAllowed,
   loadAccounts,
@@ -1669,5 +1671,100 @@ describe('sectionDataUnchanged / sectionDataSignature', () => {
     expect(sneaky).not.toBe(plain);
     // Deterministic: same input twice -> identical string.
     expect(sectionDataSignature(snap([row()]))).toBe(sectionDataSignature(snap([row()])));
+  });
+});
+
+describe('isFolderInView', () => {
+  const folders = [
+    { id: 'f-inbox', path: 'INBOX' },
+    { id: 'f-sent', path: 'Sent' },
+  ];
+
+  // Breaks: arrivals in the open folder stop refreshing the list.
+  it('matches the folder the user is looking at', () => {
+    expect(isFolderInView(folders, 'f-inbox', 'INBOX')).toBe(true);
+  });
+
+  // Breaks: mail landing in Trash/Spam during a sync yanks the open list about.
+  it('does not match a different folder', () => {
+    expect(isFolderInView(folders, 'f-inbox', 'Sent')).toBe(false);
+  });
+
+  // THE REGRESSION this helper exists for. During an initial sync (or after a
+  // rebuilt cache) the sync creates folder rows as it discovers them, so the
+  // renderer's snapshot has NOT caught up. The old check looked the ARRIVING
+  // folder up by path and compared ids — undefined for an unknown folder, so
+  // every arrival was dropped and the list sat empty behind a non-zero sidebar
+  // count until the user hit refresh. Resolving the SELECTED folder instead
+  // cannot go stale that way: it is where selectedFolderId came from.
+  it('still matches when the snapshot has not caught up with new folders', () => {
+    // 'Sarv Inbox/Promotions' was created by the sync moments ago and is absent
+    // from `folders` — the open INBOX must still refresh on its own arrivals.
+    expect(isFolderInView(folders, 'f-inbox', 'INBOX')).toBe(true);
+    expect(isFolderInView(folders, 'f-inbox', 'Sarv Inbox/Promotions')).toBe(false);
+  });
+
+  // Breaks: a virtual folder / no selection is read as "everything is visible"
+  // and every arrival re-renders the list.
+  it.each([
+    ['no selection', null],
+    ['an empty selection', ''],
+  ])('returns false for %s', (_case, selectedId) => {
+    expect(isFolderInView(folders, selectedId as string | null, 'INBOX')).toBe(false);
+  });
+
+  // Breaks: a selection pointing at a folder that no longer exists (the row was
+  // recreated with a new id) must not match by accident.
+  it('returns false when the selected id is not in the snapshot', () => {
+    expect(isFolderInView(folders, 'f-gone', 'INBOX')).toBe(false);
+  });
+
+  // Breaks: the very first flush, before folders have loaded at all, throws and
+  // takes the whole realtime flush down with it.
+  it.each([
+    ['undefined folders', undefined],
+    ['null folders', null],
+    ['an empty list', []],
+  ])('tolerates %s', (_case, list) => {
+    expect(isFolderInView(list as never, 'f-inbox', 'INBOX')).toBe(false);
+  });
+
+  // Breaks: an arrival with no folder path matching the selected folder.
+  it('returns false without a folder path', () => {
+    expect(isFolderInView(folders, 'f-inbox', undefined)).toBe(false);
+  });
+});
+
+describe('findFolderPathById', () => {
+  const folders = [
+    { id: 'f-inbox', path: 'INBOX' },
+    { id: 'f-sent', path: '[Gmail]/Sent Mail' },
+  ];
+
+  // Breaks: the progressive-fill refresh aims at the wrong folder, so the list
+  // on screen never reloads while the sync fills the DB.
+  it('resolves the selected folder to its path', () => {
+    expect(findFolderPathById(folders, 'f-sent')).toBe('[Gmail]/Sent Mail');
+  });
+
+  // Breaks: a virtual view ("All Email", "Starred") has no selected folder id —
+  // returning something truthy here would send the refresh at a folder branch
+  // instead of the virtual one.
+  it.each([
+    ['no id', null],
+    ['an empty id', ''],
+    ['an id that is not in the snapshot', 'f-gone'],
+  ])('returns null for %s', (_case, id) => {
+    expect(findFolderPathById(folders, id as string | null)).toBeNull();
+  });
+
+  // Breaks: the first progress tick, before folders have loaded, throws and
+  // takes the sync-progress listener down with it.
+  it.each([
+    ['undefined folders', undefined],
+    ['null folders', null],
+    ['an empty list', []],
+  ])('tolerates %s', (_case, list) => {
+    expect(findFolderPathById(list as never, 'f-inbox')).toBeNull();
   });
 });
