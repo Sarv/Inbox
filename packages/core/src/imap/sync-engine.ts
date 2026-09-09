@@ -11,7 +11,7 @@ import { createDeferredFetchError } from '../utils/deferred-fetch-error';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import type { EmailProvider } from '../utils/provider';
-import { withTimeout, isTimeoutError } from '../utils/timeout';
+import { withStallTimeout, isTimeoutError } from '../utils/timeout';
 
 import { findAttachmentPartByName } from './body-structure';
 import { poolIdleTimeoutForHost } from './connection-budget';
@@ -58,6 +58,13 @@ const DEFAULT_OPTIONS: SyncEngineOptions = {
 // MAX_PER_CALL bounds one call's work so a pooled connection isn't held too long; FETCH
 // _BATCH keeps each UID FETCH well under the op timeout on a slow server (~250ms/header).
 const DRAIN_MAX_PER_CALL = 300;
+// Body-fetch budget. STALL is the "nothing has arrived for this long" cut-off —
+// a dead socket still fails in 30s, exactly as it did under the old flat
+// timeout. MAX is the ceiling for a transfer that IS progressing, so a large
+// message on a slow link can finish (it never could before) without any one
+// fetch being able to hold a pooled connection indefinitely.
+const BODY_FETCH_STALL_TIMEOUT = 30_000;
+const BODY_FETCH_MAX_TIMEOUT = 5 * 60_000;
 const DRAIN_FETCH_BATCH = 100;
 // Server-search escalation: newest-first cap on how many missing matches one
 // server search downloads, so a query hitting thousands of old mails stays
@@ -1824,27 +1831,43 @@ export class SyncEngine {
 
         const promises = batch.map(async (item) => {
           try {
-            const BODY_FETCH_TIMEOUT = 30000;
-
             let result: { rawBody: string; cleanBody: string; contentType: string; source: string } | null;
+
+            // A body fetch downloads a whole RFC822 message, so its duration is
+            // a function of the message's SIZE — which means it cannot be given
+            // a flat budget. The old fixed 30s one declared any message slower
+            // than that broken, and since each retry restarted the download from
+            // byte zero it failed at exactly the same point every time, burned a
+            // poisoned pool connection per attempt, and after MAX_BODY_FETCH_RETRIES
+            // retired perfectly good mail as un-fetchable. Time the STALL instead:
+            // 30s with nothing arriving is still a dead socket, but a transfer
+            // that keeps delivering bytes is allowed to finish, up to a hard
+            // ceiling so nothing can hold a connection forever.
+            const fetchWithStallTimeout = (client: IIMAPClient, touch?: () => void) =>
+              withStallTimeout(
+                this.messageProcessor.fetchBody(client, item.folderPath, item.uid, this.storage, item.emailId),
+                {
+                  stallMs: BODY_FETCH_STALL_TIMEOUT,
+                  maxMs: BODY_FETCH_MAX_TIMEOUT,
+                  // Per-CONNECTION byte counter. Exact on a pooled connection,
+                  // which serves this fetch alone; on the shared primary client
+                  // (no pool) other traffic on the same socket can also read as
+                  // progress. That only ever delays a give-up, never causes a
+                  // premature one, and maxMs still bounds it.
+                  progress: () => client.bytesReceived?.() ?? Number.NaN,
+                  // Refresh the pool's stuck-connection clock while bytes are
+                  // arriving, or a download legitimately running past
+                  // STUCK_CONNECTION_TIMEOUT would be evicted mid-transfer.
+                  onProgress: touch,
+                  message: 'Body fetch timeout',
+                },
+              );
 
             if (this.connectionPool?.isInitialized()) {
               // Use withConnection for automatic release (even on timeout/error)
-              result = await this.connectionPool.withConnection((client) =>
-                withTimeout(
-                  this.messageProcessor.fetchBody(client, item.folderPath, item.uid, this.storage, item.emailId),
-                  BODY_FETCH_TIMEOUT,
-                  'Body fetch timeout',
-                ),
-              );
+              result = await this.connectionPool.withConnection(fetchWithStallTimeout);
             } else {
-              result = await withTimeout(
-                this.messageProcessor.fetchBody(
-                  this.connectionManager.client, item.folderPath, item.uid, this.storage, item.emailId,
-                ),
-                BODY_FETCH_TIMEOUT,
-                'Body fetch timeout',
-              );
+              result = await fetchWithStallTimeout(this.connectionManager.client);
             }
 
             // A null result is NOT success — fetchBody returns null when the

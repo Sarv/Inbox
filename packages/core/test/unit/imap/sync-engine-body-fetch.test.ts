@@ -454,3 +454,71 @@ describe('SyncEngine body-fetch queue — deferred conditions never look like a 
     await expect((engine as any).fetchBody('a', 'INBOX', 1)).rejects.toMatchObject({ code: 'AUTH_PAUSED' });
   });
 });
+
+// The budget itself, as opposed to what happens after it is exceeded.
+//
+// The body-fetch budget used to be a flat 30s, which is a fixed allowance for a
+// download whose duration is a function of the MESSAGE SIZE. A message big
+// enough to need longer could not be fetched at all: every retry restarted the
+// transfer from byte zero and hit the same wall at the same point, so all five
+// attempts failed identically, each abandoning an in-flight FETCH that cost a
+// poisoned pool connection, and the message was retired as un-fetchable. Three
+// INBOX messages sat body-less that way while ~27k others fetched fine.
+//
+// The budget is now a STALL: bytes arriving means the transfer is working, and
+// only silence counts against it.
+describe('SyncEngine body-fetch queue — slow transfer vs hung socket', () => {
+  /** Engine whose primary client reports a byte counter we can drive by hand. */
+  function makeEngineWithByteCounter() {
+    const { engine, fetchBody } = makeEngine();
+    const counter = { bytes: 0 };
+    vi.spyOn((engine as any).connectionManager, 'client', 'get')
+      .mockReturnValue({ bytesReceived: () => counter.bytes });
+    return { engine, fetchBody, counter };
+  }
+
+  // The regression: a large message on a slow link. It takes three times the old
+  // flat budget but never goes quiet, so it must download. If this fails, big
+  // mail is permanently body-less again.
+  it('completes a transfer that runs well past the old flat timeout while bytes keep arriving', async () => {
+    vi.useFakeTimers();
+    try {
+      const { engine, fetchBody, counter } = makeEngineWithByteCounter();
+      fetchBody.mockImplementation(
+        () => new Promise((resolve) => { setTimeout(() => resolve(BODY), 90_000); }),
+      );
+
+      const pending = (engine as any).fetchBody('big-attachment', 'INBOX', 1);
+      // 90s of transfer at a steady trickle — no window of stallMs is ever silent.
+      for (let tick = 0; tick < 92; tick++) {
+        counter.bytes += 8192;
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+
+      await expect(pending).resolves.toMatchObject({ rawBody: 'r' });
+      expect(fetchBody).toHaveBeenCalledTimes(1); // finished first time — no retry ladder
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The other side of the same change: a socket that has genuinely hung delivers
+  // nothing, and must still be given up on inside the stall window rather than
+  // holding its connection for the (much larger) ceiling.
+  it('still gives up on a socket that delivers no bytes at all', async () => {
+    vi.useFakeTimers();
+    try {
+      const { engine, fetchBody } = makeEngineWithByteCounter(); // counter never moves
+      fetchBody.mockImplementation(() => new Promise(() => {}));
+
+      const pending = expectDeferred((engine as any).fetchBody('hung', 'INBOX', 1));
+      // Five attempts at the 30s stall window, plus slack for the retry hops.
+      await vi.advanceTimersByTimeAsync(5 * 31_000);
+
+      await pending;
+      expect(fetchBody).toHaveBeenCalledTimes((engine as any).MAX_BODY_FETCH_RETRIES);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
