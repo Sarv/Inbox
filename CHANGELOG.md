@@ -48,6 +48,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- A mailbox database can no longer be deleted because the app failed to open its
+  account registry. The startup sweep that removes database files belonging to
+  removed accounts asked the registry which accounts still exist, and that read
+  returned an empty list both when there genuinely were no accounts and when the
+  read itself had failed — the same answer for opposite facts. So a boot in which
+  the native SQLite module could not load at all (a mismatched ABI after a
+  developer test run) looked exactly like a fresh install, and every account's
+  cached mail was swept away. Anything that deletes now reads the registry
+  through a call that fails loudly instead of answering "empty", both sweeps skip
+  and log rather than guess when that read fails, and the sweep itself treats an
+  empty keep-set as non-authoritative and keeps every account database. Locally
+  cached mail re-syncs from the server, but a large mailbox costs hours to
+  rebuild.
+- The better-sqlite3 native module is rebuilt for the right runtime
+  automatically: the dev scripts ensure Electron's ABI before launching the app
+  and the test scripts ensure Node's before running the suite. Running the tests
+  no longer leaves the app unable to open any database (which is what triggered
+  the deletion above), and the two can be alternated in any order. The rebuild is
+  skipped when the module already reports the target ABI, so the guard is free.
 - An account no longer opens two IMAP connections at once on startup. Every
   path that reconnects — first mount, window focus, the network coming back,
   the reconnect ladder — called connect independently, so a cold start could run
