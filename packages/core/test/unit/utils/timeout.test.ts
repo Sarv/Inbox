@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { TimeoutError, isTimeoutError, withTimeout, withStartGatedTimeout } from '../../../src/utils/timeout';
+import { TimeoutError, isTimeoutError, withTimeout, withStallTimeout, withStartGatedTimeout } from '../../../src/utils/timeout';
 
 // withTimeout is the single wrapper around every IMAP connect / NOOP / fetch /
 // reconnect. Two things must hold or the mail engine misbehaves in ways that are
@@ -204,5 +204,150 @@ describe('withStartGatedTimeout', () => {
     const gate = withStartGatedTimeout(p.promise, { queueMs: 1000, runMs: 1000, message: 'Timeout' });
     p.reject(new Error('NO [SERVERBUG]'));
     await expect(gate.result).rejects.toThrow('NO [SERVERBUG]');
+  });
+});
+
+// withStallTimeout replaced the flat body-fetch budget. The regressions it
+// guards are the two halves of the same bug: a message big enough to need more
+// than the old 30s could NEVER download — it failed at the same point on every
+// retry and was eventually retired as un-fetchable — while a genuinely dead
+// socket must still fail just as fast as it used to, or a broken connection sits
+// there holding a pooled socket for the full ceiling.
+describe('withStallTimeout', () => {
+  const flushMicrotasks = () => Promise.resolve().then(() => Promise.resolve());
+
+  // A slow-but-progressing transfer is the case the flat timeout got wrong: as
+  // long as bytes keep arriving it must be allowed to finish, however long it
+  // takes. If this fails, large mail silently never downloads.
+  it('lets a transfer that keeps making progress run past the stall window', async () => {
+    vi.useFakeTimers();
+    let bytes = 0;
+    let finish: (v: string) => void = () => {};
+    const inner = new Promise<string>((resolve) => { finish = resolve; });
+
+    const raced = withStallTimeout(inner, {
+      stallMs: 30_000, maxMs: 300_000, progress: () => bytes, message: 'Body fetch timeout',
+    });
+
+    // Four stall windows' worth of time, with bytes trickling in throughout.
+    for (let tick = 0; tick < 120; tick++) {
+      bytes += 1024;
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    finish('body');
+    await expect(raced).resolves.toBe('body');
+  });
+
+  // The other half: no bytes at all is a dead socket and must still fail inside
+  // the stall window, not at the (much larger) ceiling.
+  it('rejects with a TimeoutError once nothing has arrived for stallMs', async () => {
+    vi.useFakeTimers();
+    const raced = withStallTimeout(new Promise<never>(() => {}), {
+      stallMs: 30_000, maxMs: 300_000, progress: () => 0, message: 'Body fetch timeout',
+    });
+    const settled = raced.catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(29_000);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    const err = await settled;
+    expect(isTimeoutError(err)).toBe(true);
+    expect((err as Error).message).toContain('Body fetch timeout');
+  });
+
+  // A transfer that progresses forever must not hold its pooled connection
+  // forever — the ceiling is what stops one message starving the queue.
+  it('rejects at maxMs even while progress is still being made', async () => {
+    vi.useFakeTimers();
+    let bytes = 0;
+    const raced = withStallTimeout(new Promise<never>(() => {}), {
+      stallMs: 30_000, maxMs: 120_000, progress: () => { bytes += 1; return bytes; }, message: 'Body fetch timeout',
+    });
+    const settled = raced.catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(121_000);
+    const err = await settled;
+    expect(isTimeoutError(err)).toBe(true);
+    expect((err as Error).message).toContain('still running after');
+  });
+
+  // The pool evicts a connection held longer than STUCK_CONNECTION_TIMEOUT. A
+  // download legitimately running past that must keep touching it, or the pool
+  // pulls the socket out mid-transfer and the fetch can never complete.
+  it('reports progress to onProgress so a long transfer keeps its pooled connection', async () => {
+    vi.useFakeTimers();
+    let bytes = 0;
+    const touch = vi.fn();
+    const raced = withStallTimeout(new Promise<string>((resolve) => { setTimeout(() => resolve('body'), 90_000); }), {
+      stallMs: 30_000, maxMs: 300_000, progress: () => (bytes += 4096), onProgress: touch, message: 'Body fetch timeout',
+    });
+
+    await vi.advanceTimersByTimeAsync(95_000);
+    await expect(raced).resolves.toBe('body');
+    expect(touch).toHaveBeenCalled();
+  });
+
+  // An onProgress that throws is advisory bookkeeping, not the operation — it
+  // must never turn a successful download into a failure.
+  it('survives an onProgress callback that throws', async () => {
+    vi.useFakeTimers();
+    let bytes = 0;
+    const raced = withStallTimeout(new Promise<string>((resolve) => { setTimeout(() => resolve('body'), 10_000); }), {
+      stallMs: 30_000,
+      maxMs: 300_000,
+      progress: () => (bytes += 1),
+      onProgress: () => { throw new Error('pool closed'); },
+      message: 'Body fetch timeout',
+    });
+
+    await vi.advanceTimersByTimeAsync(11_000);
+    await expect(raced).resolves.toBe('body');
+  });
+
+  // A client with no counter (or one that throws) must degrade to the old
+  // fixed-budget behaviour rather than waiting forever for progress that can
+  // never be observed.
+  it.each([
+    ['an unreadable counter', () => { throw new Error('no client'); }],
+    ['a non-finite reading', () => Number.NaN],
+  ])('falls back to a plain timeout given %s', async (_label, progress) => {
+    vi.useFakeTimers();
+    const raced = withStallTimeout(new Promise<never>(() => {}), {
+      stallMs: 30_000, maxMs: 300_000, progress: progress as () => number, message: 'Body fetch timeout',
+    });
+    const settled = raced.catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(isTimeoutError(await settled)).toBe(true);
+  });
+
+  // Same leak guarantee as withTimeout: the sampling interval keeps the event
+  // loop alive, so it must be gone the moment the race settles either way.
+  it('CLEARS its sampling interval when the promise settles', async () => {
+    vi.useFakeTimers();
+    let release: (v: string) => void = () => {};
+    const inner = new Promise<string>((resolve) => { release = resolve; });
+
+    const raced = withStallTimeout(inner, {
+      stallMs: 30_000, maxMs: 300_000, progress: () => 0, message: 'nope',
+    });
+    expect(vi.getTimerCount()).toBe(1);
+
+    release('ok');
+    await expect(raced).resolves.toBe('ok');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('CLEARS its sampling interval after it times out', async () => {
+    vi.useFakeTimers();
+    const raced = withStallTimeout(new Promise<never>(() => {}), {
+      stallMs: 5_000, maxMs: 60_000, progress: () => 0, message: 'stalled',
+    });
+    const settled = raced.catch(() => 'timed out');
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await settled).toBe('timed out');
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

@@ -100,3 +100,89 @@ export function withStartGatedTimeout<T>(
 
   return { result, start };
 }
+
+/** Options for `withStallTimeout`. */
+export interface StallTimeoutOptions {
+  /** Reject once `progress()` has not moved for this long. */
+  stallMs: number;
+  /** Absolute ceiling — reject even while progress is still being made. */
+  maxMs: number;
+  /**
+   * Monotonic counter of work completed so far — e.g. bytes read off the IMAP
+   * socket. Read repeatedly; only whether it CHANGED matters, so the unit and
+   * the starting value are irrelevant. May throw or return a non-finite value
+   * (an unreadable counter reads as "no progress").
+   */
+  progress: () => number;
+  /** Called each time progress is observed — e.g. the pool's `touch`. */
+  onProgress?: () => void;
+  message: string;
+}
+
+/**
+ * Race a promise against a STALL rather than against the clock.
+ *
+ * `withTimeout` gives an operation a fixed total budget, which is only correct
+ * when the work is a fixed size. A body fetch is not: it downloads a whole
+ * RFC822 message, so a flat 30s budget says "any message that takes longer than
+ * 30s to transfer is broken". A large message on a slow link then fails, is
+ * retried from byte zero, fails again at exactly the same point, and is retired
+ * as un-fetchable — while every attempt abandons an in-flight FETCH and costs a
+ * poisoned pool connection. It can never succeed no matter how many retries it
+ * gets, which is what left three INBOX messages permanently body-less.
+ *
+ * The distinction that actually matters is "hung" vs "slow", and bytes arriving
+ * is what separates them. So: reject only when NOTHING has arrived for
+ * `stallMs` (a dead socket still fails as fast as before), keep going while the
+ * transfer is progressing, and stop unconditionally at `maxMs` so nothing can
+ * run forever.
+ *
+ * Progress is sampled on an interval and measured in ticks rather than wall
+ * clock, so a suspended machine — whose timers simply don't fire — resumes with
+ * its budget intact instead of waking to an already-blown deadline.
+ */
+export function withStallTimeout<T>(promise: Promise<T>, opts: StallTimeoutOptions): Promise<T> {
+  const { stallMs, maxMs, progress, onProgress, message } = opts;
+  const tickMs = Math.max(250, Math.min(stallMs, 5_000));
+
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let sinceProgressMs = 0;
+  let elapsedMs = 0;
+  let lastProgress = readProgress(progress);
+
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setInterval(() => {
+      elapsedMs += tickMs;
+      const current = readProgress(progress);
+      // A finite reading that differs from the last one is progress. A
+      // non-finite reading never counts, so an unreadable counter degrades to
+      // the plain `withTimeout` behaviour instead of stalling forever.
+      if (Number.isFinite(current) && current !== lastProgress) {
+        lastProgress = current;
+        sinceProgressMs = 0;
+        try { onProgress?.(); } catch { /* advisory only — never fail the op */ }
+      } else {
+        sinceProgressMs += tickMs;
+      }
+
+      if (sinceProgressMs >= stallMs) {
+        reject(new TimeoutError(`${message} (no data for ${Math.round(sinceProgressMs / 1000)}s)`));
+      } else if (elapsedMs >= maxMs) {
+        reject(new TimeoutError(`${message} (still running after ${Math.round(elapsedMs / 1000)}s)`));
+      }
+    }, tickMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearInterval(timer);
+  }) as Promise<T>;
+}
+
+/** Read a progress counter without letting it break the operation it measures. */
+function readProgress(progress: () => number): number {
+  try {
+    return progress();
+  } catch {
+    return Number.NaN;
+  }
+}
