@@ -112,6 +112,14 @@ describe('TimeoutError', () => {
     expect(err.message).toBe('deadline exceeded');
     expect(err.isTimeout).toBe(true);
   });
+
+  // A single-budget timeout has no phase to report, and a caller must be able to
+  // tell "no phase" from a phase — inventing 'running' here would make every
+  // plain withTimeout look like a stalled fetch in the aggregated logs.
+  it('carries no phase unless one is given', () => {
+    expect(new TimeoutError('x').phase).toBeUndefined();
+    expect(new TimeoutError('x', 'queued').phase).toBe('queued');
+  });
 });
 
 /**
@@ -155,6 +163,10 @@ describe('withStartGatedTimeout', () => {
     const outcome = await settled;
     expect(isTimeoutError(outcome)).toBe(true);
     expect((outcome as TimeoutError).message).toBe('Timeout');
+    // The phase is what lets a caller log "the fetch stalled" rather than the
+    // useless "timeout" — without it a saturated queue and a slow server, which
+    // want opposite fixes, are indistinguishable in the log.
+    expect((outcome as TimeoutError).phase).toBe('running');
   });
 
   // A callee that internally re-queues and retries would otherwise push the
@@ -180,7 +192,10 @@ describe('withStartGatedTimeout', () => {
     });
     const settled = gate.result.then(() => 'resolved', (e) => e);
     await vi.advanceTimersByTimeAsync(201);
-    expect(isTimeoutError(await settled)).toBe(true);
+    const outcome = await settled;
+    expect(isTimeoutError(outcome)).toBe(true);
+    // Ditto, the other half: this one never even got a turn.
+    expect((outcome as TimeoutError).phase).toBe('queued');
   });
 
   // A leaked timer keeps the Node event loop alive; on this hot path it would

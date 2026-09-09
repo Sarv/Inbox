@@ -1,5 +1,8 @@
 // Async timeout helpers
 
+/** Which of `withStartGatedTimeout`'s two budgets expired. */
+export type TimeoutPhase = 'queued' | 'running';
+
 /**
  * Error thrown when `withTimeout` loses the race. Distinguishable from a
  * command-level rejection (server NO/BAD) so callers can react specifically to
@@ -9,9 +12,20 @@
  */
 export class TimeoutError extends Error {
   readonly isTimeout = true;
-  constructor(message: string) {
+  /**
+   * Which budget ran out, for the two-phase `withStartGatedTimeout` only.
+   * `'queued'` = the work never even started; `'running'` = it started and then
+   * took too long. Undefined for a single-budget timeout, where there is no
+   * distinction to draw. Diagnostically this is the whole ballgame: a caller
+   * that logs both as "timeout" cannot tell a saturated queue (fix: submit
+   * less) from a slow server (fix: a bigger run budget), and those want
+   * opposite responses.
+   */
+  readonly phase?: TimeoutPhase;
+  constructor(message: string, phase?: TimeoutPhase) {
     super(message);
     this.name = 'TimeoutError';
+    this.phase = phase;
   }
 }
 
@@ -80,7 +94,9 @@ export function withStartGatedTimeout<T>(
   let fire: () => void = () => { /* set synchronously by the executor below */ };
 
   const timeout = new Promise<never>((_, reject) => {
-    fire = () => reject(new TimeoutError(message));
+    // `started` is read when the timer FIRES, not now, so the error names the
+    // budget that actually expired.
+    fire = () => reject(new TimeoutError(message, started ? 'running' : 'queued'));
     timer = setTimeout(fire, queueMs);
   });
 
