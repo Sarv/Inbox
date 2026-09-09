@@ -36,6 +36,16 @@ export interface IIMAPClient {
    */
   noop?(): Promise<boolean>;
 
+  /**
+   * Total bytes read off this connection's socket since it was opened. Only
+   * whether it CHANGES matters — it is the progress signal that tells a slow
+   * transfer apart from a hung one, so a long body download is not killed by a
+   * fixed timeout (see `withStallTimeout`). Optional: callers must branch on
+   * its presence, and an implementation that cannot report it should omit it
+   * rather than return a constant, which would read as a permanent stall.
+   */
+  bytesReceived?(): number;
+
   // ========== Folder Operations ==========
 
   /**
