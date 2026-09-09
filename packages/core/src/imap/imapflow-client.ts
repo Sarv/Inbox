@@ -39,7 +39,7 @@ import type {
 } from '../types/imap';
 import { IMAPError } from '../types/imap';
 import { logger } from '../utils/logger';
-import { withTimeout, isTimeoutError } from '../utils/timeout';
+import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { isConnectionError, isAuthError } from './imap-errors';
@@ -432,10 +432,48 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   // tens of seconds) while cutting wedge-detection latency in half.
   private static readonly META_OP_TIMEOUT_MS = 30_000;
 
+  // A command that STREAMS a message body (FETCH ... BODY[]) is the one command
+  // whose duration is a property of the data, not of the server's health: a
+  // 40 MB message cannot arrive in 60 seconds on any ordinary link. Racing it
+  // against the flat budget above made every such message permanently
+  // un-fetchable — the download was killed at 60s, the socket recycled as
+  // "wedged", the item re-queued, and the next attempt restarted from byte zero
+  // and died at exactly the same point, forever. So a streaming fetch is judged
+  // on whether bytes are still ARRIVING rather than on the clock: silence for
+  // STREAM_STALL_MS is a wedge, while a transfer that keeps delivering is left
+  // alone up to STREAM_MAX_MS. Both are enforced by `withStallTimeout`.
+  private static readonly STREAM_STALL_MS = 30_000;
+
+  private static readonly STREAM_MAX_MS = 5 * 60_000;
+
   /** Race an ImapFlow command against OP_TIMEOUT_MS so nothing hangs forever. */
   private op<T>(label: string, promise: Promise<T>, ms = ImapFlowClient.OP_TIMEOUT_MS): Promise<T> {
+    return this.guard(label, withTimeout(promise, ms, `IMAP ${label} timed out after ${ms}ms`));
+  }
+
+  /**
+   * Race a command that STREAMS message data against a stall, not a deadline.
+   * Use this for the one command whose duration scales with the size of what it
+   * downloads; every other command is fixed-size work and belongs on `op`.
+   *
+   * Progress is the connection's cumulative received-byte counter. On a pooled
+   * connection — which serves one fetch at a time — that is exactly this
+   * transfer. On the shared primary, another command's bytes can also read as
+   * progress; that can only ever DELAY a give-up, never cause a premature one,
+   * and STREAM_MAX_MS still bounds it.
+   */
+  private opStreaming<T>(label: string, promise: Promise<T>): Promise<T> {
+    return this.guard(label, withStallTimeout(promise, {
+      stallMs: ImapFlowClient.STREAM_STALL_MS,
+      maxMs: ImapFlowClient.STREAM_MAX_MS,
+      progress: () => this.bytesReceived(),
+      message: `IMAP ${label} timed out`,
+    }));
+  }
+
+  /** Wedge-detection + tracing shared by `op` and `opStreaming`. */
+  private guard<T>(label: string, wrapped: Promise<T>): Promise<T> {
     const started = Date.now();
-    const wrapped = withTimeout(promise, ms, `IMAP ${label} timed out after ${ms}ms`);
     // A timed-out command is STILL in-flight on the socket (ImapFlow serializes
     // commands per connection), so every command queued behind it also times out
     // at ${ms}ms — for minutes, until the 3-min health-check / 13-min socket
@@ -447,7 +485,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     void wrapped.catch((err) => {
       if (this.shuttingDown || this.connectionState === 'disconnected') return;
       if (!isTimeoutError(err)) return;
-      logger.warn(`IMAP ${label} timed out after ${ms}ms — recycling the wedged connection`);
+      logger.warn(`${(err as Error).message} — recycling the wedged connection`);
       try { this.client?.close(); } catch { /* socket already gone */ }
     });
     // Trace EVERY IMAP command we issue, with timing. TRACE-level (the full
@@ -743,7 +781,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   ): Promise<IMAPMessage[]> {
     let messages;
     try {
-      messages = await this.op('FETCH', this.client!.fetchAll(
+      const fetching = this.client!.fetchAll(
         range,
         {
           uid: true,
@@ -771,7 +809,13 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
           headers: ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'in-reply-to', 'references', 'list-id', 'list-unsubscribe', 'precedence'],
         },
         { uid: useUid },
-      ));
+      );
+      // `source` above turns this into a whole-message download, whose duration
+      // is a property of the message rather than of the server's health — so it
+      // is judged on stalls, not on a flat clock. See `opStreaming`.
+      messages = await (options?.fetchBody
+        ? this.opStreaming('FETCH (body)', fetching)
+        : this.op('FETCH', fetching));
     } catch (err) {
       throw this.toImapError(err, 'FETCH_ERROR');
     }
