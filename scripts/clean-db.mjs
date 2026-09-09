@@ -9,19 +9,40 @@
  * encryption key, and the credential/config files — the true "start over".
  *
  * Node-only, no shell dependency, so `pnpm clean:db` behaves identically on all
- * three OSes. Run: `node scripts/clean-db.mjs` (add --full / -y for a full reset
- * without the prompt).
+ * three OSes.
+ *
+ *   node scripts/clean-db.mjs          prompt; default = safe clean
+ *   node scripts/clean-db.mjs -y       no prompt, safe clean (keeps credentials)
+ *   node scripts/clean-db.mjs --full   no prompt, FULL reset (wipes credentials)
+ *
+ * QUIT THE APP FIRST. A running instance holds these files open: Windows then
+ * refuses the delete, and macOS/Linux unlink them while the app keeps writing to
+ * the orphaned inode. Anything still locked is reported at the end.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { getAppDataDirs, exists, fileSize, humanSize, rmFile, rmDir } from './lib/userdata-dirs.mjs';
+
+import { cleanStaleJs } from './lib/stale-js.mjs';
+import {
+  getAppDataDirs,
+  exists,
+  fileSize,
+  humanSize,
+  listLogFiles,
+  lockedPaths,
+  rmFile,
+  rmDir,
+} from './lib/userdata-dirs.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const ELECTRON_DIR = path.join(PROJECT_ROOT, 'apps', 'desktop', 'electron');
+const DESKTOP_DIR = path.join(PROJECT_ROOT, 'apps', 'desktop');
+// Both trees tsc can leave output in — the same pair the desktop package's own
+// `clean` script sweeps, so the two cannot disagree about what "stale" means.
+const STALE_JS_DIRS = [path.join(DESKTOP_DIR, 'electron'), path.join(DESKTOP_DIR, 'src')];
 
 // The durable, encrypted store: accounts registry, OAuth tokens, IMAP config,
 // and profile were all migrated OUT of localStorage / the standalone JSON files
@@ -90,19 +111,25 @@ function cleanAppData({ label, dir }, deleteCreds) {
     const dbPath = path.join(dir, name);
     const size = fileSize(dbPath);
     rmFile(dbPath);
+    // SQLite sidecars, plus the .bak a compaction/migration can leave behind —
+    // that copy holds the same mail, so deleting the DB without it is not a
+    // clean at all.
     rmFile(`${dbPath}-shm`);
     rmFile(`${dbPath}-wal`);
+    rmFile(`${dbPath}.bak`);
     console.log(`   Database: deleted ${name} (${humanSize(size)})`);
     dbDeleted += 1;
   }
   if (dbDeleted === 0) console.log('   Database: not found');
 
-  // Debug log
-  const logPath = path.join(dir, 'app.log');
-  if (exists(logPath)) {
-    const size = fileSize(logPath);
-    rmFile(logPath);
-    console.log(`   Debug log: deleted (${humanSize(size)})`);
+  // Debug logs — app.log AND its rotated siblings (app.log.1, …). See
+  // listLogFiles: the rotation means "delete app.log" leaves the older half.
+  const logs = listLogFiles(dir);
+  if (logs.length > 0) {
+    const total = logs.reduce((sum, p) => sum + fileSize(p), 0);
+    for (const p of logs) rmFile(p);
+    const names = logs.map((p) => path.basename(p)).join(', ');
+    console.log(`   Debug logs: deleted ${logs.length} file(s) — ${names} (${humanSize(total)})`);
   }
 
   // Attachment cache
@@ -174,34 +201,6 @@ function cleanAppData({ label, dir }, deleteCreds) {
   console.log('');
 }
 
-/** Remove compiled *.js files that have a sibling *.ts source (stale build output). */
-function cleanStaleJs(rootDir) {
-  let removed = 0;
-  const walk = (currentDir) => {
-    let dirents = [];
-    try {
-      dirents = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const dirent of dirents) {
-      if (dirent.name === 'node_modules' || dirent.name === 'dist') continue;
-      const full = path.join(currentDir, dirent.name);
-      if (dirent.isDirectory()) {
-        walk(full);
-      } else if (dirent.isFile() && full.endsWith('.js')) {
-        const tsFile = `${full.slice(0, -3)}.ts`;
-        if (exists(tsFile)) {
-          rmFile(full);
-          removed += 1;
-        }
-      }
-    }
-  };
-  if (exists(rootDir)) walk(rootDir);
-  return removed;
-}
-
 function ask(question) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -214,7 +213,23 @@ function ask(question) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  const forceFull = argv.includes('--full') || argv.includes('-y') || argv.includes('--yes');
+
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log('Usage: node scripts/clean-db.mjs [--full] [-y|--yes]\n');
+    console.log('  (no flags)   prompt, defaulting to the safe clean');
+    console.log('  -y, --yes    skip the prompt and take that safe default');
+    console.log('  --full       FULL reset: also deletes accounts, OAuth tokens and db-key.bin');
+    console.log('\nQuit the app first — a running instance holds these files open.');
+    return;
+  }
+
+  // --full is the ONLY way to delete credentials. `-y` used to mean it too,
+  // which inverted the universal convention that -y answers the prompt with its
+  // DEFAULT — and the default here is the safe clean. Anyone scripting
+  // `pnpm clean:db -y` for an unattended safe clean was silently wiping their
+  // OAuth tokens and db-key.bin instead.
+  const forceFull = argv.includes('--full');
+  const assumeDefault = argv.includes('-y') || argv.includes('--yes');
 
   console.log('Sarv Inbox Cleanup');
   console.log('==================\n');
@@ -222,7 +237,10 @@ async function main() {
   let deleteCreds;
   if (forceFull) {
     deleteCreds = true;
-    console.log('Full reset requested via flag — deleting credentials + profile too.\n');
+    console.log('Full reset requested via --full — deleting credentials + profile too.\n');
+  } else if (assumeDefault) {
+    deleteCreds = false;
+    console.log('-y — taking the default: safe clean, credentials kept (use --full to wipe them).\n');
   } else if (!process.stdin.isTTY) {
     // Non-interactive (CI, piped): choose the safe default, never wipe credentials.
     deleteCreds = false;
@@ -241,9 +259,9 @@ async function main() {
   }
 
   console.log('── Stale .js files ──');
-  const jsCount = cleanStaleJs(ELECTRON_DIR);
-  if (jsCount > 0) {
-    console.log(`   Removed ${jsCount} stale .js files (had matching .ts sources)\n`);
+  const { removed } = cleanStaleJs(STALE_JS_DIRS);
+  if (removed.length > 0) {
+    console.log(`   Removed ${removed.length} stale .js files (had matching .ts sources)\n`);
   } else {
     console.log('   No stale .js files found.\n');
   }
@@ -254,6 +272,16 @@ async function main() {
   } else {
     console.log('Done. Mailbox DB + caches deleted. Your accounts, credentials, and profile are preserved.');
     console.log('Restart the app to create a fresh database.');
+  }
+
+  // Anything still held open means the clean only half happened. Say so loudly
+  // rather than reporting success over a userData dir that is now in a state
+  // neither the user nor the app expects.
+  if (lockedPaths.length > 0) {
+    console.log(`\n⚠  ${lockedPaths.length} item(s) could not be deleted — still in use:`);
+    for (const p of lockedPaths) console.log(`     ${p}`);
+    console.log('   Quit Sarv Inbox and run this again.');
+    process.exitCode = 1;
   }
 }
 

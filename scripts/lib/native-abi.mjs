@@ -79,6 +79,23 @@ function expectedAbi({ runtime, target }) {
 }
 
 /**
+ * Is the compiled addon ALREADY valid for this runtime?
+ *
+ * `sh scripts/dev.sh` used to shell out to node-gyp unconditionally, paying a
+ * ~1-minute compile on every app start even when the binary was already built
+ * for Electron. Answering this first makes the common case a no-op.
+ *
+ * Conservative by design: an addon that will not load, or an Electron version
+ * whose ABI cannot be resolved (node-abi absent), both report false, so the
+ * caller rebuilds rather than trusting a binary it could not verify.
+ */
+export function isAbiCurrent({ runtime, target }) {
+  const wanted = expectedAbi({ runtime, target });
+  if (!wanted) return false;
+  return readBuiltAbi() === wanted;
+}
+
+/**
  * Whether another rebuild currently owns the build directory.
  *
  * Two node-gyp runs in one directory destroy each other. `node-gyp rebuild`

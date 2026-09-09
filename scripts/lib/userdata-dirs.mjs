@@ -49,6 +49,28 @@ export function exists(p) {
   return fs.existsSync(p);
 }
 
+// The file logger rotates in place: at its size cap it renames app.log →
+// app.log.1 and reopens (see apps/desktop/electron/utils/file-logger.ts). So the
+// log is up to TWO files, and "delete app.log" leaves the older — and larger —
+// half on disk. These are mail logs: they carry addresses, subjects and folder
+// names, so a half-clean before sharing a bug report is a privacy problem, not
+// just wasted space. Match the whole family, never the bare name.
+const LOG_FILE = /^app\.log(\.\d+)?$/;
+
+/** Every log file in a userData dir — app.log plus its rotated siblings. */
+export function listLogFiles(dir) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((name) => LOG_FILE.test(name))
+    .sort()
+    .map((name) => path.join(dir, name));
+}
+
 export function fileSize(p) {
   try {
     return fs.statSync(p).size;
@@ -69,16 +91,38 @@ export function humanSize(bytes) {
   return `${value.toFixed(1)} ${units[i]}`;
 }
 
+// A running app holds its database, log and cache files open. Windows refuses to
+// unlink an open file (EBUSY/EPERM) — so an uncaught throw here would abort the
+// cleanup half-done, leaving a userData dir with some files gone and some not,
+// which is worse than either extreme. macOS and Linux unlink happily and let the
+// app keep writing to the orphaned inode, which is its own kind of confusing.
+// Both cases want the same thing: skip the file, keep going, and tell the caller
+// at the end that the app needs quitting.
+const LOCKED = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY']);
+
+/** Files that could not be removed because something else holds them open. */
+export const lockedPaths = [];
+
+function remove(p, options) {
+  if (!exists(p)) return false;
+  try {
+    fs.rmSync(p, { force: true, ...options });
+    return true;
+  } catch (err) {
+    if (LOCKED.has(err?.code)) {
+      lockedPaths.push(p);
+      return false;
+    }
+    throw err;
+  }
+}
+
 /** Delete a single file. Returns true if it existed and was removed. */
 export function rmFile(p) {
-  if (!exists(p)) return false;
-  fs.rmSync(p, { force: true });
-  return true;
+  return remove(p);
 }
 
 /** Delete a directory tree. Returns true if it existed and was removed. */
 export function rmDir(p) {
-  if (!exists(p)) return false;
-  fs.rmSync(p, { recursive: true, force: true });
-  return true;
+  return remove(p, { recursive: true });
 }
