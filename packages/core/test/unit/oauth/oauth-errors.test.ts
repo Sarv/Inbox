@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 
-import { isOAuthTokenError, isTerminalOAuthError } from '../../../src/oauth/oauth-errors';
+import {
+  isOAuthServerUnreachableError,
+  isOAuthTokenError,
+  isTerminalOAuthError,
+} from '../../../src/oauth/oauth-errors';
 import { OAuthError } from '../../../src/oauth/types';
 
 /**
@@ -113,5 +117,65 @@ describe('isTerminalOAuthError', () => {
     expect(isTerminalOAuthError(null)).toBe(false);
     expect(isTerminalOAuthError(undefined)).toBe(false);
     expect(isTerminalOAuthError('invalid_grant')).toBe(false);
+  });
+});
+
+/**
+ * Separating "the server said no" from "we never reached the server".
+ *
+ * THE incident (2026-09-09): a dark-waking laptop retried refreshes before
+ * Wi-Fi had reassociated. Every attempt failed with `getaddrinfo ENOTFOUND
+ * oauth.sarv.com` — 81 in one session — and because the scheduler counted an
+ * unreachable server as a transient FAILURE, five in a row latched a healthy
+ * session into REAUTH_REQUIRED while the server was up and answering throughout.
+ *
+ * The scheduler routes on this predicate to decide whether a failure may count
+ * toward that give-up threshold, so both edges matter: too broad and a genuinely
+ * dead grant retries forever in silence; too narrow and a Wi-Fi blip signs the
+ * user out again.
+ */
+describe('isOAuthServerUnreachableError', () => {
+  // The exact shape the token-refresher throws when fetch cannot connect.
+  it('recognises a token-endpoint network failure', () => {
+    expect(isOAuthServerUnreachableError(
+      new OAuthError('Cannot reach OAuth server [ENOTFOUND] at https://oauth.sarv.com/api/oauth/token',
+        'TOKEN_REFRESH_NETWORK_ERROR'),
+    )).toBe(true);
+  });
+
+  // These reached the server, or say something about the grant. Excusing them
+  // from the failure budget would let a real problem retry forever unnoticed.
+  it('does not claim errors the server actually answered', () => {
+    expect(isOAuthServerUnreachableError(new OAuthError('bad grant', 'TOKEN_REFRESH_FAILED'))).toBe(false);
+    expect(isOAuthServerUnreachableError(new OAuthError('nope', 'REAUTH_REQUIRED'))).toBe(false);
+    expect(isOAuthServerUnreachableError(new OAuthError('gone', 'EMPTY_REFRESH_TOKEN'))).toBe(false);
+  });
+
+  // Timeout and abort are their own cases with their own handling (the request
+  // may have been received, so the token state is unknown) — not unreachable.
+  it('does not claim a timeout or an abort', () => {
+    expect(isOAuthServerUnreachableError(new OAuthError('slow', 'TOKEN_REFRESH_TIMEOUT'))).toBe(false);
+    expect(isOAuthServerUnreachableError(new OAuthError('cancelled', 'TOKEN_REFRESH_ABORTED'))).toBe(false);
+  });
+
+  // It keys on the CODE, never the text: a raw socket error that happens to
+  // mention DNS must not be excused from the budget.
+  it('keys on the code, not the message', () => {
+    expect(isOAuthServerUnreachableError(new Error('getaddrinfo ENOTFOUND oauth.sarv.com'))).toBe(false);
+    expect(isOAuthServerUnreachableError(new Error('TOKEN_REFRESH_NETWORK_ERROR'))).toBe(false);
+  });
+
+  // Unreachable is a strict SUBSET of non-terminal; the two must agree, or the
+  // scheduler could both give up and excuse the same error.
+  it('is never terminal', () => {
+    const err = new OAuthError('unreachable', 'TOKEN_REFRESH_NETWORK_ERROR');
+    expect(isOAuthServerUnreachableError(err)).toBe(true);
+    expect(isTerminalOAuthError(err)).toBe(false);
+  });
+
+  it('survives a non-error value', () => {
+    expect(isOAuthServerUnreachableError(null)).toBe(false);
+    expect(isOAuthServerUnreachableError(undefined)).toBe(false);
+    expect(isOAuthServerUnreachableError('TOKEN_REFRESH_NETWORK_ERROR')).toBe(false);
   });
 });

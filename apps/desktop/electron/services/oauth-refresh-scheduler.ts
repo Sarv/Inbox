@@ -16,9 +16,13 @@
  *  - A TERMINAL failure (refresh token revoked/expired — `invalid_grant` etc.)
  *    can't be fixed by retrying, so we STOP hammering it and ask the user to
  *    sign in again immediately.
- *  - TRANSIENT failures (network / 5xx / rate-limit) retry with linear backoff;
- *    after `MAX_TRANSIENT_FAILURES` in a row we give up and ask for re-login too
- *    (something is persistently wrong).
+ *  - TRANSIENT failures the server ANSWERED (5xx / rate-limit) retry with linear
+ *    backoff; after `MAX_TRANSIENT_FAILURES` in a row we give up and ask for
+ *    re-login too (something is persistently wrong).
+ *  - UNREACHABLE (DNS/refused/no route) is not counted at all. We never spoke to
+ *    the server, so it tells us nothing about the session; it retries with the
+ *    same backoff, forever, and can never trigger a re-login. Counting it signed
+ *    users out over a Wi-Fi blip at wake.
  *  - On system RESUME (laptop woke from sleep — timers were paused and the token
  *    likely expired) we re-evaluate every account so it refreshes promptly
  *    instead of waiting out a stale timer.
@@ -31,7 +35,7 @@
  */
 import { Notification, powerMonitor } from 'electron';
 
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, isOAuthServerUnreachableError } from '@sarvinbox/core';
 import type { OAuthProviderId } from '@sarvinbox/core';
 
 import { getMainWindow } from '../shared';
@@ -67,6 +71,11 @@ const DEFERRED_RETRY_MS = 60_000;
 
 const timers = new Map<string, NodeJS.Timeout>();
 const failCounts = new Map<string, number>();
+// Consecutive "could not reach the server" attempts, kept SEPARATE from
+// failCounts: it drives backoff only and never escalates to a re-login. Sharing
+// one counter would let a run of network outages leave the account one ordinary
+// 5xx away from being signed out.
+const unreachableCounts = new Map<string, number>();
 let started = false;
 let resumeHandler: (() => void) | null = null;
 
@@ -167,6 +176,7 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
     // with any connect refreshing at the same instant.
     await getValidAccessToken(provider, email, true);
     failCounts.delete(key);
+    unreachableCounts.delete(key);
     resolveReauth(provider, email);
     logger.info(`[OAuthRefresh] proactively refreshed ${provider}:${email}`);
     await scheduleAccount(provider, email); // reschedule off the fresh token
@@ -175,6 +185,7 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
     if (isAccountGoneError(err)) {
       clearTimer(key);
       failCounts.delete(key);
+      unreachableCounts.delete(key);
       resolveReauth(provider, email); // nothing left to sign in to
       return;
     }
@@ -189,6 +200,31 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
       armTimer(key, DEFERRED_RETRY_MS, () => void runRefresh(provider, email));
       return;
     }
+    // Could not REACH the token endpoint (DNS, refused, no route): like the
+    // suspend case above, this says nothing about the credentials, so it must
+    // not march the account toward MAX_TRANSIENT_FAILURES. A dark-waking laptop
+    // retries before Wi-Fi has reassociated, and five of those in a row latched
+    // a healthy session into REAUTH_REQUIRED — after which the fast-fail gate in
+    // getValidAccessToken refuses every later attempt WITHOUT trying, so the
+    // account stays locked out even once the network is back. One session's log
+    // had 81 ENOTFOUND against a server that was up and answering throughout.
+    //
+    // Backoff still applies, on its own counter: an unreachable server should be
+    // retried patiently and forever, never escalated. Reaching the server again
+    // — with any answer, even a rejection — hands the verdict back to the
+    // classifiers below.
+    if (isOAuthServerUnreachableError(err)) {
+      const n = (unreachableCounts.get(key) ?? 0) + 1;
+      unreachableCounts.set(key, n);
+      const delay = Math.min(RETRY_BASE_MS * n, RETRY_MAX_MS);
+      logger.warn(
+        `[OAuthRefresh] cannot reach the OAuth server for ${provider}:${email} `
+        + `(attempt ${n}) — retry in ${delay / 1000}s, session left signed in: ${(err as Error).message}`,
+      );
+      armTimer(key, delay, () => { void runRefresh(provider, email); });
+      return;
+    }
+
     const terminal = isTerminalOAuthError(err);
     const n = (failCounts.get(key) ?? 0) + 1;
     failCounts.set(key, n);
@@ -198,6 +234,7 @@ async function runRefresh(provider: OAuthProviderId, email: string): Promise<voi
       // Stop the loop and ask the user to sign in again.
       clearTimer(key);
       failCounts.delete(key);
+      unreachableCounts.delete(key);
       notifyReauthRequired(
         provider,
         email,
@@ -283,6 +320,7 @@ export function stopOAuthRefreshScheduler(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
   failCounts.clear();
+  unreachableCounts.clear();
   clearAllReauthRequired();
   if (resumeHandler) {
     if (typeof powerMonitor?.removeListener === 'function') {

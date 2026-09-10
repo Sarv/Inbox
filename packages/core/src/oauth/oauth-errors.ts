@@ -110,3 +110,25 @@ export function isTerminalOAuthError(err: unknown): boolean {
   if (/\(400\)|\(401\)/.test(msg)) return true;
   return false;
 }
+
+/**
+ * Whether a refresh failed because the token endpoint could not be REACHED at
+ * all — DNS failure, connection refused, no route — as opposed to the server
+ * answering with a verdict about the credentials.
+ *
+ * This is a strict subset of "not terminal", and it earns its own predicate
+ * because the two say very different things. A 429 or a 5xx means the server
+ * heard us and something is wrong at its end; `ENOTFOUND` means we never got
+ * that far, so it carries NO information about whether the session is still
+ * valid. Counting it toward a "give up and make the user sign in again"
+ * threshold signs people out for a Wi-Fi blip.
+ *
+ * That is not hypothetical. A laptop that dark-wakes repeatedly retries the
+ * refresh before Wi-Fi has reassociated; five such wakes in a row tripped
+ * MAX_TRANSIENT_FAILURES and latched a perfectly healthy session into
+ * REAUTH_REQUIRED — 81 `getaddrinfo ENOTFOUND oauth.sarv.com` in one session's
+ * log, with the server up and answering the whole time.
+ */
+export function isOAuthServerUnreachableError(err: unknown): boolean {
+  return (err as { code?: unknown } | null | undefined)?.code === 'TOKEN_REFRESH_NETWORK_ERROR';
+}

@@ -82,6 +82,11 @@ vi.mock('@sarvinbox/core', () => ({
   createLogger: () => ({
     info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
+  // Mirrors the real implementation (see packages/core oauth-errors, unit-tested
+  // there) rather than a marker flag, so this suite pins the actual contract:
+  // the scheduler routes on the error CODE the token-refresher attaches.
+  isOAuthServerUnreachableError: (err: unknown) =>
+    (err as { code?: unknown } | null | undefined)?.code === 'TOKEN_REFRESH_NETWORK_ERROR',
 }));
 
 const key = (provider: string, email: string): string => `${provider}:${email.toLowerCase()}`;
@@ -134,6 +139,12 @@ const K = key('gmail', EMAIL);
 const transient = (message = 'network blip'): Error => new Error(message);
 const terminal = (): Error => Object.assign(new Error('invalid_grant'), { terminal: true });
 const gone = (): Error => Object.assign(new Error('ACCOUNT_NOT_FOUND'), { gone: true });
+/** DNS/refused/no route: the token endpoint was never reached. */
+const unreachable = (code = 'ENOTFOUND'): Error =>
+  Object.assign(
+    new Error(`Cannot reach OAuth server [${code}] at https://oauth.sarv.com/api/oauth/token`),
+    { code: 'TOKEN_REFRESH_NETWORK_ERROR' },
+  );
 /** The refresh was never sent — the machine was asleep. Not a failure. */
 const deferred = (): Error =>
   Object.assign(new Error('REFRESH_DEFERRED_SUSPENDED'), { deferred: true });
@@ -636,5 +647,133 @@ describe('deferred while suspended', () => {
     expect(h.state.notifications).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(240_000);         // failure 5 -> give up
     expect(h.state.notifications).toHaveLength(1);
+  });
+});
+
+describe('cannot reach the OAuth server', () => {
+  /*
+   * THE incident these pin (2026-09-09): a laptop dark-waking every ~15 minutes
+   * retried the refresh before Wi-Fi had reassociated. Each attempt failed with
+   * `getaddrinfo ENOTFOUND oauth.sarv.com` — 81 of them in one session — and
+   * because an unreachable server counted as a transient FAILURE, five in a row
+   * tripped the give-up threshold and latched a perfectly healthy session into
+   * REAUTH_REQUIRED. The fast-fail gate then refused every later attempt without
+   * even trying, so the account stayed locked out after the network came back.
+   * The server was up and answering throughout.
+   *
+   * Never reaching the server says NOTHING about the credentials, so it must be
+   * retried patiently and can never, on its own, ask the user to sign in again.
+   */
+
+  // THE regression. Before the fix this produced a re-login prompt on attempt 5.
+  it('never asks for a re-login, however long the network is down', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, unreachable());
+    await scheduleAccount(GMAIL, EMAIL);
+
+    // Far beyond the 5-failure budget — an afternoon of dark wakes.
+    await vi.advanceTimersByTimeAsync(5_000 + 60_000 * 40);
+
+    expect(h.state.refreshCalls.length).toBeGreaterThan(5);
+    expect(h.state.notifications).toHaveLength(0);
+    expect(listReauthRequired()).toHaveLength(0);
+  });
+
+  // It must keep TRYING, on the same linear backoff, so the account recovers by
+  // itself. Retrying forever is the point: the alternative signed people out.
+  it('retries with linear backoff instead of stopping', async () => {
+    h.state.due.set(K, 10_000);
+    h.state.failWith.set(K, unreachable());
+    await scheduleAccount(GMAIL, EMAIL);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.state.refreshCalls).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(h.state.refreshCalls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);            // 1st -> 60s
+    expect(h.state.refreshCalls).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(h.state.refreshCalls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);            // 2nd -> 120s
+    expect(h.state.refreshCalls).toHaveLength(3);
+  });
+
+  // Recovery: the moment the network returns, a normal refresh happens and the
+  // account settles back onto its own due-point.
+  it('refreshes normally once the network comes back', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, unreachable());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000 + 60_000 * 3);
+    const before = h.state.refreshCalls.length;
+
+    h.state.failWith.delete(K);
+    h.state.due.set(K, 30 * 60_000);
+    await vi.advanceTimersByTimeAsync(60_000 * 4);
+
+    expect(h.state.refreshCalls.length).toBeGreaterThan(before);
+    expect(h.state.notifications).toHaveLength(0);
+  });
+
+  // The unreachable counter must not leak into the real failure budget. An
+  // outage followed by genuine 5xx answers has to get the full 5 attempts, not
+  // be signed out on the first one because the outage already used them up.
+  it('does not spend the transient-failure budget it never counted', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, unreachable());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000 + 60_000 * 10);   // a long outage
+    expect(h.state.notifications).toHaveLength(0);
+
+    // Server reachable again, but now answering with real transient errors.
+    h.state.failWith.set(K, transient('503 Service Unavailable'));
+    await vi.advanceTimersByTimeAsync(60_000);                // genuine failure 1
+    expect(h.state.notifications).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(60_000 * 2);            // 2
+    await vi.advanceTimersByTimeAsync(60_000 * 3);            // 3
+    await vi.advanceTimersByTimeAsync(60_000 * 4);            // 4
+    expect(h.state.notifications).toHaveLength(0);            // still under the cap
+    await vi.advanceTimersByTimeAsync(60_000 * 5);            // 5 -> give up
+    expect(h.state.notifications).toHaveLength(1);
+  });
+
+  // A TERMINAL verdict still wins immediately. Once the server has actually
+  // answered "this grant is dead", retrying is pointless and the user must act.
+  it('still asks for a re-login the moment the server rejects the grant', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, unreachable());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000 + 60_000 * 6);
+    expect(h.state.notifications).toHaveLength(0);
+
+    h.state.failWith.set(K, terminal());
+    await vi.advanceTimersByTimeAsync(60_000 * 8);
+
+    expect(h.state.notifications).toHaveLength(1);
+    expect(listReauthRequired()).toHaveLength(1);
+  });
+
+  // A recovered account must start from a clean slate, so a later outage gets
+  // the full backoff ladder again rather than resuming at the old delay.
+  it('resets its backoff after a successful refresh', async () => {
+    h.state.due.set(K, 0);
+    h.state.failWith.set(K, unreachable());
+    await scheduleAccount(GMAIL, EMAIL);
+    await vi.advanceTimersByTimeAsync(5_000 + 60_000 * 3);   // climb the ladder
+
+    h.state.failWith.delete(K);
+    h.state.due.set(K, 10_000);
+    await vi.advanceTimersByTimeAsync(60_000 * 4);           // success -> counters cleared
+
+    // Outage again: the FIRST retry must be 60s, not the pre-recovery delay.
+    h.state.failWith.set(K, unreachable('EAI_AGAIN'));
+    await vi.advanceTimersByTimeAsync(10_000);
+    const before = h.state.refreshCalls.length;
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(h.state.refreshCalls).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.state.refreshCalls).toHaveLength(before + 1);
   });
 });
