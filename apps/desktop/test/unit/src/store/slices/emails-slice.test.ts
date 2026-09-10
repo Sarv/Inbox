@@ -321,3 +321,128 @@ describe('fetchEmailBody — a defer must not park the email', () => {
     expect(h.state.failedBodies.has('e1')).toBe(true);
   });
 });
+
+describe('loadAllSections — the click-resolution pool', () => {
+  /**
+   * `emails` is the flat pool `selectEmail` resolves a clicked row against. It
+   * is DERIVED from `sectionData` but lives in its own slot, and `selectFolder`
+   * clears it to [] while deliberately KEEPING sectionData cached. The no-op
+   * guard compared only sectionData, so re-selecting INBOX (which is not
+   * skipped while a message is open) emptied the pool and then skipped the
+   * set() that refills it: every row stayed on screen, every click resolved to
+   * nothing, and the reading pane sat on "Select an email to read" until the
+   * sections happened to change.
+   */
+  const section = { id: 'sec-1', filter: 'everything_else', maxItems: 25 } as any;
+  const serverRows = [row('e1'), row('e2')];
+
+  interface SectionHarness {
+    state: Record<string, any>;
+    slice: any;
+    listCalls: number;
+  }
+
+  const harness = (over: Record<string, any> = {}): SectionHarness => {
+    const h: SectionHarness = {
+      state: {
+        inboxType: 'priority_first',
+        inboxSections: [section],
+        pendingDeletes: [],
+        activeInboxFilter: null,
+        selectedFolderId: 'f-inbox',
+        selectedVirtualFolder: null,
+        viewingSnoozed: false,
+        viewingAICategory: null,
+        viewingSection: null,
+        sectionData: {},
+        emails: [],
+        loadingEmails: false,
+        ...over,
+      },
+      slice: null,
+      listCalls: 0,
+    };
+    (globalThis as any).window = {
+      electronAPI: {
+        emails: {
+          listBySection: async () => { h.listCalls += 1; return { success: true, data: serverRows }; },
+          sectionCounts: async () => ({ success: true, data: { everything_else: serverRows.length } }),
+        },
+      },
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(h.state, patch); };
+    // The slice object carries the slice's INITIAL state alongside its methods,
+    // so the harness state must be spread LAST — otherwise `sectionData` reads
+    // back as {} and every reload looks like a first load.
+    const get = () => ({ ...h.slice, ...h.state });
+    h.slice = createEmailsSlice(set as any, get as any, undefined as any);
+    return h;
+  };
+
+  afterEach(() => { delete (globalThis as any).window; });
+
+  // Breaks: THE bug — the rendered rows survive the folder re-selection but the
+  // pool behind them does not, so no email can be opened any more.
+  it('refills the pool when the rows are unchanged but selectFolder emptied it', async () => {
+    const h = harness();
+    await h.slice.loadAllSections('INBOX');
+    expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1', 'e2']);
+
+    // What selectFolder does: pool cleared, sectionData deliberately kept.
+    h.state.emails = [];
+    await h.slice.loadAllSections('INBOX');
+
+    expect(h.listCalls).toBe(2);
+    expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1', 'e2']);
+  });
+
+  // Breaks: the no-op guard itself — a background reload every few seconds
+  // rebuilding every thread object and re-rendering every row (the "lags every
+  // few seconds" beachball this guard exists to prevent).
+  it('still skips the re-render when nothing changed and the pool is intact', async () => {
+    const h = harness();
+    await h.slice.loadAllSections('INBOX');
+    const rendered = h.state.sectionData;
+
+    // A spinner left on by an interrupted first load must still be cleared —
+    // otherwise the skip hides a list that is already on screen behind it.
+    h.state.loadingEmails = true;
+    await h.slice.loadAllSections('INBOX');
+
+    expect(h.listCalls).toBe(2);
+    expect(h.state.sectionData).toBe(rendered); // same identities — no re-render
+    expect(h.state.loadingEmails).toBe(false);
+  });
+
+  // Breaks: the section drill-in. There `emails` holds that section's flat page,
+  // not the pool, so comparing it against the pool would report a mismatch on
+  // every tick and re-render the list underneath the user.
+  it('leaves a section drill-in page alone instead of treating it as a stale pool', async () => {
+    const h = harness();
+    await h.slice.loadAllSections('INBOX');
+    const rendered = h.state.sectionData;
+
+    // Drilled in: a flat page of its own, deliberately a different length.
+    h.state.viewingSection = 'everything_else';
+    h.state.emails = [row('e1')];
+    await h.slice.loadAllSections('INBOX');
+
+    expect(h.state.sectionData).toBe(rendered);
+    expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1']);
+  });
+
+  // Breaks: a genuine change being skipped — the pool must follow the rows it is
+  // derived from, not just get repaired when it is empty.
+  it('replaces both the rows and the pool when the sections actually change', async () => {
+    const h = harness();
+    await h.slice.loadAllSections('INBOX');
+
+    serverRows.push(row('e3'));
+    try {
+      await h.slice.loadAllSections('INBOX');
+      expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1', 'e2', 'e3']);
+    } finally {
+      serverRows.pop();
+    }
+  });
+});

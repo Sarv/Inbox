@@ -1637,7 +1637,24 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // (id/updatedAt/date/tags/flags/subject/snippet + total/hasMore/loading), so
     // it can only ever FAIL to skip — never skip a render the user needed to see.
     const currentSnapshot = get().sectionData;
-    if (Object.keys(currentSnapshot).length > 0 && sectionDataUnchanged(currentSnapshot, newSectionData)) {
+    const nextPool = flattenSectionEmails(newSectionData);
+    // ...and only while the flat pool still matches those rows. `emails` is
+    // DERIVED from sectionData but kept in its own slot, and selectFolder
+    // clears it to [] while deliberately KEEPING sectionData cached (see its
+    // note). So "the sections render identically" does NOT imply "the pool
+    // survived": re-selecting INBOX with a message open left every row on
+    // screen unclickable, because selectEmail resolves the clicked id out of
+    // `emails`, found nothing, never loaded the thread — and the reading pane
+    // sat on "Select an email to read" until the sections happened to change.
+    // Skipped while drilled into a section: there `emails` is that section's
+    // flat page, not the pool, and must not be overwritten by it.
+    const poolMatchesSections =
+      !!get().viewingSection || get().emails.length === nextPool.length;
+    if (
+      Object.keys(currentSnapshot).length > 0
+      && sectionDataUnchanged(currentSnapshot, newSectionData)
+      && poolMatchesSections
+    ) {
       if (import.meta.env.DEV) console.log('[Store] loadAllSections: no visible change — skipped re-render');
       // Clear the first-load spinner if it somehow remained on.
       if (get().loadingEmails) set({ loadingEmails: false });
@@ -1646,7 +1663,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
 
     set({
       sectionData: newSectionData,
-      emails: flattenSectionEmails(newSectionData),
+      emails: nextPool,
       loadingEmails: false,
     });
   },
