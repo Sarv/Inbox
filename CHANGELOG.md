@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stayed on "Select an email to read" whatever was clicked, until a sync
   happened to change one of the sections. A reload now skips itself only when
   the rows AND the list behind them are both still in step.
+- Opening a section's full page ("X-Y of Z") no longer has the list swapped out
+  from under you. The page you are reading and the sectioned inbox behind it are
+  the same store slot, and every section loader wrote the whole sectioned inbox
+  into it — so the first background sync that changed anything replaced the page
+  mid-read. Which of the two owns that slot is now decided in one shared place
+  that every loader writes through.
 - The app refuses to start on a native SQLite module it cannot load, instead of
   coming up as a fresh install. `better-sqlite3` opens its compiled addon lazily
   — on the first database, not at import — and every core-database read wraps
