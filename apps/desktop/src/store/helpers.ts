@@ -192,6 +192,14 @@ export interface SyncProgressRefreshGate {
   lastRefreshAt: number;
 }
 
+/** What one sync-progress tick decided, and the gate to carry into the next. */
+export interface SyncProgressRefreshDecision {
+  /** Reload the visible list now? */
+  refresh: boolean;
+  /** The gate the caller must keep — unchanged when the tick decided nothing. */
+  gate: SyncProgressRefreshGate;
+}
+
 /**
  * Should this sync-progress tick refresh the visible list?
  *
@@ -202,21 +210,27 @@ export interface SyncProgressRefreshGate {
  * mail. The engine reports progress after each batch is COMMITTED to the DB, so
  * every one of those ticks is a point where stored mail could already be shown.
  *
- * Refresh when the count has MOVED (a tick that processed nothing stored
- * nothing — a flags-only pass or a folder that was already up to date — and a
- * reload would re-query for the same rows), and no more often than
- * SYNC_PROGRESS_REFRESH_MS. A count that went BACKWARDS is a new sync's reset,
- * which must refresh rather than be read as "no progress".
+ * Refresh only when the count has gone UP — a tick that processed nothing
+ * stored nothing (a flags-only pass, or a folder already up to date), and a
+ * reload would re-query for the same rows — and no more often than
+ * SYNC_PROGRESS_REFRESH_MS. A count that went BACKWARDS is the engine resetting
+ * to zero for a NEW sync, not mail arriving: the gate adopts the lower count so
+ * the next real batch registers as progress, without spending a reload on a
+ * pass that has stored nothing yet.
  */
-export const shouldRefreshOnSyncProgress = (
+export const decideSyncProgressRefresh = (
   status: { messagesProcessed?: number | null } | null | undefined,
   gate: SyncProgressRefreshGate,
   now: number,
-): boolean => {
+): SyncProgressRefreshDecision => {
   const processed = status?.messagesProcessed;
-  if (typeof processed !== 'number' || !Number.isFinite(processed)) return false;
-  if (processed === gate.lastProcessed) return false;
-  return now - gate.lastRefreshAt >= SYNC_PROGRESS_REFRESH_MS;
+  if (typeof processed !== 'number' || !Number.isFinite(processed)) return { refresh: false, gate };
+  // Same count, or a new sync's reset to a lower one: no new rows to show.
+  if (processed <= gate.lastProcessed) return { refresh: false, gate: { ...gate, lastProcessed: processed } };
+  // Real progress, but too soon — leave `lastProcessed` alone so the next tick
+  // past the window still counts as progress rather than being swallowed here.
+  if (now - gate.lastRefreshAt < SYNC_PROGRESS_REFRESH_MS) return { refresh: false, gate };
+  return { refresh: true, gate: { lastProcessed: processed, lastRefreshAt: now } };
 };
 
 export const ALL_MAIL_PAGE_SIZE = 100;

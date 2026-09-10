@@ -9,7 +9,7 @@ import {
   getBodyDownloadLimit,
   isFolderInView,
   findFolderPathById,
-  shouldRefreshOnSyncProgress,
+  decideSyncProgressRefresh,
 } from '../helpers';
 import type { SyncSlice, SliceCreator } from '../types';
 
@@ -169,7 +169,10 @@ async function refreshVisibleViewForFolder(
 // ---- Sync-progress refresh gate ----------------------------------------------
 // Transient plumbing like the realtime coalescer below: nothing renders off it,
 // and it must survive across ticks without a `set()` per progress event.
-const syncProgressGate = { lastProcessed: -1, lastRefreshAt: 0 };
+// `lastProcessed: 0` is the real starting point, not a sentinel: the engine
+// resets its cumulative count to 0 at the start of every sync, so a first tick
+// reporting 0 has stored nothing and must not spend a reload.
+let syncProgressGate = { lastProcessed: 0, lastRefreshAt: 0 };
 
 // ---- Realtime (IDLE) event coalescer -----------------------------------------
 // Transient plumbing, not UI state — nothing renders off it, and a `set()` per
@@ -418,11 +421,15 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
   handleSyncProgress: (status) => {
     set({ syncStatus: status });
 
-    const now = Date.now();
-    if (!shouldRefreshOnSyncProgress(status, syncProgressGate, now)) return;
-    // shouldRefreshOnSyncProgress only says yes for a finite count.
-    syncProgressGate.lastProcessed = status.messagesProcessed;
-    syncProgressGate.lastRefreshAt = now;
+    const decision = decideSyncProgressRefresh(status, syncProgressGate, Date.now());
+    syncProgressGate = decision.gate;
+    if (!decision.refresh) return;
+
+    // Named so this refresh is distinguishable in app.log from the ones
+    // syncSingleFolder and IDLE trigger — all three end in the same
+    // "refreshView: reloading sections" line, and without this the progressive
+    // fill can only be inferred from which OTHER lines are absent.
+    console.log(`[Store] syncProgress: ${decision.gate.lastProcessed} message(s) stored — filling the list mid-sync`);
 
     // Refresh the folder ON SCREEN, not the one the engine happens to be
     // reporting: a parallel sync moves `currentFolder` between folders, so

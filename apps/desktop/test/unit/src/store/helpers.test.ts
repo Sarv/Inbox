@@ -33,7 +33,7 @@ import {
   isAccountEmailDuplicated,
   isFolderInView,
   findFolderPathById,
-  shouldRefreshOnSyncProgress,
+  decideSyncProgressRefresh,
   SYNC_PROGRESS_REFRESH_MS,
   isPromoOrSpam,
   isSenderImagesAllowed,
@@ -1771,14 +1771,17 @@ describe('findFolderPathById', () => {
   });
 });
 
-describe('shouldRefreshOnSyncProgress', () => {
+describe('decideSyncProgressRefresh', () => {
   const gate = (lastProcessed: number, lastRefreshAt: number) => ({ lastProcessed, lastRefreshAt });
 
   // THE REGRESSION this rule exists for: mail used to appear only when the whole
   // sync resolved. The first tick that stored anything must show it immediately,
   // not wait out a throttle window.
   it('refreshes on the first tick that has stored mail', () => {
-    expect(shouldRefreshOnSyncProgress({ messagesProcessed: 50 }, gate(-1, 0), 10_000)).toBe(true);
+    expect(decideSyncProgressRefresh({ messagesProcessed: 50 }, gate(0, 0), 10_000)).toEqual({
+      refresh: true,
+      gate: gate(50, 10_000),
+    });
   });
 
   // Breaks: a batch commit every ~50 messages means ~500 ticks on a 25k first
@@ -1786,31 +1789,51 @@ describe('shouldRefreshOnSyncProgress', () => {
   // the "progressive fill" becomes a treadmill.
   it('throttles a second refresh inside the window', () => {
     const now = 10_000;
-    expect(
-      shouldRefreshOnSyncProgress({ messagesProcessed: 100 }, gate(50, now - (SYNC_PROGRESS_REFRESH_MS - 1)), now),
-    ).toBe(false);
+    const held = gate(50, now - (SYNC_PROGRESS_REFRESH_MS - 1));
+
+    // The gate is returned UNCHANGED: swallowing the count here would make the
+    // next tick past the window look like standing still and drop it too.
+    expect(decideSyncProgressRefresh({ messagesProcessed: 100 }, held, now)).toEqual({
+      refresh: false,
+      gate: held,
+    });
   });
 
   // Breaks: the throttle never opens again and only the first batch is ever shown.
   it('refreshes again once the window has elapsed', () => {
     const now = 10_000;
     expect(
-      shouldRefreshOnSyncProgress({ messagesProcessed: 100 }, gate(50, now - SYNC_PROGRESS_REFRESH_MS), now),
-    ).toBe(true);
+      decideSyncProgressRefresh({ messagesProcessed: 100 }, gate(50, now - SYNC_PROGRESS_REFRESH_MS), now),
+    ).toEqual({ refresh: true, gate: gate(100, now) });
   });
 
   // Breaks: a flags-only pass, or a folder already up to date, ticks progress
   // without storing a row — reloading the list there is pure cost for the same
   // rows, on the main thread, during the busiest moment of the app's life.
   it('skips a tick that processed nothing new', () => {
-    expect(shouldRefreshOnSyncProgress({ messagesProcessed: 50 }, gate(50, 0), 10_000)).toBe(false);
+    expect(decideSyncProgressRefresh({ messagesProcessed: 50 }, gate(50, 0), 10_000)).toEqual({
+      refresh: false,
+      gate: gate(50, 0),
+    });
   });
 
   // Breaks: the engine resets its cumulative count to 0 at the start of every
-  // sync. Read as "went backwards, so no progress", the FIRST batch of every
-  // sync after the first would be dropped — exactly the tick that matters most.
-  it('treats a count reset as progress, not as standing still', () => {
-    expect(shouldRefreshOnSyncProgress({ messagesProcessed: 0 }, gate(24_900, 0), 10_000)).toBe(true);
+  // sync. The reset itself has stored nothing, so it must not spend a reload —
+  // but the gate MUST adopt the lower count, or the next sync's batches would
+  // be measured against the previous sync's total and every one of them read as
+  // "no progress" until it exceeded it.
+  it('adopts a count reset without refreshing for it', () => {
+    expect(decideSyncProgressRefresh({ messagesProcessed: 0 }, gate(24_900, 0), 10_000)).toEqual({
+      refresh: false,
+      gate: gate(0, 0),
+    });
+  });
+
+  // Breaks: the wasted reload on every renderer load. The engine's first tick of
+  // a fresh sync reports 0, and a sentinel below zero would read that as
+  // progress and re-query the list before a single row had been stored.
+  it('does not refresh for a first tick that has stored nothing', () => {
+    expect(decideSyncProgressRefresh({ messagesProcessed: 0 }, gate(0, 0), 10_000).refresh).toBe(false);
   });
 
   // Breaks: a malformed status (no progress field, a null from an older main
@@ -1821,7 +1844,8 @@ describe('shouldRefreshOnSyncProgress', () => {
     ['a status with no count', {}],
     ['a non-numeric count', { messagesProcessed: 'lots' }],
     ['NaN', { messagesProcessed: Number.NaN }],
-  ])('refuses to refresh on %s', (_case, status) => {
-    expect(shouldRefreshOnSyncProgress(status as never, gate(-1, 0), 10_000)).toBe(false);
+  ])('refuses to refresh on %s, and leaves the gate alone', (_case, status) => {
+    const held = gate(50, 1_000);
+    expect(decideSyncProgressRefresh(status as never, held, 10_000)).toEqual({ refresh: false, gate: held });
   });
 });
