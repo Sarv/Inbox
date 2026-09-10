@@ -107,18 +107,18 @@ describe('reauth registry', () => {
   // difference between any two would fork one broken account into two entries —
   // and let the gated one slip past the token-path check.
   it('treats an address as the same account whatever its case', () => {
-    markReauthRequired('sarv', 'Ankur.D@Sarv.com', 'first');
-    expect(getReauthRequirement('sarv', 'ankur.d@sarv.com')?.reason).toBe('first');
+    markReauthRequired('sarv', 'Advik.D@Sarv.com', 'first');
+    expect(getReauthRequirement('sarv', 'advik.d@sarv.com')?.reason).toBe('first');
 
-    markReauthRequired('sarv', 'ankur.d@sarv.com', 'second');
+    markReauthRequired('sarv', 'advik.d@sarv.com', 'second');
     expect(listReauthRequired()).toHaveLength(1);
-    expect(clearReauthRequired('sarv', 'ANKUR.D@SARV.COM')).toBe(true);
+    expect(clearReauthRequired('sarv', 'ADVIK.D@SARV.COM')).toBe(true);
     expect(listReauthRequired()).toHaveLength(0);
   });
 
   // …while still showing the address the way the user wrote it.
   it('keeps the original spelling for display', () => {
-    markReauthRequired('sarv', 'Ankur.D@Sarv.com', 'x');
-    expect(listReauthRequired()[0].email).toBe('Ankur.D@Sarv.com');
+    markReauthRequired('sarv', 'Advik.D@Sarv.com', 'x');
+    expect(listReauthRequired()[0].email).toBe('Advik.D@Sarv.com');
   });
 });
