@@ -20,6 +20,19 @@ export { createMigrationManager, type Migration } from './migrations';
 export { writeThreadKey } from './thread-keys';
 export { setSlowQueryReporter, type SlowQueryEvent } from './slow-query-reporter';
 
+// Is the native addon loadable by this process? better-sqlite3 dlopens lazily,
+// so an ABI mismatch surfaces as an empty read rather than an error — anything
+// that boots on top of this package should provoke and report the failure
+// itself. See native-abi.ts.
+export {
+  describeNativeAbiFailure,
+  parseAbiMismatch,
+  probeNativeSqlite,
+  type NativeAbiMismatch,
+  type NativeSqliteProbe,
+} from './native-abi';
+export { probeBundledSqlite } from './native-abi-probe';
+
 // The single source of truth for "is this email waiting for AI
 // categorization" — every counter, tile and worker query builds on these.
 export {

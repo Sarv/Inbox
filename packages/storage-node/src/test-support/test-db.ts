@@ -22,6 +22,7 @@ import { createRequire } from 'node:module';
 import type Database from 'better-sqlite3';
 
 import { createMigrationManager } from '../migrations';
+import { describeNativeAbiFailure, probeNativeSqlite } from '../native-abi';
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -33,7 +34,7 @@ const requireFromHere = createRequire(import.meta.url);
 export function abiFailureMessage(cause: unknown): string {
   const detail = cause instanceof Error ? cause.message : String(cause);
   return [
-    'better-sqlite3 cannot be loaded by this Node process.',
+    describeNativeAbiFailure(cause),
     '',
     'The addon is compiled for exactly ONE ABI at a time, and `pnpm install`',
     '(scripts/postinstall.mjs) builds it for ELECTRON, which plain Node — and so',
@@ -56,10 +57,11 @@ function loadNativeCtor(): CtorLoad {
   try {
     const mod = requireFromHere('better-sqlite3');
     const ctor = (mod?.default ?? mod) as unknown;
-    // Touch the binding — the ABI error only surfaces when a DB is opened.
-    const probe = new (ctor as new (p: string) => { close: () => void })(':memory:');
-    probe.close();
-    return { ok: true, ctor };
+    // Touch the binding — the ABI error only surfaces when a DB is opened. Same
+    // provocation the app's boot guard uses, so the two cannot drift.
+    const Ctor = ctor as new (path: string) => { close: () => void };
+    const probe = probeNativeSqlite(() => new Ctor(':memory:'));
+    return probe.ok ? { ok: true, ctor } : { ok: false, cause: probe.cause };
   } catch (cause) {
     return { ok: false, cause };
   }
