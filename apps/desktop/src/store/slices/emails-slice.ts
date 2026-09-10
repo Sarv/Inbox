@@ -238,6 +238,27 @@ function flattenSectionEmails(sectionData: Record<string, { emails: any[] }>): a
   return result;
 }
 
+/**
+ * The `set()` patch that swaps freshly-loaded section rows into the store.
+ *
+ * `emails` is the flat pool `selectEmail` resolves a clicked row against, and it
+ * is DERIVED from `sectionData` — EXCEPT while drilled into one section's full
+ * page ("X-Y of Z"), where `emails` holds THAT section's paginated page and is
+ * owned by goToEmailPage. Writing the pool over it there replaces the page the
+ * user is reading with the whole sectioned inbox, on any background reload.
+ *
+ * Shared by every section loader so they cannot disagree about who owns
+ * `emails`. Pure.
+ */
+export function sectionRowsPatch(
+  viewingSection: string | null | undefined,
+  sectionData: Record<string, any>,
+): { sectionData: Record<string, any>; emails?: any[] } {
+  return viewingSection
+    ? { sectionData }
+    : { sectionData, emails: flattenSectionEmails(sectionData) };
+}
+
 export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   folders: [],
   labels: [],
@@ -1408,10 +1429,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           loading: false,
         },
       };
-      set({
-        sectionData: newSectionData,
-        emails: flattenSectionEmails(newSectionData),
-      });
+      set(sectionRowsPatch(get().viewingSection, newSectionData));
     } catch (error) {
       console.error(`[Store] Failed to load section ${sectionId}:`, error);
     } finally {
@@ -1459,20 +1477,14 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
             loading: false,
           },
         };
-        set({
-          sectionData: newSectionData,
-          emails: flattenSectionEmails(newSectionData),
-        });
+        set(sectionRowsPatch(get().viewingSection, newSectionData));
       } else {
         const latestSectionData = get().sectionData;
         const newSectionData = {
           ...latestSectionData,
           [sectionId]: { ...currentSection, hasMore: false, loading: false },
         };
-        set({
-          sectionData: newSectionData,
-          emails: flattenSectionEmails(newSectionData),
-        });
+        set(sectionRowsPatch(get().viewingSection, newSectionData));
       }
     } catch (error) {
       console.error(`[Store] Failed to load more for section ${sectionId}:`, error);
@@ -1481,10 +1493,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         ...latestSectionData,
         [sectionId]: { ...currentSection, loading: false },
       };
-      set({
-        sectionData: newSectionData,
-        emails: flattenSectionEmails(newSectionData),
-      });
+      set(sectionRowsPatch(get().viewingSection, newSectionData));
     }
   },
 
@@ -1523,7 +1532,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           hasMore: offset + threads.length < total,
         },
       };
-      set({ sectionData: newSectionData, emails: flattenSectionEmails(newSectionData) });
+      set(sectionRowsPatch(get().viewingSection, newSectionData));
     } catch (error) {
       console.error(`[Store] goToSectionPage ${sectionId} failed:`, error);
       const latest = get().sectionData;
@@ -1637,7 +1646,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // (id/updatedAt/date/tags/flags/subject/snippet + total/hasMore/loading), so
     // it can only ever FAIL to skip — never skip a render the user needed to see.
     const currentSnapshot = get().sectionData;
-    const nextPool = flattenSectionEmails(newSectionData);
+    const nextRows = sectionRowsPatch(get().viewingSection, newSectionData);
     // ...and only while the flat pool still matches those rows. `emails` is
     // DERIVED from sectionData but kept in its own slot, and selectFolder
     // clears it to [] while deliberately KEEPING sectionData cached (see its
@@ -1646,10 +1655,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // screen unclickable, because selectEmail resolves the clicked id out of
     // `emails`, found nothing, never loaded the thread — and the reading pane
     // sat on "Select an email to read" until the sections happened to change.
-    // Skipped while drilled into a section: there `emails` is that section's
-    // flat page, not the pool, and must not be overwritten by it.
+    // Only asked when the pool is ours to write: while drilled into a section
+    // `emails` belongs to that section's page, so sectionRowsPatch leaves it out
+    // and there is nothing here to compare.
     const poolMatchesSections =
-      !!get().viewingSection || get().emails.length === nextPool.length;
+      nextRows.emails === undefined || get().emails.length === nextRows.emails.length;
     if (
       Object.keys(currentSnapshot).length > 0
       && sectionDataUnchanged(currentSnapshot, newSectionData)
@@ -1661,11 +1671,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       return;
     }
 
-    set({
-      sectionData: newSectionData,
-      emails: nextPool,
-      loadingEmails: false,
-    });
+    set({ ...nextRows, loadingEmails: false });
   },
 
   _reloadCurrentView: async () => {
