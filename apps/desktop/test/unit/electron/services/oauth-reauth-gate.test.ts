@@ -49,7 +49,7 @@ import {
 } from '../../../../electron/services/reauth-registry';
 
 const SARV = 'sarv' as never;
-const EMAIL = 'ankur.d@sarv.com';
+const EMAIL = 'advik.d@sarv.com';
 const NOW_SEC = 1_800_000_000;
 const REVOKED =
   'Token refresh failed (400): {"detail":"Refresh token reuse detected. This session has been revoked for security; the user must sign in again."}';
@@ -143,7 +143,7 @@ describe('re-auth gate on getValidAccessToken', () => {
   // reads them from the IMAP config. A case difference between the two would
   // let the gated account slip straight past and resume hammering.
   it('matches the account however its address is capitalised', async () => {
-    markReauthRequired(SARV, 'Ankur.D@Sarv.com', REVOKED);
+    markReauthRequired(SARV, 'Advik.D@Sarv.com', REVOKED);
 
     const err = await getValidAccessToken(SARV, EMAIL).catch((e) => e);
 
