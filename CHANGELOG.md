@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- Emails in the sectioned inbox can be opened again after returning to the
+  folder. The rows on screen and the flat list a click is resolved against are
+  held in two places: re-selecting INBOX while a message was open emptied the
+  second one while deliberately keeping the rows cached, and the reload that
+  would have refilled it decided nothing visible had changed and skipped itself.
+  The list still looked right and every row in it was inert — the reading pane
+  stayed on "Select an email to read" whatever was clicked, until a sync
+  happened to change one of the sections. A reload now skips itself only when
+  the rows AND the list behind them are both still in step.
 - The app refuses to start on a native SQLite module it cannot load, instead of
   coming up as a fresh install. `better-sqlite3` opens its compiled addon lazily
   — on the first database, not at import — and every core-database read wraps
