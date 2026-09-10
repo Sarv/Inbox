@@ -434,6 +434,37 @@ describe('handleSyncProgress (progressive fill during a sync)', () => {
     expect(set).toHaveBeenLastCalledWith({ syncStatus: status });
   });
 
+  // Breaks: the wasted reload on every renderer load. The engine's very first
+  // tick of a sync reports a cumulative count of 0 — nothing has been stored, so
+  // there is nothing to show, and the list must not be re-queried for it.
+  it('does not refresh for the opening tick that has stored nothing', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 0 } as never);
+
+    expect(mergeNewEmails).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the FIRST batch of every sync after the first. The engine resets its
+  // cumulative count to 0 per sync, so the gate has to adopt that reset — held
+  // at the previous sync's total instead, the next sync's batches all read as
+  // "no progress" until they exceeded it, and a 40-message second sync behind a
+  // 25,000-message first one would never show anything at all.
+  it('keeps filling after the count resets for a new sync', async () => {
+    const { state, mergeNewEmails } = flatInboxState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 25_000 } as never);
+    vi.advanceTimersByTime(SYNC_PROGRESS_REFRESH_MS);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 0 } as never); // new sync
+    vi.advanceTimersByTime(SYNC_PROGRESS_REFRESH_MS);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 40 } as never);
+
+    // The reset itself stored nothing; the batch behind it did.
+    expect(mergeNewEmails).toHaveBeenCalledTimes(2);
+  });
+
   // Breaks: a malformed status from an older main process throws inside the IPC
   // listener, and every later tick — the whole progressive fill — is lost.
   it('survives a status with no progress figure', async () => {
