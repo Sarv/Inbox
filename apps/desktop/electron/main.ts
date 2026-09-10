@@ -150,6 +150,7 @@ import {
 } from './services/accounts-registry';
 import { migrateSecureCredsFromFile } from './services/secure-credential-store';
 import { backupCoreDb } from './services/core-db';
+import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 const logger = createLogger('main');
 
 // Read version from package.json
@@ -783,6 +784,13 @@ app.whenReady().then(async () => {
     } catch (err) {
       logger.warn('[Main] Failed to install CORP header stripper:', err);
     }
+
+    // BEFORE anything opens a database: prove the native SQLite module actually
+    // loads in this process. It dlopens lazily and every core-DB read swallows
+    // the failure into an empty result, so a mismatched ABI does not look like
+    // an error — it looks like a fresh install with no accounts and no mail.
+    // Stop with a named message instead of booting into that.
+    if (!ensureNativeSqliteLoadable()) return;
 
     // Initialize core services
     await initializeStorage();
