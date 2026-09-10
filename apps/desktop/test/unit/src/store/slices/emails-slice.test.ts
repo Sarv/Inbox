@@ -7,7 +7,7 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
   clearCategoryBadgeCache: vi.fn(),
 }));
 
-import { buildEmailReplacementPatch, createEmailsSlice, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
+import { buildEmailReplacementPatch, createEmailsSlice, sectionRowsPatch, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
 
 /** The vitest env is 'node'; buildThreads (called through the patch) reads the
  *  Smart-Prioritize flag from localStorage on every rebuild. */
@@ -342,7 +342,10 @@ describe('loadAllSections — the click-resolution pool', () => {
     listCalls: number;
   }
 
-  const harness = (over: Record<string, any> = {}): SectionHarness => {
+  const harness = (
+    over: Record<string, any> = {},
+    listBySection: () => Promise<any> = async () => ({ success: true, data: serverRows }),
+  ): SectionHarness => {
     const h: SectionHarness = {
       state: {
         inboxType: 'priority_first',
@@ -365,7 +368,7 @@ describe('loadAllSections — the click-resolution pool', () => {
     (globalThis as any).window = {
       electronAPI: {
         emails: {
-          listBySection: async () => { h.listCalls += 1; return { success: true, data: serverRows }; },
+          listBySection: async () => { h.listCalls += 1; return listBySection(); },
           sectionCounts: async () => ({ success: true, data: { everything_else: serverRows.length } }),
         },
       },
@@ -431,6 +434,72 @@ describe('loadAllSections — the click-resolution pool', () => {
     expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1']);
   });
 
+  // Breaks: the drill-in page being swapped for the whole sectioned inbox
+  // mid-read. A background reload that DOES find a change still has to write the
+  // new rows — it just must not write the pool over a page it does not own.
+  it('does not overwrite a drill-in page when the sections do change', async () => {
+    const h = harness();
+    await h.slice.loadAllSections('INBOX');
+
+    h.state.viewingSection = 'everything_else';
+    h.state.emails = [row('e1')];
+    serverRows.push(row('e3'));
+    try {
+      await h.slice.loadAllSections('INBOX');
+      // The rows behind the drill-in are refreshed (closing it restores from them)...
+      expect(h.state.sectionData['sec-1'].emails.map((e: any) => e.id)).toEqual(['e1', 'e2', 'e3']);
+      // ...but the page the user is reading is untouched.
+      expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1']);
+    } finally {
+      serverRows.pop();
+    }
+  });
+
+  // Breaks: the same clobber reached through the OTHER section loaders. The
+  // ownership rule has to hold everywhere section rows are written, or one of
+  // them puts the pool back over the page the user is reading.
+  it.each([
+    ['loadSectionEmails', (slice: any) => slice.loadSectionEmails('sec-1', 'everything_else', 'INBOX')],
+    ['loadMoreSectionEmails', (slice: any) => slice.loadMoreSectionEmails('sec-1', 'everything_else', 'INBOX')],
+    ['goToSectionPage', (slice: any) => slice.goToSectionPage('sec-1', 'everything_else', 0, 'INBOX')],
+  ])('%s leaves a drill-in page alone', async (_name, run) => {
+    const h = harness({
+      viewingSection: 'everything_else',
+      emails: [row('e1')],
+      sectionLoading: new Set<string>(),
+      sectionData: {
+        'sec-1': { emails: [row('e1')], threads: [], offset: 25, total: 99, hasMore: true, loading: false },
+      },
+    });
+
+    await run(h.slice);
+
+    expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1']);
+    expect(h.state.sectionData['sec-1'].emails.map((e: any) => e.id)).toEqual(['e1', 'e2']);
+  });
+
+  // Breaks: the two load-more paths that write rows WITHOUT new data — "the
+  // server had nothing more" and a failed query. Both only flip a flag, and both
+  // would have put the pool back over the drill-in page while doing it.
+  it.each([
+    ['finds nothing more', async () => ({ success: true, data: [] })],
+    ['fails outright', async () => { throw new Error('listBySection failed'); }],
+  ])('leaves a drill-in page alone when load-more %s', async (_name, list) => {
+    const h = harness({
+      viewingSection: 'everything_else',
+      emails: [row('e1')],
+      sectionData: {
+        'sec-1': { emails: [row('e1')], threads: [], offset: 25, total: 99, hasMore: true, loading: false },
+      },
+    }, list as () => Promise<any>);
+
+    await h.slice.loadMoreSectionEmails('sec-1', 'everything_else', 'INBOX');
+
+    expect(h.state.emails.map((e: any) => e.id)).toEqual(['e1']);
+    // The section's own spinner is always released, whichever way it ended.
+    expect(h.state.sectionData['sec-1'].loading).toBe(false);
+  });
+
   // Breaks: a genuine change being skipped — the pool must follow the rows it is
   // derived from, not just get repaired when it is empty.
   it('replaces both the rows and the pool when the sections actually change', async () => {
@@ -444,5 +513,36 @@ describe('loadAllSections — the click-resolution pool', () => {
     } finally {
       serverRows.pop();
     }
+  });
+});
+
+describe('sectionRowsPatch', () => {
+  /**
+   * The single rule for who owns `emails` — the flat pool a click is resolved
+   * against. Every section loader writes through this, so they cannot disagree:
+   * one of them writing the pool over a drill-in page is exactly the bug.
+   */
+  const sectionData = { s1: { emails: [row('a'), row('b')] }, s2: { emails: [row('b'), row('c')] } };
+
+  // Breaks: the pool stops following the rows it is derived from, and clicks on
+  // freshly-loaded rows resolve to nothing.
+  it('derives the pool from every section, deduplicated', () => {
+    const patch = sectionRowsPatch(null, sectionData);
+    expect(patch.sectionData).toBe(sectionData);
+    expect(patch.emails?.map((e: any) => e.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  // Breaks: THE drill-in clobber — the section's own paginated page is replaced
+  // by the whole sectioned inbox on the next background reload.
+  it('omits the pool entirely while drilled into a section', () => {
+    const patch = sectionRowsPatch('everything_else', sectionData);
+    expect(patch.sectionData).toBe(sectionData);
+    expect('emails' in patch).toBe(false);
+  });
+
+  // Breaks: an undefined `viewingSection` (the field's resting value) read as
+  // "drilled in", which would stop the pool ever being written.
+  it('treats undefined as not drilled in', () => {
+    expect(sectionRowsPatch(undefined, sectionData).emails).toHaveLength(3);
   });
 });
