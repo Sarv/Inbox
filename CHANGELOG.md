@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example domains (`example.com`, `partner.example`, patterned phone numbers).
 
 ### Fixed
+- The app refuses to start on a native SQLite module it cannot load, instead of
+  coming up as a fresh install. `better-sqlite3` opens its compiled addon lazily
+  — on the first database, not at import — and every core-database read wraps
+  that failure into an empty result, so a mismatched build showed no accounts,
+  no folders and no mail, with an onboarding screen inviting the user to add the
+  account again on top of data that was still on disk. (That reading is what let
+  a startup sweep delete two live mailbox databases.) Startup now opens a
+  throwaway in-memory database before anything else touches storage, and on
+  failure stops with a dialog and a log entry that name both ABI numbers, say
+  plainly that nothing was read, written or deleted, and give the one command
+  that fixes it.
 - Mail now appears while the first sync is still running, instead of only when
   the whole of it finishes. The view was refreshed at one point — after INBOX,
   Sent and Starred had each been pulled to their per-folder cap — so a
@@ -59,7 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one every 1.5 seconds and skipped entirely when a pass stored nothing, so a
   25,000-message first sync fills progressively rather than re-querying the list
   hundreds of times; and it is the folder ON SCREEN that is refreshed, not
-  whichever folder the parallel sync happens to be working on.
+  whichever folder the parallel sync happens to be working on. A reload is spent
+  only when the stored count has gone UP, so the zero-count tick that opens
+  every sync — and the reset to zero between one sync and the next — no longer
+  costs a re-query for rows that are not there yet.
 - A folder view could stop updating during a sync that was creating folders. The
   check for "is this the folder the user is looking at" resolved the arriving
   folder by path out of the renderer's cached folder list, which during a first
