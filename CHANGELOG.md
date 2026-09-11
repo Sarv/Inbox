@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [`docs/LICENSING-FAQ.md`](./docs/LICENSING-FAQ.md).
 
 ### Changed
+- Category labels are no longer prefixed on Sarv accounts, and no longer create
+  folders there. Sarv is our own product and its webmail already knows these
+  labels, so a categorised message is simply flagged with the bare category name
+  — `important`, `needs_response`, `invoices`. The `Sarv Inbox/…` folders an
+  earlier version created on Sarv matched no flag, so they surfaced nothing and
+  only cluttered the mailbox; they are now removed automatically, and only ever
+  once the server confirms a folder holds no mail. Every other provider (Gmail,
+  Outlook, …) is unchanged: there the label IS a mailbox and keeps its
+  `Sarv Inbox/` prefix, which is what stops our labels from passing as the
+  user's own folders.
 - The conversation ("chat") view is now rendered by the published
   [`@sarv-in/email-chat-view`](https://www.npmjs.com/package/@sarv-in/email-chat-view) package
   instead of a bundled component. The in-app `ChatView` and the ~1,000-line
