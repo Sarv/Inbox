@@ -6,7 +6,8 @@
 //
 //   A. Keyword   — STORE +FLAGS (<slug>) in place. Servers with `\*` in
 //                  PERMANENTFLAGS (sarv confirmed, Fastmail, most Dovecot).
-//                  In-place, no move, no copy, no duplication.
+//                  In-place, no move, no copy, no duplication — and nothing
+//                  created: the keyword IS the label, the server renders it.
 //   B. Gmail     — COPY to `Sarv Inbox/<Category>` label mailbox. Gmail treats
 //                  copy-to-a-label as "add label": the message keeps its INBOX
 //                  label and is NOT duplicated. (Colors are applied separately,
@@ -36,6 +37,15 @@ export interface CategoryLabel {
 /** Parent label/folder everything nests under. */
 export const SARV_LABEL_PARENT = 'Sarv Inbox';
 
+/**
+ * Matches the shared parent itself and anything nested under it, whatever the
+ * server's hierarchy delimiter. The one definition of "this mailbox is one of
+ * ours" for the providers that get the `Sarv Inbox/` prefix.
+ */
+export function isSarvLabelPath(path: string): boolean {
+  return path === SARV_LABEL_PARENT || /^Sarv Inbox[\\/.]/.test(path);
+}
+
 /** IMAP keyword atom (no spaces / specials) for the keyword strategy. */
 export function keywordForCategory(cat: CategoryLabel): string {
   const base = (cat.slug || cat.name || '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
@@ -48,6 +58,33 @@ export function folderPathForCategory(cat: CategoryLabel, delimiter: string): st
   return `${SARV_LABEL_PARENT}${delimiter}${leaf}`;
 }
 
+/**
+ * DELETE a mailbox, but ONLY once the server has confirmed it holds no mail.
+ *
+ * IMAP's DELETE destroys the messages in the mailbox, so "I think it's empty"
+ * is not good enough: an unreadable STATUS and an empty mailbox are the same
+ * silence and opposite facts. A probe that fails — gone already, denied, a
+ * connection blip — means "leave it alone", never "it was empty". Returns true
+ * only when a mailbox was actually deleted.
+ */
+async function deleteIfEmpty(client: IIMAPClient, path: string): Promise<boolean> {
+  if (!client.deleteMailbox) return false;
+  try {
+    const status = await client.getFolderStatus(path);
+    // A malformed answer is not a zero: no count means we never learned the
+    // count, which is the same "unreadable is not empty" rule as the catch.
+    if (typeof status?.messages !== 'number' || status.messages > 0) return false;
+  } catch {
+    return false; // absent, denied, or unreachable — all mean "don't touch it"
+  }
+  try {
+    await client.deleteMailbox(path);
+    return true;
+  } catch {
+    return false; // non-empty children, or denied — the server said no
+  }
+}
+
 export interface LabelStrategy {
   readonly kind: 'keyword' | 'gmail' | 'folder';
   /** Apply the category to the given messages (in `folderPath`). */
@@ -56,11 +93,17 @@ export interface LabelStrategy {
   remove(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void>;
   /**
    * Register the label up front, without applying it to any message. For the
-   * folder/Gmail strategies this CREATEs the label mailbox; for the keyword
-   * strategy it CREATEs the top-level registering folder (named == keyword) that
-   * Sarv needs to surface keyword-tagged mail under that label.
+   * folder/Gmail strategies this CREATEs the `Sarv Inbox/<Category>` mailbox.
+   * A no-op for the keyword strategy: there the keyword IS the label, so there
+   * is nothing to create — we flag the mail and the server renders it.
    */
   ensure(cat: CategoryLabel): Promise<void>;
+  /**
+   * One-time cleanup of a label scheme we no longer use, for THIS category.
+   * Called from the provisioning pass only (never from `apply`), so it may cost
+   * extra round-trips. Optional: a strategy with nothing to migrate omits it.
+   */
+  migrate?(cat: CategoryLabel): Promise<void>;
   /**
    * Rename the label in place when a category's display name changes. No-op for
    * the keyword strategy (its label is keyed on the stable slug, not the name).
@@ -70,24 +113,26 @@ export interface LabelStrategy {
 
 // ---- A: in-place keyword ---------------------------------------------------
 // The category is applied as an IMAP keyword (STORE +FLAGS) — in place, no move,
-// no copy. On most keyword-capable servers (Fastmail, Dovecot) that keyword
-// renders as a label on its own, so no folder is registered there. Sarv is the
-// exception: it only surfaces our category labels once a matching folder has been
-// registered via CREATE. So ONLY for Sarv accounts (`registerLabelFolder`) do we
-// register that folder — NESTED under the "Sarv Inbox" parent (e.g.
-// "Sarv Inbox/finance"), so all our category labels group tidily under one node
-// in the webmail sidebar instead of littering the top level. The mail is still
-// tagged in place with the keyword slug; the nested folder is purely the
-// label's registration/organisation. An earlier scheme registered these folders
-// flat at the top level — `ensure()` deletes any such leftover so the sidebar
-// converges on the nested layout (the flat folders never hold mail, so the
-// best-effort DELETE can't lose anything).
+// no copy, and NOTHING is created. Keyword-capable servers (Sarv, Fastmail, most
+// Dovecot) render the keyword as a label on their own, so there is no folder to
+// register: we flag the mail, the webmail shows the flag. On Sarv — our own
+// product — those labels are the bare category names (`important`,
+// `needs_response`, `invoices`), and its webmail already knows them.
+//
+// Every OTHER provider goes through the Gmail or folder strategy, where the
+// label IS a mailbox and carries the `Sarv Inbox/` prefix — there the prefix is
+// what stops our labels from passing as the user's own folders.
+//
+// An interim scheme did CREATE registration folders on Sarv, nested under
+// "Sarv Inbox" (e.g. "Sarv Inbox/Finance"). They matched no keyword, so they
+// surfaced nothing and only littered the sidebar. `migrate()` prunes that tree
+// on our own host — but only mailboxes the server CONFIRMS are empty (see
+// deleteIfEmpty).
 class KeywordStrategy implements LabelStrategy {
   readonly kind = 'keyword' as const;
   private delimiter?: string;
-  constructor(private client: IIMAPClient, private registerLabelFolder = false) {}
+  constructor(private client: IIMAPClient, private isSarvHost = false) {}
   async apply(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
-    await this.ensure(cat); // Sarv: register the label so the keyword surfaces
     await this.client.selectFolder(folderPath);
     await this.client.addFlags(uids, [keywordForCategory(cat)]);
   }
@@ -95,44 +140,45 @@ class KeywordStrategy implements LabelStrategy {
     await this.client.selectFolder(folderPath);
     await this.client.removeFlags(uids, [keywordForCategory(cat)]);
   }
-  async ensure(cat: CategoryLabel): Promise<void> {
-    // Only Sarv needs a registering folder; other keyword servers render the
-    // keyword natively, so creating a folder there would just be clutter.
-    if (!this.registerLabelFolder) return;
+  async ensure(_cat: CategoryLabel): Promise<void> {
+    // Nothing to provision: the keyword IS the label. Creating a mailbox to
+    // "register" it only adds a folder the user then has to look at.
+  }
+  /**
+   * Undo the interim nested scheme on our own host: drop `Sarv Inbox/<Category>`
+   * and, once the last one is gone, the now-childless `Sarv Inbox` parent.
+   *
+   * Runs from the provisioning pass only — NOT from `apply()` — so tagging a
+   * message stays a single STORE and never pays for a one-time cleanup.
+   */
+  async migrate(cat: CategoryLabel): Promise<void> {
+    if (!this.isSarvHost) return; // only ours to tidy
     if (this.delimiter === undefined) this.delimiter = (await this.client.getHierarchyDelimiter?.()) ?? '/';
-    // Register the label NESTED under "Sarv Inbox" (e.g. "Sarv Inbox/finance").
-    // Best-effort + idempotent — the parent and leaf usually already exist after
-    // the first provision.
     const nested = folderPathForCategory(cat, this.delimiter);
+    if (await deleteIfEmpty(this.client, nested)) {
+      logger.info(`[LabelStrategy] removed nested label "${nested}" (keyword labels need no folder)`);
+    }
+    // The parent goes only once nothing is left under it — CHECKED, not assumed.
+    // Plenty of servers will happily DELETE a mailbox that still has inferiors
+    // and take the whole subtree with it, so "the last category just migrated"
+    // is not a safe stand-in for "this node is childless".
+    if (await this.parentIsChildless() && await deleteIfEmpty(this.client, SARV_LABEL_PARENT)) {
+      logger.info(`[LabelStrategy] removed the now-empty "${SARV_LABEL_PARENT}" parent`);
+    }
+  }
+  /** True only when the server LISTS nothing under the parent. Unknown → false. */
+  private async parentIsChildless(): Promise<boolean> {
+    if (!this.client.listMailboxPaths) return false;
     try {
-      await this.client.createMailbox(SARV_LABEL_PARENT); // parent so the leaf nests
+      const paths = await this.client.listMailboxPaths();
+      return !paths.some((p) => p !== SARV_LABEL_PARENT && isSarvLabelPath(p));
     } catch {
-      /* parent already exists */
-    }
-    try {
-      await this.client.createMailbox(nested);
-      logger.info(`[LabelStrategy] Sarv keyword-label registered — CREATE "${nested}"`);
-    } catch (e) {
-      // Usually "already exists"; log at debug so a genuine denial is still visible.
-      logger.debug(`[LabelStrategy] CREATE "${nested}" skipped (exists/denied): ${(e as Error).message}`);
-    }
-    // Migrate away from the earlier flat top-level folder (name == keyword slug).
-    // Keyword labels never copy mail into the folder, so it's always empty — the
-    // DELETE is safe and no-ops once it's gone. Non-category folders (user labels
-    // like "Access"/"Interviews") never match a slug, so they're left untouched.
-    const flat = keywordForCategory(cat);
-    if (this.client.deleteMailbox) {
-      try {
-        await this.client.deleteMailbox(flat);
-        logger.info(`[LabelStrategy] removed legacy flat label "${flat}" (now nested under "${SARV_LABEL_PARENT}")`);
-      } catch {
-        /* absent already, or non-empty — leave it */
-      }
+      return false;
     }
   }
   async rename(_oldCat: CategoryLabel, _newCat: CategoryLabel): Promise<void> {
-    // The keyword (and thus the registered folder name) is the stable slug, not
-    // the display name, so a rename doesn't change it. No-op.
+    // The keyword is the stable slug, not the display name, so a rename doesn't
+    // change it. No-op.
   }
 }
 
@@ -224,10 +270,10 @@ export async function resolveLabelStrategy(
     return new GmailLabelStrategy(client);
   }
   if (client.supportsKeywords && (await client.supportsKeywords('INBOX'))) {
-    // Sarv (and only Sarv) needs each label registered as a top-level folder for
-    // the keyword to surface. Match the sarv.com IMAP domain EXACTLY — anchored
-    // so `mysarv.com` / `sarvodaya.com` etc. never trip it — since that folder
-    // registration should happen for our own servers, nowhere else.
+    // Is this our own host? Only there may `migrate()` delete the leftover
+    // "Sarv Inbox" folders an earlier scheme created. Match the sarv.com IMAP
+    // domain EXACTLY — anchored so `mysarv.com` / `sarvodaya.com` etc. never
+    // trip it — because nothing else's mailboxes are ours to remove.
     const isSarv = /(^|\.)sarv\.com$/i.test((host || '').trim().toLowerCase());
     return new KeywordStrategy(client, isSarv);
   }
