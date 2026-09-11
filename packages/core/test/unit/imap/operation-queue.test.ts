@@ -1253,6 +1253,44 @@ describe('OperationQueue — category / user labels', () => {
     expect(server.messageCount('Sarv Inbox/Bills')).toBe(0);
   });
 
+  // Breaks: provisioning manufactures a folder per category on a keyword server.
+  // On Sarv the webmail already knows these labels — we only flag the mail — so
+  // the pass must create nothing and must clear out the folders we used to make.
+  it('ensureCategoryLabelsExist creates no folders on Sarv and prunes the ones we left', async () => {
+    const server = await makeServer({ keywords: true });
+    Object.defineProperty(server, 'host', { get: () => 'imap.sarv.com' });
+    server.addFolder('Sarv Inbox');
+    server.addFolder('Sarv Inbox/Finance');
+    const h = await makeHarness({ server });
+
+    const n = await h.queue.ensureCategoryLabelsExist(
+      [{ slug: 'finance', name: 'Finance' }, { slug: 'needs_response', name: 'Needs Response' }],
+      'copy',
+    );
+
+    expect(n).toBe(2);
+    expect(server.callCount('createMailbox')).toBe(0);
+    const paths = await server.listMailboxPaths();
+    expect(paths.filter((p) => p.startsWith('Sarv Inbox'))).toEqual([]); // the tree is gone
+    expect(paths).not.toContain('finance'); // and no flat folder took its place
+  });
+
+  // Breaks: a server that refuses the cleanup DELETE makes provisioning report a
+  // failure, so the caller retries labels that are already there. The label is
+  // what matters; tidying up an old scheme is never allowed to fail it.
+  it('counts a label as provisioned even when its migration fails', async () => {
+    const server = await makeServer({ keywords: true });
+    Object.defineProperty(server, 'host', { get: () => 'sarv.com' });
+    server.addFolder('Sarv Inbox/Finance');
+    (server as any).getFolderStatus = async () => { throw new Error('NO [SERVERBUG] try later'); };
+    const h = await makeHarness({ server });
+
+    const n = await h.queue.ensureCategoryLabelsExist([{ slug: 'finance', name: 'Finance' }], 'copy');
+
+    expect(n).toBe(1);
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance'); // untouched, not destroyed
+  });
+
   it('renameCategoryLabel renames the label mailbox, and is a no-op on a keyword server', async () => {
     const gmail = await makeServer({ gmailLabels: true });
     const gmailHarness = await makeHarness({ server: gmail });

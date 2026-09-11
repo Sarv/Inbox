@@ -5,7 +5,7 @@ import type { IEmailStorage } from '../types/storage';
 import { logger } from '../utils/logger';
 
 import { isConnectionError, isRateLimited, isQuotaError, extractOpFailureDetail } from './imap-errors';
-import { resolveLabelStrategy, SARV_LABEL_PARENT, type FolderLabelMode } from './label-strategy';
+import { isSarvLabelPath, resolveLabelStrategy, type FolderLabelMode } from './label-strategy';
 
 /**
  * Operation types
@@ -332,7 +332,7 @@ export class OperationQueue {
     if (strategy.kind === 'keyword') return 0;
     const paths = await this.client.listMailboxPaths();
     // Match the parent and anything nested under it (any delimiter follows the name).
-    const targets = paths.filter((p) => p === SARV_LABEL_PARENT || /^Sarv Inbox[\\/.]/.test(p));
+    const targets = paths.filter(isSarvLabelPath);
     // Deepest first so children are removed before their parent.
     targets.sort((a, b) => b.length - a.length);
     let n = 0;
@@ -349,13 +349,15 @@ export class OperationQueue {
     if (!this.client) return 0;
     const strategy = await resolveLabelStrategy(this.client, this.client.host ?? '', mode);
     // Provision (register) each label up front. For folder/Gmail this CREATEs the
-    // label mailbox; for the keyword strategy `ensure()` is a no-op on plain
-    // keyword servers EXCEPT on Sarv, where it CREATEs the registering folder
-    // NESTED under "Sarv Inbox" (e.g. "Sarv Inbox/finance") that Sarv needs to
-    // surface the label — and prunes any legacy flat top-level folder from the
-    // earlier scheme. We previously EARLY-RETURNED for keyword and never
-    // provisioned — so Sarv labels were never created. Always run the loop now;
-    // ensure() self-gates.
+    // `Sarv Inbox/<Category>` mailbox. For the keyword strategy (Sarv included)
+    // `ensure()` is a no-op: the keyword IS the label, so there is nothing to
+    // create — we flag the mail and the webmail renders it. The loop still runs
+    // so every strategy answers for itself.
+    //
+    // `migrate()` runs HERE and not on the apply path: it is the one-time
+    // cleanup of an older scheme (the "Sarv Inbox/<Category>" folders we used to
+    // create on our own host), so it may cost round-trips that tagging a message
+    // must not. A failure to clean up is never a failure to provision.
     logger.info(`[LabelStrategy] label mechanism = "${strategy.kind}" (${categories.length} categories)`);
     let n = 0;
     for (const c of categories) {
@@ -364,6 +366,11 @@ export class OperationQueue {
         n++;
       } catch (e) {
         logger.warn(`ensure label failed for ${c.slug}: ${(e as Error).message}`);
+      }
+      try {
+        await strategy.migrate?.({ slug: c.slug, name: c.name });
+      } catch (e) {
+        logger.debug(`migrate label failed for ${c.slug}: ${(e as Error).message}`);
       }
     }
     return n;

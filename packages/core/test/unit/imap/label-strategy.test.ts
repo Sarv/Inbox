@@ -6,6 +6,7 @@ import { setLogLevel } from '../../../src/utils/logger';
 import {
   SARV_LABEL_PARENT,
   folderPathForCategory,
+  isSarvLabelPath,
   keywordForCategory,
   resolveLabelStrategy,
 } from '../../../src/imap/label-strategy';
@@ -23,8 +24,13 @@ import {
 //   - label provisioning is idempotent and survives "already exists" / denied /
 //     absent-optional-method, because it runs opportunistically on every apply
 //
-// The nesting under "Sarv Inbox" matters too: an earlier scheme littered the
-// webmail sidebar with flat top-level folders, which `ensure()` now prunes.
+// Where the label LIVES matters too, and the two answers are deliberate: on a
+// keyword server (Sarv included) the keyword IS the label, so NOTHING is created
+// — we flag the mail and the webmail renders it; every other provider gets a
+// real `Sarv Inbox/<Category>` mailbox, and that prefix is what keeps our labels
+// from passing as the user's folders. An interim scheme created registration
+// folders on Sarv too; `migrate()` prunes them, WITHOUT ever deleting a mailbox
+// the server hasn't confirmed is empty.
 
 setLogLevel('error'); // provisioning logs an INFO line per CREATE
 
@@ -108,36 +114,41 @@ describe('resolveLabelStrategy — capability, not guesswork', () => {
     expect((await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy')).kind).toBe('folder');
   });
 
-  it('treats an unknown (empty) host as "not ours" — no folders registered', async () => {
+  it('treats an unknown (empty) host as "not ours" — nothing created, nothing deleted', async () => {
     const server = await makeServer({ keywords: true });
+    server.addFolder('Sarv Inbox/Finance');
     const strategy = await resolveLabelStrategy(server as any, '', 'copy');
     await strategy.ensure(FINANCE);
+    await strategy.migrate!(FINANCE);
 
     expect(strategy.kind).toBe('keyword');
     expect(server.callCount('createMailbox')).toBe(0);
+    expect(server.callCount('deleteMailbox')).toBe(0);
   });
 
-  // The registering folder is created for OUR servers only, so the host match is
-  // anchored — a look-alike domain must never get folders created in it.
+  // Only OUR server's leftovers are ours to delete, so the host match is
+  // anchored — a look-alike domain must never have mailboxes removed from it.
   it.each(['sarv.com', 'imap.sarv.com', 'IMAP.SARV.COM', '  mail.sarv.com  '])(
-    'registers the label folder for the sarv.com domain (%s)',
+    'recognises the sarv.com domain (%s) for the leftover-folder cleanup',
     async (host) => {
       const server = await makeServer({ keywords: true });
+      server.addFolder('Sarv Inbox/Finance');
       const strategy = await resolveLabelStrategy(server as any, host, 'copy');
-      await strategy.ensure(FINANCE);
+      await strategy.migrate!(FINANCE);
       expect(strategy.kind).toBe('keyword');
-      expect(server.callCount('createMailbox')).toBeGreaterThan(0);
+      expect(await server.listMailboxPaths()).not.toContain('Sarv Inbox/Finance');
     },
   );
 
   it.each(['mysarv.com', 'sarvodaya.com', 'sarv.com.evil.test', 'imap.notsarv.com'])(
-    'does NOT register folders on a look-alike host (%s)',
+    'deletes nothing on a look-alike host (%s)',
     async (host) => {
       const server = await makeServer({ keywords: true });
+      server.addFolder('Sarv Inbox/Finance');
       const strategy = await resolveLabelStrategy(server as any, host, 'copy');
-      await strategy.ensure(FINANCE);
+      await strategy.migrate!(FINANCE);
       expect(strategy.kind).toBe('keyword');
-      expect(server.callCount('createMailbox')).toBe(0);
+      expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
     },
   );
 });
@@ -167,61 +178,84 @@ describe('keyword strategy — in place, no duplication', () => {
     expect(server.flagsOf('INBOX', 1)).toEqual([]);
   });
 
-  it('on Sarv, registers the label NESTED under the parent and prunes the legacy flat folder', async () => {
+  // Breaks: we start manufacturing folders in the user's own mailbox again. On
+  // Sarv the webmail already knows these labels — the flag is the whole job, and
+  // a folder per category is clutter the user has to look at.
+  it('on Sarv, flags the mail and creates NO folder for it', async () => {
     const server = await makeServer({ keywords: true });
-    server.addFolder('finance'); // leftover from the earlier flat scheme
-    const created = vi.spyOn(server, 'createMailbox');
-    const deleted = vi.spyOn(server, 'deleteMailbox');
     const strategy = await resolveLabelStrategy(server as any, 'imap.sarv.com', 'copy');
 
     await strategy.apply('INBOX', [1], FINANCE);
+    await strategy.ensure(FINANCE); // the provisioning pass asks too
 
-    expect(created.mock.calls.map(([p]) => p)).toEqual(['Sarv Inbox', 'Sarv Inbox/Finance']);
-    expect(deleted).toHaveBeenCalledWith('finance');
-    expect(server.flagsOf('INBOX', 1)).toEqual(['finance']); // still tagged in place
+    expect(server.flagsOf('INBOX', 1)).toEqual(['finance']); // the bare category name
+    expect(server.callCount('createMailbox')).toBe(0);
+    expect(await server.listMailboxPaths()).toEqual(['INBOX']);
   });
 
-  it('provisions idempotently and asks for the hierarchy delimiter only once', async () => {
+  // Breaks: tagging mail gets slower the longer the app runs. The one-time
+  // migration probes and DELETEs; on the apply path that is a round-trip per
+  // category per message, forever, to clean something up once.
+  it('never pays for the migration on the apply path', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder('Sarv Inbox/Finance');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.apply('INBOX', [1], FINANCE);
+
+    expect(server.callCount('deleteMailbox')).toBe(0);
+    expect(server.callCount('getFolderStatus')).toBe(0);
+  });
+
+
+  // Breaks: the migration asks for the delimiter on every category instead of
+  // once — the nested path it has to find is delimiter-dependent.
+  it('asks for the hierarchy delimiter only once across migrations', async () => {
     const server = await makeServer({ keywords: true, hierarchyDelimiter: '.' });
+    server.addFolder('Sarv Inbox.Finance');
     const delimiter = vi.spyOn(server, 'getHierarchyDelimiter');
     const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
 
-    await strategy.ensure(FINANCE);
-    await strategy.ensure(FINANCE);
+    await strategy.migrate!(FINANCE);
+    await strategy.migrate!(FINANCE);
 
     expect(delimiter).toHaveBeenCalledTimes(1);
-    expect(await server.listMailboxPaths()).toContain('Sarv Inbox.Finance');
+    expect(await server.listMailboxPaths()).not.toContain('Sarv Inbox.Finance');
   });
 
-  it('survives an "already exists" parent, a denied leaf, and a refused legacy DELETE', async () => {
+  it('survives a refused DELETE and still tags the mail', async () => {
     const server = await makeServer({ keywords: true });
-    (server as any).createMailbox = async () => { throw new Error('NO [ALREADYEXISTS] Mailbox already exists'); };
+    server.addFolder('Sarv Inbox');
+    server.addFolder('Sarv Inbox/Finance');
     (server as any).deleteMailbox = async () => { throw new Error('NO mailbox is not empty'); };
     const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
 
-    await expect(strategy.ensure(FINANCE)).resolves.toBeUndefined();
-    // The tagging itself still happens — provisioning is best-effort, not a gate.
+    await expect(strategy.migrate!(FINANCE)).resolves.toBeUndefined();
+    // The tagging is independent of the cleanup — it is never gated on it.
     await expect(strategy.apply('INBOX', [1], FINANCE)).resolves.toBeUndefined();
     expect(server.flagsOf('INBOX', 1)).toEqual(['finance']);
   });
 
   it('tolerates a client with no deleteMailbox at all (optional method)', async () => {
     const server = await makeServer({ keywords: true });
+    server.addFolder('Sarv Inbox/Finance');
     (server as any).deleteMailbox = undefined;
     const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
 
     await expect(strategy.ensure(FINANCE)).resolves.toBeUndefined();
+    await expect(strategy.migrate!(FINANCE)).resolves.toBeUndefined();
     expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
   });
 
   it('defaults to "/" when the client cannot report a hierarchy delimiter', async () => {
     const server = await makeServer({ keywords: true, hierarchyDelimiter: '.' });
+    server.addFolder('Sarv Inbox/Finance');
     (server as any).getHierarchyDelimiter = undefined;
     const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
 
-    await strategy.ensure(FINANCE);
+    await strategy.migrate!(FINANCE);
 
-    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
+    expect(await server.listMailboxPaths()).not.toContain('Sarv Inbox/Finance');
   });
 
   it('rename is a no-op — the keyword is keyed on the stable slug, not the name', async () => {
@@ -231,6 +265,163 @@ describe('keyword strategy — in place, no duplication', () => {
 
     await expect(strategy.rename(FINANCE, { slug: 'finance', name: 'Money' })).resolves.toBeUndefined();
     expect(renamed).not.toHaveBeenCalled();
+  });
+});
+
+describe('migrate — undoing the interim nested scheme, without losing mail', () => {
+  const INVOICES = { slug: 'invoices', name: 'Invoices' };
+
+  // Breaks: the interim "Sarv Inbox/Finance" tree stays in Sarv webmail forever
+  // next to the flat labels that replaced it — two entries for one category.
+  it('drops the nested leaf and then the childless parent', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder(SARV_LABEL_PARENT);
+    server.addFolder('Sarv Inbox/Finance');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(await server.listMailboxPaths()).not.toContain('Sarv Inbox/Finance');
+    expect(await server.listMailboxPaths()).not.toContain(SARV_LABEL_PARENT);
+  });
+
+  // Breaks: DATA LOSS. IMAP's DELETE destroys the messages in the mailbox, so a
+  // category folder someone actually filed mail into must survive the cleanup.
+  it('refuses to delete a nested label that holds mail', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder('Sarv Inbox/Finance');
+    server.addMessages('Sarv Inbox/Finance', 3);
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
+    expect(server.messageCount('Sarv Inbox/Finance')).toBe(3);
+  });
+
+  // Breaks: DATA LOSS again, one level up. Many servers delete a mailbox that
+  // still has inferiors and take the subtree with it, so the parent may only go
+  // once the server LISTS nothing under it — not merely once we migrated a leaf.
+  it('leaves the parent alone while another category is still nested under it', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder(SARV_LABEL_PARENT);
+    server.addFolder('Sarv Inbox/Finance');
+    server.addFolder('Sarv Inbox/Invoices');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(await server.listMailboxPaths()).toContain(SARV_LABEL_PARENT);
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Invoices');
+
+    // ...and once the last leaf migrates, the parent goes with it.
+    await strategy.migrate!(INVOICES);
+    expect(await server.listMailboxPaths()).not.toContain(SARV_LABEL_PARENT);
+  });
+
+  // Breaks: THE lesson from the orphan-DB sweep — an unreadable store and an
+  // empty store are the same value and opposite facts. A STATUS that fails
+  // (blip, denied, gone) must mean "leave it", never "it was empty".
+  it('deletes nothing when the server will not say how much is in there', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder(SARV_LABEL_PARENT);
+    server.addFolder('Sarv Inbox/Finance');
+    (server as any).getFolderStatus = async () => { throw new Error('NO [SERVERBUG] try again'); };
+    const deleted = vi.spyOn(server, 'deleteMailbox');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(deleted).not.toHaveBeenCalled();
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
+  });
+
+  // Breaks: a server that answers STATUS without a message count is read as
+  // "zero messages" and the mailbox is destroyed on the strength of a field
+  // that was never there.
+  it('deletes nothing when STATUS comes back without a message count', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder('Sarv Inbox/Finance');
+    (server as any).getFolderStatus = async () => ({ uidNext: 1, uidValidity: 1, unseen: 0 });
+    const deleted = vi.spyOn(server, 'deleteMailbox');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(deleted).not.toHaveBeenCalled();
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
+  });
+
+  // Breaks: the parent survives on a client that cannot LIST, because "no
+  // children found" would be read out of an answer we never got.
+  it('leaves the parent alone when the client cannot list mailboxes', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder(SARV_LABEL_PARENT);
+    (server as any).listMailboxPaths = undefined;
+    const deleted = vi.spyOn(server, 'deleteMailbox');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(deleted).not.toHaveBeenCalled();
+  });
+
+  // Same, for a LIST that errors rather than being absent.
+  it('leaves the parent alone when listing fails', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder(SARV_LABEL_PARENT);
+    (server as any).listMailboxPaths = async () => { throw new Error('NO cannot list'); };
+    const deleted = vi.spyOn(server, 'deleteMailbox');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(deleted).not.toHaveBeenCalled();
+  });
+
+  // Breaks: we start deleting mailboxes on servers that were never ours to
+  // tidy — a Fastmail/Dovecot account with a folder called "Sarv Inbox".
+  it('does nothing at all on a keyword server that is not ours', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder('Sarv Inbox/Finance');
+    const deleted = vi.spyOn(server, 'deleteMailbox');
+    const strategy = await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy');
+
+    await strategy.migrate!(FINANCE);
+
+    expect(deleted).not.toHaveBeenCalled();
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
+  });
+
+  // Breaks: the prefixed providers get their labels deleted out from under them.
+  // Only the keyword strategy has an old scheme to migrate away from.
+  it.each([
+    ['gmail', 'imap.gmail.com', { gmailLabels: true } as FakeImapServerOptions],
+    ['folder', 'imap.outlook.test', { keywords: false } as FakeImapServerOptions],
+  ])('the %s strategy has nothing to migrate', async (kind, host, options) => {
+    const server = await makeServer(options);
+    const strategy = await resolveLabelStrategy(server as any, host, 'copy');
+
+    expect(strategy.kind).toBe(kind);
+    expect(strategy.migrate).toBeUndefined();
+  });
+});
+
+describe('isSarvLabelPath', () => {
+  // Breaks: the cleanup action either misses our label tree or eats the user's
+  // folders. It is the one definition of "this mailbox is ours".
+  it('matches the parent and anything under it, whatever the delimiter', () => {
+    expect(isSarvLabelPath(SARV_LABEL_PARENT)).toBe(true);
+    expect(isSarvLabelPath('Sarv Inbox/Finance')).toBe(true);
+    expect(isSarvLabelPath('Sarv Inbox.Finance')).toBe(true);
+    expect(isSarvLabelPath('Sarv Inbox\\Finance')).toBe(true);
+  });
+
+  it('does not match a folder that merely starts with the same words', () => {
+    expect(isSarvLabelPath('Sarv Inbox Archive')).toBe(false);
+    expect(isSarvLabelPath('INBOX/Sarv Inbox')).toBe(false);
+    expect(isSarvLabelPath('finance')).toBe(false); // a plain folder, not our tree
+    expect(isSarvLabelPath('')).toBe(false);
   });
 });
 
