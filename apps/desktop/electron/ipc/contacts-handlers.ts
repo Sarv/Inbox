@@ -4,10 +4,10 @@
  * Handles contact management operations.
  */
 
-import { classifyDomainPhones, classifyDomainUrls, htmlToPlainText, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
+import { classifyDomainPhones, classifyDomainUrls, htmlMiningWindow, htmlToPlainText, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import { requireStorage, getStorageFor } from '../shared';
+import { requireStorage, getStorageFor, getAllAccountRuntimes } from '../shared';
 const logger = createLogger('contacts-handlers');
 
 /**
@@ -28,10 +28,12 @@ function storageForAccount(accountId?: string | null): ReturnType<typeof require
 
 // Cap the per-email body length fed to signal extraction (see usage below).
 const MAX_MINE_BODY_CHARS = 64 * 1024;
-// Only the TAIL of a raw body is converted for mining. A signature is the last
-// thing in a message, and html-to-text is CPU-bound and synchronous: converting
-// 64KB x 120 emails x every contact froze the main process for the length of a
-// scan (the spinning cursor). 12KB comfortably covers a signature block.
+// How much of a raw body is converted for mining. html-to-text is CPU-bound and
+// synchronous: converting 64KB x 120 emails x every contact froze the main
+// process for the length of a scan (the spinning cursor). The budget is spent
+// on BOTH ENDS of the body (htmlMiningWindow) rather than the tail alone, so a
+// top-posted reply's signature -- which sits above the quoted chain, not below
+// it -- is inside the window. 12KB comfortably covers two signature blocks.
 const MAX_CONVERT_CHARS = 12 * 1024;
 // Give up on a contact only once we have FOUND something. Signatures repeat, so
 // four hits is plenty and the rest is wasted work — but a contact that has
@@ -50,6 +52,65 @@ const HARD_CONVERSION_CEILING = 120;
 // stretch — long enough to show the spinner. Slices are cheap; long ones aren't.
 const YIELD_EVERY_CONTACTS = 1;
 const YIELD_EVERY_CONVERSIONS = 20;
+// How much of a contact's inbound mail mining looks at. Sampled generously (not
+// just the last few): a high-volume sender's own signature may sit in older mail
+// while the recent ones are content-heavy. Applied per account AND to the merged
+// result, so connecting a second account widens what is searched without
+// multiplying what is converted.
+const RECENT_MAIL_PER_CONTACT = 120;
+
+/**
+ * Somewhere a contact's mail can be read from. The contact DIRECTORY is shared
+ * by every account, but `emails` is not — a person who writes to two of the
+ * user's addresses is one row here and two mailboxes' worth of mail, and their
+ * signature may only ever have been sent to one of them.
+ */
+type MailSource = {
+  getRecentInboundEmailsForContact: (email: string, limit?: number) => Promise<unknown[]>;
+  getNewestEmailDateBySender?: () => Map<string, number>;
+};
+
+/**
+ * Every mailbox whose mail can be mined, newest-first per source.
+ *
+ * Before the directory was unified, a scan's contacts and a scan's mail came
+ * from the same database and reading one account was self-consistent. Now the
+ * contact list is everyone's and the mail is one account's: mining only the
+ * active account leaves every contact who writes to a different address of the
+ * user's looking like a contact with no signature at all. Falls back to the
+ * caller's own storage when no runtimes are registered (the pre-multi-account
+ * default slot), which is exactly the old behaviour.
+ */
+function mailSourcesFor(storage: ReturnType<typeof requireStorage>): MailSource[] {
+  const runtimes = getAllAccountRuntimes();
+  const sources = runtimes.map(([, rt]) => rt.storage as unknown as MailSource).filter(Boolean);
+  return sources.length > 0 ? sources : [storage as unknown as MailSource];
+}
+
+/**
+ * Newest inbound mail per sender across every mailbox, taking the MAX.
+ *
+ * This is the watermark the incremental skip compares against, and the numbers
+ * it guards are stored once in the shared directory. Reading it from one
+ * account would park the watermark at that account's newest mail while another
+ * account holds newer mail from the same person — whose signature would then
+ * never be re-read.
+ */
+function newestBySenderAcross(sources: MailSource[]): Map<string, number> {
+  const merged = new Map<string, number>();
+  for (const source of sources) {
+    let one: Map<string, number>;
+    try {
+      one = source.getNewestEmailDateBySender?.() ?? new Map();
+    } catch {
+      continue; // no fast path for this account — its contacts are simply re-mined
+    }
+    for (const [email, newest] of one) {
+      if ((merged.get(email) ?? 0) < newest) merged.set(email, newest);
+    }
+  }
+  return merged;
+}
 
 /**
  * Deterministic cross-domain phone classification. Mines phones from each
@@ -57,9 +118,14 @@ const YIELD_EVERY_CONVERSIONS = 20;
  * office lines from personal/direct numbers (see @sarvinbox/core phone-classifier).
  * Writes companyPhone/personalPhone into each contact's enrichment. Runs at the
  * end of a scan; returns how many contacts were updated.
+ *
+ * `storage` owns the contact list and every write (all of it shared, so any
+ * account's connection reaches the same rows); the MAIL is read from every
+ * account.
  */
 async function classifyContactPhones(storage: ReturnType<typeof requireStorage>): Promise<number> {
   const contacts = await storage.getContacts({ limit: 20000, offset: 0 });
+  const mailSources = mailSourcesFor(storage);
   const senders: SenderPhones[] = [];
   const urlSenders: SenderUrls[] = [];
   const linkedinByEmail = new Map<string, string>();
@@ -77,10 +143,7 @@ async function classifyContactPhones(storage: ReturnType<typeof requireStorage>)
   // fed to the classifier, so the domain-wide switchboard test is unaffected.
   const priorState = (storage as any).getPhoneMiningState?.() as
     Map<string, { through: number; phones: Record<string, number> }> | undefined;
-  let newestBySender = new Map<string, number>();
-  try {
-    newestBySender = (storage as any).getNewestEmailDateBySender?.() ?? new Map();
-  } catch { /* no fast path — every contact is simply re-mined */ }
+  const newestBySender = newestBySenderAcross(mailSources);
   let skipped = 0;
   let scanned = 0;
   for (const c of contacts) {
@@ -109,9 +172,21 @@ async function classifyContactPhones(storage: ReturnType<typeof requireStorage>)
       continue;
     }
 
-    const emails = await storage.getRecentInboundEmailsForContact(c.email, 120) as Array<{
+    // Newest first ACROSS accounts, not newest-first within each: the
+    // conversion budget below is spent in order, so an unmerged concatenation
+    // would spend it all on the first account and never reach the mailbox the
+    // signature actually arrived in.
+    const perSource = await Promise.all(
+      mailSources.map((source) => source
+        .getRecentInboundEmailsForContact(c.email, RECENT_MAIL_PER_CONTACT)
+        .catch(() => [] as unknown[])),
+    );
+    const emails = (perSource.flat() as Array<{
+      date?: number | null;
       clean_body?: string | null; raw_body?: string | null; cleanBody?: string | null; rawBody?: string | null;
-    }>;
+    }>)
+      .sort((a, b) => (b.date ?? 0) - (a.date ?? 0))
+      .slice(0, RECENT_MAIL_PER_CONTACT);
     if (!emails.length) continue;
     minedEmails.add(c.email.toLowerCase());
     let converted = 0;
@@ -136,9 +211,11 @@ async function classifyContactPhones(storage: ReturnType<typeof requireStorage>)
       //
       // Raw is HTML, and mining it directly scrapes numeric junk out of
       // attributes (one sender yielded 7 bogus numbers), so convert to text
-      // first. Tail only: a signature is the last thing in a message, and
-      // html-to-text is CPU-bound.
-      const rawCapped = raw.length > MAX_CONVERT_CHARS ? raw.slice(-MAX_CONVERT_CHARS) : raw;
+      // first. Both ends, not the tail: html-to-text is CPU-bound so the body
+      // is still capped, but a reply is top-posted and the sender's own
+      // signature is at the TOP -- a tail-only window kept the last signature
+      // of the quoted chain, which belongs to somebody else.
+      const rawCapped = htmlMiningWindow(raw, MAX_CONVERT_CHARS);
       let fromRaw = '';
       const budgetLeft = signatureHits === 0
         ? converted < HARD_CONVERSION_CEILING
@@ -264,6 +341,127 @@ async function classifyContactPhones(storage: ReturnType<typeof requireStorage>)
   logger.info(`[Contacts] URL classification: ${urlPerEmail.size} contacts, ${urlPerDomain.size} company domains`);
 
   return updated;
+}
+
+/**
+ * Extract contacts from every email in ONE mailbox and record that mailbox's
+ * sender stats, returning how many emails were read.
+ *
+ * Split out of the scan handler so a scan can walk EVERY connected account. The
+ * contact directory is shared, but `emails` and `sender_stats` are not: a scan
+ * that read only the active account left every correspondent of the user's
+ * other addresses missing from a list that is supposed to be one list, and they
+ * only appeared if the user happened to switch accounts and scan again.
+ *
+ * Stats stay per-mailbox deliberately. They are counts of THIS mailbox's mail
+ * and are written absolutely, so tallying them across accounts would attribute
+ * one account's mail to another and make the totals disagree with the folder.
+ */
+async function scanMailbox(
+  storage: ReturnType<typeof requireStorage>,
+  label: string,
+): Promise<number> {
+  const folders = await storage.getFolders();
+  let scanned = 0;
+
+  // address -> absolute counts observed during THIS scan.
+  type Tally = {
+    receivedCount: number; readCount: number; deletedCount: number;
+    repliedCount: number; sentToCount: number;
+  };
+  const tallies = new Map<string, Tally>();
+  const tallyFor = (addr: string): Tally => {
+    const key = addr.toLowerCase().trim();
+    let t = tallies.get(key);
+    if (!t) {
+      t = { receivedCount: 0, readCount: 0, deletedCount: 0, repliedCount: 0, sentToCount: 0 };
+      tallies.set(key, t);
+    }
+    return t;
+  };
+
+  for (const folder of folders) {
+    const folderPath = folder.path?.toLowerCase() || '';
+    const isSentFolder = folderPath.includes('sent') || folderPath.includes('[gmail]/sent');
+    const isTrashFolder = folderPath.includes('trash') || folderPath.includes('deleted');
+    const direction = isSentFolder ? 'sent' : 'received';
+
+    let offset = 0;
+    let inFolder = 0;
+    const batchSize = 500;
+    let hasMore = true;
+
+    while (hasMore) {
+      const emails = await storage.getEmailsByFolder(folder.id, { limit: batchSize, offset });
+
+      if (emails.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      let inBatch = 0;
+      for (const email of emails) {
+        // Same reason as the contact loop: these awaits resolve as
+        // microtasks over synchronous SQLite, so nothing returns to the
+        // event loop until the whole folder is done.
+        if (++inBatch % 100 === 0) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        await storage.extractContactsFromEmail(email, direction);
+
+        // Counts are TALLIED here and written once at the end, not upserted
+        // per email. `upsertSenderStats` ADDS to the stored value, so doing
+        // it inline meant every press of "Scan" stacked a fresh full pass on
+        // top of the previous totals — counters drifted upward without
+        // bound and produced impossible states (read_count 64 against
+        // received_count 62 on a mailbox holding 5 of that sender's mails).
+        // A full scan reads every email, so it can state the totals
+        // absolutely and make re-scanning idempotent.
+        if (isSentFolder && email.toAddress) {
+          const isReply = !!email.inReplyTo || (email.subject || '').match(/^Re:/i) !== null;
+          for (const addr of parseAddresses(email.toAddress)) {
+            const t = tallyFor(addr);
+            t.sentToCount += 1;
+            if (isReply) t.repliedCount += 1;
+          }
+        } else if (!isSentFolder && email.fromAddress) {
+          const t = tallyFor(email.fromAddress);
+          t.receivedCount += 1;
+          if ((email.tags || '').includes('|read|')) t.readCount += 1;
+          if (isTrashFolder) t.deletedCount += 1;
+        }
+      }
+
+      scanned += emails.length;
+      inFolder += emails.length;
+      offset += batchSize;
+
+      if (emails.length < batchSize) {
+        hasMore = false;
+      }
+    }
+
+    // Report what was actually read, not the paging offset — a folder holding
+    // one email used to log "500 emails" because `offset` jumps by batchSize.
+    logger.info(`[Contacts] ${label}: scanned folder "${folder.name}": ${inFolder} emails (${direction})`);
+  }
+
+  // Write the tallied totals absolutely, so re-scanning converges instead of
+  // accumulating. Falls back to the additive upsert only on storage impls
+  // without the absolute setter (in which case re-scan drift remains, but
+  // behaviour is unchanged from before).
+  if (typeof (storage as any).setSenderStatsCounts === 'function') {
+    await (storage as any).setSenderStatsCounts(
+      [...tallies.entries()].map(([email, t]) => ({ email, ...t })),
+    );
+  } else {
+    for (const [email, t] of tallies) {
+      await storage.upsertSenderStats({ email, ...t });
+    }
+  }
+  logger.info(`[Contacts] ${label}: recorded sender stats for ${tallies.size} addresses`);
+
+  return scanned;
 }
 
 export function registerContactsHandlers(): void {
@@ -456,103 +654,25 @@ export function registerContactsHandlers(): void {
   ipcMain.handle('contacts:scan', async () => {
     try {
       const storage = requireStorage();
-      logger.info('[Contacts] Starting full scan of all folders...');
+      // The directory is shared, so any account's connection writes the same
+      // rows — but the MAIL to read them out of lives in each account's own DB.
+      const runtimes = getAllAccountRuntimes();
+      const mailboxes: Array<[string, ReturnType<typeof requireStorage>]> =
+        runtimes.length > 0
+          ? runtimes.map(([id, rt]) => [id, rt.storage as ReturnType<typeof requireStorage>])
+          : [['this account', storage]];
+      logger.info(`[Contacts] Starting full scan of ${mailboxes.length} mailbox(es)...`);
 
-      const folders = await storage.getFolders();
       let totalScanned = 0;
-
-      // address -> absolute counts observed during THIS scan.
-      type Tally = {
-        receivedCount: number; readCount: number; deletedCount: number;
-        repliedCount: number; sentToCount: number;
-      };
-      const tallies = new Map<string, Tally>();
-      const tallyFor = (addr: string): Tally => {
-        const key = addr.toLowerCase().trim();
-        let t = tallies.get(key);
-        if (!t) {
-          t = { receivedCount: 0, readCount: 0, deletedCount: 0, repliedCount: 0, sentToCount: 0 };
-          tallies.set(key, t);
-        }
-        return t;
-      };
-
-      for (const folder of folders) {
-        const folderPath = folder.path?.toLowerCase() || '';
-        const isSentFolder = folderPath.includes('sent') || folderPath.includes('[gmail]/sent');
-        const isTrashFolder = folderPath.includes('trash') || folderPath.includes('deleted');
-        const direction = isSentFolder ? 'sent' : 'received';
-
-        let offset = 0;
-        const batchSize = 500;
-        let hasMore = true;
-
-        while (hasMore) {
-          const emails = await storage.getEmailsByFolder(folder.id, { limit: batchSize, offset });
-
-          if (emails.length === 0) {
-            hasMore = false;
-            break;
-          }
-
-          let inBatch = 0;
-          for (const email of emails) {
-            // Same reason as the contact loop: these awaits resolve as
-            // microtasks over synchronous SQLite, so nothing returns to the
-            // event loop until the whole folder is done.
-            if (++inBatch % 100 === 0) {
-              await new Promise((resolve) => setImmediate(resolve));
-            }
-            await storage.extractContactsFromEmail(email, direction);
-
-            // Counts are TALLIED here and written once at the end, not upserted
-            // per email. `upsertSenderStats` ADDS to the stored value, so doing
-            // it inline meant every press of "Scan" stacked a fresh full pass on
-            // top of the previous totals — counters drifted upward without
-            // bound and produced impossible states (read_count 64 against
-            // received_count 62 on a mailbox holding 5 of that sender's mails).
-            // A full scan reads every email, so it can state the totals
-            // absolutely and make re-scanning idempotent.
-            if (isSentFolder && email.toAddress) {
-              const isReply = !!email.inReplyTo || (email.subject || '').match(/^Re:/i) !== null;
-              for (const addr of parseAddresses(email.toAddress)) {
-                const t = tallyFor(addr);
-                t.sentToCount += 1;
-                if (isReply) t.repliedCount += 1;
-              }
-            } else if (!isSentFolder && email.fromAddress) {
-              const t = tallyFor(email.fromAddress);
-              t.receivedCount += 1;
-              if ((email.tags || '').includes('|read|')) t.readCount += 1;
-              if (isTrashFolder) t.deletedCount += 1;
-            }
-          }
-
-          totalScanned += emails.length;
-          offset += batchSize;
-
-          if (emails.length < batchSize) {
-            hasMore = false;
-          }
-        }
-
-        logger.info(`[Contacts] Scanned folder "${folder.name}": ${offset} emails (${direction})`);
-      }
-
-      // Write the tallied totals absolutely, so re-scanning converges instead of
-      // accumulating. Falls back to the additive upsert only on storage impls
-      // without the absolute setter (in which case re-scan drift remains, but
-      // behaviour is unchanged from before).
-      if (typeof (storage as any).setSenderStatsCounts === 'function') {
-        await (storage as any).setSenderStatsCounts(
-          [...tallies.entries()].map(([email, t]) => ({ email, ...t })),
-        );
-      } else {
-        for (const [email, t] of tallies) {
-          await storage.upsertSenderStats({ email, ...t });
+      for (const [accountId, mailbox] of mailboxes) {
+        try {
+          totalScanned += await scanMailbox(mailbox, accountId);
+        } catch (err) {
+          // One mailbox failing (a locked DB mid-sync, usually transient) must
+          // not cost the scan every OTHER account's contacts.
+          logger.error(`[Contacts] Scan skipped mailbox ${accountId}:`, err);
         }
       }
-      logger.info(`[Contacts] Recorded sender stats for ${tallies.size} addresses`);
 
       const total = await storage.getContactsCount();
       logger.info(`[Contacts] Scan complete. Total emails scanned: ${totalScanned}, Total contacts: ${total}`);
