@@ -25,6 +25,10 @@ interface Folder {
   subscribed?: boolean;
   backfillComplete?: boolean;
   serverMessageCount?: number;
+  // Sync state the duplicate-mailbox collapse reads: two names are only folded
+  // together when the server proved they are one store.
+  uidValidity?: number;
+  totalCount?: number;
   specialUse?: string;
   allMail?: boolean;
 }
@@ -48,7 +52,13 @@ vi.mock('../../../../electron/shared', () => ({
   getAllAccountRuntimes: () => h.runtimes,
 }));
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The REAL rule, not a stand-in: what may be collapsed into one mailbox is a
+  // data-loss decision, so the scheduler must be tested against the same
+  // function sync uses.
+  buildStandardFolderAliasMap: (
+    await import('../../../../../../packages/core/src/config/folder-mapping')
+  ).buildStandardFolderAliasMap,
   createLogger: () => ({
     info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
@@ -361,6 +371,30 @@ describe('folder selection', () => {
     await advance(FIRST_DELAY_MS);
     expect(a.state.drainCalls).toEqual(['INBOX']);
     expect(a.state.backfillCalls).toEqual(['INBOX']);
+    svc.stopBackfillScheduler();
+  });
+
+  // Breaks: a mailbox the server published twice (Sarv lists `Sent` AND
+  // `Sent Mail` for one store) having its whole history paged a second time,
+  // into a folder the sidebar never shows — thousands of fetches for mail
+  // already on disk, and a second backfill that never settles.
+  it('never crawls a duplicate of a mailbox it is already crawling', async () => {
+    // One store under two names, as the SERVER reports it: same UIDVALIDITY and
+    // same message count. Nothing is skipped without that proof — a shared role
+    // is not evidence, and dropping a genuinely separate mailbox would stop its
+    // history from ever being fetched. `Sent` is the name holding the mail.
+    const twin = { uidValidity: 42, serverMessageCount: 1718 };
+    const a = makeAccount([
+      folder('Sent Mail', { ...twin, totalCount: 0 }),
+      folder('Sent', { ...twin, totalCount: 1713 }),
+    ]);
+    h.activeStorage = a.storage;
+    h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startBackfillScheduler();
+    await advance(FIRST_DELAY_MS);
+    expect(a.state.drainCalls).toEqual(['Sent']);
+    expect(a.state.backfillCalls).toEqual(['Sent']);
     svc.stopBackfillScheduler();
   });
 

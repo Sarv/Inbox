@@ -4,10 +4,31 @@
  * Handles folder listing and folder-related operations.
  */
 
+import { createLogger, describeDuplicateRoles, withFiledCounts } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
+
 import { requireStorage, getSyncEngine } from '../shared';
-import { createLogger } from '@sarvinbox/core';
 const logger = createLogger('folder-handlers');
+
+/**
+ * Last duplicate-role report, so the line prints when the answer CHANGES rather
+ * than on every list (the renderer lists folders after every sync).
+ */
+let lastDuplicateRoleSummary: string | null = null;
+
+/**
+ * Say which mailbox each duplicated role resolves to, with the sync state it
+ * was decided from. This is the list the sidebar collapses to one folder per
+ * role, so a wrong choice here IS what the user sees — an empty Sent under a
+ * count borrowed from its twin. Reported from the same data and the same
+ * function the renderer uses, so the log cannot disagree with the screen.
+ */
+function reportDuplicateRoles(folders: Parameters<typeof describeDuplicateRoles>[0]): void {
+  const summary = describeDuplicateRoles(folders);
+  if (!summary || summary === lastDuplicateRoleSummary) return;
+  lastDuplicateRoleSummary = summary;
+  logger.info(`Folders sharing a role — ${summary}`);
+}
 
 export function registerFolderHandlers(): void {
   /**
@@ -16,7 +37,14 @@ export function registerFolderHandlers(): void {
   ipcMain.handle('folders:list', async () => {
     try {
       const storage = requireStorage();
-      const folders = await storage.getFolders();
+      // Attach the FILED count (primary folder_id) for any role the server
+      // published under two names, so the renderer resolves the role to the
+      // folder the mail is really in — the same input, from the same helper,
+      // the sync engine decides with. The stored `total_count` cannot do it: a
+      // message in two folders is one row carrying both tags, so an aliased
+      // Sent reads as full under both names. Measured only for contested roles.
+      const folders = await withFiledCounts(storage, await storage.getFolders());
+      reportDuplicateRoles(folders);
       return { success: true, data: folders };
     } catch (error) {
       logger.error('List folders error:', error);

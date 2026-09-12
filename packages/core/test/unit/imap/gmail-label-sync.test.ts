@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { MessageProcessor } from '../../../src/imap/message-processor';
 import { FakeEmailStorage } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import { parseTags } from '../../../src/utils/tags';
 
-import { MessageProcessor } from '../../../src/imap/message-processor';
 
 /**
  * Gmail: labels ARE folder membership.
@@ -122,6 +122,21 @@ describe('Gmail label sync — folder membership from X-GM-LABELS', () => {
 
     expect(tags).toContain('[Gmail]/Sent Mail');
     expect(tags).not.toContain('Sent');
+  });
+
+  // An account can list TWO mailboxes for one role: Sarv exposes the real `Sent`
+  // and an alias `Sent Mail`, and the alias is listed FIRST. Routing the role to
+  // whichever came first tagged sent mail into a mailbox nothing else uses —
+  // the same alias that left the user's Sent view empty under a count of 1,719.
+  it('routes a system label to the canonical mailbox, not an alias listed first', async () => {
+    storage.addFolder('Sent Mail');
+    storage.addFolder('Sent');
+    server.addMessage(ALL_MAIL, { labels: ['\\Sent'] });
+
+    const tags = await tagsOfOnly(await syncAllMail(server, storage));
+
+    expect(tags).toContain('Sent');
+    expect(tags).not.toContain('Sent Mail');
   });
 
   // Recovering the app's own mirror label restores the category chip for old mail

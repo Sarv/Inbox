@@ -8,6 +8,8 @@ import {
   VIRTUAL_FOLDERS,
   classifyFolder,
   findFolderByType,
+  folderDisplayName,
+  folderTypeMatchStrength,
   isAiLabelFolder,
   isArchiveFolder,
   isDraftsFolder,
@@ -100,6 +102,32 @@ describe('findFolderByType', () => {
     expect(findFolderByType([{ path: 'Work' }], 'spam')).toBeNull();
     expect(findFolderByType([], 'inbox')).toBeNull();
   });
+
+  // Regression for the Sent folder that showed a single message under "of
+  // 1,719". Sarv lists two mailboxes for one physical Sent store — `Sent` and
+  // an alias `Sent Mail` — and the sidebar collapses the role to ONE folder.
+  // Returning whichever was listed first pointed the Sent view at the empty
+  // alias: no mail, a server-sized count, and a "next" that paged into nothing.
+  it('prefers the real mailbox over an alias that only looks the part', () => {
+    const sarv = [{ path: 'INBOX' }, { path: 'Sent Mail' }, { path: 'Sent' }];
+    expect(findFolderByType(sarv, 'sent')?.path).toBe('Sent');
+  });
+
+  // Breaks: the provider preference order stops meaning anything, so Gmail's
+  // own Sent loses to a stray `Sent` label.
+  it('ranks known provider paths by their position in the list', () => {
+    expect(findFolderByType([{ path: 'Sent' }, { path: '[Gmail]/Sent Mail' }], 'sent')?.path)
+      .toBe('[Gmail]/Sent Mail');
+  });
+
+  // Breaks: the ranking changes WHICH folders match instead of only ordering
+  // them — it must stay in lockstep with classifyFolder.
+  it('scores by tier and refuses to score a folder of another type', () => {
+    expect(folderTypeMatchStrength({ path: 'X', specialUse: '\\Sent' }, 'sent')).toBe(0);
+    expect(folderTypeMatchStrength({ path: 'Sent' }, 'sent'))
+      .toBeLessThan(folderTypeMatchStrength({ path: 'Sent Mail' }, 'sent')!);
+    expect(folderTypeMatchStrength({ path: 'Trash' }, 'sent')).toBeNull();
+  });
 });
 
 describe('is<Type>Folder shorthands', () => {
@@ -171,5 +199,122 @@ describe('VIRTUAL_FOLDERS', () => {
     expect(VIRTUAL_FOLDERS.find((f) => f.id === 'virtual-all')?.query).toBeUndefined();
     expect(VIRTUAL_FOLDERS.find((f) => f.id === 'virtual-important')?.query).toEqual({ aiCategory: 'is_important' });
     expect(VIRTUAL_FOLDERS.find((f) => f.id === 'virtual-starred')?.query).toEqual({ tags: ['starred'] });
+  });
+});
+
+/**
+ * The sidebar collapses a role to ONE folder with findFolderByType, so this
+ * decides which Sent the user actually opens. It must agree with core's copy —
+ * if the two disagree the sidebar lists a mailbox the sync engine isn't
+ * filling, which is exactly the bug: an empty Sent under a 1,719 count.
+ */
+describe('findFolderByType — two names for one mailbox', () => {
+  // Same UIDVALIDITY and same server count: the server itself says one store.
+  const twin = (path: string, over: Record<string, unknown> = {}) => ({
+    path, uidValidity: 7, serverMessageCount: 1718, totalCount: 0, ...over,
+  });
+
+  // Breaks: the production bug of 2026-09-11. Sarv flags the EMPTY `Sent Mail`
+  // with `\Sent` while every sent message is filed under `Sent`; dedup by
+  // message-id means the flagged one can never gain a row, so showing it gives
+  // the user one message, a server-sized count, and a blank next page.
+  it('prefers the folder holding the mail over its empty SPECIAL-USE twin', () => {
+    const folders = [twin('Sent Mail', { specialUse: '\\Sent' }), twin('Sent', { totalCount: 1713 })];
+    expect(findFolderByType(folders, 'sent')?.path).toBe('Sent');
+  });
+
+  // Breaks: THE live account. `totalCount` counts membership TAGS, so one row
+  // in a store listed twice counts under BOTH names and the tag counts read
+  // ~1,718 either way. The main process measures primary filing for contested
+  // roles and ships it as `ownedCount` over IPC; the sidebar must prefer it, or
+  // it opens the flagged-but-empty name while the sync engine fills the other.
+  it('follows the FILED count when both names are fully tagged', () => {
+    const folders = [
+      twin('Sent Mail', { specialUse: '\\Sent', totalCount: 1718, ownedCount: 1 }),
+      twin('Sent', { serverMessageCount: 1713, totalCount: 1719, ownedCount: 1718 }),
+    ];
+    expect(findFolderByType(folders, 'sent')?.path).toBe('Sent');
+  });
+
+  // Breaks: the rail that keeps two REAL mailboxes apart on a server that
+  // reuses one UIDVALIDITY. Each name full against its OWN server count means
+  // two stores — one store can only ever fill one of its names.
+  it('ignores the row count when both names are full of their own mail', () => {
+    const folders = [
+      { path: 'Sent', specialUse: '\\Sent', uidValidity: 7, serverMessageCount: 3, totalCount: 3 },
+      { path: 'Sent Items', uidValidity: 7, serverMessageCount: 900, totalCount: 900 },
+    ];
+    expect(findFolderByType(folders, 'sent')?.path).toBe('Sent');
+  });
+
+  // Breaks: a fresh account with nothing synced flapping between two names —
+  // with no mail anywhere the ranking must still decide, once.
+  it('falls back to the ranking when neither twin holds mail yet', () => {
+    expect(findFolderByType([twin('Sent Mail'), twin('Sent', { specialUse: '\\Sent' })], 'sent')?.path)
+      .toBe('Sent');
+  });
+
+  // Breaks: the safety rail. Two mailboxes that merely share a role can hold
+  // different mail, so a bigger row count must not move the role onto one the
+  // server never said was the same store.
+  it('ignores the row count when the two are different mailboxes', () => {
+    const folders = [
+      { path: 'Sent', specialUse: '\\Sent', uidValidity: 7, serverMessageCount: 3, totalCount: 3 },
+      { path: 'Sent Items', uidValidity: 9, serverMessageCount: 900, totalCount: 900 },
+    ];
+    expect(findFolderByType(folders, 'sent')?.path).toBe('Sent');
+  });
+
+  // Breaks: the reader on a server that does not report UIDVALIDITY being left
+  // on the empty name. Which folder to SHOW may follow the weaker evidence of
+  // matching server counts — no mailbox is dropped by this choice.
+  it('follows the mail when the counts match and the server gave no UIDVALIDITY', () => {
+    const folders = [
+      { path: 'Sent Mail', specialUse: '\\Sent', serverMessageCount: 1718, totalCount: 0 },
+      { path: 'Sent', serverMessageCount: 1718, totalCount: 1713 },
+    ];
+    expect(findFolderByType(folders, 'sent')?.path).toBe('Sent');
+  });
+
+  // Breaks: a folder list with no sync state at all (nulls on both sides)
+  // comparing equal and being read as proof.
+  it('ignores the row count when the server has proven nothing', () => {
+    const folders = [{ path: 'Sent', specialUse: '\\Sent' }, { path: 'Sent Mail', totalCount: 1713 }];
+    expect(findFolderByType(folders, 'sent')?.path).toBe('Sent');
+  });
+});
+
+describe('folderDisplayName', () => {
+  // Breaks: the sidebar shouting "INBOX" next to normally-cased folders. IMAP
+  // reserves the literal name `INBOX` (RFC 3501), so every server returns it in
+  // caps; without a label for the role the raw wire name reaches the screen.
+  it('labels the inbox "Inbox" however the server spells it', () => {
+    expect(folderDisplayName({ path: 'INBOX', name: 'INBOX' })).toBe('Inbox');
+    expect(folderDisplayName({ path: 'Inbox', name: 'Inbox' })).toBe('Inbox');
+    expect(folderDisplayName({ path: 'Posteingang', name: 'Posteingang', specialUse: '\\Inbox' })).toBe('Inbox');
+  });
+
+  // Breaks: Gmail's system folders showing their wire paths ("[Gmail]/Sent Mail").
+  it('gives every standard role its canonical label', () => {
+    expect(folderDisplayName({ path: '[Gmail]/Sent Mail', name: '[Gmail]/Sent Mail' })).toBe('Sent');
+    expect(folderDisplayName({ path: '[Gmail]/Drafts', name: '[Gmail]/Drafts' })).toBe('Drafts');
+    expect(folderDisplayName({ path: 'Deleted Items', name: 'Deleted Items' })).toBe('Trash');
+    expect(folderDisplayName({ path: 'Junk Email', name: 'Junk Email' })).toBe('Spam');
+    expect(folderDisplayName({ path: '[Gmail]/All Mail', name: '[Gmail]/All Mail' })).toBe('Archive');
+  });
+
+  // Breaks: a user's own folder being renamed by a role label it never asked
+  // for, or keeping Gmail's "[Gmail]/" prefix when it has no role at all.
+  it('leaves a user folder its own name, minus the [Gmail]/ prefix', () => {
+    expect(folderDisplayName({ path: 'Receipts', name: 'Receipts' })).toBe('Receipts');
+    expect(folderDisplayName({ path: 'Work/Clients', name: 'Clients' })).toBe('Clients');
+    expect(folderDisplayName({ path: '[Gmail]/Misc', name: '[Gmail]/Misc' })).toBe('Misc');
+  });
+
+  // Breaks: a role with no canonical label (starred/important) rendering as
+  // empty instead of falling back to the server's name.
+  it('falls back to the server name for a role with no canonical label', () => {
+    expect(folderDisplayName({ path: '[Gmail]/Starred', name: '[Gmail]/Starred' })).toBe('Starred');
+    expect(folderDisplayName({ path: 'Important', name: 'Important' })).toBe('Important');
   });
 });
