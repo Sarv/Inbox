@@ -56,6 +56,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Copyright holder recorded as the legal entity, Sarv Webs Private Limited.
 - Test fixtures, sample data and the demo seed use synthetic identities and
   example domains (`example.com`, `partner.example`, patterned phone numbers).
+- Every message list now carries the same bar at the top — what you are looking
+  at on the left, the page range and prev/next on the right — so a plain folder
+  such as Sent can be paged from the top, not only from the bottom of the list.
+  Only the section, "All Inboxes" and category views used to have one, each a
+  hand-rolled copy; there is now one header component behind all of them.
+- Page sizes follow what a list is for, rather than one setting everywhere:
+  "All Email" and "All Inboxes" page 100 at a time because a page there spans
+  every folder and account; a section's full page and the lists you scan in bulk
+  within one account — Sent, Drafts, Trash, Spam, Archive, Starred and Important
+  — page 50; everything else follows your "emails per page" setting (25 by
+  default).
+  Every list, its loader and both of its page indicators now read that size from
+  one place, so they cannot disagree with each other.
+- Every message list now says how much mail is behind it — "1-50 of 5,000" — not
+  just the range on screen. "All Email", Starred, Important, Snoozed and
+  "All Inboxes" previously paged with no total at all, so there was no way to see
+  whether a list held a hundred messages or a hundred thousand. Each now reads a
+  count taken with the same rules as the list it heads, fetched once and reused
+  while paging, and "next" stops offering a page once the last one is reached.
 - Your contact directory is now one list shared by every connected account,
   instead of a separate copy per mailbox. Connect a second address and you no
   longer get a second, half-populated address book: a person you know from both
@@ -72,6 +91,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use that mailbox.
 
 ### Fixed
+- Snoozed, the last view with the conversation/message mix-up, and the one where
+  it also disagreed with the sidebar. The badge counted every message tagged
+  snoozed — including ones with no wake-up time, which the list can never show —
+  while the list counted the messages it had loaded and called that the total.
+  It now pages and counts in conversations under one predicate, so the badge, the
+  header and the rows are the same number, and a conversation is shown whole with
+  every message of it that is coming back. The view is also no longer capped: it
+  quietly stopped at 100 messages while claiming to show everything, and it now
+  has real prev/next pages. Loading it takes one query instead of one round trip
+  per snoozed message.
+- "All Email" had the same conversation/message mix-up as Starred and Important
+  below, at a bigger page size: it paged and counted in messages while showing
+  one row per conversation, so a 100-message page could render as a couple of
+  dozen rows under a total it could never reach, and a conversation whose mail
+  straddled the boundary was split across two pages. It now pages and counts in
+  conversations, and a conversation is shown whole — including the user's own
+  replies, which the old per-message query dropped mid-thread. The view is also
+  much faster on a large mailbox: the page is an index range scan instead of a
+  full table scan with twelve folder tests per message.
+- Starred and Important disagreed with themselves: the header read "1-50 of 52"
+  above 15 visible rows, page 2 held 2 more, and the inbox's own Starred section
+  said 8. The list shows one row per conversation, but these two views were
+  paged and counted in MESSAGES — so the "of N" was a message total, a page of
+  50 messages collapsed to however many conversations they happened to belong
+  to, and a conversation whose mail straddled the 50-message boundary was split
+  across two pages. Both now page and count in conversations end to end: the
+  page holds 50 whole conversations, "of N" counts conversations, and a
+  conversation is never half-shown. A star that exists only on a Trash, Spam or
+  Junk copy no longer counts, matching what the rest of the app means by
+  starred. (The inbox's "8" was always a different, correct number: it counts
+  only INBOX conversations, and skips the ones already listed under "Important
+  and unread".)
 - Phone numbers in a sender's signature were often missing from their contact
   card. Three separate causes, all fixed:
   - **Only the bottom of long mail was read.** Mining looked at the last ~12 KB
@@ -141,6 +192,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mailbox is named after its sending domain instead of the person it happens to
   be writing about. Rows already stored are corrected on upgrade; a name you set
   yourself is left alone.
+- "All Email" could show more messages than a page holds — the range read
+  "1-111" on a page of 100, and a background refresh while you were on page 4
+  pulled page 1's mail in underneath you. The virtual lists (All Email, Starred,
+  Important, All Inboxes) now refresh the page you are actually on, and no page
+  indicator can report a range wider than its own page.
+- A page of mail could report more messages than it was showing — Sent read
+  "1-100 of 1,718" under a 25-row page. After every sync the app re-read a fixed
+  100 messages from the top of the folder and folded them into the list on
+  screen, which both stretched the page past its own size and, if you had paged
+  forward, quietly swapped in the newest messages while you were reading page 4.
+  The refresh now re-reads exactly the page you are on, at the size that page
+  uses, and leaves it that size.
+- The Sent folder showed almost no mail, a count of ~1,700, and a "next" button
+  that paged into a blank list. Sarv's IMAP server lists two mailboxes for the
+  same physical Sent store — the real `Sent` and an alias `Sent Mail` — and the
+  app resolved the "sent" role to whichever the server happened to list first.
+  Mail was syncing all along, into `Sent`, while the sidebar, the sent-copy
+  upload and Gmail label routing all pointed at the alias, which held nothing.
+  A standard folder is now resolved by how strongly it matches — the server's
+  own SPECIAL-USE flag first, then a path the provider is known to use, and only
+  then a name that merely looks the part — and, decisively, by where the mail
+  actually is: when the server proves two names are one mailbox (same
+  UIDVALIDITY, and message counts that agree to within a little drift, because
+  the two names are read at different moments), the one already holding your
+  mail wins however weakly it matches. "Holding" means messages FILED under that
+  name, not merely tagged with it: a message in two folders is stored once and
+  carries both names, so the membership count reads full under both and cannot
+  tell them apart — it was the filing that showed 1,718 under `Sent` against 1
+  under `Sent Mail`. That rule is what fixes this account, where the empty alias
+  is the one Sarv flags as Sent; because a message is never stored twice, the
+  other name can never catch up, so following the mail is both correct and
+  stable. Two names that are EACH full against their own server count are left
+  alone — that is a server reusing a UIDVALIDITY across two real mailboxes, and
+  neither may be dropped. Paging is also clamped: a page that comes back empty keeps
+  the reader on the page they were on and disables "next", instead of stranding
+  them on a blank list under a count that promised more. The duplicate name is
+  dropped from sync and from the historical backfill rather than merely
+  out-ranked, so one mailbox is no longer fetched, paged and counted twice — and
+  a sync asked for by the dropped name runs against the mailbox it stands for
+  instead of doing nothing. Nothing is dropped on a guess: only the four roles a
+  server has exactly one mailbox for (Sent, Drafts, Trash, Spam), only across
+  top-level or known provider paths — a folder of your own that happens to be
+  named like a system one (`Archive/Sent`) is never folded into it — only once
+  the server has proved the two are the same store, and never at all if the
+  folder list can't be read. The inflated count had a second cause of its own:
+  every polling cycle wrote the server's message count into the field that
+  records how many messages we actually hold locally, so both halves of the
+  displayed count were the server's number and nothing was left to disagree with
+  it — a folder holding one message still read "1-1 of 1,719". The poll now
+  records only what the server reports, leaving the local count to be recounted
+  from what is really stored; that also restores every "have we got them all
+  yet?" comparison.
 - Emails in the sectioned inbox can be opened again after returning to the
   folder. The rows on screen and the flat list a click is resolved against are
   held in two places: re-selecting INBOX while a message was open emptied the
