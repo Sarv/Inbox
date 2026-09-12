@@ -89,6 +89,14 @@ const RE_ENRICH_MIN_AGE_SECONDS = 90 * 86400; // 90 days
 const NOREPLY_LOCAL_PART_RE =
   /^(no-?reply|do-?not-?reply|donotreply|notifications?|notify|reminders?|alerts?|alert|mailer|mailer-daemon|postmaster|bounces?|delivery|deliveries|automated|auto|system|root|daemon|cron|transactional|receipts?|statements?|invoices?|payments?|orders?|shipping|tracking|tickets?|news|newsletters?|updates?|digest|verify|verification|confirm|confirmation|subscribe|unsubscribe|abuse|webmaster|hostmaster|sysadmin|mail|email)([.\-_+].*)?$/i;
 
+// Same tier written as a SUFFIX — keep byte-identical with
+// NOREPLY_LOCAL_PART_SUFFIX_RE in packages/core/src/utils/role-address.ts.
+// Providers put the marker at the END of a generated local-part
+// (`drive-shares-dm-noreply@`, `pullrequests-reply@`), which the prefix pattern
+// above cannot see, so those bodies were being run through enrichment.
+const NOREPLY_LOCAL_PART_SUFFIX_RE =
+  /[.\-_+](no-?reply|do-?not-?reply|donotreply|reply|notifications?|notify|alerts?|bounces?|mailer|daemon|unsubscribe)$/i;
+
 /**
  * Should we SKIP enrichment for this address? True only for the no-reply/machine
  * tier — mailboxes that never carry a human signature and whose bodies are full
@@ -100,7 +108,7 @@ const NOREPLY_LOCAL_PART_RE =
 function isLikelyAutomatedSender(email: string): boolean {
   if (!email) return false;
   const local = email.split('@')[0]?.toLowerCase() || '';
-  return NOREPLY_LOCAL_PART_RE.test(local);
+  return NOREPLY_LOCAL_PART_RE.test(local) || NOREPLY_LOCAL_PART_SUFFIX_RE.test(local);
 }
 
 /**
