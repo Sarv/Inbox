@@ -635,6 +635,25 @@ describe('EmailRepository write paths', () => {
     expect(repo.countByFolderTag('nothing')).toBe(0);
   });
 
+  // The counterpart that decides which of two names for ONE physical mailbox
+  // the app routes to. Sarv lists its Sent store as both `Sent` and `Sent Mail`,
+  // so a sent message is ONE row tagged with both names and countByFolderTag
+  // reads ~full under EITHER — it cannot tell them apart. Primary filing can:
+  // the row is filed under the name it synced from and dedup never files it
+  // twice. If this ever counts tags too, the app goes back to routing Sent at
+  // the empty alias, whose listing shows one message under a 1,719 header.
+  it('countByPrimaryFolder counts rows FILED here, never rows merely tagged', async () => {
+    await insert(repo, db, { folderId: 'f-sent', uid: 1, tags: '|Sent|Sent Mail|' });
+    await insert(repo, db, { folderId: 'f-sent', uid: 2, tags: '|Sent|Sent Mail|' });
+    await insert(repo, db, { folderId: 'f-sent-items', uid: 3, tags: '|Sent|Sent Mail|' });
+
+    expect(repo.countByFolderTag('Sent')).toBe(3);      // the tag count cannot choose
+    expect(repo.countByFolderTag('Sent Mail')).toBe(3);
+    expect(repo.countByPrimaryFolder('f-sent')).toBe(2); // the filing can
+    expect(repo.countByPrimaryFolder('f-sent-items')).toBe(1);
+    expect(repo.countByPrimaryFolder('f-nothing')).toBe(0);
+  });
+
   // ---------------- repair / sender / sent ----------------
 
   // Incremental sync skips UIDs already in the DB, so a message stored with an

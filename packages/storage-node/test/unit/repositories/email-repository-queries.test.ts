@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReadModelMaintainer } from '../../../src/read-model-maintainer';
 import { newMigratedDb } from '../../../src/test-support/test-db';
 
-import { EmailRepository } from '../../../src/repositories/email-repository';
+import { EmailRepository, allMailPageSql, flagViewPageSql, snoozedThreadsPageSql } from '../../../src/repositories/email-repository';
 
 const FOLDERS: Array<[string, string]> = [
   ['f-inbox', 'INBOX'],
@@ -286,6 +286,39 @@ describe('fixed-section list queries', () => {
     expect(ids(await repo.getAll({ limit: 1, offset: 0 })).length).toBe(1);
   });
 
+  // Same bug as Starred, same shape: the "All Email" list renders one row per
+  // CONVERSATION, so a message-grained LIMIT/COUNT made the paginator promise a
+  // total the list could never reach and split threads across page boundaries.
+  it('getAll pages by conversation and getAllCount counts conversations', async () => {
+    // One 2-message conversation + two singletons + mail that isn't "all mail".
+    add(db, { id: 'c1', thread: 't-conv', tags: '|INBOX|read|', date: 5 });
+    add(db, { id: 'c2', thread: 't-conv', tags: '|INBOX|', date: 7 });
+    add(db, { id: 'solo', tags: '|INBOX|', date: 3 });
+    add(db, { id: 'work', tags: '|Work|', date: 1 });
+    add(db, { id: 'sent', tags: '|Sent|', date: 9 });
+
+    expect(await repo.getAllCount()).toBe(3); // conversations, not the 4 listable messages
+
+    // Page 1 = ONE conversation, hydrated to BOTH of its messages.
+    expect(idSet(await repo.getAll({ limit: 1, offset: 0 }))).toEqual(new Set(['c2', 'c1']));
+    // Pages 2 and 3 continue — nothing re-shown, nothing skipped.
+    expect(ids(await repo.getAll({ limit: 1, offset: 1 }))).toEqual(['solo']);
+    expect(ids(await repo.getAll({ limit: 1, offset: 2 }))).toEqual(['work']);
+  });
+
+  // Deliberate widening that came with the thread grain: membership is decided
+  // per CONVERSATION, so a thread with one INBOX message is in "All Email" and
+  // is then handed back whole — including the user's own Sent reply, which the
+  // old per-message query dropped mid-conversation.
+  it('getAll admits a conversation on its listable copy and hydrates the whole thread', async () => {
+    add(db, { id: 'in', thread: 't-reply', tags: '|INBOX|read|', date: 10 });
+    add(db, { id: 'myreply', thread: 't-reply', tags: '|Sent|', date: 11 });
+    add(db, { id: 'gone', thread: 't-gone', tags: '|Trash|', date: 12 });
+
+    expect(await repo.getAllCount()).toBe(1); // t-gone has no listable copy at all
+    expect(idSet(await repo.getAll())).toEqual(new Set(['myreply', 'in']));
+  });
+
   // instr() is case-SENSITIVE on purpose: a mailbox literally named "Starred"
   // must not be read as the |starred| flag (and vice versa), or every message in
   // that folder would show a star.
@@ -299,6 +332,38 @@ describe('fixed-section list queries', () => {
     expect(ids(await repo.getStarred())).toEqual(['star2', 'star']); // date DESC
     expect(await repo.getStarredCount()).toBe(2);
     expect(ids(await repo.getStarred({ limit: 1, offset: 1 }))).toEqual(['star']);
+  });
+
+  // The bug this pins: the Starred list renders one row per CONVERSATION, so a
+  // message-grained LIMIT/COUNT made the paginator promise "of 52" over 15 rows
+  // and split a thread across the page boundary. Both must be in threads.
+  it('getStarred pages by conversation and getStarredCount counts conversations', async () => {
+    // One 3-message conversation (only the newest is starred) + two singletons.
+    add(db, { id: 'c1', thread: 't-conv', tags: '|INBOX|read|', date: 5 });
+    add(db, { id: 'c2', thread: 't-conv', tags: '|INBOX|read|', date: 6 });
+    add(db, { id: 'c3', thread: 't-conv', tags: '|INBOX|starred|', date: 7 });
+    add(db, { id: 'solo', tags: '|INBOX|starred|', date: 3 });
+    add(db, { id: 'older', tags: '|Work|starred|', date: 1 });
+
+    expect(await repo.getStarredCount()).toBe(3); // conversations, not the 5 messages
+
+    // Page 1 = ONE conversation, hydrated to all THREE of its messages.
+    const first = await repo.getStarred({ limit: 1, offset: 0 });
+    expect(idSet(first)).toEqual(new Set(['c3', 'c2', 'c1']));
+    // Page 2 continues with the next conversation — nothing is re-shown or skipped.
+    expect(ids(await repo.getStarred({ limit: 1, offset: 1 }))).toEqual(['solo']);
+    expect(ids(await repo.getStarred({ limit: 1, offset: 2 }))).toEqual(['older']);
+  });
+
+  // A star that only exists on a Trash/Spam/Junk copy is gone, so the thread
+  // must not appear — and must not be counted either, or "of N" outruns the list.
+  it('getStarred ignores a thread whose only starred copy is discarded', async () => {
+    add(db, { id: 'live', thread: 't-mixed', tags: '|INBOX|read|', date: 9 });
+    add(db, { id: 'dead', thread: 't-mixed', tags: '|Trash|starred|', date: 10 });
+    add(db, { id: 'junked', tags: '|Junk|starred|', date: 8 });
+
+    expect(ids(await repo.getStarred())).toEqual([]);
+    expect(await repo.getStarredCount()).toBe(0);
   });
 
   it('getImportant orders by priority score then date, excluding Trash/Spam', async () => {
@@ -331,7 +396,57 @@ describe('fixed-section list queries', () => {
 
     expect(ids(await repo.getSnoozed())).toEqual(['sooner', 'later']);
     expect(ids(await repo.getSnoozed({ limit: 1, offset: 1 }))).toEqual(['later']);
-    expect(await repo.getSnoozedCount()).toBe(3); // tag-only count
+    // The COUNT runs the same predicate as the list. It used to count the tag
+    // alone (3 here, including 'no-time'), so the sidebar badge and the view's
+    // "of N" both promised a row the list could never render.
+    expect(await repo.getSnoozedCount()).toBe(2);
+  });
+
+  // The Snoozed view renders one row per CONVERSATION, so the page window and
+  // the count have to be conversations too — a thread with three snoozed replies
+  // is one row, and a limit of 1 must not hand back a third of the mailbox.
+  it('getSnoozed pages by conversation and getSnoozedCount counts conversations', async () => {
+    add(db, { id: 't1-a', thread: 't1', tags: '|INBOX|snoozed|', snoozeUntil: 3000 });
+    add(db, { id: 't1-b', thread: 't1', tags: '|INBOX|snoozed|', snoozeUntil: 1000 });
+    add(db, { id: 't1-c', thread: 't1', tags: '|INBOX|', snoozeUntil: null });
+    add(db, { id: 't2-a', thread: 't2', tags: '|INBOX|snoozed|', snoozeUntil: 2000 });
+
+    // Two conversations, not four messages and not three snoozed ones.
+    expect(await repo.getSnoozedCount()).toBe(2);
+
+    // t1 comes first on its SOONEST message (1000), ahead of t2's 2000, and the
+    // whole conversation travels with it.
+    const page = await repo.getSnoozed();
+    expect(ids(page)).toEqual(['t1-b', 't1-a', 't2-a']);
+
+    // One conversation, every snoozed message of it — t1-c has no snooze time,
+    // so it is not part of what is coming back and must not be listed.
+    expect(ids(await repo.getSnoozed({ limit: 1, offset: 0 }))).toEqual(['t1-b', 't1-a']);
+    expect(ids(await repo.getSnoozed({ limit: 1, offset: 1 }))).toEqual(['t2-a']);
+  });
+
+  // Every row the Snoozed listing returns becomes a snooze record downstream
+  // (`snoozeUntil: e.snoozeUntil!`), so a hydrated sibling with no snooze time
+  // would turn into a record with an undefined wake-up.
+  it('getSnoozed returns only messages that carry a snooze time', async () => {
+    add(db, { id: 'awake', thread: 't1', tags: '|INBOX|', snoozeUntil: null });
+    add(db, { id: 'asleep', thread: 't1', tags: '|INBOX|snoozed|', snoozeUntil: 1000 });
+    const rows = await repo.getSnoozed();
+    expect(rows.every((row) => typeof row.snoozeUntil === 'number')).toBe(true);
+    expect(ids(rows)).toEqual(['asleep']);
+  });
+
+  // The Snoozed set is tiny but the tag test is unindexable, so the plan must
+  // enter through the partial index on snooze_until. A SCAN here means every
+  // sidebar badge refresh reads the whole mailbox.
+  it('pages Snoozed through idx_emails_snooze, never a full scan of emails', async () => {
+    const plan = db
+      .prepare(`EXPLAIN QUERY PLAN ${snoozedThreadsPageSql()}`)
+      .all(10, 0)
+      .map((r: any) => r.detail)
+      .join(' | ');
+    expect(plan).toContain('idx_emails_snooze');
+    expect(plan).not.toMatch(/SCAN emails\b/);
   });
 
   // Deterministic clock: getDueSnoozed compares against now() in SECONDS, so a
@@ -795,6 +910,108 @@ describe('read-model fast paths (thread_folders)', () => {
       .toEqual(['un', 'ee', 'st', 'iu']);
     // Not opted into thread collapsing => per-message legacy rows.
     expect(idSet(await repo.getByFolder('f-inbox', page))).toEqual(new Set(['iu', 'st', 'ee', 'un']));
+  });
+
+  // The read-model path and the legacy GROUP BY must agree on the Starred and
+  // Important views down to the row — the kill-switch flips between them at
+  // runtime, and a disagreement means the same mailbox shows a different list
+  // (and a different "of N") depending on a flag the user can't see.
+  it('getStarred / getImportant and their counts match between the read-model and legacy paths', async () => {
+    // A multi-message conversation so thread-vs-message grain actually differs.
+    add(db, { id: 'st2', thread: 't-star', tags: '|INBOX|read|', date: 41 });
+    add(db, { id: 'st3', thread: 't-star', tags: '|Work|starred|', date: 42 });
+    new ReadModelMaintainer(() => db).backfillNow();
+
+    expect(repo.readModelReadsEnabled()).toBe(true);
+    const fastStarred = await repo.getStarred(page);
+    const fastImportant = await repo.getImportant(page);
+    const fastStarredCount = await repo.getStarredCount();
+    const fastImportantCount = await repo.getImportantCount();
+
+    process.env.SARVINBOX_READMODEL_READS = '0';
+    expect(idSet(fastStarred)).toEqual(idSet(await repo.getStarred(page)));
+    expect(idSet(fastImportant)).toEqual(idSet(await repo.getImportant(page)));
+    expect(fastStarredCount).toBe(await repo.getStarredCount());
+    expect(fastImportantCount).toBe(await repo.getImportantCount());
+
+    // One conversation, all three of its messages — the count is in threads.
+    expect(fastStarredCount).toBe(1);
+    expect(idSet(fastStarred)).toEqual(new Set(['st', 'st2', 'st3']));
+  });
+
+  // Without the partial indexes every Starred/Important page is a full scan of
+  // `threads` plus a sort — invisible on a test mailbox, a stall on a real one.
+  // Asserted against the repository's REAL exported SQL so the two can't drift.
+  it.each([
+    ['starred', 'idx_threads_flagged'],
+    ['important', 'idx_threads_important'],
+  ] as const)('pages the %s view through %s, never a full scan of threads', (view, index) => {
+    const plan = (db.prepare(`EXPLAIN QUERY PLAN ${flagViewPageSql(view)}`)
+      .all(50, 0) as Array<{ detail: string }>)
+      .map((r) => r.detail)
+      .join(' | ');
+
+    expect(plan).toContain(index);
+    expect(plan).not.toMatch(/SCAN threads/);
+    // The index order IS the query order, so there is no sort step to pay for.
+    expect(plan).not.toMatch(/USE TEMP B-TREE FOR ORDER BY/);
+  });
+
+  // "All Email" has two implementations and a runtime kill-switch between them.
+  // Set equality, not order: the read-model path orders by the conversation's
+  // newest LIVE message (which counts the user's own Sent replies) while the
+  // legacy GROUP BY orders by its newest LISTED one — a known, accepted
+  // difference, documented on allMailLegacySql. Membership and "of N" must
+  // still agree exactly, or the same mailbox shows a different list depending
+  // on a flag the user cannot see.
+  it('getAll and getAllCount match between the read-model and legacy paths', async () => {
+    add(db, { id: 'sent1', thread: 't-star', tags: '|Sent|', date: 44 });
+    add(db, { id: 'binned', thread: 't-binned', tags: '|Trash|', date: 45 });
+    new ReadModelMaintainer(() => db).backfillNow();
+
+    expect(repo.readModelReadsEnabled()).toBe(true);
+    const fast = await repo.getAll(page);
+    const fastCount = await repo.getAllCount();
+
+    process.env.SARVINBOX_READMODEL_READS = '0';
+    expect(idSet(fast)).toEqual(idSet(await repo.getAll(page)));
+    expect(fastCount).toBe(await repo.getAllCount());
+
+    // The four INBOX conversations; the Trash-only one is in neither.
+    expect(fastCount).toBe(4);
+    expect(threads(fast)).toEqual(new Set(['t-impunread', 't-star', 't-else', 't-unread']));
+  });
+
+  // A mailbox mid-first-sync has no Trash/Sent/Drafts rows yet, so the excluded
+  // id list is empty — `NOT IN ()` is a syntax error, and building the page
+  // query at all must not depend on those folders existing.
+  it('getAll still pages when the mailbox has no special folders to exclude', async () => {
+    db.prepare(`DELETE FROM folders WHERE path IN ('Trash','Spam','Sent','Drafts','Junk','[Gmail]/Trash')`).run();
+    new ReadModelMaintainer(() => db).backfillNow();
+
+    expect(await repo.getAllCount()).toBe(4);
+    expect(threads(await repo.getAll(page)))
+      .toEqual(new Set(['t-impunread', 't-star', 't-else', 't-unread']));
+  });
+
+  // thread_folders is keyed (folder_id, thread_id), so the "does this thread
+  // list anywhere that isn't a discard pile?" test had no seekable key and
+  // scanned the whole projection per candidate; the ORDER BY had no composite
+  // index and sorted every conversation in the mailbox. Both are invisible on a
+  // test mailbox and a stall on a real one. Asserted against the repository's
+  // REAL exported SQL so the two can't drift.
+  it('pages All Email through idx_tf_thread, never a full scan of the projection', () => {
+    const excluded = ['f-trash', 'f-spam', 'f-sent', 'f-drafts', 'f-junk', 'f-gtrash'];
+    const plan = (db.prepare(`EXPLAIN QUERY PLAN ${allMailPageSql(excluded.length)}`)
+      .all(...excluded, 50, 0) as Array<{ detail: string }>)
+      .map((r) => r.detail)
+      .join(' | ');
+
+    expect(plan).toContain('idx_tf_thread');
+    expect(plan).not.toMatch(/SCAN thread_folders/);
+    // The date index carries `id` too, so the ORDER BY is the scan order.
+    expect(plan).toContain('idx_threads_last_message_date');
+    expect(plan).not.toMatch(/USE TEMP B-TREE FOR ORDER BY/);
   });
 
   it('listFolderFast / countFolderFast agree with each other and honor quick filters', async () => {
