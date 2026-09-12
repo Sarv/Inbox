@@ -56,8 +56,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Copyright holder recorded as the legal entity, Sarv Webs Private Limited.
 - Test fixtures, sample data and the demo seed use synthetic identities and
   example domains (`example.com`, `partner.example`, patterned phone numbers).
+- Your contact directory is now one list shared by every connected account,
+  instead of a separate copy per mailbox. Connect a second address and you no
+  longer get a second, half-populated address book: a person you know from both
+  accounts is one contact, with one set of notes, one enrichment history and one
+  merged view of their phone numbers and links. The directory lives in its own
+  `sarvinbox-contacts.db` alongside the mailbox databases, attached to each
+  account as it opens, and is encrypted with the same key as your mail (an
+  existing plaintext install is rekeyed in place the first time a key is
+  available). Each account's existing contacts are merged into it once, on
+  upgrade; the per-account tables are kept as `pre_directory_*` for this release
+  so nothing is destroyed by the move, and a later release will drop them. Which
+  account a contact first arrived from is recorded, but not shown anywhere yet.
+  Per-account sender statistics stay per-account, since they describe how you
+  use that mailbox.
 
 ### Fixed
+- Phone numbers in a sender's signature were often missing from their contact
+  card. Three separate causes, all fixed:
+  - **Only the bottom of long mail was read.** Mining looked at the last ~12 KB
+    of a message, which on a top-posted reply is the *end of the quoted chain* —
+    so it read whoever signed off last in the thread and never saw the sender's
+    own signature at the top. It now reads both ends of a long message, cutting
+    on tag boundaries so no markup leaks into the text.
+  - **A click-to-call button was scored as a switchboard.** A signature whose
+    number appears only behind a "Call me" link arrives as `tel:+…`, and the
+    scorer matched the `tel` of that URI against its list of office-line labels
+    and docked the number — inverting the one signal that meant the opposite. A
+    `tel:` link is now read as the person's own number; a written `Tel:` label
+    still means the landline and keeps its penalty.
+  - **Mail in your other accounts was ignored.** With one shared directory, a
+    contact who writes to your second address was mined only against the account
+    you happened to be scanning from, so their signature looked absent.
+    Signature mining now reads that contact's recent mail across every connected
+    account, newest first.
+  Because mining only ever re-reads mail newer than what it has already seen, the
+  fix would otherwise have reached nobody until each contact wrote again — and
+  never for one who has gone quiet. Upgrading therefore clears that mark once, so
+  every contact is re-read under the corrected rules on the next scan. Numbers
+  already found are kept.
+- **"Scan" read only the account you were looking at.** The contact directory is
+  now one list shared by every account, but the mail it is built from still lives
+  in each account's own database — and the scan walked just the active one. Every
+  person who writes to your other address was therefore missing from the list
+  until you happened to switch to that account and scan again. A scan now walks
+  every connected mailbox in one pass, and if one of them can't be read it
+  finishes the rest instead of giving up. Per-account statistics stay per-account.
+- **Your whole address book could disappear on launch.** The startup sweep that
+  clears out orphaned per-account databases treated `sarvinbox-contacts.db` —
+  the new shared contact directory — as one of them, because it deletes any
+  `sarvinbox-*.db` it does not recognise. On the first launch after the unified
+  directory shipped it deleted the file; the next launch recreated it empty, and
+  Contacts was blank. The sweep now keeps the directory by name, and no longer
+  assumes an unfamiliar database is a dead one: it deletes only files shaped
+  like the per-account DBs it used to write, and logs anything else it leaves
+  alone. Nothing was actually lost — the move parks each mailbox's original
+  contacts rather than dropping them — so upgrading restores the address book,
+  with the repairs below applied to it, the first time it finds the directory
+  empty and those copies still on disk.
+- A contact could show somebody else's phone number. Two causes, both fixed:
+  - **A job title was read as an office label.** The scorer looks just before a
+    number for a word like "Office" or "Support" that marks it as a company
+    line, but the look-back ran past the end of the line — onto the title
+    printed above. "VP Support" over a mobile docked that mobile as if it were
+    a switchboard, and the same hole hit every "Head of Sales", "Office
+    Manager" or "... Support" signature. The label must now sit on the number's
+    own line, which is where a real one is always written.
+  - **One well-formatted sighting outranked a number seen fifty times.** Ranking
+    went by signature-shape alone, so a vendor's number the contact had
+    forwarded once, in a tidy signature, beat the number in their own sign-off
+    on every mail they had ever sent. How often a number is seen under a
+    person's name now counts towards it — with a ceiling, so repetition can
+    lift a weak signal but never claim a colleague's number outright.
+  Both verdicts are worked out while a signature is read and then stored, so
+  upgrading re-reads every contact's mail once under the corrected rules rather
+  than waiting for each of them to write again.
+- Colleagues' names appeared on robot addresses. A notification service puts the
+  acting person in the From name, so Jira, Bitbucket and Google Drive mail
+  landed in the directory as real people — one teammate's name on
+  `notifications@atlassian.net`, another's on `pullrequests-reply@bitbucket.org`
+  — and once a name was stored no later scan replaced it. No-reply detection
+  only recognised the marker at the START of an address, so `...-reply@` and
+  `...-noreply@` read as human; it now matches at either end, and a machine
+  mailbox is named after its sending domain instead of the person it happens to
+  be writing about. Rows already stored are corrected on upgrade; a name you set
+  yourself is left alone.
 - Emails in the sectioned inbox can be opened again after returning to the
   folder. The rows on screen and the flat list a click is resolved against are
   held in two places: re-selecting INBOX while a message was open emptied the
