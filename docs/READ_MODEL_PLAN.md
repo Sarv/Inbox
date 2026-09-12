@@ -6,8 +6,9 @@ Status: **live — section reads served from the read-model by default**. Done:
 schema + v64/v65 migrations, `thread-rollup.ts` derivation, trigger-based dirty
 queue + `ReadModelMaintainer` (upkeep + backfill), the section read cutover
 (default-on once backfilled; kill-switch `SARVINBOX_READMODEL_READS=0`), and
-category-definition re-dirtying. Remaining: cross-account k-way merge, All-Mail
-(folder-less) fast path, optional keyset pagination, and legacy-path retirement.
+category-definition re-dirtying, and the folder-less views (All Email, Starred,
+Important). Remaining: cross-account k-way merge, optional keyset pagination, and
+legacy-path retirement.
 31 tests pass.
 
 ## Why
@@ -232,10 +233,18 @@ stream) and k-way merge the top 50 in the main process. Bounded by `50 × N`.
   forces the legacy `GROUP BY` path (instant rollback, no redeploy). Verified on a
   ~25k-mail DB: legacy `getSectionByThreads` slow-queries went 312 → 0, no slow
   fast-path queries.
-- **All-Mail (folder-less) fast path.** The cutover covers folder-scoped views
-  (INBOX sections — the beachball). `selectedVirtualFolder = virtual-all`
-  (folderPath undefined) still falls back to legacy; needs a folder-less scan
-  over `thread_folders` (or a dedup across folder rows).
+- ~~**All-Mail (folder-less) fast path.**~~ **Done** (v83) — `getAll`/`getAllCount`
+  select THREAD ids off `threads`, with membership asked as
+  `EXISTS (SELECT 1 FROM thread_folders tf WHERE tf.thread_id = t.id AND
+  tf.folder_id NOT IN (<the listing-excluded folders>))`; `idx_tf_thread` gives
+  that EXISTS its seekable key and `idx_threads_last_message_date` gained `id` so
+  the page's ORDER BY is the scan order. Starred/Important (v82) read their
+  conversation-wide LIVE flags straight off `threads`.
+  Known, accepted difference between the two paths: the fast one orders by
+  `threads.last_message_date` (newest LIVE non-draft message, which counts the
+  user's own Sent replies), the legacy `GROUP BY` by the newest LISTED message.
+  Membership and the "of N" agree exactly; only the order of a thread whose
+  latest message is a sent reply can differ.
 - **Cross-account k-way merge** for the unified "All Inboxes" view — per-account
   fast query, merge top-50 in the main process (scatter-gather).
 - **Keyset pagination.** The cutover kept OFFSET (indexed now, so the beachball is
