@@ -16,7 +16,7 @@ import { join } from 'path';
 import { app } from 'electron';
 
 import { SyncEngine, createLogger } from '@sarvinbox/core';
-import { SQLiteStorage } from '@sarvinbox/storage-node';
+import { SHARED_CONTACTS_FILE, SQLiteStorage } from '@sarvinbox/storage-node';
 import { getDbEncryptionKey } from './db-key-store';
 import { getMeta, setMeta } from './core-db';
 import { deleteAccountSecrets, rekeyAccountSecrets } from './secure-credential-store';
@@ -72,7 +72,10 @@ export function dbFileForAccount(accountId: string): string {
  * engine. The SMTP client is created lazily on connect (smtp-handlers), so it
  * starts null here.
  */
-export async function createAccountRuntime(dbFile: string): Promise<AccountRuntime> {
+export async function createAccountRuntime(
+  dbFile: string,
+  accountId?: string,
+): Promise<AccountRuntime> {
   const dbPath = join(app.getPath('userData'), dbFile);
   // The primary account may be (re)opened here too; give it the larger cache and
   // every OTHER account the modest default (8 MB) so 10 accounts don't multiply
@@ -85,6 +88,11 @@ export async function createAccountRuntime(dbFile: string): Promise<AccountRunti
     verbose: false,
     key: getDbEncryptionKey(),
     cacheSizeKb: isPrimaryDb ? 32768 : 8192,
+    // Contacts live in ONE directory shared by every account (see
+    // shared-contacts.ts); the id is what lets the directory record which
+    // mailbox an address was actually seen in. Omitted only by callers that
+    // genuinely have no account yet, which fall back to the DB file name.
+    ...(accountId ? { accountId } : {}),
   });
   await storage.initialize();
   const syncEngine = new SyncEngine(storage);
@@ -231,7 +239,7 @@ export async function ensureAccountRuntime(accountId: string): Promise<AccountRu
   }
 
   const dbFile = isPrimary ? PRIMARY_DB_FILE : dbFileForAccount(accountId);
-  const rt = await createAccountRuntime(dbFile);
+  const rt = await createAccountRuntime(dbFile, accountId);
   registerAccountRuntime(accountId, rt);
   return rt;
 }
@@ -426,7 +434,14 @@ export function cleanupOrphanedAccountDbs(opts?: {
   const dir = app.getPath('userData');
   const removed: string[] = [];
   const HASHED = /^sarvinbox-[0-9a-f]{32}\.db$/;
-  const KEEP_EXACT = new Set([PRIMARY_DB_FILE, 'sarvinbox-core.db']);
+  // Every `sarvinbox-*.db` this app legitimately creates. The shared contact
+  // directory is one of them: it is NOT an account DB, and the sweep deleted it
+  // on the first boot after the directory shipped, taking the whole address
+  // book with it. Add a file here the moment you create one beside the account
+  // DBs — the branch below treats anything unrecognised as an orphan.
+  const KEEP_EXACT = new Set([PRIMARY_DB_FILE, 'sarvinbox-core.db', SHARED_CONTACTS_FILE]);
+  // The only raw-named per-account DBs ever written: `sarvinbox-acct-<id>.db`.
+  const LEGACY_ACCOUNT = /^sarvinbox-acct-[a-z0-9-]+\.db$/i;
   // Non-empty is the authority test — see `keepAccountIds`. `null` here means
   // "keep every hashed DB", which is always the safe answer.
   const keepFiles = opts?.keepAccountIds?.length
@@ -475,8 +490,16 @@ export function cleanupOrphanedAccountDbs(opts?: {
         }
         continue;
       }
-      // Raw-named legacy per-account DB (e.g. `sarvinbox-acct-…​.db`) — never
-      // created by current code, always an orphan.
+      // Raw-named legacy per-account DB (`sarvinbox-acct-<id>.db`) — never
+      // created by current code, always an orphan. Matched by SHAPE, not by
+      // "everything we didn't recognise": this branch once read the shared
+      // contact directory as an orphan and deleted it, and an unrecognised
+      // file is far more likely to be a store added since this code was
+      // written than a stale one. Leave it and say so.
+      if (!LEGACY_ACCOUNT.test(name)) {
+        logger.warn('[Accounts] cleanup: keeping unrecognised DB file (not an account DB):', name);
+        continue;
+      }
       deleteDbFiles(join(dir, name));
       removed.push(name);
       logger.info('[Accounts] removed orphaned legacy DB:', name);

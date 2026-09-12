@@ -45,7 +45,12 @@ vi.mock('@sarvinbox/core', () => ({
   },
 }));
 
-vi.mock('@sarvinbox/storage-node', () => ({
+// Async factory on purpose: the sweep needs the REAL shared-directory
+// filename. Hard-coding it in the mock would let a rename in storage-node
+// silently re-arm the delete that wiped the address book once already.
+vi.mock('@sarvinbox/storage-node', async () => ({
+  SHARED_CONTACTS_FILE: (await import('../../../../../../packages/storage-node/src/shared-contacts'))
+    .SHARED_CONTACTS_FILE,
   SQLiteStorage: class {
     opts: Record<string, unknown>;
     entry: { opts: Record<string, unknown>; initialized: boolean; closed: boolean; closeThrows: boolean };
@@ -92,6 +97,7 @@ vi.mock('../../../../electron/shared', () => ({
   unregisterRuntime: (accountId: string) => { h.unregistered.push(accountId); h.runtimes.delete(accountId); },
 }));
 
+import { SHARED_CONTACTS_FILE } from '../../../../../../packages/storage-node/src/shared-contacts';
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {
   PRIMARY_DB_FILE,
@@ -612,6 +618,31 @@ describe('cleanupOrphanedAccountDbs', () => {
     expect(cleanupOrphanedAccountDbs()).toEqual(['sarvinbox-acct-advik-d-sarv-com.db']);
     expect(existsSync(join(h.userData, 'sarvinbox-acct-advik-d-sarv-com.db'))).toBe(false);
     expect(existsSync(join(h.userData, 'sarvinbox-acct-advik-d-sarv-com.db-wal'))).toBe(false);
+  });
+
+  // Regression, and a real data loss: `sarvinbox-contacts.db` is the SHARED
+  // contact directory, not an account DB. The sweep matched it as a raw-named
+  // legacy orphan and deleted it — with its sidecars — on the first boot after
+  // the unified directory shipped, taking the whole address book (954 contacts
+  // here) with it.
+  it('keeps the shared contact directory', () => {
+    touch(SHARED_CONTACTS_FILE);
+    touch(`${SHARED_CONTACTS_FILE}-wal`);
+    expect(cleanupOrphanedAccountDbs()).toEqual([]);
+    expect(existsSync(join(h.userData, SHARED_CONTACTS_FILE))).toBe(true);
+    expect(existsSync(join(h.userData, `${SHARED_CONTACTS_FILE}-wal`))).toBe(true);
+  });
+
+  // Regression: the sweep used to delete every `sarvinbox-*.db` it did not
+  // recognise. An unrecognised name is far more likely to be a store added
+  // since this code was written (the contact directory was exactly that) than
+  // a stale one, so it must be LEFT ALONE — deleting is not the safe default.
+  it('leaves an unrecognised sarvinbox DB alone instead of assuming it is an orphan', () => {
+    touch('sarvinbox-calendar.db');
+    touch('sarvinbox-calendar.db-shm');
+    expect(cleanupOrphanedAccountDbs()).toEqual([]);
+    expect(existsSync(join(h.userData, 'sarvinbox-calendar.db'))).toBe(true);
+    expect(existsSync(join(h.userData, 'sarvinbox-calendar.db-shm'))).toBe(true);
   });
 
   it('KEEPS every hashed DB when no authoritative keep-set is supplied', () => {
