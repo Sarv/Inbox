@@ -15,6 +15,8 @@ import type {
 } from '@sarvinbox/core';
 import { parseAddresses } from '@sarvinbox/core';
 
+import { SHARED } from '../shared-contacts';
+
 import {
   agentEligibleClause,
   agentStuckClause,
@@ -28,6 +30,17 @@ import {
 } from './agent-eligibility';
 import { BaseRepository } from './base-repository';
 import { cleanBodyExpression } from './body-storage';
+
+/*
+ * Contacts and their notes live in the SHARED directory (see shared-contacts.ts),
+ * reached through the ATTACHed `shared` schema. Naming the schema is not
+ * optional: an unqualified `contacts` resolves against `main` first, so a stray
+ * local table would silently shadow the directory and every classification
+ * below would write to a table nothing reads. `sender_stats`, `emails` and the
+ * agent tables stay unqualified -- they are genuinely per-account.
+ */
+const CONTACTS = SHARED('contacts');
+const CONTACT_NOTES = SHARED('contact_notes');
 
 /**
  * One candidate for category-label mirroring; `date` is the merge key only.
@@ -1369,7 +1382,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
 
   addNote(email: string, note: string, category: string, sourceEmailId?: string, confidence?: number): number {
     const result = this.db.prepare(`
-      INSERT INTO contact_notes (email, note, category, source_email_id, confidence)
+      INSERT INTO ${CONTACT_NOTES} (email, note, category, source_email_id, confidence)
       VALUES (?, ?, ?, ?, ?)
     `).run(this.normalizeEmailKey(email), note, category, sourceEmailId || null, confidence ?? 0.8);
     return result.lastInsertRowid as number;
@@ -1378,7 +1391,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
   addNotesBatch(notes: Array<{ email: string; note: string; category: string; sourceEmailId?: string; confidence?: number }>): number {
     if (notes.length === 0) return 0;
     const stmt = this.db.prepare(`
-      INSERT INTO contact_notes (email, note, category, source_email_id, confidence)
+      INSERT INTO ${CONTACT_NOTES} (email, note, category, source_email_id, confidence)
       VALUES (?, ?, ?, ?, ?)
     `);
     const txn = this.db.transaction((items: typeof notes) => {
@@ -1386,7 +1399,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
       for (const n of items) {
         // Skip duplicates: same email + same note text
         const existing = this.db.prepare(
-          'SELECT 1 FROM contact_notes WHERE email = ? AND note = ? AND is_active = 1'
+          `SELECT 1 FROM ${CONTACT_NOTES} WHERE email = ? AND note = ? AND is_active = 1`
         ).get(this.normalizeEmailKey(n.email), n.note);
         if (existing) continue;
 
@@ -1401,7 +1414,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
   getNotes(email: string, limit: number = 50): Array<{ id: number; note: string; category: string; sourceEmailId: string | null; confidence: number; createdAt: number; updatedAt: number }> {
     return this.db.prepare(`
       SELECT id, note, category, source_email_id as sourceEmailId, confidence, created_at as createdAt, updated_at as updatedAt
-      FROM contact_notes WHERE email = ? AND is_active = 1
+      FROM ${CONTACT_NOTES} WHERE email = ? AND is_active = 1
       ORDER BY created_at DESC LIMIT ?
     `).all(this.normalizeEmailKey(email), limit) as any[];
   }
@@ -1421,26 +1434,26 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
 
   updateNote(id: number, note: string): void {
     this.db.prepare(
-      'UPDATE contact_notes SET note = ?, updated_at = ? WHERE id = ?'
+      `UPDATE ${CONTACT_NOTES} SET note = ?, updated_at = ? WHERE id = ?`
     ).run(note, Math.floor(Date.now() / 1000), id);
   }
 
   deactivateNote(id: number): void {
     this.db.prepare(
-      'UPDATE contact_notes SET is_active = 0, updated_at = ? WHERE id = ?'
+      `UPDATE ${CONTACT_NOTES} SET is_active = 0, updated_at = ? WHERE id = ?`
     ).run(Math.floor(Date.now() / 1000), id);
   }
 
   getNotesCount(email: string): number {
     const row = this.db.prepare(
-      'SELECT COUNT(*) as count FROM contact_notes WHERE email = ? AND is_active = 1'
+      `SELECT COUNT(*) as count FROM ${CONTACT_NOTES} WHERE email = ? AND is_active = 1`
     ).get(this.normalizeEmailKey(email)) as { count: number };
     return row.count;
   }
 
   searchNotes(query: string, limit: number = 20): Array<{ email: string; note: string; category: string }> {
     return this.db.prepare(`
-      SELECT email, note, category FROM contact_notes
+      SELECT email, note, category FROM ${CONTACT_NOTES}
       WHERE is_active = 1 AND note LIKE ?
       ORDER BY created_at DESC LIMIT ?
     `).all(`%${query}%`, limit) as any[];
@@ -1742,7 +1755,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     source: ContactTypeSource,
   ): void {
     this.db.prepare(`
-      UPDATE contacts
+      UPDATE ${CONTACTS}
       SET contact_type = ?, contact_type_confidence = ?, contact_type_source = ?
       WHERE email = ?
     `).run(contactType, confidence, source, this.normalizeEmailKey(email));
@@ -1765,7 +1778,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
       const publicDomains = ['gmail.com','yahoo.com','outlook.com','hotmail.com','live.com','aol.com','icloud.com','protonmail.com','mail.com','yandex.com','zoho.com','rediffmail.com'];
       if (userDomain && !publicDomains.includes(userDomain)) {
         const r = this.db.prepare(`
-          UPDATE contacts
+          UPDATE ${CONTACTS}
           SET contact_type = 'colleague', contact_type_confidence = 0.9, contact_type_source = 'rule'
           WHERE email LIKE ? AND contact_type = 'unknown'
         `).run(`%@${userDomain}`);
@@ -1776,7 +1789,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
       const autoPatterns = ['noreply@', 'no-reply@', 'donotreply@', 'mailer-daemon@', 'postmaster@', 'notifications@'];
       for (const pattern of autoPatterns) {
         const r = this.db.prepare(`
-          UPDATE contacts
+          UPDATE ${CONTACTS}
           SET contact_type = 'automated', contact_type_confidence = 0.95, contact_type_source = 'rule'
           WHERE email LIKE ? AND contact_type = 'unknown'
         `).run(`${pattern}%`);
@@ -1785,7 +1798,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
 
       // 3. Newsletter: high volume, low reply rate, unsubscribe-likely
       const r3 = this.db.prepare(`
-        UPDATE contacts
+        UPDATE ${CONTACTS}
         SET contact_type = 'newsletter', contact_type_confidence = 0.8, contact_type_source = 'behavior'
         WHERE contact_type = 'unknown'
           AND received_count >= 10
@@ -1796,7 +1809,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
 
       // 4. Potential customer: they contacted us (inbound) and we replied but low volume
       const r4 = this.db.prepare(`
-        UPDATE contacts
+        UPDATE ${CONTACTS}
         SET contact_type = 'potential_customer', contact_type_confidence = 0.6, contact_type_source = 'behavior'
         WHERE contact_type = 'unknown'
           AND received_count >= 1 AND received_count <= 5
@@ -1807,7 +1820,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
 
       // 5. Existing customer: sustained two-way communication
       const r5 = this.db.prepare(`
-        UPDATE contacts
+        UPDATE ${CONTACTS}
         SET contact_type = 'existing_customer', contact_type_confidence = 0.65, contact_type_source = 'behavior'
         WHERE contact_type = 'unknown'
           AND received_count >= 5
@@ -1819,9 +1832,9 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
       // Sync to sender_stats
       this.db.prepare(`
         UPDATE sender_stats SET contact_type = (
-          SELECT contact_type FROM contacts WHERE contacts.email = sender_stats.email
+          SELECT c.contact_type FROM ${CONTACTS} c WHERE c.email = sender_stats.email
         ) WHERE EXISTS (
-          SELECT 1 FROM contacts WHERE contacts.email = sender_stats.email AND contacts.contact_type != 'unknown'
+          SELECT 1 FROM ${CONTACTS} c WHERE c.email = sender_stats.email AND c.contact_type != 'unknown'
         )
       `).run();
     });
@@ -1845,7 +1858,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
              c.contact_type_source, c.received_count, c.sent_count,
              c.last_inbound_at, c.last_outbound_at, c.avg_response_time_sec,
              c.thread_count, c.needs_response, c.is_favorite
-      FROM contacts c
+      FROM ${CONTACTS} c
       WHERE c.contact_type = ?
     `;
     const params: any[] = [contactType];
@@ -1869,7 +1882,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
   getContactTypeCounts(): Record<ContactType, number> {
     const rows = this.db.prepare(`
       SELECT contact_type, COUNT(*) as count
-      FROM contacts
+      FROM ${CONTACTS}
       GROUP BY contact_type
     `).all() as { contact_type: string; count: number }[];
 
@@ -1889,7 +1902,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
              c.contact_type_source, c.received_count, c.sent_count,
              c.last_inbound_at, c.last_outbound_at, c.avg_response_time_sec,
              c.thread_count, c.needs_response, c.is_favorite
-      FROM contacts c
+      FROM ${CONTACTS} c
       WHERE c.needs_response = 1
       ORDER BY c.last_inbound_at DESC
       LIMIT ?
@@ -1904,7 +1917,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
   refreshNeedsResponse(): number {
     // Mark contacts as needing response where their latest inbound has no subsequent outbound
     const result = this.db.prepare(`
-      UPDATE contacts SET needs_response = 1, last_inbound_at = (
+      UPDATE ${CONTACTS} SET needs_response = 1, last_inbound_at = (
         SELECT MAX(a.timestamp) FROM user_action_log a
         WHERE a.sender_address = contacts.email AND a.action_type = 'read'
       )
@@ -1923,7 +1936,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
 
     // Clear needs_response for contacts we've replied to
     this.db.prepare(`
-      UPDATE contacts SET needs_response = 0
+      UPDATE ${CONTACTS} SET needs_response = 0
       WHERE needs_response = 1 AND email IN (
         SELECT DISTINCT sender_address FROM user_action_log
         WHERE action_type IN ('reply', 'reply_all')
@@ -1953,7 +1966,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
              e.date as received_at,
              (? - e.date) as waiting_seconds
       FROM emails e
-      LEFT JOIN contacts c ON LOWER(e.from_address) = c.email
+      LEFT JOIN ${CONTACTS} c ON LOWER(e.from_address) = c.email
       WHERE instr(e.tags, '|read|') = 0
         AND e.date > (? - 604800)
         AND instr(e.tags, '|Trash|') = 0

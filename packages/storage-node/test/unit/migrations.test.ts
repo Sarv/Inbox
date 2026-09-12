@@ -10,6 +10,7 @@ import {
   reconcileLabelDrift,
   type Migration,
 } from '../../src/migrations';
+import { attachSharedContacts, SHARED_SCHEMA } from '../../src/shared-contacts';
 import { openTestDb } from '../../src/test-support/test-db';
 
 // The migration chain is the ONLY thing standing between an existing user's
@@ -53,23 +54,35 @@ function managerUpTo(db: Database.Database, maxVersion: number): MigrationManage
   return manager;
 }
 
-const tableNames = (db: Database.Database): Set<string> =>
+// Every inspector below takes a SCHEMA, because the mailbox is no longer the
+// only database on the connection: contacts moved to the attached `shared`
+// directory. Defaulting to `main` keeps the mailbox assertions unchanged, and
+// an explicit `SHARED_SCHEMA` is what proves a directory table really did land
+// in the directory rather than back in somebody's mailbox.
+const tableNames = (db: Database.Database, schema = 'main'): Set<string> =>
   new Set(
     (
       db
-        .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')")
+        .prepare(`SELECT name FROM ${schema}.sqlite_master WHERE type IN ('table','view')`)
         .all() as Array<{ name: string }>
     ).map((r) => r.name),
   );
 
-const columnsOf = (db: Database.Database, table: string): Set<string> =>
+const columnsOf = (db: Database.Database, table: string, schema = 'main'): Set<string> =>
   new Set(
-    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name),
+    (db.prepare(`PRAGMA ${schema}.table_info(${table})`).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    ),
   );
 
-const objectExists = (db: Database.Database, type: string, name: string): boolean =>
+const objectExists = (
+  db: Database.Database,
+  type: string,
+  name: string,
+  schema = 'main',
+): boolean =>
   !!db
-    .prepare('SELECT 1 AS ok FROM sqlite_master WHERE type = ? AND name = ?')
+    .prepare(`SELECT 1 AS ok FROM ${schema}.sqlite_master WHERE type = ? AND name = ?`)
     .get(type, name);
 
 const appliedVersions = (db: Database.Database): number[] =>
@@ -89,6 +102,10 @@ describe('fresh install reaches the current production schema', () => {
 
   beforeEach(() => {
     db = openTestDb();
+    // Same order as SQLiteStorage.initialize: the directory is attached BEFORE
+    // the chain runs, because v77 adopts this mailbox's contacts into it. An
+    // empty path gives each test a private, anonymous directory.
+    attachSharedContacts(db, '');
     createMigrationManager(db).migrate();
   });
 
@@ -97,9 +114,9 @@ describe('fresh install reaches the current production schema', () => {
   // A fresh DB that stops short of the newest version means the app queries
   // columns/tables that do not exist yet — every sync throws "no such column".
   it('ends on the newest registered version and records every applied version', () => {
-    expect(CURRENT_VERSION).toBe(76);
+    expect(CURRENT_VERSION).toBe(81);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..76 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..81 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -113,9 +130,6 @@ describe('fresh install reaches the current production schema', () => {
       'folders',
       'attachments',
       'accounts',
-      'contacts',
-      'contact_notes',
-      'contact_enrichment_history',
       'sender_stats',
       'sender_daily_metrics',
       'spammers',
@@ -153,6 +167,30 @@ describe('fresh install reaches the current production schema', () => {
       'schema_version',
     ]) {
       expect(names, `missing table ${table}`).toContain(table);
+    }
+    // ...and NOT the directory's. A local `contacts` table would shadow
+    // `shared.contacts` for any query that forgot its prefix, and the mailbox
+    // would quietly read an empty address book.
+    for (const moved of ['contacts', 'contact_notes', 'contact_enrichment_history']) {
+      expect(names, `${moved} must not be re-created in the mailbox`).not.toContain(moved);
+    }
+  });
+
+  // The address book is shared across accounts and lives in its own attached
+  // database. If these were missing, every contact query would fail outright
+  // with `no such table: shared.contacts` — the whole contacts UI, the agent's
+  // sender classification and the enrichment pipeline at once.
+  it('creates the shared contact directory tables', () => {
+    const names = tableNames(db, SHARED_SCHEMA);
+    for (const table of [
+      'contacts',
+      'contact_notes',
+      'contact_enrichment_history',
+      // v77 provenance: which mailbox each address was actually seen in. The
+      // union is only maintainable while the parts are still known.
+      'contact_accounts',
+    ]) {
+      expect(names, `missing directory table ${table}`).toContain(table);
     }
   });
 
@@ -204,7 +242,11 @@ describe('fresh install reaches the current production schema', () => {
   });
 
   it('carries the columns later migrations add to contacts/sender_stats/queues', () => {
-    const contacts = columnsOf(db, 'contacts');
+    // The directory schema is written out in full rather than replayed from the
+    // per-account chain, so this is what keeps the two from drifting: a column
+    // added to `contacts` by a migration but forgotten in `directorySchema`
+    // fails here instead of at runtime.
+    const contacts = columnsOf(db, 'contacts', SHARED_SCHEMA);
     for (const col of [
       'contact_type',
       'contact_type_confidence',
@@ -268,7 +310,6 @@ describe('fresh install reaches the current production schema', () => {
       'idx_tf_list',
       'idx_tf_unread',
       'idx_tc_slug',
-      'idx_contacts_type',
       'idx_threads_chat_extraction',
       // Every sender lookup in the app is case-folded, so the plain
       // `from_address` index cannot serve any of them. Without this expression
@@ -277,6 +318,25 @@ describe('fresh install reaches the current production schema', () => {
       'idx_emails_from_lower_date',
     ]) {
       expect(objectExists(db, 'index', index), `missing index ${index}`).toBe(true);
+    }
+    // Contact indexes moved with the table: they are only useful where the rows
+    // actually are, and a leftover copy in the mailbox would index nothing.
+    for (const index of [
+      'idx_contacts_type',
+      'idx_contacts_needs_response',
+      'idx_contacts_last_inbound',
+      'idx_contacts_kind',
+      'idx_contacts_mobile',
+      'idx_contact_notes_email',
+      'idx_enrichment_history_contact',
+    ]) {
+      expect(
+        objectExists(db, 'index', index, SHARED_SCHEMA),
+        `missing directory index ${index}`,
+      ).toBe(true);
+      expect(objectExists(db, 'index', index), `${index} must not linger in the mailbox`).toBe(
+        false,
+      );
     }
     for (const trigger of [
       'emails_fts_insert',

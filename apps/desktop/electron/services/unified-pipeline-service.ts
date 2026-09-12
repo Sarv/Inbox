@@ -673,11 +673,12 @@ export function initializeUnifiedPipeline(
       getEnabledCategoryDefinitions: () => { try { return (pStorage() as any).getEnabledCategoryDefinitions(); } catch { return []; } },
       saveEmailCategoriesBatch: (batch) => { try { return pRepos().ai.saveEmailCategoriesBatch(batch); } catch { return 0; } },
       executeAction: (emailId, action, value) => executeAgentAction(emailId, action, value),
+      // Goes through the storage facade rather than reaching into `.db`: the
+      // contact directory is shared across accounts and lives in an ATTACHed
+      // schema, so the table name is qualified in exactly one place.
       getContactType: (email: string): ContactType => {
-        try {
-          const row = (pStorage() as any).db?.prepare?.('SELECT contact_type FROM contacts WHERE email = ?')?.get(email.toLowerCase());
-          return (row?.contact_type as ContactType) || 'unknown';
-        } catch { return 'unknown'; }
+        try { return (pStorage().getContactType(email) as ContactType) || 'unknown'; }
+        catch { return 'unknown'; }
       },
       getImportanceScore: (emailId: string) => {
         try {
@@ -721,10 +722,8 @@ export function initializeUnifiedPipeline(
     getSenderSignalData: (s: string) => pRepos().agent.getSenderSignalData(s, userEmail),
     getThreadParticipation: (t: string) => pRepos().agent.getThreadParticipation(t, userEmail),
     getContactType: (e: string) => {
-      try {
-        const row = (pStorage() as any).db?.prepare?.('SELECT contact_type FROM contacts WHERE email = ?')?.get(e.toLowerCase());
-        return row?.contact_type || 'unknown';
-      } catch { return 'unknown'; }
+      try { return pStorage().getContactType(e); }
+      catch { return 'unknown'; }
     },
     getPeakHours: () => pRepos().agent.getPeakActivityHours(),
   });

@@ -176,6 +176,10 @@ export function claimDefaultRuntime(accountId: string): boolean {
   if (def && def.storage) {
     runtimes.delete(DEFAULT_SLOT);
     runtimes.set(accountId, def);
+    // The legacy database was opened before anyone knew whose it was. Now we
+    // know — tell it, so the shared contact directory files this mailbox's
+    // contacts under the account id every other mailbox uses.
+    def.storage.adoptAccountId(accountId);
     return true;
   }
   return false;

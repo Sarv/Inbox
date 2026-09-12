@@ -14,6 +14,10 @@ export {
 } from './sqlite-storage';
 export { SQLiteVectorStorage } from './vector-storage';
 export { createMigrationManager, type Migration } from './migrations';
+// The shared contact directory's filename. Exported because the desktop app's
+// orphan-DB sweep has to know this file is not an account DB — it deleted the
+// whole address book once by assuming it was.
+export { SHARED_CONTACTS_FILE, SHARED_SCHEMA } from './shared-contacts';
 // Every writer of the `emails` table must record the thread resolver's lookup
 // key — including the sent-mail append and the draft save in the Electron main
 // process, which insert rows directly rather than through EmailRepository.

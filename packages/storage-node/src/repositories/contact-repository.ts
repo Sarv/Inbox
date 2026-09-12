@@ -9,11 +9,31 @@ import type {
   PaginationOptions,
   EmailRecord,
 } from '@sarvinbox/core';
-import { isRoleAddress, parseAddressList, PUBLIC_DOMAINS } from '@sarvinbox/core';
+import { contactNameForAddress, isRoleAddress, parseAddressList, PUBLIC_DOMAINS } from '@sarvinbox/core';
 
+import { SHARED } from '../shared-contacts';
 import type { SenderStats, SignaturePattern } from '../sqlite-storage';
 
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
+
+/*
+ * The contact directory is SHARED across accounts and reached through the
+ * ATTACHed `shared` schema, so every statement below names it explicitly.
+ * A bare `contacts` would resolve against `main` first: if any account
+ * database ever regained a local table of that name the query would silently
+ * read it instead, and an empty address book looks exactly like a user who
+ * has no contacts. Going through SHARED() keeps the schema name in one place
+ * and makes every directory access greppable.
+ *
+ * `sender_stats`, `signature_patterns` and `emails` stay unqualified on
+ * purpose -- those ARE per-account, and the joins below mix the two.
+ */
+const CONTACTS = SHARED('contacts');
+const CONTACT_ACCOUNTS = SHARED('contact_accounts');
+const ENRICHMENT_HISTORY = SHARED('contact_enrichment_history');
+
+/** Provenance account id used when a storage was opened with no account. */
+const UNKNOWN_ACCOUNT = 'unknown-account';
 
 /** Best-effort platform label for a social URL (for the otherSocials blob). */
 function socialPlatformOf(url: string): string {
@@ -63,7 +83,7 @@ export const SQL_ENRICHMENT_CANDIDATES = `
         c.kind AS kind,
         c.enriched_through_email_at AS enriched_through_email_at,
         MAX(e.date) AS newest_email_at
-      FROM contacts c
+      FROM ${CONTACTS} c
       INNER JOIN emails e ON LOWER(e.from_address) = LOWER(c.email)
       WHERE c.kind = 'individual'
       GROUP BY c.id
@@ -138,8 +158,56 @@ export interface SenderContext {
  * Repository for contact-related operations
  */
 export class ContactRepository extends BaseRepository {
-  constructor(getDb: DatabaseAccessor) {
+  /**
+   * @param getDb       the account's connection, with the directory attached.
+   * @param accountKey  which mailbox this repository speaks for, recorded as
+   *   contact provenance. A thunk rather than a value because the storage that
+   *   owns this repository is constructed before its account is known, and a
+   *   default rather than a required argument because a storage opened with no
+   *   account behind it (the seeding script, the test fixtures) still has to
+   *   work — it just cannot say whose contacts these are.
+   */
+  constructor(getDb: DatabaseAccessor, private readonly accountKey: () => string = () => UNKNOWN_ACCOUNT) {
     super(getDb);
+  }
+
+  /**
+   * Record what THIS mailbox contributed to a directory row.
+   *
+   * The directory holds the union; this holds the parts. Without it the union
+   * is a one-way door: disconnecting an account could only either leave its
+   * counts fused into a total with no remaining source, or delete a shared
+   * contact that another account still sees. It also answers "which of my
+   * addresses does this person actually write to", which is the only way to
+   * pick a from-address for a reply.
+   *
+   * Deltas, applied with the same arithmetic as the contact row itself, so the
+   * two can never drift: a metadata-only upsert adds nothing.
+   */
+  private recordProvenanceSync(email: string, delta: {
+    firstSeen: number; lastSeen: number;
+    emailCount: number; sentCount: number; receivedCount: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO ${CONTACT_ACCOUNTS}
+        (email, account_id, first_seen, last_seen, email_count, sent_count, received_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())
+      ON CONFLICT(email, account_id) DO UPDATE SET
+        first_seen     = MIN(COALESCE(first_seen, excluded.first_seen), excluded.first_seen),
+        last_seen      = MAX(COALESCE(last_seen, 0), excluded.last_seen),
+        email_count    = COALESCE(email_count, 0)    + excluded.email_count,
+        sent_count     = COALESCE(sent_count, 0)     + excluded.sent_count,
+        received_count = COALESCE(received_count, 0) + excluded.received_count,
+        updated_at     = unixepoch()
+    `).run(
+      this.normalizeEmailKey(email),
+      this.accountKey(),
+      delta.firstSeen,
+      delta.lastSeen,
+      delta.emailCount,
+      delta.sentCount,
+      delta.receivedCount,
+    );
   }
 
   // ========== Contact Operations ==========
@@ -186,6 +254,13 @@ export class ContactRepository extends BaseRepository {
       }
 
       this.updateSync(existing.id, updates);
+      this.recordProvenanceSync(contact.email, {
+        firstSeen: updates.firstSeen ?? existing.firstSeen ?? now,
+        lastSeen: updates.lastSeen ?? now,
+        emailCount: updates.emailCount === undefined ? 0 : 1,
+        sentCount: contact.sentCount || 0,
+        receivedCount: contact.receivedCount || 0,
+      });
       return { ...existing, ...updates };
     } else {
       const newContact: ContactRecord = {
@@ -220,7 +295,7 @@ export class ContactRepository extends BaseRepository {
       const roleType = isRoleAddress(newContact.email) ? 'automated' : null;
 
       this.db.prepare(`
-        INSERT INTO contacts (
+        INSERT INTO ${CONTACTS} (
           id, email, name, display_name, avatar_url, organization, title, phone,
           first_seen, last_seen, email_count, sent_count, received_count,
           is_favorite, notes, tags, metadata, contact_type, contact_type_source
@@ -251,6 +326,14 @@ export class ContactRepository extends BaseRepository {
         contactTypeSource: roleType ? 'heuristic' : null,
       });
 
+      this.recordProvenanceSync(newContact.email, {
+        firstSeen: newContact.firstSeen,
+        lastSeen: newContact.lastSeen,
+        emailCount: newContact.emailCount,
+        sentCount: newContact.sentCount,
+        receivedCount: newContact.receivedCount,
+      });
+
       return newContact;
     }
   }
@@ -265,10 +348,25 @@ export class ContactRepository extends BaseRepository {
   /** Synchronous core of {@link getByEmail} — callable inside a transaction. */
   getByEmailSync(email: string): ContactRecord | null {
     const row = this.db
-      .prepare('SELECT * FROM contacts WHERE email = ?')
+      .prepare(`SELECT * FROM ${CONTACTS} WHERE email = ?`)
       .get(this.normalizeEmailKey(email)) as any;
 
     return row ? this.rowToContactRecord(row) : null;
+  }
+
+  /**
+   * The agent-facing contact type for one address, or `'unknown'`.
+   *
+   * A single-column read that the pipeline calls once per email, so it stays
+   * out of {@link getByEmail} (which hydrates the whole row and its JSON
+   * blobs). It lives here rather than in the pipeline so the directory's
+   * schema qualification is applied in exactly one place.
+   */
+  getContactTypeSync(email: string): string {
+    const row = this.db
+      .prepare(`SELECT contact_type FROM ${CONTACTS} WHERE email = ?`)
+      .get(this.normalizeEmailKey(email)) as { contact_type?: string } | undefined;
+    return row?.contact_type || 'unknown';
   }
 
   /**
@@ -276,7 +374,7 @@ export class ContactRepository extends BaseRepository {
    */
   async get(id: string): Promise<ContactRecord | null> {
     const row = this.db
-      .prepare('SELECT * FROM contacts WHERE id = ?')
+      .prepare(`SELECT * FROM ${CONTACTS} WHERE id = ?`)
       .get(id) as any;
 
     return row ? this.rowToContactRecord(row) : null;
@@ -307,14 +405,14 @@ export class ContactRepository extends BaseRepository {
       sql = `
         SELECT *,
           ((sent_count * 3 + received_count) * (1.0 / (1.0 + (? - last_seen) / 2592000.0))) as relevance_score
-        FROM contacts
+        FROM ${CONTACTS}
       `;
       params.push(now);
       sql += where;
       params.push(...filterParams);
       sql += ` ORDER BY relevance_score ${sortDirection}`;
     } else {
-      sql = 'SELECT * FROM contacts';
+      sql = `SELECT * FROM ${CONTACTS}`;
       sql += where;
       params.push(...filterParams);
       sql += ` ORDER BY ${sortColumn} ${sortDirection}`;
@@ -332,7 +430,7 @@ export class ContactRepository extends BaseRepository {
    */
   async getCount(search?: string, contactType?: string): Promise<number> {
     const { where, params } = this.buildListWhere({ search, contactType });
-    const sql = 'SELECT COUNT(*) as count FROM contacts' + where;
+    const sql = `SELECT COUNT(*) as count FROM ${CONTACTS}` + where;
     const row = this.db.prepare(sql).get(...params) as any;
     return row.count;
   }
@@ -384,17 +482,34 @@ export class ContactRepository extends BaseRepository {
 
     params.id = id;
     this.db.prepare(`
-      UPDATE contacts
+      UPDATE ${CONTACTS}
       SET ${setClauses.join(', ')}
       WHERE id = @id
     `).run(params);
   }
 
   /**
-   * Delete contact
+   * Delete a contact from the directory — for EVERY account, not just this one.
+   *
+   * The row is shared now, so this is the user saying "I don't want this person
+   * in my address book", not "this mailbox no longer sees them". The provenance
+   * rows go with it: leaving them behind would make the next sync from any
+   * account resurrect the contact with the old counts fused back in.
+   *
+   * Sourced from the row itself rather than from the caller's idea of the
+   * address, and a no-op when the row is already gone — so a delete can never
+   * take provenance with it on a mistaken id.
    */
   async delete(id: string): Promise<void> {
-    this.db.prepare('DELETE FROM contacts WHERE id = ?').run(id);
+    const row = this.db
+      .prepare(`SELECT email FROM ${CONTACTS} WHERE id = ?`)
+      .get(id) as { email?: string } | undefined;
+    if (!row?.email) return;
+
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM ${CONTACTS} WHERE id = ?`).run(id);
+      this.db.prepare(`DELETE FROM ${CONTACT_ACCOUNTS} WHERE email = ?`).run(row.email);
+    })();
   }
 
   /**
@@ -449,7 +564,9 @@ export class ContactRepository extends BaseRepository {
 
       this.upsertSync({
         email: contact.email,
-        name: contact.name,
+        // A machine mailbox never wears the name of the human the notification
+        // happens to be about — see contactNameForAddress.
+        name: contactNameForAddress(contact.email, contact.name),
         firstSeen: emailDate,
         lastSeen: emailDate,
         sentCount: contact.direction === 'sent' ? 1 : 0,
@@ -802,7 +919,7 @@ export class ContactRepository extends BaseRepository {
         COALESCE(ss.is_blocked, 0) as is_blocked,
         ss.last_replied as last_replied,
         ss.last_sent_to as last_sent_to
-      FROM contacts c
+      FROM ${CONTACTS} c
       LEFT JOIN sender_stats ss ON LOWER(ss.email) = LOWER(c.email)
       WHERE LOWER(c.email) IN (${placeholders})
       UNION ALL
@@ -822,7 +939,7 @@ export class ContactRepository extends BaseRepository {
         ss2.last_sent_to as last_sent_to
       FROM sender_stats ss2
       WHERE LOWER(ss2.email) IN (${placeholders})
-        AND NOT EXISTS (SELECT 1 FROM contacts c2 WHERE LOWER(c2.email) = LOWER(ss2.email))
+        AND NOT EXISTS (SELECT 1 FROM ${CONTACTS} c2 WHERE LOWER(c2.email) = LOWER(ss2.email))
     `).all(...lowered, ...lowered) as any[];
 
     const result: Record<string, SenderContext> = {};
@@ -1011,8 +1128,8 @@ export class ContactRepository extends BaseRepository {
    */
   async findContactsByMobile(mobileE164: string, excludeContactId?: string): Promise<ContactRecord[]> {
     const rows = excludeContactId
-      ? this.db.prepare('SELECT * FROM contacts WHERE mobile_e164 = ? AND id != ?').all(mobileE164, excludeContactId)
-      : this.db.prepare('SELECT * FROM contacts WHERE mobile_e164 = ?').all(mobileE164);
+      ? this.db.prepare(`SELECT * FROM ${CONTACTS} WHERE mobile_e164 = ? AND id != ?`).all(mobileE164, excludeContactId)
+      : this.db.prepare(`SELECT * FROM ${CONTACTS} WHERE mobile_e164 = ?`).all(mobileE164);
     return (rows as any[]).map((row) => this.rowToContactRecord(row));
   }
 
@@ -1045,11 +1162,11 @@ export class ContactRepository extends BaseRepository {
 
     // Prefer lookup by synthetic email (exact match) — any pre-existing
     // company with that key is the right target.
-    const existingRow = this.db.prepare('SELECT * FROM contacts WHERE email = ?').get(syntheticEmail) as any;
+    const existingRow = this.db.prepare(`SELECT * FROM ${CONTACTS} WHERE email = ?`).get(syntheticEmail) as any;
     if (existingRow) {
       const existing = this.rowToContactRecord(existingRow);
       if (params.name && !existing.organization) {
-        this.db.prepare('UPDATE contacts SET organization = ? WHERE id = ?').run(params.name, existing.id);
+        this.db.prepare(`UPDATE ${CONTACTS} SET organization = ? WHERE id = ?`).run(params.name, existing.id);
         return { ...existing, organization: params.name };
       }
       return existing;
@@ -1064,7 +1181,7 @@ export class ContactRepository extends BaseRepository {
     };
 
     this.db.prepare(`
-      INSERT INTO contacts (
+      INSERT INTO ${CONTACTS} (
         id, email, name, organization, first_seen, last_seen,
         email_count, sent_count, received_count,
         is_favorite, tags, metadata,
@@ -1078,7 +1195,7 @@ export class ContactRepository extends BaseRepository {
       now, now, JSON.stringify(enrichment), now, now, now,
     );
 
-    const createdRow = this.db.prepare('SELECT * FROM contacts WHERE id = ?').get(id) as any;
+    const createdRow = this.db.prepare(`SELECT * FROM ${CONTACTS} WHERE id = ?`).get(id) as any;
     if (!createdRow) throw new Error('Failed to create company contact');
     return this.rowToContactRecord(createdRow);
   }
@@ -1122,7 +1239,7 @@ export class ContactRepository extends BaseRepository {
         // group reconverges on a single id.
         for (const m of mobileMatches) {
           if (!m.personId) {
-            this.db.prepare('UPDATE contacts SET person_id = ?, updated_at = ? WHERE id = ?')
+            this.db.prepare(`UPDATE ${CONTACTS} SET person_id = ?, updated_at = ? WHERE id = ?`)
               .run(personId, now, m.id);
           }
         }
@@ -1155,7 +1272,7 @@ export class ContactRepository extends BaseRepository {
       // --- Close out any open history row if the company or designation
       // changed (job switch).
       const prevOpen = this.db.prepare(`
-        SELECT * FROM contact_enrichment_history
+        SELECT * FROM ${ENRICHMENT_HISTORY}
         WHERE contact_id = ? AND effective_to IS NULL
         ORDER BY effective_from DESC LIMIT 1
       `).get(contact.id) as any;
@@ -1172,14 +1289,14 @@ export class ContactRepository extends BaseRepository {
         );
 
       if (prevOpen && isJobSwitch) {
-        this.db.prepare('UPDATE contact_enrichment_history SET effective_to = ? WHERE id = ?')
+        this.db.prepare(`UPDATE ${ENRICHMENT_HISTORY} SET effective_to = ? WHERE id = ?`)
           .run(now, prevOpen.id);
       }
 
       // --- Insert new history row if this is the first enrichment or a change.
       if (!prevOpen || isJobSwitch) {
         this.db.prepare(`
-          INSERT INTO contact_enrichment_history
+          INSERT INTO ${ENRICHMENT_HISTORY}
             (id, contact_id, person_id, enrichment, company_contact_id,
              designation, organization, effective_from, source, source_email_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1192,7 +1309,7 @@ export class ContactRepository extends BaseRepository {
       } else {
         // Same employer/role — just refresh the snapshot on the open row.
         this.db.prepare(`
-          UPDATE contact_enrichment_history
+          UPDATE ${ENRICHMENT_HISTORY}
           SET enrichment = ?, effective_from = ?
           WHERE id = ?
         `).run(JSON.stringify(enrichment), input.enrichedThroughEmailAt, prevOpen.id);
@@ -1217,7 +1334,7 @@ export class ContactRepository extends BaseRepository {
       const newName = nameIsPlaceholder && signatureName ? signatureName : null;
 
       this.db.prepare(`
-        UPDATE contacts SET
+        UPDATE ${CONTACTS} SET
           kind = COALESCE(?, kind),
           person_id = ?,
           company_contact_id = ?,
@@ -1261,7 +1378,7 @@ export class ContactRepository extends BaseRepository {
   async recordEnrichmentWatermark(contactId: string, throughEmailAt: number): Promise<void> {
     const now = this.now();
     this.db.prepare(`
-      UPDATE contacts SET enriched_through_email_at = ?, updated_at = ?
+      UPDATE ${CONTACTS} SET enriched_through_email_at = ?, updated_at = ?
       WHERE id = ?
     `).run(throughEmailAt, now, contactId);
   }
@@ -1272,7 +1389,7 @@ export class ContactRepository extends BaseRepository {
   async setAvatarCandidate(contactId: string, dataUri: string): Promise<void> {
     const now = this.now();
     this.db.prepare(`
-      UPDATE contacts SET avatar_url = ?, avatar_status = 'pending', avatar_checked_at = ?, updated_at = ?
+      UPDATE ${CONTACTS} SET avatar_url = ?, avatar_status = 'pending', avatar_checked_at = ?, updated_at = ?
       WHERE id = ?
     `).run(dataUri, now, now, contactId);
   }
@@ -1281,7 +1398,7 @@ export class ContactRepository extends BaseRepository {
   async confirmAvatar(contactId: string): Promise<void> {
     const now = this.now();
     this.db.prepare(`
-      UPDATE contacts SET avatar_status = 'confirmed', updated_at = ?
+      UPDATE ${CONTACTS} SET avatar_status = 'confirmed', updated_at = ?
       WHERE id = ?
     `).run(now, contactId);
   }
@@ -1293,7 +1410,7 @@ export class ContactRepository extends BaseRepository {
    */
   async markAvatarChecked(contactId: string): Promise<void> {
     const now = this.now();
-    this.db.prepare(`UPDATE contacts SET avatar_checked_at = ?, updated_at = ? WHERE id = ?`)
+    this.db.prepare(`UPDATE ${CONTACTS} SET avatar_checked_at = ?, updated_at = ? WHERE id = ?`)
       .run(now, now, contactId);
   }
 
@@ -1301,7 +1418,7 @@ export class ContactRepository extends BaseRepository {
   async rejectAvatar(contactId: string): Promise<void> {
     const now = this.now();
     this.db.prepare(`
-      UPDATE contacts SET avatar_url = NULL, avatar_status = 'rejected', avatar_checked_at = ?, updated_at = ?
+      UPDATE ${CONTACTS} SET avatar_url = NULL, avatar_status = 'rejected', avatar_checked_at = ?, updated_at = ?
       WHERE id = ?
     `).run(now, now, contactId);
   }
@@ -1313,7 +1430,7 @@ export class ContactRepository extends BaseRepository {
    */
   async getContactsNeedingAvatar(limit: number, staleBefore: number): Promise<ContactRecord[]> {
     const rows = this.db.prepare(`
-      SELECT * FROM contacts
+      SELECT * FROM ${CONTACTS}
       WHERE avatar_status IS NULL
         AND email IS NOT NULL AND email != ''
         AND (avatar_checked_at IS NULL OR avatar_checked_at < ?)
@@ -1329,7 +1446,7 @@ export class ContactRepository extends BaseRepository {
    */
   async getEnrichmentHistory(contactId: string): Promise<ContactEnrichmentHistoryRecord[]> {
     const rows = this.db.prepare(`
-      SELECT * FROM contact_enrichment_history
+      SELECT * FROM ${ENRICHMENT_HISTORY}
       WHERE contact_id = ?
       ORDER BY effective_from DESC
     `).all(contactId) as any[];
@@ -1357,10 +1474,10 @@ export class ContactRepository extends BaseRepository {
    * changed jobs.
    */
   async getRelatedByPerson(contactId: string): Promise<ContactRecord[]> {
-    const row = this.db.prepare('SELECT person_id FROM contacts WHERE id = ?').get(contactId) as any;
+    const row = this.db.prepare(`SELECT person_id FROM ${CONTACTS} WHERE id = ?`).get(contactId) as any;
     if (!row?.person_id) return [];
     const rows = this.db.prepare(`
-      SELECT * FROM contacts WHERE person_id = ? AND id != ?
+      SELECT * FROM ${CONTACTS} WHERE person_id = ? AND id != ?
     `).all(row.person_id, contactId) as any[];
     return rows.map((r) => this.rowToContactRecord(r));
   }
@@ -1391,7 +1508,7 @@ export class ContactRepository extends BaseRepository {
   getPhoneMiningState(): Map<string, { through: number; phones: Record<string, number> }> {
     const rows = this.db.prepare(
       `SELECT LOWER(email) AS email, phones_mined_through, phones_mined
-         FROM contacts
+         FROM ${CONTACTS}
         WHERE phones_mined_through IS NOT NULL`,
     ).all() as Array<{ email: string; phones_mined_through: number; phones_mined: string | null }>;
     const out = new Map<string, { through: number; phones: Record<string, number> }>();
@@ -1414,7 +1531,7 @@ export class ContactRepository extends BaseRepository {
   /** Record what mining saw for a contact, so the next scan can skip them. */
   setPhoneMiningState(email: string, through: number, phones: Record<string, number>): void {
     this.db.prepare(
-      'UPDATE contacts SET phones_mined_through = ?, phones_mined = ? WHERE LOWER(email) = LOWER(?)',
+      `UPDATE ${CONTACTS} SET phones_mined_through = ?, phones_mined = ? WHERE LOWER(email) = LOWER(?)`,
     ).run(through, JSON.stringify(phones), email);
   }
 
@@ -1432,7 +1549,7 @@ export class ContactRepository extends BaseRepository {
     linkedinUrl: string | null = null,
   ): void {
     const row = this.db
-      .prepare('SELECT id, enrichment, phone FROM contacts WHERE LOWER(email) = LOWER(?)')
+      .prepare(`SELECT id, enrichment, phone FROM ${CONTACTS} WHERE LOWER(email) = LOWER(?)`)
       .get(email) as { id: string; enrichment: string | null; phone: string | null } | undefined;
     if (!row) return;
     let enrichment: Record<string, unknown> = {};
@@ -1447,7 +1564,7 @@ export class ContactRepository extends BaseRepository {
     if (linkedinUrl) enrichment.linkedinUrl = linkedinUrl;
     const phone = directPhone || officePhone || null;
     this.db
-      .prepare('UPDATE contacts SET enrichment = ?, phone = ?, updated_at = ? WHERE id = ?')
+      .prepare(`UPDATE ${CONTACTS} SET enrichment = ?, phone = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify(enrichment), phone, Math.floor(Date.now() / 1000), row.id);
   }
 
@@ -1459,14 +1576,14 @@ export class ContactRepository extends BaseRepository {
   applyLinkedInUrl(email: string, url: string): void {
     if (!url) return;
     const row = this.db
-      .prepare('SELECT id, enrichment FROM contacts WHERE LOWER(email) = LOWER(?)')
+      .prepare(`SELECT id, enrichment FROM ${CONTACTS} WHERE LOWER(email) = LOWER(?)`)
       .get(email) as { id: string; enrichment: string | null } | undefined;
     if (!row) return;
     let enrichment: Record<string, unknown> = {};
     try { if (row.enrichment) enrichment = JSON.parse(row.enrichment); } catch { enrichment = {}; }
     enrichment.linkedinUrl = url;
     this.db
-      .prepare('UPDATE contacts SET enrichment = ?, updated_at = ? WHERE id = ?')
+      .prepare(`UPDATE ${CONTACTS} SET enrichment = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify(enrichment), Math.floor(Date.now() / 1000), row.id);
   }
 
@@ -1494,7 +1611,7 @@ export class ContactRepository extends BaseRepository {
     urls: { twitter?: string | null; website?: string | null; socials?: string[] },
   ): void {
     const row = this.db
-      .prepare(`SELECT id, enrichment FROM contacts WHERE ${whereClause}`)
+      .prepare(`SELECT id, enrichment FROM ${CONTACTS} WHERE ${whereClause}`)
       .get(...params) as { id: string; enrichment: string | null } | undefined;
     if (!row) return;
     let e: Record<string, any> = {};
@@ -1512,7 +1629,7 @@ export class ContactRepository extends BaseRepository {
       e.otherSocials = existing;
     }
     this.db
-      .prepare('UPDATE contacts SET enrichment = ?, updated_at = ? WHERE id = ?')
+      .prepare(`UPDATE ${CONTACTS} SET enrichment = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify(e), Math.floor(Date.now() / 1000), row.id);
   }
 
