@@ -1,4 +1,3 @@
-import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import {
   Search,
   User,
@@ -36,22 +35,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { enrichContact } from '../services/contact-enrichment-service';
 
 import { Avatar } from './Avatar';
+import { contactPhoneView, formatPhone } from './contact-phone-view';
 import { Tooltip } from './Tooltip';
-
-/**
- * Render any phone number in one consistent international format
- * ("+91 88990 01122") via libphonenumber-js, so a contact's office/direct
- * numbers don't show up in the mismatched shapes senders type. Falls back to
- * the original string when the value can't be parsed as a phone number.
- */
-function formatPhone(raw: string | null | undefined): string {
-  if (!raw) return '';
-  try {
-    const parsed = parsePhoneNumberFromString(raw, 'IN');
-    if (parsed && parsed.isValid()) return parsed.formatInternational();
-  } catch { /* not a parseable number — show as-is */ }
-  return raw;
-}
 
 interface ContactEnrichmentView {
   designation?: string | null;
@@ -779,30 +764,17 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                     </div>
 
                     {(() => {
-                      // Prefer the LLM-classified personal/mobile number over
-                      // selectedContact.phone — the raw column is populated
-                      // from signature scraping and frequently lands on the
-                      // office/toll-free line, which is misleading next to
-                      // the contact's name. Fall back to the raw phone only
-                      // when enrichment hasn't found a personal/mobile yet.
-                      const personal =
-                        selectedContact.enrichment?.personalPhone ||
-                        selectedContact.enrichment?.whatsappNumber ||
-                        selectedContact.mobileE164 ||
-                        null;
-                      const office = selectedContact.enrichment?.companyPhone || null;
-                      const display = personal || office || selectedContact.phone || null;
-                      if (!display) return null;
-                      // With no personal/mobile number, the only number we have is
-                      // the shared office line — label it so it isn't read as the
-                      // contact's own number.
-                      const isOffice = !personal;
+                      // Same rule as the list row (contact-phone-view), so the
+                      // card and the row can never show different numbers for
+                      // the same person.
+                      const view = contactPhoneView(selectedContact);
+                      if (!view) return null;
                       return (
                         <div className="flex items-center gap-3">
                           <Phone className="h-4 w-4 text-muted-foreground" />
                           <span className="text-sm">
-                            {formatPhone(display)}
-                            {isOffice && <span className="text-xs text-muted-foreground ml-1">(office)</span>}
+                            {view.number}
+                            {view.isOffice && <span className="text-xs text-muted-foreground ml-1">(office)</span>}
                           </span>
                         </div>
                       );

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyDomainPhones, type SenderPhones } from '../../../src/contact-enrichment/phone-classifier';
+import {
+  classifyDomainPhones,
+  recurrenceBonus,
+  MAX_RECURRENCE_BONUS,
+  type SenderPhones,
+} from '../../../src/contact-enrichment/phone-classifier';
 
 /**
  * Phone classification across a domain.
@@ -87,5 +92,110 @@ describe('classifyDomainPhones', () => {
     ]);
     expect(r.get('someone@gmail.com')!.directPhone).toBe(POOJA);
     expect(r.get('someone@gmail.com')!.officePhone).toBeNull();
+  });
+});
+
+describe('recurrence versus a single well-formatted sighting', () => {
+  const BHUPESH = '+919414511220';   // his own mobile, in 49 of his own mails
+  const VENDOR = '+917033058211';    // a supplier's, in one mail he forwarded
+
+  /** A domain big enough for the org test, so SWITCHBOARD is an orgKey. */
+  const withColleagues = (subject: SenderPhones): SenderPhones[] => [
+    subject,
+    ...['a', 'b', 'c', 'd'].map((n) => ({
+      email: `${n}@sarv.com`,
+      domain: 'sarv.com',
+      phones: new Map([[SWITCHBOARD, { display: SWITCHBOARD, count: 30 }]]),
+      scores: { [SWITCHBOARD]: 35 },
+    })),
+  ];
+
+  // Regression: score decided outright and count only broke ties, so ONE
+  // sighting of a cleanly-formatted vendor signature (50) beat the sender's own
+  // mobile sitting in 49 of his own emails (35). His card showed the vendor's
+  // number. Recurrence in a person's own outgoing mail is the strongest
+  // ownership evidence there is and cannot be a tiebreak.
+  it('prefers the number seen 49 times over the one seen once', () => {
+    const bhupesh: SenderPhones = {
+      email: 'bhupesh@sarv.com',
+      domain: 'sarv.com',
+      phones: new Map([
+        [BHUPESH, { display: BHUPESH, count: 49 }],
+        [VENDOR, { display: VENDOR, count: 1 }],
+        [SWITCHBOARD, { display: SWITCHBOARD, count: 51 }],
+      ]),
+      scores: { [BHUPESH]: 35, [VENDOR]: 50, [SWITCHBOARD]: 50 },
+    };
+    const out = classifyDomainPhones(withColleagues(bhupesh));
+    expect(out.get('bhupesh@sarv.com')).toEqual({
+      officePhone: SWITCHBOARD,
+      directPhone: BHUPESH,
+    });
+  });
+
+  // The bonus must ORDER candidates without swamping the per-email signals: a
+  // number seen twice is not thereby better than a signature seen once. If the
+  // weight ever grows enough to invert this, a number quoted in passing starts
+  // outranking a real sign-off.
+  it('does not let two sightings overturn a much stronger signal', () => {
+    const sender: SenderPhones = {
+      email: 'e@sarv.com',
+      domain: 'sarv.com',
+      phones: new Map([
+        ['+919000000001', { display: '+919000000001', count: 2 }],
+        ['+919000000002', { display: '+919000000002', count: 1 }],
+      ]),
+      scores: { '+919000000001': 10, '+919000000002': 70 },
+    };
+    const out = classifyDomainPhones(withColleagues(sender));
+    expect(out.get('e@sarv.com')?.directPhone).toBe('+919000000002');
+  });
+
+  // Recurrence must never buy a number the sender does not own. The ownership
+  // test (their count is the domain maximum) still runs first, so quoting a
+  // colleague's mobile a hundred times cannot claim it.
+  it('cannot claim a colleague’s number however often it is quoted', () => {
+    const owner: SenderPhones = {
+      email: 'pooja@sarv.com',
+      domain: 'sarv.com',
+      phones: new Map([[POOJA, { display: POOJA, count: 200 }]]),
+      scores: { [POOJA]: 35 },
+    };
+    const quoter: SenderPhones = {
+      email: 'quoter@sarv.com',
+      domain: 'sarv.com',
+      phones: new Map([[POOJA, { display: POOJA, count: 100 }]]),
+      scores: { [POOJA]: 35 },
+    };
+    const out = classifyDomainPhones(withColleagues(owner).concat(quoter));
+    expect(out.get('quoter@sarv.com')?.directPhone).toBeNull();
+    expect(out.get('pooja@sarv.com')?.directPhone).toBe(POOJA);
+  });
+});
+
+describe('recurrenceBonus', () => {
+  // Regression: the bonus must be bounded and monotonic. An unbounded one lets
+  // a high-volume sender's every stray number outrank real signature evidence;
+  // a non-monotonic one makes the ranking depend on mailbox size.
+  it('is zero for a single sighting and saturates at eight', () => {
+    expect(recurrenceBonus(0)).toBe(0);
+    expect(recurrenceBonus(1)).toBe(0);
+    expect(recurrenceBonus(2)).toBeGreaterThan(0);
+    expect(recurrenceBonus(8)).toBe(MAX_RECURRENCE_BONUS);
+    expect(recurrenceBonus(49)).toBe(MAX_RECURRENCE_BONUS);
+    expect(recurrenceBonus(10_000)).toBe(MAX_RECURRENCE_BONUS);
+  });
+
+  it('never decreases as sightings grow', () => {
+    for (let n = 1; n < 40; n++) {
+      expect(recurrenceBonus(n + 1)).toBeGreaterThanOrEqual(recurrenceBonus(n));
+    }
+  });
+
+  // A missing/garbage count must not produce NaN — NaN poisons every
+  // comparison in the sort and silently randomises the ranking.
+  it('treats a non-finite count as no evidence', () => {
+    expect(recurrenceBonus(NaN)).toBe(0);
+    expect(recurrenceBonus(Infinity)).toBe(0);
   });
 });

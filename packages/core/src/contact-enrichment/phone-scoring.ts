@@ -56,6 +56,18 @@ const NAME_WINDOW = 50;
 
 const PERSONAL_LABEL = /\b(mobile|mob|cell|direct|dial|handy|whats\s?app|personal|m)\s*[:.-]?\s*$|\b(mobile|mob|cell|direct|handy|whatsapp|personal)\b/i;
 const ORG_LABEL = /\b(office|tel|telephone|main|hq|head\s?office|switchboard|reception|support|landline|board)\b/i;
+/**
+ * html-to-text renders a link as `text [href]`, and signature mining keeps
+ * hrefs ON, so a click-to-call button arrives as `Call me [tel:+919876543210]`.
+ * ORG_LABEL matched the `tel` of that URI and docked the number 20 points for
+ * being an office line — inverting the signal, because a `tel:` href is the
+ * number the person put behind their own call button, and when the button has
+ * no visible digits it is the ONLY place that number appears.
+ *
+ * Only the bracketed URI form is exempt. The WRITTEN label `Tel:` really does
+ * mean the landline in most signatures and keeps its penalty.
+ */
+const TEL_URI_HREF = /\[\s*(?:tel|callto)\s*:\s*$/i;
 // Verified against libphonenumber: most ID-shaped strings (ISO dates,
 // timestamps, tracking codes, "Ref: 2024-9812-4412", "Meeting ID: 842 1928
 // 3311") are already rejected as invalid numbers. These are the labels whose
@@ -165,14 +177,26 @@ export function scoreCandidate(
   // vetoed the personal mobile and the switchboard printed beside it — every
   // Sarv contact lost both. Only the last few characters before the number
   // count, and the toll-free DIGITS are handled by isLikelyPersonalPhone.
-  const immediatelyBefore = before.slice(-LABEL_TIGHT);
+  //
+  // The window also stops at the START OF THE LINE. A label describes the
+  // number printed beside it ("Office: +91 ..."), so it is always on the same
+  // line; what sits on the line ABOVE is the person's name and job title. Let
+  // the window run past the newline and a title is read as a label — "Bhupesh
+  // Chugh\nVP Support\n+91 94145 11220" matched ORG_LABEL on the `Support` of
+  // his TITLE and docked his own mobile 20 points, which dropped it below a
+  // vendor's number he had forwarded once. Every "... Support", "Head of
+  // Sales", "Office Manager" signature had the same hole.
+  const lineBefore = before.slice(before.lastIndexOf('\n') + 1);
+  const immediatelyBefore = lineBefore.slice(-LABEL_TIGHT);
 
   if (NEGATIVE_LABEL.test(immediatelyBefore) || TOLL_FREE_LABEL.test(immediatelyBefore)) {
     add(PHONE_SCORE.faxOrTollFree, 'fax / toll-free / registration id');
     vetoed = true;
   }
   if (PERSONAL_LABEL.test(immediatelyBefore)) add(PHONE_SCORE.personalLabel, 'personal label');
-  if (ORG_LABEL.test(immediatelyBefore)) add(PHONE_SCORE.orgLabel, 'org label');
+  if (ORG_LABEL.test(immediatelyBefore) && !TEL_URI_HREF.test(immediatelyBefore)) {
+    add(PHONE_SCORE.orgLabel, 'org label');
+  }
 
   // Bottom-of-body bonus. Only for prose: a signature already scores for its
   // zone, and a disclaimer sits at the bottom by definition, so applying it
