@@ -1,11 +1,11 @@
-import { Loader2, Filter, X, ArrowLeft, Globe } from 'lucide-react';
+import { Loader2, Filter, X, Globe } from 'lucide-react';
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { SECTION_FILTER_LABELS, SETTINGS_KEY, DEFAULT_SECTIONS } from '../../config/inbox-types';
 import type { SectionFilter } from '../../config/inbox-types';
 import { useEmailStore } from '../../store/email-store';
-import { accountDisplayLabel, getEmailsPerPage, getPageSizeForView } from '../../store/helpers';
+import { accountDisplayLabel, getEmailsPerPage, getPageSizeForView, isThreadPagedView } from '../../store/helpers';
 import { emailMatchesLiveSearchFilter, hasLiveSearchFilterTokens } from '../../utils/search-filter';
 import type { SectionData , EmailThread } from '../../utils/thread-utils';
 import { adjustTotalForFilteredOut, buildThreads, threadStaysVisible, visibleThreadsUnderFilter } from '../../utils/thread-utils';
@@ -19,6 +19,8 @@ import { CategoryFilterBar } from './CategoryFilterBar';
 import { CompactThreadRow } from './CompactThreadRow';
 import { useEmailListSearch } from './hooks/useEmailListSearch';
 import { useSectionAssignment } from './hooks/useSectionAssignment';
+import { listHeaderTitle } from './list-header-view';
+import { ListHeader } from './ListHeader';
 import { Paginator } from './Paginator';
 import { SectionList } from './SectionList';
 import { ThreadCard } from './ThreadCard';
@@ -197,15 +199,18 @@ export function EmailList() {
   const isVirtualImportant = selectedVirtualFolder === 'virtual-important';
   const isImportantView = isImportantFolder || isVirtualImportant;
 
-  // The current view's page size — shared by the header and footer paginators so
-  // they can never disagree. Section view → its fixed window; AI-category view →
-  // the user's setting (even on the firehose views); else the view's page size
-  // ("All Email" / "All Inboxes" are fixed 100).
+  // The current view's page size — shared by the header and footer paginators
+  // and by the store loaders, so they can never disagree. The tiers live in
+  // getPageSizeForView: section 50, "All Email"/"All Inboxes" 100, the account's
+  // own standard mailboxes (Sent, Drafts, …) 50, everything else emailsPerPage.
   const listPageSize = viewingSection
     ? viewingSectionPageSize
-    : viewingAICategory
-      ? getEmailsPerPage()
-      : getPageSizeForView(selectedVirtualFolder);
+    : getPageSizeForView({
+        virtualFolder: selectedVirtualFolder,
+        aiCategory: viewingAICategory,
+        snoozed: viewingSnoozed,
+        folder: selectedFolder,
+      });
 
   // Filter emails
   const displayEmails = useMemo(() => {
@@ -246,6 +251,19 @@ export function EmailList() {
   // rows the moment 21 mails are read in webmail. Same helper as the per-section
   // `droppedPerSection` adjustment below.
   const flatTotal = adjustTotalForFilteredOut(emailsTotal, threads.length - flatThreads.length);
+
+  // True when the SOURCE paged by conversation — the section full-page view and
+  // the Starred/Important virtual folders all fetch pageSize THREADS and hand
+  // back every message of those threads. The paginator must then label the
+  // fixed thread window and count collapsed rows; using the message count is
+  // what made Starred read "1-50 of 52" above 15 visible rows.
+  const threadPaged = isThreadPagedView({
+    section: viewingSection,
+    virtualFolder: selectedVirtualFolder,
+    // Snoozed is the same kind of source (a page of conversations, every snoozed
+    // message of each) but carries no virtualFolder to recognise it by.
+    snoozed: viewingSnoozed,
+  });
 
   // Section assignment hook
   const { sectionedThreads, threadMatchesFilter } = useSectionAssignment({
@@ -734,21 +752,53 @@ export function EmailList() {
   // Unified "All Inboxes": map accountId -> { color, label } so each row can show
   // a per-account dot. Empty/unused in every other view.
   const isUnifiedView = selectedVirtualFolder === 'virtual-unified';
-  // Show the "All Inboxes" header (title + right-side pagination, no back button)
-  // instead of the bottom footer paginator — only in the plain unified list, not
-  // a section full-page view or search results.
-  const showUnifiedHeader = isUnifiedView && !viewingSection && !searchQuery;
-  // Coming from the inbox into a category (single-account) had NO top header —
-  // only the footer paginator, which vanishes when a page empties. Give the
-  // category its own top header (name + right-side pagination), matching the
-  // section/unified bars. On All Inboxes the unified header already carries the
-  // category paginator, so don't double it up there.
-  const showCategoryHeader = !!viewingAICategory && !searchQuery && !viewingSection && !showUnifiedHeader;
-  // Human label for the header from the category slug (e.g. "needs-response" →
-  // "Needs Response"); the active chip above shows the canonical name/count.
-  const categoryLabel = viewingAICategory
-    ? viewingAICategory.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-    : '';
+  // ── The one top bar ─────────────────────────────────────────────────────
+  // Every listing gets a title + pager at the top; the footer pager stays as the
+  // second copy. Previously only the section / All Inboxes / AI-category views
+  // hand-rolled a bar, so a plain folder (Sent, a user folder) had none — you
+  // could only page from the bottom of the list. The sectioned inbox is the one
+  // view without one: each section there carries its own pager.
+  const listHeader = useMemo(() => {
+    if (useDbSections) return null;
+    const title = listHeaderTitle({
+      sectionLabel: viewingSection ? viewingSectionLabel : null,
+      searching: !!searchQuery,
+      aiCategory: viewingAICategory,
+      snoozed: viewingSnoozed,
+      virtualFolder: selectedVirtualFolder,
+      folder: selectedFolder,
+    });
+    if (title === null) return null;
+    if (searchQuery) {
+      // Search pages through ALL matches with no exact total (no COUNT), so
+      // prev/next is gated by hasMore.
+      return {
+        title, page: searchPage, pageSize: getEmailsPerPage(), count: searchResults.length,
+        total: searchTotal, hasMore: searchHasMore, loading: searching,
+        onGoToPage: goToSearchPage, fixedWindow: false,
+        onBack: undefined as (() => void) | undefined, backLabel: undefined as string | undefined,
+      };
+    }
+    return {
+      title,
+      onBack: viewingSection ? () => closeSectionFullPage() : undefined,
+      backLabel: viewingSection ? 'Back to inbox' : undefined,
+      page: emailsPage,
+      pageSize: listPageSize,
+      // A thread-paged view fetches pageSize THREADS per page, so its label must
+      // follow the window, not the collapsed on-screen row count.
+      count: threadPaged ? flatThreads.length : displayEmails.length,
+      total: flatTotal,
+      hasMore: hasMoreEmails,
+      loading: loadingMoreEmails,
+      onGoToPage: goToEmailPage,
+      fixedWindow: threadPaged,
+    };
+  }, [useDbSections, viewingSection, viewingSectionLabel, searchQuery, viewingAICategory, viewingSnoozed,
+      selectedVirtualFolder, selectedFolder, searchPage, searchResults.length, searchTotal, searchHasMore,
+      searching, goToSearchPage, closeSectionFullPage, emailsPage, listPageSize, flatThreads.length,
+      displayEmails.length, flatTotal, hasMoreEmails, loadingMoreEmails, goToEmailPage, threadPaged]);
+
   const accounts = useEmailStore((s) => s.accounts);
   const accountMetaById = useMemo(
     () => Object.fromEntries(accounts.map((a) => [a.id, { color: a.color, label: accountDisplayLabel(accounts, a.id) }])),
@@ -916,71 +966,23 @@ export function EmailList() {
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto overflow-x-hidden"
       >
-        {/* Full-page section view header (Gmail: clicked a section's count) */}
-        {viewingSection && (
-          <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-2 bg-muted border-b border-border">
-            <Tooltip content="Back to inbox" delayMs={40}>
-              <button
-                onClick={() => closeSectionFullPage()}
-                className="p-1 hover:bg-accent rounded text-foreground"
-                aria-label="Back to inbox"
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </button>
-            </Tooltip>
-            {viewingSectionLabel && <span className="text-sm font-medium text-foreground">{viewingSectionLabel}</span>}
-            <div className="ml-auto">
-              <Paginator
-                page={emailsPage}
-                pageSize={viewingSectionPageSize}
-                count={flatThreads.length}
-                total={flatTotal}
-                hasMore={hasMoreEmails}
-                loading={loadingMoreEmails}
-                onGoToPage={goToEmailPage}
-                inline
-                fixedWindow
-              />
-            </div>
-          </div>
-        )}
-        {/* "All Inboxes" header — same bar as the section view but no back button */}
-        {showUnifiedHeader && (
-          <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-2 bg-muted border-b border-border">
-            <span className="text-sm font-medium text-foreground">All Inboxes</span>
-            <div className="ml-auto">
-              <Paginator
-                page={emailsPage}
-                pageSize={listPageSize}
-                count={displayEmails.length}
-                total={emailsTotal}
-                hasMore={hasMoreEmails}
-                loading={loadingMoreEmails}
-                onGoToPage={goToEmailPage}
-                inline
-              />
-            </div>
-          </div>
-        )}
-        {/* AI-category header — name + right-side pagination. Rendered above the
-            loading/empty/populated switch so the paginator stays reachable even
+        {/* The one top bar every listing wears (title + pager). Rendered above
+            the loading/empty/populated switch so the pager stays reachable even
             when the current page is momentarily empty (recover via prev/next). */}
-        {showCategoryHeader && (
-          <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-2 bg-muted border-b border-border">
-            <span className="text-sm font-medium text-foreground">{categoryLabel}</span>
-            <div className="ml-auto">
-              <Paginator
-                page={emailsPage}
-                pageSize={listPageSize}
-                count={emails.length}
-                total={emailsTotal}
-                hasMore={hasMoreEmails}
-                loading={loadingMoreEmails}
-                onGoToPage={goToEmailPage}
-                inline
-              />
-            </div>
-          </div>
+        {listHeader && (
+          <ListHeader
+            title={listHeader.title}
+            onBack={listHeader.onBack}
+            backLabel={listHeader.backLabel}
+            page={listHeader.page}
+            pageSize={listHeader.pageSize}
+            count={listHeader.count}
+            total={listHeader.total}
+            hasMore={listHeader.hasMore}
+            loading={listHeader.loading}
+            onGoToPage={listHeader.onGoToPage}
+            fixedWindow={listHeader.fixedWindow}
+          />
         )}
         {loadingEmails || isSearching ? (
           <div className="flex items-center justify-center p-8">
@@ -1075,15 +1077,16 @@ export function EmailList() {
                 onGoToPage={goToSearchPage}
               />
             )}
-            {!useDbSections && !searchQuery && !showUnifiedHeader && (
+            {!useDbSections && !searchQuery && (
               <Paginator
                 page={emailsPage}
                 pageSize={listPageSize}
-                count={viewingSection ? flatThreads.length : emails.length}
+                count={threadPaged ? flatThreads.length : displayEmails.length}
                 total={flatTotal}
                 hasMore={hasMoreEmails}
                 loading={loadingMoreEmails}
                 onGoToPage={goToEmailPage}
+                fixedWindow={threadPaged}
               />
             )}
           </div>

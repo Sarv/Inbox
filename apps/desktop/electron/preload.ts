@@ -180,8 +180,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('emails:getImportant', limit, offset),
     getStarred: (limit?: number, offset?: number) =>
       ipcRenderer.invoke('emails:getStarred', limit, offset),
-    getVirtualFolderCounts: () =>
-      ipcRenderer.invoke('emails:getVirtualFolderCounts'),
+    getVirtualFolderCounts: (keys?: Array<'all' | 'starred' | 'important' | 'snoozed'>) =>
+      ipcRenderer.invoke('emails:getVirtualFolderCounts', keys),
     getRecent: (options?: { minutes?: number; limit?: number }) =>
       ipcRenderer.invoke('emails:getRecent', options),
     listBySection: (filter: string, limit: number, offset: number, folderPath?: string, viewFilter?: any) =>
@@ -365,7 +365,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (emailId: string, snoozeUntil: number) =>
       ipcRenderer.invoke('snooze:set', emailId, snoozeUntil),
     remove: (emailId: string) => ipcRenderer.invoke('snooze:remove', emailId),
-    list: () => ipcRenderer.invoke('snooze:list'),
+    list: (options?: { limit?: number; offset?: number }) =>
+      ipcRenderer.invoke('snooze:list', options),
+    listEmails: (options?: { limit?: number; offset?: number }) =>
+      ipcRenderer.invoke('snooze:listEmails', options),
     get: (emailId: string) => ipcRenderer.invoke('snooze:get', emailId),
     count: () => ipcRenderer.invoke('snooze:count'),
     checkDue: () => ipcRenderer.invoke('snooze:checkDue'),
@@ -922,7 +925,7 @@ export interface ElectronAPI {
     getAll: (limit?: number, offset?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     getImportant: (limit?: number, offset?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     getStarred: (limit?: number, offset?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>;
-    getVirtualFolderCounts: () => Promise<{ success: boolean; data?: { important: number; starred: number; all: number }; error?: string }>;
+    getVirtualFolderCounts: (keys?: Array<'all' | 'starred' | 'important' | 'snoozed'>) => Promise<{ success: boolean; data?: Partial<Record<'important' | 'starred' | 'all' | 'snoozed', number>>; error?: string }>;
     getRecent: (options?: { minutes?: number; limit?: number }) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     listBySection: (filter: string, limit: number, offset: number, folderPath?: string, viewFilter?: any) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     sectionCounts: (filters: string[], folderPath?: string, viewFilter?: any) => Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
@@ -1062,7 +1065,10 @@ export interface ElectronAPI {
   snooze: {
     set: (emailId: string, snoozeUntil: number) => Promise<{ success: boolean; data?: SnoozedEmail; error?: string }>;
     remove: (emailId: string) => Promise<{ success: boolean; error?: string }>;
-    list: () => Promise<{ success: boolean; data?: SnoozedEmail[]; error?: string }>;
+    list: (options?: { limit?: number; offset?: number }) =>
+      Promise<{ success: boolean; data?: SnoozedEmail[]; error?: string }>;
+    listEmails: (options?: { limit?: number; offset?: number }) =>
+      Promise<{ success: boolean; data?: any[]; error?: string }>;
     get: (emailId: string) => Promise<{ success: boolean; data?: SnoozedEmail | null; error?: string }>;
     count: () => Promise<{ success: boolean; data?: number; error?: string }>;
     checkDue: () => Promise<{ success: boolean; data?: { unsnoozed: number }; error?: string }>;
@@ -1161,7 +1167,7 @@ export interface ElectronAPI {
     save: (accounts: RegistryAccountDTO[]) => Promise<{ success: boolean; error?: string }>;
     getActive: () => Promise<{ success: boolean; data?: string | null; error?: string }>;
     setActivePointer: (accountId: string | null) => Promise<{ success: boolean; error?: string }>;
-    unifiedInbox: (opts: { accountIds: string[]; limit?: number; offset?: number; filter?: ViewFilter; aiCategory?: string }) => Promise<{ success: boolean; data?: { emails: EmailRecord[]; hasMore: boolean }; error?: string }>;
+    unifiedInbox: (opts: { accountIds: string[]; limit?: number; offset?: number; filter?: ViewFilter; aiCategory?: string }) => Promise<{ success: boolean; data?: { emails: EmailRecord[]; total: number; hasMore: boolean }; error?: string }>;
     unifiedCategoryCounts: (accountIds: string[], mode?: 'unread' | 'total') => Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
     unifiedSearch: (opts: { accountIds: string[]; searchQuery: any; limit?: number; offset?: number }) => Promise<{ success: boolean; data?: EmailRecord[]; error?: string }>;
     unreadSummary: (accountIds: string[]) => Promise<{ success: boolean; data?: Array<{ accountId: string; unread: number }>; error?: string }>;

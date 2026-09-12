@@ -254,17 +254,33 @@ function getThreadImportanceScore(emails: EmailRecord[]): number {
   return Math.max(...emails.map(e => e.importanceScore ?? 0));
 }
 
+/**
+ * The key a message collapses under in the list — one list ROW.
+ *
+ * Unified "All Inboxes" rows carry accountId — group by account + thread so the
+ * SAME message dual-delivered to two accounts stays as TWO rows (each with its
+ * own account color), instead of collapsing into one (both copies share a
+ * Message-ID -> same threadId). Normal views (no accountId) group purely by
+ * thread.
+ *
+ * Shared so anything that has to reason about ROWS without building them
+ * (paging math, page-window capping) counts exactly what buildThreads renders.
+ */
+export function threadRowKey(email: EmailRecord): string {
+  const realThreadId = email.threadId || email.id;
+  return email.accountId ? `${email.accountId}::${realThreadId}` : realThreadId;
+}
+
+/** How many list ROWS a set of messages collapses into. */
+export function threadRowCount(emails: EmailRecord[]): number {
+  return new Set(emails.map(threadRowKey)).size;
+}
+
 export function buildThreads(emails: EmailRecord[]): EmailThread[] {
   const threadMap = new Map<string, EmailRecord[]>();
 
   for (const email of emails) {
-    const realThreadId = email.threadId || email.id;
-    // Unified "All Inboxes" rows carry accountId — group by account + thread so
-    // the SAME message dual-delivered to two accounts stays as TWO rows (each
-    // with its own account color), instead of collapsing into one (both copies
-    // share a Message-ID → same threadId). Normal views (no accountId) group
-    // purely by thread, unchanged.
-    const groupKey = email.accountId ? `${email.accountId}::${realThreadId}` : realThreadId;
+    const groupKey = threadRowKey(email);
     if (!threadMap.has(groupKey)) {
       threadMap.set(groupKey, []);
     }

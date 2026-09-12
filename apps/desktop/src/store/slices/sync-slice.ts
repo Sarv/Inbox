@@ -3,13 +3,15 @@ import pLimit from 'p-limit';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import { findFolderByType } from '../../config/folder-mapping';
-import { buildThreads } from '../../utils/thread-utils';
+import { buildThreads, threadRowKey } from '../../utils/thread-utils';
 import {
   getMaxEmailsPerFolder,
   getBodyDownloadLimit,
   isFolderInView,
   findFolderPathById,
   decideSyncProgressRefresh,
+  getPageSizeForState,
+  mergePageWindow,
 } from '../helpers';
 import type { SyncSlice, SliceCreator } from '../types';
 
@@ -629,81 +631,46 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
 
   mergeNewEmails: async (folderId) => {
     try {
-      const { emails } = get();
-      const existingIds = new Set(emails.map(e => e.id));
+      const { emails, emailsPage } = get();
+      const pageSize = getPageSizeForState(get());
+      const offset = emailsPage * pageSize;
       // Rows in the 5s delete-undo window still exist in the DB; don't re-add
       // them as "new" (ghost reappearance until folder switch).
       const pendingDeleteIds = new Set(get().pendingDeletes.map((p) => p.emailId));
 
-      const result = await window.electronAPI.emails.list(folderId, 100, 0);
+      // The SAME window the view is paged to — see mergePageWindow. Refetching
+      // a fixed 100 at offset 0 refreshed page 1 while the user read page 4,
+      // and stretched the page past its own size.
+      const result = await window.electronAPI.emails.list(folderId, pageSize, offset);
 
       if (result.success && result.data) {
-        const fetchedEmails = result.data as any[];
-        const freshMap = new Map<string, any>(fetchedEmails.map(e => [e.id, e]));
-        const newEmails = fetchedEmails.filter((e: any) => !existingIds.has(e.id) && !pendingDeleteIds.has(e.id));
-
-        // Also refresh existing emails whose flags/tags/subject changed
-        // server-side (read/unread, starred, etc.). Previously this
-        // merge only ADDED new rows — flag changes from
-        // syncFlags-updated DB rows never made it back into the
-        // in-memory list, so reading an email in Gmail web kept it
-        // shown as unread in Sarv Inbox until folder switch.
-        let updatedCount = 0;
-        const refreshed = emails.map((e: any) => {
-          const f = freshMap.get(e.id);
-          if (!f) return e;
-          if (e.tags !== f.tags || e.date !== f.date || e.subject !== f.subject
-            || e.threadIsStarred !== f.threadIsStarred || e.threadIsImportant !== f.threadIsImportant) {
-            updatedCount++;
-            return f;
-          }
-          return e;
-        });
-
-        // Drop rows that no longer exist on the first server page IF
-        // they're within the first 100 emails of our local list. This
-        // catches server-side deletions that the realtime 'deleted'
-        // path missed (older deletes that happened while disconnected).
-        // We only check the top of the list to stay safe — anything past
-        // page 1 might just have scrolled off the recent window.
-        const topSize = Math.min(refreshed.length, 100);
-        const topIds = refreshed.slice(0, topSize).map((e: any) => e.id);
-        const trimmedTop = refreshed
-          .slice(0, topSize)
-          .filter((e: any) => freshMap.has(e.id));
-        const trimmedTail = refreshed.slice(topSize);
-        const deletedCount = topIds.length - trimmedTop.length;
-        const afterDelete = [...trimmedTop, ...trimmedTail];
-
-        const noWork = newEmails.length === 0 && updatedCount === 0 && deletedCount === 0;
-        if (noWork) return;
-
-        const merged = [...newEmails, ...afterDelete].sort((a, b) => (b.date || 0) - (a.date || 0));
-        console.log(`[Store] mergeNewEmails: +${newEmails.length} new, ~${updatedCount} updated, -${deletedCount} removed`);
-        set({ emails: merged });
+        const merge = mergePageWindow(emails as any[], result.data as any[], pageSize, pendingDeleteIds);
+        if (!merge.changed) return;
+        console.log(`[Store] mergeNewEmails: +${merge.added} new, ~${merge.updated} updated, -${merge.removed} removed`);
+        set({ emails: merge.emails });
       }
     } catch (error) {
       console.error('[Store] mergeNewEmails failed:', error);
     }
   },
 
-  // Smooth merge for virtual-all view: same diff-and-prepend
-  // strategy as mergeNewEmails but reading from getAll() so the
-  // virtual list picks up new arrivals from any folder without
-  // dropping/clearing the existing list (= no flicker).
+  // Smooth merge for virtual-all view: same page-window merge as
+  // mergeNewEmails but reading from getAll() so the virtual list picks up new
+  // arrivals from any folder without dropping/clearing the list (= no flicker).
   mergeNewEmailsVirtualAll: async () => {
     try {
-      const { emails } = get();
-      const existingIds = new Set(emails.map(e => e.id));
-      const result = await window.electronAPI.emails.getAll(100, 0);
+      const { emails, emailsPage } = get();
+      const pageSize = getPageSizeForState(get());
+      const result = await window.electronAPI.emails.getAll(pageSize, emailsPage * pageSize);
       if (result.success && result.data) {
-        const fetched = result.data as any[];
-        const newOnes = fetched.filter((e: any) => !existingIds.has(e.id));
-        if (newOnes.length > 0) {
-          console.log(`[Store] mergeNewEmailsVirtualAll: ${newOnes.length} new`);
-          const merged = [...newOnes, ...emails].sort((a, b) => (b.date || 0) - (a.date || 0));
-          set({ emails: merged });
-        }
+        // getAll pages by CONVERSATION, so the window holds pageSize threads (all
+        // of their messages) — capping by message would truncate a thread.
+        const merge = mergePageWindow(
+          emails as any[], result.data as any[], pageSize, undefined, (row: any) => threadRowKey(row),
+        );
+        if (!merge.changed) return;
+        console.log(`[Store] mergeNewEmailsVirtualAll: +${merge.added} new, ~${merge.updated} updated, -${merge.removed} removed`);
+        set({ emails: merge.emails });
       }
     } catch (error) {
       console.error('[Store] mergeNewEmailsVirtualAll failed:', error);
@@ -713,17 +680,18 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
   // Same as above but for the virtual-starred view.
   mergeNewEmailsVirtualStarred: async () => {
     try {
-      const { emails } = get();
-      const existingIds = new Set(emails.map(e => e.id));
-      const result = await window.electronAPI.emails.getStarred(100, 0);
+      const { emails, emailsPage } = get();
+      const pageSize = getPageSizeForState(get());
+      const result = await window.electronAPI.emails.getStarred(pageSize, emailsPage * pageSize);
       if (result.success && result.data) {
-        const fetched = result.data as any[];
-        const newOnes = fetched.filter((e: any) => !existingIds.has(e.id));
-        if (newOnes.length > 0) {
-          console.log(`[Store] mergeNewEmailsVirtualStarred: ${newOnes.length} new`);
-          const merged = [...newOnes, ...emails].sort((a, b) => (b.date || 0) - (a.date || 0));
-          set({ emails: merged });
-        }
+        // getStarred pages by CONVERSATION, so the window holds pageSize threads
+        // (all of their messages) — capping by message would truncate a thread.
+        const merge = mergePageWindow(
+          emails as any[], result.data as any[], pageSize, undefined, (row: any) => threadRowKey(row),
+        );
+        if (!merge.changed) return;
+        console.log(`[Store] mergeNewEmailsVirtualStarred: +${merge.added} new, ~${merge.updated} updated, -${merge.removed} removed`);
+        set({ emails: merge.emails });
       }
     } catch (error) {
       console.error('[Store] mergeNewEmailsVirtualStarred failed:', error);

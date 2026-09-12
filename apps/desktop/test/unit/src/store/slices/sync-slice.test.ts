@@ -475,3 +475,160 @@ describe('handleSyncProgress (progressive fill during a sync)', () => {
     expect(mergeNewEmails).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// mergeNewEmails — the background refresh must re-read THE PAGE THE USER IS ON.
+//
+// The field report this guards: Sent showed "1–100 of 1,718" under a page that
+// holds far fewer rows. Every sync completion refetched a hardcoded 100 rows at
+// offset 0 and unioned them into the in-memory list, so the page grew past its
+// own window (the label counts rows in memory) and, on any page but the first,
+// silently replaced what the reader was looking at with page 1.
+// ---------------------------------------------------------------------------
+describe('mergeNewEmails (page-window refresh)', () => {
+  const row = (id: string, date: number) => ({ id, threadId: `t-${id}`, date, tags: '', subject: id });
+
+  const mergeHarness = async (state: Record<string, any>, listRows: any[]) => {
+    vi.resetModules();
+    const list = vi.fn(async () => ({ success: true, data: listRows }));
+    (globalThis as any).window = { electronAPI: { emails: { list } } };
+    const full: any = { pendingDeletes: [], emailsPage: 0, folders: [], ...state };
+    const mod = await import('../../../../../src/store/slices/sync-slice');
+    const slice = mod.createSyncSlice(
+      ((patch: any) => Object.assign(full, patch)) as any,
+      (() => full) as any,
+      {} as any,
+    );
+    return { slice, state: full, list };
+  };
+
+  it('asks for the folder page size at the current page offset, not a fixed 100 at 0', async () => {
+    // Sent is one of the account's own standard mailboxes: 50 a page. On page 3
+    // the refresh must read rows 150-199, which is what the reader can see.
+    const { slice, list } = await mergeHarness(
+      {
+        folders: [{ id: 'f-sent', path: 'Sent', specialUse: '\\Sent' }],
+        selectedFolderId: 'f-sent',
+        emailsPage: 3,
+        emails: [row('e1', 5)],
+      },
+      [row('e1', 5)],
+    );
+    await slice.mergeNewEmails('f-sent');
+    expect(list).toHaveBeenCalledWith('f-sent', 50, 150);
+  });
+
+  it('never leaves more rows in memory than the page holds', async () => {
+    // This is the "1–100 of 1,718" label: the Paginator counts the rows in the
+    // store, so a merge that grows the array past the window mislabels the page.
+    const fresh = Array.from({ length: 50 }, (_, i) => row(`n${i}`, 1000 - i));
+    const { slice, state } = await mergeHarness(
+      {
+        folders: [{ id: 'f-sent', path: 'Sent', specialUse: '\\Sent' }],
+        selectedFolderId: 'f-sent',
+        emails: [row('old', 1)],
+      },
+      fresh,
+    );
+    await slice.mergeNewEmails('f-sent');
+    expect(state.emails).toHaveLength(50);
+    expect(state.emails[0].id).toBe('n0');
+  });
+
+  it('leaves the list untouched when the window came back identical', async () => {
+    // A new array identity on every sync tick re-renders every row and rebuilds
+    // every thread — the merge must be a no-op when nothing moved.
+    const same = [row('e1', 5), row('e2', 4)];
+    const { slice, state } = await mergeHarness(
+      { folders: [{ id: 'f-inbox', path: 'INBOX' }], selectedFolderId: 'f-inbox', emails: same },
+      [row('e1', 5), row('e2', 4)],
+    );
+    await slice.mergeNewEmails('f-inbox');
+    expect(state.emails).toBe(same);
+  });
+
+  it('does not resurrect a row inside the delete-undo window', async () => {
+    // It still exists in the DB for 5s, so it is in every refetch; re-adding it
+    // makes the deleted mail flash back until the user switches folders.
+    const { slice, state } = await mergeHarness(
+      {
+        folders: [{ id: 'f-inbox', path: 'INBOX' }],
+        selectedFolderId: 'f-inbox',
+        emails: [row('e1', 5)],
+        pendingDeletes: [{ emailId: 'ghost' }],
+      },
+      [row('e1', 5), row('ghost', 9)],
+    );
+    await slice.mergeNewEmails('f-inbox');
+    expect(state.emails.map((e: any) => e.id)).toEqual(['e1']);
+  });
+
+  it('swallows an IPC failure rather than breaking the sync-complete handler', async () => {
+    vi.resetModules();
+    (globalThis as any).window = {
+      electronAPI: { emails: { list: vi.fn(async () => { throw new Error('ipc down'); }) } },
+    };
+    const full: any = { pendingDeletes: [], emailsPage: 0, folders: [], emails: [] };
+    const mod = await import('../../../../../src/store/slices/sync-slice');
+    const slice = mod.createSyncSlice((() => {}) as any, (() => full) as any, {} as any);
+    await expect(slice.mergeNewEmails('f-inbox')).resolves.toBeUndefined();
+  });
+});
+
+describe('mergeNewEmailsVirtualStarred — the window is CONVERSATIONS', () => {
+  // Breaks: getStarred hands back every message of the page's threads, so a
+  // message-grained cap chops the tail off the last conversation — the row
+  // renders missing its older mail and the next page repeats it.
+  it('keeps pageSize whole conversations, not pageSize messages', async () => {
+    vi.resetModules();
+    const message = (id: string, threadId: string, date: number) =>
+      ({ id, threadId, tags: '|INBOX|starred|', date, subject: id });
+    // 30 conversations x 3 messages, against the 50-per-page Starred tier.
+    const fresh = Array.from({ length: 90 }, (_, i) =>
+      message(`m${i}`, `t${Math.floor(i / 3)}`, 10_000 - i));
+    (globalThis as any).window = {
+      electronAPI: { emails: { getStarred: async () => ({ success: true, data: fresh }) } },
+    };
+    const mod = await import('../../../../../src/store/slices/sync-slice');
+    const state: Record<string, any> = {
+      emails: [], emailsPage: 0, selectedVirtualFolder: 'virtual-starred',
+      viewingSection: null, viewingSectionPageSize: 0, viewingAICategory: null,
+      selectedFolderId: null, folders: [],
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
+    const slice = mod.createSyncSlice(set as never, (() => state) as never, {} as never);
+
+    await slice.mergeNewEmailsVirtualStarred();
+
+    const byThread = new Set(state.emails.map((e: any) => e.threadId));
+    expect(byThread.size).toBe(30);            // every conversation the page held
+    expect(state.emails).toHaveLength(90);     // with all of their messages
+  });
+
+  // Breaks: the same cap on "All Email", whose 100-per-page window makes a
+  // message-grained truncation both more likely and more visible.
+  it('caps All Email by conversation too, at its own page size', async () => {
+    vi.resetModules();
+    // 60 conversations x 3 messages, against the 100-per-page All Email tier —
+    // 180 messages, so a message-grained cap would stop inside conversation 34.
+    const fresh = Array.from({ length: 180 }, (_, i) =>
+      ({ id: `m${i}`, threadId: `t${Math.floor(i / 3)}`, tags: '|INBOX|', date: 10_000 - i, subject: `m${i}` }));
+    (globalThis as any).window = {
+      electronAPI: { emails: { getAll: async () => ({ success: true, data: fresh }) } },
+    };
+    const mod = await import('../../../../../src/store/slices/sync-slice');
+    const state: Record<string, any> = {
+      emails: [], emailsPage: 0, selectedVirtualFolder: 'virtual-all',
+      viewingSection: null, viewingSectionPageSize: 0, viewingAICategory: null,
+      selectedFolderId: null, folders: [],
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
+    const slice = mod.createSyncSlice(set as never, (() => state) as never, {} as never);
+
+    await slice.mergeNewEmailsVirtualAll();
+
+    const byThread = new Set(state.emails.map((e: any) => e.threadId));
+    expect(byThread.size).toBe(60);            // all 60 fit inside the 100-thread window
+    expect(state.emails).toHaveLength(180);    // with all of their messages
+  });
+});

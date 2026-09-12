@@ -1,6 +1,8 @@
 import type { SMTPConfig } from '@sarvinbox/core';
 
 import { clearCategoryBadgeCache, applyEmailCategories, getCachedCategorySlugs, warmCategoryDefs } from '../components/email-list/CategoryBadges';
+import type { ClassifiableFolder, StandardFolderType } from '../config/folder-mapping';
+import { classifyFolder } from '../config/folder-mapping';
 import type { InboxType, InboxSection } from '../config/inbox-types';
 import { DEFAULT_SECTIONS, SETTINGS_KEY } from '../config/inbox-types';
 import { reportAIHealthy, reportAIUnhealthy, getDefaultProvider, syncAIProviderToMain } from '../services/ai-service';
@@ -233,16 +235,133 @@ export const decideSyncProgressRefresh = (
   return { refresh: true, gate: { lastProcessed: processed, lastRefreshAt: now } };
 };
 
+// ── One page size per view class ───────────────────────────────────────────
+// Every list in the app pages through getPageSizeForView, so the initial load,
+// the header paginator, the footer paginator, prev/next and any background
+// refresh all use the SAME number. A mismatch anywhere is what makes the label
+// disagree with the rows on screen (the reported "1–100 of 1,718" on a 25-row
+// page, where a background merge had fetched 100).
+
+/** Cross-folder / cross-account firehose views ("All Email", "All Inboxes"). */
 export const ALL_MAIL_PAGE_SIZE = 100;
 const FIXED_PAGE_VIEWS = new Set(['virtual-all', 'virtual-unified']);
 
-/** The page size for a given view: the fixed 100 for the firehose views ("All
- *  Email" / "All Inboxes"), otherwise the user's emailsPerPage. Single source of
- *  truth so the initial load, the Paginator label, and prev/next all agree — a
- *  mismatch is exactly what makes the count jump (e.g. 20 → 50) between the first
- *  render and the next page. */
-export const getPageSizeForView = (selectedVirtualFolder?: string | null): number =>
-  selectedVirtualFolder && FIXED_PAGE_VIEWS.has(selectedVirtualFolder) ? ALL_MAIL_PAGE_SIZE : getEmailsPerPage();
+/** Account-specific mailboxes you scan in bulk rather than read. */
+export const STANDARD_FOLDER_PAGE_SIZE = 50;
+const BULK_SCAN_FOLDER_TYPES = new Set<StandardFolderType>([
+  'sent', 'drafts', 'trash', 'spam', 'archive',
+]);
+/**
+ * Snoozed has no `selectedVirtualFolder` of its own — the store flags it with
+ * `viewingSnoozed` — but it is the same kind of list as Starred, and the count
+ * key it shares with the sidebar badge is already spelled this way. Callers pass
+ * the flag; everything below resolves it to the view it behaves like, so there
+ * is one set of tiers, not two.
+ */
+const SNOOZED_VIRTUAL_FOLDER = 'virtual-snoozed';
+
+const pagedVirtualFolder = (view: PagedView): string | null | undefined =>
+  view.snoozed ? SNOOZED_VIRTUAL_FOLDER : view.virtualFolder;
+
+/**
+ * Starred/Important are the same kind of list as Sent or Drafts — one account's
+ * own mail gathered across its folders — so they page the same way. Unlike
+ * "All Email" they don't span accounts, which is what earns that view its 100.
+ */
+const STANDARD_PAGE_VIRTUAL_VIEWS = new Set([
+  'virtual-starred', 'virtual-important', SNOOZED_VIRTUAL_FOLDER,
+]);
+
+/**
+ * The virtual views the REPOSITORY pages and counts by CONVERSATION: getAll,
+ * getStarred and getImportant each select a page of thread ids, then hand back
+ * every message of those threads.
+ *
+ * Deliberately NOT the same set as either page-size tier, because the two
+ * questions are independent: "All Email" pages by conversation but at 100,
+ * while "All Inboxes" (virtual-unified) shares that 100 and is still
+ * message-grained — it merges several accounts' lists in the renderer, with no
+ * single repository query to make thread-grained.
+ */
+export const THREAD_PAGED_VIRTUAL_VIEWS = new Set([
+  'virtual-starred', 'virtual-important', 'virtual-all', SNOOZED_VIRTUAL_FOLDER,
+]);
+
+/**
+ * True when the view's page window is measured in CONVERSATIONS rather than
+ * messages — the source fetched N threads and handed back all their messages.
+ *
+ * Everything downstream of the fetch has to agree on the unit: `emailsOffset`
+ * advances by threads, `hasMoreEmails` compares thread counts, the paginator
+ * labels a fixed thread window, and a background merge caps the page at N
+ * threads. Mixing units is what made Starred read "1–50 of 52" over 15 rows.
+ */
+export const isThreadPagedView = (view: Pick<PagedView, 'section' | 'virtualFolder' | 'snoozed'> = {}): boolean => {
+  const virtualFolder = pagedVirtualFolder(view);
+  return !!view.section || (!!virtualFolder && THREAD_PAGED_VIRTUAL_VIEWS.has(virtualFolder));
+};
+
+/** The view a page size is being resolved for. Every field optional so a caller
+ *  can pass just what it knows; the store passes its whole state. */
+export interface PagedView {
+  /** `viewingSection` — the full-page view behind a section's counter. */
+  section?: string | null;
+  /** `selectedVirtualFolder` — 'virtual-all', 'virtual-unified', … */
+  virtualFolder?: string | null;
+  /** `viewingAICategory` — a category pill's full-page list. */
+  aiCategory?: string | null;
+  /** The selected folder record (path + specialUse are what classify it). */
+  folder?: ClassifiableFolder | null;
+  /** `viewingSnoozed` — the Snoozed list, which carries no virtualFolder. */
+  snoozed?: boolean | null;
+}
+
+/**
+ * The page size for a view, in tiers:
+ *   100 — "All Email" / "All Inboxes": one page spans every folder or account.
+ *    50 — a section's full-page view, and the account's own bulk-scan mailboxes:
+ *         Sent, Drafts, Trash, Spam, Archive, Starred, Important and Snoozed.
+ *    25 — everything else, from the user's `emailsPerPage` setting: INBOX, the
+ *         folders they made, AI categories and search.
+ * Single source of truth: a mismatch between any two readers of this is exactly
+ * what makes the count jump between the first render and the next page.
+ */
+export const getPageSizeForView = (view: PagedView = {}): number => {
+  if (view.section) return SECTION_FULL_PAGE_SIZE;
+  // Checked before the view it sits on: a category list is the user's own
+  // reading list whichever folder or firehose it was opened from, so it follows
+  // their setting rather than inheriting that view's tier.
+  if (view.aiCategory) return getEmailsPerPage();
+  const virtualFolder = pagedVirtualFolder(view);
+  if (virtualFolder && FIXED_PAGE_VIEWS.has(virtualFolder)) return ALL_MAIL_PAGE_SIZE;
+  if (virtualFolder && STANDARD_PAGE_VIRTUAL_VIEWS.has(virtualFolder)) return STANDARD_FOLDER_PAGE_SIZE;
+  const folderType = view.folder ? classifyFolder(view.folder) : null;
+  if (folderType && BULK_SCAN_FOLDER_TYPES.has(folderType)) return STANDARD_FOLDER_PAGE_SIZE;
+  return getEmailsPerPage();
+};
+
+/** The page size for the store's CURRENT view — what every slice should call, so
+ *  no loader has to re-derive the tiers (and get them wrong) from raw state. */
+export const getPageSizeForState = (state: {
+  viewingSection?: string | null;
+  viewingSectionPageSize?: number;
+  selectedVirtualFolder?: string | null;
+  viewingAICategory?: string | null;
+  selectedFolderId?: string | null;
+  viewingSnoozed?: boolean | null;
+  folders?: Array<{ id: string } & ClassifiableFolder>;
+}): number => {
+  // The section view carries its own size in state (set when it was opened), so
+  // a size change mid-view can't strand the reader on a half page.
+  if (state.viewingSection && state.viewingSectionPageSize) return state.viewingSectionPageSize;
+  return getPageSizeForView({
+    section: state.viewingSection,
+    virtualFolder: state.selectedVirtualFolder,
+    aiCategory: state.viewingAICategory,
+    snoozed: state.viewingSnoozed,
+    folder: state.folders?.find((f) => f.id === state.selectedFolderId) ?? null,
+  });
+};
 
 /** Resolve a folder view's "of N" total. The read-model paginates folders by
  *  THREAD (getByFolder → thread_folders), so when it's ready the denominator is
@@ -288,6 +407,38 @@ export const fetchAICategoryTotal = async (params: {
       if (r?.success && r.data) counts = r.data as Record<string, number>;
     }
     return counts?.[category] ?? 0;
+  } catch {
+    return 0;
+  }
+};
+
+/** Which count from `emails:getVirtualFolderCounts` heads which virtual list. */
+const VIRTUAL_FOLDER_COUNT_KEYS: Record<string, 'all' | 'starred' | 'important' | 'snoozed'> = {
+  'virtual-all': 'all',
+  'virtual-starred': 'starred',
+  'virtual-important': 'important',
+  'virtual-snoozed': 'snoozed',
+};
+
+/**
+ * The "of N" denominator for a static virtual folder (All Email / Starred /
+ * Important / Snoozed).
+ *
+ * One COUNT(*) round trip per view, invariant while paging — callers fetch it on
+ * page 0 and reuse it, the same way the section and AI-category views do. Every
+ * listing shows "X-Y of N"; a view with no countable source would otherwise page
+ * with a bare "1-100" and no idea how much mail is behind it.
+ *
+ * Returns 0 on any failure, which the Paginator reads as "total unknown" and
+ * falls back to hasMore-gated paging rather than showing a wrong number.
+ */
+export const fetchVirtualFolderTotal = async (virtualFolder: string): Promise<number> => {
+  const key = VIRTUAL_FOLDER_COUNT_KEYS[virtualFolder];
+  if (!key) return 0;
+  try {
+    // Ask for THIS view's count only — each one is a full tag scan.
+    const res = await window.electronAPI.emails.getVirtualFolderCounts([key]);
+    return res?.success && res.data ? (res.data[key] ?? 0) : 0;
   } catch {
     return 0;
   }
@@ -1274,4 +1425,111 @@ export function setupAICategorizationListeners(useEmailStore: { setState: (state
     else if (level === 'warn') console.warn(prefix, message);
     else console.log(prefix, message);
   });
+}
+
+// ── Page-window merge ──────────────────────────────────────────────────────
+// A background refresh (sync completion, IDLE flush) re-reads the list the user
+// is looking at and folds it into the rows already on screen, so new mail
+// appears without the list flashing empty. It must re-read THE SAME WINDOW the
+// view is paged to and leave the window the same size: fetching a fixed 100 at
+// offset 0 both grew a 25-row page to 100 (the reported "1-100 of 1,718" label
+// on a 25-row page) and refreshed page 1's rows while the user was on page 4.
+
+/** The fields a background refresh can legitimately change on a row on screen. */
+const REFRESHABLE_FIELDS = ['tags', 'date', 'subject', 'threadIsStarred', 'threadIsImportant'] as const;
+
+/** Minimal row shape the merge needs; every list row has these. */
+export interface PageWindowRow {
+  id: string;
+  date?: number | string | null;
+}
+
+export interface PageWindowMerge<T> {
+  /** The page's rows after the merge — always at most one page. */
+  emails: T[];
+  added: number;
+  updated: number;
+  removed: number;
+  /** False when the refresh found nothing to do, so the caller can skip `set`
+   *  (a new array identity re-renders every row and rebuilds every thread). */
+  changed: boolean;
+}
+
+const rowWasRefreshed = <T extends PageWindowRow>(existing: T, incoming: T): boolean =>
+  REFRESHABLE_FIELDS.some(
+    (field) => (existing as Record<string, unknown>)[field] !== (incoming as Record<string, unknown>)[field],
+  );
+
+const newestFirst = <T extends PageWindowRow>(a: T, b: T): number =>
+  (Number(b.date) || 0) - (Number(a.date) || 0);
+
+/**
+ * Cap a sorted window to `pageSize` ROWS, where a row is either one message
+ * (no `rowKeyOf`) or one conversation. In conversation mode every message of an
+ * accepted thread is kept wherever it sorts, so a thread is never half-shown.
+ */
+const capToPageWindow = <T,>(rows: T[], pageSize: number, rowKeyOf?: (row: T) => string): T[] => {
+  const limit = Math.max(pageSize, 0);
+  if (!rowKeyOf) return rows.slice(0, limit);
+  const accepted = new Set<string>();
+  return rows.filter((row) => {
+    const key = rowKeyOf(row);
+    if (accepted.has(key)) return true;
+    if (accepted.size >= limit) return false;
+    accepted.add(key);
+    return true;
+  });
+};
+
+/**
+ * Fold a freshly-fetched page window into the rows currently on screen.
+ *
+ * `fresh` must come from the SAME query the view is paged to (same limit, same
+ * offset), because it is authoritative for that window: a row on screen that
+ * `fresh` no longer carries was deleted server-side (the realtime 'deleted'
+ * event can miss deletes that happened while disconnected), and the result is
+ * capped back to `pageSize` so new arrivals push the oldest row onto the next
+ * page instead of stretching the one being read.
+ *
+ * `skipIds` holds rows inside the delete-undo window: still in the DB, so they
+ * would otherwise come back as "new" and reappear as ghosts until a folder switch.
+ *
+ * `rowKeyOf` makes the cap count CONVERSATIONS instead of messages — pass it for
+ * any view {@link isThreadPagedView} is true of, or the merge silently truncates
+ * a thread-grained page mid-conversation.
+ */
+export function mergePageWindow<T extends PageWindowRow>(
+  current: T[],
+  fresh: T[],
+  pageSize: number,
+  skipIds: ReadonlySet<string> = new Set(),
+  rowKeyOf?: (row: T) => string,
+): PageWindowMerge<T> {
+  const freshById = new Map(fresh.map((row) => [row.id, row]));
+  const onScreenIds = new Set(current.map((row) => row.id));
+
+  let updated = 0;
+  const kept = current.reduce<T[]>((rows, row) => {
+    const incoming = freshById.get(row.id);
+    if (!incoming) return rows; // gone from the window — dropped, counted below
+    if (rowWasRefreshed(row, incoming)) {
+      updated++;
+      return [...rows, incoming];
+    }
+    return [...rows, row];
+  }, []);
+  const removed = current.length - kept.length;
+
+  const added = fresh.filter((row) => !onScreenIds.has(row.id) && !skipIds.has(row.id));
+  const pageRows = capToPageWindow([...added, ...kept].sort(newestFirst), pageSize, rowKeyOf);
+
+  return {
+    emails: pageRows,
+    added: added.length,
+    updated,
+    removed,
+    // An over-long page shrinking back to its window is a change worth applying
+    // even when nothing arrived, changed or vanished.
+    changed: added.length > 0 || updated > 0 || removed > 0 || pageRows.length !== current.length,
+  };
 }
