@@ -26,6 +26,7 @@ import {
   isAiLabelFolder,
   classifyFolder,
   findFolderByType,
+  folderDisplayName,
   VIRTUAL_FOLDERS,
   type VirtualFolder,
 } from '../config/folder-mapping';
@@ -408,17 +409,9 @@ export function Sidebar() {
     return [];
   };
 
-  // Canonical labels for the collapsed system folders — so the resolved Sent
-  // folder shows as "Sent" even when it's "[Gmail]/Sent Mail" on the wire.
-  const SYSTEM_FOLDER_LABELS: Record<string, string> = {
-    sent: 'Sent', drafts: 'Drafts', archive: 'Archive', spam: 'Spam', trash: 'Trash',
-  };
-
   const renderFolder = (folder: typeof folders[0]) => {
     const gotoHints = getFolderGotoHints(folder.path);
-    const folderType = classifyFolder(folder);
-    const displayName =
-      (folderType && SYSTEM_FOLDER_LABELS[folderType]) || folder.name.replace('[Gmail]/', '');
+    const displayName = folderDisplayName(folder);
     const btn = (
       <button
         key={folder.id}

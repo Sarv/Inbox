@@ -677,10 +677,17 @@ export class RealtimeManager extends EventEmitter {
           logger.warn(`Polling: recalculateFolderCounts failed: ${(err as Error).message}`);
         }
       }
-      // Update stored counts
+      // Record what the SERVER holds. Only that — `totalCount` is the number of
+      // rows WE hold (folder-repository recounts it from the folder tag), and
+      // writing the server's EXISTS over it makes the two fields say the same
+      // thing while meaning opposite ones. That is what put "1–1 of 1,719" over
+      // a Sent folder holding one message: the list counter is
+      // max(totalCount, serverMessageCount), so both halves were the server's
+      // number and nothing was left to disagree with it. It also silently
+      // defeats every "do we have them all?" comparison, and it misreported
+      // which of two aliased mailboxes actually holds the mail.
       await this.storage.updateFolder(folder.id, {
         lastKnownMessageCount: status.messages,
-        totalCount: status.messages,
       } as any);
     } catch (error) {
       if (this.isConnectionError(error)) {

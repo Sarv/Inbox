@@ -11,6 +11,7 @@ import type {
   SearchQuery,
   PaginationOptions,
   StorageStats,
+  ViewFilter,
 } from './models';
 
 // IAgentStorage is exported at the package root via the agent types barrel
@@ -170,6 +171,18 @@ export interface IEmailStorage {
   ): Promise<EmailRecord[]>;
 
   /**
+   * How many messages `getEmailsByFolder` would return under the same filter —
+   * the "of N" for a per-message folder listing (no thread collapsing).
+   *
+   * Optional: storages that can't count cheaply simply omit it, and callers
+   * fall back to "unknown total" rather than a wrong one.
+   */
+  countEmailsInFolder?(
+    folderId: string,
+    options?: { filter?: ViewFilter; categoryTag?: string }
+  ): Promise<number>;
+
+  /**
    * Get emails in a thread
    */
   getEmailsByThread(threadId: string): Promise<EmailRecord[]>;
@@ -263,6 +276,20 @@ export interface IEmailStorage {
    * folder_id UID diff.
    */
   countEmailsWithFolderTag?(folderPath: string): Promise<number>;
+
+  /**
+   * Count every email FILED in `folderId` — rows whose PRIMARY folder is this
+   * one (`emails.folder_id`), each message counted once.
+   *
+   * The counterpart to {@link countEmailsWithFolderTag}, and the only one of
+   * the two that can tell two names for a single mailbox apart. A message that
+   * belongs to two folders is one row carrying both membership tags, so the tag
+   * count reads the full mailbox under BOTH names of an aliased Sent while the
+   * filed count reads the truth: everything under the name it was synced from,
+   * nothing under the alias. Optional: when omitted, callers fall back to the
+   * stored tag count.
+   */
+  countEmailsFiledIn?(folderId: string): Promise<number>;
 
   /**
    * Every email carrying `folderPath` as a membership TAG whose PRIMARY folder is

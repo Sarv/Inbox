@@ -25,7 +25,8 @@ function makeStorage(folder: Folder = { id: 'f1', path: 'INBOX', lastSyncUid: 0,
   return {
     folder,
     getFolderByPath: vi.fn(async (path: string) => (path === folder.path ? folder : null)),
-    updateFolder: vi.fn(async () => {}),
+    // Varargs so a test can assert on the patch object the manager writes.
+    updateFolder: vi.fn(async (_id: string, _patch: Record<string, unknown>) => {}),
     recalculateFolderCounts: vi.fn(async () => {}),
     getEmailByFolderAndUid: vi.fn(async (_folderId: string, _uid: number) => null as null | { id: string }),
     unlinkOrDeleteEmailsFromFolder: vi.fn(async () => ({ unlinked: 0, deleted: 1 })),
@@ -772,12 +773,41 @@ describe('RealtimeManager — polling loop', () => {
 
     // uidNext (2) > lastSyncUid + 1 → new mail; the poll pulls it in.
     expect(processor.processBatch).toHaveBeenCalledTimes(1);
-    expect(storage.updateFolder).toHaveBeenCalledWith('f1', expect.objectContaining({
-      lastKnownMessageCount: 1, totalCount: 1,
-    }));
+    // Breaks: the poll stops recording what the server holds, so the "do we
+    // have them all?" comparison has nothing to compare against.
+    // It used to write `totalCount: status.messages` here too — see the
+    // dedicated regression below for why that field must stay untouched.
+    expect(storage.updateFolder).toHaveBeenCalledWith('f1', { lastKnownMessageCount: 1 });
 
     await vi.advanceTimersByTimeAsync(30_000);
     expect(processor.syncFlags).toHaveBeenCalledTimes(2); // second poll ran
+  });
+
+  // Breaks: the SERVER's message count gets written into `totalCount`, the
+  // field that means "rows WE hold" (folder-repository recounts it from the
+  // folder tag). The two then say the same number while meaning opposite
+  // things, and since the list counter is max(totalCount, serverMessageCount)
+  // nothing is left to disagree with the server — that is exactly how a Sent
+  // folder holding ONE message showed "1-1 of 1,719". It also misreports which
+  // of two aliased mailboxes actually holds the mail, because the
+  // follow-the-rows rule reads totalCount.
+  it('records the server count without overwriting the local row count', async () => {
+    const { realtime, client, storage } = await makeRealtime({
+      idle: false,
+      folder: { id: 'f1', path: 'INBOX', lastSyncUid: 0, lastKnownMessageCount: 0 },
+    });
+    client.addMessage('INBOX', { subject: 'one' });
+    client.addMessage('INBOX', { subject: 'two' });
+
+    await realtime.start('INBOX');
+
+    const counts = storage.updateFolder.mock.calls.filter(
+      ([, patch]) => 'lastKnownMessageCount' in patch,
+    );
+    expect(counts.length).toBeGreaterThan(0);
+    for (const [, patch] of counts) {
+      expect(patch).not.toHaveProperty('totalCount');
+    }
   });
 
   it('debounces polls that arrive inside minPollIntervalMs', async () => {

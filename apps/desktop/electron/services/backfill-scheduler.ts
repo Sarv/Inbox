@@ -22,7 +22,7 @@
  */
 
 import { getStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId, sendToWindow } from '../shared';
-import { createLogger, getEventBus, isTrashFolder, isSpamFolder, isAllMailSuperset, LARGE_MAILBOX_THRESHOLD } from '@sarvinbox/core';
+import { buildStandardFolderAliasMap, createLogger, getEventBus, isTrashFolder, isSpamFolder, isAllMailSuperset, LARGE_MAILBOX_THRESHOLD } from '@sarvinbox/core';
 import { maybeBackfillBulk } from './bulk-backfill';
 import { isConnectionRecentlyUnstable } from './connection-health';
 import { recordThreadRepairPass, threadRepairWindowStart } from './thread-repair-watermark';
@@ -165,6 +165,17 @@ function isExcludedFolder(folder: any): boolean {
 }
 
 /**
+ * Drop mailboxes the server published twice (Sarv lists both `Sent` and
+ * `Sent Mail` for one store). Backfilling an alias pages thousands of messages
+ * that are already on disk under the canonical name, into a folder the sidebar
+ * never shows — pure cost, and a second `backfill_complete` that never settles.
+ */
+function backfillableFolders(all: any[]): any[] {
+  const aliases = buildStandardFolderAliasMap(all);
+  return aliases.size === 0 ? all : all.filter((f) => !aliases.has(f.path));
+}
+
+/**
  * Advance one account's historical backfill by (at most) one folder this tick,
  * plus a throttled deletion reconcile for large folders. Returns the number of
  * folders still needing backfill for this account (0 = fully archived).
@@ -175,7 +186,7 @@ async function backfillAccount(
   chunksPerTick: number,
   sweepAllFolders: boolean,
 ): Promise<{ remaining: number; inserted: number }> {
-  const folders: any[] = (await storage.getFolders?.()) ?? [];
+  const folders: any[] = backfillableFolders((await storage.getFolders?.()) ?? []);
   // Gmail-style accounts: an All-Mail superset means we only need to backfill that
   // one folder for complete search coverage (see isAllMailSuperset). Other
   // providers have disjoint folders → backfill them all.
@@ -288,7 +299,7 @@ async function backfillAccount(
 
   // Stay active while ANYTHING is behind: history still paging (backfillComplete=false)
   // OR messages still missing (anyShort). Only back off to idle once fully caught up.
-  const after: any[] = (await storage.getFolders?.()) ?? [];
+  const after: any[] = backfillableFolders((await storage.getFolders?.()) ?? []);
   const afterSuperset = after.find(isAllMailSuperset);
   const afterCandidates = afterSuperset ? [afterSuperset] : after;
   const stillPending = afterCandidates.filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isExcludedFolder(f) && !f.backfillComplete).length;

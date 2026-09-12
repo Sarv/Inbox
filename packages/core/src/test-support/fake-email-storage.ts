@@ -377,6 +377,12 @@ export class FakeEmailStorage {
     return this.rowsTaggedWith(folderPath).length;
   }
 
+  /** Rows FILED here (primary folderId) — NOT the ones merely tagged with it. */
+  async countEmailsFiledIn(folderId: string): Promise<number> {
+    this.note('countEmailsFiledIn');
+    return this.allRows().filter((email) => email.folderId === folderId).length;
+  }
+
   async getFolderMembersOutsideUidSpace(
     folderId: string,
     folderPath: string,
@@ -425,14 +431,27 @@ export class FakeEmailStorage {
     this.note('syncFolders');
     for (const incoming of folders) {
       const existing = this.folders.get(incoming.id);
-      // Upsert: never clobber sync state (uidValidity / lastSyncUid / modseq) of
-      // a folder we already know — the real folder upsert preserves it too.
-      this.folders.set(
-        incoming.id,
-        existing
-          ? { ...incoming, uidValidity: existing.uidValidity, lastSyncUid: existing.lastSyncUid, lastSyncTime: existing.lastSyncTime, totalCount: existing.totalCount, unreadCount: existing.unreadCount, highestModseq: (existing as FolderRecord).highestModseq }
-          : incoming,
-      );
+      if (!existing) {
+        this.folders.set(incoming.id, incoming);
+        continue;
+      }
+      // Upsert, the way the real one does it (folder-repository.sync): the LIST
+      // refreshes only what LIST knows, and every other column on the existing
+      // row survives untouched. Written as "keep the row, overwrite these few"
+      // rather than the reverse — spreading `incoming` silently dropped any
+      // field the folder-list record does not carry (it has no
+      // serverMessageCount), so the fake reset sync state the real store keeps.
+      this.folders.set(incoming.id, {
+        ...existing,
+        name: incoming.name,
+        parentId: incoming.parentId,
+        specialUse: incoming.specialUse,
+        subscribed: incoming.subscribed,
+        uidValidity: incoming.uidValidity ?? existing.uidValidity,
+        lastSyncUid: incoming.lastSyncUid ?? existing.lastSyncUid,
+        lastSyncTime: incoming.lastSyncTime ?? existing.lastSyncTime,
+        highestModseq: incoming.highestModseq ?? existing.highestModseq,
+      });
     }
   }
 

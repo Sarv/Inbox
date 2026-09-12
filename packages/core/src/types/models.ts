@@ -125,9 +125,14 @@ export interface FolderRecord {
   highestModseq?: number | null; // CONDSTORE: highest MODSEQ for efficient flag sync
 
   // Counts
-  totalCount: number;          // Local DB email count for this folder
+  totalCount: number;          // Rows TAGGED with this folder (a shared message counts under every name)
   unreadCount: number;         // Local DB unread count for this folder
   serverMessageCount?: number; // IMAP server message count (for "load more")
+
+  // Rows FILED here (primary folder_id), counted once. Not stored: attached in
+  // memory by withFiledCounts for contested roles only, so it survives the IPC
+  // trip to the renderer's findFolderByType. Absent means "not measured".
+  ownedCount?: number | null;
 
   // Historical backfill progress. The background scheduler pages older mail
   // DOWNWARD by UID; backfillOldestUid is the lowest UID reached so far (the

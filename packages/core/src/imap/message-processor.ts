@@ -3,7 +3,7 @@
 import libmime from 'libmime';
 import { simpleParser, type ParsedMail } from 'mailparser';
 
-import { classifyFolder, type ClassifiableFolder } from '../config/folder-mapping';
+import { findFolderByType, type ClassifiableFolder } from '../config/folder-mapping';
 import { LARGE_MAILBOX_THRESHOLD, STALE_FLAG_VERIFY_MAX, SYNC_RECENT_WINDOW_DAYS, recentWindowCutoffDate } from '../config/sync';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
 import type { FilterRule } from '../types/filters';
@@ -548,28 +548,23 @@ export class MessageProcessor {
    * load the category definitions a `Sarv Inbox/*` mirror label can name.
    *
    * The path for a role differs per account (`[Gmail]/Sent Mail` vs `Sent`), so
-   * it is resolved from the account's own folder list via classifyFolder rather
-   * than hardcoded. `\All` is deliberately NOT mapped: All Mail is the superset
-   * we are already syncing from, and re-tagging every message with it would put
-   * the entire mailbox in one folder view.
+   * it is resolved from the account's own folder list via findFolderByType
+   * rather than hardcoded. `\All` is deliberately NOT mapped: All Mail is the
+   * superset we are already syncing from, and re-tagging every message with it
+   * would put the entire mailbox in one folder view.
    */
   private async buildGmailLabelContext(storage: IEmailStorage): Promise<GmailLabelContext> {
     const roleToPath = new Map<GmailFolderRole, string>();
     let knownCategories: KnownCategory[] | undefined;
     try {
-      const folders = (await storage.getFolders?.()) ?? [];
-      for (const f of folders) {
-        const type = classifyFolder(f as ClassifiableFolder);
-        const role: GmailFolderRole | null =
-          type === 'inbox' ? 'inbox'
-            : type === 'sent' ? 'sent'
-              : type === 'drafts' ? 'drafts'
-                : type === 'trash' ? 'trash'
-                  : type === 'spam' ? 'spam'
-                    : null;
-        // First match wins: a duplicate/alias mailbox must not displace the
-        // canonical one the rest of the app already routes to.
-        if (role && !roleToPath.has(role)) roleToPath.set(role, f.path);
+      const folders = ((await storage.getFolders?.()) ?? []) as ClassifiableFolder[];
+      // Ranked, not first-seen: an account can expose two mailboxes for one role
+      // (Sarv lists `Sent` and an alias `Sent Mail`), and the canonical one — the
+      // one the rest of the app routes to — must win wherever the server listed it.
+      const roles: GmailFolderRole[] = ['inbox', 'sent', 'drafts', 'trash', 'spam'];
+      for (const role of roles) {
+        const folder = findFolderByType(folders, role);
+        if (folder) roleToPath.set(role, folder.path);
       }
     } catch (e) {
       logger.warn(`[GmailLabels] could not resolve folder roles: ${(e as Error).message}`);

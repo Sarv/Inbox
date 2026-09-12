@@ -3,11 +3,13 @@
 import LRUCache from 'lru-cache';
 import { simpleParser } from 'mailparser';
 
+import { buildStandardFolderAliasMap, describeDuplicateRoles, duplicateRoleCandidates } from '../config/folder-mapping';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
 import type { IMAPConfig, IIMAPClient, IMAPFolder, SearchCriteria } from '../types/imap';
-import type { EmailRecord } from '../types/models';
+import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
+import { withFiledCounts } from '../utils/folder-counts';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import type { EmailProvider } from '../utils/provider';
@@ -131,6 +133,10 @@ export class SyncEngine {
 
   // Storage
   private storage: IEmailStorage;
+  /** Last duplicate-role report, so the line prints on change, not per sync. */
+  private lastDuplicateRoleSummary: string | null = null;
+  /** Folders whose local count was recounted because two names claim one role. */
+  private readonly recountedContestedFolders = new Set<string>();
 
   // Body fetch queue. Items are tiny ({emailId, folderPath, uid, listeners})
   // and the drain rate is IMAP-bound regardless of size, so the cap exists
@@ -837,9 +843,17 @@ export class SyncEngine {
     // Get selectable folders
     let selectableFolders = this.getSelectableFolders(folders);
 
-    // Filter to requested folders
+    // Drop the duplicate names for a mailbox we already sync under another one.
+    const collapsed = await this.collapseDuplicateMailboxes(selectableFolders);
+    selectableFolders = collapsed.folders;
+
+    // Filter to requested folders — through the alias map, so a request naming
+    // a dropped duplicate syncs the mailbox it stands for instead of nothing.
     if (options.folders && options.folders.length > 0) {
-      selectableFolders = this.filterFolders(selectableFolders, options.folders);
+      selectableFolders = this.filterFolders(
+        selectableFolders,
+        options.folders.map((path) => collapsed.aliases.get(path) ?? path),
+      );
     }
 
     // Sort by priority
@@ -933,8 +947,14 @@ export class SyncEngine {
     // Get selectable folders
     let selectableFolders = this.getSelectableFolders(folders);
 
+    const collapsed = await this.collapseDuplicateMailboxes(selectableFolders);
+    selectableFolders = collapsed.folders;
+
     if (options.folders && options.folders.length > 0) {
-      selectableFolders = this.filterFolders(selectableFolders, options.folders);
+      selectableFolders = this.filterFolders(
+        selectableFolders,
+        options.folders.map((path) => collapsed.aliases.get(path) ?? path),
+      );
     }
 
     selectableFolders = this.folderSyncer.sortFoldersByPriority(selectableFolders);
@@ -2552,6 +2572,115 @@ export class SyncEngine {
       (f) => f.subscribed || f.path.toUpperCase() === 'INBOX',
     );
     return subscribed.length > 0 ? subscribed : result;
+  }
+
+  /**
+   * Collapse a role the server published TWICE, and say which name replaced
+   * which.
+   *
+   * Sarv lists both `Sent` and `Sent Mail` for one physical store — same
+   * UIDVALIDITY, same UID range, same messages. Synced as two folders they each
+   * keep their own sync state and counts, while the sidebar shows only one of
+   * them: the other accumulates state nothing displays. Worse, dedup by
+   * message-id means whichever name synced FIRST owns every row and the second
+   * can never gain one, which is how Sent came to claim 1,719 messages, show
+   * one, and offer a "next page" that was always blank.
+   *
+   * Which name wins is decided in `buildStandardFolderAliasMap`, and it needs
+   * the sync state — local row count, UIDVALIDITY, server EXISTS — that a bare
+   * LIST entry does not carry, so the stored record for each path is merged in
+   * first. Without it the ranking alone picks, and on this account it picks the
+   * empty one: Sarv puts SPECIAL-USE `\Sent` on the alias.
+   *
+   * If that read fails we collapse NOTHING. An unreadable store and a store
+   * with no folders are the same value here and opposite facts, and the wrong
+   * guess stops syncing a mailbox that holds mail.
+   */
+  private async collapseDuplicateMailboxes(
+    folders: IMAPFolder[],
+  ): Promise<{ folders: IMAPFolder[]; aliases: Map<string, string> }> {
+    const unchanged = { folders, aliases: new Map<string, string>() };
+
+    let stored: FolderRecord[];
+    try {
+      stored = await this.storage.getFolders();
+    } catch (error) {
+      logger.warn(
+        `Could not read stored folders; not collapsing duplicate mailboxes: ${(error as Error).message}`,
+      );
+      return unchanged;
+    }
+
+    const attachSyncState = (records: FolderRecord[]) => {
+      const byPath = new Map(records.map((f) => [f.path, f]));
+      return folders.map((folder) => {
+        const record = byPath.get(folder.path);
+        return {
+          ...folder,
+          // The stored id, so the filed-count measurement below can address the
+          // folder; '' for a mailbox the LIST just discovered, which has no
+          // stored rows to count anyway.
+          id: record?.id ?? '',
+          uidValidity: record?.uidValidity ?? null,
+          totalCount: record?.totalCount ?? 0,
+          serverMessageCount: record?.serverMessageCount ?? null,
+        };
+      });
+    };
+
+    let withSyncState = attachSyncState(stored);
+
+    // Refresh the stored tag counts for the contested folders once each. These
+    // feed the totals the UI shows (they are only recomputed when a sync pass
+    // changed something, so a quiet duplicate can sit indefinitely on a stale
+    // value — and, until the polling fix, on the server's count written over
+    // it). They do NOT decide which name wins: a tag count reads the whole
+    // mailbox under both of its names, because a message belonging to two
+    // folders is one row carrying both tags. That decision is made from the
+    // filed counts attached below.
+    const contested = duplicateRoleCandidates(withSyncState)
+      .flatMap((role) => role.candidates.map((candidate) => candidate.path))
+      .filter((path) => !this.recountedContestedFolders.has(path));
+    if (contested.length > 0) {
+      try {
+        await this.storage.recalculateFolderCounts(contested);
+        for (const path of contested) this.recountedContestedFolders.add(path);
+        withSyncState = attachSyncState(await this.storage.getFolders());
+      } catch (error) {
+        // Deciding on a stale count is still better than not deciding.
+        logger.warn(
+          `Could not recount folders sharing a role (${contested.join(', ')}): ${(error as Error).message}`,
+        );
+      }
+    }
+
+    // Where is the mail actually filed? The only measurement that separates two
+    // names for one store — `Sent` holds all 1,718 rows, its `Sent Mail` alias
+    // holds the 1 that happened to arrive under that name.
+    withSyncState = await withFiledCounts(this.storage, withSyncState);
+
+    const aliases = buildStandardFolderAliasMap(withSyncState);
+
+    // Report the decision AND its inputs, once per change. Which name kept the
+    // mail is the whole question, and `Sent -> Sent Mail` on its own cannot be
+    // checked against anything; a role that was NOT collapsed is just as worth
+    // seeing, since "no duplicate", "no proof yet" and "two real mailboxes"
+    // look identical from the outside and call for opposite responses.
+    const roles = describeDuplicateRoles(withSyncState);
+    if (roles) {
+      const decision =
+        aliases.size === 0
+          ? 'collapsing none (the server has not proven any two are one mailbox)'
+          : `skipping ${[...aliases.keys()].join(', ')}`;
+      const summary = `${roles} — ${decision}`;
+      if (summary !== this.lastDuplicateRoleSummary) {
+        this.lastDuplicateRoleSummary = summary;
+        logger.info(`Mailboxes sharing a role — ${summary}`);
+      }
+    }
+
+    if (aliases.size === 0) return unchanged;
+    return { folders: folders.filter((f) => !aliases.has(f.path)), aliases };
   }
 
   /**
