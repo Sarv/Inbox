@@ -43,6 +43,7 @@ import {
   THREAD_META_SHARED,
   liveUnreadSum,
   listingExclusion,
+  LISTING_EXCLUDED_FOLDERS,
 } from './thread-sql';
 
 const log = createLogger('EmailRepo');
@@ -89,6 +90,186 @@ export function hasSentFolderTag(tags: string): boolean {
 const SENT_FOLDER_TAG_SQL = SENT_FOLDER_PATHS
   .map(p => `instr(lower(tags), '|${p.toLowerCase()}|') > 0`)
   .join(' OR ');
+
+/**
+ * Folders whose mail is NOT "all mail": the discard piles (Trash/Spam) and the
+ * user's own outgoing/unsent piles (Sent/Drafts), under every name the servers
+ * we support publish them as.
+ *
+ * This IS {@link LISTING_EXCLUDED_FOLDERS}, not a copy of it: "All Email" now has
+ * two implementations — the read-model one excludes these folders by ID off
+ * `thread_folders`, the legacy one by tag off `emails` — and the folder
+ * projection those IDs come from is itself built with LISTING_EXCLUDED_FOLDERS.
+ * A second list here would let the two paths disagree about what "all mail"
+ * means, and the paginator would then promise pages the list cannot show.
+ */
+const NON_MAIL_FOLDER_TAGS = LISTING_EXCLUDED_FOLDERS;
+
+/** `AND instr(tags, '|X|') = 0` for each tag — literal paths, no user input. */
+const excludeFolderTagsSql = (tags: readonly string[]): string =>
+  tags.map((tag) => `AND instr(tags, '|${tag}|') = 0`).join('\n          ');
+
+const EXCLUDE_NON_MAIL_SQL = excludeFolderTagsSql(NON_MAIL_FOLDER_TAGS);
+
+/**
+ * The two folder-less views whose membership is a conversation-wide LIVE flag
+ * rather than a folder: Starred and Important. Both page and count by THREAD.
+ */
+type FlagView = 'starred' | 'important';
+
+/**
+ * Per-view SQL knobs. Unlike a folder or section listing there is no
+ * `folderPath` to key `thread_folders` by, so the read-model path reads the
+ * conversation-wide LIVE flags straight off `threads` — exactly the semantics
+ * the old per-message query was reaching for (a starred message in Trash does
+ * not make the thread starred). Important sorts by priority first, matching the
+ * ORDER BY the message-level query used.
+ */
+const FLAG_VIEWS = {
+  starred: {
+    tag: 'starred',
+    column: 'has_flagged',
+    fastOrderBy: 't.last_message_date DESC, t.id DESC',
+    legacyOrderBy: 'last_date DESC, tid DESC',
+  },
+  important: {
+    tag: 'important',
+    column: 'has_important',
+    fastOrderBy: 't.max_priority_score DESC, t.last_message_date DESC, t.id DESC',
+    legacyOrderBy: 'max_priority DESC, last_date DESC, tid DESC',
+  },
+} as const;
+
+/** The read-model page query for a flag view (binds limit, offset). Exported so
+ *  the query-plan test asserts the REAL SQL against the real partial index —
+ *  without one, every page is a full scan of `threads` plus a sort. */
+export const flagViewPageSql = (view: FlagView): string => `
+  SELECT t.id FROM threads t
+  WHERE t.${FLAG_VIEWS[view].column} = 1
+  ORDER BY ${FLAG_VIEWS[view].fastOrderBy}
+  LIMIT ? OFFSET ?
+`;
+
+/** Legacy (pre-read-model) thread ids for a flag view: GROUP BY conversation
+ *  over the LIVE copies only, keeping any conversation with >= 1 tagged
+ *  message. Selected columns carry the sort keys so ORDER BY can name them. */
+const flagViewLegacySql = (view: FlagView, tail: string): string => `
+  SELECT COALESCE(e.thread_id, e.id) AS tid,
+         MAX(e.date) AS last_date,
+         MAX(COALESCE(e.priority_score, 0)) AS max_priority
+  FROM emails e
+  WHERE 1 = 1
+    ${threadFolderExclusion('e')}
+  GROUP BY tid
+  HAVING SUM(CASE WHEN instr(e.tags, '|${FLAG_VIEWS[view].tag}|') > 0 THEN 1 ELSE 0 END) > 0
+  ${tail}
+`;
+
+/**
+ * "All Email" membership, at THREAD grain: the conversation lists in at least
+ * one folder that isn't a discard/outgoing pile. `thread_folders` already holds
+ * exactly that — the rollup writes a row per (folder, thread) only for copies
+ * the folder's own listing would show — so the test is an EXISTS over the
+ * non-excluded folder ids rather than a re-derivation from tags.
+ *
+ * The excluded ids are BOUND, not interpolated: they come from the folders
+ * table, not from this file's literals.
+ */
+const allMailExistsSql = (excludedFolderIdCount: number): string => {
+  const notExcluded = excludedFolderIdCount > 0
+    ? `AND tf.folder_id NOT IN (${new Array(excludedFolderIdCount).fill('?').join(', ')})`
+    : '';
+  return `EXISTS (
+    SELECT 1 FROM thread_folders tf
+    WHERE tf.thread_id = t.id ${notExcluded}
+  )`;
+};
+
+/** The read-model page query for "All Email" (binds the excluded folder ids,
+ *  then limit, offset). Exported so the query-plan test asserts the REAL SQL:
+ *  without idx_tf_thread the EXISTS scans the whole projection per candidate,
+ *  and without the composite date index the ORDER BY builds a temp b-tree over
+ *  every conversation in the mailbox. */
+export const allMailPageSql = (excludedFolderIdCount: number): string => `
+  SELECT t.id FROM threads t
+  WHERE ${allMailExistsSql(excludedFolderIdCount)}
+  ORDER BY t.last_message_date DESC, t.id DESC
+  LIMIT ? OFFSET ?
+`;
+
+/** The read-model "of N" for "All Email" — same predicate, no order/window. */
+export const allMailCountSql = (excludedFolderIdCount: number): string => `
+  SELECT COUNT(*) as count FROM threads t
+  WHERE ${allMailExistsSql(excludedFolderIdCount)}
+`;
+
+/** Legacy (pre-read-model) thread ids for "All Email": GROUP BY conversation
+ *  over the listable copies only. No HAVING — surviving the WHERE is itself the
+ *  membership test.
+ *
+ *  Deliberate, known difference from the read-model path: this orders by the
+ *  newest LISTED message, while `threads.last_message_date` is the newest LIVE
+ *  non-draft message and so counts the user's own Sent replies. A thread whose
+ *  latest message is a reply the user sent therefore sorts higher on the fast
+ *  path. Accepted (it is the more useful "latest activity" order, and matches
+ *  what webmail does); the cross-path test asserts set equality, not order. */
+const allMailLegacySql = (tail: string): string => `
+  SELECT COALESCE(e.thread_id, e.id) AS tid,
+         MAX(e.date) AS last_date
+  FROM emails e
+  WHERE 1 = 1
+    ${EXCLUDE_NON_MAIL_SQL}
+  GROUP BY tid
+  ${tail}
+`;
+
+/**
+ * Snoozed, at THREAD grain: one row per conversation that has mail coming back,
+ * ordered by whichever of its messages returns SOONEST.
+ *
+ * Both halves of the predicate are required and always travel together. A row
+ * tagged `|snoozed|` with no `snooze_until` has no time to come back at, so it
+ * can never appear in the list — counting it (as the count alone used to) makes
+ * the header promise mail the view cannot show.
+ *
+ * No read-model fast path, deliberately: `threads` carries no snooze column, and
+ * adding one would mean a rollup change plus a full re-backfill for a view whose
+ * whole population is already covered by the partial index
+ * `idx_emails_snooze (snooze_until) WHERE snooze_until IS NOT NULL` — the
+ * unindexable instr() is then a residual filter over a handful of rows, not a
+ * scan of the mailbox.
+ */
+const snoozedThreadsSql = (tail: string): string => `
+  SELECT COALESCE(e.thread_id, e.id) AS tid,
+         MIN(e.snooze_until) AS wake
+  FROM emails e
+  WHERE instr(e.tags, '|snoozed|') > 0
+    AND e.snooze_until IS NOT NULL
+  GROUP BY tid
+  ${tail}
+`;
+
+/** The page query for the Snoozed view (binds limit, offset). Exported so the
+ *  query-plan test asserts the REAL SQL against the real partial index. */
+export const snoozedThreadsPageSql = (): string =>
+  snoozedThreadsSql('ORDER BY wake ASC, tid ASC LIMIT ? OFFSET ?');
+
+/**
+ * Put hydrated messages back in the order their THREADS were selected in.
+ *
+ * Every thread-grained listing picks its page as thread ids in the order the
+ * view wants (priority, wake time, date), then hydrates the messages with a
+ * single IN (...) query whose ORDER BY can only sort WITHIN a thread — across
+ * threads it interleaves, which silently throws the view's ranking away. The
+ * sort is stable, so the within-thread order the hydration query established
+ * survives untouched.
+ */
+const orderByThreadRank = (records: EmailRecord[], threadIds: string[]): EmailRecord[] => {
+  const rank = new Map(threadIds.map((id, index) => [id, index]));
+  const rankOf = (record: EmailRecord): number =>
+    rank.get(record.threadId || record.id) ?? Number.MAX_SAFE_INTEGER;
+  return [...records].sort((a, b) => rankOf(a) - rankOf(b));
+};
 
 // ========== Thread-Level Tag Predicates ==========
 // One shared semantics for "thread is starred/important": ANY email in
@@ -694,6 +875,19 @@ export class EmailRepository extends BaseRepository {
   }
 
   /**
+   * Rows FILED in this folder — primary `folder_id`, one row per message.
+   * Indexed (idx_emails_folder_id), unlike the `instr(tags, …)` tag count which
+   * cannot use an index; and unlike that count it never counts a message twice
+   * under two names for the same mailbox.
+   */
+  countByPrimaryFolder(folderId: string): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) as count FROM emails WHERE folder_id = ?')
+      .get(folderId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  /**
    * Tag-members of `folderPath` whose PRIMARY folder is another folder. See
    * IEmailStorage.getFolderMembersOutsideUidSpace.
    */
@@ -897,103 +1091,108 @@ export class EmailRepository extends BaseRepository {
   }
 
   /**
-   * Get all emails, excluding Trash/Spam/Drafts/Sent
+   * How many messages `getByFolder` would return for this folder under the same
+   * view filter / category — the "of N" for a per-message folder listing.
+   *
+   * Shares `getByFolder`'s WHERE (folder tag + special-folder exclusions + the
+   * view filter), so the count and the list can't disagree. Message-level, like
+   * the list it heads — it does NOT collapse threads.
+   */
+  async countByFolder(folderId: string, options: { filter?: ViewFilter; categoryTag?: string } = {}): Promise<number> {
+    const folder = this.db.prepare('SELECT path FROM folders WHERE id = ?').get(folderId) as any;
+    if (!folder) return 0;
+    const excludeSpecial = this.getExcludeSpecialFolders(folder.path);
+    const { sql: filterSql, params: filterParams } = this.viewFilterSql(options.filter, options.categoryTag);
+    const result = this.timed('countByFolder', () => this.db
+      .prepare(`
+        SELECT COUNT(*) as count
+        FROM emails
+        WHERE instr(tags, '|' || ? || '|') > 0
+        ${excludeSpecial}
+        ${filterSql}
+      `)
+      .get(folder.path, ...filterParams) as { count: number },
+      { folder: folder.path, filter: options.filter },
+    );
+    return result?.count ?? 0;
+  }
+
+  /**
+   * "All Email" (Trash/Spam/Drafts/Sent excluded) — paged by CONVERSATION.
+   *
+   * The list renders one row per conversation, so the page window has to be
+   * conversations too: a message-grained LIMIT 100 collapsed to however many
+   * rows those 100 messages happened to belong to, and split a thread across
+   * the page boundary. See {@link getStarred} — same bug, same shape.
    */
   async getAll(options: { limit?: number; offset?: number } = {}): Promise<EmailRecord[]> {
     const limit = options.limit || 100;
     const offset = options.offset || 0;
     this.logQuery('getAll', { limit, offset });
-
-    const rows = this.db
-      .prepare(`
-        SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
-        WHERE instr(tags, '|Trash|') = 0
-          AND instr(tags, '|Spam|') = 0
-          AND instr(tags, '|Drafts|') = 0
-          AND instr(tags, '|Sent|') = 0
-          AND instr(tags, '|[Gmail]/Trash|') = 0
-          AND instr(tags, '|[Gmail]/Spam|') = 0
-          AND instr(tags, '|[Gmail]/Drafts|') = 0
-          AND instr(tags, '|[Gmail]/Sent Mail|') = 0
-          AND instr(tags, '|Junk|') = 0
-          AND instr(tags, '|Junk Email|') = 0
-          AND instr(tags, '|Deleted Items|') = 0
-          AND instr(tags, '|Sent Items|') = 0
-        ORDER BY date DESC
-        LIMIT ? OFFSET ?
-      `)
-      .all(limit, offset) as any[];
-
-    return rows.map(row => this.rowToRecord(row));
+    return this.listAllMailThreads(limit, offset);
   }
 
   /**
-   * Get starred emails (excluding Trash/Spam)
+   * Get starred emails (excluding Trash/Spam) — paged by CONVERSATION.
+   *
+   * The list renders one row per conversation, so the page window has to be
+   * conversations too: a message-grained LIMIT 50 collapsed to 15 visible rows
+   * and split a thread across the page boundary.
    */
   async getStarred(options: { limit?: number; offset?: number } = {}): Promise<EmailRecord[]> {
     const limit = options.limit || 100;
     const offset = options.offset || 0;
     this.logQuery('getStarred', { limit, offset });
-
-    const rows = this.db
-      .prepare(`
-        SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
-        WHERE instr(tags, '|starred|') > 0
-          AND instr(tags, '|Trash|') = 0
-          AND instr(tags, '|Spam|') = 0
-          AND instr(tags, '|[Gmail]/Trash|') = 0
-          AND instr(tags, '|[Gmail]/Spam|') = 0
-        ORDER BY date DESC
-        LIMIT ? OFFSET ?
-      `)
-      .all(limit, offset) as any[];
-
-    return rows.map(row => this.rowToRecord(row));
+    return this.listFlagViewThreads('starred', limit, offset);
   }
 
   /**
-   * Get important emails (excluding Trash/Spam)
+   * Get important emails (excluding Trash/Spam) — paged by CONVERSATION, see
+   * {@link getStarred}.
    */
   async getImportant(options: { limit?: number; offset?: number } = {}): Promise<EmailRecord[]> {
     const limit = options.limit || 100;
     const offset = options.offset || 0;
     this.logQuery('getImportant', { limit, offset });
-
-    const rows = this.db
-      .prepare(`
-        SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
-        WHERE instr(tags, '|important|') > 0
-          AND instr(tags, '|Trash|') = 0
-          AND instr(tags, '|Spam|') = 0
-          AND instr(tags, '|[Gmail]/Trash|') = 0
-          AND instr(tags, '|[Gmail]/Spam|') = 0
-        ORDER BY COALESCE(priority_score, 0) DESC, date DESC
-        LIMIT ? OFFSET ?
-      `)
-      .all(limit, offset) as any[];
-
-    return rows.map(row => this.rowToRecord(row));
+    return this.listFlagViewThreads('important', limit, offset);
   }
 
   /**
-   * Get snoozed emails
+   * The Snoozed view — paged by CONVERSATION, soonest back first.
+   *
+   * The list renders one row per conversation, so the window and the "of N"
+   * have to be conversations too; see {@link getStarred} for the same bug in
+   * the other folder-less views.
+   *
+   * Unlike those, this hydrates only the SNOOZED messages of the page's
+   * conversations rather than every message they hold: the view exists to show
+   * what is coming back and when, so mail that already arrived is not part of
+   * it. It also keeps the guarantee every caller relies on — each returned row
+   * carries a `snoozeUntil`, which is what makes a snooze record out of it.
    */
   async getSnoozed(options: { limit?: number; offset?: number } = {}): Promise<EmailRecord[]> {
     const limit = options.limit || 100;
     const offset = options.offset || 0;
     this.logQuery('getSnoozed', { limit, offset });
 
+    const tids = this.timed('listSnoozed', () => this.db
+      .prepare(snoozedThreadsPageSql())
+      .all(limit, offset) as { tid: string }[], { limit, offset });
+    if (tids.length === 0) return [];
+
+    const threadIds = tids.map((t) => t.tid);
+    const placeholders = threadIds.map(() => '?').join(',');
     const rows = this.db
       .prepare(`
         SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
         WHERE instr(tags, '|snoozed|') > 0
           AND snooze_until IS NOT NULL
+          AND COALESCE(thread_id, id) IN (${placeholders})
         ORDER BY snooze_until ASC
-        LIMIT ? OFFSET ?
       `)
-      .all(limit, offset) as any[];
+      .all(...threadIds) as any[];
 
-    return rows.map(row => this.rowToRecord(row));
+    return orderByThreadRank(rows.map(row => this.rowToRecord(row)), threadIds);
   }
 
   /**
@@ -1144,20 +1343,10 @@ export class EmailRepository extends BaseRepository {
       const excludeSpecial = this.getExcludeSpecialFolders(query.folderPath);
       sql += ` ${excludeSpecial}`;
     } else if (query.scope === 'all' || (!query.folderPath && !query.folderIds?.length)) {
-      // "All Email" scope: exclude Trash, Spam, Sent, Drafts
+      // "All Email" scope: the same exclusions the All Email list uses, so a
+      // search across everything covers exactly what that list shows.
       sql += `
-        AND instr(tags, '|Trash|') = 0
-        AND instr(tags, '|Spam|') = 0
-        AND instr(tags, '|Drafts|') = 0
-        AND instr(tags, '|Sent|') = 0
-        AND instr(tags, '|[Gmail]/Trash|') = 0
-        AND instr(tags, '|[Gmail]/Spam|') = 0
-        AND instr(tags, '|[Gmail]/Drafts|') = 0
-        AND instr(tags, '|[Gmail]/Sent Mail|') = 0
-        AND instr(tags, '|Junk|') = 0
-        AND instr(tags, '|Junk Email|') = 0
-        AND instr(tags, '|Deleted Items|') = 0
-        AND instr(tags, '|Sent Items|') = 0`;
+          ${EXCLUDE_NON_MAIL_SQL}`;
     }
 
     // Legacy folderIds support
@@ -1331,32 +1520,26 @@ export class EmailRepository extends BaseRepository {
 
   // ========== Count Methods ==========
 
-  async getImportantCount(): Promise<number> {
-    const result = this.db
-      .prepare(`
-        SELECT COUNT(*) as count FROM emails
-        WHERE instr(tags, '|important|') > 0
-          AND instr(tags, '|Trash|') = 0
-          AND instr(tags, '|Spam|') = 0
-          AND instr(tags, '|[Gmail]/Trash|') = 0
-          AND instr(tags, '|[Gmail]/Spam|') = 0
-      `)
-      .get() as { count: number };
-    return result.count;
+  /**
+   * How many CONVERSATIONS the "All Email" list holds — the "of N" that heads
+   * it, in the same unit {@link getAll} pages by, so the denominator can never
+   * promise a page the list doesn't have (or hide one it does).
+   */
+  async getAllCount(): Promise<number> {
+    return this.countAllMailThreads();
   }
 
+  /** The "of N" heading the Important view — CONVERSATIONS, the same unit
+   *  {@link getImportant} pages by, so the denominator can never promise pages
+   *  the list cannot show. */
+  async getImportantCount(): Promise<number> {
+    return this.countFlagViewThreads('important');
+  }
+
+  /** The "of N" heading the Starred view — CONVERSATIONS, see
+   *  {@link getImportantCount}. */
   async getStarredCount(): Promise<number> {
-    const result = this.db
-      .prepare(`
-        SELECT COUNT(*) as count FROM emails
-        WHERE instr(tags, '|starred|') > 0
-          AND instr(tags, '|Trash|') = 0
-          AND instr(tags, '|Spam|') = 0
-          AND instr(tags, '|[Gmail]/Trash|') = 0
-          AND instr(tags, '|[Gmail]/Spam|') = 0
-      `)
-      .get() as { count: number };
-    return result.count;
+    return this.countFlagViewThreads('starred');
   }
 
   async getUnreadImportantCount(): Promise<number> {
@@ -1370,11 +1553,16 @@ export class EmailRepository extends BaseRepository {
     return result.count;
   }
 
+  /** The "of N" heading the Snoozed view, and the sidebar's snoozed badge —
+   *  CONVERSATIONS, the unit {@link getSnoozed} pages by, under exactly the same
+   *  predicate. It used to count the TAG alone: a row tagged `|snoozed|` with no
+   *  `snooze_until` was counted but could never be listed, so the badge and the
+   *  header both promised mail that did not exist. */
   async getSnoozedCount(): Promise<number> {
-    const result = this.db
-      .prepare(`SELECT COUNT(*) as count FROM emails WHERE instr(tags, '|snoozed|') > 0`)
-      .get() as { count: number };
-    return result.count;
+    const row = this.timed('countSnoozed', () => this.db
+      .prepare(`SELECT COUNT(*) as count FROM (${snoozedThreadsSql('')})`)
+      .get() as { count: number });
+    return row.count;
   }
 
   /**
@@ -1617,7 +1805,7 @@ export class EmailRepository extends BaseRepository {
   /** Hydrate a page of thread ids into list rows — the SAME shape/order the
    *  legacy outer query returns (all emails of those threads, newest-first, with
    *  THREAD_META), so the renderer/client threading is unchanged. */
-  private hydrateThreads(threadIds: string[]): EmailRecord[] {
+  private hydrateThreads(threadIds: string[], preserveThreadOrder = false): EmailRecord[] {
     if (threadIds.length === 0) return [];
     const placeholders = threadIds.map(() => '?').join(',');
     const rows = this.db.prepare(`
@@ -1625,7 +1813,9 @@ export class EmailRepository extends BaseRepository {
       WHERE COALESCE(thread_id, id) IN (${placeholders})
       ORDER BY date DESC
     `).all(...threadIds) as any[];
-    return rows.map((row) => this.rowToRecord(row));
+    const records = rows.map((row) => this.rowToRecord(row));
+    if (!preserveThreadOrder) return records;
+    return orderByThreadRank(records, threadIds);
   }
 
   /** Read-model section listing: pick the page's thread ids from thread_folders
@@ -1691,6 +1881,96 @@ export class EmailRepository extends BaseRepository {
       WHERE tf.folder_id = ? ${vfSql}
     `).get(folderId) as { count: number },
       { folderId });
+    return row.count;
+  }
+
+  /**
+   * The folder-LESS flag views (Starred, Important). Unlike a folder or section
+   * listing there is no `folderPath` to key `thread_folders` by, so these read
+   * the conversation-wide LIVE flags straight off `threads` — which is exactly
+   * the semantics the old per-message query was reaching for (a starred message
+   * in Trash doesn't make the thread starred).
+   *
+   * `tag` drives the legacy fallback's HAVING; `column` the read-model scan.
+   * Important sorts by priority first, matching the old message-level ORDER BY.
+   */
+  /** One page of a flag view, THREAD-grained: pick the page's conversations,
+   *  then hydrate each to all of its messages (the same shape the section and
+   *  folder fast paths return, so a thread never straddles a page boundary). */
+  private listFlagViewThreads(view: FlagView, limit: number, offset: number): EmailRecord[] {
+    if (this.readModelReadsEnabled()) {
+      const tids = this.timed(`listFlagView:${view}`, () => this.db
+        .prepare(flagViewPageSql(view))
+        .all(limit, offset) as { id: string }[], { view });
+      return this.hydrateThreads(tids.map((t) => t.id), true);
+    }
+
+    const rows = this.timed(`listFlagViewLegacy:${view}`, () => this.db
+      .prepare(flagViewLegacySql(view, `ORDER BY ${FLAG_VIEWS[view].legacyOrderBy} LIMIT ? OFFSET ?`))
+      .all(limit, offset) as { tid: string }[], { view });
+    return this.hydrateThreads(rows.map((r) => r.tid), true);
+  }
+
+  /** How many CONVERSATIONS a flag view holds — the pagination unit
+   *  {@link listFlagViewThreads} uses, so list and "of N" agree. */
+  private countFlagViewThreads(view: FlagView): number {
+    if (this.readModelReadsEnabled()) {
+      const row = this.timed(`countFlagView:${view}`, () => this.db
+        .prepare(`SELECT COUNT(*) as count FROM threads t WHERE t.${FLAG_VIEWS[view].column} = 1`)
+        .get() as { count: number }, { view });
+      return row.count;
+    }
+
+    const row = this.timed(`countFlagViewLegacy:${view}`, () => this.db
+      .prepare(`SELECT COUNT(*) as count FROM (${flagViewLegacySql(view, '')})`)
+      .get() as { count: number }, { view });
+    return row.count;
+  }
+
+  /** Ids of the folders "All Email" hides (Trash/Spam/Drafts/Sent, under every
+   *  name the servers publish them as) — resolved in ONE indexed lookup, not
+   *  twelve, and only for the folders this mailbox actually has. */
+  private listingExcludedFolderIds(): string[] {
+    const placeholders = LISTING_EXCLUDED_FOLDERS.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(`SELECT id FROM folders WHERE path IN (${placeholders})`)
+      .all(...LISTING_EXCLUDED_FOLDERS) as { id: string }[];
+    return rows.map((row) => row.id);
+  }
+
+  /** One page of "All Email", THREAD-grained: pick the page's conversations,
+   *  then hydrate each to all of its messages — the same shape the folder,
+   *  section and flag-view fast paths return, so a thread never straddles a
+   *  page boundary. */
+  private listAllMailThreads(limit: number, offset: number): EmailRecord[] {
+    if (this.readModelReadsEnabled()) {
+      const excluded = this.listingExcludedFolderIds();
+      const tids = this.timed('listAllMail', () => this.db
+        .prepare(allMailPageSql(excluded.length))
+        .all(...excluded, limit, offset) as { id: string }[], { excluded: excluded.length });
+      return this.hydrateThreads(tids.map((t) => t.id), true);
+    }
+
+    const rows = this.timed('listAllMailLegacy', () => this.db
+      .prepare(allMailLegacySql('ORDER BY last_date DESC, tid DESC LIMIT ? OFFSET ?'))
+      .all(limit, offset) as { tid: string }[]);
+    return this.hydrateThreads(rows.map((r) => r.tid), true);
+  }
+
+  /** How many CONVERSATIONS "All Email" holds — the pagination unit
+   *  {@link listAllMailThreads} uses, so list and "of N" agree. */
+  private countAllMailThreads(): number {
+    if (this.readModelReadsEnabled()) {
+      const excluded = this.listingExcludedFolderIds();
+      const row = this.timed('countAllMail', () => this.db
+        .prepare(allMailCountSql(excluded.length))
+        .get(...excluded) as { count: number }, { excluded: excluded.length });
+      return row.count;
+    }
+
+    const row = this.timed('countAllMailLegacy', () => this.db
+      .prepare(`SELECT COUNT(*) as count FROM (${allMailLegacySql('')})`)
+      .get() as { count: number });
     return row.count;
   }
 

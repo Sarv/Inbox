@@ -503,6 +503,7 @@ describe('SQLiteStorage folder operations', () => {
       makeFolder('f-arch', 'Archive'),
       makeFolder('f-trash', 'Trash', { specialUse: '\\Trash' }),
       makeFolder('f-rec', 'Recon'),
+      makeFolder('f-alias', 'Recon Mail'),
     ]);
     await storage.insertEmail(makeEmail({ id: 'rc1', folderId: 'f-rec', uid: 30, tags: '|Recon|' }));
     await storage.insertEmail(makeEmail({ id: 'rc2', folderId: 'f-rec', uid: 10, tags: '|Recon|read|' }));
@@ -523,6 +524,15 @@ describe('SQLiteStorage folder operations', () => {
     // getEmailsByFolderViaJunction is the legacy alias — same rows as getEmailsByFolder.
     const viaJunction = await storage.getEmailsByFolderViaJunction('f-rec', { limit: 10, offset: 0 });
     expect(viaJunction.map((e) => e.id).sort()).toEqual(['rc1', 'rc2']);
+
+    // Two names for ONE mailbox tag the same row twice, so the tag count reads
+    // full under both and the app picked the empty name to route Sent at.
+    // countEmailsFiledIn is what separates them — rows FILED here, counted once.
+    await storage.insertEmail(makeEmail({ id: 'rc3', folderId: 'f-alias', uid: 40, tags: '|Recon|Recon Mail|' }));
+    expect(await storage.countEmailsWithFolderTag('Recon')).toBe(3);
+    expect(await storage.countEmailsFiledIn('f-rec')).toBe(2);
+    expect(await storage.countEmailsFiledIn('f-alias')).toBe(1);
+    expect(await storage.countEmailsFiledIn('f-nope')).toBe(0);
   });
 
   it('recalculateFolderCounts and the delta maintainers agree on unread counts', async () => {

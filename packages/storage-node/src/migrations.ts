@@ -2890,6 +2890,67 @@ function hasLocalTable(db: Database.Database, name: string): boolean {
  * has deliberately deleted since the move. Wholesale loss and a few deletions
  * are not the same shape, and only the first one is worth repairing.
  */
+/**
+ * v82 — partial indexes for the folder-less flag views (Starred / Important).
+ *
+ * Those two views page and count by CONVERSATION off `threads.has_flagged` /
+ * `has_important`, which had no index: every page was a full scan of `threads`
+ * plus a sort. Partial (`WHERE flag = 1`) so the index holds only the flagged
+ * conversations — a few hundred rows in a mailbox of hundreds of thousands —
+ * and its column order matches the queries' ORDER BY, so the page is a plain
+ * range scan with no sort step at all.
+ */
+export const flagViewThreadIndexes: Migration = {
+  version: 82,
+  name: 'flag_view_thread_indexes',
+  up: (db) => {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_threads_flagged
+        ON threads(last_message_date DESC, id DESC) WHERE has_flagged = 1;
+      CREATE INDEX IF NOT EXISTS idx_threads_important
+        ON threads(max_priority_score DESC, last_message_date DESC, id DESC) WHERE has_important = 1;
+    `);
+    logger.info('Flag views (v82): idx_threads_flagged + idx_threads_important created');
+  },
+  down: (db) => {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_threads_flagged;
+      DROP INDEX IF EXISTS idx_threads_important;
+    `);
+  },
+};
+
+/**
+ * v83 — indexes for the folder-less "All Email" view, now paged by CONVERSATION.
+ *
+ * Membership is "the conversation lists in at least one non-special folder",
+ * asked as an EXISTS over `thread_folders`. That table is WITHOUT ROWID keyed
+ * (folder_id, thread_id), so the by-thread direction had no seekable key and
+ * every page scanned the whole projection; idx_tf_thread supplies it. The
+ * `threads` date index gains `id` so the page's ORDER BY
+ * (last_message_date DESC, id DESC) is served entirely by the index instead of
+ * a temp b-tree over every conversation in the mailbox.
+ */
+export const allMailThreadIndexes: Migration = {
+  version: 83,
+  name: 'all_mail_thread_indexes',
+  up: (db) => {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tf_thread ON thread_folders(thread_id, folder_id);
+      DROP INDEX IF EXISTS idx_threads_last_message_date;
+      CREATE INDEX IF NOT EXISTS idx_threads_last_message_date ON threads(last_message_date DESC, id DESC);
+    `);
+    logger.info('All Email (v83): idx_tf_thread + composite idx_threads_last_message_date created');
+  },
+  down: (db) => {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_tf_thread;
+      DROP INDEX IF EXISTS idx_threads_last_message_date;
+      CREATE INDEX IF NOT EXISTS idx_threads_last_message_date ON threads(last_message_date DESC);
+    `);
+  },
+};
+
 export const restoreLostContactDirectory: Migration = {
   version: 81,
   name: 'restore_lost_contact_directory',
@@ -3062,5 +3123,7 @@ export function createMigrationManager(
   manager.register(machineMailboxNames);
   manager.register(remineContactPhonesAfterLabelFix);
   manager.register(restoreLostContactDirectory);
+  manager.register(flagViewThreadIndexes);
+  manager.register(allMailThreadIndexes);
   return manager;
 }

@@ -556,9 +556,20 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);
 
 -- Thread indexes
-CREATE INDEX IF NOT EXISTS idx_threads_last_message_date ON threads(last_message_date DESC);
+-- (last_message_date, id) not just the date: the folder-less "All Email" page
+-- orders by both, and a date-only index leaves the tie-break to a temp b-tree
+-- over the WHOLE table. The extra column is free for every older date-only user.
+CREATE INDEX IF NOT EXISTS idx_threads_last_message_date ON threads(last_message_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_has_unread ON threads(has_unread);
 CREATE INDEX IF NOT EXISTS idx_threads_chat_extraction ON threads(chat_extracted_at, chat_email_count, message_count);
+
+-- Folder-less flag views (Starred / Important): partial covering indexes so the
+-- page is an indexed range scan over the few flagged threads instead of a full
+-- `threads` scan + sort. Column order matches the queries' ORDER BY exactly.
+CREATE INDEX IF NOT EXISTS idx_threads_flagged
+  ON threads(last_message_date DESC, id DESC) WHERE has_flagged = 1;
+CREATE INDEX IF NOT EXISTS idx_threads_important
+  ON threads(max_priority_score DESC, last_message_date DESC, id DESC) WHERE has_important = 1;
 
 -- Read-model indexes (see docs/READ_MODEL_PLAN.md).
 -- Base date-ordered listing (normal folder + date-sorted sections). Serves BOTH
@@ -574,6 +585,10 @@ CREATE INDEX IF NOT EXISTS idx_tf_unread
   ON thread_folders(folder_id, last_message_date DESC, thread_id DESC) WHERE has_unread = 1;
 CREATE INDEX IF NOT EXISTS idx_tf_unlabelled
   ON thread_folders(folder_id, last_message_date DESC, thread_id DESC) WHERE has_category = 0;
+-- Reverse lookup for the "All Email" membership test: the PK is
+-- (folder_id, thread_id), so "does this thread list in ANY non-special folder?"
+-- had no seekable key and fell back to scanning the projection.
+CREATE INDEX IF NOT EXISTS idx_tf_thread ON thread_folders(thread_id, folder_id);
 -- Per-category browse ("all threads in category X").
 CREATE INDEX IF NOT EXISTS idx_tc_slug ON thread_categories(slug, thread_id);
 

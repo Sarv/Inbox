@@ -627,6 +627,36 @@ describe('SQLiteStorage section and list queries', () => {
     expect(await storage.getUnreadImportantCount()).toBe(1);
   });
 
+  // The "of N" that heads the All Email list. If this count and getAllEmails
+  // ever disagree about what "all mail" means, the paginator promises pages the
+  // list can't show (or hides mail the user has).
+  it('getAllCount counts exactly what getAllEmails lists', async () => {
+    const storage = ctx.get();
+    const listed = await storage.getAllEmails({ limit: 500, offset: 0 });
+    expect(await storage.getAllCount()).toBe(listed.length);
+    expect(await storage.getAllCount()).toBe(4); // Trash is excluded from both
+  });
+
+  // The "of N" for a per-message folder listing (All Inboxes counts each
+  // account's INBOX this way). Message-level, filter-aware, and it must match
+  // what getEmailsByFolder returns under the same filter.
+  it('countEmailsInFolder matches the folder listing under the same filter', async () => {
+    const storage = ctx.get();
+    const all = await storage.getEmailsByFolder('f-inbox', { limit: 100, offset: 0 });
+    expect(await storage.countEmailsInFolder('f-inbox')).toBe(all.length);
+
+    const unread = await storage.getEmailsByFolder('f-inbox', { limit: 100, offset: 0, filter: { isUnread: true } });
+    expect(await storage.countEmailsInFolder('f-inbox', { filter: { isUnread: true } })).toBe(unread.length);
+
+    const starred = await storage.getEmailsByFolder('f-inbox', { limit: 100, offset: 0, filter: { isFlagged: true } });
+    expect(await storage.countEmailsInFolder('f-inbox', { filter: { isFlagged: true } })).toBe(starred.length);
+
+    // An unknown folder counts 0 rather than throwing — a missing mailbox must
+    // read as "nothing to page", not crash the view that heads it.
+    expect(await storage.countEmailsInFolder('f-nonexistent')).toBe(0);
+    expect(await storage.countEmailsInFolder('f-inbox', { categoryTag: 'invoice' })).toBe(0);
+  });
+
   it('getRecentEmails windows by timestamp', async () => {
     const storage = ctx.get();
     expect(ids(await storage.getRecentEmails({ sinceTimestamp: T0 + 35 }))).toEqual(['s-impunread', 's-trash']);
@@ -763,6 +793,38 @@ describe('SQLiteStorage snooze', () => {
     await expect(storage.snoozeEmail('no-such-id', T0)).rejects.toThrow('Email not found: no-such-id');
     await expect(storage.unsnoozeEmail('no-such-id')).resolves.toBeUndefined();
   });
+});
+
+// Its own storage: the assertions are about the WHOLE snoozed set (its count and
+// how it pages), so a leftover snooze from another test would move every number.
+describe('SQLiteStorage snooze listings are thread-grained', () => {
+  const ctx = withStorage();
+
+  // The Snoozed VIEW pages by conversation, and both listings must agree with
+  // getSnoozedCount — a limit that meant messages would cut a thread in half and
+  // leave the header counting pages the list can't turn to.
+  it('lists snoozed mail a conversation at a time, as records and as emails', async () => {
+    const storage = ctx.get();
+    await storage.insertEmail(makeEmail({ id: 'zt1a', threadId: 'th-zt1', tags: '|INBOX|', date: T0 + 1 }));
+    await storage.insertEmail(makeEmail({ id: 'zt1b', threadId: 'th-zt1', tags: '|INBOX|', date: T0 + 2 }));
+    await storage.insertEmail(makeEmail({ id: 'zt2a', threadId: 'th-zt2', tags: '|INBOX|', date: T0 + 3 }));
+    await storage.snoozeEmail('zt1a', T0 + 100);
+    await storage.snoozeEmail('zt1b', T0 + 900);
+    await storage.snoozeEmail('zt2a', T0 + 500);
+
+    expect(await storage.getSnoozedCount()).toBe(2); // two conversations, three messages
+
+    // One conversation asked for, every snoozed message of it handed back.
+    const firstPage = await storage.getSnoozedEmails({ limit: 1, offset: 0 });
+    expect(firstPage.map((s) => s.emailId)).toEqual(['zt1a', 'zt1b']);
+    expect(firstPage.every((s) => typeof s.snoozeUntil === 'number')).toBe(true);
+
+    // The emails form of the same page — what the view renders, in one call
+    // instead of one IPC round trip per message.
+    const rows = await storage.getSnoozedEmailRecords({ limit: 1, offset: 1 });
+    expect(rows.map((e) => e.id)).toEqual(['zt2a']);
+  });
+
 });
 
 // ===========================================================================

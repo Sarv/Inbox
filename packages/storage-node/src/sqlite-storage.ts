@@ -823,6 +823,24 @@ export class SQLiteStorage implements IEmailStorage {
     return this.emailRepo.getStarred(options);
   }
 
+  /** The Snoozed view's rows, as EMAILS — the same shape every other listing
+   *  hands the renderer, so the view does not have to fetch each message back
+   *  one IPC call at a time. `limit`/`offset` count conversations. */
+  async getSnoozedEmailRecords(options: { limit?: number; offset?: number } = {}): Promise<EmailRecord[]> {
+    this.ensureInitialized();
+    return this.emailRepo.getSnoozed(options);
+  }
+
+  async getAllCount(): Promise<number> {
+    this.ensureInitialized();
+    return this.emailRepo.getAllCount();
+  }
+
+  async countEmailsInFolder(folderId: string, options: { filter?: ViewFilter; categoryTag?: string } = {}): Promise<number> {
+    this.ensureInitialized();
+    return this.emailRepo.countByFolder(folderId, options);
+  }
+
   async getImportantCount(): Promise<number> {
     this.ensureInitialized();
     return this.emailRepo.getImportantCount();
@@ -1058,6 +1076,15 @@ export class SQLiteStorage implements IEmailStorage {
   async countEmailsWithFolderTag(folderPath: string): Promise<number> {
     this.ensureInitialized();
     return this.emailRepo.countByFolderTag(folderPath);
+  }
+
+  /**
+   * Count emails FILED in this folder (primary `folder_id`) — the count that
+   * separates two names for one mailbox, where the tag count cannot.
+   */
+  async countEmailsFiledIn(folderId: string): Promise<number> {
+    this.ensureInitialized();
+    return this.emailRepo.countByPrimaryFolder(folderId);
   }
 
   async getFolderMembersOutsideUidSpace(
@@ -1805,9 +1832,16 @@ export class SQLiteStorage implements IEmailStorage {
     } as any);
   }
 
-  async getSnoozedEmails(): Promise<SnoozedEmail[]> {
+  /**
+   * The Snoozed listing, as snooze records — one per snoozed MESSAGE, but drawn
+   * from a page of CONVERSATIONS (see {@link EmailRepository.getSnoozed}), so
+   * `limit` is a number of conversations and matches what `getSnoozedCount`
+   * returns. The caller used to take the repository's default silently, which
+   * made an unpaginated view quietly stop at 100 messages.
+   */
+  async getSnoozedEmails(options: { limit?: number; offset?: number } = {}): Promise<SnoozedEmail[]> {
     this.ensureInitialized();
-    const emails = await this.emailRepo.getSnoozed();
+    const emails = await this.emailRepo.getSnoozed(options);
     return emails.map(e => ({
       id: `snooze-${e.id}`,
       emailId: e.id,
