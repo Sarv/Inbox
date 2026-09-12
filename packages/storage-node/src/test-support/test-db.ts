@@ -23,6 +23,7 @@ import type Database from 'better-sqlite3';
 
 import { createMigrationManager } from '../migrations';
 import { describeNativeAbiFailure, probeNativeSqlite } from '../native-abi';
+import { attachSharedContacts } from '../shared-contacts';
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -113,9 +114,21 @@ export function openTestDb(
  * incremental migration). Repositories tested against this cannot drift from the
  * real column set — a missing column or renamed table fails the test instead of
  * only failing in the app.
+ *
+ * The shared contact directory is attached FIRST, in the same order
+ * `SQLiteStorage.initialize` does it — contacts no longer live in the mailbox,
+ * so a database migrated without it has no `contacts` table at all and every
+ * contact query fails with `no such table: shared.contacts`.
+ *
+ * @param sharedContactsPath  a file to use as the directory. Omit it and each
+ *   database gets a private, anonymous temporary directory that dies with the
+ *   connection — the right isolation for a single-account test. Pass the SAME
+ *   path to two databases to model two accounts sharing one address book, which
+ *   is the only way to test the unification.
  */
-export function newMigratedDb(path = ':memory:'): Database.Database {
+export function newMigratedDb(path = ':memory:', sharedContactsPath = ''): Database.Database {
   const db = openTestDb(path);
+  attachSharedContacts(db, sharedContactsPath);
   createMigrationManager(db).migrate();
   return db;
 }

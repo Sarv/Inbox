@@ -340,28 +340,14 @@ CREATE TABLE IF NOT EXISTS ai_category_definitions (
 -- Supporting Tables
 -- ============================================================
 
--- Contacts
-CREATE TABLE IF NOT EXISTS contacts (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  name TEXT,
-  display_name TEXT,
-  avatar_url TEXT,
-  organization TEXT,
-  title TEXT,
-  phone TEXT,
-  first_seen INTEGER NOT NULL,
-  last_seen INTEGER NOT NULL,
-  email_count INTEGER DEFAULT 1,
-  sent_count INTEGER DEFAULT 0,
-  received_count INTEGER DEFAULT 0,
-  is_favorite INTEGER DEFAULT 0,
-  notes TEXT,
-  tags TEXT DEFAULT '[]',
-  metadata TEXT DEFAULT '{}',
-  created_at INTEGER DEFAULT (unixepoch()),
-  updated_at INTEGER DEFAULT (unixepoch())
-);
+-- Contacts live in the SHARED contact directory (`sarvinbox-contacts.db`,
+-- attached as the schema `shared`), NOT in a mailbox — one address book for
+-- every account instead of one per account. See src/shared-contacts.ts.
+--
+-- Deliberately absent here rather than merely unused: SQLite resolves an
+-- unqualified `contacts` against `main` first, so re-creating an empty local
+-- table would silently shadow the directory and the app would show an empty
+-- address book with no error anywhere.
 
 -- Sender statistics
 CREATE TABLE IF NOT EXISTS sender_stats (
@@ -595,9 +581,7 @@ CREATE INDEX IF NOT EXISTS idx_tc_slug ON thread_categories(slug, thread_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_email_id ON attachments(email_id);
 
 -- Contact indexes
-CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
-CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
-CREATE INDEX IF NOT EXISTS idx_contacts_last_seen ON contacts(last_seen DESC);
+-- (contacts indexes live with the table, in the shared directory)
 
 -- Sender stats indexes
 CREATE INDEX IF NOT EXISTS idx_sender_stats_email ON sender_stats(email);
@@ -646,13 +630,7 @@ BEGIN
   UPDATE threads SET updated_at = unixepoch() WHERE id = NEW.id;
 END;
 
--- Update contacts.updated_at on update
-CREATE TRIGGER IF NOT EXISTS contacts_update_timestamp
-AFTER UPDATE ON contacts
-FOR EACH ROW
-BEGIN
-  UPDATE contacts SET updated_at = unixepoch() WHERE id = NEW.id;
-END;
+-- (contacts' updated_at trigger lives with the table, in the shared directory)
 
 -- Update sender_stats.updated_at on update
 CREATE TRIGGER IF NOT EXISTS sender_stats_update_timestamp

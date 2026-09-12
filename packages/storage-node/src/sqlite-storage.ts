@@ -1,8 +1,7 @@
 // SQLite storage implementation for Node.js
 // Refactored to use modular repositories for cleaner code organization
 
-import { existsSync, statSync, openSync, readSync, closeSync } from 'fs';
-import { basename } from 'path';
+import { basename, dirname, join } from 'path';
 
 import type {
   IEmailStorage,
@@ -23,9 +22,11 @@ import { parseAddresses , createLogger } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 
 import { BodyStorageBackfill } from './body-storage-backfill';
+import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
 import { InlineImageBackfill } from './inline-image-backfill';
 import { createMigrationManager } from './migrations';
 import { ReadModelMaintainer } from './read-model-maintainer';
+import { attachSharedContacts, SHARED_CONTACTS_FILE } from './shared-contacts';
 import {
   EmailRepository,
   FolderRepository,
@@ -60,6 +61,24 @@ export interface SQLiteStorageConfig {
    */
   key?: string;
   /**
+   * Path to the SHARED contact directory (`sarvinbox-contacts.db`), attached to
+   * this connection as the schema `shared`. Contacts are one directory for the
+   * whole app, not one address book per mailbox — see `shared-contacts.ts`.
+   *
+   * Defaults to a sibling of `dbPath`, which is what makes this work without
+   * every caller having to know: in the app all account databases live in the
+   * same userData directory, so they all resolve to the SAME directory file,
+   * while a test using its own temp directory gets its own isolated one.
+   */
+  sharedContactsPath?: string;
+  /**
+   * The account this database belongs to, recorded as provenance on each
+   * directory row (`contact_accounts`) so the union of accounts can still be
+   * broken back down into its parts. Omitted outside the multi-account runtime
+   * (tests, tools), where provenance simply isn't tracked.
+   */
+  accountId?: string;
+  /**
    * SQLite page-cache size in KiB (applied as `PRAGMA cache_size = -<kb>`).
    * IMPORTANT: this is PER open connection, and every account opens its OWN
    * encrypted DB that stays open for the session — so with N accounts the total
@@ -67,25 +86,6 @@ export interface SQLiteStorageConfig {
    * active account a larger cache. Defaults to 8 MB when omitted.
    */
   cacheSizeKb?: number;
-}
-
-/** True only when `path` is an existing, NON-empty, PLAINTEXT SQLite DB (header
- *  "SQLite format 3"). Read straight off disk so we can decide key-vs-rekey
- *  BEFORE opening — an encrypted DB has an opaque header, a new/absent file none. */
-function isExistingPlaintextDb(path: string): boolean {
-  try {
-    if (!existsSync(path) || statSync(path).size < 16) return false;
-    const fd = openSync(path, 'r');
-    try {
-      const buf = Buffer.alloc(16);
-      readSync(fd, buf, 0, 16, 0);
-      return buf.toString('latin1').startsWith('SQLite format 3');
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -149,7 +149,7 @@ export class SQLiteStorage implements IEmailStorage {
 
   private get contactRepo(): ContactRepository {
     if (!this._contactRepo) {
-      this._contactRepo = new ContactRepository(() => this.db!);
+      this._contactRepo = new ContactRepository(() => this.db!, () => this.accountKey());
     }
     return this._contactRepo;
   }
@@ -220,7 +220,7 @@ export class SQLiteStorage implements IEmailStorage {
     // read/write or journal pragma. Escape single quotes defensively (the key is
     // hex today, so this never triggers, but never build SQL from an unescaped value).
     if (this.config.key) {
-      const k = this.config.key.replace(/'/g, "''");
+      const k = escapeDbKey(this.config.key);
       if (legacyPlaintext) {
         // Migrate a plaintext DB to encrypted IN PLACE. Checkpoint + leave WAL
         // first (rekey rewrites every page; doing it under a rollback journal is
@@ -252,7 +252,13 @@ export class SQLiteStorage implements IEmailStorage {
     // instead of spilling decrypted pages to a temp file on disk.
     this.db.pragma('temp_store = MEMORY');
 
-    const migrationManager = createMigrationManager(this.db);
+    // Attach the shared contact directory BEFORE migrating. The migration that
+    // adopts this mailbox's old per-account `contacts` table has to be able to
+    // read both sides at once, and every contact query from here on resolves
+    // through `shared.` — so the schema has to exist before any of them runs.
+    this.attachDirectory();
+
+    const migrationManager = createMigrationManager(this.db, { accountId: this.config.accountId });
     migrationManager.migrate();
 
     this.initialized = true;
@@ -281,6 +287,72 @@ export class SQLiteStorage implements IEmailStorage {
     // delay is longer, which keeps the two from competing for the first minute.
     this.inlineImages = new InlineImageBackfill(() => this.db, dbLabel);
     this.inlineImages.start();
+  }
+
+  /**
+   * Where this connection's contact directory lives.
+   *
+   * A sibling of the account database by default. That single rule gives both
+   * behaviours we need with no configuration: every account database in the
+   * app's userData directory resolves to the SAME directory file (one address
+   * book), while a test that builds its database in its own temp directory gets
+   * a directory of its own (no cross-test bleed).
+   *
+   * An in-memory database has no directory to be a sibling of, so it attaches
+   * an anonymous temporary database — private to the connection and deleted
+   * when it closes, which is the right isolation for the throwaway case.
+   */
+  /**
+   * Provenance id for this mailbox's contributions to the shared directory.
+   *
+   * Falls back to the database's file name, which is derived from the account
+   * (`sarvinbox-<hash>.db`) — so even a storage opened without an explicit
+   * `accountId` records something a human can trace back to a mailbox. The same
+   * fallback as the adoption migration, deliberately: the two must agree or one
+   * account's history would split into two provenance rows.
+   */
+  /**
+   * Name this connection's mailbox for the contact directory's provenance table.
+   *
+   * The LEGACY primary database is opened at startup, before the account that
+   * owns it is known, so it starts out identified by its file name and is
+   * renamed here once an account claims it. Without this, that mailbox's
+   * provenance rows would be filed under `sarvinbox.db` and removing the
+   * account could not find — and so could not subtract — what it contributed.
+   *
+   * Only ever set to a REAL account id, and only while the id is still unknown:
+   * re-pointing a live connection at a different account would split one
+   * mailbox's contributions across two provenance keys.
+   */
+  adoptAccountId(accountId: string): void {
+    if (!accountId || this.config.accountId) return;
+    this.config.accountId = accountId;
+  }
+
+  private accountKey(): string {
+    if (this.config.accountId) return this.config.accountId;
+    const path = this.config.dbPath;
+    return path && path !== ':memory:' ? basename(path) : 'unknown-account';
+  }
+
+  private sharedContactsPath(): string {
+    if (this.config.sharedContactsPath) return this.config.sharedContactsPath;
+    const path = this.config.dbPath;
+    if (!path || path === ':memory:' || path.startsWith('file::memory:')) return '';
+    return join(dirname(path), SHARED_CONTACTS_FILE);
+  }
+
+  /**
+   * Open + attach the shared contact directory.
+   *
+   * Deliberately NOT wrapped in a try/catch that carries on. If the directory
+   * cannot be opened, every contact read would answer "none" — indistinguishable
+   * from a genuinely empty address book, and the enrichment schedulers would
+   * start rebuilding one on top of the real one. Failing here, loudly, at open
+   * time is the only version of this that can be diagnosed.
+   */
+  private attachDirectory(): void {
+    attachSharedContacts(this.db!, this.sharedContactsPath(), this.config.key);
   }
 
   async close(): Promise<void> {
@@ -1353,6 +1425,12 @@ export class SQLiteStorage implements IEmailStorage {
   ): Promise<void> {
     this.ensureInitialized();
     return this.contactRepo.setSenderStatsCounts(entries);
+  }
+
+  /** See ContactRepository.getContactTypeSync. */
+  getContactType(email: string): string {
+    this.ensureInitialized();
+    return this.contactRepo.getContactTypeSync(email);
   }
 
   /** See ContactRepository.getPhoneMiningState. */

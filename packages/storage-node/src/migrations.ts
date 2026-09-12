@@ -2,20 +2,65 @@
 // Fresh start: just load schema.sql, no incremental migrations
 
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
 
-import { logger, isRoleAddress, normalizeSubject } from '@sarvinbox/core';
+import { logger, isRoleAddress, isNoReplyAddress, contactNameForAddress, normalizeSubject } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 import { applyFtsSchema, FTS_TRIGGERS } from './fts-schema';
+import { hasSharedContacts, SHARED } from './shared-contacts';
 import { rawBodyExpression } from './repositories/body-storage';
 import { clearInlineImageCache, inflateInlineImages } from './repositories/inline-image-store';
+
+/**
+ * Facts a migration cannot read off the connection it is handed.
+ *
+ * Only the adoption pass (v77) needs one so far: folding a mailbox's contacts
+ * into the shared directory has to record WHICH mailbox they came from, and
+ * the account id lives in the storage config, not in the database.
+ *
+ * Every field is optional and every migration must work without it — the
+ * seeding script, the test fixtures and any direct `new SQLiteStorage(...)`
+ * all open databases with no account behind them.
+ */
+export interface MigrationContext {
+  /** Stable id of the account this database belongs to, when one is known. */
+  accountId?: string;
+}
 
 export interface Migration {
   version: number;
   name: string;
-  up: (db: Database.Database) => void;
-  down?: (db: Database.Database) => void;
+  up: (db: Database.Database, context: MigrationContext) => void;
+  down?: (db: Database.Database, context: MigrationContext) => void;
+}
+
+/**
+ * Does THIS mailbox still own a local `contacts` table?
+ *
+ * Contacts moved to the shared directory (`shared.contacts`, see
+ * shared-contacts.ts), so every migration that was written to evolve a
+ * per-account contacts table now has nothing to evolve on a database created
+ * after the move — and must not try.
+ *
+ * Two different failures make this a hard guard rather than a tidy-up:
+ *  - `PRAGMA table_info(contacts)` and `ALTER TABLE contacts` both resolve
+ *    THROUGH the attached schema, so an unguarded migration would quietly
+ *    alter the shared directory on behalf of one account.
+ *  - `CREATE INDEX … ON contacts(…)` does NOT: an unqualified index is created
+ *    in `main`, where the table no longer exists, so it throws `no such table:
+ *    main.contacts` — and because migrations abort on the first throw, that one
+ *    error would strand the database on a stale schema forever.
+ *
+ * Scoped to `main` on purpose (`sqlite_master`, not `sqlite_schema` across
+ * schemas): the question is whether the table is HERE, not whether it is
+ * reachable.
+ */
+export function hasLocalContactsTable(db: Database.Database): boolean {
+  const row = db
+    .prepare("SELECT 1 AS present FROM main.sqlite_master WHERE type = 'table' AND name = 'contacts'")
+    .get() as { present: number } | undefined;
+  return !!row;
 }
 
 /**
@@ -37,10 +82,17 @@ export function addColumnIfMissing(
   table: string,
   column: string,
   definition: string,
+  schema = 'main',
 ): boolean {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  // Both statements name the schema. Every table these migrations widen is a
+  // per-account one, but the shared contact directory is ATTACHed to the same
+  // connection and an unqualified name resolves THROUGH it once `main` has no
+  // table of that name — which would silently alter one account's directory on
+  // everyone's behalf. Note the two different placements SQLite requires:
+  // `PRAGMA <schema>.table_info(<table>)`, but `ALTER TABLE <schema>.<table>`.
+  const cols = db.prepare(`PRAGMA ${schema}.table_info(${table})`).all() as Array<{ name: string }>;
   if (cols.some((c) => c.name === column)) return false;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  db.exec(`ALTER TABLE ${schema}.${table} ADD COLUMN ${column} ${definition}`);
   return true;
 }
 
@@ -50,7 +102,7 @@ export function addColumnIfMissing(
 export class MigrationManager {
   private migrations: Migration[] = [];
 
-  constructor(private db: Database.Database) {}
+  constructor(private db: Database.Database, private context: MigrationContext = {}) {}
 
   register(migration: Migration): void {
     this.migrations.push(migration);
@@ -90,7 +142,7 @@ export class MigrationManager {
     logger.info(`Running migration ${migration.version}: ${migration.name}`);
 
     const transaction = this.db.transaction(() => {
-      migration.up(this.db);
+      migration.up(this.db, this.context);
       this.db
         .prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (?)')
         .run(migration.version);
@@ -130,7 +182,7 @@ export class MigrationManager {
 
     for (const migration of migrationsToRollback) {
       const transaction = this.db.transaction(() => {
-        migration.down!(this.db);
+        migration.down!(this.db, this.context);
         this.db
           .prepare('DELETE FROM schema_version WHERE version = ?')
           .run(migration.version);
@@ -168,7 +220,13 @@ export const initialTagsSchema: Migration = {
       DROP TABLE IF EXISTS signature_patterns;
       DROP TABLE IF EXISTS spammers;
       DROP TABLE IF EXISTS sender_stats;
-      DROP TABLE IF EXISTS contacts;
+      -- main-qualified on purpose. The shared contact directory is ATTACHed as
+      -- schema "shared", and an unqualified DROP resolves through it once main
+      -- has no such table -- so rolling ONE mailbox back would delete the
+      -- address book of EVERY account. The main. prefix keeps the rollback
+      -- local, and IF EXISTS makes it a no-op once this mailbox has adopted
+      -- the directory and no longer owns a local contacts table.
+      DROP TABLE IF EXISTS main.contacts;
       DROP TABLE IF EXISTS ai_category_definitions;
       DROP TABLE IF EXISTS embedding_metadata;
       DROP TABLE IF EXISTS attachments;
@@ -430,57 +488,51 @@ export const contactClassification: Migration = {
   version: 29,
   name: 'contact_classification',
   up: (db) => {
-    // Add classification columns to contacts
-    const cols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
-    const colNames = new Set(cols.map(c => c.name));
+    // sender_stats is PER-ACCOUNT and stays that way — it counts what this user
+    // did to a sender in this mailbox. It is widened on every database,
+    // including one created after contacts moved out, so it must sit OUTSIDE
+    // the directory guard below.
+    addColumnIfMissing(db, 'sender_stats', 'contact_type', "TEXT DEFAULT 'unknown'");
 
-    if (!colNames.has('contact_type')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN contact_type TEXT DEFAULT 'unknown';`);
-    }
-    if (!colNames.has('contact_type_confidence')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN contact_type_confidence REAL DEFAULT 0;`);
-    }
-    if (!colNames.has('contact_type_source')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN contact_type_source TEXT DEFAULT 'unset';`);
-    }
-    if (!colNames.has('company')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN company TEXT;`);
-    }
-    if (!colNames.has('last_inbound_at')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN last_inbound_at INTEGER;`);
-    }
-    if (!colNames.has('last_outbound_at')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN last_outbound_at INTEGER;`);
-    }
-    if (!colNames.has('avg_response_time_sec')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN avg_response_time_sec INTEGER;`);
-    }
-    if (!colNames.has('thread_count')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN thread_count INTEGER DEFAULT 0;`);
-    }
-    if (!colNames.has('needs_response')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN needs_response INTEGER DEFAULT 0;`);
+    // The contacts half. Contacts live in the shared directory now, which is
+    // created already carrying these columns; only a mailbox that still owns a
+    // local table has anything to widen. See hasLocalContactsTable for why an
+    // unguarded run would both alter the wrong table and then throw.
+    if (!hasLocalContactsTable(db)) {
+      logger.info('Contact classification (v29): contacts live in the shared directory — sender_stats only');
+      return;
     }
 
-    // Add classification columns to sender_stats
-    const ssCols = db.prepare("PRAGMA table_info(sender_stats)").all() as { name: string }[];
-    const ssColNames = new Set(ssCols.map(c => c.name));
-
-    if (!ssColNames.has('contact_type')) {
-      db.exec(`ALTER TABLE sender_stats ADD COLUMN contact_type TEXT DEFAULT 'unknown';`);
+    for (const [column, definition] of [
+      ['contact_type', "TEXT DEFAULT 'unknown'"],
+      ['contact_type_confidence', 'REAL DEFAULT 0'],
+      ['contact_type_source', "TEXT DEFAULT 'unset'"],
+      ['company', 'TEXT'],
+      ['last_inbound_at', 'INTEGER'],
+      ['last_outbound_at', 'INTEGER'],
+      ['avg_response_time_sec', 'INTEGER'],
+      ['thread_count', 'INTEGER DEFAULT 0'],
+      ['needs_response', 'INTEGER DEFAULT 0'],
+    ]) {
+      addColumnIfMissing(db, 'contacts', column, definition);
     }
 
-    // Index for classification queries
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_type ON contacts(contact_type);`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_needs_response ON contacts(needs_response) WHERE needs_response = 1;`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_last_inbound ON contacts(last_inbound_at DESC);`);
+    // Index for classification queries. Schema-qualified on both sides: the
+    // index name says which database it lands in, and SQLite then looks for the
+    // table in that same schema.
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_type ON contacts(contact_type);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_needs_response ON contacts(needs_response) WHERE needs_response = 1;`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_last_inbound ON contacts(last_inbound_at DESC);`);
 
     logger.info('Contact classification schema (v29) applied');
   },
   down: (db) => {
-    db.exec(`DROP INDEX IF EXISTS idx_contacts_type;`);
-    db.exec(`DROP INDEX IF EXISTS idx_contacts_needs_response;`);
-    db.exec(`DROP INDEX IF EXISTS idx_contacts_last_inbound;`);
+    // main-qualified: unqualified names resolve through the attached shared
+    // directory, so an unqualified rollback of ONE mailbox would drop the
+    // directory's indexes for every account.
+    db.exec(`DROP INDEX IF EXISTS main.idx_contacts_type;`);
+    db.exec(`DROP INDEX IF EXISTS main.idx_contacts_needs_response;`);
+    db.exec(`DROP INDEX IF EXISTS main.idx_contacts_last_inbound;`);
     // SQLite <3.35 can't DROP COLUMN, columns remain
   },
 };
@@ -599,8 +651,10 @@ export const contactKnowledgeBase: Migration = {
   version: 32,
   name: 'contact_knowledge_base',
   up: (db) => {
+    // contact_notes belongs to the shared directory, which creates it itself.
+    if (!hasLocalContactsTable(db)) return;
     db.exec(`
-      CREATE TABLE IF NOT EXISTS contact_notes (
+      CREATE TABLE IF NOT EXISTS main.contact_notes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
         note TEXT NOT NULL,
@@ -612,14 +666,16 @@ export const contactKnowledgeBase: Migration = {
         is_active INTEGER DEFAULT 1
       );
 
-      CREATE INDEX IF NOT EXISTS idx_contact_notes_email ON contact_notes(email);
-      CREATE INDEX IF NOT EXISTS idx_contact_notes_category ON contact_notes(email, category);
-      CREATE INDEX IF NOT EXISTS idx_contact_notes_active ON contact_notes(email, is_active) WHERE is_active = 1;
+      CREATE INDEX IF NOT EXISTS main.idx_contact_notes_email ON contact_notes(email);
+      CREATE INDEX IF NOT EXISTS main.idx_contact_notes_category ON contact_notes(email, category);
+      CREATE INDEX IF NOT EXISTS main.idx_contact_notes_active ON contact_notes(email, is_active) WHERE is_active = 1;
     `);
     logger.info('Contact Knowledge Base (v32) applied');
   },
   down: (db) => {
-    db.exec('DROP TABLE IF EXISTS contact_notes;');
+    // main-qualified: notes live in the shared directory now, and an unqualified
+    // DROP would resolve through it and delete every account's notes.
+    db.exec('DROP TABLE IF EXISTS main.contact_notes;');
   },
 };
 
@@ -919,42 +975,31 @@ export const contactEnrichment: Migration = {
   version: 39,
   name: 'contact_enrichment',
   up: (db) => {
-    const cols = db.prepare('PRAGMA table_info(contacts)').all() as { name: string }[];
-    const colNames = new Set(cols.map((c) => c.name));
+    if (!hasLocalContactsTable(db)) return; // shared directory already has these
 
-    if (!colNames.has('kind')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN kind TEXT NOT NULL DEFAULT 'individual';`);
-    }
-    if (!colNames.has('person_id')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN person_id TEXT;`);
-    }
-    if (!colNames.has('company_contact_id')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN company_contact_id TEXT;`);
-    }
-    if (!colNames.has('mobile_e164')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN mobile_e164 TEXT;`);
-    }
-    if (!colNames.has('enrichment')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN enrichment TEXT;`);
-    }
-    if (!colNames.has('enriched_through_email_at')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN enriched_through_email_at INTEGER;`);
-    }
-    if (!colNames.has('enrichment_source')) {
-      db.exec(`ALTER TABLE contacts ADD COLUMN enrichment_source TEXT;`);
+    for (const [column, definition] of [
+      ['kind', "TEXT NOT NULL DEFAULT 'individual'"],
+      ['person_id', 'TEXT'],
+      ['company_contact_id', 'TEXT'],
+      ['mobile_e164', 'TEXT'],
+      ['enrichment', 'TEXT'],
+      ['enriched_through_email_at', 'INTEGER'],
+      ['enrichment_source', 'TEXT'],
+    ]) {
+      addColumnIfMissing(db, 'contacts', column, definition);
     }
 
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_kind ON contacts(kind);`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_person_id ON contacts(person_id) WHERE person_id IS NOT NULL;`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON contacts(company_contact_id) WHERE company_contact_id IS NOT NULL;`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_mobile ON contacts(mobile_e164) WHERE mobile_e164 IS NOT NULL;`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_enriched_through ON contacts(enriched_through_email_at);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_kind ON contacts(kind);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_person_id ON contacts(person_id) WHERE person_id IS NOT NULL;`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_company_id ON contacts(company_contact_id) WHERE company_contact_id IS NOT NULL;`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_mobile ON contacts(mobile_e164) WHERE mobile_e164 IS NOT NULL;`);
+    db.exec(`CREATE INDEX IF NOT EXISTS main.idx_contacts_enriched_through ON contacts(enriched_through_email_at);`);
 
     // Audit trail: one row per detected enrichment change. Closed rows
     // (effective_to set) are the historical record when a person moves
     // jobs; the open row is the current state.
     db.exec(`
-      CREATE TABLE IF NOT EXISTS contact_enrichment_history (
+      CREATE TABLE IF NOT EXISTS main.contact_enrichment_history (
         id TEXT PRIMARY KEY,
         contact_id TEXT NOT NULL,
         person_id TEXT,
@@ -968,20 +1013,22 @@ export const contactEnrichment: Migration = {
         source_email_id TEXT,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       );
-      CREATE INDEX IF NOT EXISTS idx_enrichment_history_contact ON contact_enrichment_history(contact_id, effective_from DESC);
-      CREATE INDEX IF NOT EXISTS idx_enrichment_history_person ON contact_enrichment_history(person_id) WHERE person_id IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS idx_enrichment_history_open ON contact_enrichment_history(contact_id) WHERE effective_to IS NULL;
+      CREATE INDEX IF NOT EXISTS main.idx_enrichment_history_contact ON contact_enrichment_history(contact_id, effective_from DESC);
+      CREATE INDEX IF NOT EXISTS main.idx_enrichment_history_person ON contact_enrichment_history(person_id) WHERE person_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS main.idx_enrichment_history_open ON contact_enrichment_history(contact_id) WHERE effective_to IS NULL;
     `);
 
     logger.info('Contact enrichment schema (v39) applied');
   },
   down: (db) => {
-    db.exec('DROP TABLE IF EXISTS contact_enrichment_history;');
-    db.exec('DROP INDEX IF EXISTS idx_contacts_kind;');
-    db.exec('DROP INDEX IF EXISTS idx_contacts_person_id;');
-    db.exec('DROP INDEX IF EXISTS idx_contacts_company_id;');
-    db.exec('DROP INDEX IF EXISTS idx_contacts_mobile;');
-    db.exec('DROP INDEX IF EXISTS idx_contacts_enriched_through;');
+    // main-qualified: see v29/v32 -- rolling one mailbox back must never reach
+    // through the ATTACHed shared directory and delete it for the others.
+    db.exec('DROP TABLE IF EXISTS main.contact_enrichment_history;');
+    db.exec('DROP INDEX IF EXISTS main.idx_contacts_kind;');
+    db.exec('DROP INDEX IF EXISTS main.idx_contacts_person_id;');
+    db.exec('DROP INDEX IF EXISTS main.idx_contacts_company_id;');
+    db.exec('DROP INDEX IF EXISTS main.idx_contacts_mobile;');
+    db.exec('DROP INDEX IF EXISTS main.idx_contacts_enriched_through;');
     // SQLite can't DROP COLUMN cleanly; columns stay.
   },
 };
@@ -1055,24 +1102,29 @@ const contactRoleReclassification: Migration = {
   version: 42,
   name: 'contact_role_reclassification',
   up: (db) => {
+    // A repair pass over THIS mailbox's own contact rows. Once contacts live in
+    // the shared directory every account would re-run it over the same rows, and
+    // the strip is destructive (person_id and mobile_e164 to NULL) -- so it runs
+    // only while the mailbox still owns the table it was written for.
+    if (!hasLocalContactsTable(db)) return;
     // Guard: skip cleanly if the enrichment columns aren't present yet
     // (they arrive in v39 — which always runs first, but be defensive).
-    const cols = db.prepare('PRAGMA table_info(contacts)').all() as { name: string }[];
+    const cols = db.prepare('PRAGMA main.table_info(contacts)').all() as { name: string }[];
     const has = (n: string) => cols.some((c) => c.name === n);
     if (!has('person_id') || !has('contact_type')) return;
 
     const rows = db.prepare(
-      'SELECT id, email, person_id, mobile_e164, contact_type FROM contacts'
+      'SELECT id, email, person_id, mobile_e164, contact_type FROM main.contacts'
     ).all() as Array<{
       id: string; email: string; person_id: string | null;
       mobile_e164: string | null; contact_type: string | null;
     }>;
 
     const stripIdentity = db.prepare(
-      'UPDATE contacts SET person_id = NULL, mobile_e164 = NULL, updated_at = unixepoch() WHERE id = ?'
+      'UPDATE main.contacts SET person_id = NULL, mobile_e164 = NULL, updated_at = unixepoch() WHERE id = ?'
     );
     const setAutomated = db.prepare(
-      "UPDATE contacts SET contact_type = 'automated', contact_type_source = 'heuristic', updated_at = unixepoch() WHERE id = ?"
+      "UPDATE main.contacts SET contact_type = 'automated', contact_type_source = 'heuristic', updated_at = unixepoch() WHERE id = ?"
     );
 
     let stripped = 0;
@@ -1444,19 +1496,14 @@ const contactPhonesMinedWatermark: Migration = {
   version: 58,
   name: 'contact_phones_mined_watermark',
   up: (db) => {
-    const cols = db.prepare('PRAGMA table_info(contacts)').all() as Array<{ name: string }>;
-    const names = new Set(cols.map((c) => c.name));
-    if (!names.has('phones_mined_through')) {
-      db.exec('ALTER TABLE contacts ADD COLUMN phones_mined_through INTEGER;');
-    }
+    if (!hasLocalContactsTable(db)) return; // shared directory already has these
+    addColumnIfMissing(db, 'contacts', 'phones_mined_through', 'INTEGER');
     // The mined result itself, as JSON {e164: count}. Skipping a contact saves
     // the CPU of re-reading their mail, but the classifier still needs their
     // numbers to judge the DOMAIN — a switchboard is only identifiable by how
     // many colleagues carry it. Without this, an incremental scan would compute
     // org lines from whichever handful of contacts happened to change.
-    if (!names.has('phones_mined')) {
-      db.exec('ALTER TABLE contacts ADD COLUMN phones_mined TEXT;');
-    }
+    addColumnIfMissing(db, 'contacts', 'phones_mined', 'TEXT');
   },
 };
 
@@ -1569,10 +1616,9 @@ export const contactAvatarConfirmation: Migration = {
   version: 63,
   name: 'contact_avatar_confirmation',
   up: (db) => {
-    const cols = db.prepare('PRAGMA table_info(contacts)').all() as { name: string }[];
-    const names = new Set(cols.map((c) => c.name));
-    if (!names.has('avatar_status')) db.exec(`ALTER TABLE contacts ADD COLUMN avatar_status TEXT;`);
-    if (!names.has('avatar_checked_at')) db.exec(`ALTER TABLE contacts ADD COLUMN avatar_checked_at INTEGER;`);
+    if (!hasLocalContactsTable(db)) return; // shared directory already has these
+    addColumnIfMissing(db, 'contacts', 'avatar_status', 'TEXT');
+    addColumnIfMissing(db, 'contacts', 'avatar_checked_at', 'INTEGER');
   },
   down: () => { /* additive columns; nothing to undo */ },
 };
@@ -2417,10 +2463,547 @@ function restoreInlineImagesToBodies(db: Database.Database): void {
 }
 
 /**
+ * v77 — adopt this mailbox's contacts into the SHARED directory.
+ *
+ * Contacts used to be per-account, so the same person who emailed two of the
+ * user's addresses existed as two rows that never learnt anything from each
+ * other. They now live once, in `sarvinbox-contacts.db`, ATTACHed as `shared`
+ * (see shared-contacts.ts). This is the one-time pass that folds each existing
+ * mailbox in — it runs once per account database, and the SECOND account to run
+ * it merges into what the first one left.
+ *
+ * Three properties it has to have, and how each is obtained:
+ *
+ *  - **It only ever adds.** Nothing here deletes a directory row. An account
+ *    that arrives with an empty or unreadable `contacts` table contributes
+ *    nothing rather than emptying the address book — an unreadable store and an
+ *    empty store are the same value and opposite facts.
+ *  - **It is re-runnable.** A transaction that spans `main` and an attached
+ *    database is NOT atomic under WAL, so this can be interrupted with one side
+ *    committed. Every statement is therefore idempotent, and counts are
+ *    RECOMPUTED from `contact_accounts` rather than accumulated — running it
+ *    twice cannot double anyone's email count.
+ *  - **It does not destroy the source.** The local tables are renamed aside,
+ *    not dropped, so the half-committed case above leaves the mailbox's own
+ *    copy intact and recoverable. (They can be dropped by a later release once
+ *    the directory has proven itself in the field.)
+ *
+ * The rename is also what makes the move take effect: SQLite resolves an
+ * unqualified `contacts` against `main` first, so while a local table of that
+ * name exists it SHADOWS the directory for any statement that forgot to
+ * qualify. After this migration `main` has no such table, and
+ * {@link hasLocalContactsTable} turns the earlier contact migrations into
+ * no-ops for good.
+ *
+ * Known limitation, deliberately not papered over: `person_id` groups rows that
+ * enrichment decided are the same human, and two accounts generated those ids
+ * independently. Merging does not attempt to reconcile them, so one person
+ * reached at two addresses may stay two groups until enrichment next runs and
+ * re-links them by phone. Reconciling here would mean guessing.
+ */
+export const unifiedContactDirectory: Migration = {
+  version: 77,
+  name: 'unified_contact_directory',
+  up: (db, context) => {
+    // No local table means a database created after the move: the directory is
+    // already this mailbox's address book and there is nothing to fold in.
+    if (!hasLocalContactsTable(db)) return;
+
+    // Never drop a mailbox's contacts into a directory that is not there. The
+    // attach is supposed to have happened before migrations run (see
+    // SQLiteStorage.initialize); if it did not, stopping leaves the local table
+    // exactly where it is, which is the only recoverable outcome.
+    if (!hasSharedContacts(db)) {
+      throw new Error(
+        'unified_contact_directory: the shared contact directory is not attached — ' +
+        'refusing to adopt contacts into a schema that does not exist',
+      );
+    }
+
+    const accountKey = migrationAccountKey(db, context);
+    const localCount = (
+      db.prepare('SELECT COUNT(*) AS n FROM main.contacts').get() as { n: number }
+    ).n;
+
+    // 1. Provenance first, so the directory's totals always have parts to be
+    //    derived from. REPLACE rather than accumulate: this account's whole
+    //    contribution IS its local table, which makes the write idempotent.
+    db.exec(`
+      INSERT OR REPLACE INTO ${SHARED('contact_accounts')}
+        (email, account_id, first_seen, last_seen, email_count, sent_count, received_count, updated_at)
+      SELECT LOWER(email), '${accountKey.replace(/'/g, "''")}',
+             first_seen, last_seen,
+             COALESCE(email_count, 0), COALESCE(sent_count, 0), COALESCE(received_count, 0),
+             unixepoch()
+      FROM main.contacts
+    `);
+
+    // 2. Addresses the directory has never seen. OR IGNORE covers both the
+    //    re-run and the (vanishingly unlikely) case of two accounts having
+    //    generated the same row id.
+    db.exec(`
+      INSERT OR IGNORE INTO ${SHARED('contacts')} (
+        id, email, name, display_name, avatar_url, organization, title, phone,
+        first_seen, last_seen, email_count, sent_count, received_count,
+        is_favorite, notes, tags, metadata, created_at, updated_at,
+        contact_type, contact_type_confidence, contact_type_source, company,
+        last_inbound_at, last_outbound_at, avg_response_time_sec, thread_count, needs_response,
+        kind, person_id, company_contact_id, mobile_e164, enrichment,
+        enriched_through_email_at, enrichment_source,
+        phones_mined_through, phones_mined, avatar_status, avatar_checked_at
+      )
+      SELECT
+        id, LOWER(email), name, display_name, avatar_url, organization, title, phone,
+        first_seen, last_seen, email_count, sent_count, received_count,
+        is_favorite, notes, tags, metadata, created_at, updated_at,
+        contact_type, contact_type_confidence, contact_type_source, company,
+        last_inbound_at, last_outbound_at, avg_response_time_sec, thread_count, needs_response,
+        kind, person_id, company_contact_id, mobile_e164, enrichment,
+        enriched_through_email_at, enrichment_source,
+        phones_mined_through, phones_mined, avatar_status, avatar_checked_at
+      FROM main.contacts
+    `);
+
+    // 3. Addresses another account already contributed. COALESCE fills gaps
+    //    without overwriting: a name, an avatar or an enrichment the directory
+    //    already holds was paid for once and stays. The activity window widens
+    //    to cover both mailboxes, and the flags are a union — a contact
+    //    favourited on one account is favourited everywhere, which is the whole
+    //    point of unifying.
+    db.exec(`
+      UPDATE ${SHARED('contacts')} AS d SET
+        name                      = COALESCE(d.name, l.name),
+        display_name              = COALESCE(d.display_name, l.display_name),
+        avatar_url                = COALESCE(d.avatar_url, l.avatar_url),
+        avatar_status             = COALESCE(d.avatar_status, l.avatar_status),
+        avatar_checked_at         = COALESCE(d.avatar_checked_at, l.avatar_checked_at),
+        organization              = COALESCE(d.organization, l.organization),
+        title                     = COALESCE(d.title, l.title),
+        phone                     = COALESCE(d.phone, l.phone),
+        notes                     = COALESCE(d.notes, l.notes),
+        company                   = COALESCE(d.company, l.company),
+        person_id                 = COALESCE(d.person_id, l.person_id),
+        company_contact_id        = COALESCE(d.company_contact_id, l.company_contact_id),
+        mobile_e164               = COALESCE(d.mobile_e164, l.mobile_e164),
+        enrichment                = COALESCE(d.enrichment, l.enrichment),
+        enrichment_source         = COALESCE(d.enrichment_source, l.enrichment_source),
+        enriched_through_email_at = MAX(COALESCE(d.enriched_through_email_at, 0),
+                                        COALESCE(l.enriched_through_email_at, 0)),
+        phones_mined              = COALESCE(d.phones_mined, l.phones_mined),
+        phones_mined_through      = COALESCE(d.phones_mined_through, l.phones_mined_through),
+        first_seen                = MIN(d.first_seen, l.first_seen),
+        last_seen                 = MAX(d.last_seen, l.last_seen),
+        last_inbound_at           = MAX(COALESCE(d.last_inbound_at, 0), COALESCE(l.last_inbound_at, 0)),
+        last_outbound_at          = MAX(COALESCE(d.last_outbound_at, 0), COALESCE(l.last_outbound_at, 0)),
+        thread_count              = MAX(COALESCE(d.thread_count, 0), COALESCE(l.thread_count, 0)),
+        is_favorite               = MAX(COALESCE(d.is_favorite, 0), COALESCE(l.is_favorite, 0)),
+        needs_response            = MAX(COALESCE(d.needs_response, 0), COALESCE(l.needs_response, 0)),
+        contact_type              = CASE WHEN d.contact_type IS NULL OR d.contact_type = 'unknown'
+                                         THEN l.contact_type ELSE d.contact_type END,
+        contact_type_source       = CASE WHEN d.contact_type IS NULL OR d.contact_type = 'unknown'
+                                         THEN l.contact_type_source ELSE d.contact_type_source END,
+        contact_type_confidence   = MAX(COALESCE(d.contact_type_confidence, 0),
+                                        COALESCE(l.contact_type_confidence, 0)),
+        updated_at                = unixepoch()
+      FROM main.contacts AS l
+      WHERE d.email = LOWER(l.email) AND d.id != l.id
+    `);
+
+    // 4. Counts are the SUM of the parts, never a running total. This is what
+    //    makes step 1-3 safe to repeat, and it is also how removing an account
+    //    will later be able to subtract exactly what that account contributed.
+    db.exec(`
+      UPDATE ${SHARED('contacts')} AS d SET
+        email_count    = agg.email_count,
+        sent_count     = agg.sent_count,
+        received_count = agg.received_count
+      FROM (
+        SELECT email,
+               SUM(COALESCE(email_count, 0))    AS email_count,
+               SUM(COALESCE(sent_count, 0))     AS sent_count,
+               SUM(COALESCE(received_count, 0)) AS received_count
+        FROM ${SHARED('contact_accounts')}
+        GROUP BY email
+      ) AS agg
+      WHERE d.email = agg.email
+        AND d.email IN (SELECT LOWER(email) FROM main.contacts)
+    `);
+
+    // 5. Notes. The id is an AUTOINCREMENT integer, so it cannot carry across —
+    //    dedupe on (email, note), the same identity the runtime already uses
+    //    when it decides a note is already known.
+    if (hasLocalTable(db, 'contact_notes')) {
+      db.exec(`
+        INSERT INTO ${SHARED('contact_notes')}
+          (email, note, category, source_email_id, confidence, created_at, updated_at, is_active)
+        SELECT LOWER(l.email), l.note, l.category, l.source_email_id, l.confidence,
+               l.created_at, l.updated_at, l.is_active
+        FROM main.contact_notes AS l
+        WHERE NOT EXISTS (
+          SELECT 1 FROM ${SHARED('contact_notes')} AS d
+          WHERE d.email = LOWER(l.email) AND d.note = l.note
+        )
+      `);
+    }
+
+    // 6. Enrichment history, with contact_id REMAPPED. The directory may
+    //    already hold this address under the id another account generated, and
+    //    a history row pointing at an id that no longer exists is a row nothing
+    //    can ever read back.
+    if (hasLocalTable(db, 'contact_enrichment_history')) {
+      db.exec(`
+        INSERT OR IGNORE INTO ${SHARED('contact_enrichment_history')} (
+          id, contact_id, person_id, enrichment, company_contact_id, designation,
+          organization, effective_from, effective_to, source, source_email_id, created_at
+        )
+        SELECT h.id, COALESCE(d.id, h.contact_id), h.person_id, h.enrichment,
+               h.company_contact_id, h.designation, h.organization,
+               h.effective_from, h.effective_to, h.source, h.source_email_id, h.created_at
+        FROM main.contact_enrichment_history AS h
+        LEFT JOIN main.contacts AS l ON l.id = h.contact_id
+        LEFT JOIN ${SHARED('contacts')} AS d ON d.email = LOWER(l.email)
+      `);
+    }
+
+    // 7. Move the originals out of the way. Renamed, not dropped: see the note
+    //    above about cross-database commits. The local trigger and indexes go,
+    //    because they only cost writes on a table nothing reads any more.
+    db.exec('DROP TRIGGER IF EXISTS main.contacts_update_timestamp');
+    for (const index of [
+      'idx_contacts_email', 'idx_contacts_name', 'idx_contacts_last_seen',
+      'idx_contacts_type', 'idx_contacts_needs_response', 'idx_contacts_last_inbound',
+      'idx_contacts_kind', 'idx_contacts_person_id', 'idx_contacts_company_id',
+      'idx_contacts_mobile', 'idx_contacts_enriched_through',
+      'idx_contact_notes_email', 'idx_contact_notes_category', 'idx_contact_notes_active',
+      'idx_enrichment_history_contact', 'idx_enrichment_history_person',
+      'idx_enrichment_history_open',
+    ]) {
+      db.exec(`DROP INDEX IF EXISTS main.${index}`);
+    }
+    renameLocalTableAside(db, 'contacts');
+    renameLocalTableAside(db, 'contact_notes');
+    renameLocalTableAside(db, 'contact_enrichment_history');
+
+    const directoryCount = (
+      db.prepare(`SELECT COUNT(*) AS n FROM ${SHARED('contacts')}`).get() as { n: number }
+    ).n;
+    logger.info(
+      `Unified contact directory (v77): adopted ${localCount} contacts from account ` +
+      `${accountKey}; directory now holds ${directoryCount}`,
+    );
+  },
+
+  /**
+   * Put this mailbox's own address book back where it was.
+   *
+   * This is an UNDO of the move, not of the merge: the directory rows stay.
+   * They have to — once two accounts have contributed to a row there is no
+   * record of which half came from where beyond `contact_accounts`, and the
+   * older build this rollback exists to serve reads the local table anyway, so
+   * leaving the directory populated costs it nothing. The only thing an old
+   * build cannot survive is its `contacts` table having vanished, and that is
+   * exactly what the rename parked rather than destroyed.
+   *
+   * A mailbox that never had a local table (any install created after the
+   * unification) has nothing parked, and correctly gets nothing back.
+   */
+  down: (db) => {
+    for (const name of DIRECTORY_TABLE_NAMES) {
+      // Never overwrite a live table with the parked copy: if one exists, it is
+      // newer than what was parked and the parked copy is the stale one.
+      if (hasLocalTable(db, `pre_directory_${name}`) && hasLocalTable(db, name)) {
+        db.exec(`DROP TABLE IF EXISTS main.pre_directory_${name}`);
+      }
+    }
+    unparkDirectoryTables(db);
+  },
+};
+
+/**
+ * Forget where phone mining last stopped, so every contact is re-read under
+ * the current rules on the next scan.
+ *
+ * Shared by every migration that corrects the extractor or the scorer: mining
+ * only ever looks at mail NEWER than this mark, so a fix to how a signature is
+ * read reaches nobody until each contact happens to write again — and never at
+ * all for one who has gone quiet. Clearing it costs one extra pass over mail
+ * already on disk; the mined numbers themselves are kept, and still feed the
+ * domain-wide switchboard test on the next scan before re-mining replaces them.
+ */
+function clearPhoneMiningWatermarks(db: Database.Database, tag: string): void {
+  // The watermark lives in the shared directory. No directory attached means
+  // no contacts to re-mine, and forcing one open here would be the wrong place
+  // to do it — skip, exactly as a fresh install would.
+  if (!hasSharedContacts(db)) return;
+  const cleared = db
+    .prepare(`UPDATE ${SHARED('contacts')} SET phones_mined_through = NULL WHERE phones_mined_through IS NOT NULL`)
+    .run().changes;
+  if (cleared > 0) logger.info(`Re-mine contact phones (${tag}): cleared the watermark on ${cleared} contacts`);
+}
+
+/**
+ * v78 — re-mine every contact's signatures once.
+ *
+ * Phone mining is incremental: `phones_mined_through` records the newest mail a
+ * contact had when mining last read them, and a later scan skips anyone with
+ * nothing newer. That watermark says "we already looked", which is only a safe
+ * thing to believe while the looking itself does not change.
+ *
+ * It just changed. Mining now converts BOTH ends of a long body instead of the
+ * tail alone (a reply is top-posted, so the sender's own signature sits above
+ * the quoted chain and a tail-only window never saw it) and no longer reads the
+ * `tel:` of a click-to-call href as an "office" label. Contacts whose number
+ * was missed for either reason are exactly the ones whose watermark now bars
+ * them from being re-read: without this they stay wrong until they happen to
+ * send new mail, and a contact who has gone quiet stays wrong forever.
+ *
+ * Clearing the watermark costs one extra pass over mail already on disk. The
+ * mined numbers themselves are kept — they still feed the domain-wide
+ * switchboard test on the next scan, before re-mining replaces them.
+ */
+export const remineContactPhones: Migration = {
+  version: 78,
+  name: 'remine_contact_phones',
+  up: (db) => clearPhoneMiningWatermarks(db, 'v78'),
+
+  /**
+   * Nothing to undo. The watermark is a cache of "when we last looked", so the
+   * only effect of this migration is one extra scan; restoring the old values
+   * is impossible (they were overwritten) and pointless (an older build
+   * re-mines and re-sets them itself).
+   */
+  down: () => {},
+};
+
+/**
+ * Take colleagues' names off the robot mailboxes that were wearing them.
+ *
+ * Notification services put the human who triggered the event in the From
+ * display name while sending from a machine address, so the directory had
+ * entries like "Devendra Rathore <pullrequests-reply@bitbucket.org>" and
+ * "Bhupesh Chugh <notifications@atlassian.net>" — a real person's name on an
+ * address that is not theirs. Searching for that colleague returned mostly
+ * robots. Two things let it happen: the no-reply detector only matched the
+ * marker as a PREFIX (so `*-reply@`/`*-noreply@` read as people), and the
+ * upsert only ever fills a name when the row has none, so a wrong one written
+ * once is never corrected by a later scan. This repairs the rows already
+ * stored; contactNameForAddress prevents new ones.
+ *
+ * Idempotent: it rewrites a name to a value derived from the address, so a
+ * re-run computes the same answer and changes nothing.
+ */
+export const machineMailboxNames: Migration = {
+  version: 79,
+  name: 'machine_mailbox_names',
+  up: (db) => {
+    // Contacts live in the shared directory now. No directory attached means
+    // there is nothing to repair — exactly as on a fresh install.
+    if (!hasSharedContacts(db)) return;
+
+    const rows = db.prepare(
+      `SELECT id, email, name, contact_type FROM ${SHARED('contacts')}`
+    ).all() as Array<{ id: string; email: string; name: string | null; contact_type: string | null }>;
+
+    const rename = db.prepare(
+      `UPDATE ${SHARED('contacts')} SET name = ?, updated_at = unixepoch() WHERE id = ?`
+    );
+    // Never override a type a user or the agent chose; only fill in the ones
+    // that were never classified, mirroring v42.
+    const setAutomated = db.prepare(
+      `UPDATE ${SHARED('contacts')} SET contact_type = 'automated', contact_type_source = 'heuristic', updated_at = unixepoch() WHERE id = ?`
+    );
+
+    let renamed = 0;
+    let typed = 0;
+    for (const row of rows) {
+      if (!isNoReplyAddress(row.email)) continue;
+      const service = contactNameForAddress(row.email, row.name);
+      if (service && row.name !== service) { rename.run(service, row.id); renamed += 1; }
+      if (row.contact_type == null || row.contact_type === 'unknown') { setAutomated.run(row.id); typed += 1; }
+    }
+    if (renamed > 0 || typed > 0) {
+      logger.info(`Machine mailbox names (v79): renamed ${renamed}, typed ${typed} automated`);
+    }
+  },
+
+  /**
+   * Nothing to undo. The names being replaced were the wrong person's, and the
+   * originals are not recoverable from the row — an older build simply leaves
+   * the service name in place, which is still accurate.
+   */
+  down: () => {},
+};
+
+/**
+ * v80 — re-mine every contact's signatures again, under the corrected scorer.
+ *
+ * Same reasoning as v78, for a different correction: the scorer was reading a
+ * job title on the line ABOVE a number as an office label ("VP Support" docked
+ * a personal mobile), and ranking ignored how often a number had been seen, so
+ * one tidy forwarded signature could outrank a contact's own number. Both
+ * verdicts are computed at mining time and stored, so the fix only reaches a
+ * contact whose signatures are read again — and v78 has already run on installs
+ * that took the previous build, leaving their watermarks set.
+ */
+export const remineContactPhonesAfterLabelFix: Migration = {
+  version: 80,
+  name: 'remine_contact_phones_label_fix',
+  up: (db) => clearPhoneMiningWatermarks(db, 'v80'),
+
+  /** Nothing to undo — see v78. */
+  down: () => {},
+};
+
+/** Does `main` still hold a table of this name? (See hasLocalContactsTable.) */
+function hasLocalTable(db: Database.Database, name: string): boolean {
+  const row = db
+    .prepare("SELECT 1 AS present FROM main.sqlite_master WHERE type = 'table' AND name = ?")
+    .get(name) as { present: number } | undefined;
+  return !!row;
+}
+
+/**
+ * v81 — put the address book back when the startup sweep deleted it.
+ *
+ * `sarvinbox-contacts.db` is the shared directory, not an account database,
+ * but the orphan-DB sweep matched it as a raw-named legacy per-account file
+ * and deleted it — with its sidecars — on the first boot after the directory
+ * shipped. The next boot recreated it empty, so the user's whole address book
+ * (names, favourites, notes, paid-for enrichment) was simply gone from the UI.
+ * The sweep no longer touches it (see cleanupOrphanedAccountDbs), but that
+ * only stops the NEXT loss; this repairs the one already taken.
+ *
+ * Recovery is possible because v77 PARKED each mailbox's contacts as
+ * `pre_directory_*` rather than dropping them — exactly the "rename, never
+ * drop" rule that migration was written under. Bringing them back under their
+ * live names lets v77's own adoption run again, unchanged, and re-park them.
+ *
+ * Deliberately narrow, and per MAILBOX rather than per directory. The test is
+ * "the directory has lost this account's contribution": it holds provenance for
+ * fewer than half the rows this mailbox parked. With two accounts connected,
+ * only the first one to run would see an EMPTY directory — the second would
+ * find the first's 954 rows, call the directory healthy, and leave its own 895
+ * parked forever.
+ *
+ * Half, rather than "any row missing", because deleting a contact removes its
+ * provenance too: an exact test would resurrect the handful of contacts a user
+ * has deliberately deleted since the move. Wholesale loss and a few deletions
+ * are not the same shape, and only the first one is worth repairing.
+ */
+export const restoreLostContactDirectory: Migration = {
+  version: 81,
+  name: 'restore_lost_contact_directory',
+  up: (db, context) => {
+    // No directory attached: nothing to compare against, nothing to adopt into.
+    if (!hasSharedContacts(db)) return;
+    // A live `contacts` table means v77 has not moved this mailbox yet; it will
+    // adopt on its own, and unparking underneath it would fight that.
+    if (hasLocalTable(db, 'contacts')) return;
+    if (!hasLocalTable(db, 'pre_directory_contacts')) return;
+
+    const parkedCount = (
+      db.prepare('SELECT COUNT(*) AS n FROM main.pre_directory_contacts').get() as { n: number }
+    ).n;
+    if (parkedCount === 0) return;
+    const accountKey = migrationAccountKey(db, context);
+    const contributed = (
+      db
+        .prepare(`SELECT COUNT(*) AS n FROM ${SHARED('contact_accounts')} WHERE account_id = ?`)
+        .get(accountKey) as { n: number }
+    ).n;
+    if (contributed * 2 >= parkedCount) return;
+
+    const restored = unparkDirectoryTables(db);
+    if (!restored.includes('contacts')) return;
+    logger.warn(
+      `Restore contact directory (v81): the directory holds ${contributed} of this mailbox's ` +
+      `${parkedCount} parked contacts — re-adopting them (${restored.join(', ')})`,
+    );
+    // v77's adoption, unchanged: it reads the live tables, folds them into the
+    // directory and parks them again, so a second run finds nothing to do.
+    unifiedContactDirectory.up(db, context);
+
+    // The rows coming back are the ones v77 first adopted, so they predate the
+    // two repairs above — and those are recorded as applied, so they will not
+    // run again by themselves. Re-run them here, against the restored rows:
+    // both are idempotent, and skipping them would hand the user back an
+    // address book with the robot names and the stale mining marks they had
+    // before.
+    machineMailboxNames.up(db, context);
+    clearPhoneMiningWatermarks(db, 'v81');
+  },
+
+  /**
+   * Nothing to undo. The rows are back where v77 puts them and the parked
+   * copies are parked again — the same state an install that never lost its
+   * directory is in, which is what v77's own rollback expects to find.
+   */
+  down: () => {},
+};
+
+/** The three tables the directory owns, in adoption order. */
+const DIRECTORY_TABLE_NAMES = ['contacts', 'contact_notes', 'contact_enrichment_history'] as const;
+
+/**
+ * Bring parked `pre_directory_*` tables back under their live names, and say
+ * which ones moved.
+ *
+ * Only ever renames into a name that is FREE — a live table is this mailbox's
+ * current truth and the parked copy is the stale one, so the caller decides
+ * what to do about that before calling. Used both to undo the move (v77's
+ * rollback) and to re-adopt from the parked copies when the directory itself
+ * was lost (v81).
+ */
+function unparkDirectoryTables(db: Database.Database): string[] {
+  const restored: string[] = [];
+  for (const name of DIRECTORY_TABLE_NAMES) {
+    const parked = `pre_directory_${name}`;
+    if (!hasLocalTable(db, parked) || hasLocalTable(db, name)) continue;
+    db.exec(`ALTER TABLE main.${parked} RENAME TO ${name}`);
+    restored.push(name);
+  }
+  return restored;
+}
+
+/**
+ * Park a per-account table under a `pre_directory_` name.
+ *
+ * Deliberately a rename and not a drop — the adopted rows are the user's own
+ * address book and the commit that moved them into the directory spans two
+ * database files, which WAL does not make atomic.
+ */
+function renameLocalTableAside(db: Database.Database, name: string): void {
+  if (!hasLocalTable(db, name)) return;
+  const parked = `pre_directory_${name}`;
+  // A previous interrupted run may already have parked a copy; the live table
+  // is the newer truth, so keep it and discard the older parking space.
+  db.exec(`DROP TABLE IF EXISTS main.${parked}`);
+  db.exec(`ALTER TABLE main.${name} RENAME TO ${parked}`);
+}
+
+/**
+ * Which account is this database? Used only to record contact provenance.
+ *
+ * Falls back to the database's file name, which is derived from the account in
+ * the first place (`sarvinbox-<hash>.db`), and finally to a constant — the
+ * adoption must still run for a storage opened with no account behind it (the
+ * seed script, the test fixtures), it just cannot say whose contacts these are.
+ */
+function migrationAccountKey(db: Database.Database, context: MigrationContext): string {
+  if (context.accountId) return context.accountId;
+  const rows = db.pragma('database_list') as Array<{ name: string; file: string }>;
+  const file = rows.find((r) => r.name === 'main')?.file;
+  return file ? basename(file) : 'unknown-account';
+}
+
+/**
  * Create migration manager with the fresh schema
  */
-export function createMigrationManager(db: Database.Database): MigrationManager {
-  const manager = new MigrationManager(db);
+export function createMigrationManager(
+  db: Database.Database,
+  context: MigrationContext = {},
+): MigrationManager {
+  const manager = new MigrationManager(db, context);
   manager.register(initialTagsSchema);
   manager.register(chatExtractionTracking);
   manager.register(pendingOperationsUpgrade);
@@ -2474,5 +3057,10 @@ export function createMigrationManager(db: Database.Database): MigrationManager 
   manager.register(inlineImageBlobTable);
   manager.register(inlineImageSizeIndex);
   manager.register(emailAiCategories);
+  manager.register(unifiedContactDirectory);
+  manager.register(remineContactPhones);
+  manager.register(machineMailboxNames);
+  manager.register(remineContactPhonesAfterLabelFix);
+  manager.register(restoreLostContactDirectory);
   return manager;
 }

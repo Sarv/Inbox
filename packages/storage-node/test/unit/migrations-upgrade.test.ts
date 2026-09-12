@@ -2,6 +2,8 @@ import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MigrationManager, createMigrationManager, type Migration } from '../../src/migrations';
+import { attachSharedContacts, SHARED_SCHEMA } from '../../src/shared-contacts';
+import { createLegacyContactsTable } from '../../src/test-support/legacy-contacts';
 import { openTestDb } from '../../src/test-support/test-db';
 
 // THE upgrade test. Every shipped release re-runs the chain over a database an
@@ -37,8 +39,8 @@ function migrateRange(db: Database.Database, from: number, to: number): void {
   manager.migrate();
 }
 
-const columnsOf = (db: Database.Database, table: string): string[] =>
-  (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+const columnsOf = (db: Database.Database, table: string, schema = 'main'): string[] =>
+  (db.prepare(`PRAGMA ${schema}.table_info(${table})`).all() as Array<{ name: string }>)
     .map((r) => r.name)
     .sort();
 
@@ -66,6 +68,15 @@ const scalar = (db: Database.Database, sql: string, ...params: unknown[]): unkno
  */
 function newLegacyDb(): Database.Database {
   const db = openTestDb();
+  // Every real connection has the contact directory attached before the chain
+  // runs (SQLiteStorage.initialize), and v77 adopts this mailbox's `contacts`
+  // into it. An empty path gives this database a private, anonymous directory —
+  // which is also what a single upgrading account has: one mailbox, one
+  // directory, nothing else contributing yet.
+  attachSharedContacts(db, '');
+  // The address book a v24-era mailbox really had, from the shared fixture so
+  // this file and the adoption tests cannot disagree about what "legacy" means.
+  createLegacyContactsTable(db);
   db.exec(`
     CREATE TABLE emails (
       id TEXT PRIMARY KEY,
@@ -143,28 +154,6 @@ function newLegacyDb(): Database.Database {
       labels TEXT NOT NULL DEFAULT '[]',
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    CREATE TABLE contacts (
-      id TEXT PRIMARY KEY,
-      email TEXT NOT NULL UNIQUE,
-      name TEXT,
-      display_name TEXT,
-      avatar_url TEXT,
-      organization TEXT,
-      title TEXT,
-      phone TEXT,
-      first_seen INTEGER NOT NULL,
-      last_seen INTEGER NOT NULL,
-      email_count INTEGER DEFAULT 1,
-      sent_count INTEGER DEFAULT 0,
-      received_count INTEGER DEFAULT 0,
-      is_favorite INTEGER DEFAULT 0,
-      notes TEXT,
-      tags TEXT DEFAULT '[]',
-      metadata TEXT DEFAULT '{}',
-      created_at INTEGER DEFAULT (unixepoch()),
-      updated_at INTEGER DEFAULT (unixepoch())
     );
 
     CREATE TABLE sender_stats (
@@ -586,13 +575,13 @@ describe('upgrading a v24-era database to the current version', () => {
     migrateRange(db, 24, CURRENT_VERSION);
 
     const fresh = openTestDb();
+    attachSharedContacts(fresh, '');
     createMigrationManager(fresh).migrate();
 
     for (const table of [
       'emails',
       'threads',
       'folders',
-      'contacts',
       'sender_stats',
       'pending_operations',
       'pending_sends',
@@ -608,6 +597,14 @@ describe('upgrading a v24-era database to the current version', () => {
     ]) {
       expect(columnsOf(db, table), `column drift on ${table}`).toEqual(columnsOf(fresh, table));
     }
+    // `contacts` is no longer in the mailbox at all. The same drift check still
+    // matters, and matters MORE here: the upgrader's directory was populated by
+    // v77 from a v24-era table, the fresh install's was created empty from
+    // `directorySchema`, and the two must still be the same shape.
+    expect(
+      columnsOf(db, 'contacts', SHARED_SCHEMA),
+      'column drift on shared.contacts',
+    ).toEqual(columnsOf(fresh, 'contacts', SHARED_SCHEMA));
     fresh.close();
   });
 

@@ -194,15 +194,26 @@ describe('setCurrentAccount', () => {
 });
 
 describe('claimDefaultRuntime', () => {
+  /**
+   * The legacy primary database is opened before anyone knows whose it is, so
+   * the claim is also where its storage LEARNS its account id. Doubles here
+   * carry `adoptAccountId` for that reason — without it the shared contact
+   * directory files this mailbox's provenance under the file name instead of
+   * the account every other mailbox is keyed by.
+   */
+  const claimable = (tag: string) => ({ tag, adoptAccountId: vi.fn() });
+
   it('moves the startup runtime under the primary account (DB reused, not re-opened)', () => {
-    const storage = { tag: 'sarvinbox.db' } as never;
-    shared.setStorage(storage);
+    const storage = claimable('sarvinbox.db');
+    shared.setStorage(storage as never);
     shared.setSyncEngine({ tag: 'engine' } as never);
 
     expect(shared.claimDefaultRuntime('acct-primary')).toBe(true);
     expect(shared.getStorageFor('acct-primary')).toBe(storage);
     expect(shared.getAllAccountIds()).toEqual(['acct-primary']);
-    expect(shared.getAccountIdForStorage(storage)).toBe('acct-primary');
+    expect(shared.getAccountIdForStorage(storage as never)).toBe('acct-primary');
+    // Regression: the claim must TELL the storage its id, not just file it.
+    expect(storage.adoptAccountId).toHaveBeenCalledWith('acct-primary');
   });
 
   it('refuses when the default slot has no open storage (nothing to claim)', () => {
@@ -213,7 +224,7 @@ describe('claimDefaultRuntime', () => {
   });
 
   it('can only be claimed once', () => {
-    shared.setStorage({ tag: 'db' } as never);
+    shared.setStorage(claimable('db') as never);
     expect(shared.claimDefaultRuntime('acct-a')).toBe(true);
     expect(shared.claimDefaultRuntime('acct-b')).toBe(false);
   });

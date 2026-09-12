@@ -509,6 +509,32 @@ describe('ContactRepository — extraction from an email', () => {
     expect(await repo.getCount()).toBe(0);
   });
 
+  // Regression: notification services send from a machine address but put the
+  // HUMAN who triggered the event in the From display name. Taken at face value
+  // that mints contacts wearing a real colleague's name on an address that is
+  // not theirs — "Devendra Rathore <pullrequests-reply@bitbucket.org>" — and
+  // searching for that person then returns mostly robots.
+  it('never lets a machine mailbox wear the name of the human in the From', async () => {
+    await repo.extractFromEmail(
+      email({ fromAddress: 'notifications@atlassian.net', fromName: 'Bhupesh Chugh' }), 'received',
+    );
+    await repo.extractFromEmail(
+      email({ fromAddress: 'pullrequests-reply@bitbucket.org', fromName: 'Devendra Rathore' }), 'received',
+    );
+
+    expect((await repo.getByEmail('notifications@atlassian.net'))?.name).toBe('atlassian.net');
+    expect((await repo.getByEmail('pullrequests-reply@bitbucket.org'))?.name).toBe('bitbucket.org');
+  });
+
+  // The flip side: this rule sits on the path EVERY contact is created through,
+  // so a real person's name must come through untouched.
+  it('keeps a real person’s display name', async () => {
+    await repo.extractFromEmail(
+      email({ fromAddress: 'bhupesh@sarv.com', fromName: 'Bhupesh Chugh' }), 'received',
+    );
+    expect((await repo.getByEmail('bhupesh@sarv.com'))?.name).toBe('Bhupesh Chugh');
+  });
+
   it('falls back to now when the email carries no date, so activity ordering never gets a 1970 row', async () => {
     await repo.extractFromEmailSync(
       email({ date: undefined, fromAddress: 'nodate@corp.io' }) as EmailRecord, 'received',
