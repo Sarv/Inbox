@@ -250,24 +250,32 @@ export function registerAccountsHandlers(): void {
         // Parallel + per-account try/catch: one unreadable account never breaks
         // the whole view or stalls the others.
         const perAccount = await Promise.all(
-          accountIds.map(async (accountId): Promise<EmailRecord[]> => {
+          accountIds.map(async (accountId): Promise<{ emails: EmailRecord[]; total: number }> => {
             try {
               const rt = await ensureAccountRuntime(accountId);
-              if (!rt?.storage) return [];
+              if (!rt?.storage) return { emails: [], total: 0 };
               const inbox = await findInbox(rt.storage);
-              if (!inbox) return [];
-              const emails = await rt.storage.getEmailsByFolder(inbox.id, { limit: fetchPerAccount, offset: 0, filter, categoryTag });
-              return emails.map((e) => ({ ...e, accountId }));
+              if (!inbox) return { emails: [], total: 0 };
+              const [emails, total] = await Promise.all([
+                rt.storage.getEmailsByFolder(inbox.id, { limit: fetchPerAccount, offset: 0, filter, categoryTag }),
+                // The "of N" for All Inboxes. `merged.length` can't be it: each
+                // account is only over-fetched to offset+limit, so the merged
+                // array is a page window, not the mailbox. Counted per account
+                // under the SAME filter, so the denominator matches the list.
+                rt.storage.countEmailsInFolder?.(inbox.id, { filter, categoryTag }) ?? Promise.resolve(0),
+              ]);
+              return { emails: emails.map((e) => ({ ...e, accountId })), total };
             } catch (e) {
               logger.warn('[Accounts] unifiedInbox: skipping account', accountId, (e as Error).message);
-              return [];
+              return { emails: [], total: 0 };
             }
           }),
         );
 
-        const merged = perAccount.flat().sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
+        const merged = perAccount.flatMap((a) => a.emails).sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
+        const total = perAccount.reduce((sum, a) => sum + a.total, 0);
         const page = merged.slice(offset, offset + limit);
-        return { success: true, data: { emails: page, hasMore: merged.length > offset + limit } };
+        return { success: true, data: { emails: page, total, hasMore: total > 0 ? offset + page.length < total : merged.length > offset + limit } };
       } catch (error) {
         logger.error('[Accounts] unifiedInbox failed:', error);
         return { success: false, error: (error as Error).message };

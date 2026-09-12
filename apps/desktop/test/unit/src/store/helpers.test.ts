@@ -9,6 +9,7 @@ import {
   ACCOUNT_COLORS,
   ALL_MAIL_PAGE_SIZE,
   SECTION_FULL_PAGE_SIZE,
+  STANDARD_FOLDER_PAGE_SIZE,
   accountColorForIndex,
   accountDisplayLabel,
   accountHost,
@@ -22,6 +23,7 @@ import {
   effectiveSmtpConfig,
   extractSecrets,
   fetchAICategoryTotal,
+  fetchVirtualFolderTotal,
   fetchVaultSecrets,
   findAccountByEmailHost,
   getBodyDownloadLimit,
@@ -29,6 +31,9 @@ import {
   getMaxAIProcessingEmails,
   getMaxEmailsPerFolder,
   getPageSizeForView,
+  isThreadPagedView,
+  getPageSizeForState,
+  mergePageWindow,
   getRemoteImageMode,
   isAccountEmailDuplicated,
   isFolderInView,
@@ -173,23 +178,219 @@ describe('page size selection', () => {
   });
 
   it('pages the firehose views at a FIXED 100, ignoring emailsPerPage', () => {
-    // "All Email" / "All Inboxes" are deliberate exceptions — a 25-row page over
-    // the whole mailbox makes the view unusable.
+    // "All Email" / "All Inboxes" are deliberate exceptions — they span every
+    // folder and account, and a 25-row page over that makes the view unusable.
     writeSettings({ emailsPerPage: 25 });
-    expect(getPageSizeForView('virtual-all')).toBe(ALL_MAIL_PAGE_SIZE);
-    expect(getPageSizeForView('virtual-unified')).toBe(100);
+    expect(getPageSizeForView({ virtualFolder: 'virtual-all' })).toBe(ALL_MAIL_PAGE_SIZE);
+    expect(getPageSizeForView({ virtualFolder: 'virtual-unified' })).toBe(100);
+  });
+
+  it('pages the account\'s own standard mailboxes at 50', () => {
+    // Sent/Drafts/Trash/Spam/Archive are scanned in bulk, not read one by one.
+    // If this regresses they drop back to a 25-row page (and, before the tiers
+    // existed, disagreed with the background merge's hardcoded 100 — which is
+    // what put "1–100 of 1,718" under a 25-row Sent page).
+    writeSettings({ emailsPerPage: 25 });
+    expect(getPageSizeForView({ folder: { path: 'Sent', specialUse: '\\Sent' } })).toBe(STANDARD_FOLDER_PAGE_SIZE);
+    expect(getPageSizeForView({ folder: { path: 'Drafts' } })).toBe(50);
+    expect(getPageSizeForView({ folder: { path: '[Gmail]/Trash' } })).toBe(50);
+    expect(getPageSizeForView({ folder: { path: 'Junk Email' } })).toBe(50);
+    expect(getPageSizeForView({ folder: { path: 'Archive' } })).toBe(50);
+  });
+
+  it('pages Starred and Important at 50, like the account\'s other bulk-scan lists', () => {
+    // They gather ONE account's mail across its folders — the same kind of list
+    // as Sent or Drafts, so they page the same way. They are NOT the firehose:
+    // they don't span accounts, which is what earns All Email its 100. If this
+    // regresses they drop back to a 25-row page while Sent shows 50, which is
+    // exactly the inconsistency the tiers exist to remove.
+    writeSettings({ emailsPerPage: 25 });
+    expect(getPageSizeForView({ virtualFolder: 'virtual-starred' })).toBe(STANDARD_FOLDER_PAGE_SIZE);
+    expect(getPageSizeForView({ virtualFolder: 'virtual-important' })).toBe(50);
+    // ...and "All Email" keeps its 100 even though it now pages by conversation
+    // too: the grain and the tier are separate decisions, and folding them into
+    // one set would silently cut the firehose page in half.
+    expect(getPageSizeForView({ virtualFolder: 'virtual-all' })).toBe(ALL_MAIL_PAGE_SIZE);
+  });
+
+  it('pages the section full-page view at 50 whatever folder it sits on', () => {
+    // Clicking a section's counter opens its full page; the size is the
+    // section's, not the folder's, so INBOX and Sent both page it at 50.
+    writeSettings({ emailsPerPage: 25 });
+    expect(getPageSizeForView({ section: 'unread' })).toBe(SECTION_FULL_PAGE_SIZE);
+    expect(getPageSizeForView({ section: 'unread', folder: { path: 'Sent' } })).toBe(50);
+    expect(getPageSizeForView({ section: 'unread', virtualFolder: 'virtual-all' })).toBe(50);
   });
 
   it('honours the user setting for every other view', () => {
     writeSettings({ emailsPerPage: 50 });
-    expect(getPageSizeForView('INBOX')).toBe(50);
-    expect(getPageSizeForView(null)).toBe(50);
-    expect(getPageSizeForView(undefined)).toBe(50);
-    expect(getPageSizeForView('virtual-starred')).toBe(50);
+    expect(getPageSizeForView({ folder: { path: 'INBOX' } })).toBe(50);
+    expect(getPageSizeForView({ folder: { path: 'Projects/2026' } })).toBe(50);
+    expect(getPageSizeForView({})).toBe(50);
+    expect(getPageSizeForView()).toBe(50);
+    // A category list is the user's reading list wherever it came from — it
+    // must NOT inherit the 100 of the firehose view it was opened on top of.
+    expect(getPageSizeForView({ virtualFolder: 'virtual-all', aiCategory: 'needs-response' })).toBe(50);
   });
 
   it('pins the Gmail-style full-page section size at 50 (independent of maxItems)', () => {
     expect(SECTION_FULL_PAGE_SIZE).toBe(50);
+  });
+});
+
+describe('getPageSizeForState', () => {
+  // The store's loaders, the header pager and the footer pager all read the size
+  // from here. If any of them re-derives it from raw state instead, the label
+  // and the rows disagree — the reported "1–100 of 1,718" on a 25-row page.
+  beforeEach(() => writeSettings({ emailsPerPage: 25 }));
+
+  const folders = [
+    { id: 'f-inbox', path: 'INBOX' },
+    { id: 'f-sent', path: 'Sent', specialUse: '\\Sent' },
+  ];
+
+  it('reads the tier of the folder the store is on', () => {
+    expect(getPageSizeForState({ selectedFolderId: 'f-sent', folders })).toBe(50);
+    expect(getPageSizeForState({ selectedFolderId: 'f-inbox', folders })).toBe(25);
+  });
+
+  it('prefers the size the section view was opened with', () => {
+    // Captured when the section was opened, so changing emailsPerPage mid-view
+    // cannot strand the reader on a half page.
+    expect(getPageSizeForState({
+      viewingSection: 'unread', viewingSectionPageSize: 50, selectedFolderId: 'f-inbox', folders,
+    })).toBe(50);
+  });
+
+  it('falls back to the section tier when the stored size is missing', () => {
+    expect(getPageSizeForState({ viewingSection: 'unread', viewingSectionPageSize: 0, folders })).toBe(50);
+  });
+
+  it('pages the firehose views at 100 and an empty state at the user setting', () => {
+    expect(getPageSizeForState({ selectedVirtualFolder: 'virtual-all' })).toBe(100);
+    expect(getPageSizeForState({})).toBe(25);
+  });
+
+  // Snoozed pages like Starred (50 conversations), and the store reaches it
+  // through viewingSnoozed, not a virtual folder — resolved in ONE place so the
+  // loader, the pager and a background refresh can't pick different sizes.
+  it('pages Snoozed at the standard tier whichever way the view is named', () => {
+    expect(getPageSizeForState({ viewingSnoozed: true })).toBe(50);
+    expect(getPageSizeForView({ snoozed: true })).toBe(50);
+    expect(getPageSizeForView({ virtualFolder: 'virtual-snoozed' })).toBe(50);
+  });
+});
+
+describe('isThreadPagedView', () => {
+  // The unit the page window is measured in. Starred read "1-50 of 52" over 15
+  // rows because the fetch counted conversations and everything downstream
+  // counted messages; these are the views where that mistake is possible.
+  it('is true for the section full-page view and the thread-paged virtual folders', () => {
+    expect(isThreadPagedView({ section: 'starred' })).toBe(true);
+    expect(isThreadPagedView({ virtualFolder: 'virtual-starred' })).toBe(true);
+    expect(isThreadPagedView({ virtualFolder: 'virtual-important' })).toBe(true);
+    expect(isThreadPagedView({ virtualFolder: 'virtual-all' })).toBe(true);
+  });
+
+  // Snoozed is the same kind of source but has no selectedVirtualFolder to
+  // recognise it by — the store flags it separately. Without the flag its label
+  // counts messages over collapsed rows, the bug this whole set guards.
+  it('is true for the Snoozed view, which carries a flag instead of a virtual folder', () => {
+    expect(isThreadPagedView({ snoozed: true })).toBe(true);
+    expect(isThreadPagedView({ virtualFolder: 'virtual-snoozed' })).toBe(true);
+    expect(isThreadPagedView({ snoozed: false })).toBe(false);
+  });
+
+  // The grain and the page SIZE are independent questions: "All Inboxes" shares
+  // All Email's 100 but merges several accounts' lists in the renderer, with no
+  // single thread-grained repository query behind it. Flipping it here without
+  // changing that would break its label instead of fixing it.
+  it('is false for All Inboxes and for no view at all', () => {
+    expect(isThreadPagedView({ virtualFolder: 'virtual-unified' })).toBe(false);
+    expect(isThreadPagedView({})).toBe(false);
+    expect(isThreadPagedView()).toBe(false);
+  });
+});
+
+describe('mergePageWindow', () => {
+  // A background refresh (sync completion / IDLE flush) folds a re-read of the
+  // CURRENT page into the rows on screen. Every assertion here is a symptom that
+  // was live: a 25-row page that grew to 100, a page-4 reader whose rows were
+  // replaced by page 1, and a deleted mail that would not go away.
+  const row = (id: string, date: number, over: Record<string, unknown> = {}) =>
+    ({ id, date, tags: '', subject: id, ...over }) as any;
+
+  it('never returns more rows than the page holds', () => {
+    const current = [row('a', 3), row('b', 2)];
+    const fresh = [row('z', 9), row('y', 8), row('a', 3), row('b', 2)];
+    const merged = mergePageWindow(current, fresh, 2);
+    expect(merged.emails.map((e) => e.id)).toEqual(['z', 'y']);
+    expect(merged.added).toBe(2);
+    expect(merged.changed).toBe(true);
+  });
+
+  it('takes the fresh row when a tracked field changed, and counts it', () => {
+    const current = [row('a', 3, { tags: '|unread|' })];
+    const fresh = [row('a', 3, { tags: '' })];
+    const merged = mergePageWindow(current, fresh, 25);
+    expect(merged.emails[0].tags).toBe('');
+    expect(merged.updated).toBe(1);
+  });
+
+  it('drops a row the window no longer carries (a delete the realtime path missed)', () => {
+    const merged = mergePageWindow([row('a', 3), row('b', 2)], [row('a', 3)], 25);
+    expect(merged.emails.map((e) => e.id)).toEqual(['a']);
+    expect(merged.removed).toBe(1);
+  });
+
+  it('does not re-add a row inside the delete-undo window', () => {
+    // It is still in the DB for 5s, so it comes back in every refetch; adding it
+    // makes the deleted mail reappear until the user switches folders.
+    const merged = mergePageWindow([row('a', 3)], [row('a', 3), row('ghost', 4)], 25, new Set(['ghost']));
+    expect(merged.emails.map((e) => e.id)).toEqual(['a']);
+    expect(merged.added).toBe(0);
+    expect(merged.changed).toBe(false);
+  });
+
+  // A thread-paged window holds pageSize CONVERSATIONS, so capping by message
+  // would lop the tail off a thread — the row would render with some of its
+  // mail missing, and the next page would show the rest as a second row.
+  it('caps a thread-paged window by conversation, keeping every message of the ones it keeps', () => {
+    const keyOf = (r: any) => r.threadId as string;
+    const current: any[] = [];
+    const fresh = [
+      row('a1', 9, { threadId: 't1' }),
+      row('b1', 8, { threadId: 't2' }),
+      row('a2', 7, { threadId: 't1' }), // older message of the FIRST thread
+      row('c1', 6, { threadId: 't3' }),
+    ];
+    const merged = mergePageWindow(current, fresh, 2, new Set(), keyOf);
+    expect(merged.emails.map((e) => e.id)).toEqual(['a1', 'b1', 'a2']);
+  });
+
+  // Without a key function the cap stays message-grained, so every existing
+  // (message-paged) caller keeps its old behaviour.
+  it('still caps by message when no conversation key is given', () => {
+    const fresh = [row('a1', 9, { threadId: 't1' }), row('b1', 8, { threadId: 't2' }), row('a2', 7, { threadId: 't1' })];
+    expect(mergePageWindow([], fresh, 2).emails.map((e) => e.id)).toEqual(['a1', 'b1']);
+  });
+
+  it('reports no change when the window came back identical', () => {
+    // The caller skips `set` on this — a new array identity re-renders every row
+    // and rebuilds every thread on each sync tick.
+    const current = [row('a', 3), row('b', 2)];
+    const merged = mergePageWindow(current, [row('a', 3), row('b', 2)], 25);
+    expect(merged.changed).toBe(false);
+  });
+
+  it('shrinks a page that an older build had already over-filled', () => {
+    // Upgrade path: the 100 rows a previous merge left in memory must collapse
+    // back to the page window on the next refresh, not stay until a folder switch.
+    const current = Array.from({ length: 100 }, (_, i) => row(`e${i}`, 100 - i));
+    const fresh = current.slice(0, 25);
+    const merged = mergePageWindow(current, fresh, 25);
+    expect(merged.emails).toHaveLength(25);
+    expect(merged.changed).toBe(true);
   });
 });
 
@@ -285,6 +486,55 @@ describe('fetchAICategoryTotal', () => {
   it('returns 0 when the IPC throws — never rejects into the caller', async () => {
     installElectronAPI({ ai: { getCategoryCounts: vi.fn().mockRejectedValue(new Error('no channel')) } });
     await expect(fetchAICategoryTotal(base)).resolves.toBe(0);
+  });
+});
+
+describe('fetchVirtualFolderTotal', () => {
+  // The "of N" for All Email / Starred / Important / Snoozed. Without it these
+  // views paged with a bare "1–100" and the user had no idea how much mail sat
+  // behind the list. One COUNT(*) round trip, reused across pages by the caller.
+  const counts = { all: 1718, starred: 42, important: 7, snoozed: 3 };
+
+  it.each([
+    ['virtual-all', 1718],
+    ['virtual-starred', 42],
+    ['virtual-important', 7],
+    ['virtual-snoozed', 3],
+  ])('reads the %s total from the shared count IPC', async (virtualFolder, expected) => {
+    const getVirtualFolderCounts = vi.fn().mockResolvedValue({ success: true, data: counts });
+    installElectronAPI({ emails: { getVirtualFolderCounts } });
+    await expect(fetchVirtualFolderTotal(virtualFolder)).resolves.toBe(expected);
+  });
+
+  // A view with no countable source (Outbox, a folder) must not fire the IPC at
+  // all — it pages by hasMore, and a bogus total would promise pages it hasn't.
+  // Each count is an unindexable tag scan. Showing ONE view's total must not
+  // pay for all four.
+  it('asks for this view\'s count only', async () => {
+    const getVirtualFolderCounts = vi.fn().mockResolvedValue({ success: true, data: counts });
+    installElectronAPI({ emails: { getVirtualFolderCounts } });
+    await fetchVirtualFolderTotal('virtual-starred');
+    expect(getVirtualFolderCounts).toHaveBeenCalledWith(['starred']);
+  });
+
+  it('returns 0 without calling the IPC for a view that has no count', async () => {
+    const getVirtualFolderCounts = vi.fn();
+    installElectronAPI({ emails: { getVirtualFolderCounts } });
+    await expect(fetchVirtualFolderTotal('virtual-outbox')).resolves.toBe(0);
+    expect(getVirtualFolderCounts).not.toHaveBeenCalled();
+  });
+
+  // Degrade to "unknown total", never to a wrong one: the Paginator reads 0 as
+  // unknown and falls back to hasMore-gated paging.
+  it('returns 0 on a missing count, an unsuccessful response, or a throwing IPC', async () => {
+    installElectronAPI({ emails: { getVirtualFolderCounts: vi.fn().mockResolvedValue({ success: true, data: {} }) } });
+    await expect(fetchVirtualFolderTotal('virtual-all')).resolves.toBe(0);
+
+    installElectronAPI({ emails: { getVirtualFolderCounts: vi.fn().mockResolvedValue({ success: false }) } });
+    await expect(fetchVirtualFolderTotal('virtual-all')).resolves.toBe(0);
+
+    installElectronAPI({ emails: { getVirtualFolderCounts: vi.fn().mockRejectedValue(new Error('no channel')) } });
+    await expect(fetchVirtualFolderTotal('virtual-all')).resolves.toBe(0);
   });
 });
 

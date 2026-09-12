@@ -75,6 +75,20 @@ function toPlainEventIcs(ics: string): string {
 // Reject a single attachment larger than this before writing it to disk. Guards
 // against a malicious/oversized attachment exhausting disk (the 500 MB cache cap
 // below only prunes AFTER the fact). Most providers cap sending well under this.
+/**
+ * The virtual lists that head themselves with an "of N", and the storage
+ * counter behind each. One map so the IPC, its callers and the storage can't
+ * drift on which count belongs to which view.
+ */
+const VIRTUAL_FOLDER_COUNTERS = {
+  all: 'getAllCount',
+  starred: 'getStarredCount',
+  important: 'getImportantCount',
+  snoozed: 'getSnoozedCount',
+} as const;
+
+type VirtualFolderCountKey = keyof typeof VIRTUAL_FOLDER_COUNTERS;
+
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50 MB
 
 /**
@@ -916,18 +930,24 @@ export function registerEmailHandlers(): void {
   /**
    * Get virtual folder counts
    */
-  ipcMain.handle('emails:getVirtualFolderCounts', async () => {
+  ipcMain.handle('emails:getVirtualFolderCounts', async (_event, keys?: VirtualFolderCountKey[]) => {
     try {
       const storage = requireStorage() as any;
       // COUNT(*) instead of materializing up to 1000 rows each just to read
       // `.length` (which also silently capped the counts at 1000).
-      const [starred, important] = await Promise.all([
-        storage.getStarredCount(),
-        storage.getImportantCount(),
-      ]);
+      // `all` and `snoozed` are the "of N" denominators for the All Email and
+      // Snoozed listings, which otherwise page with no total at all.
+      //
+      // `keys` narrows the work: each of these is an unindexable instr(tags)
+      // scan, and a paginator asking for ONE total must not pay for four. Omit
+      // it (the sidebar) to get them all.
+      const wanted = keys?.length ? keys : (Object.keys(VIRTUAL_FOLDER_COUNTERS) as VirtualFolderCountKey[]);
+      const counted = await Promise.all(
+        wanted.map(async (key) => [key, await storage[VIRTUAL_FOLDER_COUNTERS[key]]()] as const),
+      );
       return {
         success: true,
-        data: { starred, important },
+        data: Object.fromEntries(counted) as Partial<Record<VirtualFolderCountKey, number>>,
       };
     } catch (error) {
       logger.error('Get virtual folder counts error:', error);

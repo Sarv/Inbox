@@ -2,9 +2,9 @@ import type { EmailRecord } from '@sarvinbox/core';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import type { InboxSection } from '../../config/inbox-types';
-import { buildThreads } from '../../utils/thread-utils';
+import { buildThreads, threadRowCount, threadRowKey } from '../../utils/thread-utils';
 import { isRetryableBodyFetchError, looksGoneFromServer, withFailedBody } from '../body-fetch-failures';
-import { getEmailsPerPage, getPageSizeForView, ALL_MAIL_PAGE_SIZE, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal, computeSectionFetchLimit, sectionDataUnchanged } from '../helpers';
+import { getEmailsPerPage, getPageSizeForView, getPageSizeForState, isThreadPagedView, mergePageWindow, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal, fetchVirtualFolderTotal, computeSectionFetchLimit, sectionDataUnchanged } from '../helpers';
 import type { EmailsSlice, SliceCreator } from '../types';
 
 // Monotonic sequence for loadAllSections. Concurrent reloads of the SAME
@@ -64,54 +64,6 @@ function getDbFilter(section: InboxSection, inboxType: string): string {
 }
 
 const LOAD_MORE_SIZE = 25;
-
-/**
- * Merge fresh emails into the existing list without flicker.
- * - New emails get prepended (sorted by date desc)
- * - Existing emails get their fields updated in-place
- * - Removed emails get dropped
- * Returns the merged array, only creating a new reference if something changed.
- */
-function mergeEmailLists(existing: any[], fresh: any[]): any[] {
-  const freshMap = new Map<string, any>();
-  for (const e of fresh) freshMap.set(e.id, e);
-
-  let changed = false;
-
-  // Update existing emails and check for removals
-  const updated: any[] = [];
-  for (const e of existing) {
-    const freshVersion = freshMap.get(e.id);
-    if (freshVersion) {
-      // Check if anything meaningful changed (incl. thread aggregates —
-      // buildThreads prefers them over tags)
-      if (e.tags !== freshVersion.tags || e.date !== freshVersion.date || e.subject !== freshVersion.subject
-        || (e as any).threadIsStarred !== (freshVersion as any).threadIsStarred
-        || (e as any).threadIsImportant !== (freshVersion as any).threadIsImportant) {
-        updated.push(freshVersion);
-        changed = true;
-      } else {
-        updated.push(e); // keep same reference
-      }
-      freshMap.delete(e.id);
-    } else {
-      // Email no longer in fresh results — removed
-      changed = true;
-    }
-  }
-
-  // Prepend genuinely new emails
-  const newEmails = Array.from(freshMap.values());
-  if (newEmails.length > 0) {
-    changed = true;
-  }
-
-  if (!changed) return existing;
-
-  const merged = [...newEmails, ...updated];
-  merged.sort((a: any, b: any) => (b.date || 0) - (a.date || 0));
-  return merged;
-}
 
 /**
  * Merge fetched body fields into any sectionData bucket that contains the
@@ -579,7 +531,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   },
 
   loadEmails: async (folderId) => {
-    const PAGE_SIZE = getEmailsPerPage();
+    // The folder's own tier: 50 for the account's standard mailboxes (Sent,
+    // Drafts, Trash, Spam, Archive), the user's emailsPerPage elsewhere.
+    const PAGE_SIZE = getPageSizeForView({ folder: get().folders.find((f) => f.id === folderId) });
     console.log(`[View] loadEmails folderId=${folderId}, pageSize=${PAGE_SIZE}`);
     // Only show spinner on first load (no emails yet), not on refresh
     const hasExistingEmails = get().emails.length > 0;
@@ -620,7 +574,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     const { selectedFolderId, emailsOffset, loadingMoreEmails, folders, viewingAICategory, selectedVirtualFolder } = get();
     if (loadingMoreEmails) return;
 
-    const PAGE_SIZE = getEmailsPerPage();
+    const PAGE_SIZE = getPageSizeForState(get());
 
     // Unified "All Inboxes" pagination — over-fetch per account + merge (main),
     // then append only genuinely new rows (dedupe by id across the merge window).
@@ -752,15 +706,10 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
    */
   goToEmailPage: async (page) => {
     if (page < 0 || get().loadingMoreEmails) return;
-    const { selectedFolderId, folders, viewingAICategory, viewingSection, viewingSectionPageSize, selectedVirtualFolder, accounts } = get();
-    // Section full-page view pages by the section's "Show up to"; an AI-category
-    // view by the user's emailsPerPage (even on top of All Email); "All Email"
-    // by the fixed 100; everything else by the user's emailsPerPage.
-    const PAGE_SIZE = viewingSection
-      ? (viewingSectionPageSize > 0 ? viewingSectionPageSize : getEmailsPerPage())
-      : viewingAICategory
-        ? getEmailsPerPage()
-        : getPageSizeForView(selectedVirtualFolder);
+    const { selectedFolderId, folders, viewingAICategory, viewingSection, selectedVirtualFolder, viewingSnoozed, accounts } = get();
+    // One source of truth for the tiers (section 50 / All Email 100 / standard
+    // mailbox 50 / everything else emailsPerPage) — see getPageSizeForView.
+    const PAGE_SIZE = getPageSizeForState(get());
     const offset = page * PAGE_SIZE;
     set({ loadingMoreEmails: true });
     try {
@@ -796,7 +745,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         const accountIds = accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id);
         const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset });
         if (res?.success && res.data) {
-          set({ emails: res.data.emails, emailsPage: page, emailsOffset: offset + res.data.emails.length, hasMoreEmails: res.data.hasMore, emailsTotal: 0 });
+          set({ emails: res.data.emails, emailsPage: page, emailsOffset: offset + res.data.emails.length, hasMoreEmails: res.data.hasMore, emailsTotal: res.data.total ?? 0 });
         }
         return;
       }
@@ -842,13 +791,57 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       // (they fell through to the flat-folder path, which bails on a null
       // selectedFolderId).
       if (selectedVirtualFolder === 'virtual-all' || selectedVirtualFolder === 'virtual-important' || selectedVirtualFolder === 'virtual-starred') {
-        const result = selectedVirtualFolder === 'virtual-important'
-          ? await window.electronAPI.emails.getImportant(PAGE_SIZE, offset)
-          : selectedVirtualFolder === 'virtual-starred'
-            ? await window.electronAPI.emails.getStarred(PAGE_SIZE, offset)
-            : await window.electronAPI.emails.getAll(PAGE_SIZE, offset);
+        // The total is invariant across pages of the same view, so fetch it only
+        // on the first page (or when it's been invalidated to 0) and reuse it —
+        // the same needCount pattern the section and category views use.
+        const cachedTotal = get().emailsTotal;
+        const needCount = page === 0 || cachedTotal === 0;
+        const [result, total] = await Promise.all([
+          selectedVirtualFolder === 'virtual-important'
+            ? window.electronAPI.emails.getImportant(PAGE_SIZE, offset)
+            : selectedVirtualFolder === 'virtual-starred'
+              ? window.electronAPI.emails.getStarred(PAGE_SIZE, offset)
+              : window.electronAPI.emails.getAll(PAGE_SIZE, offset),
+          needCount ? fetchVirtualFolderTotal(selectedVirtualFolder) : Promise.resolve(cachedTotal),
+        ]);
         if (result.success && result.data) {
-          set({ emails: result.data, emailsPage: page, emailsOffset: offset + result.data.length, hasMoreEmails: result.data.length >= PAGE_SIZE, emailsTotal: 0 });
+          // These views page by CONVERSATION (so do their totals). Measure the
+          // page in whichever unit the source used, or the label promises pages
+          // the list can't show.
+          const rows = isThreadPagedView({ virtualFolder: selectedVirtualFolder })
+            ? threadRowCount(result.data)
+            : result.data.length;
+          set({
+            emails: result.data,
+            emailsPage: page,
+            emailsOffset: offset + rows,
+            hasMoreEmails: total > 0 ? offset + rows < total : rows >= PAGE_SIZE,
+            emailsTotal: total,
+          });
+        }
+        return;
+      }
+      // Snoozed — a cross-folder list like Starred, paged by CONVERSATION with an
+      // exact total from the same predicate the list uses. Before this it had no
+      // branch at all: prev/next fell through to the flat-folder path, which
+      // bails on a null selectedFolderId, so the view was silently capped at one
+      // page of whatever the storage default happened to be.
+      if (viewingSnoozed) {
+        const cachedTotal = get().emailsTotal;
+        const needCount = page === 0 || cachedTotal === 0;
+        const [result, total] = await Promise.all([
+          window.electronAPI.snooze.listEmails({ limit: PAGE_SIZE, offset }),
+          needCount ? fetchVirtualFolderTotal('virtual-snoozed') : Promise.resolve(cachedTotal),
+        ]);
+        if (result.success && result.data) {
+          const rows = threadRowCount(result.data as any[]);
+          set({
+            emails: result.data,
+            emailsPage: page,
+            emailsOffset: offset + rows,
+            emailsTotal: total,
+            hasMoreEmails: total > 0 ? offset + rows < total : rows >= PAGE_SIZE,
+          });
         }
         return;
       }
@@ -869,6 +862,15 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           result = await window.electronAPI.emails.list(selectedFolderId, PAGE_SIZE, offset);
           rows = result.success && result.data ? result.data : [];
         }
+      }
+      // Nothing at this offset, and the backfill could not produce it either —
+      // the server count promised mail this folder cannot actually show (an
+      // alias/duplicate mailbox, or a backfill with nothing left to fetch).
+      // Stay on the page the user was reading instead of stranding them on a
+      // blank list, and stop "next" from promising a page that isn't there.
+      if (rows.length === 0 && page > 0) {
+        set({ emailsTotal: offset, hasMoreEmails: false });
+        return;
       }
       set({
         emails: rows,
@@ -1038,11 +1040,21 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // Bail if the user navigated away while this was in flight
     const isStale = () => get().selectedVirtualFolder !== 'virtual-all' || !!get().viewingAICategory;
     try {
-      const PAGE_SIZE = ALL_MAIL_PAGE_SIZE; // "All Email" always pages 100
-      const result = await window.electronAPI.emails.getAll(PAGE_SIZE, 0);
+      const PAGE_SIZE = getPageSizeForView({ virtualFolder: 'virtual-all' }); // the fixed 100
+      // List and its "of N" together: one round trip each, so the header reads
+      // "1-100 of 1,718" from the first paint instead of a bare "1-100".
+      const [result, total] = await Promise.all([
+        window.electronAPI.emails.getAll(PAGE_SIZE, 0),
+        fetchVirtualFolderTotal('virtual-all'),
+      ]);
       if (isStale()) return;
       if (result.success && result.data) {
-        set({ emails: result.data, loadingEmails: false, emailsPage: 0, emailsOffset: PAGE_SIZE, emailsTotal: 0, hasMoreEmails: result.data.length >= PAGE_SIZE });
+        // CONVERSATIONS, not messages: getAll pages by thread and hands back every
+        // message of the threads on this page, so counting rows here would make the
+        // offset and "has more" run ahead of the list by however many replies the
+        // page happened to contain.
+        const rows = threadRowCount(result.data);
+        set({ emails: result.data, loadingEmails: false, emailsPage: 0, emailsOffset: rows, emailsTotal: total, hasMoreEmails: total > 0 ? rows < total : rows >= PAGE_SIZE });
       } else {
         console.error('[Store] Failed to load all emails:', result.error);
         set({ loadingEmails: false });
@@ -1070,11 +1082,18 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     });
     const isStale = () => get().selectedVirtualFolder !== 'virtual-important' || !!get().viewingAICategory;
     try {
-      const PAGE_SIZE = getEmailsPerPage();
-      const result = await window.electronAPI.emails.getImportant(PAGE_SIZE, 0);
+      const PAGE_SIZE = getPageSizeForView({ virtualFolder: 'virtual-important' });
+      const [result, total] = await Promise.all([
+        window.electronAPI.emails.getImportant(PAGE_SIZE, 0),
+        fetchVirtualFolderTotal('virtual-important'),
+      ]);
       if (isStale()) return;
       if (result.success && result.data) {
-        set({ emails: result.data, loadingEmails: false, emailsPage: 0, emailsOffset: PAGE_SIZE, emailsTotal: 0, hasMoreEmails: result.data.length >= PAGE_SIZE });
+        // Thread-grained view: the repository paged by CONVERSATION and `total`
+        // counts conversations, so the offset and the "is there more" test must
+        // be in rows too — the message count is larger and would claim a full page.
+        const rows = threadRowCount(result.data);
+        set({ emails: result.data, loadingEmails: false, emailsPage: 0, emailsOffset: rows, emailsTotal: total, hasMoreEmails: total > 0 ? rows < total : rows >= PAGE_SIZE });
       } else {
         console.error('[Store] Failed to load important emails:', result.error);
         set({ loadingEmails: false });
@@ -1102,11 +1121,18 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     });
     const isStale = () => get().selectedVirtualFolder !== 'virtual-starred' || !!get().viewingAICategory;
     try {
-      const PAGE_SIZE = getEmailsPerPage();
-      const result = await window.electronAPI.emails.getStarred(PAGE_SIZE, 0);
+      const PAGE_SIZE = getPageSizeForView({ virtualFolder: 'virtual-starred' });
+      const [result, total] = await Promise.all([
+        window.electronAPI.emails.getStarred(PAGE_SIZE, 0),
+        fetchVirtualFolderTotal('virtual-starred'),
+      ]);
       if (isStale()) return;
       if (result.success && result.data) {
-        set({ emails: result.data, loadingEmails: false, emailsPage: 0, emailsOffset: PAGE_SIZE, emailsTotal: 0, hasMoreEmails: result.data.length >= PAGE_SIZE });
+        // Thread-grained view: the repository paged by CONVERSATION and `total`
+        // counts conversations, so the offset and the "is there more" test must
+        // be in rows too — the message count is larger and would claim a full page.
+        const rows = threadRowCount(result.data);
+        set({ emails: result.data, loadingEmails: false, emailsPage: 0, emailsOffset: rows, emailsTotal: total, hasMoreEmails: total > 0 ? rows < total : rows >= PAGE_SIZE });
       } else {
         console.error('[Store] Failed to load starred emails:', result.error);
         set({ loadingEmails: false });
@@ -1122,7 +1148,14 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // use — so a refresh replaces exactly one page, never a mismatched size that
     // makes next/prev overlap. "All Email" and "All Inboxes" are the fixed-100
     // firehose views.
-    const PAGE_SIZE = (type === 'all' || type === 'unified') ? ALL_MAIL_PAGE_SIZE : getEmailsPerPage();
+    const PAGE_SIZE = getPageSizeForView({
+      virtualFolder: type === 'all' ? 'virtual-all' : type === 'unified' ? 'virtual-unified' : `virtual-${type}`,
+    });
+    // Refresh the page the user is ON, not page 0. A background refresh that
+    // re-read the first page while they were on page 4 used to splice page 1's
+    // mail into page 4's list and grow it past the window ("1-111 of ...").
+    const page = get().emailsPage;
+    const offset = page * PAGE_SIZE;
     try {
       let result;
       if (type === 'unified') {
@@ -1132,10 +1165,10 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         const accountIds = get().accounts
           .filter((a) => a.includeInUnified !== false)
           .map((a) => a.id);
-        const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset: 0 });
+        const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset });
         if (res?.success && res.data) {
           const merged = res.data.emails as any[];
-          set({ emails: merged, hasMoreEmails: res.data.hasMore, emailsOffset: PAGE_SIZE, emailsPage: 0, emailsTotal: 0 });
+          set({ emails: merged, hasMoreEmails: res.data.hasMore, emailsOffset: offset + merged.length, emailsTotal: res.data.total ?? 0 });
           // Rows synced header-only (e.g. just arrived via IDLE) have no preview
           // snippet. Fetch their bodies — fetchEmailBody routes to each row's OWN
           // account (via the accountId tag), so it works across accounts.
@@ -1154,24 +1187,38 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         return;
       }
       if (type === 'all') {
-        result = await window.electronAPI.emails.getAll(PAGE_SIZE, 0);
+        result = await window.electronAPI.emails.getAll(PAGE_SIZE, offset);
       } else if (type === 'starred') {
-        result = await window.electronAPI.emails.getStarred(PAGE_SIZE, 0);
+        result = await window.electronAPI.emails.getStarred(PAGE_SIZE, offset);
       } else if (type === 'important') {
-        result = await window.electronAPI.emails.getImportant(PAGE_SIZE, 0);
+        result = await window.electronAPI.emails.getImportant(PAGE_SIZE, offset);
       } else if (type === 'snoozed') {
-        const snoozedResult = await window.electronAPI.snooze.list();
-        if (snoozedResult.success && snoozedResult.data) {
-          set({ emails: snoozedResult.data as any, hasMoreEmails: false });
-        }
-        return;
+        // Emails, not snooze records: this shares the merge/cap path below with
+        // every other virtual folder, and that path renders rows. (Reached only
+        // via a 'virtual-snoozed' selection; the Snoozed view itself flags
+        // `viewingSnoozed` and reloads through loadSnoozedEmails.)
+        result = await window.electronAPI.snooze.listEmails({ limit: PAGE_SIZE, offset });
       }
       if (result?.success && result.data) {
-        // Merge instead of replace to avoid flicker
+        // Merge instead of replace to avoid flicker, but CAP to the page window:
+        // a refresh must never leave more rows on screen than the page holds.
         const freshEmails = result.data as any[];
-        const currentEmails = get().emails;
-        const merged = mergeEmailLists(currentEmails, freshEmails);
-        set({ emails: merged, hasMoreEmails: freshEmails.length >= PAGE_SIZE });
+        // Starred/Important pages hold PAGE_SIZE CONVERSATIONS, not messages —
+        // cap and measure in the same unit the fetch used, or the merge lops off
+        // the tail of a thread and "of N" disagrees with the rows again.
+        const threadPaged = isThreadPagedView({ virtualFolder: `virtual-${type}` });
+        const merge = mergePageWindow(
+          get().emails as any[], freshEmails, PAGE_SIZE, undefined,
+          threadPaged ? (row: any) => threadRowKey(row) : undefined,
+        );
+        const total = await fetchVirtualFolderTotal(`virtual-${type}`);
+        const mergedRows = threadPaged ? threadRowCount(merge.emails as any[]) : merge.emails.length;
+        const freshRows = threadPaged ? threadRowCount(freshEmails) : freshEmails.length;
+        set({
+          emails: merge.changed ? merge.emails : get().emails,
+          hasMoreEmails: total > 0 ? offset + mergedRows < total : freshRows >= PAGE_SIZE,
+          ...(total > 0 ? { emailsTotal: total } : {}),
+        });
       }
     } catch (error) {
       console.error(`[Store] Error refreshing virtual folder ${type}:`, error);
@@ -1268,20 +1315,28 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     console.log('[View] Selected: Snoozed');
     set({ loadingEmails: true, emails: [], selectedEmailId: null, highlightedEmailId: null, viewingSnoozed: true, selectedFolderId: null, selectedVirtualFolder: null, viewingAICategory: null, sectionData: {}, searchQuery: '', searchResults: [], searchInterpretation: null, viewingSection: null, viewingSectionLabel: null, viewingSectionPageSize: SECTION_FULL_PAGE_SIZE, emailsPage: 0, emailsTotal: 0 });
     try {
-      const result = await window.electronAPI.snooze.list();
-      console.log('[Store] Snoozed list result:', result);
+      // One page of CONVERSATIONS with their snoozed messages, in one call. This
+      // used to list snooze RECORDS and then fetch each message back over its own
+      // IPC round trip, on a view that took the storage layer's accidental
+      // 100-message default and still claimed to be showing everything.
+      const PAGE_SIZE = getPageSizeForState(get());
+      const [result, total] = await Promise.all([
+        window.electronAPI.snooze.listEmails({ limit: PAGE_SIZE, offset: 0 }),
+        fetchVirtualFolderTotal('virtual-snoozed'),
+      ]);
       if (result.success && result.data) {
-        console.log('[Store] Found', result.data.length, 'snoozed emails');
-        const emailPromises = result.data.map(async (snoozed: { emailId: string }) => {
-          console.log('[Store] Fetching email:', snoozed.emailId);
-          const emailResult = await window.electronAPI.emails.get(snoozed.emailId);
-          console.log('[Store] Email result for', snoozed.emailId, ':', emailResult.success, emailResult.data ? 'found' : 'not found');
-          return emailResult.success ? emailResult.data : null;
+        const emails = result.data as any[];
+        // CONVERSATIONS on both sides: the list collapses each thread to one row
+        // and getSnoozedCount counts threads under the same predicate, so the
+        // offset, "has more" and "of N" are all in the unit the rows are in.
+        const rows = threadRowCount(emails);
+        set({
+          emails,
+          emailsPage: 0,
+          emailsOffset: rows,
+          emailsTotal: total,
+          hasMoreEmails: total > 0 ? rows < total : rows >= PAGE_SIZE,
         });
-        const now = Math.floor(Date.now() / 1000);
-        const emails = (await Promise.all(emailPromises)).filter((e: any) => e && e.snoozeUntil && e.snoozeUntil > now) as any[];
-        console.log('[Store] Loaded', emails.length, 'snoozed emails (filtered expired)');
-        set({ emails, hasMoreEmails: false });
       }
     } catch (error) {
       console.error('Failed to load snoozed emails:', error);
@@ -1711,45 +1766,21 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     }
     if (selectedFolderId) {
       try {
-        const PAGE_SIZE = 100;
-        const result = await window.electronAPI.emails.list(selectedFolderId!, PAGE_SIZE);
+        // The same window the view is paged to, at the same size — a fixed 100
+        // at offset 0 refreshed page 1 while the user read page 4 and stretched
+        // the page past its own size (the "1-100 of 1,718" label on 25 rows).
+        const pageSize = getPageSizeForState(get());
+        const result = await window.electronAPI.emails.list(
+          selectedFolderId,
+          pageSize,
+          get().emailsPage * pageSize,
+        );
         if (result.success && result.data) {
-          const fresh = result.data as any[];
-          const currentEmails = get().emails;
-          const existingIds = new Set(currentEmails.map(e => e.id));
-          const freshMap = new Map<string, any>(fresh.map(e => [e.id, e]));
-
-          // Update existing emails in place where fresh has a newer version.
-          // Never drop — emails past page 1 stay in the list; deletions come
-          // via the explicit 'deleted' realtime event.
-          // `changed` is tracked explicitly: the guard below used to compare
-          // `updated === currentEmails`, but Array.prototype.map ALWAYS returns a
-          // new array, so that check could never be true and the bail-out was
-          // unreachable. Every reload therefore replaced the whole `emails`
-          // array — a new identity for the list on each sync tick, which
-          // rebuilds all threads and re-renders every row even when the server
-          // returned byte-identical data.
-          let changed = false;
-          const updated = currentEmails.map(e => {
-            const f = freshMap.get(e.id);
-            if (!f) return e;
-            if (e.tags !== f.tags || e.date !== f.date || e.subject !== f.subject
-              || (e as any).threadIsStarred !== (f as any).threadIsStarred
-              || (e as any).threadIsImportant !== (f as any).threadIsImportant) {
-              changed = true;
-              return f;
-            }
-            return e;
-          });
-
-          // Prepend genuinely new emails, sort by date desc.
-          const newOnes = fresh.filter(e => !existingIds.has(e.id));
-          if (newOnes.length === 0 && !changed) return;
-
-          const merged = [...newOnes, ...updated].sort((a, b) => (b.date || 0) - (a.date || 0));
-          set({ emails: merged });
-          // Intentionally do NOT touch emailsOffset or hasMoreEmails — user's
-          // scrolled / loaded-more state is preserved.
+          const merge = mergePageWindow(get().emails as any[], result.data as any[], pageSize);
+          if (!merge.changed) return;
+          set({ emails: merge.emails });
+          // Intentionally do NOT touch emailsOffset or hasMoreEmails — the
+          // user's page position is preserved.
         }
       } catch (error) {
         console.error('[Store] _reloadCurrentView merge failed:', error);

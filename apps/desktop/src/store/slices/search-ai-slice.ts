@@ -2,7 +2,7 @@ import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearch
 import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
 import { isSignatureDetectionEnabled, detectSignature, isCategorizationEnabled, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
 import { isAutoChatExtractEnabled, isConversationModeEnabled, extractConversation } from '../../services/conversation-service';
-import { getMaxAIProcessingEmails, getEmailsPerPage, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
+import { getMaxAIProcessingEmails, getEmailsPerPage, getPageSizeForView, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
 import type { SearchAISlice, SliceCreator } from '../types';
 
 // Re-entry guard for autoExtractRecentConversations — every IDLE 'new' event
@@ -317,7 +317,9 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       return;
     }
 
-    const PAGE_SIZE = getEmailsPerPage(); // same size the Paginator + goToEmailPage use
+    // A category list follows the user's setting whatever view it was opened
+    // from — the same size the Paginator and goToEmailPage resolve.
+    const PAGE_SIZE = getPageSizeForView({ aiCategory: category });
     // Differentiate between a NEW category selection (user intent — clear
     // slate is correct) and a BACKGROUND refresh of the same category (sync
     // just finished, merge additively so scroll/selection isn't nuked).

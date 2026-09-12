@@ -17,6 +17,8 @@ import {
   isUnreadCountable,
   sortThreadsForDisplay,
   threadMatchesViewFilter,
+  threadRowCount,
+  threadRowKey,
   threadStaysVisible,
   threadTagsString,
   visibleThreadsUnderFilter,
@@ -229,6 +231,30 @@ describe('isSmartPrioritizeEnabled', () => {
     // must still render rather than crashing on the sort.
     delete (globalThis as any).localStorage;
     expect(isSmartPrioritizeEnabled()).toBe(false);
+  });
+});
+
+describe('threadRowKey / threadRowCount', () => {
+  // These are the paging unit for every thread-paged view. If they ever stop
+  // agreeing with buildThreads, the paginator counts different rows than the
+  // list renders — which is exactly how Starred came to read "of 52" over 15.
+  it('counts the same rows buildThreads renders, across every grouping rule', () => {
+    const rows = [
+      email({ id: 'a', threadId: 't1', date: 3 }),
+      email({ id: 'b', threadId: 't1', date: 2 }),   // same conversation
+      email({ id: 'c', threadId: '', date: 1 }),     // no threadId -> its own row
+      email({ id: 'd', threadId: 't9', accountId: 'one', date: 5 }),
+      email({ id: 'e', threadId: 't9', accountId: 'two', date: 5 }), // dual-delivered
+    ];
+    expect(threadRowCount(rows)).toBe(buildThreads(rows).length);
+    expect(threadRowCount(rows)).toBe(4);
+    expect(threadRowCount([])).toBe(0);
+  });
+
+  it('keys a row the way buildThreads does', () => {
+    expect(threadRowKey(email({ id: 'a', threadId: 't1', date: 1 }))).toBe('t1');
+    expect(threadRowKey(email({ id: 'a', threadId: '', date: 1 }))).toBe('a');
+    expect(threadRowKey(email({ id: 'a', threadId: 't1', accountId: 'acct', date: 1 }))).toBe('acct::t1');
   });
 });
 

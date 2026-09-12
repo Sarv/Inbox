@@ -317,13 +317,30 @@ export function registerMiscHandlers(): void {
     }
   });
 
-  ipcMain.handle('snooze:list', async () => {
+  // `limit`/`offset` count CONVERSATIONS, the unit the Snoozed view renders and
+  // `snooze:count` counts. Omitting them takes the storage default, which is a
+  // cap, not "everything" -- the renderer passes its own explicit one.
+  ipcMain.handle('snooze:list', async (_event, options?: { limit?: number; offset?: number }) => {
     try {
       const storage = requireStorage();
-      const snoozed = await storage.getSnoozedEmails();
+      const snoozed = await storage.getSnoozedEmails(options ?? {});
       return { success: true, data: snoozed };
     } catch (error) {
       logger.error('List snoozed error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  // The listing the Snoozed VIEW uses: full emails, one page of conversations,
+  // in one round trip. `snooze:list` stays for callers that want the snooze
+  // records themselves (wake-up bookkeeping), not rows to render.
+  ipcMain.handle('snooze:listEmails', async (_event, options?: { limit?: number; offset?: number }) => {
+    try {
+      const storage = requireStorage();
+      const emails = await storage.getSnoozedEmailRecords(options ?? {});
+      return { success: true, data: emails };
+    } catch (error) {
+      logger.error('List snoozed emails error:', error);
       return { success: false, error: (error as Error).message };
     }
   });
