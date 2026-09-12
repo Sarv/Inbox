@@ -63,6 +63,31 @@ describe('scoreCandidate', () => {
     expect(mobile.score).toBeGreaterThan(office.score);
   });
 
+  // Regression: html-to-text renders a link as `text [href]` and mining keeps
+  // hrefs on, so a click-to-call button arrives as `[tel:+91...]`. ORG_LABEL
+  // matched that `tel` and docked 20 points from the one number the person
+  // deliberately made clickable — and when the button shows no digits, the href
+  // is the ONLY place that number appears.
+  it('does not read a tel: href as an office label', () => {
+    const href = 'Pooja Khatri\nCBO\nCall me [tel: +919988776655]';
+    const scored = scoreCandidate(candidate({
+      source: href, index: href.indexOf('+919988776655'),
+    }), opts);
+    expect(scored.reasons.join(' ')).not.toMatch(/org label/);
+    expect(classifyPhone(scored)).toBe('direct');
+  });
+
+  // Regression: the exemption above must stay narrow. `Tel:` WRITTEN OUT in a
+  // signature really does mean the landline in most of them, and loosening
+  // ORG_LABEL wholesale would promote every switchboard to a personal line.
+  it('still demotes a written Tel: label', () => {
+    const written = 'Pooja Khatri\nCBO\nTel: 9988776655';
+    const scored = scoreCandidate(candidate({
+      source: written, index: written.indexOf('9988776655'),
+    }), opts);
+    expect(scored.reasons.join(' ')).toMatch(/org label/);
+  });
+
   it('boosts a number sitting next to the sender\'s name', () => {
     const near = scoreCandidate(candidate({
       source: 'Pooja Khatri 9988776655', index: 'Pooja Khatri '.length,
@@ -252,5 +277,44 @@ describe('label radius', () => {
       { fromAddress: 'ajay@sarv.com' },
     );
     expect(s.vetoed).toBe(true);
+  });
+});
+
+describe('a label never reads across a line break', () => {
+  // Regression: ORG_LABEL matched the word "Support" in the sender's JOB TITLE
+  // on the line above his number, docking his own mobile 20 points. That put it
+  // below a vendor's number he had forwarded once, and his contact card showed
+  // the vendor's. Every "... Support", "Head of Sales", "Office Manager"
+  // signature had the same hole.
+  it('does not read a job title on the line above as an org label', () => {
+    const src = 'Bhupesh Chugh VP Support\n+91 9414511220';
+    const s = scoreCandidate(
+      { e164: '+919414511220', display: 'x', source: src, index: src.indexOf('+91 9414511220'), zone: 'signature' },
+      { fromAddress: 'bhupesh@sarv.com' },
+    );
+    expect(s.reasons).not.toContain('-20 org label');
+    expect(s.score).toBeGreaterThan(0);
+  });
+
+  // The flip side, and why the window is narrowed rather than removed: a label
+  // on the SAME line is exactly what the penalty is for, and must still apply.
+  it('still reads a label printed beside the number', () => {
+    const src = 'Bhupesh Chugh\nOffice: +91 9111911100';
+    const s = scoreCandidate(
+      { e164: '+919111911100', display: 'x', source: src, index: src.indexOf('+91 9111911100'), zone: 'signature' },
+      { fromAddress: 'bhupesh@sarv.com' },
+    );
+    expect(s.reasons).toContain('-20 org label');
+  });
+
+  // A veto must not leak across a line break either — "Fax" ending the line
+  // above is not describing the number below it.
+  it('does not veto on a word that ends the previous line', () => {
+    const src = 'Sales & Fax\n+91 9876500000';
+    const s = scoreCandidate(
+      { e164: '+919876500000', display: 'x', source: src, index: src.indexOf('+91 9876500000'), zone: 'signature' },
+      { fromAddress: 'ajay@sarv.com' },
+    );
+    expect(s.vetoed).toBe(false);
   });
 });

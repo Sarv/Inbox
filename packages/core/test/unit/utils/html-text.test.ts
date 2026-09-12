@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_HTML_PARSE_BYTES } from '../../../src/utils/mail-parse';
 
-import { htmlToPlainText, repairedCleanBody } from '../../../src/utils/html-text';
+import { htmlMiningWindow, htmlToPlainText, repairedCleanBody } from '../../../src/utils/html-text';
 
 // This helper is what stands between a marketing mail and a blank row in the
 // list. `clean_body` feeds the list snippet, the filter engine and every AI
@@ -110,5 +110,78 @@ describe('repairedCleanBody', () => {
     const first = repairedCleanBody('', MARKETING_HTML);
     expect(first).not.toBeNull();
     expect(repairedCleanBody(first, MARKETING_HTML)).toBeNull();
+  });
+});
+
+/**
+ * The window signature mining converts. The bug it exists to prevent is silent
+ * and permanent: a tail-only slice of a long reply thread throws away the
+ * sender's OWN signature (top-posted, above the quote) and keeps whoever's
+ * signature happened to end the chain, so a contact who writes their mobile in
+ * every mail they send shows no number at all.
+ */
+describe('htmlMiningWindow', () => {
+  const HEAD_SIG = '<p>Thanks,</p><p>Amit Shukla<br>M: +91 98765 43210</p>';
+  const QUOTE = `<blockquote>${'<p>Older thread text that pads this out.</p>'.repeat(400)}<p>Ravi Menon<br>M: +91 90000 11111</p></blockquote>`;
+
+  // Regression: the whole point. A top-posted reply longer than the budget must
+  // still carry the sender's own signature into the converted text.
+  it('keeps a top-posted signature that a tail-only slice would have dropped', () => {
+    const reply = HEAD_SIG + QUOTE;
+    expect(reply.length).toBeGreaterThan(4096);
+    const windowed = htmlMiningWindow(reply, 4096);
+    expect(windowed).toContain('+91 98765 43210');
+    expect(reply.slice(-4096)).not.toContain('+91 98765 43210');
+  });
+
+  // Regression: a bottom-posted signature (a first message, not a reply) is the
+  // case the old tail-only slice got right — it must not become the casualty of
+  // fixing the other one.
+  it('keeps a bottom-posted signature too', () => {
+    const long = `<div>${'<p>Body paragraph.</p>'.repeat(400)}</div><p>Amit Shukla<br>M: +91 98765 43210</p>`;
+    expect(htmlMiningWindow(long, 4096)).toContain('+91 98765 43210');
+  });
+
+  // Regression: a body that already fits must be handed on untouched — no
+  // separator spliced into it, nothing trimmed.
+  it('returns a body that already fits unchanged', () => {
+    const small = '<p>Hi<br>+91 98765 43210</p>';
+    expect(htmlMiningWindow(small, 4096)).toBe(small);
+    expect(htmlMiningWindow(small, small.length)).toBe(small);
+  });
+
+  // Regression: butting the two halves together would let the last digits of the
+  // head and the first digits of the tail read as one number nobody ever wrote.
+  it('separates the two halves so they cannot fuse into a phantom number', () => {
+    const fused = htmlMiningWindow(`${'x'.repeat(80)}98765${'y'.repeat(80)}43210${'z'.repeat(80)}`, 100);
+    expect(htmlToPlainText(fused)).not.toContain('9876543210');
+  });
+
+  // Regression: cutting mid-tag leaves attribute text behind, and html-to-text
+  // renders that leftover as visible words — the numeric junk that converting
+  // before mining exists to keep out.
+  it('cuts on tag boundaries so no attribute text leaks into the conversion', () => {
+    const html = `<p>start</p><img src="tracking-9988776655.png" width="600" height="400">${'<p>pad</p>'.repeat(60)}<a href="https://x.test/9911223344">end</a>`;
+    const text = htmlToPlainText(htmlMiningWindow(html, 200));
+    expect(text).not.toContain('tracking-9988776655');
+    expect(text).not.toContain('9911223344');
+  });
+
+  // Regression: raw_body is not always HTML (a text/plain mail is stored as-is),
+  // and a `<br>` spliced into plain text is a word, not a line break.
+  it('separates plain text with a blank line rather than a tag', () => {
+    const plain = `${'a'.repeat(120)}\n${'b'.repeat(120)}`;
+    const windowed = htmlMiningWindow(plain, 100);
+    expect(windowed).not.toContain('<br>');
+    expect(windowed).toContain('\n\n');
+  });
+
+  // Regression: mining calls this on every body of every contact. A non-string
+  // or an absent budget must not throw in the middle of a scan.
+  it('never throws on degenerate input', () => {
+    expect(htmlMiningWindow('', 100)).toBe('');
+    expect(htmlMiningWindow(undefined as unknown as string, 100)).toBe('');
+    expect(htmlMiningWindow('<p>abc</p>', 0)).toBe('<p>abc</p>');
+    expect(htmlMiningWindow('<p>abc</p>', -5)).toBe('<p>abc</p>');
   });
 });

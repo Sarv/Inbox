@@ -384,6 +384,21 @@ export function mineAttributedPhones(
  *  - Small org domains (< 3 members): can't judge sharing, so the most-recurring
  *    number is the direct number and any second number is tentatively office.
  */
+/** Points added per doubling of sightings, and the ceiling on that bonus. */
+export const RECURRENCE_BONUS_PER_DOUBLING = 12;
+export const MAX_RECURRENCE_BONUS = 36;
+
+/**
+ * How much a number's recurrence across a sender's mail adds to its
+ * confidence. Logarithmic and capped: the jump from 1 sighting to 4 is what
+ * distinguishes a signature from a number quoted in passing, while 40 sightings
+ * versus 80 says nothing more. Saturates at 8.
+ */
+export function recurrenceBonus(count: number): number {
+  if (!Number.isFinite(count) || count <= 1) return 0;
+  return Math.min(MAX_RECURRENCE_BONUS, Math.round(RECURRENCE_BONUS_PER_DOUBLING * Math.log2(count)));
+}
+
 export function classifyDomainPhones(senders: SenderPhones[]): Map<string, ClassifiedPhones> {
   const result = new Map<string, ClassifiedPhones>();
   const byDomain = new Map<string, SenderPhones[]>();
@@ -461,8 +476,24 @@ export function classifyDomainPhones(senders: SenderPhones[]): Map<string, Class
       // Rank by confidence first, count second. A vetoed number (fax, toll-free,
       // conference dial-in) scores -Infinity and is dropped outright.
       const scoreOf = (k: string): number => m.scores?.[k] ?? 0;
+      const countOf = (k: string): number => m.phones.get(k)?.count || 0;
+      // Confidence = the best single-email score PLUS how often the number
+      // recurs across this sender's mail.
+      //
+      // Score alone used to decide, with count only breaking ties — which made
+      // one well-formatted sighting unbeatable. A vendor's signature forwarded
+      // ONCE (clean block, job title adjacent: 50) outranked the sender's own
+      // mobile sitting in 49 of his own emails (35), and his contact card
+      // showed the vendor's number. Recurrence in someone's OWN outgoing mail
+      // is the strongest ownership evidence there is; it cannot be a tiebreak.
+      //
+      // The bonus is logarithmic and capped so it ORDERS candidates without
+      // swamping the per-email signals: it saturates at 8 sightings, by which
+      // point "they keep sending this number" is established and more of the
+      // same adds nothing. A single sighting earns nothing.
+      const confidenceOf = (k: string): number => scoreOf(k) + recurrenceBonus(countOf(k));
       const rank = (a: string, b: string): number =>
-        (scoreOf(b) - scoreOf(a)) || ((m.phones.get(b)?.count || 0) - (m.phones.get(a)?.count || 0));
+        (confidenceOf(b) - confidenceOf(a)) || (countOf(b) - countOf(a));
       const notVetoed = (k: string): boolean => scoreOf(k) !== Number.NEGATIVE_INFINITY;
 
       const personal = keys
