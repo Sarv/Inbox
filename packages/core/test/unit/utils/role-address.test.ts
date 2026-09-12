@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { isNoReplyAddress, isRoleAddress } from '../../../src/utils/role-address';
+import { contactNameForAddress, isNoReplyAddress, isRoleAddress } from '../../../src/utils/role-address';
 
 // These two predicates decide whether a mailbox is treated as a PERSON. Getting
 // them wrong is user-visible and hard to undo: a false positive strips a real
@@ -131,5 +131,82 @@ describe('isNoReplyAddress', () => {
     for (const local of ['noreply', 'postmaster', 'orders', 'digest', 'system']) {
       expect(isRoleAddress(`${local}@acmecorp.com`)).toBe(true);
     }
+  });
+});
+
+describe('machine mailboxes that carry the marker as a suffix', () => {
+  // Regression: the detector only matched the marker as a PREFIX, so the shapes
+  // the big providers actually generate read as people. Notification mail puts
+  // the acting HUMAN in the From display name, so the directory filled with a
+  // real colleague's name attached to a robot's address — searching for that
+  // person returned mostly robots.
+  it.each([
+    'drive-shares-dm-noreply@google.com',
+    'drive-shares-noreply@google.com',
+    'pullrequests-reply@bitbucket.org',
+    'comments-noreply@docs.google.com',
+    'jira-notifications@atlassian.net',
+    'build_alerts@ci.example.com',
+    'list-bounces@mailman.example.org',
+  ])('treats %s as a machine mailbox', (address) => {
+    expect(isNoReplyAddress(address)).toBe(true);
+    expect(isRoleAddress(address)).toBe(true);
+  });
+
+  // The suffix arm must need a separator before the marker, or it starts
+  // eating people. These are the names it would wrongly swallow if the
+  // boundary were dropped.
+  it.each([
+    'bhupesh@sarv.com',
+    'mahima.k@sarv.com',
+    'devendra.k@sarv.com',
+    'hnotify@sarv.com',
+    'jreply@example.com',
+    'daniel.mailery@example.com',
+  ])('leaves %s alone', (address) => {
+    expect(isNoReplyAddress(address)).toBe(false);
+  });
+
+  // Human-staffed role mailboxes stay OUT of the no-reply tier: a person mans
+  // them and signs off, so their signature is still worth mining.
+  it('keeps human-staffed role mailboxes out of the machine tier', () => {
+    expect(isNoReplyAddress('hr@sarv.com')).toBe(false);
+    expect(isNoReplyAddress('sales@sarv.com')).toBe(false);
+    expect(isRoleAddress('hr@sarv.com')).toBe(true);
+  });
+});
+
+describe('contactNameForAddress', () => {
+  // Regression: a no-reply mailbox is never held by a person, so it must never
+  // wear one's name. Atlassian sends "Bhupesh Chugh <notifications@atlassian.net>";
+  // taken at face value that mints a contact carrying a colleague's name on an
+  // address that is not his.
+  it('names a machine mailbox after the service, not the human in the From', () => {
+    expect(contactNameForAddress('notifications@atlassian.net', 'Bhupesh Chugh')).toBe('atlassian.net');
+    expect(contactNameForAddress('pullrequests-reply@bitbucket.org', 'Devendra Rathore')).toBe('bitbucket.org');
+    expect(contactNameForAddress('drive-shares-dm-noreply@google.com', 'Bhupesh Chugh (via Google Docs)'))
+      .toBe('google.com');
+  });
+
+  // A real person's display name must survive untouched — this helper sits on
+  // the path EVERY contact is created through.
+  it('leaves a real person’s name alone', () => {
+    expect(contactNameForAddress('bhupesh@sarv.com', 'Bhupesh Chugh')).toBe('Bhupesh Chugh');
+    expect(contactNameForAddress('hr@sarv.com', 'Priya Nair')).toBe('Priya Nair');
+  });
+
+  // Missing pieces must yield null rather than '' or 'undefined': upsert only
+  // fills a name when the row has none, so a junk value written once sticks.
+  it('returns null when there is no name to give', () => {
+    expect(contactNameForAddress('bhupesh@sarv.com', null)).toBeNull();
+    expect(contactNameForAddress('bhupesh@sarv.com', '')).toBeNull();
+    // A machine address with no domain left to name it after.
+    expect(contactNameForAddress('noreply@', 'Someone')).toBeNull();
+    // An absent address is not a machine mailbox, so the name stands.
+    expect(contactNameForAddress(null, 'Someone')).toBe('Someone');
+  });
+
+  it('drops a www. prefix so the service reads as one name', () => {
+    expect(contactNameForAddress('noreply@www.example.com', 'A Person')).toBe('example.com');
   });
 });

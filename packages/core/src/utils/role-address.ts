@@ -33,6 +33,18 @@
 const NOREPLY_LOCAL_PART_RE =
   /^(no-?reply|do-?not-?reply|donotreply|notifications?|notify|reminders?|alerts?|alert|mailer|mailer-daemon|postmaster|bounces?|delivery|deliveries|automated|auto|system|root|daemon|cron|transactional|receipts?|statements?|invoices?|payments?|orders?|shipping|tracking|tickets?|news|newsletters?|updates?|digest|verify|verification|confirm|confirmation|subscribe|unsubscribe|abuse|webmaster|hostmaster|sysadmin|mail|email)([.\-_+].*)?$/i;
 
+// The SAME machine tier, written as a SUFFIX. Providers overwhelmingly put the
+// marker at the END of a generated local-part, which the prefix pattern above
+// cannot see: `drive-shares-dm-noreply@google.com`,
+// `pullrequests-reply@bitbucket.org`, `comments-noreply@docs.google.com`.
+// Those addresses were being treated as people — and because notification mail
+// puts the ACTING HUMAN in the From display name, the directory filled up with
+// "Devendra Rathore <pullrequests-reply@bitbucket.org>": a real colleague's
+// name attached to a robot's address, which is what the user sees when they
+// search for that person.
+const NOREPLY_LOCAL_PART_SUFFIX_RE =
+  /[.\-_+](no-?reply|do-?not-?reply|donotreply|reply|notifications?|notify|alerts?|bounces?|mailer|daemon|unsubscribe)$/i;
+
 const HUMAN_ROLE_LOCAL_PART_RE =
   /^(billing|accounts?|accounting|finance|info|enquiry|enquiries|inquiry|contact|contactus|hello|help|helpdesk|support|care|customercare|customer-care|service|services|servicing|feedback|sales|marketing|promo|promotions?|offers?|deals?|hr|jobs|careers?|recruit|recruiting|recruitment|talent|hiring|admin|administrator|security|privacy|legal|compliance|team|office|membership)([.\-_+].*)?$/i;
 
@@ -52,7 +64,7 @@ function localPartOf(email: string | null | undefined): string {
 export function isRoleAddress(email: string | null | undefined): boolean {
   const local = localPartOf(email);
   if (!local) return false;
-  return NOREPLY_LOCAL_PART_RE.test(local) || HUMAN_ROLE_LOCAL_PART_RE.test(local);
+  return isMachineLocalPart(local) || HUMAN_ROLE_LOCAL_PART_RE.test(local);
 }
 
 /**
@@ -64,5 +76,37 @@ export function isRoleAddress(email: string | null | undefined): boolean {
 export function isNoReplyAddress(email: string | null | undefined): boolean {
   const local = localPartOf(email);
   if (!local) return false;
-  return NOREPLY_LOCAL_PART_RE.test(local);
+  return isMachineLocalPart(local);
+}
+
+/** Machine mailbox by either spelling — `noreply@x` or `drive-shares-noreply@x`. */
+function isMachineLocalPart(local: string): boolean {
+  return NOREPLY_LOCAL_PART_RE.test(local) || NOREPLY_LOCAL_PART_SUFFIX_RE.test(local);
+}
+
+/**
+ * The name a contact row should carry for `email`, given the display name the
+ * From header supplied.
+ *
+ * A no-reply mailbox is never held by a person, so it must never wear one's
+ * name. Notification senders put the human who triggered the event in the From
+ * display name — Atlassian sends "Bhupesh Chugh <notifications@atlassian.net>",
+ * Bitbucket "Devendra Rathore <pullrequests-reply@bitbucket.org>", Google
+ * "Bhupesh Chugh (via Google Docs) <drive-shares-dm-noreply@google.com>". Taken
+ * at face value that mints three extra contacts wearing one colleague's name,
+ * each with an address that is not theirs, and searching for that person
+ * returns mostly robots.
+ *
+ * Machine mailboxes are named for the service that sends them — the sending
+ * domain, verbatim. Not a prettified brand: guessing one needs a public-suffix
+ * list to avoid turning "bbc.co.uk" into "Co", and the domain is already exact,
+ * honest and recognisable.
+ */
+export function contactNameForAddress(
+  email: string | null | undefined,
+  fromName: string | null | undefined,
+): string | null {
+  if (!isNoReplyAddress(email)) return fromName || null;
+  const domain = (email || '').split('@')[1]?.toLowerCase().trim() || '';
+  return domain.replace(/^www\./, '') || null;
 }
