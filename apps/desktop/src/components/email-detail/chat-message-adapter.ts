@@ -114,13 +114,26 @@ export interface AdapterOptions extends ThreadOptions {
  * library's, so there is exactly one place where sarvinbox's storage shape is
  * described to it.
  */
+/**
+ * The stored body the transform reads: the original HTML, or the stripped
+ * preview text when that is all there is.
+ *
+ * Shared rather than repeated because {@link threadSegmentCache} is keyed on
+ * this exact string. A second copy of the expression that drifted would turn
+ * every warmed entry into a miss, and a miss is invisible — the view simply
+ * pays for the split again.
+ */
+export function bodyOf(email: EmailRecord): string {
+  return email.rawBody || email.cleanBody || '';
+}
+
 export function mailsFromEmails(
   emails: readonly EmailRecord[],
   failedBodies?: ReadonlySet<string>,
 ): Mail[] {
   const drafts = draftIdsIn(emails);
   return emails.map((email) => {
-    const body = email.rawBody || email.cleanBody || '';
+    const body = bodyOf(email);
     return {
       id: email.id,
       fromAddress: email.fromAddress || '',
@@ -159,21 +172,65 @@ export const threadSegmentCache: SegmentCache = createSegmentCache();
  * knows — how its rows are shaped ({@link mailsFromEmails}) and how to turn a
  * `sarv-image:` ref into something a browser can render.
  */
+/**
+ * The thread's mails through the library's split, with nothing done to the
+ * result.
+ *
+ * The single description of sarvinbox's thread to the transform, so the render
+ * path and the background warm below cannot ask for different work and miss
+ * each other's cache entries.
+ */
+function splitThread(emails: readonly EmailRecord[], options: ThreadOptions): ChatMessage[] {
+  return threadToMessages(mailsFromEmails(emails, options.failedBodies), {
+    currentUserAddress: options.currentUserEmail,
+    dateUnit: 's',
+    cache: threadSegmentCache,
+  });
+}
+
 export function chatMessagesFromThread(
   emails: readonly EmailRecord[],
   options: ThreadOptions,
 ): ChatMessage[] {
-  const { currentUserEmail, failedBodies, resolveImages } = options;
-  const messages = threadToMessages(mailsFromEmails(emails, failedBodies), {
-    currentUserAddress: currentUserEmail,
-    dateUnit: 's',
-    cache: threadSegmentCache,
-  });
+  const { resolveImages } = options;
+  const messages = splitThread(emails, options);
   // Image refs are resolved AFTER the split, not before: the raw body carries
   // the whole quoted history, most of which is about to be thrown away, and
   // inlining every image in it first is work nobody sees.
   if (!resolveImages) return messages;
   return messages.map((message) => ({ ...message, body: resolveImages(message.body) }));
+}
+
+/** Whether this email's body has already been split and is still cached. */
+export function isThreadSegmentWarm(email: EmailRecord): boolean {
+  const body = bodyOf(email);
+  return body !== '' && threadSegmentCache.get(email.id, body) !== undefined;
+}
+
+/**
+ * Split a slice of a thread into the shared cache, and throw the result away.
+ *
+ * The chat view's first render is one synchronous {@link chatMessagesFromThread}
+ * on the main thread: a parse, a boundary sweep and a clean for every mail in
+ * the thread. On a long one that is felt as a hang on the click that opens it.
+ * Running the same split ahead of time, a few mails at a time while the reader
+ * is still in the standard view, moves the cost off the click — the view's own
+ * call finds every segment already in {@link threadSegmentCache} and returns.
+ *
+ * Takes a SLICE rather than the whole thread because the point is to hand the
+ * main thread back between chunks. Splitting mail by mail is valid because the
+ * cache key is per mail and a mail's segments never depend on its neighbours.
+ *
+ * `failedBodies` is deliberately not a parameter: it decides only the
+ * pending/failed flags on the rendered bubble, never the split, so warming
+ * without it produces exactly the entries the render will look for.
+ */
+export function warmThreadSegments(
+  emails: readonly EmailRecord[],
+  options: Pick<ThreadOptions, 'currentUserEmail'>,
+): void {
+  if (emails.length === 0) return;
+  splitThread(emails, { currentUserEmail: options.currentUserEmail });
 }
 
 /** Chronological, drafts dropped. Progressive extraction appends out of order. */
