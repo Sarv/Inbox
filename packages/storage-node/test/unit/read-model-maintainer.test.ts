@@ -152,6 +152,74 @@ describe('ReadModelMaintainer', () => {
     expect((db.prepare('SELECT has_category FROM thread_folders WHERE thread_id=?').get('t1') as any).has_category).toBe(0);
   });
 
+  // --- chunk pacing ------------------------------------------------------
+  //
+  // The drain's stall bound used to be a ROW COUNT (100 threads per synchronous
+  // transaction), which bounds nothing: a chunk's cost is the sum of its threads'
+  // costs and those differ by orders of magnitude. These pin the time budget that
+  // replaced it — if they fail, one chunk can hold the main thread for as long as
+  // its heaviest 100 threads take, and the UI freezes for exactly that long.
+
+  it('stops a chunk once the time budget is spent and leaves the rest queued', () => {
+    for (let i = 0; i < 12; i++) insertEmail(db, `tb${i}`, 'INBOX');
+    expect(dirtyCount(db)).toBe(12);
+
+    // A zero budget: the deadline is already past when the first thread finishes,
+    // so exactly one thread is rebuilt and the other eleven stay queued.
+    const processed = m.drainChunk(100, 0);
+    expect(processed).toBe(1);
+    expect(dirtyCount(db)).toBe(11);
+    expect(tfCount(db)).toBe(1);
+  });
+
+  it('makes progress on every chunk even with a zero budget (no livelock)', () => {
+    // The deadline is checked AFTER a thread is written, never before. Checking it
+    // first would make a zero/elapsed budget return 0 forever: pump() reads 0 as
+    // "queue empty", stops, and the read model never rebuilds at all.
+    for (let i = 0; i < 5; i++) insertEmail(db, `tz${i}`, 'INBOX');
+    let guard = 0;
+    while (m.drainChunk(100, 0) > 0 && guard++ < 50) { /* drain one at a time */ }
+    expect(dirtyCount(db)).toBe(0);
+    expect(tfCount(db)).toBe(5);
+    expect(guard).toBe(5); // one thread per chunk, five chunks — not an early stop
+  });
+
+  it('dequeues only the threads it actually rebuilt', () => {
+    // The dangerous half of an early stop: a dirty row deleted without its rollup
+    // committing is a rebuild lost for good, because nothing re-dirties it. The
+    // thread would serve stale counts/flags forever.
+    for (let i = 0; i < 4; i++) insertEmail(db, `tq${i}`, 'INBOX|important');
+    m.drainChunk(100, 0);
+
+    const remaining = (db.prepare('SELECT thread_id FROM read_model_dirty ORDER BY thread_id').all() as any[])
+      .map((r) => r.thread_id);
+    const built = (db.prepare('SELECT id FROM threads ORDER BY id').all() as any[]).map((r) => r.id);
+    expect(built).toHaveLength(1);
+    expect(remaining).toHaveLength(3);
+    expect(remaining).not.toContain(built[0]); // the one built is the one dequeued
+
+    m.flushNow();
+    expect(dirtyCount(db)).toBe(0);
+    expect(tfCount(db)).toBe(4);
+  });
+
+  it('flushNow drains to empty in one pass, unpaced', () => {
+    // Shutdown and tests ask for an EMPTY queue on return; pacing it would either
+    // leave rows behind or turn the flush into a long loop of tiny transactions.
+    for (let i = 0; i < 40; i++) insertEmail(db, `tf${i}`, 'INBOX');
+    m.flushNow();
+    expect(dirtyCount(db)).toBe(0);
+    expect(tfCount(db)).toBe(40);
+  });
+
+  it('drainChunk is unpaced by default', () => {
+    // Every existing caller (and the public API) keeps run-to-completion semantics;
+    // only the background pump opts into a budget.
+    for (let i = 0; i < 7; i++) insertEmail(db, `td${i}`, 'INBOX');
+    expect(m.drainChunk()).toBe(7);
+    expect(dirtyCount(db)).toBe(0);
+  });
+
   it('seeding is idempotent (no duplicate thread_folders rows)', () => {
     insertEmail(db, 't1', 'INBOX|Sarv Inbox/Reminders|read');
     db.prepare("INSERT INTO folders (id, path) VALUES ('f-rem','Sarv Inbox/Reminders')").run();

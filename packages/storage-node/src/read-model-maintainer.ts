@@ -14,6 +14,7 @@ import type Database from 'better-sqlite3';
 
 
 import { buildRollupContext, rebuildThreads, withImmediateTxn } from './repositories/thread-rollup';
+import { prepared } from './statement-cache';
 
 const logger = createLogger('read-model-maintainer');
 
@@ -22,9 +23,19 @@ const logger = createLogger('read-model-maintainer');
  *  1 = initial · 2 = |deleted| no longer suppresses flag state (parity fix). */
 const ROLLUP_VERSION = '2';
 
-/** Threads rebuilt per transaction. Small enough to keep each synchronous chunk
- *  short; the loop yields between chunks. */
+/** Dirty rows CLAIMED per transaction — an upper bound on how many ids a single
+ *  chunk may look at, not a promise about how many it rebuilds. */
 const DRAIN_CHUNK = 100;
+/**
+ * How long one synchronous chunk may hold the event loop. This, not DRAIN_CHUNK,
+ * is what actually bounds a stall: a chunk's cost is the SUM of its threads' costs
+ * and those differ by orders of magnitude, so "100 threads" is 20ms on ordinary
+ * mail and minutes on a folder full of nine-hundred-message threads. The loop
+ * stops adding threads once the budget is spent and resumes on the next tick, so
+ * the worst case is one thread's rebuild plus this budget — regardless of the mix.
+ * 8ms keeps a chunk inside a single 60fps frame.
+ */
+const DRAIN_BUDGET_MS = 8;
 /** Periodic safety pump — catches rows the triggers add without an explicit
  *  schedule() (e.g. an ad-hoc UPDATE from some code path). unref'd so it never
  *  keeps the process alive. */
@@ -109,7 +120,7 @@ export class ReadModelMaintainer {
       if (this.stopped) { this.pumping = false; return; }
       let processed = 0;
       try {
-        processed = this.drainChunk(DRAIN_CHUNK);
+        processed = this.drainChunk(DRAIN_CHUNK, DRAIN_BUDGET_MS);
       } catch (error) {
         // A derived-state failure must never wedge the app — log and back off;
         // the rows stay queued and the next pump/safety-tick retries them.
@@ -124,27 +135,39 @@ export class ReadModelMaintainer {
   }
 
   /**
-   * Rebuild up to `limit` dirty threads in ONE immediate transaction, deleting
-   * each from the queue only after its rollup commits. Returns rows processed
-   * (0 = queue empty). Public so shutdown/tests can drive it directly.
+   * Rebuild dirty threads in ONE immediate transaction, deleting each from the
+   * queue only after its rollup commits. Claims at most `limit` rows and rebuilds
+   * as many of them as fit in `budgetMs`; the rest stay queued for the next
+   * chunk. Returns rows processed (0 = queue empty). Public so shutdown/tests can
+   * drive it directly — pass `Infinity` for an unpaced, run-to-completion drain.
    */
-  drainChunk(limit = DRAIN_CHUNK): number {
+  drainChunk(limit = DRAIN_CHUNK, budgetMs: number = Number.POSITIVE_INFINITY): number {
     const db = this.getDb();
     if (!db) return 0;
-    const ids = (db.prepare('SELECT thread_id FROM read_model_dirty LIMIT ?').all(limit) as { thread_id: string }[])
-      .map((r) => r.thread_id);
+    // Deduped here so `ids[i]` lines up with rebuildThreads' own deduped order —
+    // the queue's PK already guarantees it, but the slice-by-count dequeue below
+    // would silently drop rebuilds if that ever stopped being true.
+    const ids = [...new Set(
+      (prepared(db, 'SELECT thread_id FROM read_model_dirty LIMIT ?').all(limit) as { thread_id: string }[])
+        .map((r) => r.thread_id),
+    )];
     if (ids.length === 0) {
       this.markCompleteIfRunning(db);
       return 0;
     }
     const ctx = buildRollupContext(db);
-    const del = db.prepare('DELETE FROM read_model_dirty WHERE thread_id = ?');
+    const del = prepared(db, 'DELETE FROM read_model_dirty WHERE thread_id = ?');
+    let processed = 0;
     withImmediateTxn(db, () => {
-      rebuildThreads(db, ids, ctx);           // nested savepoint (already in a txn)
-      for (const id of ids) del.run(id);
-      this.bumpDoneIfRunning(db, ids.length);
+      // rebuildThreads returns how many it got through before the budget ran out
+      // (nested savepoint — we're already in a txn). Dequeue exactly those, in
+      // order: a row deleted without its rollup committing would lose the rebuild
+      // entirely, since nothing else re-dirties it.
+      processed = rebuildThreads(db, ids, ctx, budgetMs);
+      for (let i = 0; i < processed; i++) del.run(ids[i]);
+      this.bumpDoneIfRunning(db, processed);
     });
-    return ids.length;
+    return processed;
   }
 
   /** Seed the backfill and drain the whole queue synchronously. Blocking — for
@@ -157,7 +180,9 @@ export class ReadModelMaintainer {
   /** Drain the entire queue synchronously. For shutdown / tests. */
   flushNow(): void {
     let guard = 0;
-    while (this.drainChunk(DRAIN_CHUNK) > 0 && guard++ < 1_000_000) { /* keep draining */ }
+    // Unpaced on purpose: the caller has asked for the queue to be EMPTY when this
+    // returns, and there is no UI left to keep responsive at shutdown.
+    while (this.drainChunk(DRAIN_CHUNK, Number.POSITIVE_INFINITY) > 0 && guard++ < 1_000_000) { /* keep draining */ }
   }
 
   // --- read_model_state helpers -------------------------------------------
