@@ -91,6 +91,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use that mailbox.
 
 ### Fixed
+- Mail that was never deleted could be deleted from the app. A folder's deletion
+  reconcile asks the server for that folder's full list of message numbers and
+  removes anything local that is missing from it — but the reply carries no
+  mailbox name, and a connection that had been recycled mid-run could answer from
+  a completely different folder. On 13 September a 917-message folder was
+  reconciled against the Inbox's 24,662 message numbers and 410 live messages
+  were removed from it. Every existing safety check was defeated by the same
+  thing: they all ask whether the list is *complete*, and a list from a bigger
+  mailbox looks more than complete. Two independent facts now have to line up
+  before anything is deleted — the connection must prove it still has the
+  expected folder open at every step of the enumeration, not just at the start,
+  and the returned numbers must fit inside what the folder itself reports about
+  its own size and numbering. Anything else aborts the pass and leaves the mail
+  alone. Nothing was lost on the server, so the affected folder refills on its
+  next sync.
+- Missing mail in Trash is now re-downloaded, like it already was everywhere
+  else. The background repair that spots messages the server holds and the app
+  lacks skipped Trash and Spam, on the reasoning that neither is worth archiving
+  for search. But a gap in Trash is mail you deleted and can still restore, it is
+  invisible until you go looking, and no other folder covers it — Gmail's "All
+  Mail" excludes Trash by definition — so Trash was the one place a gap could
+  never heal by itself. It is now repaired on the same schedule as every other
+  folder. Spam is still skipped: it churns constantly and nothing in it is
+  restored.
+- The app could freeze for minutes at a time after a large batch of mail was
+  removed or re-indexed. Search index maintenance looked its rows up by a column
+  the index cannot search on, so every single message added, edited or deleted
+  quietly walked the entire search index end to end. One folder's cleanup of 410
+  messages froze the main window for over three minutes; the same cost sat on
+  every arriving message body and every edited subject. Maintenance is now a
+  direct lookup — measured at 9.2 seconds down to 44ms for that same batch. The
+  existing search index is rebuilt once, automatically, on first launch.
+- The background pass that keeps conversation lists up to date now yields on a
+  time budget instead of a fixed number of conversations. A hundred short
+  threads and a hundred nine-hundred-message threads cost wildly different
+  amounts, so a fixed count bounded nothing; the pass now stops after roughly
+  8ms and picks up where it left off, keeping the window responsive whatever the
+  mix of threads.
+- The AI view no longer hangs on a loader for a big thread. Conversation
+  extraction runs once per thread and every other caller joins that run, but a
+  joiner used to receive only the final result — not the progress. Since the
+  background extractor usually starts a large thread first and asks for no
+  progress at all, a user who then opened that thread and switched to AI view
+  watched a bare spinner for the entire multi-minute run, with no message
+  bubbles, no counter, and no way to see it was working. Joining a run now
+  streams its progress: the latest snapshot paints immediately and the bubbles
+  and the `done/total` counter fill in as each message is extracted.
 - Snoozed, the last view with the conversation/message mix-up, and the one where
   it also disagreed with the sidebar. The badge counted every message tagged
   snoozed — including ones with no wake-up time, which the list can never show —
