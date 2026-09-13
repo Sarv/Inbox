@@ -159,9 +159,41 @@ export function stopBackfillScheduler(): void {
   }
 }
 
-/** Trash/Spam hold deleted/junk mail — no point archiving them for search. */
-function isExcludedFolder(folder: any): boolean {
+/**
+ * Folders the historical ARCHIVE skips: Trash/Spam hold deleted/junk mail, so
+ * there is no point paging their back catalogue in for search.
+ *
+ * This is NOT the drain's rule. Archiving history and repairing holes are
+ * different questions: see `drainableFolders` below, which keeps Trash.
+ */
+function isArchiveExcludedFolder(folder: any): boolean {
   return isTrashFolder(folder) || isSpamFolder(folder);
+}
+
+/**
+ * The folders the MISSING-message drain runs on.
+ *
+ * Trash is included even though the archive skips it. A hole in Trash is mail the
+ * user deleted and can still restore, and it is invisible until they go looking —
+ * on 2026-09-13 a mis-anchored UID enumeration classified a live message in Trash
+ * as server-deleted, and because the drain skipped the folder it was the only row
+ * of that incident that never came back on its own.
+ *
+ * Trash also cannot ride on the All-Mail shortcut: Gmail's `\All` excludes Trash
+ * and Spam by definition, so on a superset account no other folder covers it and
+ * it has to be put back on the list explicitly.
+ *
+ * Spam stays out on purpose. It is server-classified junk with a high churn rate,
+ * so draining it pays a repeated download for messages nobody restores — and the
+ * same messages expunge again a few days later.
+ */
+function drainableFolders(all: any[], candidates: any[]): any[] {
+  const out = candidates.slice();
+  const seen = new Set(out.map((f) => f.path));
+  for (const folder of all) {
+    if (isTrashFolder(folder) && !seen.has(folder.path)) out.push(folder);
+  }
+  return out.filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isSpamFolder(f));
 }
 
 /**
@@ -218,7 +250,9 @@ async function backfillAccount(
   // inserts. Runs on the pool for any not-yet-caught-up folder REGARDLESS of
   // backfillComplete, computing the real gap live (drainFolderChunk) — NOT from the
   // stale stored serverMessageCount. A folder that reports `done` is marked so it isn't
-  // re-scanned every tick (forward sync keeps it current afterward).
+  // re-scanned every tick (forward sync keeps it current afterward). Its folder list is
+  // NOT the archive's: `drainableFolders` adds Trash back, including on a superset
+  // account where nothing else covers it.
   let anyShort = false;
   // Count rows inserted this tick so the caller can nudge the renderer to refresh
   // the sidebar counts live. `recountPaths` = backfill-touched folders that need a
@@ -226,8 +260,8 @@ async function backfillAccount(
   let insertedTotal = 0;
   const recountPaths = new Set<string>();
   let touchedSuperset = false;
-  const drainable = candidates
-    .filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isExcludedFolder(f) && !drainDone!.has(f.path))
+  const drainable = drainableFolders(folders, candidates)
+    .filter((f) => !drainDone!.has(f.path))
     .sort((a, b) => (a.path === 'INBOX' ? -1 : b.path === 'INBOX' ? 1 : 0));
   for (const folder of drainable) {
     let progressedDrain = false;
@@ -244,7 +278,7 @@ async function backfillAccount(
 
   // 2) Downward historical backfill (older-than-oldest) for folders not yet fully paged.
   const pending = candidates
-    .filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isExcludedFolder(f) && !f.backfillComplete)
+    .filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isArchiveExcludedFolder(f) && !f.backfillComplete)
     // INBOX first (most valuable), then biggest folders (most history to recover).
     .sort((a, b) => {
       const ai = a.path === 'INBOX' ? 0 : 1;
@@ -283,7 +317,7 @@ async function backfillAccount(
   // (DELETION_RECONCILE_MS) and no-ops on small folders, so sweeping every
   // candidate here is cheap and self-limiting.
   for (const folder of candidates) {
-    if (folder.subscribed === false || folder.syncEnabled === false || isExcludedFolder(folder)) continue;
+    if (folder.subscribed === false || folder.syncEnabled === false || isArchiveExcludedFolder(folder)) continue;
     await maybeReconcileDeletions(storage, engine, folder);
   }
 
@@ -302,7 +336,7 @@ async function backfillAccount(
   const after: any[] = backfillableFolders((await storage.getFolders?.()) ?? []);
   const afterSuperset = after.find(isAllMailSuperset);
   const afterCandidates = afterSuperset ? [afterSuperset] : after;
-  const stillPending = afterCandidates.filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isExcludedFolder(f) && !f.backfillComplete).length;
+  const stillPending = afterCandidates.filter((f) => f.subscribed !== false && f.syncEnabled !== false && !isArchiveExcludedFolder(f) && !f.backfillComplete).length;
   return { remaining: stillPending + (anyShort ? 1 : 0), inserted: insertedTotal };
 }
 

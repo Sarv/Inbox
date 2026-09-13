@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *   - first tick 30s after start; then FAST (3s / 24 chunks) only on a quiet
  *     machine, GENTLE (15s / 4 chunks, one folder per tick) while mail is landing,
  *     and a 30-minute sleep once everything is archived,
- *   - Trash/Spam and unsubscribed folders are never crawled; an All-Mail superset
- *     replaces the per-folder crawl,
+ *   - the ARCHIVE never crawls Trash/Spam or unsubscribed folders, and an All-Mail
+ *     superset replaces its per-folder crawl; the missing-message DRAIN keeps Trash
+ *     (restorable mail, covered by no superset) and drops only Spam,
  *   - a folder that reports "caught up" is not re-scanned every tick,
  *   - one account's failure never stops the others,
  *   - a tick already in flight is not re-entered, and stop() cancels the chain.
@@ -23,6 +24,7 @@ const LARGE_MAILBOX_THRESHOLD = 5_000;
 interface Folder {
   path: string;
   subscribed?: boolean;
+  syncEnabled?: boolean;
   backfillComplete?: boolean;
   serverMessageCount?: number;
   // Sync state the duplicate-mailbox collapse reads: two names are only folded
@@ -360,7 +362,10 @@ describe('target enumeration', () => {
 });
 
 describe('folder selection', () => {
-  it('never crawls Trash / Spam / unsubscribed folders', async () => {
+  // Breaks: the history crawler paging Trash/Spam or a folder the user turned off
+  // — thousands of fetches for mail nobody searches, in mailboxes the sidebar
+  // either hides or the user opted out of.
+  it('the ARCHIVE never crawls Trash / Spam / unsubscribed folders', async () => {
     const a = makeAccount([
       folder('Trash'), folder('[Gmail]/Spam'), folder('Archive', { subscribed: false }), folder('INBOX'),
     ]);
@@ -369,8 +374,84 @@ describe('folder selection', () => {
     const svc = await load();
     svc.startBackfillScheduler();
     await advance(FIRST_DELAY_MS);
-    expect(a.state.drainCalls).toEqual(['INBOX']);
     expect(a.state.backfillCalls).toEqual(['INBOX']);
+    svc.stopBackfillScheduler();
+  });
+
+  // BEHAVIOUR CHANGE (2026-09-13): the drain used to share the archive's rule and
+  // skip Trash. Breaks: a hole in Trash never healing. A mis-anchored UID
+  // enumeration classified a live Trash message as server-deleted, and Trash was
+  // the one folder of that incident whose row never came back — the drain, which
+  // refilled every other folder within four minutes, was not allowed to look at it.
+  // Spam and unsubscribed folders stay out.
+  it('the DRAIN covers Trash, but still skips Spam and unsubscribed folders', async () => {
+    const a = makeAccount([
+      folder('Trash'), folder('[Gmail]/Spam'), folder('Archive', { subscribed: false }), folder('INBOX'),
+    ]);
+    h.activeStorage = a.storage;
+    h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startBackfillScheduler();
+    await advance(FIRST_DELAY_MS);
+    expect(a.state.drainCalls).toEqual(['INBOX', 'Trash']); // INBOX first, then Trash
+    svc.stopBackfillScheduler();
+  });
+
+  // Breaks: Trash never draining on a Gmail account. The All-Mail shortcut narrows
+  // the candidate list to the superset alone, and `\All` excludes Trash by
+  // definition — so without putting it back explicitly, nothing covers it at all.
+  it('drains Trash on an All-Mail superset account, where no other folder covers it', async () => {
+    const a = makeAccount([
+      folder('[Gmail]/All Mail', { allMail: true }),
+      folder('Trash'),
+      folder('[Gmail]/Spam'),
+      folder('INBOX'),
+    ]);
+    h.activeStorage = a.storage;
+    h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startBackfillScheduler();
+    await advance(FIRST_DELAY_MS);
+    // The superset replaces INBOX and every label; Trash is added back beside it.
+    expect(new Set(a.state.drainCalls)).toEqual(new Set(['[Gmail]/All Mail', 'Trash']));
+    expect(a.state.backfillCalls).toEqual(['[Gmail]/All Mail']); // archive still skips Trash
+    svc.stopBackfillScheduler();
+  });
+
+  // Breaks: draining a folder twice per tick. Trash is added back by path, so on a
+  // NON-superset account (where it is already a candidate) it must not be appended
+  // a second time — two drains of one folder is wasted server round-trips.
+  it('does not drain Trash twice when it is already a candidate', async () => {
+    const a = makeAccount([folder('Trash'), folder('INBOX')]);
+    h.activeStorage = a.storage;
+    h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startBackfillScheduler();
+    await advance(FIRST_DELAY_MS);
+    expect(a.state.drainCalls).toEqual(['INBOX', 'Trash']);
+    svc.stopBackfillScheduler();
+  });
+
+  // Breaks: honouring the user's "stop syncing this folder" everywhere EXCEPT
+  // Trash. Adding Trash back must not smuggle it past the subscribed/syncEnabled
+  // gate that every other folder passes through.
+  it('still skips a Trash the user unsubscribed or disabled', async () => {
+    const unsubscribed = makeAccount([folder('Trash', { subscribed: false }), folder('INBOX')]);
+    h.activeStorage = unsubscribed.storage;
+    h.activeEngine = unsubscribed.engine;
+    let svc = await load();
+    svc.startBackfillScheduler();
+    await advance(FIRST_DELAY_MS);
+    expect(unsubscribed.state.drainCalls).toEqual(['INBOX']);
+    svc.stopBackfillScheduler();
+
+    const disabled = makeAccount([folder('Trash', { syncEnabled: false }), folder('INBOX')]);
+    h.activeStorage = disabled.storage;
+    h.activeEngine = disabled.engine;
+    svc = await load();
+    svc.startBackfillScheduler();
+    await advance(FIRST_DELAY_MS);
+    expect(disabled.state.drainCalls).toEqual(['INBOX']);
     svc.stopBackfillScheduler();
   });
 
