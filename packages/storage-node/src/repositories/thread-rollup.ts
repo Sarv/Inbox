@@ -22,6 +22,7 @@ import { createLogger } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 
+import { prepared } from '../statement-cache';
 import { THREAD_STATE_EXCLUDED_FOLDERS, isShadowedInFolder } from './thread-sql';
 
 const logger = createLogger('thread-rollup');
@@ -274,7 +275,11 @@ export function buildRollupContext(db: Database.Database): RollupContext {
 /** Read a thread's email rows and derive its rollup (no writes). */
 export function computeThreadRollup(db: Database.Database, threadId: string, ctx?: RollupContext): ThreadRollup {
   const context = ctx ?? buildRollupContext(db);
-  const rows = db.prepare(
+  // Cached, not re-prepared: this runs once PER THREAD inside the drain loop, so
+  // a fresh prepare() here is a parse+plan on every iteration of a backfill that
+  // walks every thread in the database.
+  const rows = prepared(
+    db,
     `SELECT id, message_id, tags, date, has_attachments, priority_score,
             from_name, from_address, subject, updated_at
        FROM emails WHERE thread_id = ?`,
@@ -395,16 +400,40 @@ export function rebuildThread(db: Database.Database, threadId: string, ctx?: Rol
   withImmediateTxn(db, () => write(computeThreadRollup(db, threadId, context)));
 }
 
-/** Recompute & persist many threads in ONE transaction (batch ingest / backfill). */
-export function rebuildThreads(db: Database.Database, threadIds: Iterable<string>, ctx?: RollupContext): number {
+/**
+ * Recompute & persist many threads in ONE transaction (batch ingest / backfill).
+ *
+ * `budgetMs` caps how long the synchronous loop may hold the thread: once the
+ * budget is spent the loop stops early and returns HOW MANY it actually rebuilt,
+ * leaving the rest for the caller's next pass. It is a TIME budget rather than a
+ * row count on purpose — per-thread cost varies by orders of magnitude (a
+ * two-message thread against a nine-hundred-message one), so "N threads" bounds
+ * nothing about how long the event loop is held. Omit it for the unpaced,
+ * run-to-completion behaviour (ingest, shutdown flush, tests).
+ *
+ * The deadline is only consulted AFTER a thread is written, so a budget of 0
+ * still makes progress and can never livelock the queue.
+ */
+export function rebuildThreads(
+  db: Database.Database,
+  threadIds: Iterable<string>,
+  ctx?: RollupContext,
+  budgetMs?: number,
+): number {
   const ids = [...new Set(threadIds)];
   if (ids.length === 0) return 0;
   const context = ctx ?? buildRollupContext(db);
   const write = makeWriter(db);
+  const deadline = typeof budgetMs === 'number' && Number.isFinite(budgetMs) ? Date.now() + budgetMs : null;
+  let built = 0;
   withImmediateTxn(db, () => {
-    for (const id of ids) write(computeThreadRollup(db, id, context));
+    for (const id of ids) {
+      write(computeThreadRollup(db, id, context));
+      built++;
+      if (deadline !== null && built < ids.length && Date.now() >= deadline) break;
+    }
   });
-  return ids.length;
+  return built;
 }
 
 /**
