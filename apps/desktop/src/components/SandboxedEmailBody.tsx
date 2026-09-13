@@ -3,6 +3,7 @@ import { useRef, useEffect, useMemo, useState } from 'react';
 
 import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
+import { TABLE_SCROLL_CSS, wrapOverflowingTables } from '../utils/wide-table-scroll';
 
 interface SandboxedEmailBodyProps {
   html: string;
@@ -278,6 +279,12 @@ function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boole
       color: ${fg} !important;
     }
     ` : ''}
+    ${normalize ? '' : `
+    /* A table too wide for the message scrolls inside its own wrapper rather
+       than being clipped by the body. Standard view only — the normalized path
+       above already gives every table a contained scroll. */
+    ${TABLE_SCROLL_CSS}
+    `}
     pre, code {
       white-space: pre-wrap;
       max-width: 100%;
@@ -717,6 +724,12 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
       attached = true;
 
       const measure = () => {
+        // Before measuring: a table wider than the body would otherwise be
+        // clipped away. Wrapping it changes the height (a scrollbar on
+        // platforms that reserve space for one), so it has to happen first.
+        if (!normalize) {
+          try { wrapOverflowingTables(idoc); } catch { /* layout not ready */ }
+        }
         // Measure the true bottom of the CONTENT with a Range over the body.
         // A Range's bounding box covers every text node + element (so a
         // trailing bare text node can't be missed → no under-measure →
