@@ -23,7 +23,7 @@
     "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"
   },
   "dependencies": {
-    "@sarv-in/email-chat-view": "^0.2.1",
+    "@sarv-in/email-chat-view": "^0.2.2",
     "@sarvinbox/core": "workspace:*",
     "@sarvinbox/storage-node": "workspace:*",
     "@sentry/electron": "^7.15.0",
