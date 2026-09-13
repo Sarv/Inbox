@@ -9,6 +9,7 @@ import { cacheHasHealedMojibake } from '../utils/mojibake';
 
 import { makeAICompletion, getDefaultProvider, loadAIFeatures } from './ai-service';
 import { registerImage } from './image-cache';
+import { createProgressHub, type ProgressHub } from './progress-hub';
 
 // Bump this when extraction logic changes to invalidate stale caches.
 // Exported so the renderer's pre-cache shortcut (useEmailDetail's
@@ -1085,16 +1086,23 @@ export async function reExtractSingleMessage(
 
 // ========== Main Extraction Logic ==========
 
+/** One single-flight extraction: the promise everyone joins, plus the progress
+ *  channel that run broadcasts on (see {@link createProgressHub}). */
+interface InFlightExtraction {
+  promise: Promise<ConversationResult>;
+  hub: ProgressHub<ConversationProgress>;
+}
+
 /**
  * Module-level in-flight dedup, keyed by threadId. Three independent
  * callers can race the same thread (useEmailDetail's effects, the
  * store's autoExtractRecentConversations, the background batch
  * listener) — without this each fires its own round of LLM calls and
- * the cache writes race. Non-force callers JOIN the pending promise;
- * a forceRefresh waits for the pending run to settle first, then runs
+ * the cache writes race. Non-force callers JOIN the pending run;
+ * a forceRefresh waits for it to settle first, then runs
  * fresh (so its cache write lands last).
  */
-const inFlightExtractions = new Map<string, Promise<ConversationResult>>();
+const inFlightExtractions = new Map<string, InFlightExtraction>();
 
 /**
  * Extract conversation messages from a thread.
@@ -1110,21 +1118,40 @@ export async function extractConversation(
   const pending = inFlightExtractions.get(threadId);
   if (pending) {
     if (!options.forceRefresh) {
-      // Joiners attach to the pending promise — they get the final
-      // result but NOT the in-flight run's onProgress callbacks
-      // (acceptable: only the initiating caller drives the UI).
+      // Joiners share the run's progress channel, not just its result. The
+      // background batch listener usually gets here FIRST on a big thread, so
+      // without this the user who then opens that thread and switches to AI
+      // view watched a bare spinner for the whole multi-minute run — the
+      // bubbles existed, nothing was publishing them. subscribe() replays the
+      // latest snapshot immediately, so joining mid-run paints what has been
+      // extracted so far instead of an empty pane.
       console.log(`[Conversation] Extraction already in flight for ${threadId} — joining pending run`);
-      return pending;
+      const unsubscribe = options.onProgress ? pending.hub.subscribe(options.onProgress) : null;
+      try {
+        return await pending.promise;
+      } finally {
+        unsubscribe?.();
+      }
     }
     // Forced refresh: let the in-flight run finish (its cache write
     // would otherwise race ours), then start the fresh run below.
     console.log(`[Conversation] Force refresh for ${threadId} — waiting for in-flight run to settle first`);
-    await pending.catch(() => { /* previous run's failure is its caller's concern */ });
+    await pending.promise.catch(() => { /* previous run's failure is its caller's concern */ });
   }
-  const run = doExtractConversation(threadId, emails, _currentUserEmail, options).finally(() => {
-    if (inFlightExtractions.get(threadId) === run) inFlightExtractions.delete(threadId);
+  // The run ALWAYS publishes through the hub — even when this caller passed no
+  // onProgress (the background extractor never does). That is what gives a
+  // later joiner a snapshot to replay; without it the run that most needs
+  // watching is the one nobody can watch.
+  const hub = createProgressHub<ConversationProgress>();
+  const unsubscribeOwner = options.onProgress ? hub.subscribe(options.onProgress) : null;
+  const run = doExtractConversation(threadId, emails, _currentUserEmail, {
+    ...options,
+    onProgress: (update) => hub.publish(update),
+  }).finally(() => {
+    unsubscribeOwner?.();
+    if (inFlightExtractions.get(threadId)?.promise === run) inFlightExtractions.delete(threadId);
   });
-  inFlightExtractions.set(threadId, run);
+  inFlightExtractions.set(threadId, { promise: run, hub });
   return run;
 }
 
