@@ -10,6 +10,7 @@ import { LabelChips } from '../LabelChips';
 import { ThreadSummary } from '../ThreadSummary';
 import { Tooltip } from '../Tooltip';
 
+import { useChatPrewarm } from './chat-prewarm';
 import { EmailCard } from './EmailCard';
 import { EmailToolbar } from './EmailToolbar';
 import { useEmailDetail } from './hooks/useEmailDetail';
@@ -18,6 +19,9 @@ import { SignatureDetectionModal } from './SignatureDetectionModal';
 import { ThreadChatView } from './ThreadChatView';
 import { ThreadList } from './ThreadList';
 
+
+/** Stable empty thread, so the prewarm effect does not restart on every render. */
+const NO_EMAILS: readonly [] = [];
 
 export function EmailDetail() {
   const ctx = useEmailDetail();
@@ -53,6 +57,18 @@ export function EmailDetail() {
         : '',
     [ctx?.conversationMessages, ctx?.threadEmails, currentUserEmail],
   );
+
+  // Get the chat view's split done in the background while the reader is still
+  // in the standard view, so switching to it is instant rather than a freeze on
+  // a long thread. Gated on the same condition that decides whether the toggle
+  // is offered at all — warming a thread the reader cannot switch is work that
+  // only evicts another thread's from a shared cache.
+  useChatPrewarm({
+    emails: ctx?.threadEmails ?? NO_EMAILS,
+    currentUserEmail,
+    enabled:
+      !!ctx && !ctx.chatViewEnabled && (ctx.threadEmails.length > 1 || ctx.hasInlineConversation),
+  });
 
   if (!ctx) {
     return (

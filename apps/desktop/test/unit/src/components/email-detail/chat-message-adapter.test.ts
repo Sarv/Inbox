@@ -7,56 +7,19 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   attachmentsOf,
   chatMessagesFromConversation,
+  bodyOf,
   chatMessagesFromThread,
   draftIdsIn,
   isFromMe,
+  isThreadSegmentWarm,
   mailsFromEmails,
   toEpochMs,
   toEpochSeconds,
+  warmThreadSegments,
 } from '../../../../../src/components/email-detail/chat-message-adapter';
 import type { ConversationMessage } from '../../../../../src/services/conversation-service';
 
-const ME = 'me@acme.example';
-
-/** Seconds, the unit sarvinbox stores — deliberately not milliseconds. */
-const TEN_AM = 1772532000; // 2026-03-03T10:00:00Z
-const ELEVEN_AM = TEN_AM + 3600;
-
-function email(overrides: Partial<EmailRecord> & { id: string }): EmailRecord {
-  return {
-    messageId: `<${overrides.id}@acme.example>`,
-    threadId: 't1',
-    folderId: 'INBOX',
-    uid: 1,
-    tags: '',
-    subject: 'Q3',
-    fromAddress: 'alice@acme.example',
-    fromName: 'Alice Chen',
-    toAddress: ME,
-    toNames: null,
-    ccAddress: null,
-    ccNames: null,
-    bccAddress: null,
-    bccNames: null,
-    replyTo: null,
-    date: TEN_AM,
-    receivedDate: null,
-    cleanBody: '',
-    rawBody: '',
-    contentType: 'html',
-    contentHash: 'hash',
-    inReplyTo: null,
-    references: null,
-    priority: null,
-    hasAttachments: false,
-    attachmentCount: 0,
-    attachmentNames: null,
-    attachmentSizes: null,
-    hasEmbedding: false,
-    embeddingLastGenerated: null,
-    ...overrides,
-  } as EmailRecord;
-}
+import { ELEVEN_AM, email, ME, TEN_AM } from './email-fixture';
 
 function conversationMessage(
   overrides: Partial<ConversationMessage> & { id: string },
@@ -469,5 +432,92 @@ describe('chatMessagesFromThread', () => {
 
   it('has nothing to show for an empty thread', () => {
     expect(convert([])).toEqual([]);
+  });
+});
+
+describe('bodyOf', () => {
+  // Regression: the segment cache is keyed on this string. If the warm and the
+  // render ever disagree about which column the body comes from, every warmed
+  // entry is a miss and nothing says so — the view just does the work twice.
+  it('prefers the original HTML and falls back to the stripped preview', () => {
+    expect(bodyOf(email({ id: 'e1', rawBody: '<p>raw</p>', cleanBody: 'clean' }))).toBe('<p>raw</p>');
+    expect(bodyOf(email({ id: 'e2', rawBody: '', cleanBody: 'clean' }))).toBe('clean');
+    expect(bodyOf(email({ id: 'e3', rawBody: '', cleanBody: '' }))).toBe('');
+  });
+});
+
+describe('warmThreadSegments', () => {
+  /** A fresh id per assertion — the segment cache is shared and long-lived. */
+  let serial = 0;
+  const fresh = (body: string) =>
+    email({ id: `warm-${(serial += 1)}`, date: ELEVEN_AM, rawBody: body });
+
+  const QUOTING_REPLY = [
+    '<div dir="ltr">Thanks Alice, that works.</div>',
+    '<div class="gmail_quote">',
+    '<div dir="ltr" class="gmail_attr">',
+    'On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br>',
+    '</div>',
+    '<blockquote class="gmail_quote"><div dir="ltr">Can we move Q3 to Friday?</div></blockquote>',
+    '</div>',
+  ].join('');
+
+  // Regression: the whole point. If the warm writes an entry the render path
+  // does not look for, the click that opens the chat view still splits the
+  // whole thread — and the only symptom is that it stayed slow.
+  it('leaves the split where the chat view will find it', () => {
+    const mail = fresh(QUOTING_REPLY);
+    expect(isThreadSegmentWarm(mail)).toBe(false);
+
+    warmThreadSegments([mail], { currentUserEmail: ME });
+
+    expect(isThreadSegmentWarm(mail)).toBe(true);
+  });
+
+  // Regression: warming a slice at a time is only safe because a mail's
+  // segments do not depend on the mails around it. If that ever stops being
+  // true the chunked warm would serve the view a DIFFERENT split than the one
+  // it would have computed — wrong bubbles, not just slow ones.
+  it('produces the same bubbles warmed one mail at a time as in one pass', () => {
+    const first = fresh(QUOTING_REPLY);
+    const second = email({ id: `warm-${(serial += 1)}`, date: TEN_AM, rawBody: '<p>Earlier</p>' });
+    const cold = chatMessagesFromThread([first, second], { currentUserEmail: ME });
+
+    const warmFirst = fresh(QUOTING_REPLY);
+    const warmSecond = email({
+      id: `warm-${(serial += 1)}`,
+      date: TEN_AM,
+      rawBody: '<p>Earlier</p>',
+    });
+    warmThreadSegments([warmFirst], { currentUserEmail: ME });
+    warmThreadSegments([warmSecond], { currentUserEmail: ME });
+    const warmed = chatMessagesFromThread([warmFirst, warmSecond], { currentUserEmail: ME });
+
+    expect(warmed.map((each) => each.body)).toEqual(cold.map((each) => each.body));
+    expect(warmed.map((each) => each.date)).toEqual(cold.map((each) => each.date));
+  });
+
+  // Regression: a body that arrives late replaces an empty one, and the entry
+  // warmed for the old text must not be served for the new. The cache is keyed
+  // on the body for exactly this, so the warm must key it the same way.
+  it('does not count a mail as warm once its body changes', () => {
+    const mail = fresh('<p>First</p>');
+    warmThreadSegments([mail], { currentUserEmail: ME });
+
+    expect(isThreadSegmentWarm({ ...mail, rawBody: '<p>Second</p>' })).toBe(false);
+  });
+
+  // Regression: a mail with no body has nothing to split, and calling it warm
+  // would let the walk skip it forever — the body would land and never be
+  // split ahead of the click.
+  it('never calls a mail with no body warm', () => {
+    const mail = email({ id: `warm-${(serial += 1)}`, rawBody: '', cleanBody: '' });
+    warmThreadSegments([mail], { currentUserEmail: ME });
+
+    expect(isThreadSegmentWarm(mail)).toBe(false);
+  });
+
+  it('has nothing to do for an empty slice', () => {
+    expect(() => warmThreadSegments([], { currentUserEmail: ME })).not.toThrow();
   });
 });
