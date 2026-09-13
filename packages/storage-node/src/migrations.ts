@@ -7,7 +7,7 @@ import { basename, join } from 'path';
 import { logger, isRoleAddress, isNoReplyAddress, contactNameForAddress, normalizeSubject } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
-import { applyFtsSchema, FTS_TRIGGERS } from './fts-schema';
+import { applyFtsSchema, FTS_REBUILD_SQL, FTS_TRIGGERS } from './fts-schema';
 import { hasSharedContacts, SHARED } from './shared-contacts';
 import { rawBodyExpression } from './repositories/body-storage';
 import { clearInlineImageCache, inflateInlineImages } from './repositories/inline-image-store';
@@ -2951,6 +2951,65 @@ export const allMailThreadIndexes: Migration = {
   },
 };
 
+/**
+ * v84 — re-key the search index by rowid so maintaining it stops scanning it.
+ *
+ * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
+ * maintenance statement written as `WHERE email_id = ?` planned as a full scan
+ * of the entire index to reach ONE row — on the DELETE path and, because the
+ * update trigger deletes before re-inserting, on the UPDATE path too. Measured
+ * on a 27k-message index: 410 deletes took 9,165ms by `email_id` and 44ms by
+ * `rowid`, for the same resulting index. On a real mailbox it showed up as a
+ * 194-second main-process freeze while a folder reconciled 410 deletions.
+ *
+ * The triggers now address rows by fts5's own `rowid`, holding it equal to the
+ * `emails` rowid the entry mirrors (see the rowid contract in fts-schema.ts).
+ * Existing indexes were built without that alignment, so their rowids are
+ * arbitrary and the new statements would address the wrong row — the index has
+ * to be rebuilt, not just re-triggered.
+ *
+ * The rebuild re-tokenizes every message, so it is not cheap on a large mailbox
+ * (seconds, once, at startup). It runs inside the migration's transaction: a
+ * half-rebuilt index would silently return partial search results, which is far
+ * worse than a slower launch, and an interrupted run rolls back to the old index
+ * and retries on the next boot.
+ */
+export const ftsRowidAlignment: Migration = {
+  version: 84,
+  name: 'fts_rowid_alignment',
+  up: (db) => {
+    const hasFts = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='emails_fts'")
+      .get();
+    if (!hasFts) {
+      logger.info('FTS rowid (v84): no FTS table on this DB — nothing to re-key');
+      return;
+    }
+
+    // DROP rather than DELETE: this discards the old index wholesale, and
+    // applyFtsSchema recreates the table (its DDL is IF NOT EXISTS) together
+    // with every trigger in its current shape.
+    db.exec('DROP TABLE IF EXISTS emails_fts;');
+    applyFtsSchema(db);
+    db.exec(FTS_REBUILD_SQL);
+
+    const indexed = (db.prepare('SELECT COUNT(*) AS n FROM emails_fts').get() as { n: number }).n;
+    logger.info(`FTS rowid (v84): search index re-keyed by rowid (${indexed} message(s) re-indexed)`);
+  },
+  down: (db) => {
+    // The old shape is simply the same index without the rowid alignment; the
+    // rebuild is what matters, so re-run it. Triggers are restored by whichever
+    // earlier migration owns them.
+    const hasFts = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='emails_fts'")
+      .get();
+    if (!hasFts) return;
+    db.exec('DROP TABLE IF EXISTS emails_fts;');
+    applyFtsSchema(db);
+    db.exec(FTS_REBUILD_SQL);
+  },
+};
+
 export const restoreLostContactDirectory: Migration = {
   version: 81,
   name: 'restore_lost_contact_directory',
@@ -3125,5 +3184,6 @@ export function createMigrationManager(
   manager.register(restoreLostContactDirectory);
   manager.register(flagViewThreadIndexes);
   manager.register(allMailThreadIndexes);
+  manager.register(ftsRowidAlignment);
   return manager;
 }
