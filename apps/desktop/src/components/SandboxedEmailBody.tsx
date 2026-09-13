@@ -3,7 +3,10 @@ import { useRef, useEffect, useMemo, useState } from 'react';
 
 import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
-import { TABLE_SCROLL_CSS, wrapOverflowingTables } from '../utils/wide-table-scroll';
+// Shared with Chat View rather than kept in a second copy here: the two
+// renderers had the same two-step fit written twice, and the measurement is the
+// part that is easy to get subtly wrong. The library owns it and its tests.
+import { WIDE_TABLE_CSS, fitWideTables } from '@sarv-in/email-chat-view';
 
 interface SandboxedEmailBodyProps {
   html: string;
@@ -280,10 +283,11 @@ function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boole
     }
     ` : ''}
     ${normalize ? '' : `
-    /* A table too wide for the message scrolls inside its own wrapper rather
-       than being clipped by the body. Standard view only — the normalized path
-       above already gives every table a contained scroll. */
-    ${TABLE_SCROLL_CSS}
+    /* A table too wide for the message is first allowed to wrap its text, and
+       scrolls on its own only if that still isn't enough — rather than being
+       clipped by the body. Standard view only: the normalized path above
+       already restructures every table. */
+    ${WIDE_TABLE_CSS}
     `}
     pre, code {
       white-space: pre-wrap;
@@ -725,10 +729,10 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
 
       const measure = () => {
         // Before measuring: a table wider than the body would otherwise be
-        // clipped away. Wrapping it changes the height (a scrollbar on
-        // platforms that reserve space for one), so it has to happen first.
+        // clipped away. Letting it reflow (and scrolling it if that isn't
+        // enough) changes the height, so it has to happen first.
         if (!normalize) {
-          try { wrapOverflowingTables(idoc); } catch { /* layout not ready */ }
+          try { fitWideTables(idoc); } catch { /* layout not ready — the next measurement retries */ }
         }
         // Measure the true bottom of the CONTENT with a Range over the body.
         // A Range's bounding box covers every text node + element (so a
