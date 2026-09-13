@@ -23,7 +23,28 @@
  * fallback, and the WHEN guards are explained in migration 73.
  */
 
-/** The virtual table. `email_id` is UNINDEXED — it is a key, not a search term. */
+/**
+ * The virtual table. `email_id` is UNINDEXED — it is a key, not a search term.
+ *
+ * ROWID CONTRACT: every index row is written with `rowid` set to the `emails`
+ * rowid it mirrors, and every maintenance statement addresses it that way.
+ *
+ * This is load-bearing, not tidiness. `UNINDEXED` means exactly what it says:
+ * fts5 stores `email_id` but builds no index over it, and fts5 exposes no
+ * secondary index at all — so `DELETE FROM emails_fts WHERE email_id = ?` plans
+ * as `SCAN emails_fts VIRTUAL TABLE INDEX 0:`, a full scan of the whole index
+ * for ONE row. Every delete and every re-index paid that, which made routine
+ * maintenance quadratic in mailbox size: measured on a 27k-message index,
+ * deleting 410 messages took 9,165ms by `email_id` and 44ms by `rowid` — the
+ * same 410 rows and the same resulting index, 208x apart. On a real mailbox
+ * that scan was a 194-SECOND main-process freeze (2026-09-13, reconciling 410
+ * deletions in one folder), and because `emails_fts_update` deletes before it
+ * re-inserts, the same scan was on the UPDATE path too — every edited subject or
+ * arriving body paid it.
+ *
+ * `rowid` is fts5's own primary key, so addressing by it plans as
+ * `INDEX 0:=` — a seek. Keep every statement here keyed that way.
+ */
 export const FTS_TABLE_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS emails_fts USING fts5(
     email_id UNINDEXED,
@@ -48,12 +69,28 @@ export const ftsBodySource = (idExpr: string, inlineExpr: string): string =>
 
 /** Index row built from an `emails` row in scope as `new`. */
 const INSERT_FROM_NEW_EMAIL = `
-  INSERT INTO emails_fts(${FTS_COLUMNS})
+  INSERT INTO emails_fts(rowid, ${FTS_COLUMNS})
   VALUES (
+    new.rowid,
     new.id, new.subject, new.from_address, new.from_name, new.to_address, new.cc_address, new.attachment_names,
     ${ftsBodySource('new.id', 'new.clean_body')}
   );
 `;
+
+/**
+ * Drop the index entry for one email, addressed by fts5's rowid.
+ *
+ * The `email_bodies` triggers have no `emails` row in scope, so the rowid comes
+ * from a PK lookup on `emails` — a seek, unlike the scan a WHERE on the
+ * UNINDEXED `email_id` column would plan as (see the rowid contract above).
+ *
+ * A missing header row yields NULL, which matches nothing. That is exactly right
+ * during a cascade delete: `emails_fts_delete` has already removed the entry by
+ * `old.rowid` and then deleted the body row, so this fires with the header
+ * already gone and must be a no-op.
+ */
+const DELETE_BY_EMAIL_ID = (idExpr: string): string =>
+  `DELETE FROM emails_fts WHERE rowid = (SELECT rowid FROM emails WHERE id = ${idExpr});`;
 
 /**
  * Index row built from a body row in scope as `new`/`old`, reading the headers
@@ -62,8 +99,8 @@ const INSERT_FROM_NEW_EMAIL = `
  * entry is written.
  */
 const insertFromBodyRow = (bodyExpr: string, idExpr: string): string => `
-  INSERT INTO emails_fts(${FTS_COLUMNS})
-  SELECT e.id, e.subject, e.from_address, e.from_name, e.to_address, e.cc_address, e.attachment_names, ${bodyExpr}
+  INSERT INTO emails_fts(rowid, ${FTS_COLUMNS})
+  SELECT e.rowid, e.id, e.subject, e.from_address, e.from_name, e.to_address, e.cc_address, e.attachment_names, ${bodyExpr}
   FROM emails e WHERE e.id = ${idExpr};
 `;
 
@@ -84,7 +121,7 @@ export const FTS_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
   [
     'emails_fts_delete',
     `CREATE TRIGGER emails_fts_delete AFTER DELETE ON emails BEGIN
-      DELETE FROM emails_fts WHERE email_id = old.id;
+      DELETE FROM emails_fts WHERE rowid = old.rowid;
       -- Not left to ON DELETE CASCADE: \`PRAGMA foreign_keys\` is per-connection
       -- and defaults to OFF, so a tool or a future code path that opens this DB
       -- without setting it would leak a body row per deleted email — the largest
@@ -108,7 +145,7 @@ export const FTS_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
         OR (new.clean_body IS NOT old.clean_body
             AND NOT EXISTS (SELECT 1 FROM email_bodies b WHERE b.email_id = new.id))
     BEGIN
-      DELETE FROM emails_fts WHERE email_id = old.id;
+      DELETE FROM emails_fts WHERE rowid = old.rowid;
       ${INSERT_FROM_NEW_EMAIL}
     END;`,
   ],
@@ -121,7 +158,7 @@ export const FTS_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
     `CREATE TRIGGER email_bodies_fts_insert AFTER INSERT ON email_bodies
       WHEN new.clean_body IS NOT (SELECT e.clean_body FROM emails e WHERE e.id = new.email_id)
     BEGIN
-      DELETE FROM emails_fts WHERE email_id = new.email_id;
+      ${DELETE_BY_EMAIL_ID('new.email_id')}
       ${insertFromBodyRow('new.clean_body', 'new.email_id')}
     END;`,
   ],
@@ -130,7 +167,7 @@ export const FTS_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
     `CREATE TRIGGER email_bodies_fts_update AFTER UPDATE ON email_bodies
       WHEN new.clean_body IS NOT old.clean_body
     BEGIN
-      DELETE FROM emails_fts WHERE email_id = new.email_id;
+      ${DELETE_BY_EMAIL_ID('new.email_id')}
       ${insertFromBodyRow('new.clean_body', 'new.email_id')}
     END;`,
   ],
@@ -141,7 +178,7 @@ export const FTS_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
     // no longer exists.
     'email_bodies_fts_delete',
     `CREATE TRIGGER email_bodies_fts_delete AFTER DELETE ON email_bodies BEGIN
-      DELETE FROM emails_fts WHERE email_id = old.email_id;
+      ${DELETE_BY_EMAIL_ID('old.email_id')}
       ${insertFromBodyRow('e.clean_body', 'old.email_id')}
     END;`,
   ],
@@ -154,8 +191,8 @@ export const FTS_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
  * would silently produce a body-less index on any relocated database.
  */
 export const FTS_REBUILD_SQL = `
-  INSERT INTO emails_fts(${FTS_COLUMNS})
-  SELECT id, subject, from_address, from_name, to_address, cc_address, attachment_names,
+  INSERT INTO emails_fts(rowid, ${FTS_COLUMNS})
+  SELECT rowid, id, subject, from_address, from_name, to_address, cc_address, attachment_names,
          ${ftsBodySource('emails.id', 'clean_body')}
   FROM emails;
 `;
@@ -167,11 +204,11 @@ export const FTS_REBUILD_SQL = `
  * indexing a message twice makes search return every hit twice.
  */
 export const FTS_BACKFILL_MISSING_SQL = `
-  INSERT INTO emails_fts(${FTS_COLUMNS})
-  SELECT id, subject, from_address, from_name, to_address, cc_address, attachment_names,
+  INSERT INTO emails_fts(rowid, ${FTS_COLUMNS})
+  SELECT rowid, id, subject, from_address, from_name, to_address, cc_address, attachment_names,
          ${ftsBodySource('emails.id', 'clean_body')}
   FROM emails
-  WHERE NOT EXISTS (SELECT 1 FROM emails_fts WHERE emails_fts.email_id = emails.id);
+  WHERE NOT EXISTS (SELECT 1 FROM emails_fts WHERE emails_fts.rowid = emails.rowid);
 `;
 
 /** Create the table and (re)create every trigger, replacing any older copy. */
