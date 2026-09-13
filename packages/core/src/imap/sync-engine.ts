@@ -1255,7 +1255,7 @@ export class SyncEngine {
     const doDrain = async (client: IIMAPClient, touch?: () => void): Promise<{ inserted: number; remaining: number; done: boolean }> => {
       if (typeof client.fetchAllUIDs !== 'function') return { inserted: 0, remaining: 0, done: true };
       await client.selectFolder(folderPath);
-      const serverUids = await client.fetchAllUIDs();
+      const serverUids = await client.fetchAllUIDs(folderPath);
       if (serverUids.length === 0) return { inserted: 0, remaining: 0, done: true };
       const localRows = await this.storage.getEmailUidsInFolder!(folder.id);
       const localSet = new Set(localRows.map((r) => r.uid));

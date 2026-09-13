@@ -767,11 +767,41 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     return messages.length > 0 ? messages[0] : null;
   }
 
-  private ensureCurrentFolder(): void {
+  /**
+   * Assert a mailbox is selected, and — when the caller names one — that it is
+   * THAT mailbox, judged by ImapFlow's live `mailbox.path` rather than by this
+   * class's own `currentFolder` bookkeeping.
+   *
+   * The distinction is the whole point. `currentFolder` is set by openFolder and
+   * cleared on disconnect, so it records what we last MEANT to select. The live
+   * `mailbox` is what the connection actually has open, and the two come apart
+   * whenever a connection is recycled mid-operation — which this app does
+   * routinely, on every wedged-command timeout. A stale-but-non-null
+   * `currentFolder` then let a whole-mailbox enumeration run against a DIFFERENT
+   * mailbox and report the result as this folder's.
+   *
+   * That is not a hypothetical: on 2026-09-13 a reconcile of a 917-message
+   * folder enumerated INBOX instead and came back with 24,662 UIDs. Every
+   * downstream guard PASSED, because a wrong list that is far LARGER than the
+   * folder looks complete — `serverUidsSet.size >= serverExists` held, the
+   * local-max-UID check held (985 < 27394) — and 410 live messages were
+   * classified as server-side deletions and removed. An unreadable answer and a
+   * true answer were the same value; only identity could tell them apart.
+   */
+  private ensureCurrentFolder(expectedPath?: string): string {
     this.ensureConnected();
-    if (!this.currentFolder) {
+    const livePath = (this.client as { mailbox?: { path?: string } })?.mailbox?.path;
+    if (typeof livePath !== 'string' || livePath.length === 0) {
       throw new IMAPError('No folder selected', 'NO_FOLDER_SELECTED');
     }
+    const wanted = expectedPath ?? this.currentFolder;
+    if (wanted && livePath !== wanted) {
+      throw new IMAPError(
+        `Mailbox mismatch: connection has "${livePath}" selected, not "${wanted}"`,
+        'MAILBOX_MISMATCH',
+      );
+    }
+    return livePath;
   }
 
   private async fetchInternal(
@@ -1085,8 +1115,13 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   async fetchFlagsOnly(
     uids: number[],
     onBatch?: () => void,
+    expectedPath?: string,
   ): Promise<Array<{ uid: number; flags: string[] }>> {
-    this.ensureCurrentFolder();
+    // Anchored for the same reason as fetchAllUIDs: these flags are applied to
+    // local rows BY UID, so a wrong mailbox silently rewrites this folder's
+    // read/starred state from another folder's — the 2026-09-13 reconcile read
+    // 24,662 flags from INBOX while reconciling a 917-message folder.
+    const selected = this.ensureCurrentFolder(expectedPath);
     if (uids.length === 0) return [];
 
     const BATCH = 500;
@@ -1106,6 +1141,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       if (!client || !this.isConnected()) {
         throw new IMAPError('Not connected to IMAP server', 'NOT_CONNECTED');
       }
+      // Reconnecting is not enough — a recycled connection comes back with
+      // whatever mailbox the next caller selected, and the batches after that
+      // point would report another folder's flags under this folder's UIDs.
+      this.ensureCurrentFolder(selected);
       const slice = sorted.slice(i, i + BATCH);
       const range = `${slice[0]}:${slice[slice.length - 1]}`;
       try {
@@ -1149,46 +1188,57 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * their labels cost a few bytes each. Empty array on a non-Gmail server so the
    * caller needs no capability check.
    */
-  async fetchAllLabels(): Promise<Array<{ uid: number; labels: string[] }>> {
-    this.ensureCurrentFolder();
+  async fetchAllLabels(expectedPath?: string): Promise<Array<{ uid: number; labels: string[] }>> {
+    const selected = this.ensureCurrentFolder(expectedPath);
     if (!this.supportsGmailLabels()) return [];
+    let rows: Array<{ uid: number; labels: string[] }>;
     try {
       const list = await this.op(
         'FETCH labels',
         this.client!.fetchAll('1:*', { uid: true, labels: true } as any, { uid: false }),
       );
-      return list
+      rows = list
         .filter((m) => m.uid > 0)
         .map((m) => ({ uid: m.uid, labels: (m as { labels?: Set<string> }).labels ? [...(m as { labels: Set<string> }).labels] : [] }));
     } catch (err) {
       throw this.toImapError(err, 'FETCH_LABELS_ERROR');
     }
+    // Outside the catch so a mismatch surfaces as MAILBOX_MISMATCH rather than
+    // being relabelled a fetch failure. Labels are filed against local rows BY
+    // UID, so a set harvested from a re-selected mailbox re-files this folder's mail.
+    this.ensureCurrentFolder(selected);
+    return rows;
   }
 
-  async fetchAllFlags(): Promise<Array<{ uid: number; flags: string[] }>> {
-    this.ensureCurrentFolder();
+  async fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[] }>> {
+    const selected = this.ensureCurrentFolder(expectedPath);
+    let rows: Array<{ uid: number; flags: string[] }>;
     try {
       const list = await this.op('FETCH flags', this.client!.fetchAll('1:*', { uid: true, flags: true }, { uid: false }));
-      return list
+      rows = list
         .filter((m) => m.uid > 0)
         .map((m) => ({ uid: m.uid, flags: m.flags ? [...m.flags] : [] }));
     } catch (err) {
       throw this.toImapError(err, 'FETCH_FLAGS_ERROR');
     }
+    // Same anchoring as fetchFlagsOnly, and outside the catch for the same reason:
+    // flags land on local rows by UID.
+    this.ensureCurrentFolder(selected);
+    return rows;
   }
 
-  async fetchAllUIDs(): Promise<number[]> {
-    this.ensureCurrentFolder();
+  async fetchAllUIDs(expectedPath?: string): Promise<number[]> {
+    // Anchored: a UID set is only meaningful as THIS folder's UID set, and the
+    // callers that diff it against local rows delete what is missing from it.
+    const selected = this.ensureCurrentFolder(expectedPath);
     // Prefer a real `UID SEARCH ALL` — it returns the complete UID set in one
     // compact response and is far lighter than streaming a `FETCH 1:*` over the
     // whole (possibly 20k+) mailbox. Some servers (observed on Sarv's INBOX)
     // reject the large sequence `FETCH 1:*` with "Command failed" while happily
     // answering SEARCH. Fall back to the FETCH form if SEARCH is unavailable.
+    let uids: number[] | false;
     try {
-      const uids = await this.op('UID SEARCH ALL', this.client!.search({ all: true }, { uid: true }));
-      if (Array.isArray(uids)) return uids.filter((u) => u > 0);
-      // search() returns false when nothing matches an open-but-empty mailbox.
-      return [];
+      uids = await this.op('UID SEARCH ALL', this.client!.search({ all: true }, { uid: true }));
     } catch (searchErr) {
       const msg = (searchErr as Error)?.message ?? String(searchErr);
       // On a TIMEOUT (heavy/slow account), the connection is already struggling —
@@ -1205,15 +1255,25 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // FETCH, but CHUNK by UID range so no single command enumerates the whole
       // (possibly huge) mailbox in one 60s-bounded op.
       logger.warn(`UID SEARCH ALL failed (rejected) — falling back to chunked UID FETCH: ${msg}`);
-      return await this.fetchAllUidsChunked();
+      return await this.fetchAllUidsChunked(selected);
     }
+    // OUTSIDE the catch, deliberately. The connection can be recycled and
+    // re-selected WHILE the search is in flight, so the answer has to be
+    // re-attributed to the mailbox it came from — checking only before the
+    // round-trip guards the wrong instant. A mismatch must ABORT: if this threw
+    // inside the try it would read as "SEARCH failed" and escalate to the chunked
+    // FETCH fallback, re-asking the same wrong mailbox.
+    this.ensureCurrentFolder(selected);
+    if (Array.isArray(uids)) return uids.filter((u) => u > 0);
+    // search() returns false when nothing matches an open-but-empty mailbox.
+    return [];
   }
 
   /** Enumerate every UID via ranged `UID FETCH` chunks (bounded per op), for
    *  servers that reject `SEARCH ALL` / `FETCH 1:*`. A chunk failure throws — the
    *  caller must never diff local rows against a PARTIAL server set (missing uids
    *  read as mass deletions). */
-  private async fetchAllUidsChunked(): Promise<number[]> {
+  private async fetchAllUidsChunked(expectedPath: string): Promise<number[]> {
     const uidNext = (this.client as { mailbox?: { uidNext?: number } })?.mailbox?.uidNext;
     const hi = typeof uidNext === 'number' && uidNext > 1 ? uidNext - 1 : 0;
     if (hi <= 0) {
@@ -1226,6 +1286,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     for (let lo = 1; lo <= hi; lo += CHUNK) {
       const range = `${lo}:${Math.min(lo + CHUNK - 1, hi)}`;
       const list = await this.op(`FETCH uids ${range}`, this.client!.fetchAll(range, { uid: true }, { uid: true }));
+      // Per chunk, not just once: a mid-enumeration re-select would otherwise
+      // splice another mailbox's UIDs into this folder's set.
+      this.ensureCurrentFolder(expectedPath);
       for (const m of list) if (m.uid > 0) out.push(m.uid);
     }
     return out;
@@ -1238,16 +1301,20 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * the whole-mailbox SEARCH ALL / FETCH 1:* returns partial lists or times out.
    * SEARCH SINCE stays compact (a month of mail) so it completes reliably.
    */
-  async fetchUidsSince(since: Date): Promise<number[]> {
-    this.ensureCurrentFolder();
+  async fetchUidsSince(since: Date, expectedPath?: string): Promise<number[]> {
+    const selected = this.ensureCurrentFolder(expectedPath);
+    let uids: number[] | false;
     try {
-      const uids = await this.op('UID SEARCH SINCE', this.client!.search({ since }, { uid: true }));
-      if (Array.isArray(uids)) return uids.filter((u) => u > 0);
-      // search() returns false when nothing matches (empty window).
-      return [];
+      uids = await this.op('UID SEARCH SINCE', this.client!.search({ since }, { uid: true }));
     } catch (err) {
       throw this.toImapError(err, 'FETCH_UIDS_SINCE_ERROR');
     }
+    // The windowed reconcile deletes local rows missing from this set, so it must
+    // be re-attributed to the mailbox it actually came from.
+    this.ensureCurrentFolder(selected);
+    if (Array.isArray(uids)) return uids.filter((u) => u > 0);
+    // search() returns false when nothing matches (empty window).
+    return [];
   }
 
   /**
@@ -1258,9 +1325,12 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * deleted-locally messages on the server to be re-synced back. Keys are the
    * bracket-stripped, lower-cased id so both `<id>` and `id` forms match.
    */
-  async fetchMessageIdToUidMap(): Promise<Map<string, number>> {
-    this.ensureCurrentFolder();
+  async fetchMessageIdToUidMap(expectedPath?: string): Promise<Map<string, number>> {
+    const selected = this.ensureCurrentFolder(expectedPath);
     const list = await this.op('FETCH msgid-map', this.client!.fetchAll('1:*', { uid: true, envelope: true }, { uid: false }));
+    // Callers use this map to EXPUNGE on the server — a UID resolved against the
+    // wrong mailbox would delete an unrelated message.
+    this.ensureCurrentFolder(selected);
     const map = new Map<string, number>();
     for (const m of list) {
       const mid = (m.envelope?.messageId || '').replace(/[<>]/g, '').trim().toLowerCase();
@@ -1323,7 +1393,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * mailbox is open or the server didn't report a modseq — callers treat that
    * as "delta not eligible" and take the full path.
    */
-  getCurrentMailboxState(): { path?: string; highestModseq?: number; uidValidity?: number; exists?: number } | null {
+  getCurrentMailboxState(): { path?: string; highestModseq?: number; uidValidity?: number; exists?: number; uidNext?: number } | null {
     const mbox = this.client?.mailbox;
     if (!mbox) return null;
     return {
@@ -1339,6 +1409,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // fetch: when we received as many UIDs as the mailbox claims to hold, the
       // fetch didn't get cut short.
       exists: typeof mbox.exists === 'number' ? mbox.exists : undefined,
+      // The next UID this mailbox will hand out. Nothing in this folder can ever
+      // carry a UID at or above it, which makes it an independent check on a UID
+      // set's PROVENANCE — not just its completeness.
+      uidNext: typeof mbox.uidNext === 'number' ? mbox.uidNext : undefined,
     };
   }
 

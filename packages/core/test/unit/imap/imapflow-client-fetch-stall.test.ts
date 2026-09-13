@@ -27,6 +27,7 @@ function makeClient(fetchAll: () => Promise<unknown[]>, counter: { bytes: number
   const close = vi.fn();
   (client as unknown as Internals).client = {
     usable: true,
+      mailbox: { path: 'INBOX' },
     stats: () => ({ sent: 0, received: counter.bytes }),
     fetchAll,
     close,

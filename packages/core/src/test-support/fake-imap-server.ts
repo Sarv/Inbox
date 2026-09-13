@@ -368,6 +368,23 @@ export class FakeImapServer {
     return this.requireFolder(this.selected);
   }
 
+  /**
+   * Same contract as the real client's `ensureCurrentFolder`: a whole-mailbox
+   * enumeration that a caller attributes to a named folder must fail loudly when
+   * the connection has some OTHER mailbox open. Keeping the fake honest here is
+   * what lets a test reproduce the 2026-09-13 cross-mailbox reconcile without a
+   * live server.
+   */
+  private requireSelectedPath(expectedPath?: string): FakeFolder {
+    const folder = this.requireSelected();
+    if (expectedPath && this.selected !== expectedPath) {
+      throw new Error(
+        `Mailbox mismatch: connection has "${this.selected}" selected, not "${expectedPath}"`,
+      );
+    }
+    return folder;
+  }
+
   private note(method: string): void {
     this.calls.push(method);
   }
@@ -530,9 +547,10 @@ export class FakeImapServer {
   async fetchFlagsOnly(
     uids: number[],
     onBatch?: () => void,
+    expectedPath?: string,
   ): Promise<Array<{ uid: number; flags: string[] }>> {
     this.note('fetchFlagsOnly');
-    const folder = this.requireSelected();
+    const folder = this.requireSelectedPath(expectedPath);
     // Mirror the real client's batched fetch (imapflow-client batches in 500s and
     // fires onBatch after each) so a caller relying on the per-batch progress
     // heartbeat exercises the same shape here — otherwise a whole-mailbox re-read
@@ -549,33 +567,33 @@ export class FakeImapServer {
     return out;
   }
 
-  async fetchAllFlags(): Promise<Array<{ uid: number; flags: string[] }>> {
+  async fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[] }>> {
     this.note('fetchAllFlags');
-    return this.requireSelected().messages.map((m) => ({ uid: m.uid, flags: [...m.flags] }));
+    return this.requireSelectedPath(expectedPath).messages.map((m) => ({ uid: m.uid, flags: [...m.flags] }));
   }
 
   /** Labels for every message in the selected folder; empty without the ext. */
-  async fetchAllLabels(): Promise<Array<{ uid: number; labels: string[] }>> {
+  async fetchAllLabels(expectedPath?: string): Promise<Array<{ uid: number; labels: string[] }>> {
     this.note('fetchAllLabels');
     if (!this.opts.gmailLabels) return [];
-    return this.requireSelected().messages.map((m) => ({ uid: m.uid, labels: [...m.labels] }));
+    return this.requireSelectedPath(expectedPath).messages.map((m) => ({ uid: m.uid, labels: [...m.labels] }));
   }
 
-  async fetchAllUIDs(): Promise<number[]> {
+  async fetchAllUIDs(expectedPath?: string): Promise<number[]> {
     this.note('fetchAllUIDs');
-    return this.requireSelected().messages.map((m) => m.uid);
+    return this.requireSelectedPath(expectedPath).messages.map((m) => m.uid);
   }
 
-  async fetchUidsSince(since: Date): Promise<number[]> {
+  async fetchUidsSince(since: Date, expectedPath?: string): Promise<number[]> {
     this.note('fetchUidsSince');
-    return this.requireSelected()
+    return this.requireSelectedPath(expectedPath)
       .messages.filter((m) => m.date >= since)
       .map((m) => m.uid);
   }
 
-  async fetchMessageIdToUidMap(): Promise<Map<string, number>> {
+  async fetchMessageIdToUidMap(expectedPath?: string): Promise<Map<string, number>> {
     this.note('fetchMessageIdToUidMap');
-    return new Map(this.requireSelected().messages.map((m) => [m.messageId, m.uid]));
+    return new Map(this.requireSelectedPath(expectedPath).messages.map((m) => [m.messageId, m.uid]));
   }
 
   supportsCondstore(): boolean {
@@ -623,6 +641,7 @@ export class FakeImapServer {
       path: folder.path,
       exists: folder.messages.length,
       uidValidity: folder.uidValidity,
+      uidNext: folder.uidNext,
       ...(this.opts.condstore ? { highestModseq: folder.highestModseq } : {}),
     };
   }

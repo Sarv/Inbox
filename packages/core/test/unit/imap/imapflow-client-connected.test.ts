@@ -88,6 +88,7 @@ describe('ImapFlowClient.fetchFlagsOnly — survives a mid-loop connection loss'
     let calls = 0;
     internals.client = {
       usable: true,
+      mailbox: { path: 'INBOX' },
       fetchAll: async () => { calls += 1; internals.client = null; return []; },
     };
     await expect(c.fetchFlagsOnly(uids600)).rejects.toThrow(/not connected/i);
@@ -105,6 +106,7 @@ describe('ImapFlowClient.fetchFlagsOnly — survives a mid-loop connection loss'
     let calls = 0;
     internals.client = {
       usable: true,
+      mailbox: { path: 'INBOX' },
       fetchAll: async () => {
         calls += 1;
         if (calls === 1) throw new Error('Command failed'); // NOT a connection error
@@ -126,7 +128,7 @@ describe('ImapFlowClient.fetchFlagsOnly — survives a mid-loop connection loss'
     const internals = c as unknown as FlagsInternals;
     internals.connectionState = 'selected';
     internals.currentFolder = 'INBOX';
-    internals.client = { usable: true, fetchAll: async () => [] };
+    internals.client = { usable: true, mailbox: { path: 'INBOX' }, fetchAll: async () => [] };
     const onBatch = vi.fn();
 
     await c.fetchFlagsOnly(uids600, onBatch); // 600 uids => 2 batches
@@ -144,6 +146,7 @@ describe('ImapFlowClient.fetchFlagsOnly — survives a mid-loop connection loss'
     internals.currentFolder = 'INBOX';
     internals.client = {
       usable: true,
+      mailbox: { path: 'INBOX' },
       fetchAll: async () => { internals.client = null; return []; },
     };
     const onBatch = vi.fn();
