@@ -6,7 +6,13 @@ import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } fro
 // Shared with Chat View rather than kept in a second copy here: the two
 // renderers had the same two-step fit written twice, and the measurement is the
 // part that is easy to get subtly wrong. The library owns it and its tests.
-import { WIDE_TABLE_CSS, fitWideTables } from '@sarv-in/email-chat-view';
+import {
+  WIDE_TABLE_CSS,
+  documentSurfaceCss,
+  fitDocumentSurfaces,
+  fitWideTables,
+  measureFrameHeight,
+} from '@sarv-in/email-chat-view';
 
 interface SandboxedEmailBodyProps {
   html: string;
@@ -83,7 +89,17 @@ interface SandboxedEmailBodyProps {
  * — we set defaults but never use !important, so any rule the email
  * author wrote wins.
  */
-function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boolean, transparentCanvas: boolean): string {
+/**
+ * The frame's own stylesheet.
+ *
+ * Exported for its tests: it is a pure function of the four flags, and the
+ * flags are how the same component serves three different pages — a forced
+ * white canvas, a tinted bubble that keeps the sender's layout, and a
+ * normalized bubble that does not. Which rules reach which page is the part
+ * that has actually been got wrong, and it is not reachable through the
+ * component: jsdom neither lays out nor renders `srcdoc`.
+ */
+export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boolean, transparentCanvas: boolean): string {
   // !important forces normalized typography across mismatched senders —
   // only applied when caller opts in (Chat View). Standard email view
   // keeps everything low-specificity so the email's own inline styles
@@ -114,6 +130,10 @@ function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boole
   // into a readable pastel (their hue shows through at ~35%). White-ish in
   // light mode, dark in dark mode, so text stays legible on top either way.
   const cellWash = emailDark ? 'rgba(17, 24, 39, 0.62)' : 'rgba(255, 255, 255, 0.64)';
+  // The opaque sibling of the wash: the page a ruled data table is drawn as,
+  // put back under it once the canvas behind is the sender's colour rather
+  // than the white page their mail was written for.
+  const tableSheet = emailDark ? 'rgb(17, 24, 39)' : 'rgb(255, 255, 255)';
   const tableCss = styledTables ? `
     table:not([cellspacing]):not([cellpadding]) {
       max-width: 100%;
@@ -282,6 +302,20 @@ function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boole
       color: ${fg} !important;
     }
     ` : ''}
+    ${lightCanvas ? '' : `
+    /* Told apart by measurement in \`fitDocumentSurfaces\` (called from the
+       measurement pass below), because no selector can tell white from teal:
+         - a wrapper whose white is the EDITOR's — Word and Outlook stamp
+           \`background:white\` on ordinary paragraphs — is blanked, so the
+           bubble's tint runs under the whole message instead of showing
+           around an opaque slab covering part of it;
+         - a ruled data table IS drawn as paper with lines on it, so once the
+           page behind is tinted it gets its sheet back and its plain rows read
+           white again.
+       Only when the canvas is transparent: on the forced white canvas the
+       message is already on the page it was written for. */
+    ${documentSurfaceCss(tableSheet)}
+    `}
     ${normalize ? '' : `
     /* A table too wide for the message is first allowed to wrap its text, and
        scrolls on its own only if that still isn't enough — rather than being
@@ -734,27 +768,18 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
         if (!normalize) {
           try { fitWideTables(idoc); } catch { /* layout not ready — the next measurement retries */ }
         }
-        // Measure the true bottom of the CONTENT with a Range over the body.
-        // A Range's bounding box covers every text node + element (so a
-        // trailing bare text node can't be missed → no under-measure →
-        // no scrollbar) but EXCLUDES trailing margins/whitespace (so a
-        // paragraph's bottom margin doesn't become dead space at the bottom of
-        // the bubble). scrollHeight would include that margin; last-child-bottom
-        // would miss trailing text — the Range gets both right.
-        let h = 0;
-        try {
-          const range = idoc.createRange();
-          range.selectNodeContents(idoc.body);
-          const bottom = range.getBoundingClientRect().bottom;
-          const bodyTop = idoc.body.getBoundingClientRect().top;
-          h = Math.ceil(bottom - bodyTop);
-        } catch { /* Range unavailable — fall back below */ }
-        // Never UNDER-measure: take the max of the Range height and the
-        // document scrollHeight. The iframe's own scrollbar is disabled
-        // (scrolling="no"), so an under-measure would CLIP content — we size to
-        // the full content height and let the outer page scroll instead. The
-        // trailing-dead-space trim keeps scrollHeight from reserving empty space.
-        h = Math.max(h, idoc.body.scrollHeight, idoc.documentElement.scrollHeight);
+        if (normalize || transparentCanvas) {
+          // Also before the height, and for the same reason: blanking the
+          // editor's white collapses the margins it was holding open.
+          try { fitDocumentSurfaces(idoc); } catch { /* layout not ready — the next measurement retries */ }
+        }
+        // Shared with Chat View rather than kept in a second copy here: this
+        // was the same Range-then-scrollHeight measurement written twice, and
+        // the copy here carried the same bug — it counted
+        // `documentElement.scrollHeight`, which is never less than the iframe's
+        // own height, so the measurement could grow but never shrink and a
+        // short mail kept a screenful of empty space under its last line.
+        const h = measureFrameHeight(idoc);
         if (h > 0) {
           setMeasuredHeight(h + heightPadding);
           // First real measurement → safe to fade the content in.
@@ -851,7 +876,10 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
       if (onWindowResize) window.removeEventListener('resize', onWindowResize);
       if (clickHost && onBodyClick) clickHost.removeEventListener('click', onBodyClick);
     };
-  }, [html, styledTables, normalize]);
+    // `transparentCanvas` too: with `normalize` it decides whether the page
+    // under the message is the sender's tint, which is the whole question
+    // `fitDocumentSurfaces` is asked inside the measurement below.
+  }, [html, styledTables, normalize, transparentCanvas]);
 
   // Theme change: re-render so our injected <style> picks up new colors.
   useEffect(() => {
