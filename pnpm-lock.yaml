@@ -55,8 +55,8 @@ importers:
   apps/desktop:
     dependencies:
       '@sarv-in/email-chat-view':
-        specifier: ^0.2.1
-        version: 0.2.1(react-dom@18.3.1)(react@18.3.1)
+        specifier: ^0.2.2
+        version: 0.2.2(react-dom@18.3.1)(react@18.3.1)
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -2657,8 +2657,8 @@ packages:
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
     dev: true
 
-  /@sarv-in/email-chat-view@0.2.1(react-dom@18.3.1)(react@18.3.1):
-    resolution: {integrity: sha512-i4emrySoTK00WA4Jkf3K+KlTGS4kkZOw7EPpIn+YpwxwDwAsV1FrQZuNti1PffFVZEnr3anj70T78uM09WXRfg==}
+  /@sarv-in/email-chat-view@0.2.2(react-dom@18.3.1)(react@18.3.1):
+    resolution: {integrity: sha512-P6kNiadBN9XmW/8eUNeWdZf3Unym5ovC5ZMfcmfoM1edg+jMdXlWr52u4iz9L1zq6EnScBvxEl3qtDygcHCgiQ==}
     engines: {node: '>=18'}
     peerDependencies:
       react: ^18.2.0 || ^19.0.0
