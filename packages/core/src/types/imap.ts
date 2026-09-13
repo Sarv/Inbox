@@ -134,6 +134,17 @@ export interface IIMAPClient {
    * Fetch only flags for messages (efficient for flag sync)
    * Returns array of { uid, flags }
    *
+   * `expectedPath` ANCHORS the answer to a mailbox. Every whole-mailbox
+   * enumeration on this interface accepts it, and callers that attribute the
+   * result to a specific folder must pass that folder's path: the answer is a
+   * set of bare UIDs with no mailbox in it, so a connection re-selected between
+   * SELECT and FETCH (routine — pooled connections are recycled on timeouts)
+   * hands back another mailbox's UIDs under this folder's name. On 2026-09-13
+   * that enumerated INBOX's 24,662 UIDs as a 917-message folder's, and the
+   * deletion reconcile removed 410 live messages that were never missing.
+   * Implementations throw `MAILBOX_MISMATCH` rather than return a mis-attributed
+   * set.
+   *
    * `onBatch` fires after each internal FLAGS sub-batch completes — a progress
    * heartbeat so a caller holding a POOLED connection (the whole-mailbox deletion
    * reconcile) can refresh the pool's stuck-eviction timer and not be reclaimed
@@ -143,13 +154,14 @@ export interface IIMAPClient {
   fetchFlagsOnly(
     uids: number[],
     onBatch?: () => void,
+    expectedPath?: string,
   ): Promise<Array<{ uid: number; flags: string[] }>>;
 
   /**
    * Fetch flags for all messages in folder (efficient bulk fetch)
    * Returns array of { uid, flags }
    */
-  fetchAllFlags(): Promise<Array<{ uid: number; flags: string[] }>>;
+  fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[] }>>;
 
   /**
    * Check if server supports CONDSTORE extension
@@ -191,12 +203,12 @@ export interface IIMAPClient {
    * before labels were fetched. Labels-only, so it costs a fraction of a
    * re-download. Returns `[]` on a server without the Gmail extension.
    */
-  fetchAllLabels?(): Promise<Array<{ uid: number; labels: string[] }>>;
+  fetchAllLabels?(expectedPath?: string): Promise<Array<{ uid: number; labels: string[] }>>;
 
   /**
    * Fetch all UIDs in current folder (efficient for deletion detection)
    */
-  fetchAllUIDs?(): Promise<number[]>;
+  fetchAllUIDs?(expectedPath?: string): Promise<number[]>;
 
   /**
    * Fetch UIDs of messages with an internal date on/after `since`
@@ -204,18 +216,18 @@ export interface IIMAPClient {
    * reconcile only the recent window on large mailboxes, where enumerating the
    * whole mailbox returns partial lists / times out.
    */
-  fetchUidsSince?(since: Date): Promise<number[]>;
+  fetchUidsSince?(since: Date, expectedPath?: string): Promise<number[]>;
 
   /**
    * CONDSTORE state (highestModseq + uidValidity) of the currently-open mailbox,
    * or null when none is open / the server reported no modseq. Used by the
    * flag-delta path to gate eligibility and to persist the reconciled modseq.
    */
-  getCurrentMailboxState?(): { path?: string; highestModseq?: number; uidValidity?: number; exists?: number } | null;
+  getCurrentMailboxState?(): { path?: string; highestModseq?: number; uidValidity?: number; exists?: number; uidNext?: number } | null;
 
   /** Map Message-ID (bracket-stripped, lower-cased) → UID for the current folder,
    *  via envelope fetch. Reliable delete-by-id when HEADER search is unsupported. */
-  fetchMessageIdToUidMap?(): Promise<Map<string, number>>;
+  fetchMessageIdToUidMap?(expectedPath?: string): Promise<Map<string, number>>;
 
   /** Atomically \Deleted + expunge the given UIDs (no flag-then-purge race). */
   deleteAndExpunge?(uids: number[]): Promise<void>;

@@ -1287,3 +1287,94 @@ describe('syncFlags — Phase 2b: stale tag-only memberships', () => {
     expect(ctx.db.tagsOf(stale).sort()).toEqual([INBOX, 'Trash']);
   });
 });
+
+describe('syncFlags — Phase 2: is this UID set even THIS mailbox\'s?', () => {
+  // Every other Phase-2 guard asks whether the server list is COMPLETE. None of
+  // them asks where it came from, and all of them are defeated by a wrong list
+  // that is LARGER than the folder: size >= EXISTS makes it "provably complete",
+  // a huge server max UID clears the truncation guard, and the missing ratio can
+  // sit comfortably under the 50% ceiling while still naming hundreds of live
+  // messages.
+  //
+  // That is not hypothetical. On 2026-09-13 a recycled pooled connection handed
+  // INBOX's 24,662 UIDs to a 917-message folder's reconcile; every guard passed
+  // and 410 live messages were deleted. These pin the two facts the mailbox
+  // reports about ITSELF that settle provenance independently of the connection.
+
+  /** A wrong list: most of this folder's UIDs, plus a foreign mailbox's. */
+  const foreignList = (localUids: number[], foreign: number[]): Array<{ uid: number; flags: string[] }> =>
+    [...localUids, ...foreign].map((uid) => ({ uid, flags: [] as string[] }));
+
+  it('refuses a UID set containing UIDs at or above this folder\'s UIDNEXT', async () => {
+    // Nothing in a folder can carry a UID at or above the UID it will hand out
+    // next. One such UID proves the list was enumerated somewhere else.
+    const ctx = setup();
+    const uids = Array.from({ length: 10 }, () => seedSynced(ctx));
+    await ctx.server.selectFolder(INBOX);
+    // Overlaps 6 of 10 local rows, so the missing ratio is 40% — UNDER the 50%
+    // ceiling that would otherwise have caught it.
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue(foreignList(uids.slice(0, 6), [27394]));
+
+    const res = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+
+    expect(res.deleted).toBe(0);
+    expect(ctx.db.callCount('unlinkOrDeleteEmailsFromFolder')).toBe(0);
+    expect(ctx.db.allRows()).toHaveLength(10);
+  });
+
+  it('refuses a UID set far longer than the mailbox says it is', async () => {
+    // The other half: a wrong mailbox that shares the UID ceiling still cannot
+    // hide its size. EXISTS=10 against a 500-UID list is not a complete list of
+    // this folder, it is a complete list of a different one.
+    const ctx = setup();
+    const uids = Array.from({ length: 10 }, () => seedSynced(ctx));
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'getCurrentMailboxState').mockReturnValue({
+      path: INBOX, exists: 10, uidValidity: 1, uidNext: 30000,
+    });
+    const foreign = Array.from({ length: 494 }, (_, i) => 20000 + i);
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue(foreignList(uids.slice(0, 6), foreign));
+
+    const res = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+
+    expect(res.deleted).toBe(0);
+    expect(ctx.db.allRows()).toHaveLength(10);
+  });
+
+  it('still deletes when the list is merely a little longer than EXISTS', async () => {
+    // The guard must not become a reason deletions never apply: mail arriving
+    // mid-enumeration legitimately makes the list longer than the EXISTS the
+    // mailbox reported a moment earlier.
+    const ctx = setup();
+    const uids = Array.from({ length: 10 }, () => seedSynced(ctx));
+    const gone = uids[0];
+    ctx.server.expungeOnServer(INBOX, gone);
+    await ctx.server.selectFolder(INBOX);
+    // 9 survivors + 3 that arrived after the EXISTS reading, all inside the UID space.
+    vi.spyOn(ctx.server, 'getCurrentMailboxState').mockReturnValue({
+      path: INBOX, exists: 9, uidValidity: 1, uidNext: 100,
+    });
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue(foreignList(uids.slice(1), [50, 51, 52]));
+
+    const res = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+
+    expect(res.deleted).toBe(1);
+    expect(ctx.db.rowsPrimaryIn(INBOX).map((e) => e.uid)).not.toContain(gone);
+  });
+
+  it('the shared fake refuses a mis-anchored enumeration, like the real client', async () => {
+    // The fake backs every sync test in the suite. If it answered from whatever
+    // folder happened to be selected, no test in this file could ever reproduce a
+    // cross-mailbox reconcile — the class of bug that caused the data loss.
+    const ctx = setup();
+    seedSynced(ctx);
+    await ctx.server.selectFolder('Trash');
+
+    await expect(ctx.server.fetchAllUIDs(INBOX)).rejects.toThrow(/Mailbox mismatch/);
+    await expect(ctx.server.fetchAllFlags(INBOX)).rejects.toThrow(/Mailbox mismatch/);
+    await expect(ctx.server.fetchFlagsOnly([1], undefined, INBOX)).rejects.toThrow(/Mailbox mismatch/);
+    // ...and answers happily once the right mailbox is open.
+    await ctx.server.selectFolder(INBOX);
+    await expect(ctx.server.fetchAllUIDs(INBOX)).resolves.toHaveLength(1);
+  });
+});

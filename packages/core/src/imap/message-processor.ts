@@ -602,7 +602,7 @@ export class MessageProcessor {
   ): Promise<{ scanned: number; updated: number }> {
     if (typeof client.fetchAllLabels !== 'function') return { scanned: 0, updated: 0 };
     await client.selectFolder(folder.path);
-    const labelRows = await client.fetchAllLabels();
+    const labelRows = await client.fetchAllLabels(folder.path);
     if (labelRows.length === 0) return { scanned: 0, updated: 0 };
 
     // Both are optional on the interface — a storage impl without them simply
@@ -1271,7 +1271,7 @@ export class MessageProcessor {
     const loadFullFlags = async (): Promise<boolean> => {
       let serverFlags: Array<{ uid: number; flags: string[] }>;
       try {
-        serverFlags = await client.fetchAllFlags();
+        serverFlags = await client.fetchAllFlags(folder.path);
       } catch (err) {
         logger.warn(`Failed to fetch flags from server for ${folder.path}, skipping flag sync: ${(err as Error)?.message ?? err}`);
         return false;
@@ -1323,7 +1323,7 @@ export class MessageProcessor {
       if (!skipFullFetch && await loadFullFlags()) return true;
       if (typeof client.fetchAllUIDs !== 'function') return false;
       try {
-        const allUids = await client.fetchAllUIDs();
+        const allUids = await client.fetchAllUIDs(folder.path);
         for (const uid of allUids) serverUidsSet.add(uid);
         touch?.(); // the whole-mailbox UID search landed — heartbeat before the (batched) flag fetch
 
@@ -1335,7 +1335,7 @@ export class MessageProcessor {
         // Partial results are still a win: whatever lands reconciles.
         if (allUids.length > 0) {
           try {
-            const flags = await client.fetchFlagsOnly(allUids, touch);
+            const flags = await client.fetchFlagsOnly(allUids, touch, folder.path);
             for (const f of flags) serverFlagsMap.set(f.uid, f.flags);
           } catch (err) {
             logger.warn(`Batched flag fetch failed for ${folder.path}: ${(err as Error).message}`);
@@ -1374,7 +1374,7 @@ export class MessageProcessor {
     const loadWindowedFlags = async (reason: string): Promise<boolean> => {
       if (typeof client.fetchUidsSince !== 'function') return false;
       try {
-        const windowUids = await client.fetchUidsSince(recentWindowCutoffDate());
+        const windowUids = await client.fetchUidsSince(recentWindowCutoffDate(), folder.path);
         // Record the window itself, not just the flags read from it — this is the
         // only complete server UID list a large mailbox ever produces, and Phase 2
         // needs it to spot mail that never landed locally (addition only; see the
@@ -1383,7 +1383,7 @@ export class MessageProcessor {
         windowSetReady = true;
         if (windowUids.length > 0) {
           try {
-            const flags = await client.fetchFlagsOnly(windowUids, touch);
+            const flags = await client.fetchFlagsOnly(windowUids, touch, folder.path);
             for (const f of flags) serverFlagsMap.set(f.uid, f.flags);
           } catch (err) {
             logger.warn(`Windowed flag fetch failed for ${folder.path}: ${(err as Error).message}`);
@@ -1509,7 +1509,7 @@ export class MessageProcessor {
             );
           }
         } else if (dueForDeletion) {
-          const allUids = await client.fetchAllUIDs!();
+          const allUids = await client.fetchAllUIDs!(folder.path);
           for (const uid of allUids) serverUidsSet.add(uid);
           deletionSetReady = true;
           lastDeletionReconcile.set(folder.id, Date.now());
@@ -1559,7 +1559,7 @@ export class MessageProcessor {
               await loadWindowedFlags(`large-mailbox flag drift net (${changed.length} delta changes)`);
             } else {
               try {
-                const allFlags = await client.fetchFlagsOnly(allUids, touch);
+                const allFlags = await client.fetchFlagsOnly(allUids, touch, folder.path);
                 for (const f of allFlags) serverFlagsMap.set(f.uid, f.flags);
               } catch (err) {
                 logger.warn(`Full flag reconcile failed for ${folder.path}: ${(err as Error).message}`);
@@ -1679,7 +1679,7 @@ export class MessageProcessor {
         if (selection.wrapped) checked.clear();
         if (selection.uids.length > 0) {
           try {
-            const staleFlags = await client.fetchFlagsOnly(selection.uids, touch);
+            const staleFlags = await client.fetchFlagsOnly(selection.uids, touch, folder.path);
             for (const f of staleFlags) serverFlagsMap.set(f.uid, f.flags);
             // Mark the whole REQUESTED batch, not just what came back. A UID the
             // server didn't return is gone from the mailbox — a deletion, which this
@@ -1915,6 +1915,39 @@ export class MessageProcessor {
     // this, the guard below skipped ALL deletions whenever the newest local mail
     // was the one deleted, so webmail-trashed top mail never left the app inbox.
     const serverListComplete = serverExists != null && serverUidsSet.size >= serverExists;
+
+    // PROVENANCE guard — does this UID set even belong to this folder?
+    //
+    // Every guard above asks whether the server list is COMPLETE. None of them
+    // asks whether it is THIS MAILBOX'S list, and all three are defeated by a
+    // wrong list that is LARGER than the folder: on 2026-09-13 a recycled pooled
+    // connection enumerated INBOX while the code believed it held "Interview",
+    // and 24,662 INBOX UIDs arrived for a 917-message folder. size >= exists made
+    // serverListComplete TRUE, local max 985 < server max 27394 passed the
+    // truncation guard, and the 46% missing ratio sat under the 50% ceiling — so
+    // the completeness check AUTHORISED deleting 410 live messages.
+    //
+    // Two cheap facts the mailbox itself reports settle provenance:
+    //  - UIDNEXT: nothing in this folder can carry a UID at or above it.
+    //  - EXISTS: a complete list is about as long as the folder is, never orders
+    //    of magnitude longer (slack for mail arriving mid-enumeration).
+    // Either one failing means the list came from somewhere else. Skip the whole
+    // reconcile — a wrong list must never reach the deletion diff.
+    const serverUidNext = typeof currentState?.uidNext === 'number' ? currentState.uidNext : null;
+    if (serverUidNext != null && serverMaxUid >= serverUidNext) {
+      logger.error(
+        `[syncFlags] ${folder.path}: ABORTED — server UID list contains UID ${serverMaxUid} at/above this folder's UIDNEXT ${serverUidNext}; the list is not this mailbox's. Skipping flag/deletion reconcile.`,
+      );
+      return result;
+    }
+    const EXISTS_OVERSHOOT_SLACK = 100;
+    if (serverExists != null && serverUidsSet.size > serverExists * 2 + EXISTS_OVERSHOOT_SLACK) {
+      logger.error(
+        `[syncFlags] ${folder.path}: ABORTED — server UID list has ${serverUidsSet.size} UIDs but the mailbox reports EXISTS=${serverExists}; the list is not this mailbox's. Skipping flag/deletion reconcile.`,
+      );
+      return result;
+    }
+
     // A pure Gmail label mirror has NO rows in its own folder_id UID space (every
     // message lives primarily in All Mail), so every UID in the window would look
     // "missing" on every sync and we'd re-fetch and re-link the same window forever
