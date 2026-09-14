@@ -2,6 +2,7 @@ import { Loader2, Filter, X, Globe } from 'lucide-react';
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
+import { isDraftsFolder } from '../../config/folder-mapping';
 import { SECTION_FILTER_LABELS, SETTINGS_KEY, DEFAULT_SECTIONS } from '../../config/inbox-types';
 import type { SectionFilter } from '../../config/inbox-types';
 import { useEmailStore } from '../../store/email-store';
@@ -13,6 +14,7 @@ import { SearchBar } from '../SearchBar';
 import { canOfferServerSearch, hasServerSearchableParsedQuery } from '../server-search';
 import { Tooltip } from '../Tooltip';
 
+import { actionableEmailIds, selectedEmailIdsFor } from './bulk-selection';
 import { BulkActionBar } from './BulkActionBar';
 import { getCachedCategorySlugs } from './CategoryBadges';
 import { CategoryFilterBar } from './CategoryFilterBar';
@@ -182,6 +184,15 @@ export function EmailList() {
 
   // Check if viewing starred/important folder
   const selectedFolder = folders.find(f => f.id === selectedFolderId);
+
+  // Drafts context for bulk actions. Both are derived from the SAME folder list
+  // the rest of the view uses, so a provider-specific path (INBOX.Drafts,
+  // [Gmail]/Drafts) is covered without a hardcoded name.
+  const viewIsDrafts = !!selectedFolder && isDraftsFolder(selectedFolder as never);
+  const draftFolderPaths = useMemo(
+    () => new Set(folders.filter(f => isDraftsFolder(f as never)).map(f => f.path)),
+    [folders],
+  );
   const isInboxFolder = selectedFolder?.path === 'INBOX';
   // True while this folder's mail is still resolving (global sync or this
   // folder's own sync) — lets empty sections show "checking…" not "none".
@@ -444,8 +455,12 @@ export function EmailList() {
         t.latestEmail.id === emailId ||
         t.badgeEmailId === emailId,
     );
-    return thread ? thread.emails.map(e => e.id) : [emailId];
-  }, [visibleThreads]);
+    // Narrowed for Drafts by the SAME rule the bulk toolbar uses: the hover
+    // trash icon on a draft row must not delete the mail it replies to either.
+    return thread
+      ? actionableEmailIds(thread.emails, viewIsDrafts, draftFolderPaths)
+      : [emailId];
+  }, [visibleThreads, viewIsDrafts, draftFolderPaths]);
 
   const toggleStar = useCallback((emailId: string, currentlyStarred: boolean, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -528,16 +543,8 @@ export function EmailList() {
 
   // --- Bulk Action Handlers ---
 
-  const getSelectedEmailIds = (): string[] => {
-    // ALL emails in each selected thread, not just the latest. Acting on only
-    // the representative left a multi-message thread's siblings untouched — e.g.
-    // "mark read" marked the latest but the thread stayed bold (a sibling was
-    // still unread) while the toolbar showed it as read. Bulk archive/delete/
-    // mark-read now cover the whole conversation, matching the detail toolbar.
-    return visibleThreads
-      .filter(t => selectedThreadIds.has(t.threadId))
-      .flatMap(t => t.emails.map(e => e.id));
-  };
+  const getSelectedEmailIds = (): string[] =>
+    selectedEmailIdsFor({ visibleThreads, selectedThreadIds, viewIsDrafts, draftFolderPaths });
 
   const handleBulkArchive = () => {
     const ids = getSelectedEmailIds();
