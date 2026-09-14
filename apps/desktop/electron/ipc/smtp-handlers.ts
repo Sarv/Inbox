@@ -7,7 +7,7 @@
 import { ipcMain, dialog } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { SMTPClient, emailContentHash, findFolderByType, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { SMTPClient, emailContentHash, findFolderByType, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
 import { getValidAccessToken } from '../services/oauth-service';
@@ -524,8 +524,7 @@ export async function appendSentCopy(
   const sentPath = sent.path;
   const midKey = messageId.replace(/[<>]/g, '').trim().toLowerCase();
 
-  const run = async (conn: any): Promise<void> => {
-    await conn.selectFolder(sentPath);
+  const run = async (conn: any): Promise<void> => withFolderSelected(conn, sentPath, async () => {
 
     // Dedupe: is this message ALREADY in the server's Sent folder? Some servers
     // auto-file a Sent copy, so only append when it's genuinely missing. A
@@ -558,7 +557,7 @@ export async function appendSentCopy(
     // protected; the next natural Sent sync fetches the server copy and stamps the
     // real UID via linkEmailToFolder — at which point the UID is provably IN the
     // server listing, so deletion can't fire.
-  };
+  });
 
   const pool = (syncEngine as any).connectionPool;
   if (pool?.withConnection) {

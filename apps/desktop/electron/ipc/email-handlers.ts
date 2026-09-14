@@ -12,7 +12,7 @@ import { deferBodyPrefetch } from '../services/body-prefetch-scheduler';
 import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine, getStorageFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
 import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { logUserAction } from './agent-handlers';
-import { fetchBodyQueued, safeFilename, resolveWithinDir, sanitizeIcsText, createLogger, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { fetchBodyQueued, withFolderSelected, safeFilename, resolveWithinDir, sanitizeIcsText, createLogger, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
 const logger = createLogger('email-handlers');
 
 
@@ -425,9 +425,9 @@ async function placeEmailInFolder(
       if (syncEngine?.isConnected() && pool && email.messageId) {
         const { client: conn, release } = await pool.acquire();
         try {
-          await conn.selectFolder(sourceFolder.path);
           const msgId = email.messageId.replace(/^<|>$/g, '');
-          const uids = await conn.search({ header: [{ name: 'Message-ID', value: msgId }] });
+          const uids = await withFolderSelected<number[]>(conn, sourceFolder.path, () =>
+            conn.search({ header: [{ name: 'Message-ID', value: msgId }] }));
           if (uids.length > 0) {
             uid = uids[0];
           } else {
@@ -507,24 +507,24 @@ export function registerEmailHandlers(): void {
               }
 
               if (searchFolder) {
-                await client.selectFolder(searchFolder.path);
-                const isStarredFolder = searchFolder.path.toLowerCase().includes('starred');
-                const starredUIDs = isStarredFolder
-                  ? await client.search({ all: true })
-                  : await client.search({ flagged: true });
+                // SEARCH and the FETCH of its hits are one section — the UIDs it
+                // returns are only meaningful in the mailbox that produced them.
+                const messages = await withFolderSelected(client, searchFolder.path, async () => {
+                  const isStarredFolder = searchFolder.path.toLowerCase().includes('starred');
+                  const starredUIDs = isStarredFolder
+                    ? await client.search({ all: true })
+                    : await client.search({ flagged: true });
+                  if (starredUIDs.length === 0) return [];
+                  return client.fetchMessagesByUID(starredUIDs.slice(-100), { bodies: ['HEADER'] });
+                });
 
-                if (starredUIDs.length > 0) {
-                  const uidsToCheck = starredUIDs.slice(-100);
-                  const messages = await client.fetchMessagesByUID(uidsToCheck, { bodies: ['HEADER'] });
-
-                  for (const msg of messages) {
-                    if (msg.envelope?.messageId) {
-                      const existing = await storage.getEmailByMessageId(msg.envelope.messageId);
-                      if (existing && !(existing.flags || []).includes('\\Flagged')) {
-                        await storage.updateEmail(existing.id, {
-                          flags: [...(existing.flags || []), '\\Flagged']
-                        });
-                      }
+                for (const msg of messages) {
+                  if (msg.envelope?.messageId) {
+                    const existing = await storage.getEmailByMessageId(msg.envelope.messageId);
+                    if (existing && !(existing.flags || []).includes('\\Flagged')) {
+                      await storage.updateEmail(existing.id, {
+                        flags: [...(existing.flags || []), '\\Flagged']
+                      });
                     }
                   }
                 }
@@ -1276,25 +1276,30 @@ export function registerEmailHandlers(): void {
         return { success: false, error: 'No suitable folder found for starred sync' };
       }
 
-      await client.selectFolder(searchFolder.path);
-      const isStarredFolder = searchFolder.path.toLowerCase().includes('starred');
-      const starredUIDs = isStarredFolder
-        ? await client.search({ all: true })
-        : await client.search({ flagged: true });
+      // SEARCH and the FETCH of its hits are one section — the UIDs it returns
+      // are only meaningful in the mailbox that produced them.
+      const { starredUIDs, messages } = await withFolderSelected(client, searchFolder.path, async () => {
+        const isStarredFolder = searchFolder.path.toLowerCase().includes('starred');
+        const uids: number[] = isStarredFolder
+          ? await client.search({ all: true })
+          : await client.search({ flagged: true });
+        return {
+          starredUIDs: uids,
+          messages: uids.length > 0
+            ? await client.fetchMessagesByUID(uids, { bodies: ['HEADER'] })
+            : [],
+        };
+      });
 
       let updatedCount = 0;
-      if (starredUIDs.length > 0) {
-        const messages = await client.fetchMessagesByUID(starredUIDs, { bodies: ['HEADER'] });
-
-        for (const msg of messages) {
-          if (msg.envelope?.messageId) {
-            const existing = await storage.getEmailByMessageId(msg.envelope.messageId);
-            if (existing && !(existing.flags || []).includes('\\Flagged')) {
-              await storage.updateEmail(existing.id, {
-                flags: [...(existing.flags || []), '\\Flagged']
-              });
-              updatedCount++;
-            }
+      for (const msg of messages) {
+        if (msg.envelope?.messageId) {
+          const existing = await storage.getEmailByMessageId(msg.envelope.messageId);
+          if (existing && !(existing.flags || []).includes('\\Flagged')) {
+            await storage.updateEmail(existing.id, {
+              flags: [...(existing.flags || []), '\\Flagged']
+            });
+            updatedCount++;
           }
         }
       }
