@@ -600,6 +600,48 @@ describe('syncFlags — Phase 2: addition reconcile (mid-range holes)', () => {
    * folder AND fired only when the reconcile actually stored something. A
    * converged folder syncs on every tick and must pay nothing.
    */
+  /**
+   * Breaks: the log claims progress a reconcile did not make, and the gap it is
+   * chasing never closes.
+   *
+   * OBSERVED live — an INBOX logged `addition reconcile inserted 0, linked 53`
+   * on every sync for hours. `linked` was `skipped + updated`, so 53 messages
+   * that were already present and needed nothing read as 53 placed. The tally
+   * that would have said "this pass achieved nothing" was the one number the
+   * line did not carry, and hours went into chasing a gap that the log insisted
+   * was closing. `unchanged` must stay separate from `linked`, and a pass that
+   * stores nothing must not claim a recount it has no reason to run.
+   */
+  it('reports a fetch-but-place-nothing pass as unchanged, and does not recount', async () => {
+    const ctx = setup();
+    const inboxId = ctx.db.folderId(INBOX);
+    // Three messages the server lists, all ALREADY present locally and already
+    // tagged into INBOX — but seeded under another folder's id, so they are
+    // absent from this folder's own UID space and look "missing" to Phase 2.
+    // The reconcile therefore fetches them, matches each by Message-ID, and
+    // finds nothing to do: the pure-skip pass.
+    const ids = ['<skip-1@test.local>', '<skip-2@test.local>', '<skip-3@test.local>'];
+    const uids = ids.map((messageId) => ctx.server.addMessage(INBOX, { messageId }));
+    uids.forEach((uid, i) => {
+      ctx.db.seedEmail({
+        folderId: 'some-other-folder',
+        uid,
+        tags: `|${INBOX}|`,
+        messageId: ids[i],
+      });
+    });
+    await ctx.storage.updateFolder!(ctx.folder().id, { lastSyncUid: Math.max(...uids) });
+    await ctx.server.selectFolder(INBOX);
+
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+
+    // Nothing was stored, so nothing needs recounting — a full pass is a ~200ms
+    // synchronous main-thread stall and a converged folder must pay nothing.
+    expect(ctx.db.callCount('recalculateFolderCounts')).toBe(0);
+    // And no duplicate rows: the messages were matched, not re-inserted.
+    expect(ctx.db.rowsTaggedWith(INBOX)).toHaveLength(3);
+  });
+
   it('does NOT recount when the reconcile found nothing to add', async () => {
     const ctx = setup();
     const uids = ctx.server.addMessages(INBOX, 3);

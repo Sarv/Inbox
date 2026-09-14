@@ -1958,8 +1958,17 @@ export class MessageProcessor {
     // without converging. Those folders are covered by All Mail's own reconcile.
     // Whole-folder mode is unaffected — it has the tag-count gate for this.
     const additionFromWindow = additionOnly && localUids.length > 0;
+    // `localUidSpace`, NOT `local`. This counts only rows whose PRIMARY folder is
+    // this one; a message linked here by tag (its primary copy living in another
+    // folder — every Gmail label, and anything moved) is absent from it by
+    // design. Printed as "local" beside a server total it reads as a message
+    // deficit, and it is not one: an INBOX showing localUidSpace=1873 against
+    // server=1957 held 1954 of those 1957 by tag and was three short, not
+    // eighty-four. Hours went into chasing that phantom gap. The comparable
+    // number is the tag count, which the addition reconcile below logs as
+    // `tagged` — the two are different questions and must not look alike.
     logger.info(
-      `[syncFlags] ${folder.path}: Phase-2 running — local=${localUids.length} (max ${localMaxUid}), server=${serverUidsSet.size} (max ${serverMaxUid}, exists ${serverExists ?? '?'}), complete=${serverListComplete}`
+      `[syncFlags] ${folder.path}: Phase-2 running — localUidSpace=${localUids.length} (max ${localMaxUid}; rows primary to this folder — NOT comparable to server total), server=${serverUidsSet.size} (max ${serverMaxUid}, exists ${serverExists ?? '?'}), complete=${serverListComplete}`
       + `${additionOnly ? `, ADDITION-ONLY from ${windowedUidsSet.size}-uid recent window${additionFromWindow ? '' : ' (skipped — no rows in this folder\'s own UID space)'}` : ''}`,
     );
     if (serverMaxUid > 0 && localMaxUid > serverMaxUid && !serverListComplete) {
@@ -2048,7 +2057,7 @@ export class MessageProcessor {
         // inserts nothing (all-or-nothing). Sub-batching keeps each FETCH under the op
         // timeout and makes partial progress durable — if a later sub-batch fails, the
         // earlier ones are already inserted and the rest drains next sync.
-        let inserted = 0, linked = 0, attempted = 0;
+        let inserted = 0, linked = 0, unchanged = 0, attempted = 0;
         const triedSet = tried ?? new Set<number>();
         for (let i = 0; i < toFetch.length; i += ADDITION_FETCH_BATCH) {
           const sub = toFetch.slice(i, i + ADDITION_FETCH_BATCH);
@@ -2062,7 +2071,15 @@ export class MessageProcessor {
             if (fetched.length > 0) {
               const r = await this.processBatch(fetched, folder, storage, undefined, { quiet: true });
               inserted += r.inserted;
-              linked += r.skipped + r.updated;
+              // Keep these apart. `updated` is real convergence (a row gained
+              // this folder's tag); `skipped` is a no-op (the row already had
+              // it, or the Message-ID was a duplicate within the batch).
+              // Reporting their SUM as "linked" made a reconcile that achieved
+              // nothing read as one that placed every message — a gap that never
+              // closes while the log says it is closing every cycle. That line
+              // cost real debugging time; the two numbers must stay separate.
+              linked += r.updated;
+              unchanged += r.skipped;
               // Mark tried ONLY the UIDs the server RETURNED and we actually
               // ACCOUNTED FOR (stored, matched, or permanently unprocessable). A UID
               // requested-but-not-returned (partial FETCH) or one that hit a
@@ -2087,8 +2104,19 @@ export class MessageProcessor {
         // just means the next sync re-verifies from scratch (correct, only slower).
         if (triedSet.size > MessageProcessor.RECONCILE_TRIED_CAP) triedSet.clear();
         this.reconcileTriedUids.set(folder.path, triedSet);
+        // Always report the outcome, including "nothing changed". A reconcile
+        // that fetches messages and places none of them is the signature of a
+        // gap that cannot close, and staying silent about it is what let one run
+        // unnoticed: the only visible line said `linked 53` every cycle, which
+        // read as progress. `unchanged` is that case, named.
+        if (attempted > 0) {
+          logger.info(
+            `[syncFlags] ${folder.path}: addition reconcile inserted ${inserted}, linked ${linked}, `
+            + `unchanged ${unchanged}, of ${attempted} attempted`
+            + `${inserted + linked === 0 ? ' — NO PROGRESS: every message was already present' : ''}`,
+          );
+        }
         if (inserted + linked > 0) {
-          logger.info(`[syncFlags] ${folder.path}: addition reconcile inserted ${inserted}, linked ${linked}, of ${attempted} attempted`);
           // Recount HERE rather than reporting upwards. syncFlags returns only
           // {updated, deleted} — flag changes and expunges — and every one of its
           // six callers gates its recount on exactly those two numbers. So a pass
