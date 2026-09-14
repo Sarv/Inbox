@@ -66,6 +66,20 @@ export interface IIMAPClient {
   ensureFolderSelected?(folderPath: string): Promise<void>;
 
   /**
+   * Run `fn` with `folderPath` selected AND held selected for its whole
+   * duration, so a concurrent user of the same connection cannot re-select in
+   * between two of `fn`'s commands. Any operation that issues more than one
+   * command against a mailbox must use this rather than `selectFolder` + work.
+   * Optional on the interface — use the `withFolderSelected` helper, which
+   * falls back to a plain select for clients that don't implement it.
+   */
+  withFolder?<T>(
+    folderPath: string,
+    fn: () => Promise<T>,
+    opts?: { select?: boolean },
+  ): Promise<T>;
+
+  /**
    * Get current selected folder
    */
   getCurrentFolder(): string | null;
