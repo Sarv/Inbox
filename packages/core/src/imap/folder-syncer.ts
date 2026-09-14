@@ -10,6 +10,7 @@ import { isWatermarkImpossible } from '../utils/sync-watermark';
 
 import { fetchNewMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor } from './message-processor';
+import { withFolderSelected } from './with-folder';
 
 
 /**
@@ -313,16 +314,21 @@ export class FolderSyncer {
       // Determine sync strategy
       if (opts.flagsOnly && storedFolder.lastSyncUid) {
         // Flags-only sync — force deletion reconciliation (see incrementalSync).
-        const flagsResult = await this.messageProcessor.syncFlags(
-          client,
-          storedFolder,
-          storage,
-          undefined,
-          (emailId, uid) => this.onEmailDeleted?.(emailId, uid, storedFolder.path),
-          { forceDeletion: true },
-          undefined,
-          touch,
-        );
+        // Held across the whole reconcile: syncFlags issues many commands over a
+        // long window against the CURRENTLY selected mailbox, and the select at
+        // the top of syncFolder is long gone by now — a body prefetch or realtime
+        // re-select landing in between makes it read another folder entirely.
+        const flagsResult = await withFolderSelected(client, storedFolder.path, () =>
+          this.messageProcessor.syncFlags(
+            client,
+            storedFolder,
+            storage,
+            undefined,
+            (emailId, uid) => this.onEmailDeleted?.(emailId, uid, storedFolder.path),
+            { forceDeletion: true },
+            undefined,
+            touch,
+          ));
         result.flagsUpdated = flagsResult.updated;
         result.deletedCount = flagsResult.deleted;
         result.success = true;
@@ -469,11 +475,17 @@ export class FolderSyncer {
 
       let messages;
       try {
-        messages = await client.fetchMessages(range, {
-          fetchHeaders: true,
-          fetchBody: !options.headersOnly,
-          fetchBodyStructure: true,
-        });
+        // Re-asserted PER BATCH, not once for the loop: processBatch between
+        // batches is long storage work, and holding the mailbox across it would
+        // pin the connection. `range` is a SEQUENCE range — in the wrong mailbox
+        // it returns someone else's mail with no error at all, which is why this
+        // one matters more than the UID fetches.
+        messages = await withFolderSelected(client, folder.path, () =>
+          client.fetchMessages(range, {
+            fetchHeaders: true,
+            fetchBody: !options.headersOnly,
+            fetchBodyStructure: true,
+          }));
       } catch (err) {
         // A single batch failing (timeout on a heavy chunk) must not abort the
         // whole sync — log it and keep going so the rest of the inbox still lands.
@@ -550,16 +562,20 @@ export class FolderSyncer {
     // on the frequent IDLE ticks — so the CONDSTORE deletion throttle (which
     // exists to keep SEARCH ALL off every IDLE poll) must NOT suppress it here.
     // A user hitting Refresh expects mail deleted on webmail to disappear NOW.
-    const flagsResult = await this.messageProcessor.syncFlags(
-      client,
-      folder,
-      storage,
-      undefined,
-      (emailId, uid) => this.onEmailDeleted?.(emailId, uid, folder.path),
-      { forceDeletion: true },
-      undefined,
-      touch,
-    );
+    // One section (see the flags-only branch of syncFolder): the mailbox must
+    // stay put for every command syncFlags issues, not merely be right when it
+    // starts.
+    const flagsResult = await withFolderSelected(client, folder.path, () =>
+      this.messageProcessor.syncFlags(
+        client,
+        folder,
+        storage,
+        undefined,
+        (emailId, uid) => this.onEmailDeleted?.(emailId, uid, folder.path),
+        { forceDeletion: true },
+        undefined,
+        touch,
+      ));
 
     // Check for new messages
     if (boxStatus.uidNext <= lastUID + 1) {
@@ -579,11 +595,12 @@ export class FolderSyncer {
     // helper also drops any UID <= lastUID (some servers echo the boundary
     // message for an out-of-range low bound) so lastSyncUid can never regress
     // into a permanent redundant refetch loop.
-    const messages = await fetchNewMessagesWindowed(client, lastUID, boxStatus.uidNext, {
-      fetchHeaders: true,
-      fetchBody: !options.headersOnly,
-      fetchBodyStructure: true,
-    });
+    const messages = await withFolderSelected(client, folder.path, () =>
+      fetchNewMessagesWindowed(client, lastUID, boxStatus.uidNext, {
+        fetchHeaders: true,
+        fetchBody: !options.headersOnly,
+        fetchBodyStructure: true,
+      }));
 
     if (messages.length === 0) {
       // Handle sent folder edge case
@@ -691,12 +708,12 @@ export class FolderSyncer {
       return { ...noop, loUid, hiUid, done: true };
     }
 
-    await client.selectFolder(folder.path);
-    const messages = await client.fetchMessagesByUidRange(loUid, hiUid, {
-      fetchHeaders: true,
-      fetchBody: false,
-      fetchBodyStructure: true,
-    });
+    const messages = await withFolderSelected(client, folder.path, () =>
+      client.fetchMessagesByUidRange!(loUid, hiUid, {
+        fetchHeaders: true,
+        fetchBody: false,
+        fetchBodyStructure: true,
+      }));
 
     let inserted = 0;
     if (messages.length > 0) {
@@ -741,17 +758,20 @@ export class FolderSyncer {
     // connection instead of being reclaimed mid-run (the reconnect-storm cause).
     touch?: () => void,
   ): Promise<{ updated: number; deleted: number }> {
-    await client.selectFolder(folder.path);
-    return this.messageProcessor.syncFlags(
-      client,
-      folder,
-      storage,
-      undefined,
-      (emailId, uid) => this.onEmailDeleted?.(emailId, uid, folder.path),
-      { forceDeletion: true, fullReconcile: true },
-      undefined,
-      touch,
-    );
+    // The full reconcile is the most dangerous pass to run on the wrong mailbox
+    // — it treats "not on the server" as a deletion — so the selection is held
+    // for the whole of it rather than set once and hoped for.
+    return withFolderSelected(client, folder.path, () =>
+      this.messageProcessor.syncFlags(
+        client,
+        folder,
+        storage,
+        undefined,
+        (emailId, uid) => this.onEmailDeleted?.(emailId, uid, folder.path),
+        { forceDeletion: true, fullReconcile: true },
+        undefined,
+        touch,
+      ));
   }
 
   /**
@@ -776,11 +796,14 @@ export class FolderSyncer {
     const startSeq = Math.max(1, boxStatus.messages - fetchCount + 1);
     const range = `${startSeq}:${boxStatus.messages}`;
 
-    const messages = await client.fetchMessages(range, {
-      fetchHeaders: true,
-      fetchBody: !options.headersOnly,
-      fetchBodyStructure: true,
-    });
+    // Sequence range again — see fullSync. The wrong mailbox here would file
+    // another folder's mail as recently-sent.
+    const messages = await withFolderSelected(client, folder.path, () =>
+      client.fetchMessages(range, {
+        fetchHeaders: true,
+        fetchBody: !options.headersOnly,
+        fetchBodyStructure: true,
+      }));
 
     // Filter to only new messages. One batched existence lookup instead of a
     // getEmailByMessageId per message (matches the main processBatch path).
