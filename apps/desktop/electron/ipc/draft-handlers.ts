@@ -7,7 +7,7 @@
 import { ipcMain } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import pLimit from 'p-limit';
-import { emailContentHash, findFolderByType, createLogger } from '@sarvinbox/core';
+import { emailContentHash, findFolderByType, createLogger, withFolderSelected } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
 import { resolveAccountTarget } from './email-handlers';
@@ -484,8 +484,10 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
     const folderPath = await findDraftsFolderPath(storage);
     if (!folderPath) return;
     const pool = (syncEngine as any).connectionPool;
-    const runDelete = async (conn: any) => {
-      await conn.selectFolder(folderPath);
+    // The whole scan-then-expunge sequence is ONE section: a re-select landing
+    // between the UID map and the EXPUNGE would delete those UIDs in whatever
+    // mailbox is selected by then.
+    const runDelete = async (conn: any) => withFolderSelected(conn, folderPath, async () => {
       const uidsToDelete = new Set<number>();
       for (const r of draftRows) if (r.uid && r.uid > 0) uidsToDelete.add(r.uid);
       if (draftRows.some((r) => !r.uid || r.uid <= 0) && typeof conn.fetchMessageIdToUidMap === 'function') {
@@ -499,7 +501,7 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
         if (typeof conn.deleteAndExpunge === 'function') await conn.deleteAndExpunge([...uidsToDelete]);
         else { await conn.deleteMessages([...uidsToDelete]); await conn.expunge(); }
       }
-    };
+    });
     try {
       if (pool?.withConnection) await pool.withConnection(runDelete);
       else await runDelete(syncEngine.getClient());
@@ -696,9 +698,9 @@ export function registerDraftHandlers(): void {
       return { success: true, imap: false, reason: 'Drafts folder not found' };
     }
     const pool = (syncEngine as any).connectionPool;
-    const runDelete = async (conn: any) => {
-      await conn.selectFolder(folderPath);
-
+    // Select + Message-ID scan + EXPUNGE must not be interleaved with another
+    // SELECT on this connection, or the expunge lands in the wrong mailbox.
+    const runDelete = async (conn: any) => withFolderSelected(conn, folderPath, async () => {
       // Resolve the server UIDs to delete: stored uid on the row (set at append
       // time), else a full-folder Message-ID→UID scan (the only reliable locator
       // when HEADER MESSAGE-ID SEARCH is unsupported, e.g. sarv.com).
@@ -744,7 +746,7 @@ export function registerDraftHandlers(): void {
         && draftRows.some((r) => !r.uid || r.uid <= 0);
       draftLog('delete:imap:done', { folderPath, deletedUids: totalDeleted, unscannable });
       return { success: true, imap: true, deleted: totalDeleted, unscannable };
-    };
+    });
     try {
       // withConnection poisons a timed-out/broken connection instead of returning
       // it dirty to the pool (which otherwise scrambles the next op's pipeline).
@@ -808,8 +810,9 @@ export function registerDraftHandlers(): void {
           const pool = (syncEngine as any).connectionPool;
           if (folderPath && pool?.withConnection) {
             await serializeDraftImap(() => pool.withConnection(async (conn: any) => {
-              {
-                await conn.selectFolder(folderPath);
+              // One section — the date SEARCH's UIDs are only valid in the
+              // mailbox that produced them, and the EXPUNGE follows them.
+              await withFolderSelected(conn, folderPath, async () => {
                 const uids = new Set<number>();
 
                 // (a) locally-known copies
@@ -840,7 +843,7 @@ export function registerDraftHandlers(): void {
                   else { await conn.deleteMessages([...uids]); await conn.expunge(); }
                   imapDeleted = uids.size;
                 }
-              }
+              });
             }));
           }
         }
