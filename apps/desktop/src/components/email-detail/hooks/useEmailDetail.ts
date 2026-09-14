@@ -7,7 +7,7 @@ import { extractConversation, isConversationModeEnabled, isAutoChatViewEnabled, 
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
-import { isDraftEmail } from '../../../utils/thread-utils';
+import { isDraftEmail, isDraftRow } from '../../../utils/thread-utils';
 import type { EmailDetailContext } from '../types';
 import {
   getInitials,
@@ -83,7 +83,10 @@ export function useEmailDetail(): EmailDetailContext | null {
   // `|draft|`-only filter missed, so they leaked in as read-only messages
   // showing the signature as "content").
   const allThreadEmails = useMemo(
-    () => rawThreadEmails.filter(e => !isDraftEmail(e, draftFolderPaths)),
+    // `isDraftRow`, not `isDraftEmail`: the latter answers "may I edit this?"
+    // and says no once a draft is in Trash, so DELETING a draft made it appear
+    // here as an ordinary message. Reported from the field.
+    () => rawThreadEmails.filter(e => !isDraftRow(e, draftFolderPaths)),
     [rawThreadEmails, draftFolderPaths]
   );
 
