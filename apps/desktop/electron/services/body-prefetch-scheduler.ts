@@ -57,6 +57,10 @@ export const IDLE_INTERVAL_MS = 10 * 60_000;
 // starved ticks back off 2m -> 4m -> 8m, capped at the idle interval, and snap
 // straight back to the active cadence the moment one body downloads again.
 export const STARVED_BACKOFF_CAP_MS = IDLE_INTERVAL_MS;
+// Gap between ticks during a manual "download bodies now" run. Short enough
+// that the batches read as one continuous download, long enough to leave the
+// connection pool a breath between 200-body ticks.
+export const BOOST_INTERVAL_MS = 2_000;
 // Seed = newest emails (any read state) missing a body. Each tick we
 // also expand to ALL siblings in the seeds' threads so conversation
 // extraction sees the complete thread — a thread with 1 fresh unread
@@ -210,10 +214,21 @@ export function computeNextTickDelay(input: {
   drained: boolean;
   starved: boolean;
   starvedStreak: number;
+  boostRemaining?: number;
 }): { delayMs: number; starvedStreak: number } {
-  const { drained, starved, starvedStreak } = input;
+  const { drained, starved, starvedStreak, boostRemaining = 0 } = input;
   if (drained) return { delayMs: IDLE_INTERVAL_MS, starvedStreak: 0 };
-  if (!starved) return { delayMs: ACTIVE_INTERVAL_MS, starvedStreak: 0 };
+  if (!starved) {
+    // A manual "download bodies now" run comes straight back for the next
+    // batch. Waiting out the full active interval between 200-body ticks would
+    // make a 500-body request take eight minutes of mostly idling, which reads
+    // as a button that did nothing.
+    return { delayMs: boostRemaining > 0 ? BOOST_INTERVAL_MS : ACTIVE_INTERVAL_MS, starvedStreak: 0 };
+  }
+  // Starvation still backs off, boost or not: the server telling us to slow
+  // down outranks the user asking us to hurry. Re-bursting into a throttle is
+  // what prolongs it.
+
   const nextStreak = starvedStreak + 1;
   const delayMs = Math.min(ACTIVE_INTERVAL_MS * 2 ** nextStreak, STARVED_BACKOFF_CAP_MS);
   return { delayMs, starvedStreak: nextStreak };
@@ -233,6 +248,15 @@ let stopped = false;
 // actively fetching a body (opening an email) so their download gets IMAP
 // connection priority instead of racing the background backlog.
 let deferUntil = 0;
+// Manual "download bodies now" budget, in bodies still to download. While it is
+// above zero the scheduler seeds UNREAD-first (what the AI can actually use)
+// and comes back every BOOST_INTERVAL_MS instead of idling. Each tick spends it
+// by what actually landed, so a tick that downloads nothing does not burn the
+// user's request. Reaching zero, draining the backlog, or stop() ends the run.
+let boostRemaining = 0;
+// What the run was asked for, kept for the renderer's progress bar — the panel
+// needs "312 of 500", which the remaining count alone cannot give.
+let boostTarget = 0;
 
 /**
  * Start the prefetch loop. Idempotent — calling twice is a no-op.
@@ -270,6 +294,10 @@ export function startBodyPrefetchScheduler(): void {
  */
 export function stopBodyPrefetchScheduler(): void {
   stopped = true;
+  // A manual run cannot outlive the scheduler that spends its budget; leaving
+  // it armed would resume a download the next start() never asked for.
+  boostRemaining = 0;
+  boostTarget = 0;
   if (timer) {
     clearTimeout(timer);
     timer = null;
@@ -314,6 +342,83 @@ export function kickBodyPrefetchScheduler(opts?: { resetBackoff?: boolean }): vo
   }
   clearTimeout(timer);
   timer = setTimeout(runTick, 1_000);
+}
+
+/**
+ * Progress of a manual body-download run, as the renderer sees it.
+ * `downloaded` counts only bodies that actually landed this run.
+ */
+export interface ManualDownloadState {
+  active: boolean;
+  target: number;
+  downloaded: number;
+  remaining: number;
+}
+
+/** Current manual-run progress. `active: false` when no run is in flight. */
+export function getManualBodyDownloadState(): ManualDownloadState {
+  return {
+    active: boostRemaining > 0,
+    target: boostTarget,
+    downloaded: Math.max(0, boostTarget - boostRemaining),
+    remaining: boostRemaining,
+  };
+}
+
+/** Tell the renderer where the manual run has got to. Best-effort. */
+function emitManualProgress(): void {
+  const win = getMainWindow();
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('body-download:progress', getManualBodyDownloadState());
+  }
+}
+
+/**
+ * Start a manual body download of up to `target` bodies, seeded from the UNREAD
+ * backlog — the mail the AI pipeline can actually act on once a body exists.
+ *
+ * The background scheduler already drains this queue on its own; this is the
+ * "do it now, and do this many" button. It reuses the same fetch path, so the
+ * give-up guard, the churn check and the starvation back-off all still apply.
+ *
+ * Calling it during a run RAISES the budget rather than starting a second run —
+ * two concurrent drains would fight over the same connection pool.
+ *
+ * @param target how many bodies to download; clamped to at least 1
+ * @returns the state the caller should render, including `active: false` if the
+ *          scheduler is not running (nothing was started)
+ */
+export function startManualBodyDownload(target: number): ManualDownloadState {
+  const want = Math.max(1, Math.floor(target));
+  // No scheduler = no storage/sync wired up yet. Report honestly rather than
+  // arming a budget that nothing will ever spend.
+  if (!timer && !inFlight) return { active: false, target: 0, downloaded: 0, remaining: 0 };
+
+  if (boostRemaining > 0) {
+    boostTarget += want;
+    boostRemaining += want;
+  } else {
+    boostTarget = want;
+    boostRemaining = want;
+  }
+  // A manual run is an explicit "try again now": clear the back-off ladder and
+  // the seed rotation so it starts at the newest mail on a healthy connection.
+  starvedStreak = 0;
+  seedOffsets.clear();
+  if (timer) {
+    clearTimeout(timer);
+    timer = setTimeout(runTick, 250);
+  }
+  emitManualProgress();
+  return getManualBodyDownloadState();
+}
+
+/** Cancel a manual run. The background scheduler keeps going at its own pace. */
+export function stopManualBodyDownload(): ManualDownloadState {
+  boostRemaining = 0;
+  boostTarget = 0;
+  emitManualProgress();
+  return getManualBodyDownloadState();
 }
 
 /**
@@ -401,8 +506,19 @@ async function prefetchAccountBodies(
   syncEngine: any,
   label?: string,
   offset = 0,
+  opts: { unreadFirst?: boolean } = {},
 ): Promise<AccountTickOutcome> {
+  // A manual run seeds UNREAD-first. The background seed is deliberately
+  // thread-driven (read mail included) so opening an old thread finds every
+  // body; but the button that starts a manual run sits under "Unread + no body
+  // yet" and promises the AI will pick the mail up — and the AI skips read
+  // mail. Seeding the background list there would download hundreds of bodies
+  // the pipeline then ignores, and the row the user is watching would barely
+  // move.
   const readSeeds = (from: number): string[] =>
+    (opts.unreadFirst
+      ? (storage.getUnreadEmailIdsWithoutBody?.(SEED_PER_TICK) as string[] | undefined)
+      : undefined) ||
     (storage.getSeedEmailIdsWithoutBody?.(SEED_PER_TICK, from) as string[] | undefined) ||
     (storage.getUnreadEmailIdsWithoutBody?.(SEED_PER_TICK) as string[] | undefined) ||
     [];
@@ -597,7 +713,10 @@ async function runTick(): Promise<void> {
         // the start-time sweep, so this is the only thing that gives their
         // retired rows another chance.
         clearUnfetchableMarkersFor(t.storage);
-        const outcome = await prefetchAccountBodies(t.storage, t.engine, t.label, seedOffsets.get(t.label) ?? 0);
+        const outcome = await prefetchAccountBodies(
+          t.storage, t.engine, t.label, seedOffsets.get(t.label) ?? 0,
+          { unreadFirst: boostRemaining > 0 },
+        );
         totalAttempted += outcome.attempted;
         totalDownloaded += outcome.downloaded;
         totalTransient += outcome.transient;
@@ -623,7 +742,17 @@ async function runTick(): Promise<void> {
     // (server-side throttle) instead of re-bursting into it every minute.
     if (!stopped) {
       const starved = totalAttempted > 0 && totalDownloaded === 0 && totalTransient > 0;
-      const { delayMs, starvedStreak: nextStreak } = computeNextTickDelay({ drained, starved, starvedStreak });
+      if (boostRemaining > 0) {
+        // Spend the budget on what LANDED, not on what we tried: a tick that
+        // timed out every fetch must not consume the user's request and leave
+        // the run "finished" with nothing downloaded. Draining ends the run
+        // too — there is no more mail to spend it on.
+        boostRemaining = drained ? 0 : Math.max(0, boostRemaining - totalDownloaded);
+        emitManualProgress();
+      }
+      const { delayMs, starvedStreak: nextStreak } = computeNextTickDelay({
+        drained, starved, starvedStreak, boostRemaining,
+      });
       if (starved) {
         logger.warn(
           `[BodyPrefetch] all ${totalAttempted} fetch(es) timed out this tick (throttled) — `

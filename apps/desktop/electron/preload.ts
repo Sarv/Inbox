@@ -193,6 +193,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // On-demand body loading
     fetchBody: (emailId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:fetchBody', emailId, accountId),
+    startBodyDownload: (target: number) =>
+      ipcRenderer.invoke('emails:startBodyDownload', target),
+    stopBodyDownload: () => ipcRenderer.invoke('emails:stopBodyDownload'),
+    getBodyDownloadState: () => ipcRenderer.invoke('emails:getBodyDownloadState'),
+    onBodyDownloadProgress: (cb: (state: BodyDownloadState) => void) => {
+      const listener = (_e: unknown, state: BodyDownloadState) => cb(state);
+      ipcRenderer.on('body-download:progress', listener);
+      return () => ipcRenderer.removeListener('body-download:progress', listener);
+    },
     getRawSource: (emailId: string) =>
       ipcRenderer.invoke('emails:getRawSource', emailId),
     fetchBodiesBatch: (emailIds: string[]) =>
@@ -836,6 +845,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 // Type definitions for the exposed API
+/** Progress of a manual body download (see `emails:startBodyDownload`). */
+export interface BodyDownloadState {
+  active: boolean;
+  target: number;
+  downloaded: number;
+  remaining: number;
+}
+
 export interface ElectronAPI {
   app: {
     getVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
@@ -931,6 +948,14 @@ export interface ElectronAPI {
     sectionCounts: (filters: string[], folderPath?: string, viewFilter?: any) => Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
     folderThreadCount: (folderPath?: string, viewFilter?: any) => Promise<{ success: boolean; data?: number | null; error?: string }>;
     fetchBody: (emailId: string, accountId?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+    startBodyDownload: (target: number) =>
+      Promise<{ success: boolean; data?: BodyDownloadState; error?: string }>;
+    stopBodyDownload: () =>
+      Promise<{ success: boolean; data?: BodyDownloadState; error?: string }>;
+    getBodyDownloadState: () =>
+      Promise<{ success: boolean; data?: BodyDownloadState; error?: string }>;
+    /** Subscribe to manual body-download progress. Returns an unsubscribe fn. */
+    onBodyDownloadProgress: (cb: (state: BodyDownloadState) => void) => () => void;
     getRawSource: (emailId: string) => Promise<{ success: boolean; data?: string; error?: string }>;
     fetchBodiesBatch: (emailIds: string[]) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     downloadBodies: (limit?: number) => Promise<{ success: boolean; data?: { downloaded: number }; error?: string }>;

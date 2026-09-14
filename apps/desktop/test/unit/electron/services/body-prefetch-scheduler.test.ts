@@ -27,6 +27,7 @@ const MAX_BODY_FETCH_ATTEMPTS = 3;
 const STARVED_BACKOFF_1_MS = 120_000;
 const TICK_BUDGET_MS = 5 * 60_000;
 const RETIRED_RECHECK_MS = 6 * 60 * 60_000;
+const BOOST_INTERVAL_MS = 2_000;
 
 const h = vi.hoisted(() => ({
   logs: [] as string[],
@@ -132,6 +133,8 @@ interface AccountState {
   /** Wall-clock ONE fetch consumes. Lets a test exhaust the per-tick budget. */
   fetchDelayMs: number;
   seedCalls: number[];
+  /** Calls to the UNREAD seed query — proves a manual run changed seed source. */
+  unreadSeedCalls: number[];
   /** OFFSET passed with each seed query — the rotation window under test. */
   seedOffsetCalls: number[];
   siblingCalls: Array<[string[], number]>;
@@ -140,6 +143,9 @@ interface AccountState {
   markThrows: boolean;
   useLegacyApi: boolean;
   seedThrows: boolean;
+  /** Unread-only backlog. Defined on the storage ONLY when a test sets it, so
+   *  every existing test keeps exercising the background seed path. */
+  unreadSeeds?: string[];
 }
 
 const makeAccount = (over: Partial<AccountState> = {}) => {
@@ -156,6 +162,7 @@ const makeAccount = (over: Partial<AccountState> = {}) => {
     cleared: [],
     fetchDelayMs: 0,
     seedCalls: [],
+    unreadSeedCalls: [],
     seedOffsetCalls: [],
     siblingCalls: [],
     fetched: [],
@@ -205,6 +212,12 @@ const makeAccount = (over: Partial<AccountState> = {}) => {
       return state.seeds.slice(offset, offset + limit);
     };
     storage.countEmailsWithoutBody = () => state.remaining;
+    if (state.unreadSeeds) {
+      storage.getUnreadEmailIdsWithoutBody = (limit: number) => {
+        state.unreadSeedCalls.push(limit);
+        return state.unreadSeeds!.slice(0, limit);
+      };
+    }
   }
 
   const engine = {
@@ -528,6 +541,184 @@ describe('computeNextTickDelay', () => {
       }
       expect(windows).toEqual([120_000, 240_000, 480_000, IDLE_INTERVAL_MS, IDLE_INTERVAL_MS]);
     });
+  });
+});
+
+describe('computeNextTickDelay — during a manual run', () => {
+  // The point of the manual button: back-to-back batches instead of a minute of
+  // idling between each 200-body tick, which would make a 500-body request take
+  // eight minutes of doing almost nothing and read as a button that didn't work.
+  it('comes straight back for the next batch while a budget remains', async () => {
+    const svc = await load();
+    expect(svc.computeNextTickDelay({
+      drained: false, starved: false, starvedStreak: 0, boostRemaining: 300,
+    })).toEqual({ delayMs: BOOST_INTERVAL_MS, starvedStreak: 0 });
+  });
+
+  // THE safety property. A manual run must not override the server telling us to
+  // slow down — re-bursting into a FETCH throttle every 2s is what prolongs it,
+  // and it is exactly what a "hurry up" button invites.
+  it('still backs off a throttled server, budget or not', async () => {
+    const svc = await load();
+    expect(svc.computeNextTickDelay({
+      drained: false, starved: true, starvedStreak: 0, boostRemaining: 500,
+    })).toEqual({ delayMs: 120_000, starvedStreak: 1 });
+  });
+
+  // An exhausted budget is an ended run: the cadence must fall back rather than
+  // keep polling every 2 seconds for the rest of the session.
+  it('returns to the normal cadence once the budget is spent', async () => {
+    const svc = await load();
+    expect(svc.computeNextTickDelay({
+      drained: false, starved: false, starvedStreak: 0, boostRemaining: 0,
+    })).toEqual({ delayMs: ACTIVE_INTERVAL_MS, starvedStreak: 0 });
+  });
+
+  // Nothing left to download ends the run too, however much budget is left.
+  it('sleeps normally when the backlog drained mid-run', async () => {
+    const svc = await load();
+    expect(svc.computeNextTickDelay({
+      drained: true, starved: false, starvedStreak: 0, boostRemaining: 400,
+    })).toEqual({ delayMs: IDLE_INTERVAL_MS, starvedStreak: 0 });
+  });
+
+  // Omitting the field must behave exactly as before this feature existed —
+  // every other caller passes three fields.
+  it('defaults to no boost when the caller omits it', async () => {
+    const svc = await load();
+    expect(svc.computeNextTickDelay({ drained: false, starved: false, starvedStreak: 0 }))
+      .toEqual({ delayMs: ACTIVE_INTERVAL_MS, starvedStreak: 0 });
+  });
+});
+
+describe('manual body download', () => {
+  /** Start the scheduler with one connected account and run its first tick. */
+  const started = async (over: Parameters<typeof makeAccount>[0] = {}) => {
+    const a = makeAccount(over);
+    h.activeStorage = a.storage;
+    h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startBodyPrefetchScheduler();
+    await advance(FIRST_DELAY_MS + 10);
+    return { a, svc };
+  };
+
+  // THE feature: the button targets the "Unread + no body yet" row, and the AI
+  // only acts on unread mail. Seeding the background list instead would download
+  // hundreds of read bodies the pipeline ignores, leaving the number the user is
+  // watching almost unmoved.
+  it('seeds the UNREAD backlog rather than the background thread-driven one', async () => {
+    const { a, svc } = await started({ seeds: ['read1'], unreadSeeds: ['u1', 'u2'], remaining: 2 });
+    a.state.fetched.length = 0;
+
+    svc.startManualBodyDownload(100);
+    await advance(1_000);
+
+    expect(a.state.unreadSeedCalls.length).toBeGreaterThan(0);
+    expect(a.state.fetched).toContain('u1');
+    expect(a.state.fetched).not.toContain('read1');
+  });
+
+  // A tick where every fetch timed out downloaded nothing. Spending the budget on
+  // what we ATTEMPTED would let one bad minute consume the user's whole request
+  // and report the run "finished" with zero bodies downloaded.
+  it('spends the budget on bodies that landed, not on attempts', async () => {
+    const { svc } = await started({
+      unreadSeeds: ['u1', 'u2'],
+      seeds: ['u1', 'u2'],
+      remaining: 2,
+      fetchFails: new Set(['u1', 'u2']),
+    });
+
+    svc.startManualBodyDownload(2);
+    await advance(1_000);
+
+    // Nothing downloaded → the whole budget survives the tick.
+    expect(svc.getManualBodyDownloadState()).toMatchObject({ active: true, downloaded: 0 });
+  });
+
+  // The run has to end on its own, or the scheduler polls every 2s forever.
+  it('ends the run once the budget is spent', async () => {
+    const { svc } = await started({ unreadSeeds: ['u1'], seeds: ['u1'], remaining: 1 });
+
+    svc.startManualBodyDownload(1);
+    await advance(5_000);
+
+    expect(svc.getManualBodyDownloadState().active).toBe(false);
+  });
+
+  // Asking for 500 when only 12 exist must not leave a run armed against mail
+  // that isn't there.
+  it('ends the run when the backlog drains before the budget does', async () => {
+    const { svc } = await started({ unreadSeeds: [], seeds: [], remaining: 0 });
+
+    svc.startManualBodyDownload(500);
+    await advance(5_000);
+
+    expect(svc.getManualBodyDownloadState().active).toBe(false);
+  });
+
+  // The panel shows "312 of 500"; without a target it could only show a
+  // countdown, and without the event it would not move until the 30s poll.
+  it('reports progress to the renderer', async () => {
+    const { svc } = await started({ unreadSeeds: ['u1'], seeds: ['u1'], remaining: 1 });
+    h.window!.sent.length = 0;
+
+    svc.startManualBodyDownload(50);
+    await advance(5_000);
+
+    const progress = h.window!.sent.filter((m) => m.channel === 'body-download:progress');
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress[0].payload).toMatchObject({ active: true, target: 50 });
+  });
+
+  // Two concurrent drains would fight over the same connection pool, so a second
+  // press raises the budget instead of starting a rival run.
+  it('raises the budget instead of starting a second run', async () => {
+    const { svc } = await started({ unreadSeeds: ['u1'], seeds: ['u1'], remaining: 1 });
+
+    svc.startManualBodyDownload(100);
+    const after = svc.startManualBodyDownload(50);
+
+    expect(after.target).toBe(150);
+  });
+
+  it('cancels on request, leaving the background scheduler running', async () => {
+    const { svc } = await started({ unreadSeeds: ['u1'], seeds: ['u1'], remaining: 1 });
+
+    svc.startManualBodyDownload(500);
+    expect(svc.stopManualBodyDownload().active).toBe(false);
+    expect(svc.getManualBodyDownloadState()).toMatchObject({ active: false, target: 0 });
+  });
+
+  // Pressing the button before any account has connected must say so rather than
+  // arm a budget nothing will ever spend — a button that silently does nothing.
+  it('reports inactive when the scheduler is not running', async () => {
+    const svc = await load();
+    expect(svc.startManualBodyDownload(500).active).toBe(false);
+  });
+
+  // A run cannot outlive the scheduler that spends its budget; leaving it armed
+  // would resume a download the next start() never asked for.
+  it('is cleared when the scheduler stops', async () => {
+    const { svc } = await started({ unreadSeeds: ['u1'], seeds: ['u1'], remaining: 1 });
+
+    svc.startManualBodyDownload(500);
+    svc.stopBodyPrefetchScheduler();
+
+    expect(svc.getManualBodyDownloadState().active).toBe(false);
+  });
+
+  // Older storage (or a background account whose adapter predates the unread
+  // query) must still download SOMETHING rather than throwing or stalling.
+  it('falls back to the background seed when unread-first is unavailable', async () => {
+    const { a, svc } = await started({ seeds: ['e1'], remaining: 1 });
+    a.state.fetched.length = 0;
+
+    svc.startManualBodyDownload(10);
+    await advance(1_000);
+
+    expect(a.state.fetched).toContain('e1');
   });
 });
 
