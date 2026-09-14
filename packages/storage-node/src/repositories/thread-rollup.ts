@@ -23,6 +23,7 @@ import type Database from 'better-sqlite3';
 
 
 import { prepared } from '../statement-cache';
+
 import { THREAD_STATE_EXCLUDED_FOLDERS, isShadowedInFolder } from './thread-sql';
 
 const logger = createLogger('thread-rollup');

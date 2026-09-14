@@ -8,9 +8,9 @@ import { logger, isRoleAddress, isNoReplyAddress, contactNameForAddress, normali
 import type Database from 'better-sqlite3';
 
 import { applyFtsSchema, FTS_REBUILD_SQL, FTS_TRIGGERS } from './fts-schema';
-import { hasSharedContacts, SHARED } from './shared-contacts';
 import { rawBodyExpression } from './repositories/body-storage';
 import { clearInlineImageCache, inflateInlineImages } from './repositories/inline-image-store';
+import { hasSharedContacts, SHARED } from './shared-contacts';
 
 /**
  * Facts a migration cannot read off the connection it is handed.

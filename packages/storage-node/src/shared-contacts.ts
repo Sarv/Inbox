@@ -31,9 +31,9 @@
  *     per-account adoption pass (see `migrations.ts`, `unified_contact_directory`)
  *     only ever merges rows INTO the directory.
  */
+import { createLogger } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
-import { createLogger } from '@sarvinbox/core';
 
 import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
 

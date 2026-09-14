@@ -26,7 +26,6 @@ import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
 import { InlineImageBackfill } from './inline-image-backfill';
 import { createMigrationManager } from './migrations';
 import { ReadModelMaintainer } from './read-model-maintainer';
-import { attachSharedContacts, SHARED_CONTACTS_FILE } from './shared-contacts';
 import {
   EmailRepository,
   FolderRepository,
@@ -41,6 +40,7 @@ import {
 } from './repositories';
 import { missingBodyClause } from './repositories/agent-eligibility';
 import { areBodyLengthsReady } from './repositories/body-metrics';
+import { attachSharedContacts, SHARED_CONTACTS_FILE } from './shared-contacts';
 import { resolveThreadId, reattachOrphans, repairThreading as repairThreadingImpl } from './thread-resolver';
 
 
