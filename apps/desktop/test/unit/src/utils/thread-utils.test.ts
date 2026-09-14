@@ -12,6 +12,7 @@ import {
   hasStarredFlag,
   isDraft,
   isDraftEmail,
+  isDraftRow,
   isRead,
   isSmartPrioritizeEnabled,
   isUnreadCountable,
@@ -776,5 +777,50 @@ describe('adjustTotalForFilteredOut', () => {
   // order: a negative drop must never INFLATE the total past the server count.
   it('ignores a negative dropped count', () => {
     expect(adjustTotalForFilteredOut(30, -5)).toBe(30);
+  });
+});
+
+/**
+ * `isDraftRow` — "should this render as a message in the conversation?"
+ *
+ * Distinct from `isDraftEmail` ("may I edit this?"), and the difference is a
+ * shipped bug: deleting a draft MADE IT APPEAR in the thread. The delete added
+ * `|Trash|`, `isDraftEmail` stopped calling it a draft, and the thread view's
+ * filter — which used `isDraftEmail` — let it through as an ordinary message.
+ * Reported from the field as "draft is deleted but when I open the main thread
+ * it's showing".
+ */
+describe('isDraftRow', () => {
+  const row = (tags: string) => ({ tags }) as never;
+  const DRAFT_PATHS = new Set(['INBOX.Drafts']);
+
+  it('is true for a live draft', () => {
+    expect(isDraftRow(row('|Drafts|draft|'))).toBe(true);
+  });
+
+  // THE regression: a discarded draft must stay hidden from the conversation.
+  it('is STILL true for a draft that was deleted into Trash', () => {
+    expect(isDraftRow(row('|Trash|draft|'))).toBe(true);
+    // …whereas the editability question correctly says no.
+    expect(isDraftEmail(row('|Trash|draft|'))).toBe(false);
+  });
+
+  // A sent copy keeps a stale `|draft|` tag from the compose that made it, but
+  // it is a real message. Hiding it would erase the user's own replies from
+  // every thread they ever sent one in.
+  it('is false for a sent copy carrying a stale draft tag', () => {
+    expect(isDraftRow(row('|Sent|draft|'))).toBe(false);
+    expect(isDraftRow(row('|[Gmail]/Sent Mail|draft|'))).toBe(false);
+    expect(isDraftRow(row('|Sent Items|draft|'))).toBe(false);
+  });
+
+  it('recognises a provider Drafts path with no local marker', () => {
+    expect(isDraftRow(row('|INBOX.Drafts|'), DRAFT_PATHS)).toBe(true);
+    expect(isDraftRow(row('|[Gmail]/Drafts|'))).toBe(true);
+  });
+
+  it('is false for ordinary received mail', () => {
+    expect(isDraftRow(row('|INBOX|read|'))).toBe(false);
+    expect(isDraftRow(row(''))).toBe(false);
   });
 });

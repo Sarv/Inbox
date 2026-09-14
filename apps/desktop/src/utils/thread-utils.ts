@@ -88,6 +88,41 @@ export function isDraft(email: EmailRecord): boolean {
   return isDraftEmail(email);
 }
 
+/**
+ * Is this row a draft — LIVE or DISCARDED?
+ *
+ * `isDraftEmail` answers "may I edit this?", so it says no once a draft is in
+ * Trash. The thread view asks a different question: "should this render as a
+ * message in the conversation?", and for a discarded draft the answer is also
+ * no. Filtering the message list on `isDraftEmail` alone meant deleting a draft
+ * MADE IT APPEAR: the delete added `|Trash|`, the row stopped being a live
+ * draft, and it fell straight through the filter into the thread as an ordinary
+ * message. Reported from the field as "draft is deleted but when I open the
+ * main thread it's showing".
+ *
+ * A SENT copy is the deliberate exception. It keeps a stale `|draft|` tag from
+ * the compose that produced it, but it is a real message the user sent and
+ * belongs in the conversation — excluding it would hide their own replies from
+ * every thread they ever answered.
+ */
+export function isDraftRow(email: EmailRecord, draftFolderPaths?: Set<string>): boolean {
+  const tags = email.tags || '';
+  if (
+    tags.includes('|Sent|') ||
+    tags.includes('|[Gmail]/Sent Mail|') ||
+    tags.includes('|Sent Items|')
+  ) {
+    return false;
+  }
+  if (tags.includes('|draft|')) return true;
+  if (draftFolderPaths) {
+    for (const path of draftFolderPaths) {
+      if (path && tags.includes(`|${path}|`)) return true;
+    }
+  }
+  return tags.includes('|Drafts|') || tags.includes('|[Gmail]/Drafts|');
+}
+
 export function hasImportanceFlag(email: EmailRecord): boolean {
   // Check tags for |important| or fall back to derived isImportant
   if (email.tags) return email.tags.includes('|important|');
