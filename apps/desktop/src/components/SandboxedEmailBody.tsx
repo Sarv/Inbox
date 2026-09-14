@@ -1,3 +1,10 @@
+import {
+  WIDE_TABLE_CSS,
+  documentSurfaceCss,
+  fitDocumentSurfaces,
+  fitWideTables,
+  measureFrameHeight,
+} from '@sarv-in/email-chat-view';
 import { ImageOff } from 'lucide-react';
 import { useRef, useEffect, useMemo, useState } from 'react';
 
@@ -6,13 +13,6 @@ import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } fro
 // Shared with Chat View rather than kept in a second copy here: the two
 // renderers had the same two-step fit written twice, and the measurement is the
 // part that is easy to get subtly wrong. The library owns it and its tests.
-import {
-  WIDE_TABLE_CSS,
-  documentSurfaceCss,
-  fitDocumentSurfaces,
-  fitWideTables,
-  measureFrameHeight,
-} from '@sarv-in/email-chat-view';
 
 interface SandboxedEmailBodyProps {
   html: string;
