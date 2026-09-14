@@ -2440,12 +2440,24 @@ async function executeAgentAction(emailId: string, action: UserActionType, _valu
   // IMAP sync (skip in testMode)
   if (!testMode) {
     const syncEngine = getSyncEngine();
-    if (syncEngine?.isConnected() && email.uid) {
+    // NOT gated on isConnected(). These calls go through the operation queue,
+    // which exists to persist an op while offline and replay it on reconnect —
+    // the same path a user-initiated mark-read takes. Checking isConnected()
+    // first threw that away: the local `|read|` tag was applied unconditionally
+    // above, and when IMAP happened to be down the IMAP half was silently
+    // dropped instead of queued. Nothing ever retried it, so the message stayed
+    // read here and unread on the server forever. Observed in the field on mail
+    // the Activity log showed as auto-read by the agent.
+    if (syncEngine && email.uid) {
       const folder = await storage.getFolder(email.folderId);
       if (folder) {
-        if (action === 'read') syncEngine.markAsRead(folder.path, email.uid).catch(console.error);
-        else if (action === 'star') syncEngine.markAsStarred(folder.path, email.uid, true).catch(console.error);
-        else if (action === 'archive') (syncEngine as any).operationQueue?.archive(folder.path, email.uid).catch(console.error);
+        // Failures are logged, never swallowed to console (CLAUDE.md: always the
+        // shared logger). A dropped line here is a divergence nobody can see.
+        const onFail = (what: string) => (err: unknown) =>
+          logger.error(`[Pipeline] agent ${what} did not reach IMAP for ${emailId}:`, err);
+        if (action === 'read') syncEngine.markAsRead(folder.path, email.uid).catch(onFail('mark-read'));
+        else if (action === 'star') syncEngine.markAsStarred(folder.path, email.uid, true).catch(onFail('star'));
+        else if (action === 'archive') (syncEngine as any).operationQueue?.archive(folder.path, email.uid).catch(onFail('archive'));
       }
     }
   }
