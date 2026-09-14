@@ -11,12 +11,7 @@ import { setAIProviderConfigured } from '../services/conversation-extraction-sch
 import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
 import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
 import { createLogger } from '@sarvinbox/core';
-import {
-  areBodyLengthsReady,
-  hasBodyClause,
-  missingBodyClause,
-  notExcludedByTagsClause,
-} from '@sarvinbox/storage-node';
+import { processingBreakdown } from '@sarvinbox/storage-node';
 const logger = createLogger('ai-handlers');
 
 /**
@@ -349,52 +344,12 @@ export function registerAIHandlers(): void {
       const db = storage.db;
       if (!db?.prepare) return { success: false, error: 'DB not available' };
 
-      const get = (sql: string): number =>
-        ((db.prepare(sql).get() as { n: number })?.n || 0);
-
-      // Body and tag tests come from the shared eligibility module, so this
-      // breakdown can never quietly disagree with the worker about what "has a
-      // body" or "is skippable" means — the drift that let the progress bar
-      // report pending work no phase could select.
-      //
-      // `bodyLengthsReady` decides whether the has-body test can be answered
-      // from the length columns (index-servable) or must read every body. It is
-      // read from THIS database rather than assumed, because a mailbox whose
-      // background backfill has not finished still has NULL lengths, and a NULL
-      // read as "no body" would make this breakdown claim the entire mailbox is
-      // unprocessable.
-      const ready          = areBodyLengthsReady(db);
-      const total          = get(`SELECT COUNT(*) AS n FROM emails`);
-      const withBody       = get(`SELECT COUNT(*) AS n FROM emails WHERE ${hasBodyClause('', ready)}`);
-      const noBody         = get(`SELECT COUNT(*) AS n FROM emails WHERE ${missingBodyClause('', ready)}`);
-      const readSkipped    = get(`SELECT COUNT(*) AS n FROM emails WHERE instr(tags,'|read|') > 0`);
-      const aiProcessed    = get(`SELECT COUNT(*) AS n FROM emails WHERE ai_processed_at IS NOT NULL`);
-      // Bulk-run eligibility: what a user-triggered "Process More" could take
-      // on. Deliberately keyed on ai_processed_at rather than agent_status —
-      // this asks "never AI-processed", not "queued for the background poll".
-      const eligibleNow    = get(`
-        SELECT COUNT(*) AS n FROM emails
-        WHERE ai_processed_at IS NULL
-          AND ${hasBodyClause('', ready)}
-          AND ${notExcludedByTagsClause()}
-      `);
-      const unreadWithBody = get(`
-        SELECT COUNT(*) AS n FROM emails
-        WHERE instr(tags,'|read|') = 0
-          AND ${hasBodyClause('', ready)}
-      `);
-      const unreadNoBody   = get(`
-        SELECT COUNT(*) AS n FROM emails
-        WHERE instr(tags,'|read|') = 0
-          AND ${missingBodyClause('', ready)}
-      `);
-      return {
-        success: true,
-        data: {
-          total, withBody, noBody, readSkipped, aiProcessed,
-          eligibleNow, unreadWithBody, unreadNoBody,
-        },
-      };
+      // The whole breakdown lives in storage-node beside the eligibility clauses
+      // it is built from, so this handler cannot drift from what the worker
+      // treats as eligible — and so the counts are testable against a real
+      // migrated database instead of only through the IPC surface.
+      const data = processingBreakdown(db);
+      return { success: true, data };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }

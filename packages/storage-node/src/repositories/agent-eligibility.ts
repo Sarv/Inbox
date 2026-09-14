@@ -15,7 +15,7 @@
  * query, use these instead.
  */
 
-import { fastHasBodyExpression, legacyHasBodyExpression } from './body-metrics';
+import { areBodyLengthsReady, fastHasBodyExpression, legacyHasBodyExpression } from './body-metrics';
 
 /** Qualify a column with an optional table alias (`e.tags` vs `tags`). */
 const col = (alias: string, name: string): string => (alias ? `${alias}.${name}` : name);
@@ -209,4 +209,74 @@ export function extractionStuckClause(alias = '', options: EligibilityOptions = 
     `${col(alias, 'extraction_status')} = 'pending'`,
     missingBodyClause(alias, options.bodyLengthsReady),
   ].join('\n        AND ');
+}
+
+/** Every count the AI dashboard's "processing breakdown" panel shows. */
+export interface ProcessingBreakdown {
+  total: number;
+  withBody: number;
+  noBody: number;
+  readSkipped: number;
+  aiProcessed: number;
+  eligibleNow: number;
+  unreadWithBody: number;
+  unreadNoBody: number;
+}
+
+/**
+ * The dashboard's breakdown, built from the SAME clauses the worker selects on
+ * so the panel cannot quietly disagree with it about what "has a body" or "is
+ * skippable" means.
+ *
+ * `unreadWithBody` / `unreadNoBody` carry the folder exclusions deliberately.
+ * Without them they counted unread mail in Trash, Spam and Junk — mail the user
+ * will never open — so the row the UI labels "eligible pool" described messages
+ * that could never become eligible, and it did not fall as mail was read.
+ * Reported from the field with ~1,000 unread in Trash against ~358 in the
+ * inbox: three quarters of the number was deleted mail that had never been
+ * opened, so reading made no visible difference to it.
+ *
+ * Lives here rather than in the IPC handler so it can be tested against a real
+ * migrated database instead of only through Electron.
+ *
+ * @param db an open, migrated database
+ */
+export function processingBreakdown(db: {
+  prepare: (sql: string) => { get: () => unknown };
+}): ProcessingBreakdown {
+  const get = (sql: string): number => ((db.prepare(sql).get() as { n: number })?.n || 0);
+
+  // Whether the has-body test can be answered from the length columns
+  // (index-servable) or must read every body. Read from THIS database rather
+  // than assumed: a mailbox whose background backfill has not finished still
+  // has NULL lengths, and reading a NULL as "no body" would make the breakdown
+  // claim the entire mailbox is unprocessable.
+  const ready = areBodyLengthsReady(db as never);
+
+  return {
+    total: get(`SELECT COUNT(*) AS n FROM emails`),
+    withBody: get(`SELECT COUNT(*) AS n FROM emails WHERE ${hasBodyClause('', ready)}`),
+    noBody: get(`SELECT COUNT(*) AS n FROM emails WHERE ${missingBodyClause('', ready)}`),
+    readSkipped: get(`SELECT COUNT(*) AS n FROM emails WHERE instr(tags,'|read|') > 0`),
+    aiProcessed: get(`SELECT COUNT(*) AS n FROM emails WHERE ai_processed_at IS NOT NULL`),
+    // Bulk-run eligibility: what "Process More" could take on. Keyed on
+    // ai_processed_at rather than agent_status — this asks "never AI-processed",
+    // not "queued for the background poll".
+    eligibleNow: get(`
+      SELECT COUNT(*) AS n FROM emails
+      WHERE ai_processed_at IS NULL
+        AND ${hasBodyClause('', ready)}
+        AND ${notExcludedByTagsClause()}
+    `),
+    unreadWithBody: get(`
+      SELECT COUNT(*) AS n FROM emails
+      WHERE ${hasBodyClause('', ready)}
+        AND ${notExcludedByTagsClause()}
+    `),
+    unreadNoBody: get(`
+      SELECT COUNT(*) AS n FROM emails
+      WHERE ${missingBodyClause('', ready)}
+        AND ${notExcludedByTagsClause()}
+    `),
+  };
 }

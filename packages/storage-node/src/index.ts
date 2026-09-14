@@ -51,6 +51,8 @@ export {
   missingBodyClause,
   notExcludedByTagsClause,
   recentWindowClause,
+  processingBreakdown,
+  type ProcessingBreakdown,
 } from './repositories/agent-eligibility';
 
 // Body-size metrics: the length columns that let a has-body test be answered
