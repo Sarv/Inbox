@@ -379,6 +379,33 @@ function createWindow(): void {
     }
   });
 
+  // Same rule for a navigation started INSIDE a frame. `will-navigate` fires
+  // for the top-level frame only, so an email body's iframe could navigate
+  // itself to a remote page and render it inside the inbox — the sandbox
+  // (`allow-same-origin allow-popups`, no `allow-top-navigation`) stops it
+  // taking over the window but not from replacing its own content. The renderer
+  // rewrites anchors to target="_blank" so they route through the
+  // setWindowOpenHandler above, and it also intercepts clicks at runtime; this
+  // is the backstop that cannot be raced or bypassed by markup neither of those
+  // anticipated. Guarded because `will-frame-navigate` is Electron 25+.
+  if (typeof (mainWindow.webContents as { on?: unknown }).on === 'function') {
+    try {
+      mainWindow.webContents.on('will-frame-navigate' as never, ((event: Electron.Event, url: string) => {
+        const appOrigin = VITE_DEV_SERVER_URL || 'file://';
+        // about:srcdoc / about:blank are the email iframe being (re)built by us.
+        if (url.startsWith(appOrigin) || url.startsWith('about:')) return;
+        event.preventDefault();
+        if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mailto:')) {
+          shell.openExternal(url).catch((err) => logger.warn('[Main] openExternal failed:', err));
+        } else {
+          logger.warn('[Main] Blocked in-frame navigation to an unsupported scheme:', url);
+        }
+      }) as never);
+    } catch (err) {
+      logger.warn('[Main] will-frame-navigate unavailable on this Electron:', err);
+    }
+  }
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     // Open DevTools AFTER the window is visible, docked to the right. Opening it
