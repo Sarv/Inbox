@@ -8,6 +8,7 @@
 // unsolicited `* FETCH` responses correctly, giving a modern Promise/
 // async-iterator API with a stable response pipeline.
 
+import { AsyncLocalStorage } from 'async_hooks';
 import { EventEmitter } from 'events';
 
 import type {
@@ -40,6 +41,7 @@ import type {
 } from '../types/imap';
 import { IMAPError } from '../types/imap';
 import { logger } from '../utils/logger';
+import { createMutex, type Mutex } from '../utils/mutex';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
@@ -87,6 +89,13 @@ export function resolveImplicitTls(config: { security?: 'ssl' | 'starttls' | 'no
 export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   private client: ImapFlow | null = null;
   private currentFolder: string | null = null;
+  /**
+   * Serializes every mailbox SELECT on this socket, and — via `withFolder` —
+   * whole select-then-command sections. See `withFolder` for the bug this
+   * closes; `folderLockHeld` is how a section re-enters without deadlocking.
+   */
+  private readonly mailboxMutex: Mutex = createMutex();
+  private readonly folderLockHeld = new AsyncLocalStorage<true>();
   private connectionState: ConnectionState = 'disconnected';
   private capabilities: string[] = [];
   private shuttingDown = false;
@@ -631,7 +640,77 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     await this.openFolder(folderPath, undefined, { withUnseen: false });
   }
 
+  /**
+   * Run `fn` with `folderPath` SELECTed and GUARANTEED to stay selected for the
+   * whole of it — the only safe way to issue more than one command against a
+   * mailbox on a shared connection.
+   *
+   * `SELECT` is connection state, not a command argument: every command after it
+   * is interpreted against whatever mailbox the socket last selected. So a
+   * caller doing `selectFolder(X)` then `fetchAllUIDs(X)` is only correct if
+   * nothing re-selects in the gap — and on this app's PRIMARY connection things
+   * routinely do. The realtime manager re-selects the IDLE-monitored folder from
+   * its poll timer, its flag-sync timer, and `reselectMonitoredFolder()` after
+   * any foreground op; a flag reconcile, a drain or a Gmail-label repair is
+   * running folder-scoped work on that same socket at the same time. The loser
+   * of that race used to enumerate the WRONG mailbox and report it as this
+   * folder's (see `ensureCurrentFolder` for what that cost us), and now fails
+   * outright with MAILBOX_MISMATCH — correct, but it means the reconcile,
+   * deletion sweep or drain simply did not run, and mail silently stops agreeing
+   * with the server.
+   *
+   * Holding the mutex across select+work is what actually removes the race: a
+   * barging `selectFolder` QUEUES behind the section instead of landing inside
+   * it. Opportunistic re-selects (the realtime timers) need no change — they
+   * wait their turn automatically because every select goes through the same
+   * lock.
+   *
+   * Reentrant: `fn` may call `selectFolder`/`withFolder` on this same client
+   * (a nested helper re-asserting its folder is normal) without deadlocking —
+   * the AsyncLocalStorage flag marks the section's async context as already
+   * holding the lock. It does NOT make the client reentrant across connections:
+   * each client has its own lock.
+   */
+  async withFolder<T>(
+    folderPath: string,
+    fn: () => Promise<T>,
+    opts?: { select?: boolean },
+  ): Promise<T> {
+    this.ensureConnected();
+    // `select: false` is for a section that issues its OWN specialised SELECT
+    // (the QRESYNC resynchronising select, whose VANISHED response is the whole
+    // point of it) — it takes the lock without spending a redundant round-trip
+    // on a plain SELECT that the section is about to replace.
+    const shouldSelect = opts?.select !== false;
+    const body = async (): Promise<T> => {
+      if (shouldSelect) await this.ensureFolderSelected(folderPath);
+      return fn();
+    };
+    // Already inside this connection's section — the lock is ours; run inline
+    // (re-asserting the mailbox, a no-op when it is already the selected one).
+    if (this.folderLockHeld.getStore()) return body();
+    return this.mailboxMutex.runExclusive(() => this.folderLockHeld.run(true, body));
+  }
+
+  /**
+   * Every SELECT on this socket funnels through here, and takes the mailbox
+   * lock — that is what makes a `withFolder` section uninterruptible. Inside
+   * such a section the lock is already ours, so re-select directly.
+   */
   private async openFolder(
+    folderPath: string,
+    extraOpts?: { changedSince?: bigint; uidValidity?: bigint },
+    opts?: { withUnseen?: boolean },
+  ): Promise<FolderStatus> {
+    if (this.folderLockHeld.getStore()) {
+      return this.openFolderUnlocked(folderPath, extraOpts, opts);
+    }
+    return this.mailboxMutex.runExclusive(() =>
+      this.folderLockHeld.run(true, () => this.openFolderUnlocked(folderPath, extraOpts, opts)),
+    );
+  }
+
+  private async openFolderUnlocked(
     folderPath: string,
     extraOpts?: { changedSince?: bigint; uidValidity?: bigint },
     opts?: { withUnseen?: boolean },

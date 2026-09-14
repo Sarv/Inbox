@@ -27,6 +27,7 @@
  * while we weren't looking" without awaiting anything.
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
 import { EventEmitter } from 'events';
 
 import type {
@@ -39,6 +40,7 @@ import type {
   IMAPMessage,
   SearchCriteria,
 } from '../types/imap';
+import { createMutex, type Mutex } from '../utils/mutex';
 
 export interface FakeMessageInit {
   /** Assigned automatically from the folder's uidNext when omitted. */
@@ -160,6 +162,9 @@ function buildRawSource(m: Omit<FakeMessage, 'modseq'>): string {
 export class FakeImapServer {
   private folders = new Map<string, FakeFolder>();
   private selected: string | null = null;
+  /** Mailbox lock — same contract as the real client's. See `withFolder`. */
+  private readonly mailboxMutex: Mutex = createMutex();
+  private readonly folderLockHeld = new AsyncLocalStorage<true>();
   private connected = false;
   private idleCallback: ((event: IMAPEvent) => void) | null = null;
   private opts: Required<Omit<FakeImapServerOptions, 'capabilities' | 'noop'>> & {
@@ -463,6 +468,17 @@ export class FakeImapServer {
   }
 
   async selectFolder(folderPath: string): Promise<FolderStatus> {
+    // Queue behind any in-flight withFolder section, exactly as the real client
+    // does — this is what makes a barging re-select wait rather than corrupt.
+    if (!this.folderLockHeld.getStore()) {
+      return this.mailboxMutex.runExclusive(() =>
+        this.folderLockHeld.run(true, () => this.selectFolderUnlocked(folderPath)),
+      );
+    }
+    return this.selectFolderUnlocked(folderPath);
+  }
+
+  private async selectFolderUnlocked(folderPath: string): Promise<FolderStatus> {
     this.note('selectFolder');
     const folder = this.requireFolder(folderPath);
     this.selected = folderPath;
@@ -485,6 +501,34 @@ export class FakeImapServer {
 
   async ensureFolderSelected(folderPath: string): Promise<void> {
     if (this.selected !== folderPath) await this.selectFolder(folderPath);
+  }
+
+  /**
+   * Mirror the real client's mailbox lock (see `ImapFlowClient.withFolder`): the
+   * section holds the selection, and any concurrent select on this same fake
+   * connection queues behind it instead of landing mid-sequence. Without this the
+   * fake would let a test pass that the real client would fail — and the whole
+   * point of the fake is to reproduce the cross-mailbox race offline.
+   */
+  async withFolder<T>(
+    folderPath: string,
+    fn: () => Promise<T>,
+    opts?: { select?: boolean },
+  ): Promise<T> {
+    this.note('withFolder');
+    const body = async (): Promise<T> => {
+      // `ensureFolderSelected` is the cheap fast path (skip the SELECT when the
+      // mailbox is already open), but it is OPTIONAL on IIMAPClient — a lease or
+      // a leaner client may not have it, and a test stubs it out to prove the
+      // fallback still works. Degrade to a plain SELECT rather than throwing.
+      if (opts?.select !== false) {
+        if (typeof this.ensureFolderSelected === 'function') await this.ensureFolderSelected(folderPath);
+        else await this.selectFolder(folderPath);
+      }
+      return fn();
+    };
+    if (this.folderLockHeld.getStore()) return body();
+    return this.mailboxMutex.runExclusive(() => this.folderLockHeld.run(true, body));
   }
 
   getCurrentFolder(): string | null {

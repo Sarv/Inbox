@@ -94,3 +94,6 @@ export {
   type FetchedBody,
   type QueuedBodyFetcher,
 } from './fetch-body-queued';
+
+// Mailbox-scoped critical section (select-then-work on a shared connection)
+export { withFolderSelected } from './with-folder';
