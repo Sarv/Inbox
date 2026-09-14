@@ -25,6 +25,8 @@ import type { IIMAPClient } from '../types/imap';
 import { logger } from '../utils/logger';
 import { detectProvider } from '../utils/provider';
 
+import { withFolderSelected } from './with-folder';
+
 export type FolderLabelMode = 'copy' | 'move';
 
 export interface CategoryLabel {
@@ -133,12 +135,16 @@ class KeywordStrategy implements LabelStrategy {
   private delimiter?: string;
   constructor(private client: IIMAPClient, private isSarvHost = false) {}
   async apply(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
-    await this.client.selectFolder(folderPath);
-    await this.client.addFlags(uids, [keywordForCategory(cat)]);
+    // UIDs are only meaningful in the mailbox they came from, so the STORE must
+    // land in the mailbox this select opened — hence the held selection rather
+    // than select-then-store (a concurrent re-select in the gap would flag
+    // whatever messages happen to hold those UIDs in some other folder).
+    await withFolderSelected(this.client, folderPath, () =>
+      this.client.addFlags(uids, [keywordForCategory(cat)]));
   }
   async remove(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
-    await this.client.selectFolder(folderPath);
-    await this.client.removeFlags(uids, [keywordForCategory(cat)]);
+    await withFolderSelected(this.client, folderPath, () =>
+      this.client.removeFlags(uids, [keywordForCategory(cat)]));
   }
   async ensure(_cat: CategoryLabel): Promise<void> {
     // Nothing to provision: the keyword IS the label. Creating a mailbox to
@@ -197,16 +203,17 @@ class GmailLabelStrategy implements LabelStrategy {
     await this.client.createMailbox(SARV_LABEL_PARENT);
     const label = await this.path(cat);
     await this.client.createMailbox(label); // idempotent
-    await this.client.selectFolder(folderPath);
-    await this.client.copyMessages(uids, label); // Gmail: adds the label, keeps INBOX, no duplicate
+    await withFolderSelected(this.client, folderPath, () =>
+      this.client.copyMessages(uids, label)); // Gmail: adds the label, keeps INBOX, no duplicate
   }
   async remove(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
     // Remove the Gmail label in place via STORE -X-GM-LABELS (no delete, message
     // stays in All Mail). Works off the INBOX uid — no need for the label
     // mailbox's own uid. No-op on a client without Gmail-label support.
     if (!this.client.removeGmailLabels) return;
-    await this.client.selectFolder(folderPath);
-    await this.client.removeGmailLabels(uids, [await this.path(cat)]);
+    const label = await this.path(cat); // resolved outside the section — no round-trip held
+    await withFolderSelected(this.client, folderPath, () =>
+      this.client.removeGmailLabels!(uids, [label]));
   }
   async ensure(cat: CategoryLabel): Promise<void> {
     await this.client.createMailbox(SARV_LABEL_PARENT);
@@ -231,12 +238,13 @@ class FolderStrategy implements LabelStrategy {
     await this.client.createMailbox(SARV_LABEL_PARENT); // parent so it nests
     const dest = await this.path(cat);
     await this.client.createMailbox(dest);
-    await this.client.selectFolder(folderPath);
-    if (this.mode === 'move') {
-      await this.client.moveMessages(uids, dest); // leaves the inbox, no duplicate
-    } else {
-      await this.client.copyMessages(uids, dest); // keeps the inbox, but a real duplicate
-    }
+    await withFolderSelected(this.client, folderPath, async () => {
+      if (this.mode === 'move') {
+        await this.client.moveMessages(uids, dest); // leaves the inbox, no duplicate
+      } else {
+        await this.client.copyMessages(uids, dest); // keeps the inbox, but a real duplicate
+      }
+    });
   }
   async remove(_folderPath: string, _uids: number[], _cat: CategoryLabel): Promise<void> {
     logger.debug('[LabelStrategy] folder remove is a no-op in v1');

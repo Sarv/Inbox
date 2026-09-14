@@ -28,6 +28,7 @@ import { OperationQueue, type OperationResult } from './operation-queue';
 import { applyQresyncVanished } from './qresync-reconcile';
 import { RealtimeManager, type RealtimeMode, type RealtimeEvent } from './realtime-manager';
 import { SyncStateManager, type SyncStatus, type SyncState } from './sync-state';
+import { withFolderSelected } from './with-folder';
 
 /**
  * Sync engine options
@@ -711,14 +712,12 @@ export class SyncEngine {
     if (uids.length === 0) return 0;
     const byUid = new Map(records.map((r) => [r.uid, r]));
 
-    const fetchViaClient = async (client: IIMAPClient) => {
-      await client.selectFolder(folderPath);
-      return client.fetchMessagesByUID(uids, {
+    const fetchViaClient = async (client: IIMAPClient) =>
+      withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(uids, {
         fetchHeaders: true,
         fetchBody: false,
         fetchBodyStructure: false,
-      });
-    };
+      }));
 
     const messages = this.connectionPool?.isInitialized()
       ? await this.connectionPool.withConnection(fetchViaClient)
@@ -1254,8 +1253,7 @@ export class SyncEngine {
 
     const doDrain = async (client: IIMAPClient, touch?: () => void): Promise<{ inserted: number; remaining: number; done: boolean }> => {
       if (typeof client.fetchAllUIDs !== 'function') return { inserted: 0, remaining: 0, done: true };
-      await client.selectFolder(folderPath);
-      const serverUids = await client.fetchAllUIDs(folderPath);
+      const serverUids = await withFolderSelected(client, folderPath, () => client.fetchAllUIDs!(folderPath));
       if (serverUids.length === 0) return { inserted: 0, remaining: 0, done: true };
       const localRows = await this.storage.getEmailUidsInFolder!(folder.id);
       const localSet = new Set(localRows.map((r) => r.uid));
@@ -1299,11 +1297,15 @@ export class SyncEngine {
       const accounted = new Set<number>();
       for (let i = 0; i < toFetch.length; i += DRAIN_FETCH_BATCH) {
         const sub = toFetch.slice(i, i + DRAIN_FETCH_BATCH);
-        const fetched = await client.fetchMessagesByUID(sub, {
+        // Re-asserted per batch rather than held across the whole loop: each
+        // FETCH is its own critical section, so the processBatch/storage work
+        // between batches doesn't keep the primary's mailbox pinned away from
+        // the IDLE folder for the length of a drain.
+        const fetched = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(sub, {
           fetchHeaders: true,
           fetchBody: false,          // header-only; bodies fetch lazily on open
           fetchBodyStructure: true,
-        });
+        }));
         if (fetched.length > 0) {
           const r = await this.messageProcessor.processBatch(fetched, folder, this.storage, undefined, { quiet: true });
           inserted += r.inserted;
@@ -1382,8 +1384,7 @@ export class SyncEngine {
       client: IIMAPClient,
       touch?: () => void,
     ): Promise<{ matched: number; alreadyLocal: number; inserted: number }> => {
-      await client.selectFolder(folderPath);
-      const matchedUids = await client.search(criteria);
+      const matchedUids = await withFolderSelected(client, folderPath, () => client.search(criteria));
       if (matchedUids.length === 0) return { matched: 0, alreadyLocal: 0, inserted: 0 };
 
       // UIDs the DB already holds are already searchable locally — never re-fetch
@@ -1407,11 +1408,15 @@ export class SyncEngine {
       let inserted = 0;
       for (let i = 0; i < missing.length; i += DRAIN_FETCH_BATCH) {
         const sub = missing.slice(i, i + DRAIN_FETCH_BATCH);
-        const fetched = await client.fetchMessagesByUID(sub, {
-          fetchHeaders: true,
-          fetchBody: false,          // header-only; bodies fetch lazily on open
-          fetchBodyStructure: true,
-        });
+        // Re-asserted per batch (processBatch between batches is storage work
+        // that must not pin the mailbox): these UIDs came from the SEARCH above
+        // and mean something else entirely in any other folder.
+        const fetched = await withFolderSelected(client, folderPath, () =>
+          client.fetchMessagesByUID(sub, {
+            fetchHeaders: true,
+            fetchBody: false,          // header-only; bodies fetch lazily on open
+            fetchBodyStructure: true,
+          }));
         if (fetched.length > 0) {
           const result = await this.messageProcessor.processBatch(fetched, folder, this.storage, undefined, { quiet: true });
           inserted += result.inserted;
@@ -1458,12 +1463,11 @@ export class SyncEngine {
     if (!this.isConnected() || uids.length === 0) return bulk;
     if (!this.connectionPool?.isInitialized()) return bulk; // pool-only for safety
     const doFetch = async (client: IIMAPClient): Promise<Set<number>> => {
-      await client.selectFolder(folderPath);
-      const msgs = await client.fetchMessagesByUID(uids, {
+      const msgs = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(uids, {
         fetchHeaders: true,
         fetchBody: false,
         fetchBodyStructure: false,
-      });
+      }));
       const set = new Set<number>();
       for (const m of msgs) if (m.isBulk && typeof m.uid === 'number') set.add(m.uid);
       return set;
@@ -2202,13 +2206,11 @@ export class SyncEngine {
     filename: string
   ): Promise<{ filename: string; contentType: string; content: Buffer }> {
     const doFetch = async (client: IIMAPClient) => {
-      await client.selectFolder(folderPath);
-
-      const messages = await client.fetchMessagesByUID([uid], {
+      const messages = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID([uid], {
         fetchHeaders: false,
         fetchBody: true,
         fetchBodyStructure: false,
-      });
+      }));
 
       if (messages.length === 0) {
         throw new Error(`Message not found: UID ${uid} in ${folderPath}`);
@@ -2263,14 +2265,17 @@ export class SyncEngine {
     if (!this.isConnected()) return null;
     const doFetch = async (client: IIMAPClient): Promise<{ filename: string; content: Buffer } | null> => {
       if (typeof client.downloadPart !== 'function') return null;
-      await client.selectFolder(folderPath);
-      const msgs = await client.fetchMessagesByUID([uid], {
-        fetchHeaders: false, fetchBody: false, fetchBodyStructure: true,
+      // The structure FETCH and the part download are ONE section: the part
+      // path it resolves is only meaningful against the mailbox it came from.
+      return withFolderSelected(client, folderPath, async () => {
+        const msgs = await client.fetchMessagesByUID([uid], {
+          fetchHeaders: false, fetchBody: false, fetchBodyStructure: true,
+        });
+        const part = findAttachmentPartByName(msgs[0]?.bodyStructure, filename);
+        if (!part) return null; // unresolved → caller uses the whole-message path
+        const content = await client.downloadPart!(uid, part);
+        return content ? { filename, content } : null;
       });
-      const part = findAttachmentPartByName(msgs[0]?.bodyStructure, filename);
-      if (!part) return null; // unresolved → caller uses the whole-message path
-      const content = await client.downloadPart(uid, part);
-      return content ? { filename, content } : null;
     };
     try {
       if (this.connectionPool?.isInitialized()) return await this.connectionPool.withConnection(doFetch);
@@ -2323,12 +2328,11 @@ export class SyncEngine {
     // select would make "Show Original" display somebody else's message.
     const expectedMessageId = (await this.storage.getEmail(emailId))?.messageId;
     const doFetch = async (client: IIMAPClient) => {
-      await client.selectFolder(folderPath);
-      const messages = await client.fetchMessagesByUID([uid], {
+      const messages = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID([uid], {
         fetchHeaders: false,
         fetchBody: true,
         fetchBodyStructure: false,
-      });
+      }));
       const message = messages[0];
       if (!message?.body) {
         throw new Error(`Raw source unavailable: UID ${uid} in ${folderPath}`);
@@ -2481,12 +2485,10 @@ export class SyncEngine {
 
     try {
       const client = this.connectionManager.client;
-      await client.selectFolder(folderPath);
-
-      // Search by message ID header
-      const uids = await client.search({
+      const uids = await withFolderSelected(client, folderPath, () => client.search({
+        // Search by message ID header
         header: [{ name: 'Message-ID', value: messageId }],
-      });
+      }));
 
       return uids.length > 0 ? uids[0] : null;
     } catch (error) {
@@ -2515,16 +2517,24 @@ export class SyncEngine {
     // shared helper also serves as the folder's SELECT; it no-ops (and leaves the
     // folder unselected) when QRESYNC is unavailable, so fall back to a plain SELECT.
     // syncFlags still runs afterwards for flag reconciliation.
-    const { selected } = await applyQresyncVanished(
-      client, folder, this.storage,
-      (id) => this.syncState.emitEmailDeleted(id, folderPath),
-    );
-    // syncFlags fetches flags from the CURRENTLY selected mailbox —
-    // select the requested folder or we'd apply another folder's flags
-    if (!selected) {
-      await client.selectFolder(folderPath);
-    }
-    const result = await this.messageProcessor.syncFlags(client, folder, this.storage);
+    // ONE critical section: the QRESYNC select, the fallback select and the whole
+    // of syncFlags read the CURRENTLY selected mailbox, and syncFlags issues many
+    // commands over a long window. Without the lock the realtime manager's own
+    // re-select of the IDLE folder lands in the middle and the reconcile either
+    // aborts (MAILBOX_MISMATCH) or, worse, applies another folder's flags.
+    // `select: false` — applyQresyncVanished performs the specialised select itself.
+    const result = await withFolderSelected(client, folderPath, async () => {
+      const { selected } = await applyQresyncVanished(
+        client, folder, this.storage,
+        (id) => this.syncState.emitEmailDeleted(id, folderPath),
+      );
+      // syncFlags fetches flags from the CURRENTLY selected mailbox —
+      // select the requested folder or we'd apply another folder's flags
+      if (!selected) {
+        await client.selectFolder(folderPath);
+      }
+      return this.messageProcessor.syncFlags(client, folder, this.storage);
+    }, { select: false });
 
     // Restore the IDLE-watched folder
     await this.reselectMonitoredFolder();

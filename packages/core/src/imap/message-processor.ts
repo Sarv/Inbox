@@ -33,6 +33,7 @@ import {
   transcodeDetectedCharset,
 } from './charset-repair';
 import { mapEnvelopeFields } from './envelope-mapper';
+import { withFolderSelected } from './with-folder';
 
 // Deletion-detection throttle for the CONDSTORE delta path. Flag deltas
 // (fetchFlagsChangedSince) run every sync — cheap. But the full server UID set
@@ -601,8 +602,9 @@ export class MessageProcessor {
     storage: IEmailStorage,
   ): Promise<{ scanned: number; updated: number }> {
     if (typeof client.fetchAllLabels !== 'function') return { scanned: 0, updated: 0 };
-    await client.selectFolder(folder.path);
-    const labelRows = await client.fetchAllLabels(folder.path);
+    // Whole-mailbox enumeration: it must be the mailbox we asked for, and the
+    // only way to know that is to hold the selection across the fetch.
+    const labelRows = await withFolderSelected(client, folder.path, () => client.fetchAllLabels!(folder.path));
     if (labelRows.length === 0) return { scanned: 0, updated: 0 };
 
     // Both are optional on the interface — a storage impl without them simply
@@ -1023,14 +1025,15 @@ export class MessageProcessor {
     // only thing that can prove the body we get back belongs to this email.
     const target = await storage.getEmail(emailId);
 
-    await client.selectFolder(folderPath);
-
+    // Every fetch below resolves a UID, and a UID only means anything inside the
+    // mailbox it was issued in — so the selection is held for all of them, not
+    // just re-asserted before the first.
     const fetchOne = async (targetUid: number) => {
-      const found = await client.fetchMessagesByUID([targetUid], {
+      const found = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID([targetUid], {
         fetchHeaders: false,
         fetchBody: true,
         fetchBodyStructure: true,
-      });
+      }));
       return found[0];
     };
 
@@ -1059,7 +1062,8 @@ export class MessageProcessor {
       let correctedUid: number | undefined;
       let hitCount = 0;
       try {
-        const hits = await client.search({ header: [{ name: 'message-id', value: bare }] });
+        const hits = await withFolderSelected(client, folderPath, () =>
+          client.search({ header: [{ name: 'message-id', value: bare }] }));
         hitCount = hits.length;
         correctedUid = hits.find((u) => u !== uid);
       } catch (err) {
@@ -2295,7 +2299,8 @@ export class MessageProcessor {
       const bare = m.messageId.replace(/^<|>$/g, '');
       let hits: number[];
       try {
-        hits = await client.search({ header: [{ name: 'message-id', value: bare }] });
+        hits = await withFolderSelected(client, folder.path, () =>
+          client.search({ header: [{ name: 'message-id', value: bare }] }));
       } catch (err) {
         // The SEARCH failed: evidence about the CONNECTION, not the message. Stop
         // the sweep here (nothing unlinked on a guess); the next sync asks again.

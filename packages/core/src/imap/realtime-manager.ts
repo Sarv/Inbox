@@ -5,10 +5,12 @@ import { EventEmitter } from 'events';
 import type { IIMAPClient, IMAPEvent } from '../types/imap';
 import type { IEmailStorage } from '../types/storage';
 import { logger } from '../utils/logger';
+import { createMutex, type Mutex } from '../utils/mutex';
 
 import { isConnectionError } from './imap-errors';
 import { fetchNewMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor } from './message-processor';
+import { withFolderSelected } from './with-folder';
 
 /**
  * Real-time event types
@@ -106,7 +108,7 @@ export class RealtimeManager extends EventEmitter {
 
   /** Serializes start()/stop()/updateClient() so two callers can't interleave
    *  their awaits and end up with two half-built sessions. */
-  private lifecycleChain: Promise<unknown> = Promise.resolve();
+  private readonly lifecycleMutex: Mutex = createMutex();
 
   // IDLE state. Keepalive is owned entirely by ImapFlow (maxIdleTime) plus TCP
   // keepalive on the socket — we no longer run an app-level NOOP timer, which
@@ -253,12 +255,10 @@ export class RealtimeManager extends EventEmitter {
    * handler, and the Tier-B background sweep's stop→sync→start cycle all reach
    * this class) used to interleave those awaits and leave `mode` /
    * `monitoredFolder` describing one session while the timers belonged to
-   * another. Chaining them makes each transition atomic.
+   * another. Serializing them makes each transition atomic.
    */
   private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.lifecycleChain.then(fn, fn);
-    this.lifecycleChain = next.then(() => undefined, () => undefined);
-    return next;
+    return this.lifecycleMutex.runExclusive(fn);
   }
 
   /**
@@ -411,8 +411,11 @@ export class RealtimeManager extends EventEmitter {
     }
 
     try {
-      await this.client.selectFolder(folderPath);
-      await this.client.startIdle((event) => this.handleIdleEvent(event));
+      // IDLE watches the SELECTED mailbox, so the select and the IDLE command
+      // are one section — a re-select landing between them silently monitors
+      // the wrong folder and this account simply stops seeing new mail.
+      await withFolderSelected(this.client, folderPath, () =>
+        this.client!.startIdle((event) => this.handleIdleEvent(event)));
       this.idleActive = true;
       return true;
     } catch (error) {
@@ -637,29 +640,33 @@ export class RealtimeManager extends EventEmitter {
         await this.handleNewMessages();
       }
 
-      // Sync flags and detect deletions during polling
-      const flagsResult = await this.messageProcessor.syncFlags(
-        this.client,
-        folder,
-        this.storage,
-        (emailId, uid, flags) => {
-          this.emitEvent({
-            type: 'flagsChanged',
-            folderPath: this.monitoredFolder!,
-            emailId,
-            uid,
-            flags,
-          });
-        },
-        (emailId, uid) => {
-          this.emitEvent({
-            type: 'deleted',
-            folderPath: this.monitoredFolder!,
-            emailId,
-            uid,
-          });
-        }
-      );
+      // Sync flags and detect deletions during polling. syncFlags issues many
+      // commands against the CURRENTLY selected mailbox over a long window, and
+      // the foreground (drain, reconcile, queued ops) shares this socket — so
+      // the selection is HELD for the whole pass, not merely set before it.
+      const flagsResult = await withFolderSelected(this.client, this.monitoredFolder, () =>
+        this.messageProcessor.syncFlags(
+          this.client!,
+          folder,
+          this.storage!,
+          (emailId, uid, flags) => {
+            this.emitEvent({
+              type: 'flagsChanged',
+              folderPath: this.monitoredFolder!,
+              emailId,
+              uid,
+              flags,
+            });
+          },
+          (emailId, uid) => {
+            this.emitEvent({
+              type: 'deleted',
+              folderPath: this.monitoredFolder!,
+              emailId,
+              uid,
+            });
+          }
+        ));
 
       if (flagsResult.updated > 0) {
         logger.info(`Polling: ${flagsResult.updated} flags updated`);
@@ -816,22 +823,28 @@ export class RealtimeManager extends EventEmitter {
       const folder = await storage.getFolderByPath(folderPath);
       if (!folder || epoch !== this.epoch) return;
 
-      const status = await client.selectFolder(folderPath);
-      if (epoch !== this.epoch) return;
-
       const lastUid = folder.lastSyncUid || 0;
+      // The status drives the fetch window and the fetch consumes it, so both
+      // must run against the SAME mailbox — one held section covers the select,
+      // the status it returns and every FETCH the window issues.
+      //
       // Bounded, windowed fetch — NEVER an unbounded `lastUid+1:*`. On this
       // LARGE/slow account the single unbounded fetch blew the 60s op timeout
       // every cycle and new mail never landed (see incremental-fetch.ts). Cap
       // per-cycle work so a big backlog drains across cycles (backfill/periodic
       // sync cover the rest) instead of one command that can't finish in time.
-      const messages = await fetchNewMessagesWindowed(
-        client,
-        lastUid,
-        status.uidNext,
-        { fetchHeaders: true, fetchBody: false, fetchBodyStructure: true },
-        { maxMessages: this.config.maxNewMessagesBatch * 100 },
-      );
+      const messages = await withFolderSelected(client, folderPath, async () => {
+        const status = await client.selectFolder(folderPath);
+        if (epoch !== this.epoch) return [];
+        return fetchNewMessagesWindowed(
+          client,
+          lastUid,
+          status.uidNext,
+          { fetchHeaders: true, fetchBody: false, fetchBodyStructure: true },
+          { maxMessages: this.config.maxNewMessagesBatch * 100 },
+        );
+      });
+      if (epoch !== this.epoch) return;
 
       if (messages.length === 0) return;
 
@@ -1042,10 +1055,13 @@ export class RealtimeManager extends EventEmitter {
     try {
       const folder = await storage.getFolderByPath(folderPath);
       if (!folder || epoch !== this.epoch) return;
-      await client.selectFolder(folderPath);
-      if (epoch !== this.epoch) return;
       const readFlips: Array<{ emailId: string; nowRead: boolean }> = [];
-      const result = await this.messageProcessor.syncFlags(
+      // Held, not merely set: syncFlags runs a long multi-command pass against
+      // the selected mailbox while the foreground shares this socket. This is
+      // the pass that was aborting with MAILBOX_MISMATCH — i.e. not reconciling
+      // at all — whenever a drain or reconcile re-selected underneath it.
+      const result = await withFolderSelected(client, folderPath, () =>
+        this.messageProcessor.syncFlags(
         client,
         folder,
         storage,
@@ -1063,7 +1079,7 @@ export class RealtimeManager extends EventEmitter {
           if (epoch !== this.epoch) return;
           readFlips.push({ emailId, nowRead });
         },
-      );
+        ));
       if (epoch !== this.epoch) return;
       // A server-driven change alters folder unread counts; refresh so the
       // sidebar badge doesn't sit stale for the IDLE session. Deletions change a

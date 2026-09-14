@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 
 import { isConnectionError, isRateLimited, isQuotaError, extractOpFailureDetail } from './imap-errors';
 import { isSarvLabelPath, resolveLabelStrategy, type FolderLabelMode } from './label-strategy';
+import { withFolderSelected } from './with-folder';
 
 /**
  * Operation types
@@ -769,21 +770,20 @@ export class OperationQueue {
 
   /** Run a flag op on an arbitrary (leased) connection. */
   private async runFlagOp(client: IIMAPClient, type: OperationType, folderPath: string, uids: number[]): Promise<void> {
-    // Cheapest select: no-op if already open on this mailbox, and no STATUS
-    // round-trip (a flag op never needs the unseen count). Falls back to the
-    // full selectFolder for clients that don't implement the fast path.
-    if (client.ensureFolderSelected) {
-      await client.ensureFolderSelected(folderPath);
-    } else {
-      await client.selectFolder(folderPath);
-    }
-    switch (type) {
-      case 'markRead': await client.addFlags(uids, ['\\Seen']); break;
-      case 'markUnread': await client.removeFlags(uids, ['\\Seen']); break;
-      case 'markStarred': await client.addFlags(uids, ['\\Flagged']); break;
-      case 'markUnstarred': await client.removeFlags(uids, ['\\Flagged']); break;
-      default: throw new Error(`runFlagOp: ${type} is not a flag op`);
-    }
+    // Held for the STORE, not merely set before it: these UIDs mean one thing in
+    // this mailbox and something else in the next, so a re-select landing between
+    // the select and the STORE flags somebody else's mail. The section still uses
+    // the cheapest select available (no STATUS round-trip — a flag op never needs
+    // the unseen count).
+    await withFolderSelected(client, folderPath, async () => {
+      switch (type) {
+        case 'markRead': await client.addFlags(uids, ['\\Seen']); break;
+        case 'markUnread': await client.removeFlags(uids, ['\\Seen']); break;
+        case 'markStarred': await client.addFlags(uids, ['\\Flagged']); break;
+        case 'markUnstarred': await client.removeFlags(uids, ['\\Flagged']); break;
+        default: throw new Error(`runFlagOp: ${type} is not a flag op`);
+      }
+    });
   }
 
   /**
@@ -809,35 +809,30 @@ export class OperationQueue {
   ): Promise<void> {
     switch (type) {
       case 'markRead': {
-        await this.client!.selectFolder(folderPath);
         // Explicit IMAP-command log so the mail server / IMAP team can confirm we
         // ALWAYS issue a STORE for reads. Single read = INFO (visible by default);
         // bulk = DEBUG (a select-all mark-read would otherwise flood INFO).
         const seenDetail = `folder="${folderPath}" ${uids.length === 1 ? `UID ${uids[0]}` : `${uids.length} UIDs [${uids.slice(0, 20).join(',')}${uids.length > 20 ? ',…' : ''}]`}`;
         if (uids.length > 1) logger.debug(`IMAP STORE +FLAGS (\\Seen) — bulk mark-read ${seenDetail}`);
         else logger.info(`IMAP STORE +FLAGS (\\Seen) — mark-read ${seenDetail}`);
-        await this.client!.addFlags(uids, ['\\Seen']);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.addFlags(uids, ['\\Seen']));
         break;
       }
 
       case 'markUnread':
-        await this.client!.selectFolder(folderPath);
-        await this.client!.removeFlags(uids, ['\\Seen']);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.removeFlags(uids, ['\\Seen']));
         break;
 
       case 'markStarred':
-        await this.client!.selectFolder(folderPath);
-        await this.client!.addFlags(uids, ['\\Flagged']);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.addFlags(uids, ['\\Flagged']));
         break;
 
       case 'markUnstarred':
-        await this.client!.selectFolder(folderPath);
-        await this.client!.removeFlags(uids, ['\\Flagged']);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.removeFlags(uids, ['\\Flagged']));
         break;
 
       case 'move': {
-        await this.client!.selectFolder(folderPath);
-        const uidMap = await this.client!.moveMessages(uids, data.destPath);
+        const uidMap = await withFolderSelected(this.client!, folderPath, () => this.client!.moveMessages(uids, data.destPath));
         await this.remapMovedUids(data.destPath, uids, uidMap);
         break;
       }
@@ -846,44 +841,43 @@ export class OperationQueue {
         // COPY leaves the source copies in place, so — unlike move — there is no
         // UID remap for the source rows (their UIDs don't change). The dest copies
         // get their own new UIDs, picked up by the destination folder's next sync.
-        await this.client!.selectFolder(folderPath);
-        await this.client!.copyMessages(uids, data.destPath);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.copyMessages(uids, data.destPath));
         break;
       }
 
       case 'moveToTrash': {
         const trashFolder = await this.findSpecialFolder('trash');
-        await this.client!.selectFolder(folderPath);
-        const uidMap = await this.client!.moveMessages(uids, trashFolder.path);
+        const uidMap = await withFolderSelected(this.client!, folderPath, () => this.client!.moveMessages(uids, trashFolder.path));
         await this.remapMovedUids(trashFolder.path, uids, uidMap);
         break;
       }
 
       case 'moveToSpam': {
         const spamFolder = await this.findSpecialFolder('spam');
-        await this.client!.selectFolder(folderPath);
-        const uidMap = await this.client!.moveMessages(uids, spamFolder.path);
+        const uidMap = await withFolderSelected(this.client!, folderPath, () => this.client!.moveMessages(uids, spamFolder.path));
         await this.remapMovedUids(spamFolder.path, uids, uidMap);
         break;
       }
 
       case 'archive': {
         const archiveFolder = await this.findSpecialFolder('archive');
-        await this.client!.selectFolder(folderPath);
-        const uidMap = await this.client!.moveMessages(uids, archiveFolder.path);
+        const uidMap = await withFolderSelected(this.client!, folderPath, () => this.client!.moveMessages(uids, archiveFolder.path));
         await this.remapMovedUids(archiveFolder.path, uids, uidMap);
         break;
       }
 
       case 'delete':
-        await this.client!.selectFolder(folderPath);
-        await this.client!.deleteMessages(uids);
-        await this.client!.expunge();
+        // STORE \\Deleted and EXPUNGE are ONE section. Split, a re-select between
+        // them expunges the deleted messages of whatever mailbox landed in the
+        // gap — the worst outcome this whole lock exists to prevent.
+        await withFolderSelected(this.client!, folderPath, async () => {
+          await this.client!.deleteMessages(uids);
+          await this.client!.expunge();
+        });
         break;
 
       case 'setLabel':
-        await this.client!.selectFolder(folderPath);
-        await this.client!.copyMessages(uids, data.label);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.copyMessages(uids, data.label));
         break;
 
       case 'applyCategoryLabel': {
@@ -906,8 +900,7 @@ export class OperationQueue {
         if (!this.client!.removeGmailLabels) break;
         const labels: string[] = data.labels ?? [];
         if (labels.length === 0) break;
-        await this.client!.selectFolder(folderPath);
-        await this.client!.removeGmailLabels(uids, labels);
+        await withFolderSelected(this.client!, folderPath, () => this.client!.removeGmailLabels!(uids, labels));
         break;
       }
 
@@ -964,13 +957,16 @@ export class OperationQueue {
         logger.warn(`remapMovedUids: no uidMap and client not connected for "${destPath}"; local uids left stale (will self-heal on next full sync)`);
         return;
       }
-      await this.client!.selectFolder(destPath);
       for (const srcUid of sourceUids) {
         const row = await this.storage.getEmailByFolderAndUid(destFolder.id, srcUid);
         if (!row || !row.messageId) continue;
         const msgId = row.messageId.replace(/^<|>$/g, '');
         if (!msgId) continue;
-        const hits = await this.client!.search({ header: [{ name: 'Message-ID', value: msgId }] });
+        // Per-search section rather than one select up front: the UID this
+        // writes back is only correct if the SEARCH ran in destPath, and the
+        // storage round-trips between iterations are ample room for a re-select.
+        const hits = await withFolderSelected(this.client!, destPath, () =>
+          this.client!.search({ header: [{ name: 'Message-ID', value: msgId }] }));
         if (hits.length > 0 && hits[0] !== row.uid) {
           await this.storage.updateEmail(row.id, { uid: hits[0] });
         }
