@@ -618,6 +618,75 @@ function fixBareLinks(html: string): string {
 }
 
 /**
+ * Force every link to open OUT of the frame, in the source string.
+ *
+ * The iframe's sandbox is `allow-same-origin allow-popups` — no
+ * `allow-top-navigation`, so a link cannot hijack the app window, but nothing
+ * stops it navigating the IFRAME. A click then replaced the email body with the
+ * remote page, rendered inside the inbox. Reported in the field on a hotel
+ * booking mail whose "Online Account" link loaded in place.
+ *
+ * A runtime click listener already tries to catch this and call
+ * `openExternal`, but it can only attach once the iframe document has parsed,
+ * and it gives up after ~1s of polling. A large marketing email — exactly the
+ * kind full of links — is what loses that race, and it loses it silently.
+ *
+ * `target="_blank"` removes the race instead of narrowing it: the click becomes
+ * a window-open request, which Electron routes to `setWindowOpenHandler` in
+ * main.ts, which opens it in the real browser and denies the popup. No
+ * JavaScript in this component has to run at all, and `allow-popups` is already
+ * in the sandbox so the request is permitted to reach that handler.
+ *
+ * `rel="noopener noreferrer"` because the target must never get a handle back
+ * to this frame, and a mail's link should not leak the referrer.
+ *
+ * `href` is deliberately KEPT. Stripping it would neutralise navigation too,
+ * but browsers style and expose `a[href]` specially: the link would lose its
+ * affordance, its hover URL, and "Copy link address".
+ */
+export function forceLinksExternal(html: string): string {
+  // Match the WHOLE open tag, not the run up to `href=`. An earlier version
+  // captured only as far as `href=`, so the guard below was inspecting a string
+  // that stopped before the href VALUE — it could never see `#` or `mailto:`
+  // and never fired. In-page anchors were being turned into popup requests that
+  // setWindowOpenHandler then denied, which silently broke jump links inside an
+  // email; a `target` appearing after `href` was also missed, emitting a second
+  // one. Matching the full tag is what makes the rules below actually apply.
+  return html.replace(/<a\s([^>]*?)(\/?)>/gi, (tag, attrs: string, selfClose: string) => {
+    const href = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs);
+    const url = (href?.[1] ?? href?.[2] ?? href?.[3] ?? '').trim();
+    // No href: nothing to navigate, leave the markup untouched.
+    if (!url) return tag;
+    // `#anchor` scrolls within the body and `mailto:` belongs to the OS handler
+    // (the click listener and setWindowOpenHandler both route it). Neither
+    // should become a popup — forcing _blank on `#` breaks jump links outright,
+    // because a window-open of a fragment is denied and simply does nothing.
+    if (/^(#|mailto:)/i.test(url)) return tag;
+
+    let next = attrs;
+    // Replace an existing target rather than adding a second one; duplicate
+    // attributes are invalid and leave the outcome to parser tie-breaking.
+    next = /\btarget\s*=/i.test(next)
+      ? next.replace(/\btarget\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, 'target="_blank"')
+      : `target="_blank" ${next}`;
+    // Merge into an existing rel rather than skipping it. `noopener` must not
+    // be optional just because the mail already carried a `rel="nofollow"`:
+    // today the popup is denied outright by setWindowOpenHandler so there is no
+    // window to leak an opener to, but that is a property of the backstop, and
+    // this attribute should not depend on the backstop staying that way.
+    const rel = /\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(next);
+    if (!rel) {
+      next = `rel="noopener noreferrer" ${next}`;
+    } else {
+      const have = new Set((rel[1] ?? rel[2] ?? rel[3] ?? '').toLowerCase().split(/\s+/).filter(Boolean));
+      for (const token of ['noopener', 'noreferrer']) have.add(token);
+      next = next.replace(rel[0], `rel="${[...have].join(' ')}"`);
+    }
+    return `<a ${next.trim()}${selfClose}>`;
+  });
+}
+
+/**
  * Make all <img> tags non-blocking. Without this, the iframe's `load`
  * event waits for every image to fetch before firing, so a designed
  * email with 30+ tracking pixels + content images blocks the entire
@@ -728,7 +797,9 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
     // Lazy-load images BEFORE srcdoc so the iframe's load event isn't
     // gated on every image network request finishing.
     const lazied = makeImagesNonBlocking(html);
-    const fixed = fixBareLinks(lazied);
+    // Anchors get their href repaired first, THEN forced external — the order
+    // matters: fixBareLinks mints hrefs that must also be made to open out.
+    const fixed = forceLinksExternal(fixBareLinks(lazied));
     // Own/trusted content, or the auto-load setting, always loads; otherwise
     // received mail loads only once the user clicks "Load images".
     const doc = buildSrcdoc(fixed, themeCss, normalize, !effectiveBlock || imagesLoaded);
