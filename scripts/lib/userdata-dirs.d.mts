@@ -12,7 +12,7 @@ export interface AppDataDir {
   dir: string;
 }
 
-export declare function appDataBase(): string;
+export declare function appDataBase(homeDir?: string): string;
 export declare const APP_NAMES: string[];
 export declare function getAppDataDirs(): AppDataDir[];
 export declare function exists(p: string): boolean;
