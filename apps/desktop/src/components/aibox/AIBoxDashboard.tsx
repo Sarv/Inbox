@@ -5,12 +5,16 @@ import {
   ArrowRight,
   CheckCircle2,
   CircleDashed,
+  Download,
+  Loader2,
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 import { useEmailStore } from '../../store/email-store';
+import { useConfirm } from '../ConfirmDialog';
 
 import { AIProgressPanel } from './AIProgressPanel';
+import { planBodyDownload, targetForChoice, DOWNLOAD_BATCH } from './body-download-plan';
 import type { AICategoryCounts, CategoryDefinition } from './types';
 import { ICON_MAP, COLOR_MAP } from './types';
 
@@ -22,6 +26,11 @@ export function AIBoxDashboard() {
     processEmailsForAICategorization,
   } = useEmailStore();
 
+  const { choose, confirmDialog } = useConfirm();
+  const [download, setDownload] = useState<{
+    active: boolean; target: number; downloaded: number; remaining: number;
+  } | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [categoryCounts, setCategoryCounts] = useState<AICategoryCounts>({});
   const [unprocessedCount, setUnprocessedCount] = useState<number>(0);
   const [categoryDefs, setCategoryDefs] = useState<CategoryDefinition[]>([]);
@@ -102,12 +111,60 @@ export function AIBoxDashboard() {
     return () => clearInterval(interval);
   }, [aiCategoryCountsLastUpdate]);
 
+  // Live progress of a manual body download, plus whatever run was already in
+  // flight when this panel mounted (the user can navigate away and back).
+  useEffect(() => {
+    const api = window.electronAPI.emails;
+    api.getBodyDownloadState?.().then((r) => {
+      if (r?.success && r.data?.active) setDownload(r.data);
+    }).catch(() => { /* best-effort */ });
+    const off = api.onBodyDownloadProgress?.((state) => {
+      setDownload(state.active ? state : null);
+      // The run just finished — pull fresh counts so the rows the user was
+      // watching actually move instead of waiting out the 30s poll.
+      if (!state.active) useEmailStore.setState({ aiCategoryCountsLastUpdate: Date.now() });
+    });
+    return () => { off?.(); };
+  }, []);
+
+  const startBodyDownload = useCallback(async () => {
+    const pending = breakdown?.unreadNoBody ?? 0;
+    const plan = planBodyDownload(pending);
+    if (plan.empty) return;
+    setDownloadError(null);
+
+    let target = plan.batch;
+    if (plan.needsPrompt) {
+      const choice = await choose({
+        title: 'Download email bodies',
+        message:
+          `${plan.all.toLocaleString()} unread emails still need their body downloaded.\n\n`
+          + `Downloading all of them is a long run against your mail server. `
+          + `The AI automatically categorises only the newest ${DOWNLOAD_BATCH.toLocaleString()} `
+          + `emails by date — older ones keep their body for search and wait for a `
+          + `"Process More" run.`,
+        confirmLabel: `Download ${plan.batch.toLocaleString()} first`,
+        secondaryLabel: `Download all ${plan.all.toLocaleString()}`,
+        cancelLabel: 'Cancel',
+        destructive: false,
+      });
+      const chosen = targetForChoice(choice, plan);
+      if (chosen === null) return;
+      target = chosen;
+    }
+
+    const res = await window.electronAPI.emails.startBodyDownload?.(target);
+    if (res?.success && res.data) setDownload(res.data);
+    else setDownloadError(res?.error || 'Could not start the download.');
+  }, [breakdown?.unreadNoBody, choose]);
+
   const totalCategorized = Object.values(categoryCounts).reduce((a, b) => a + b, 0);
   const totalEmails = totalCategorized + unprocessedCount;
   const progressPercent = totalEmails > 0 ? Math.round((totalCategorized / totalEmails) * 100) : 0;
 
   return (
     <div className="p-4 space-y-4">
+      {confirmDialog}
       {/* Live AI Processing Panel */}
       {aiProcessing && <AIProgressPanel />}
 
@@ -176,8 +233,45 @@ export function AIBoxDashboard() {
                 <BreakdownRow label="Eligible right now"              value={breakdown.eligibleNow} tone={breakdown.eligibleNow > 0 ? 'info' : undefined} />
               </div>
               {breakdown.unreadNoBody > 0 && (
-                <div className="mt-3 text-[11px] text-muted-foreground">
-                  Body prefetch is running in the background — {breakdown.unreadNoBody.toLocaleString()} unread emails are waiting for their bodies. They'll become eligible automatically once fetched.
+                <div className="mt-3 flex items-start justify-between gap-3">
+                  <div className="text-[11px] text-muted-foreground">
+                    {download?.active ? (
+                      <>
+                        Downloading bodies — {download.downloaded.toLocaleString()} of{' '}
+                        {download.target.toLocaleString()} done. They become eligible for the AI
+                        as each one lands.
+                      </>
+                    ) : (
+                      <>
+                        {breakdown.unreadNoBody.toLocaleString()} unread emails are waiting for
+                        their bodies. Background prefetch picks them up slowly — download them now
+                        to make them eligible for the AI.
+                      </>
+                    )}
+                    {downloadError && (
+                      <div className="mt-1 text-amber-600 dark:text-amber-400">{downloadError}</div>
+                    )}
+                  </div>
+                  {download?.active ? (
+                    <button
+                      onClick={async () => {
+                        const res = await window.electronAPI.emails.stopBodyDownload?.();
+                        if (res?.success) setDownload(null);
+                      }}
+                      className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-border text-[11px] font-medium hover:bg-muted/50 transition-colors"
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startBodyDownload}
+                      className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-primary text-primary-foreground text-[11px] font-medium hover:bg-primary/90 transition-colors"
+                    >
+                      <Download className="h-3 w-3" />
+                      Download bodies
+                    </button>
+                  )}
                 </div>
               )}
             </div>

@@ -8,7 +8,12 @@ import { ipcMain, dialog, shell, app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import ICAL from 'ical.js';
-import { deferBodyPrefetch } from '../services/body-prefetch-scheduler';
+import {
+  deferBodyPrefetch,
+  startManualBodyDownload,
+  stopManualBodyDownload,
+  getManualBodyDownloadState,
+} from '../services/body-prefetch-scheduler';
 import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine, getStorageFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
 import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { logUserAction } from './agent-handlers';
@@ -585,6 +590,52 @@ export function registerEmailHandlers(): void {
       return { success: true, data: email };
     } catch (error) {
       logger.error('Get email error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /**
+   * Start a manual body download over the unread backlog.
+   *
+   * The background prefetch already drains this queue, but at a cadence built
+   * for not disturbing anyone — 200 bodies a minute when there is a backlog,
+   * and a ten-minute sleep once it thinks it is done. A user looking at
+   * "Unread + no body yet: 757" wants those bodies NOW so the AI can work on
+   * them, and had no way to say so.
+   *
+   * `target` is a budget, not a promise: the run stops early if the backlog
+   * drains, and a throttled server still backs the scheduler off.
+   */
+  ipcMain.handle('emails:startBodyDownload', async (_event, target: number) => {
+    try {
+      const state = startManualBodyDownload(target);
+      if (!state.active) {
+        // The scheduler is not running — almost always "no account connected
+        // yet". Saying so beats a button that silently does nothing.
+        return { success: false, error: 'Body download is not available yet — no connected account.' };
+      }
+      logger.info(`[Bodies] manual download started: target ${state.target}`);
+      return { success: true, data: state };
+    } catch (error) {
+      logger.error('Start body download error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /** Cancel a manual body download. Background prefetch continues as normal. */
+  ipcMain.handle('emails:stopBodyDownload', async () => {
+    try {
+      return { success: true, data: stopManualBodyDownload() };
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /** Progress of a manual body download, for a renderer that just mounted. */
+  ipcMain.handle('emails:getBodyDownloadState', async () => {
+    try {
+      return { success: true, data: getManualBodyDownloadState() };
+    } catch (error) {
       return { success: false, error: (error as Error).message };
     }
   });

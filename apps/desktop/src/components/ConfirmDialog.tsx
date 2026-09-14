@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 
+/**
+ * Which button the user pressed. `cancel` also covers Escape and a backdrop
+ * click, so a dismissed dialog is never mistaken for a choice.
+ */
+export type ConfirmChoice = 'confirm' | 'secondary' | 'cancel';
+
 export interface ConfirmOptions {
   title?: string;
   message: string;
@@ -7,11 +13,20 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** Style the confirm button as a destructive action (red). Default true. */
   destructive?: boolean;
+  /**
+   * Optional THIRD button, for a question with two real answers rather than a
+   * yes/no — "download 500 now" vs "download all 4,000". Omit it and the dialog
+   * is the usual two-button confirm.
+   *
+   * Only {@link useConfirm().choose} can report it; `confirm()` keeps its
+   * boolean contract and reads anything but the primary as "no".
+   */
+  secondaryLabel?: string;
 }
 
 interface DialogState extends ConfirmOptions {
   open: boolean;
-  resolve?: (confirmed: boolean) => void;
+  resolve?: (choice: ConfirmChoice) => void;
 }
 
 /**
@@ -28,15 +43,22 @@ interface DialogState extends ConfirmOptions {
 export function useConfirm() {
   const [state, setState] = useState<DialogState>({ open: false, message: '' });
 
-  const confirm = useCallback((opts: ConfirmOptions) => {
-    return new Promise<boolean>((resolve) => {
+  /** Ask a question with up to three answers. */
+  const choose = useCallback((opts: ConfirmOptions) => {
+    return new Promise<ConfirmChoice>((resolve) => {
       setState({ ...opts, open: true, resolve });
     });
   }, []);
 
-  const close = useCallback((confirmed: boolean) => {
+  /** The yes/no form. Anything but the primary button is a "no". */
+  const confirm = useCallback(
+    (opts: ConfirmOptions) => choose(opts).then((c) => c === 'confirm'),
+    [choose],
+  );
+
+  const close = useCallback((choice: ConfirmChoice) => {
     setState((s) => {
-      s.resolve?.(confirmed);
+      s.resolve?.(choice);
       return { ...s, open: false, resolve: undefined };
     });
   }, []);
@@ -44,12 +66,13 @@ export function useConfirm() {
   const confirmDialog = state.open ? (
     <ConfirmDialogView
       {...state}
-      onConfirm={() => close(true)}
-      onCancel={() => close(false)}
+      onConfirm={() => close('confirm')}
+      onSecondary={() => close('secondary')}
+      onCancel={() => close('cancel')}
     />
   ) : null;
 
-  return { confirm, confirmDialog };
+  return { confirm, choose, confirmDialog };
 }
 
 export function ConfirmDialogView({
@@ -58,9 +81,15 @@ export function ConfirmDialogView({
   confirmLabel = 'Delete',
   cancelLabel = 'Cancel',
   destructive = true,
+  secondaryLabel,
   onConfirm,
+  onSecondary,
   onCancel,
-}: ConfirmOptions & { onConfirm: () => void; onCancel: () => void }) {
+}: ConfirmOptions & {
+  onConfirm: () => void;
+  onCancel: () => void;
+  onSecondary?: () => void;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
@@ -95,6 +124,14 @@ export function ConfirmDialogView({
           >
             {cancelLabel}
           </button>
+          {secondaryLabel && onSecondary && (
+            <button
+              onClick={onSecondary}
+              className="px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted/50 transition-colors"
+            >
+              {secondaryLabel}
+            </button>
+          )}
           <button
             onClick={onConfirm}
             autoFocus
