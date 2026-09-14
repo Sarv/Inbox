@@ -23,14 +23,28 @@ import { join, resolve } from 'node:path';
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
+import { appDataBase } from '../../../../../scripts/lib/userdata-dirs.mjs';
+
 const SCRIPT = resolve(__dirname, '../../../../../scripts/clean-db.mjs');
 
 let home: string;
 let userData: string;
 
-/** The macOS layout; the script derives it from HOME via os.homedir(). */
+/**
+ * Seed a fake userData tree at whatever layout THIS platform uses.
+ *
+ * Never hardcode the macOS path. `appDataBase()` is
+ * ~/Library/Application Support on darwin but $XDG_CONFIG_HOME || ~/.config on
+ * Linux, so a hardcoded macOS path seeds a directory the script never looks at:
+ * every assertion then fails on the Linux CI runner while passing on the
+ * author's Mac. CLAUDE.md's cross-platform rule covers tests too, and this is
+ * exactly how it bites — green locally, red for everyone else.
+ *
+ * `appDataBase()` is called AFTER the HOME override below is in place, so it
+ * resolves inside the scratch directory rather than the real home.
+ */
 const seedUserData = () => {
-  userData = join(home, 'Library', 'Application Support', 'Sarv Inbox Dev');
+  userData = join(appDataBase(home), 'Sarv Inbox Dev');
   mkdirSync(userData, { recursive: true });
   for (const name of [
     'sarvinbox-abc123.db', // mailbox — re-syncable, always deleted
@@ -50,17 +64,37 @@ const seedUserData = () => {
 const run = (args: string[]) =>
   execFileSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
+    // process.env already carries the scratch HOME and no XDG_CONFIG_HOME
+    // (see beforeEach), so the child resolves the same directory this test seeded.
     env: { ...process.env, HOME: home },
   });
 
 const present = (name: string) => existsSync(join(userData, name));
 
+/** Env this test overrides, restored after each case. */
+let realHome: string | undefined;
+let realXdg: string | undefined;
+
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'clean-db-cli-'));
+  realHome = process.env.HOME;
+  realXdg = process.env.XDG_CONFIG_HOME;
+  // The CHILD is a real process, so HOME on its env redirects it properly.
+  // This test's own `appDataBase(home)` call takes the path explicitly instead —
+  // see that helper for why $HOME cannot be overridden from a worker thread.
+  process.env.HOME = home;
+  // On Linux a real XDG_CONFIG_HOME would win over $HOME and point the script
+  // at the developer's actual config directory — which this test then seeds and
+  // DELETES. Clearing it keeps the whole run inside the scratch tree.
+  delete process.env.XDG_CONFIG_HOME;
   seedUserData();
 });
 
 afterEach(() => {
+  // Restore the real environment before the next file runs — leaking a scratch
+  // HOME into an unrelated suite would point IT at a deleted directory.
+  if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+  if (realXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = realXdg;
   rmSync(home, { recursive: true, force: true });
 });
 

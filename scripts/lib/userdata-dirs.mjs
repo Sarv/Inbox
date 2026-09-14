@@ -18,14 +18,19 @@ import path from 'node:path';
  *   Windows → %APPDATA% (…/AppData/Roaming)
  *   Linux   → $XDG_CONFIG_HOME or ~/.config
  */
-export function appDataBase() {
+export function appDataBase(homeDir = os.homedir()) {
+  // `homeDir` is a parameter, not just os.homedir(), so a test can point this at
+  // a scratch directory. Overriding $HOME does NOT work from inside a worker
+  // thread — `process.env` there is a JS-level copy and `os.homedir()` reads the
+  // real process environment through libuv, so the override is invisible to it.
+  // vitest runs in worker threads, which is exactly where that bit.
   if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support');
+    return path.join(homeDir, 'Library', 'Application Support');
   }
   if (process.platform === 'win32') {
-    return process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return process.env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
   }
-  return process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return process.env.XDG_CONFIG_HOME || path.join(homeDir, '.config');
 }
 
 // All app.name values the app has shipped under (current + legacy). Every rename
