@@ -39,9 +39,20 @@ export class PromptRepository extends BaseRepository {
     description?: string | null;
     content: string;
   }): void {
-    // On conflict we keep the user-edited `content` column as-is and only
-    // refresh label / description / default_content, so the Reset button in
-    // Settings pulls in any upstream prompt changes while preserving edits.
+    // On conflict, a user's EDITED content is preserved — but an UNEDITED one
+    // adopts the new default.
+    //
+    // Only `default_content` used to be refreshed, which meant an upstream
+    // prompt fix reached nobody: every install already has the row, so the live
+    // `content` kept whatever shipped on first run and the improvement sat in a
+    // column only the Reset button reads. A user would have had to guess that a
+    // prompt they never touched needed resetting.
+    //
+    // "Unedited" is `content = default_content` — exactly how seeding left it.
+    // The moment the user edits, the two diverge and their text is never
+    // overwritten. SQLite evaluates every SET expression against the ORIGINAL
+    // row, so the comparison sees the OLD default even though this same
+    // statement replaces it.
     this.db
       .prepare(
         `INSERT INTO agent_prompt_templates (id, label, description, content, default_content)
@@ -49,6 +60,11 @@ export class PromptRepository extends BaseRepository {
          ON CONFLICT(id) DO UPDATE SET
            label = excluded.label,
            description = excluded.description,
+           content = CASE
+             WHEN agent_prompt_templates.content IS agent_prompt_templates.default_content
+               THEN excluded.content
+             ELSE agent_prompt_templates.content
+           END,
            default_content = excluded.default_content`,
       )
       .run(
