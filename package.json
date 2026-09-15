@@ -38,7 +38,8 @@
     "test:watch": "turbo run test:watch",
     "test:coverage": "turbo run test:coverage",
     "test:node-abi": "node scripts/native-abi.mjs node",
-    "lint": "turbo run lint",
+    "lint": "turbo run lint && pnpm lint:scripts",
+    "lint:scripts": "eslint scripts --ext .mjs,.js,.cjs",
     "lint:fix": "turbo run lint --fix",
     "type-check": "turbo run type-check",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
@@ -49,7 +50,8 @@
     "release": "./scripts/release.sh",
     "release:patch": "./scripts/release.sh patch",
     "release:minor": "./scripts/release.sh minor",
-    "release:major": "./scripts/release.sh major"
+    "release:major": "./scripts/release.sh major",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
@@ -61,6 +63,8 @@
     "eslint-import-resolver-typescript": "^3.6.1",
     "eslint-plugin-import": "^2.29.1",
     "eslint-plugin-react-hooks": "^4.6.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1",
     "prettier": "^3.2.4",
     "turbo": "^1.11.3",
     "typescript": "^5.3.3",

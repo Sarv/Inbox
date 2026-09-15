@@ -1,0 +1,11 @@
+# Run eslint --fix over the files being committed.
+#
+# `import/order` is an error-level rule, and before this hook existed the only
+# thing running it was CI — so it was discovered after a push, three times in one
+# fortnight (see c4d6071). Worse, the rule only covered `src/`, so the unlinted
+# Electron main process had no canonical import order at all and two branches
+# appending to the same block conflicted on every rebase.
+#
+# Fixing it here means neither happens: the order is settled before the commit
+# exists, so CI has nothing to catch and merges converge instead of colliding.
+pnpm exec lint-staged
