@@ -15,7 +15,7 @@ import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import type { EmailProvider } from '../utils/provider';
 import { withStallTimeout, isTimeoutError } from '../utils/timeout';
 
-import { findAttachmentPartByName } from './body-structure';
+import { base64DecodeCollapsed, findAttachmentNodeByName } from './body-structure';
 import { poolIdleTimeoutForHost } from './connection-budget';
 import { ConnectionManager } from './connection-manager';
 import { IMAPConnectionPool, PoolConnectionParkedError, type ConnectionPoolConfig } from './connection-pool';
@@ -26,6 +26,7 @@ import { getSuggestedBackoffMs } from './imap-errors';
 import { MessageProcessor, isExpectedMessage } from './message-processor';
 import { OperationQueue, type OperationResult } from './operation-queue';
 import { applyQresyncVanished } from './qresync-reconcile';
+import { attachmentBytesFromSource } from './raw-mime-part';
 import { RealtimeManager, type RealtimeMode, type RealtimeEvent } from './realtime-manager';
 import { SyncStateManager, type SyncStatus, type SyncState } from './sync-state';
 import { withFolderSelected } from './with-folder';
@@ -2205,12 +2206,13 @@ export class SyncEngine {
     uid: number,
     filename: string
   ): Promise<{ filename: string; contentType: string; content: Buffer }> {
-    const doFetch = async (client: IIMAPClient) => {
-      const messages = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID([uid], {
+    // Select-then-fetch is ONE mailbox section: a UID only means anything against
+    // the mailbox it was issued in.
+    const doFetch = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
+      const messages = await client.fetchMessagesByUID([uid], {
         fetchHeaders: false,
         fetchBody: true,
-        fetchBodyStructure: false,
-      }));
+      });
 
       if (messages.length === 0) {
         throw new Error(`Message not found: UID ${uid} in ${folderPath}`);
@@ -2223,7 +2225,8 @@ export class SyncEngine {
 
       // message.body is the lossless latin1 raw source — reconstruct exact bytes
       // so mailparser decodes attachments in the message's own charset/CTE.
-      const parsed = await simpleParser(Buffer.from(message.body, 'latin1'), SIMPLE_PARSER_OPTIONS);
+      const source = Buffer.from(message.body, 'latin1');
+      const parsed = await simpleParser(source, SIMPLE_PARSER_OPTIONS);
 
       if (!parsed.attachments || parsed.attachments.length === 0) {
         throw new Error('No attachments found in message');
@@ -2234,12 +2237,19 @@ export class SyncEngine {
         throw new Error(`Attachment "${filename}" not found`);
       }
 
+      // The lying-encoding recovery, judged against the source we already hold.
+      // This fallback is not the rare path it looks like: the per-part fetch bows
+      // out whenever a sync holds the primary socket, so most opens during a sync
+      // land here — and without this the collapsed 7-byte decode was what reached
+      // the cache. The source, not the server's BODYSTRUCTURE: the mailbox that
+      // produced this bug returns every BODYSTRUCTURE parameter with its value
+      // missing, so there is no filename in it to match and no size to compare.
       return {
         filename: attachment.filename || filename,
         contentType: attachment.contentType || 'application/octet-stream',
-        content: attachment.content,
+        content: await attachmentBytesFromSource(source, filename, attachment.content),
       };
-    };
+    });
 
     if (this.connectionPool?.isInitialized()) {
       return this.connectionPool.withConnection(doFetch);
@@ -2271,10 +2281,12 @@ export class SyncEngine {
         const msgs = await client.fetchMessagesByUID([uid], {
           fetchHeaders: false, fetchBody: false, fetchBodyStructure: true,
         });
-        const part = findAttachmentPartByName(msgs[0]?.bodyStructure, filename);
-        if (!part) return null; // unresolved → caller uses the whole-message path
-        const content = await client.downloadPart!(uid, part);
-        return content ? { filename, content } : null;
+        const node = findAttachmentNodeByName(msgs[0]?.bodyStructure, filename);
+        if (!node?.part) return null; // unresolved → caller uses the whole-message path
+        const content = await client.downloadPart!(uid, node.part);
+        if (!content) return null;
+        const part = { number: node.part, encoding: node.encoding, declaredSize: node.size ?? 0 };
+        return { filename, content: await this.repairMisdeclaredBase64(client, uid, part, content) };
       });
     };
     try {
@@ -2287,6 +2299,67 @@ export class SyncEngine {
       logger.warn(`fetchAttachmentPart failed for "${filename}" (falling back to full message): ${(err as Error)?.message ?? err}`);
       return null;
     }
+  }
+
+  /**
+   * Undo a part whose `Content-Transfer-Encoding` header lies.
+   *
+   * A part that declares `base64` but carries raw text collapses when decoded:
+   * the decoder keeps only alphabet characters and stops at the first `=`, so a
+   * real message whose .txt attachment begins `"<p><span style=` decoded to
+   * SEVEN bytes of binary — which is what got cached, opened in the OS viewer,
+   * and stored as the attachment's size. The server's declared part size is the
+   * tell: genuine base64 decodes to about 75% of it and never to under half.
+   * Below that, re-fetch the part undecoded and use those bytes — the same
+   * content Gmail shows for the same attachment.
+   */
+  private async repairMisdeclaredBase64(
+    client: IIMAPClient,
+    uid: number,
+    part: { number: string; encoding: string; declaredSize: number },
+    decoded: Buffer,
+  ): Promise<Buffer> {
+    // One line per attachment open (user-initiated, never a hot path), because
+    // the numbers this decision turns on are otherwise invisible: when the
+    // recovery does not happen, "wrong bytes" and "a part that was fine" look
+    // identical from outside.
+    logger.info(
+      `Attachment part ${part.number}: encoding=${part.encoding} ` +
+        `declared=${part.declaredSize} decoded=${decoded.length}`,
+    );
+    if (!base64DecodeCollapsed(part.encoding, part.declaredSize, decoded.length)) return decoded;
+
+    // Past here the bytes are known bad, so EVERY exit says why it could not
+    // repair them. Silent early returns are what made this undiagnosable: the
+    // absence of a log meant any of three different things.
+    const context =
+      `Part ${part.number} declares base64 but decoded to ${decoded.length} bytes of ~` +
+      `${Math.round(part.declaredSize * 0.75)} expected`;
+
+    if (typeof client.downloadPartRaw !== 'function') {
+      logger.warn(`${context} — this client cannot fetch a part undecoded`);
+      return decoded;
+    }
+
+    let raw: Buffer | null;
+    try {
+      raw = await client.downloadPartRaw(uid, part.number);
+    } catch (error) {
+      // A failed REPAIR must never fail the fetch: the decoded bytes are wrong,
+      // but returning them still opens the attachment, and throwing here would
+      // take down an open that used to work.
+      logger.warn(`${context} — the undecoded re-fetch failed: ${(error as Error)?.message ?? error}`);
+      return decoded;
+    }
+
+    if (!raw || raw.length <= decoded.length) {
+      logger.warn(
+        `${context} — the undecoded re-fetch returned ${raw?.length ?? 0} bytes, keeping the decode`,
+      );
+      return decoded;
+    }
+    logger.warn(`${context} — serving the ${raw.length} undecoded bytes`);
+    return raw;
   }
 
   // Cache a raw source. lru-cache handles recency + eviction past the cap.

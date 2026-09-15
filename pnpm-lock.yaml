@@ -241,6 +241,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@zone-eu/mailsplit':
+        specifier: ^5.4.8
+        version: 5.4.12
       chardet:
         specifier: ^2.2.0
         version: 2.2.0
