@@ -49,9 +49,14 @@ vi.mock('../../../../electron/services/body-prefetch-scheduler', () => ({ deferB
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
 vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: vi.fn() }));
 
-import { registerEmailHandlers } from '../../../../electron/ipc/email-handlers';
+import {
+  CID_REPAIR_MEMORY,
+  claimCidRepairAttempt,
+  registerEmailHandlers,
+} from '../../../../electron/ipc/email-handlers';
 
 const fetchBodiesBatch = () => h.handlers.get('emails:fetchBodiesBatch')!;
+const fetchBody = () => h.handlers.get('emails:fetchBody')!;
 const spyConsoleWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
 let warnSpy: ReturnType<typeof spyConsoleWarn>;
 const batchWarns = () =>
@@ -226,5 +231,130 @@ describe('emails:bulkAction — flag ops must reach the operation queue', () => 
 
     expect(res.success).toBe(true);
     expect(h.storage.bulkUpdateTags).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * emails:fetchBody — repairing a stored body whose `cid:` images never resolved.
+ *
+ * A body was parsed and stored by code that couldn't resolve some `cid:` image
+ * (see packages/core/src/utils/cid-images.ts). The raw source is not kept, so
+ * the substitution can only happen on a fresh parse — re-fetching is the only
+ * repair there is. The two ways to get this wrong are both bad: never repair
+ * (the image stays broken forever), or repair unconditionally (a reference that
+ * names no part in the message can NEVER resolve, so the mail re-downloads its
+ * entire source from IMAP every single time it is opened).
+ */
+describe('emails:fetchBody — cid: repair', () => {
+  const stored = (over: Record<string, unknown> = {}) => ({
+    id: 'e1', rawBody: '<p>hello</p>', folderId: 'f', uid: 7, hasAttachments: false, ...over,
+  });
+
+  // Breaks: every mail with a cached body re-downloads its source on open.
+  it('returns a cached body untouched when it holds no cid reference', async () => {
+    h.storage.getEmail.mockResolvedValue(stored({ id: 'clean-1' }));
+
+    const res = await fetchBody()(null, 'clean-1');
+
+    expect(res).toEqual({ success: true, data: expect.objectContaining({ id: 'clean-1' }) });
+    expect(h.syncEngine.fetchBody).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the reported broken image is permanent for every mail already in the
+  // database — the fix would only ever help mail that arrives after it.
+  it('re-fetches a stored body that still carries a cid reference, and returns the repaired row', async () => {
+    h.storage.getEmail
+      .mockResolvedValueOnce(stored({ id: 'broken-1', rawBody: '<img src="cid:avatar@x">' }))
+      .mockResolvedValueOnce(stored({ id: 'broken-1', rawBody: '<img src="data:image/png;base64,AAA">' }));
+    h.syncEngine.fetchBody.mockResolvedValue({ rawBody: 'r', cleanBody: 'c', contentType: 'text/html' });
+
+    const res = await fetchBody()(null, 'broken-1');
+
+    expect(h.syncEngine.fetchBody).toHaveBeenCalledWith('broken-1', 'INBOX', 7);
+    expect(res.data.rawBody).toContain('data:image/png');
+  });
+
+  // Breaks: a sender's unresolvable reference (a part that simply isn't in the
+  // message) turns every open of that mail into a full source download, forever.
+  it('tries exactly once per email per session', async () => {
+    const unfixable = stored({ id: 'broken-2', rawBody: '<img src="cid:gone@x">' });
+    h.storage.getEmail.mockResolvedValue(unfixable);
+    h.syncEngine.fetchBody.mockResolvedValue({ rawBody: 'r', cleanBody: 'c', contentType: 'text/html' });
+
+    await fetchBody()(null, 'broken-2');
+    await fetchBody()(null, 'broken-2');
+    await fetchBody()(null, 'broken-2');
+
+    expect(h.syncEngine.fetchBody).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: opening an old mail OFFLINE shows an error where the body used to
+  // be. The repair is cosmetic — it must never cost the user a body they have.
+  it('falls back to the stored body when the repair cannot run', async () => {
+    h.storage.getEmail.mockResolvedValue(stored({ id: 'broken-3', rawBody: '<img src="cid:x@y">' }));
+    h.syncEngine.isConnected.mockReturnValue(false);
+
+    const res = await fetchBody()(null, 'broken-3');
+
+    expect(res).toEqual({ success: true, data: expect.objectContaining({ id: 'broken-3' }) });
+    expect(h.syncEngine.fetchBody).not.toHaveBeenCalled();
+  });
+
+  // Breaks: same, for the two other ways the re-fetch can come up empty — a row
+  // with no UID, and a fetch that returns nothing.
+  it('falls back to the stored body when the fetch yields nothing', async () => {
+    h.storage.getEmail.mockResolvedValue(stored({ id: 'broken-4', rawBody: '<img src="cid:x@y">' }));
+    h.syncEngine.fetchBody.mockResolvedValue(null);
+
+    const res = await fetchBody()(null, 'broken-4');
+
+    expect(res.success).toBe(true);
+    expect(res.data.rawBody).toBe('<img src="cid:x@y">');
+  });
+
+  // Breaks: an email with no body at all stops reporting real failures, because
+  // the cid fallback swallows them. Only a repair may degrade to success.
+  it('still reports a real failure when there is no body to fall back on', async () => {
+    h.storage.getEmail.mockResolvedValue(stored({ id: 'empty-1', rawBody: null }));
+    h.syncEngine.isConnected.mockReturnValue(false);
+
+    await expect(fetchBody()(null, 'empty-1')).resolves.toEqual({
+      success: false, error: 'Not connected to IMAP',
+    });
+  });
+});
+
+describe('claimCidRepairAttempt', () => {
+  // Breaks: the once-only rule either never fires (repeat downloads) or fires
+  // for bodies that need nothing (a download per open of every mail).
+  it('claims a body with a reference once and never again', () => {
+    const attempted = new Set<string>();
+    expect(claimCidRepairAttempt('<img src="cid:a@b">', 'e1', attempted)).toBe(true);
+    expect(claimCidRepairAttempt('<img src="cid:a@b">', 'e1', attempted)).toBe(false);
+    // A different email is judged on its own.
+    expect(claimCidRepairAttempt('<img src="cid:a@b">', 'e2', attempted)).toBe(true);
+  });
+
+  // Breaks: a body with nothing to repair is claimed, so the set fills with ids
+  // that never needed an attempt and every mail re-downloads once.
+  it('claims nothing for a body with no reference', () => {
+    const attempted = new Set<string>();
+    expect(claimCidRepairAttempt('<p>plain</p>', 'e1', attempted)).toBe(false);
+    expect(claimCidRepairAttempt(null, 'e2', attempted)).toBe(false);
+    expect(claimCidRepairAttempt(undefined, 'e3', attempted)).toBe(false);
+    expect(attempted.size).toBe(0);
+  });
+
+  // Breaks: a long-running session grows this set without bound — a slow leak in
+  // the main process, which is the one that must never be restarted under the user.
+  it('forgets everything once it reaches the cap', () => {
+    const attempted = new Set<string>();
+    for (let i = 0; i < CID_REPAIR_MEMORY; i++) claimCidRepairAttempt('<img src="cid:a@b">', `e${i}`, attempted);
+    expect(attempted.size).toBe(CID_REPAIR_MEMORY);
+
+    claimCidRepairAttempt('<img src="cid:a@b">', 'one-more', attempted);
+
+    expect(attempted.size).toBe(1);
+    expect(attempted.has('one-more')).toBe(true);
   });
 });

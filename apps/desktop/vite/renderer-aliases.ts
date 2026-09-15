@@ -34,5 +34,22 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/single-flight.ts',
     ),
+    // Pure (zero imports) — the attachment allow-list and viewer classification.
+    // The renderer MUST see the same module the `sarv-attachment://` handler
+    // uses: if the two ever disagreed about what a file is, the renderer would
+    // render something main typed as a different thing. That is the whole reason
+    // it is a deep import rather than a renderer copy.
+    '@sarvinbox/core/attachment-kind': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/attachment-kind.ts',
+    ),
+    // Pure (imports only the equally pure role-address + tags helpers) — the
+    // "is this a blast rather than a person" predicate. Deep-imported for the
+    // same reason as the others, and shared so the renderer cannot grow its own
+    // no-reply regex beside core's.
+    '@sarvinbox/core/bulk-mail': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/bulk-mail.ts',
+    ),
   };
 }

@@ -24,6 +24,7 @@ export * from './filters';
 export * from './ai-error';
 export * from './calendar';
 export * from './email-address';
+export * from './attachment-kind';
 export * from './safe-path';
 export * from './mail-parse';
 export * from './html-text';

@@ -5,11 +5,15 @@
  * Handles app lifecycle, window management, and initialization.
  */
 
-import { app, BrowserWindow, Menu, ipcMain, powerMonitor, session, shell } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { SyncEngine, ExtensionManager, createLogger, getLogLevel, setLogLevel, isConnectionError } from '@sarvinbox/core';
+import {
+  ATTACHMENT_SCHEME_PRIVILEGES,
+  registerAttachmentProtocol,
+} from './services/attachment-protocol';
 import { installEmailImageRequestHandlers } from './services/email-image-requests';
 
 // Shared state management
@@ -124,6 +128,24 @@ if (!isDev && !process.env['SARV_LOG_LEVEL']) {
 
 // Initialize crash/error reporting as early as possible, before any app work.
 initSentryMain();
+
+// The in-app attachment viewer's scheme. MUST be declared at module scope:
+// Electron only accepts privileged-scheme registration before `app.whenReady()`,
+// and a scheme registered late silently loses `stream`/`secure` — the symptom is
+// a PDF that never paints and a video that cannot seek, with no error anywhere.
+// The handler itself is installed inside whenReady (see registerAttachmentProtocol).
+//
+// And it MUST come AFTER initSentryMain(). Electron does not merge repeated
+// registrations: each call REPLACES the per-privilege scheme lists it names. The
+// Sentry SDK registers its own `sentry-ipc` scheme during init and, knowing this,
+// proxies `registerSchemesAsPrivileged` so that every LATER call carries its
+// scheme along — but a call made BEFORE it is simply overwritten. Registering
+// first left the renderer with `--standard-schemes=sarv-attachment` and
+// `--secure-schemes/--cors-schemes/--fetch-schemes=sentry-ipc`: attachments kept
+// the privileges nothing else claimed and lost the three Sentry also wanted. The
+// visible result was that `<img>`/`<video>`/the PDF viewer worked while the text
+// pane's `fetch()` failed with "Failed to fetch" before the handler ever ran.
+protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES]);
 
 // IPC handlers
 import { registerAllHandlers } from './ipc';
@@ -325,6 +347,12 @@ function createWindow(): void {
       // which the sandbox would forbid. If a future preload dep pulls a Node
       // builtin, the app blank-screens at launch and this must go back to false.
       sandbox: true,
+      // Chromium's built-in PDF viewer is a plugin; without this an <iframe>
+      // pointing at a PDF downloads instead of rendering, which is the exact
+      // behaviour the in-app viewer exists to remove. This does NOT widen the
+      // email-content surface: the sandboxed email-body iframe runs under
+      // `default-src 'none'`, which already blocks <embed>/<object>.
+      plugins: true,
     },
     title: 'Sarv Inbox',
     show: false,
@@ -791,6 +819,11 @@ app.whenReady().then(async () => {
 
     // Initialize core services
     await initializeStorage();
+    // After storage, because the handler reads the email row to authorize each
+    // request; before the window loads, so the first render can already fetch.
+    // Given the SAME url the window loads, so the handler allows exactly our own
+    // renderer's origin to fetch attachment bytes and nothing else.
+    registerAttachmentProtocol(VITE_DEV_SERVER_URL ?? `file://${join(__dirname, '../dist/index.html')}`);
     await initializeSyncEngine();
     // Seed the durable accounts registry + auto-activate the persisted account
     // so main is self-sufficient (survives a lost renderer localStorage and

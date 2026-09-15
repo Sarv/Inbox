@@ -218,12 +218,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     removeBodyFetchedListener: () => {
       ipcRenderer.removeAllListeners('body:fetched');
     },
-    downloadAttachment: (emailId: string, filename: string) =>
-      ipcRenderer.invoke('emails:downloadAttachment', emailId, filename),
-    getAttachmentBase64: (emailId: string, filename: string) =>
-      ipcRenderer.invoke('emails:getAttachmentBase64', emailId, filename),
-    previewAttachment: (emailId: string, filename: string) =>
-      ipcRenderer.invoke('emails:previewAttachment', emailId, filename),
+    downloadAttachment: (emailId: string, filename: string, accountId?: string) =>
+      ipcRenderer.invoke('emails:downloadAttachment', emailId, filename, accountId),
+    getAttachmentBase64: (emailId: string, filename: string, accountId?: string) =>
+      ipcRenderer.invoke('emails:getAttachmentBase64', emailId, filename, accountId),
+    previewAttachment: (emailId: string, filename: string, accountId?: string) =>
+      ipcRenderer.invoke('emails:previewAttachment', emailId, filename, accountId),
     getCalendarInvite: (emailId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:getCalendarInvite', emailId, accountId),
     openCalendarInvite: (emailId: string, accountId?: string) =>
@@ -961,9 +961,9 @@ export interface ElectronAPI {
     downloadBodies: (limit?: number) => Promise<{ success: boolean; data?: { downloaded: number }; error?: string }>;
     onBodyFetched: (callback: (email: any) => void) => () => void;
     removeBodyFetchedListener: () => void;
-    downloadAttachment: (emailId: string, filename: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
-    getAttachmentBase64: (emailId: string, filename: string) => Promise<{ success: boolean; base64?: string; error?: string }>;
-    previewAttachment: (emailId: string, filename: string) => Promise<{ success: boolean; error?: string }>;
+    downloadAttachment: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    getAttachmentBase64: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; base64?: string; error?: string }>;
+    previewAttachment: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     getCalendarInvite: (emailId: string, accountId?: string) => Promise<{ success: boolean; ics?: string | null; error?: string }>;
     openCalendarInvite: (emailId: string, accountId?: string) => Promise<{ success: boolean; noHandler?: boolean; error?: string }>;
     setCalendarAdded: (emailId: string, added: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;

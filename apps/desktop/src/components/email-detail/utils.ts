@@ -1,3 +1,4 @@
+import { parseAttachmentNames } from '@sarvinbox/core/attachment-kind';
 import { format, differenceInCalendarDays, differenceInHours, differenceInMinutes, isToday } from 'date-fns';
 import {
   FileText,
@@ -10,6 +11,7 @@ import {
   FileCode,
 } from 'lucide-react';
 import React from 'react';
+
 
 // Get file icon based on extension
 export function getFileIcon(filename: string) {
@@ -59,30 +61,11 @@ export function getFileIcon(filename: string) {
   return iconMap[ext] || React.createElement(File, { className: 'h-8 w-8 text-muted-foreground' });
 }
 
-// Attachment types we open with the OS default app (Preview/Quick Look for
-// images & PDFs, TextEdit/Notepad for text, Word/Excel/etc. for documents,
-// QuickTime/Media Player for A/V) instead of forcing a Save dialog. Opening
-// still requires an explicit user click.
-//
-// This is an ALLOW-LIST on purpose: executables and scripts are intentionally
-// EXCLUDED (.exe/.msi/.bat/.cmd/.com/.scr/.ps1/.sh/.app/.dmg/.pkg/.jar/.js/.vbs
-// …) — they fall through to "download", so a malicious attachment can never be
-// launched by a single click. `.html`/`.htm` are also excluded (would open a
-// browser — a phishing vector); they download instead.
-const PREVIEWABLE_EXTENSIONS = new Set([
-  // documents
-  'pdf', 'txt', 'text', 'log', 'md', 'markdown', 'csv', 'tsv', 'rtf', 'json', 'xml', 'ics', 'vcf',
-  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'pages', 'numbers', 'key', 'epub',
-  // images
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'svg', 'heic', 'heif', 'ico', 'avif',
-  // audio / video
-  'mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi', 'mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac',
-]);
-
-export function isPreviewableAttachment(filename: string): boolean {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-  return PREVIEWABLE_EXTENSIONS.has(ext);
-}
+// The attachment allow-list lives in core (`utils/attachment-kind.ts`) so the
+// `sarv-attachment://` handler in the main process and this renderer classify a
+// file identically. Re-exported here because the components in this folder have
+// always imported it from `./utils`.
+export { isPreviewableAttachment } from '@sarvinbox/core/attachment-kind';
 
 // Get file type label
 export function getFileType(filename: string): string {
@@ -363,17 +346,12 @@ export function parseAttachments(
   attachmentNames?: string | null,
   attachmentSizes?: string | null,
 ): ParsedAttachment[] {
-  if (!attachmentNames) return [];
-  let names: string[] = [];
-  if (attachmentNames.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(attachmentNames);
-      if (Array.isArray(parsed)) names = parsed.map(String).filter(Boolean);
-    } catch { /* not JSON — fall through to comma-split */ }
-  }
-  if (names.length === 0) {
-    names = attachmentNames.split(',').map((n) => n.trim()).filter(Boolean);
-  }
+  // The name parsing itself is `parseAttachmentNames` in core — the SAME
+  // function the main process authorizes a request with. If the two ever read
+  // the column differently, a legitimate attachment the UI offered would be
+  // refused (or worse, one it never showed would be served).
+  const names = parseAttachmentNames(attachmentNames);
+  if (names.length === 0) return [];
   let sizes: number[] = [];
   if (attachmentSizes) {
     try {

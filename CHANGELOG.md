@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Attachments now open **inside** Sarv Inbox. Clicking an attachment shows it in
+  an in-app viewer — PDFs, images (including SVG), text/CSV/JSON/Markdown/log
+  files, audio and video — instead of writing a copy to disk and handing the file
+  to another application. Nothing reaches Downloads and no external app is
+  launched unless you ask: "Save a copy…" and "Open in system app" are explicit
+  buttons in the viewer header. Left/right arrows move between a message's
+  attachments; Escape or a click outside closes it. Only file types the app can
+  render itself are ever displayed, and the type comes from the file's own
+  extension rather than what the sender declared — so a `.exe`, `.html`, `.js`
+  or script attachment can never be rendered or launched by a click; it gets a
+  card offering Save a copy only. Formats we do not render yet (docx, xlsx,
+  pptx, archives) keep today's "Open in system app" fallback.
 - Gmail-style "Select" menu in the bulk-action bar — select threads by
   read / unread / starred / unstarred state.
 - An in-app banner when an account's session expires, so a mailbox can no longer
@@ -120,6 +132,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redirecting a redirect to a different site is something the browser refuses
   outright, which failed those images harder than the proxy ever did. They load
   through the proxy, with the referer above getting them past its `429`.
+- Attachments on a message belonging to a non-active account failed with "Email
+  not found" in All Inboxes. Opening, saving and base64-reading an attachment now
+  resolve the message's own account instead of always using the active one.
+- A message whose stored attachment list was an empty JSON array showed a
+  phantom attachment named `[]`.
+- Text attachments would not open in the in-app viewer. Text is the only kind the
+  viewer reads with `fetch` rather than handing to an element, and the
+  `sarv-attachment://` scheme is its own origin — so the browser discarded every
+  one of those reads as cross-origin and the panel showed a bare "This file could
+  not be read". The handler now allows exactly the app's own renderer origin, and
+  a failed read shows the reason it failed instead of a dead end.
+- Text attachments still would not open after that, failing with a bare
+  "Failed to fetch" before the app's own handler was ever reached. The
+  privileges a custom URL scheme gets are declared once at startup, and Electron
+  does not merge those declarations — a later one replaces the earlier. Our crash
+  reporter declares a scheme of its own during initialisation, which was running
+  after ours and quietly stripping `sarv-attachment://` of the privileges the
+  viewer's `fetch` needs. Images, video and PDFs kept working, which is why this
+  looked like a text-only problem. The declaration now runs after the crash
+  reporter's, so both schemes keep their privileges.
 - An attachment whose part declares `base64` but actually carries plain text came
   through as a handful of junk bytes — a `.txt` holding HTML arrived as 7 bytes,
   which is what the app cached, showed as its size, and handed to the system
