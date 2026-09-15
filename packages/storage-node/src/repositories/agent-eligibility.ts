@@ -21,22 +21,61 @@ import { areBodyLengthsReady, fastHasBodyExpression, legacyHasBodyExpression } f
 const col = (alias: string, name: string): string => (alias ? `${alias}.${name}` : name);
 
 /**
+ * Mailbox folders whose contents are never AI-categorized, across providers.
+ *
+ * Deleted and junk mail is self-evident. DRAFTS and SENT are here because they
+ * are the user's OWN writing: categorising your own outbox tells you nothing,
+ * and a priority score on a message you wrote yourself is meaningless.
+ *
+ * This list was previously written twice — here (as part of
+ * {@link AGENT_EXCLUDED_TAGS}) and again as `excludeSpecialFolders` in
+ * ai-repository, which the category CHIPS use — and the two disagreed. The
+ * worker's copy was missing Drafts, Sent, Junk Email, Deleted Items and Sent
+ * Items, so the pipeline spent LLM calls categorising mail the chips then
+ * filtered straight back out: 140 drafts and sent messages in one real mailbox,
+ * every result invisible. `Junk` had drifted the same way once before, in the
+ * other direction.
+ *
+ * Provider spellings all live here together: Gmail prefixes with `[Gmail]/`,
+ * Outlook says `Junk Email` / `Deleted Items` / `Sent Items`, IMAP-standard
+ * servers say `Junk`.
+ */
+export const EXCLUDED_FOLDER_TAGS = [
+  '|Spam|',
+  '|Junk|',
+  '|Junk Email|',
+  '|Trash|',
+  '|Deleted Items|',
+  '|Drafts|',
+  '|Sent|',
+  '|Sent Items|',
+  '|[Gmail]/Spam|',
+  '|[Gmail]/Trash|',
+  '|[Gmail]/Drafts|',
+  '|[Gmail]/Sent Mail|',
+] as const;
+
+/**
  * Tags that permanently disqualify an email from AI categorization.
  *
  * `read` — the user already triaged it themselves, so spending an LLM call on
- * it is waste. The rest are folders whose contents we never categorize.
- * `Junk` is the IMAP-standard spelling that non-Gmail servers use; it was
- * missing from the worker's copy of this list while the dashboard had it,
- * which is exactly the kind of drift this module exists to prevent.
+ * it is waste — plus every folder in {@link EXCLUDED_FOLDER_TAGS}.
  */
 export const AGENT_EXCLUDED_TAGS = [
   '|read|',
-  '|Spam|',
-  '|Junk|',
-  '|Trash|',
-  '|[Gmail]/Spam|',
-  '|[Gmail]/Trash|',
+  ...EXCLUDED_FOLDER_TAGS,
 ] as const;
+
+/**
+ * True when the email is in none of the never-categorized folders. Read state
+ * is deliberately NOT considered: callers that page over a category view need
+ * read mail too, and add their own `|read|` test when they want unread only.
+ */
+export function notInExcludedFolderClause(alias = ''): string {
+  return EXCLUDED_FOLDER_TAGS
+    .map((tag) => `instr(${col(alias, 'tags')}, '${tag}') = 0`)
+    .join(' AND ');
+}
 
 /** True when the email carries none of the disqualifying tags. */
 export function notExcludedByTagsClause(alias = ''): string {
