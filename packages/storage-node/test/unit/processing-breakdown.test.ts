@@ -24,7 +24,15 @@ let n = 0;
 function seed(
   db: ReturnType<typeof newMigratedDb>,
   tags: string,
-  opts: { body?: string; aiProcessed?: boolean } = {},
+  opts: {
+    body?: string;
+    aiProcessed?: boolean;
+    /** agent pipeline state — separate from aiProcessed, see agentPending. */
+    agentStatus?: 'pending' | 'done';
+    extractionDone?: boolean;
+    /** Older than everything else, to fall outside the recent window. */
+    old?: boolean;
+  } = {},
 ) {
   n += 1;
   const body = opts.body ?? '';
@@ -35,11 +43,13 @@ function seed(
   db.prepare(
     `INSERT INTO emails (id, message_id, thread_id, folder_id, uid, tags,
        subject, from_address, date, raw_body, clean_body,
-       raw_body_len, clean_body_len, content_type, content_hash, ai_processed_at)
-     VALUES (?, ?, ?, 'f1', ?, ?, 's', 'a@b.com', 1, ?, ?, ?, ?, 'text', ?, ?)`,
+       raw_body_len, clean_body_len, content_type, content_hash, ai_processed_at,
+       agent_status, extraction_status)
+     VALUES (?, ?, ?, 'f1', ?, ?, 's', 'a@b.com', ?, ?, ?, ?, ?, 'text', ?, ?, ?, ?)`,
   ).run(
-    `e${n}`, `<m${n}@x>`, `t${n}`, n, tags,
+    `e${n}`, `<m${n}@x>`, `t${n}`, n, tags, opts.old ? 1 : 1_000_000 + n,
     body, body, body.length, body.length, `h${n}`, opts.aiProcessed ? 1 : null,
+    opts.agentStatus ?? null, opts.extractionDone === false ? 'pending' : 'done',
   );
 }
 
@@ -174,5 +184,77 @@ describe('processingBreakdown — eligibility', () => {
 
     expect(b.eligibleNow).toBe(0);
     expect(b.unreadWithBody).toBe(0);
+  });
+});
+
+
+/**
+ * The agent pipeline's own backlog.
+ *
+ * THE complaint: the panel read "100% complete, 0 pending" for a solid hour
+ * while the agent worked through 252 emails — scoring them, assigning
+ * categories, even auto-drafting replies. The bar only ever measured
+ * CATEGORIZATION (`ai_processed_at`), which was genuinely finished; the agent
+ * runs on `agent_status` and had no row at all. The user reasonably read
+ * "0 pending" as "nothing is happening" and asked why processing had stopped.
+ */
+describe('processingBreakdown — the agent pipeline', () => {
+  it('counts what the agent still has to do', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'pending' });
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'done' });
+
+    const b = processingBreakdown(db);
+
+    expect(b.agentPending).toBe(1);
+    expect(b.agentDone).toBe(1);
+  });
+
+  // THE bug this row exists to make visible: categorization finished, agent
+  // did not. The two numbers have to be able to disagree.
+  it('reports agent work outstanding even when categorization is finished', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', aiProcessed: true, agentStatus: 'pending' });
+
+    const b = processingBreakdown(db);
+
+    expect(b.eligibleNow).toBe(0);   // the bar's input — nothing left
+    expect(b.agentPending).toBe(1);  // …but the agent is still working
+  });
+
+  // The agent's worker skips rows whose body has not been extracted yet, so
+  // counting them would show a backlog the poll cannot actually take on.
+  it('ignores rows the agent worker cannot select yet', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'pending', extractionDone: false });
+    seed(db, '|INBOX|', { agentStatus: 'pending' });                       // no body
+    seed(db, '|INBOX|read|', { body: 'hello', agentStatus: 'pending' });   // read
+    seed(db, '|Trash|', { body: 'hello', agentStatus: 'pending' });        // deleted
+
+    expect(processingBreakdown(db).agentPending).toBe(0);
+  });
+
+  // THE reason the window is passed in at all. With a cap of 500 and a row
+  // older than the newest 500, the poll can never reach it — so counting it
+  // would reproduce the exact "number that never moves" bug this panel keeps
+  // being reported for.
+  it('counts only what the poll can reach within the user\'s window', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'pending', old: true });
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'pending' });
+
+    // Window of 1 = only the newest row is reachable.
+    expect(processingBreakdown(db, { recentWindow: 1 }).agentPending).toBe(1);
+    // A window wide enough for both.
+    expect(processingBreakdown(db, { recentWindow: 500 }).agentPending).toBe(2);
+  });
+
+  // Omitting the window must mean "no window", matching getEmailsPendingAgent,
+  // rather than silently defaulting to some cap the caller never chose.
+  it('applies no window when none is given', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'pending', old: true });
+
+    expect(processingBreakdown(db).agentPending).toBe(1);
   });
 });

@@ -43,6 +43,8 @@ export function AIBoxDashboard() {
     eligibleNow: number;
     unreadWithBody: number;
     unreadNoBody: number;
+    agentPending: number;
+    agentDone: number;
   } | null>(null);
 
   // Load category definitions
@@ -205,7 +207,14 @@ export function AIBoxDashboard() {
                 {unprocessedCount} pending
               </span>
             </div>
-            <span>{progressPercent}% complete</span>
+            <span>
+              {progressPercent}% categorised
+              {(breakdown?.agentPending ?? 0) > 0 && (
+                <span className="ml-2 text-blue-600 dark:text-blue-400">
+                  · agent: {breakdown!.agentPending.toLocaleString()} to go
+                </span>
+              )}
+            </span>
           </div>
 
           {/* Transparency breakdown — explains why "100% complete" can
@@ -227,10 +236,17 @@ export function AIBoxDashboard() {
                 <BreakdownRow label="Bodies actually downloaded"      value={breakdown.withBody} />
                 <BreakdownRow label="Bodies NOT downloaded yet"       value={breakdown.noBody} tone={breakdown.noBody > 0 ? 'warn' : undefined} />
                 <BreakdownRow label="Read emails (skipped by policy)" value={breakdown.readSkipped} />
-                <BreakdownRow label="Unread + with body (eligible pool)" value={breakdown.unreadWithBody} />
-                <BreakdownRow label="Unread + no body yet"            value={breakdown.unreadNoBody} tone={breakdown.unreadNoBody > 0 ? 'warn' : undefined} />
-                <BreakdownRow label="Already AI-processed"            value={breakdown.aiProcessed} />
-                <BreakdownRow label="Eligible right now"              value={breakdown.eligibleNow} tone={breakdown.eligibleNow > 0 ? 'info' : undefined} />
+                {/* NOT a queue — it counts unread mail with a body whether or
+                    not the AI has finished with it, so it does not fall as work
+                    completes. Labelling it "eligible pool" made it contradict
+                    the 100% bar directly above: 212 "remaining" next to "0
+                    pending". "Waiting for the AI" is the row below. */}
+                <BreakdownRow label="Unread, body downloaded"         value={breakdown.unreadWithBody} />
+                <BreakdownRow label="Unread, body still missing"      value={breakdown.unreadNoBody} tone={breakdown.unreadNoBody > 0 ? 'warn' : undefined} />
+                <BreakdownRow label="Finished by the AI"              value={breakdown.aiProcessed} />
+                <BreakdownRow label="Waiting to be categorised"       value={breakdown.eligibleNow} tone={breakdown.eligibleNow > 0 ? 'info' : undefined} />
+                <BreakdownRow label="Waiting for priority + actions"  value={breakdown.agentPending} tone={breakdown.agentPending > 0 ? 'info' : undefined} />
+                <BreakdownRow label="Scored + actioned by the agent"  value={breakdown.agentDone} />
               </div>
               {breakdown.unreadNoBody > 0 && (
                 <div className="mt-3 flex items-start justify-between gap-3">
