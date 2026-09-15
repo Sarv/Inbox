@@ -6,6 +6,7 @@ import { sentryVitePlugin } from '@sentry/vite-plugin';
 import { resolve } from 'path';
 import { copyFileSync, mkdirSync, readFileSync } from 'fs';
 
+import { injectCspMeta } from './vite/app-csp';
 import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
 import { linkedDepsToExclude, linkedDepsToWatch } from './vite/linked-packages';
 import { rendererAliases } from './vite/renderer-aliases';
@@ -144,45 +145,10 @@ export default defineConfig(({ mode }) => ({
     // builds (which legitimately use these) are unaffected. This is what stops the
     // "Dynamic require of \"stream\" is not supported" startup crash from shipping.
     forbidNodeOnlyInRenderer(),
-    // Inject a strict Content-Security-Policy into the app document — but ONLY in
-    // a production build. The packaged renderer loads from file:// (so a response
-    // header CSP can't be applied) and ships as static self-hosted bundles, so a
-    // <meta> CSP is the right mechanism. Skipped in dev because Vite HMR / React
-    // Refresh need 'unsafe-eval'/'unsafe-inline' and a ws: connection. This is
-    // defense-in-depth on top of sandbox+contextIsolation; the untrusted-email
-    // iframe has its own separate, stricter CSP.
-    {
-      name: 'inject-csp-meta',
-      transformIndexHtml: {
-        order: 'post' as const,
-        handler(html: string) {
-          if (mode !== 'production') return html;
-          const csp = [
-            "default-src 'self'",
-            "script-src 'self'",
-            "style-src 'self' 'unsafe-inline'",
-            "img-src 'self' data: blob:",
-            "font-src 'self' data:",
-            "connect-src 'self' https:",
-            "frame-src 'self' data: blob:",
-            "worker-src 'self' blob:",
-            "object-src 'none'",
-            "base-uri 'self'",
-            "form-action 'none'",
-          ].join('; ');
-          return {
-            html,
-            tags: [
-              {
-                tag: 'meta',
-                attrs: { 'http-equiv': 'Content-Security-Policy', content: csp },
-                injectTo: 'head-prepend' as const,
-              },
-            ],
-          };
-        },
-      },
-    },
+    // Inject the app document's Content-Security-Policy (production only).
+    // Lives in vite/app-csp.ts — its img-src is load-bearing for the email body
+    // iframe, which inherits this policy and can only narrow it.
+    injectCspMeta(mode),
     // Keep the Sentry plugin last so it sees the final emitted bundle + maps.
     ...sentrySourceMapPlugins(),
   ],

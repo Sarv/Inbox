@@ -113,6 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ourselves. A message already in your mailbox repairs itself the next time you
   open it, once per message, and an image that genuinely isn't in the message
   stays broken rather than re-downloading the mail on every open.
+- Remote images in email could not load at all in packaged builds, and "Load
+  images" did nothing. The app document's own security policy capped what the
+  email frame was allowed to load — a frame can only tighten the page's policy,
+  never widen it — so the setting had no way to take effect. It could not be
+  reproduced in development, where that policy is not applied. Blocking is still
+  enforced where it always was, inside the email frame: with remote images off,
+  tracking pixels and remote images are refused exactly as before.
 - Some remote images in email — avatars in Bitbucket/Jira notifications among
   them — never loaded, even with "Load images" on, because the hosting server
   answered `429 Too Many Requests` to every request. The cause was not volume: a
