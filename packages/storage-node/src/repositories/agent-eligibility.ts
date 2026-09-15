@@ -260,6 +260,15 @@ export interface ProcessingBreakdown {
   eligibleNow: number;
   unreadWithBody: number;
   unreadNoBody: number;
+  /**
+   * The AGENT pipeline's backlog — priority scoring, actions and drafts. A
+   * separate pipeline from categorization, keyed on `agent_status` rather than
+   * `ai_processed_at`, and until this row existed it was invisible: the panel
+   * sat at "100% complete, 0 pending" for an hour while the agent worked
+   * through 252 emails, because the bar only ever measured the OTHER pipeline.
+   */
+  agentPending: number;
+  agentDone: number;
 }
 
 /**
@@ -280,10 +289,16 @@ export interface ProcessingBreakdown {
  *
  * @param db an open, migrated database
  */
-export function processingBreakdown(db: {
-  prepare: (sql: string) => { get: () => unknown };
-}): ProcessingBreakdown {
+export function processingBreakdown(
+  db: { prepare: (sql: string) => { get: (...params: unknown[]) => unknown } },
+  options: { recentWindow?: number } = {},
+): ProcessingBreakdown {
   const get = (sql: string): number => ((db.prepare(sql).get() as { n: number })?.n || 0);
+  const getWith = (sql: string, params: unknown[]): number =>
+    ((db.prepare(sql).get(...params) as { n: number })?.n || 0);
+  // How far back the background poll may reach — the user's "AI Processing
+  // Limit". 0 means "no window", matching getEmailsPendingAgent.
+  const recentWindow = Math.max(0, Math.floor(options.recentWindow ?? 0));
 
   // Whether the has-body test can be answered from the length columns
   // (index-servable) or must read every body. Read from THIS database rather
@@ -317,5 +332,21 @@ export function processingBreakdown(db: {
       WHERE ${missingBodyClause('', ready)}
         AND ${notExcludedByTagsClause()}
     `),
+    // The agent pipeline's own backlog, measured with the SAME clause its
+    // worker selects on — including the recent-window cap, so the number
+    // reflects what the poll can actually reach rather than what merely
+    // exists. Without the window a user whose cap is 500 would watch a count
+    // that never moves, which is the bug this whole panel keeps reproducing.
+    agentPending: recentWindow > 0
+      ? getWith(
+        `SELECT COUNT(*) AS n FROM emails e
+         WHERE ${agentEligibleClause('e', { recentWindow: true, bodyLengthsReady: ready })}`,
+        [recentWindow],
+      )
+      : get(`
+        SELECT COUNT(*) AS n FROM emails e
+        WHERE ${agentEligibleClause('e', { bodyLengthsReady: ready })}
+      `),
+    agentDone: get(`SELECT COUNT(*) AS n FROM emails WHERE agent_status = 'done'`),
   };
 }

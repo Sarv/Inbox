@@ -350,7 +350,9 @@ export function registerAIHandlers(): void {
       // it is built from, so this handler cannot drift from what the worker
       // treats as eligible — and so the counts are testable against a real
       // migrated database instead of only through the IPC surface.
-      const data = processingBreakdown(db);
+      // Pass the user's "AI Processing Limit" so the agent backlog row counts
+      // what the poll can actually REACH, not merely what exists.
+      const data = processingBreakdown(db, { recentWindow: getAutoBacklogCap() });
       return { success: true, data };
     } catch (error) {
       return { success: false, error: (error as Error).message };
