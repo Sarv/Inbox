@@ -91,6 +91,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use that mailbox.
 
 ### Fixed
+- Images a sender embedded in the message itself (a `cid:` reference — signature
+  logos, avatars in notification mail) could render as a broken image while the
+  same email looked fine in Gmail. The mail parser only inlines such a part when
+  its declared type matches a narrow pattern, so an image sent as `image/x-png`,
+  `image/x-icon`, or as `application/octet-stream` with an image filename was
+  left as a reference nothing in the app could resolve — and it failed silently:
+  no banner, no error, just a missing picture. Those parts are now inlined
+  ourselves. A message already in your mailbox repairs itself the next time you
+  open it, once per message, and an image that genuinely isn't in the message
+  stays broken rather than re-downloading the mail on every open.
 - Some remote images in email — avatars in Bitbucket/Jira notifications among
   them — never loaded, even with "Load images" on, because the hosting server
   answered `429 Too Many Requests` to every request. The cause was not volume: a
@@ -461,7 +471,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deferred refresh is re-checked shortly afterwards and never counts as a
   failure, so a night of sleep can no longer exhaust the retry budget and leave
   the account showing as disconnected in the morning.
-
 ## [1.1.0] - 2026-07-09
 
 ### Added
