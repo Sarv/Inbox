@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { SyncEngine } from '../../../src/imap/sync-engine';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
-
 import type { IMAPFolder } from '../../../src/types/imap';
 
-import { SyncEngine } from '../../../src/imap/sync-engine';
 
 // getSelectableFolders() requires `selectable` (and prefers `subscribed`), which
 // the fake server's listFolders() doesn't set — shape a real folder entry here.

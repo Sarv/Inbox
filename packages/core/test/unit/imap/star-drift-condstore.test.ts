@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MessageProcessor } from '../../../src/imap/message-processor';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IEmailStorage } from '../../../src/types/storage';
 import { planFolderDrift } from '../../../src/utils/folder-drift';
 
-import { MessageProcessor } from '../../../src/imap/message-processor';
 
 /**
  * END-TO-END for the one webmail change no COUNT can see: a star removed.

@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import { FolderRepository } from '../../../src/repositories/folder-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // Proves a webmail move (e.g. Trash -> Inbox) never erases a message from BOTH
 // folders. The destination sync relinks the row (linkEmail adds the folder tag),

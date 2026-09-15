@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import { MessageProcessor } from '../../../src/imap/message-processor';
+import { withFolderSelected } from '../../../src/imap/with-folder';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IIMAPClient } from '../../../src/types/imap';
 
-import { MessageProcessor } from '../../../src/imap/message-processor';
-import { withFolderSelected } from '../../../src/imap/with-folder';
 
 /**
  * The folder-selection race, end to end.

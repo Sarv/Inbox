@@ -1,8 +1,6 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
-
 import {
   THREAD_FIRST_SENDER_SQL,
   THREAD_LAST_SENDER_SQL,
@@ -18,6 +16,8 @@ import {
   threadTagExists,
   unreadInFolderPredicate,
 } from '../../../src/repositories/thread-sql';
+import { openTestDb } from '../../../src/test-support/test-db';
+
 
 // These fragments are the SINGLE definition of "what counts as part of a
 // conversation" for the list views AND search. Every test here EXECUTES the

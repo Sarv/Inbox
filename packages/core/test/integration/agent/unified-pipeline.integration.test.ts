@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from 'vitest';
 
 import type { CategoryDef } from '../../../src/agent/categorization-utils';
 import { UnifiedPipeline, type UnifiedPipelineDeps } from '../../../src/agent/unified-pipeline';
-
 import type { EmailRecord } from '../../../src/types/models';
 
 // INTEGRATION test for the "a mail is received → the AI pipeline runs" flow.

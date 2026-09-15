@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+import { RealtimeManager, type RealtimeConfig, type RealtimeEvent } from '../../../src/imap/realtime-manager';
 import { FakeImapServer } from '../../../src/test-support/fake-imap-server';
 
-import { RealtimeManager, type RealtimeConfig, type RealtimeEvent } from '../../../src/imap/realtime-manager';
 
 // The RealtimeManager owns every timer that keeps mail flowing: IDLE, the polling
 // fallback, the polling->IDLE upgrade retry, the debounced flag reconciliation and

@@ -155,6 +155,10 @@ describe('cleanEmailHtmlForLLM — structure and text the LLM needs', () => {
     // character, so the `&nbsp;` → ' ' rule never sees an entity, and the
     // whitespace collapse only touches ASCII space/tab). Normalize before
     // asserting so this pins the real output rather than the intended one.
+    // The literal U+00A0 in this regex is the assertion: it is the character
+    // sanitize-html leaves behind, and replacing it with an ASCII space would
+    // delete the very thing the test checks.
+    // eslint-disable-next-line no-irregular-whitespace
     expect(out.replace(/ /g, ' ')).toContain('Tom & Jerry');
     expect(out).toContain('<tag>');
     expect(out).toContain('"quoted"');

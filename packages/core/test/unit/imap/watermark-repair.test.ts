@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LARGE_MAILBOX_THRESHOLD } from '../../../src/config/sync';
+import { FolderSyncer } from '../../../src/imap/folder-syncer';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IMAPFolder } from '../../../src/types/imap';
 
-import { FolderSyncer } from '../../../src/imap/folder-syncer';
 
 /**
  * END-TO-END for the wedged forward sync: mail that silently stops arriving.

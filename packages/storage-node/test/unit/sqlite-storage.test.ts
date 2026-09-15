@@ -9,6 +9,11 @@
 // sqlite-storage-emails.test.ts; transaction/rollback guarantees in
 // sqlite-storage-tx.test.ts.
 
+/* eslint-disable import/order -- the facade import at the bottom of this block is
+   deliberately placed after the `Module._load` patch (see its own comment). That
+   splits the sibling import group in two, which makes `newlines-between` report
+   the gap on the import BEFORE it — a position no inline directive can reach.
+   Re-enabled immediately after the last import. */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import Module from 'node:module';
 import { tmpdir } from 'node:os';
@@ -37,7 +42,11 @@ nodeModule._load = function (request, parent, isMain) {
   return originalModuleLoad.call(this, request, parent, isMain);
 };
 
+// Imported LAST, on purpose: the facade is loaded only once the `_load` patch
+// above is in place, or it resolves the real better-sqlite3 binding first.
+// eslint-disable-next-line import/first
 import { SQLiteStorage } from '../../src/sqlite-storage';
+/* eslint-enable import/order */
 
 // ---------------------------------------------------------------------------
 // Fixtures. Every timestamp is explicit — nothing may depend on the wall clock.

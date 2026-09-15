@@ -20,7 +20,7 @@
     "test": "node ../../scripts/native-abi.mjs node && vitest run",
     "test:coverage": "node ../../scripts/native-abi.mjs node && vitest run --coverage",
     "test:watch": "node ../../scripts/native-abi.mjs node && vitest",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src test --ext .ts",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist",
     "test:unit": "node ../../scripts/native-abi.mjs node && vitest run test/unit",

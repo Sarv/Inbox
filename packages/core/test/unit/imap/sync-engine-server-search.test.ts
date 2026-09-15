@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { SyncEngine } from '../../../src/imap/sync-engine';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 
-import { SyncEngine } from '../../../src/imap/sync-engine';
 
 // Server search reaches past the local index: SEARCH the folder on the server,
 // then DOWNLOAD only the matches we don't already hold so the normal local search

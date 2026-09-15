@@ -1,11 +1,19 @@
+// `newMigratedDb` gives this file the real schema, built by the real migrations.
+// It comes from storage-node's TEST-ONLY helper rather than being re-created
+// here: it already carries the better-sqlite3/node:sqlite fallback (the packaged
+// binding is compiled for ELECTRON's ABI and cannot be dlopen'd by vitest's
+// Node), and a second copy of that logic is exactly the duplication this repo
+// forbids.
 import { NO_BODY_CONTENT_HASH_PREFIX, bodyContentHash, noBodyContentHash } from '@sarvinbox/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// The real schema, built by the real migrations. Imported from storage-node's
-// TEST-ONLY helper rather than re-created here: it already carries the
-// better-sqlite3/node:sqlite fallback (the packaged binding is compiled for
-// ELECTRON's ABI and cannot be dlopen'd by vitest's Node), and a second copy of
-// that logic is exactly the duplication this repo forbids.
+// import/order contradicts itself on this one line and cannot be satisfied:
+// the TS resolver sees a workspace package (external group, no blank line
+// before it) while the specifier is written as a relative path (parent group,
+// blank line required). `--fix` adds the blank line, then reports it. This is
+// the only cross-package relative import in the tree; every other test-db
+// importer lives inside storage-node and hits neither half of the conflict.
+// eslint-disable-next-line import/order
 import { newMigratedDb } from '../../../../../../packages/storage-node/src/test-support/test-db';
 
 // What breaks if this file fails: the two writers that put an `emails` row on

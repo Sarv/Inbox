@@ -1,4 +1,3 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +8,7 @@ import {
   SARV_PRODUCTION_CLIENT_ID,
   setOAuthClientId,
 } from '@sarvinbox/core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * `initializeOAuth()` — the Sarv client_id it installs at startup.

@@ -12,10 +12,10 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 
 import { AIRepository } from '../../../src/repositories/ai-repository';
 import { EmailRepository } from '../../../src/repositories/email-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 /** 2026-08-18T12:00:00Z — every timestamp the repo stamps itself is derived
  *  from this, so ids like `spam-<ms>` and `processedAt` defaults are stable. */

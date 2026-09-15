@@ -1,6 +1,6 @@
+import { OAuthError } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-import { OAuthError } from '@sarvinbox/core';
 
 /**
  * Cancelling and deferring token refreshes around system sleep.

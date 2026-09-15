@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+import { accountIdFor } from '@sarvinbox/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -65,7 +66,6 @@ vi.mock('@sarvinbox/core', async () => {
   };
 });
 
-import { accountIdFor } from '@sarvinbox/core';
 
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {

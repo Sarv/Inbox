@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import { FolderRepository } from '../../../src/repositories/folder-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // recalculateFolderCounts is the source of truth for the sidebar badge
 // (unread_count) and the flat-folder pagination denominator (total_count). Two

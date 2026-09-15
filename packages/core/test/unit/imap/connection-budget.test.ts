@@ -221,7 +221,7 @@ describe('connection governor — Gmail foreground priority / reserved headroom'
 
     // A 5th BACKGROUND connect is refused — the reserve is kept clear.
     let bg5 = false;
-    const p5 = acquireConnectionSlot(GMAIL, U, 30000, 'background').then((r) => { bg5 = true; return r; });
+    const _p5 = acquireConnectionSlot(GMAIL, U, 30000, 'background').then((r) => { bg5 = true; return r; });
     await vi.advanceTimersByTimeAsync(GMAIL_INTERVAL_MS);
     expect(bg5).toBe(false);
 

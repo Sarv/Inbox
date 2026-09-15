@@ -1,10 +1,10 @@
+import type { EmailRecord, SearchQuery } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { EmailRecord, SearchQuery } from '@sarvinbox/core';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 import { SearchRepository } from '../../../src/repositories/search-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 // Search is how users find mail they can't see in a list, so a wrong predicate
 // here is indistinguishable from lost mail: the message exists but the app swears

@@ -1,6 +1,6 @@
+import type { AppendSentFn, SendFn } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AppendSentFn, SendFn } from '@sarvinbox/core';
 
 /**
  * Outbox wiring (the SendQueue itself lives in @sarvinbox/core). What this module

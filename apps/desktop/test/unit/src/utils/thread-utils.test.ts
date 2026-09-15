@@ -2,7 +2,6 @@ import type { EmailRecord } from '@sarvinbox/core';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { InboxSection, SectionFilter } from '../../../../src/config/inbox-types';
-
 import type { EmailThread } from '../../../../src/utils/thread-utils';
 import {
   adjustTotalForFilteredOut,

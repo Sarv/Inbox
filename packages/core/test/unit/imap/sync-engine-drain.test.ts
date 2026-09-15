@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { SyncEngine } from '../../../src/imap/sync-engine';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 
-import { SyncEngine } from '../../../src/imap/sync-engine';
 
 // Regression for the "Gmail stuck at ~8.6k, never finishes" strand in the DRAIN.
 //

@@ -4,13 +4,14 @@
 // Edits → re-run → see scorecard. No app rebuild needed.
 
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+import { appDataBase } from '../lib/userdata-dirs.mjs';
+
+import { compressToPlainText, compressToFit, estimateTokens } from './compress.mjs';
 import { SYSTEM_PROMPT_V1, SYSTEM_PROMPT_V2, SYSTEM_PROMPT_V3, buildUserPrompt } from './prompt.mjs';
 import { score, printScorecard } from './scorer.mjs';
-import { compressToPlainText, compressToFit, estimateTokens } from './compress.mjs';
-import { appDataBase } from '../lib/userdata-dirs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

@@ -5,7 +5,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import type { AppSettings } from '../../../../src/components/settings/types';
-
 import { getSignatureHtml, loadSignatureState, migrateSignatures, normalizeSignatureHtml } from '../../../../src/utils/signatures';
 
 const SETTINGS_KEY = 'sarvinbox-settings';

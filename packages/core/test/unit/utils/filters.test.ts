@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 
 import type { FilterAction, FilterCondition, FilterRule } from '../../../src/types/filters';
 import type { EmailRecord } from '../../../src/types/models';
-
 import { collectFilterActions, computeFilterActionResult, emailMatchesRule } from '../../../src/utils/filters';
 
 // Filter rules run on EVERY ingested message and can mark read / move / delete.

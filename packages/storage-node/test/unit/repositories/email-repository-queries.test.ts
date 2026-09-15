@@ -17,9 +17,9 @@ import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ReadModelMaintainer } from '../../../src/read-model-maintainer';
+import { EmailRepository, allMailPageSql, flagViewPageSql, snoozedThreadsPageSql } from '../../../src/repositories/email-repository';
 import { newMigratedDb } from '../../../src/test-support/test-db';
 
-import { EmailRepository, allMailPageSql, flagViewPageSql, snoozedThreadsPageSql } from '../../../src/repositories/email-repository';
 
 const FOLDERS: Array<[string, string]> = [
   ['f-inbox', 'INBOX'],

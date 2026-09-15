@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { isTimeoutError } from '../../../src/utils/timeout';
 import {
   fetchBodyQueued,
   BODY_FETCH_QUEUE_WAIT_MS,
   BODY_FETCH_RUN_MS,
   type FetchedBody,
 } from '../../../src/imap/fetch-body-queued';
+import { isTimeoutError } from '../../../src/utils/timeout';
 
 /**
  * The single deadline policy for every batching caller of SyncEngine.fetchBody.

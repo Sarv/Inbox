@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import { FolderRepository } from '../../../src/repositories/folder-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // Regression: a UIDVALIDITY change must re-key a folder WITHOUT destroying rows
 // that still live in other folders. The old path (deleteEmailsByFolder) ran a

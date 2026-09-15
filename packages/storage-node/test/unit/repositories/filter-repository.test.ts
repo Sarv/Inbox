@@ -1,10 +1,10 @@
+import type { FilterAction, FilterCondition } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { FilterAction, FilterCondition } from '@sarvinbox/core';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 import { FilterRepository } from '../../../src/repositories/filter-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 // Filter rules mutate incoming mail (mark read, archive, delete, move) so any
 // storage bug here silently misfiles or destroys real messages: a rule that
