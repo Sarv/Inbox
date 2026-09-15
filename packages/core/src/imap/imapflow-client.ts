@@ -1172,6 +1172,27 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     return Buffer.concat(chunks);
   }
 
+  /**
+   * Download one MIME part WITHOUT reversing its transfer encoding.
+   *
+   * For a part whose `Content-Transfer-Encoding` header lies. A base64 decoder
+   * keeps only alphabet characters and stops at the first `=`, so raw HTML text
+   * mislabelled `base64` collapses to a handful of junk bytes (`<p><span style=`
+   * decoded to 7). These are the bytes Gmail shows for such a message.
+   */
+  async downloadPartRaw(uid: number, part: string): Promise<Buffer | null> {
+    this.ensureConnected();
+    const msg: any = await this.op(
+      'FETCH_RAW_PART',
+      this.client!.fetchOne(String(uid), { bodyParts: [part] }, { uid: true }),
+    );
+    const parts = msg?.bodyParts;
+    if (!parts) return null;
+    // ImapFlow hands back a Map; tolerate a plain object from a fake/other impl.
+    const content = typeof parts.get === 'function' ? parts.get(part) : parts[part];
+    return content ? Buffer.from(content) : null;
+  }
+
   // ========== Flag-only fetches ==========
 
   /**

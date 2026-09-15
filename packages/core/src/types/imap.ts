@@ -109,6 +109,14 @@ export interface IIMAPClient {
    */
   downloadPart?(uid: number, part: string): Promise<Buffer | null>;
 
+  /**
+   * The same part, WITHOUT reversing its transfer encoding — the escape hatch for
+   * a part whose `Content-Transfer-Encoding` header lies (raw text declared
+   * `base64`). Optional; callers only reach for it when the decoded bytes are
+   * implausibly short against the size the server declared.
+   */
+  downloadPartRaw?(uid: number, part: string): Promise<Buffer | null>;
+
   // ========== Message Fetch ==========
 
   /**
