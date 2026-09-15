@@ -530,6 +530,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deferred refresh is re-checked shortly afterwards and never counts as a
   failure, so a night of sleep can no longer exhaust the retry budget and leave
   the account showing as disconnected in the morning.
+- The "this message may not be from who it claims to be" warning is now shown per
+  message. It was computed only for the message a thread opens on, so in a thread
+  whose first mail is genuine every later one was unchecked — including the newly
+  arrived message the reader is actually looking at, with the rest collapsed above
+  it. Every expanded message in the thread and every message in the chat view now
+  carries its own.
+
 ## [1.1.0] - 2026-07-09
 
 ### Added

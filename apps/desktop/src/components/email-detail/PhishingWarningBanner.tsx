@@ -8,6 +8,10 @@ interface PhishingWarningBannerProps {
   fromAddress?: string | null;
   /** Rendered HTML body — scanned for deceptive links (anchor text ≠ href). */
   html?: string | null;
+  /** Outer spacing. Defaults to `mb-4` (banner above a body); a caller that
+   *  renders it BELOW a body — the chat bubble, whose library gives no slot
+   *  above one — passes its own margin instead. */
+  className?: string;
 }
 
 /**
@@ -19,7 +23,12 @@ interface PhishingWarningBannerProps {
  * Renders nothing when no signal fires (the common case), so its presence stays
  * meaningful. See utils/phishing.ts for the heuristics.
  */
-export function PhishingWarningBanner({ fromName, fromAddress, html }: PhishingWarningBannerProps) {
+export function PhishingWarningBanner({
+  fromName,
+  fromAddress,
+  html,
+  className = 'mb-4',
+}: PhishingWarningBannerProps) {
   const { level, reasons } = useMemo(
     () => assessPhishing({ fromName, fromAddress, html }),
     [fromName, fromAddress, html],
@@ -43,7 +52,7 @@ export function PhishingWarningBanner({ fromName, fromAddress, html }: PhishingW
     : 'Be careful with this message';
 
   return (
-    <div className={`mb-4 rounded-lg border ${shell} overflow-hidden`} role="alert">
+    <div className={`${className} rounded-lg border ${shell} overflow-hidden`} role="alert">
       <div className="flex items-start gap-3 p-3">
         <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md ${iconWrap}`}>
           <Icon className="h-5 w-5" />

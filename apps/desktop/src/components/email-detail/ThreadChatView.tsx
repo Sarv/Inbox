@@ -17,6 +17,7 @@ import { Tooltip } from '../Tooltip';
 import { chatMessagesFromConversation, chatMessagesFromThread } from './chat-message-adapter';
 import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
 import { EmailMenu } from './EmailMenu';
+import { PhishingWarningBanner } from './PhishingWarningBanner';
 import type { EmailDetailContext } from './types';
 import { parseAttachments } from './utils';
 
@@ -258,6 +259,26 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     ],
   );
 
+  // The phishing check is per message and body-independent, so every bubble
+  // gets it — not just the thread's anchor card, which is the OLDEST message
+  // and therefore never the newly arrived one a reader is looking at. The
+  // library offers no slot above a bubble's body, so it sits under it.
+  const renderFooter = useCallback(
+    (message: ChatMessage) => {
+      const email = emailFor(message);
+      if (!email) return null;
+      return (
+        <PhishingWarningBanner
+          fromName={email.fromName}
+          fromAddress={email.fromAddress}
+          html={email.rawBody}
+          className="mt-2"
+        />
+      );
+    },
+    [emailFor],
+  );
+
   return (
     <div className="relative border border-border rounded-lg bg-card mt-2 pt-3">
       {/* AI / Logical toggle — sits on the top border line. Always
@@ -370,6 +391,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
           runAttachmentAction(attachment, message, 'download')
         }
         renderActions={renderActions}
+        renderFooter={renderFooter}
         emptyState={
           showProcessPrompt ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center">
