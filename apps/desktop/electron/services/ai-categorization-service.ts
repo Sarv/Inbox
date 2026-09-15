@@ -7,11 +7,12 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { getMainWindow, requireStorage } from '../shared';
-import { chromiumFetch } from './net-fetch';
-import type { EmailRecord } from '@sarvinbox/core';
 import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger } from '@sarvinbox/core';
-import type { AIErrorInfo } from '@sarvinbox/core';
+import type { EmailRecord , AIErrorInfo } from '@sarvinbox/core';
+
+import { getMainWindow, requireStorage } from '../shared';
+
+import { chromiumFetch } from './net-fetch';
 const logger = createLogger('ai-categorization-service');
 
 // ========== Helpers ==========

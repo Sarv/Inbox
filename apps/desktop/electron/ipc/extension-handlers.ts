@@ -4,10 +4,12 @@
  * Handles extension management and extension function calls.
  */
 
-import { ipcMain, dialog } from 'electron';
 import type { EmailSummarizationExports, AICategorizationExports } from '@sarvinbox/core';
-import { getExtensionManager, getMainWindow } from '../shared';
 import { createLogger } from '@sarvinbox/core';
+import { ipcMain, dialog } from 'electron';
+
+import { getExtensionManager, getMainWindow } from '../shared';
+
 const logger = createLogger('extension-handlers');
 
 export function registerExtensionHandlers(): void {

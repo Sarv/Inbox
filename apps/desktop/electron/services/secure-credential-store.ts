@@ -14,14 +14,15 @@
  * legacy file is migrated into the DB and renamed `.premigrated` (kept as a
  * recovery fallback until the startup cleanup removes it).
  */
-import { app, safeStorage } from 'electron';
 import { existsSync, renameSync } from 'fs';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 
-import { createWriteQueue } from './write-queue';
-import { getBlob, setBlob } from './core-db';
 import { createLogger } from '@sarvinbox/core';
+import { app, safeStorage } from 'electron';
+
+import { getBlob, setBlob } from './core-db';
+import { createWriteQueue } from './write-queue';
 const logger = createLogger('secure-credential-store');
 
 const LEGACY_FILE_NAME = 'secure-credentials.json';

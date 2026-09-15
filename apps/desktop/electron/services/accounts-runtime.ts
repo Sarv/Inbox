@@ -13,16 +13,18 @@ import { createHash } from 'crypto';
 import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { join } from 'path';
 
-import { app } from 'electron';
 
 import { SyncEngine, createLogger } from '@sarvinbox/core';
 import { SHARED_CONTACTS_FILE, SQLiteStorage } from '@sarvinbox/storage-node';
-import { getDbEncryptionKey } from './db-key-store';
-import { getMeta, setMeta } from './core-db';
-import { deleteAccountSecrets, rekeyAccountSecrets } from './secure-credential-store';
+import { app } from 'electron';
+
 
 import type { AccountRuntime } from '../shared';
 import { claimDefaultRuntime, getAccountRuntime, hasAccountRuntime, registerAccountRuntime, rekeyRuntime, unregisterRuntime } from '../shared';
+
+import { getMeta, setMeta } from './core-db';
+import { getDbEncryptionKey } from './db-key-store';
+import { deleteAccountSecrets, rekeyAccountSecrets } from './secure-credential-store';
 const logger = createLogger('accounts-runtime');
 
 /** The legacy single-account database — owned by the primary account. */

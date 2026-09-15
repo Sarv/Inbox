@@ -11,14 +11,15 @@
  * container changed. The legacy file is migrated on first read and renamed
  * `.premigrated` (removed later by the startup cleanup).
  */
-import { app, safeStorage } from 'electron';
 import { existsSync, renameSync } from 'fs';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 
-import { createWriteQueue } from './write-queue';
-import { getBlob, setBlob, deleteBlob } from './core-db';
 import { createLogger } from '@sarvinbox/core';
+import { app, safeStorage } from 'electron';
+
+import { getBlob, setBlob, deleteBlob } from './core-db';
+import { createWriteQueue } from './write-queue';
 const logger = createLogger('imap-account-store');
 
 const LEGACY_FILE_NAME = 'imap-account.json';

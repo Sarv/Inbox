@@ -18,6 +18,7 @@ import { createHash } from 'crypto';
 import { createLogger } from '@sarvinbox/core';
 
 import { getStorage, getMainWindow } from '../shared';
+
 import { chromiumFetch } from './net-fetch';
 
 const logger = createLogger('avatar-discovery');

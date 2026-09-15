@@ -1,4 +1,3 @@
-import { protocol } from 'electron';
 import * as fs from 'fs';
 import { Readable } from 'stream';
 
@@ -9,6 +8,7 @@ import {
   isInlineRenderableAttachment,
   parseAttachmentUrl,
 } from '@sarvinbox/core';
+import { protocol } from 'electron';
 
 import { AttachmentError, resolveAttachmentFile } from './attachment-cache';
 

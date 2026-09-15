@@ -13,6 +13,7 @@
  */
 
 import { SendQueue, type SendFn, type AppendSentFn, type IEmailStorage, createLogger } from '@sarvinbox/core';
+
 import { getStorage, getSmtpClient, getStorageFor, getSmtpClientFor, getMainWindow } from '../shared';
 const logger = createLogger('outbox-service');
 

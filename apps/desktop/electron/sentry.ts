@@ -18,10 +18,10 @@
  */
 import { createHash } from 'crypto';
 
-import * as Sentry from '@sentry/electron/main';
-import { app } from 'electron';
 import { setLogSink, type LogLevel } from '@sarvinbox/core';
 import { setSlowQueryReporter, type SlowQueryEvent } from '@sarvinbox/storage-node';
+import * as Sentry from '@sentry/electron/main';
+import { app } from 'electron';
 
 import { redactSecrets } from './utils/file-logger';
 

@@ -6,8 +6,8 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import { contextBridge, ipcRenderer } from 'electron';
 import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter } from '@sarvinbox/core';
+import { contextBridge, ipcRenderer } from 'electron';
 
 /**
  * A toast mirrored into the renderer when native OS notifications can't be

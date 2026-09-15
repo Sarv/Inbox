@@ -9,8 +9,8 @@
 import { createLogger, type LabelInput } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import { requireStorage, getCurrentAccountId, getSyncEngine } from '../shared';
 import { ensureAccountRuntime } from '../services/accounts-runtime';
+import { requireStorage, getCurrentAccountId, getSyncEngine } from '../shared';
 
 const logger = createLogger('label-handlers');
 

@@ -14,10 +14,11 @@
  * (documented, warned — encryption then only raises the bar, it isn't airtight).
  */
 import { randomBytes } from 'crypto';
-import { app, safeStorage } from 'electron';
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join } from 'path';
+
 import { createLogger } from '@sarvinbox/core';
+import { app, safeStorage } from 'electron';
 const logger = createLogger('db-key-store');
 
 const FILE_NAME = 'db-key.bin';

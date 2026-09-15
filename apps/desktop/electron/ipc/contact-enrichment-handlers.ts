@@ -16,6 +16,7 @@
  */
 
 import { ipcMain } from 'electron';
+
 import {
   reportContactEnrichmentProgress,
   reportBatchDone,

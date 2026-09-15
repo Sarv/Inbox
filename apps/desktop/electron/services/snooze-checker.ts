@@ -5,8 +5,9 @@
  * and unsnoozes them, notifying the renderer.
  */
 
-import { getStorage, getStorageFor, getAllAccountIds, getMainWindow } from '../shared';
 import { createLogger } from '@sarvinbox/core';
+
+import { getStorage, getStorageFor, getAllAccountIds, getMainWindow } from '../shared';
 const logger = createLogger('snooze-checker');
 
 let snoozeCheckInterval: NodeJS.Timeout | null = null;

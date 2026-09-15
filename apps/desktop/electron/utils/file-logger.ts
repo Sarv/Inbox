@@ -13,10 +13,11 @@
  * which also gives release logs. In dev the file is gitignored via `*.log`.
  */
 
-import { app } from 'electron';
 import { existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { inspect } from 'util';
+
+import { app } from 'electron';
 import pino from 'pino';
 
 const MAX_BYTES = 20 * 1024 * 1024; // 20 MB hard cap on the file

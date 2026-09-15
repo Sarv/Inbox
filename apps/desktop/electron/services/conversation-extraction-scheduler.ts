@@ -8,8 +8,9 @@
  * and sends batch IPC to the renderer for AI processing.
  */
 
-import { getStorage, getMainWindow } from '../shared';
 import { createLogger } from '@sarvinbox/core';
+
+import { getStorage, getMainWindow } from '../shared';
 const logger = createLogger('conversation-extraction-scheduler');
 
 let schedulerInterval: NodeJS.Timeout | null = null;

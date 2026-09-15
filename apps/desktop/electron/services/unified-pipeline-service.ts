@@ -11,44 +11,57 @@
  * Pipeline 2 ONLY runs after Pipeline 1 completes.
  */
 
+import {
+  BehaviorIntelligence,
+  LogAggregator,
+  MAX_API_RETRIES,
+  SARV_LABEL_PARENT,
+  UnifiedPipeline,
+  callAIWithRetry,
+  classifyCategorizationPass,
+  cleanEmailHtmlForLLM,
+  decideCategorizationAction,
+  encodeAiCategories,
+  folderPathForCategory,
+  getEventBus,
+  labelDrainDecision,
+  mirrorableCategories,
+  parseTags,
+  createLogger,
+  type AIProviderConfig,
+  type ContactType,
+  type FolderLabelMode,
+  type OAuthProviderId,
+  type UnifiedPipelineConfig,
+  type UserActionType,
+} from '@sarvinbox/core';
+import { cleanBodyExpression, rawBodyExpression } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import pLimit from 'p-limit';
-import {
-  UnifiedPipeline,
-  type UnifiedPipelineConfig,
-  type AIProviderConfig,
-  type OAuthProviderId,
-  callAIWithRetry,
-  getEventBus,
-  BehaviorIntelligence,
-  MAX_API_RETRIES,
-  classifyCategorizationPass,
-  decideCategorizationAction,
-  createLogger,
-} from '@sarvinbox/core';
-import type { UserActionType, ContactType } from '@sarvinbox/core';
-import { cleanEmailHtmlForLLM } from '@sarvinbox/core';
-import { folderPathForCategory, parseTags, SARV_LABEL_PARENT, LogAggregator, type FolderLabelMode } from '@sarvinbox/core';
-import { encodeAiCategories, labelDrainDecision, mirrorableCategories } from '@sarvinbox/core';
-import { cleanBodyExpression, rawBodyExpression } from '@sarvinbox/storage-node';
-import { getStorage, getStorageFor, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient } from '../shared';
-import { resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
-import { savePipelineAIConfig, loadPipelineAIConfigSync, clearPipelineAIConfig } from './pipeline-ai-config-store';
-import { getAccount as getOAuthAccount } from './oauth-token-store';
+// One import for the whole barrel. It used to be five separate statements from
+// the same module, which `eslint --fix` cannot merge safely — it folds the
+// `import type { ... }` line into a value import and emits a stray comma,
+// leaving the file syntactically invalid. Merged by hand so the fixer has
+// nothing left to do here.
+
 import { logUserAction } from '../ipc/agent-handlers';
 import { saveDraftToIMAP } from '../ipc/draft-handlers';
 import { sendEmailFromMain, appendSentCopy } from '../ipc/smtp-handlers';
-import { attachOAuthBearer, getValidAccessToken } from './oauth-service';
-import { ensureGmailLabelColor, renameGmailLabel, deleteGmailLabelsUnder } from './gmail-label-api';
-import { listAccounts } from './oauth-token-store';
-import { chromiumFetch } from './net-fetch';
-import { isAIProviderConfigured } from './conversation-extraction-scheduler';
-import { notifyNewMail } from './notification-service';
-import { getMeta, setMeta } from './core-db';
+import { getStorage, getStorageFor, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient } from '../shared';
+
+import { resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
 import { loadAgentConfig } from './agent-config-store';
+import { decideAIErrorPolicy } from './ai-error-policy';
+import { isAIProviderConfigured } from './conversation-extraction-scheduler';
+import { getMeta, setMeta } from './core-db';
+import { ensureGmailLabelColor, renameGmailLabel, deleteGmailLabelsUnder } from './gmail-label-api';
+import { chromiumFetch } from './net-fetch';
+import { notifyNewMail } from './notification-service';
+import { attachOAuthBearer, getValidAccessToken } from './oauth-service';
+import { getAccount as getOAuthAccount, listAccounts } from './oauth-token-store';
+import { savePipelineAIConfig, loadPipelineAIConfigSync, clearPipelineAIConfig } from './pipeline-ai-config-store';
 import { resolveDeferredPipelineConfig } from './pipeline-init-config';
 import { SiblingCategoryCache } from './sibling-category-cache';
-import { decideAIErrorPolicy } from './ai-error-policy';
 
 // Live AI-pipeline diagnostics (why categorization is / isn't running). Stored in
 // the core DB's registry_meta as a JSON snapshot instead of a plaintext file, so
@@ -389,7 +402,7 @@ let abortController: AbortController | null = null;
 let unsubscribeSync: (() => void) | null = null;
 let unsubscribeBodyReady: (() => void) | null = null;
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
-let processingLock = new Set<string>();
+const processingLock = new Set<string>();
 /**
  * serviceConfig carries runtime context that travels with the pipeline:
  * - userEmail: the account address we're drafting as
@@ -1406,9 +1419,9 @@ async function autoDraftReply(emailId: string): Promise<void> {
     // Tier 2: shared identity resolver (registry-first, legacy accounts table
     // fallback) — the same source every other pipeline path uses.
     const identity = resolveAccountIdentity(storage);
-    let userEmail = identity.email;
+    const userEmail = identity.email;
     let userName = identity.name;
-    let userAliases: string[] = identity.aliases;
+    const userAliases: string[] = identity.aliases;
 
     // Tier 1: profile name pushed from Settings (highest priority)
     if (serviceConfig.userName && serviceConfig.userName.trim()) {

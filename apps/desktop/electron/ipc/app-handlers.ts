@@ -4,10 +4,11 @@
  * Handles app-level operations like version info and external links.
  */
 
-import { ipcMain, shell } from 'electron';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+
 import { createLogger } from '@sarvinbox/core';
+import { ipcMain, shell } from 'electron';
 const logger = createLogger('app-handlers');
 
 // Read version from package.json

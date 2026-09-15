@@ -4,13 +4,15 @@
  * Thin bridge from renderer to the main-process OAuth service.
  */
 
-import { ipcMain } from 'electron';
 import {
   getOAuthProvider,
   isOAuthProviderConfigured,
   listOAuthProviders,
   type OAuthProviderId,
 } from '@sarvinbox/core';
+import { ipcMain } from 'electron';
+
+import { rescheduleOAuthAccount, unscheduleOAuthAccount } from '../services/oauth-refresh-scheduler';
 import {
   cancelOAuthFlow,
   getValidAccessToken,
@@ -18,7 +20,6 @@ import {
   signOut,
   startOAuthFlow,
 } from '../services/oauth-service';
-import { rescheduleOAuthAccount, unscheduleOAuthAccount } from '../services/oauth-refresh-scheduler';
 import { listReauthRequired } from '../services/reauth-registry';
 
 export function registerOAuthHandlers(): void {

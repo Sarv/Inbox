@@ -10,8 +10,9 @@
  */
 
 import { ipcMain } from 'electron';
-import { requireStorage, getSyncEngine, getSmtpClient } from '../shared';
+
 import { drainOutbox, notifyOutboxChanged } from '../services/outbox-service';
+import { requireStorage, getSyncEngine, getSmtpClient } from '../shared';
 
 /** Fate of a single send after a manual retry, for a clear UI status message. */
 type RetryOutcome = 'sent' | 'queued' | 'failed';

@@ -4,14 +4,15 @@
  * Handles AI categorization, thread summaries, and AI search operations.
  */
 
-import { ipcMain } from 'electron';
-import { requireStorage, getAllAccountRuntimes } from '../shared';
-import { onCategoryDefinitionUpserted } from '../services/unified-pipeline-service';
-import { setAIProviderConfigured } from '../services/conversation-extraction-scheduler';
-import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
-import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
 import { createLogger } from '@sarvinbox/core';
 import { processingBreakdown } from '@sarvinbox/storage-node';
+import { ipcMain } from 'electron';
+
+import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
+import { setAIProviderConfigured } from '../services/conversation-extraction-scheduler';
+import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
+import { onCategoryDefinitionUpserted } from '../services/unified-pipeline-service';
+import { requireStorage, getAllAccountRuntimes } from '../shared';
 const logger = createLogger('ai-handlers');
 
 /**

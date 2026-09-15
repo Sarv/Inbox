@@ -21,8 +21,10 @@
  *   - Idle tick:   30 min once every folder's backfill is complete
  */
 
-import { getStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId, sendToWindow } from '../shared';
 import { buildStandardFolderAliasMap, createLogger, getEventBus, isTrashFolder, isSpamFolder, isAllMailSuperset, LARGE_MAILBOX_THRESHOLD } from '@sarvinbox/core';
+
+import { getStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId, sendToWindow } from '../shared';
+
 import { maybeBackfillBulk } from './bulk-backfill';
 import { isConnectionRecentlyUnstable } from './connection-health';
 import { recordThreadRepairPass, threadRepairWindowStart } from './thread-repair-watermark';

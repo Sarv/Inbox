@@ -14,14 +14,15 @@
  * plaintext; the ENC1/PLAIN1 tag records which, so load() decodes correctly.
  */
 
-import { app, safeStorage } from 'electron';
-import { existsSync, renameSync } from 'fs';
-import { promises as fs } from 'fs';
+import { existsSync, renameSync , promises as fs } from 'fs';
 import { join } from 'path';
+
 import type { OAuthAccount, OAuthProviderId } from '@sarvinbox/core';
-import { createWriteQueue } from './write-queue';
-import { getBlob, setBlob } from './core-db';
 import { createLogger } from '@sarvinbox/core';
+import { app, safeStorage } from 'electron';
+
+import { getBlob, setBlob } from './core-db';
+import { createWriteQueue } from './write-queue';
 const logger = createLogger('oauth-token-store');
 
 const LEGACY_FILE_NAME = 'oauth-accounts.json';

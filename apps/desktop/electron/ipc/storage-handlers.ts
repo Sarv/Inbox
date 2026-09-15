@@ -8,9 +8,9 @@
  * disk headroom, nothing to reclaim) and the user needs the reason, not a
  * generic failure.
  */
+import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import { createLogger } from '@sarvinbox/core';
 
 import { listRegistryAccounts } from '../services/accounts-registry';
 import {

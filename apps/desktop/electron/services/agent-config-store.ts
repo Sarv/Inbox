@@ -18,11 +18,11 @@
  * first read (write-to-DB FIRST) and removed later by the startup cleanup.
  */
 
-import { app } from 'electron';
 import { readFileSync, renameSync } from 'fs';
 import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
+import { app } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
 

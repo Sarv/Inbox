@@ -15,12 +15,11 @@
  * `sarvinbox-<id>.db`. This holds across restarts even when a secondary account
  * is active on launch, so no account can grab the primary's database.
  */
+import type { EmailRecord, ViewFilter } from '@sarvinbox/core';
+import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import type { EmailRecord, ViewFilter } from '@sarvinbox/core';
 
-import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accountInboxUnread, rekeyAccount, deleteAccountData, legacyDbExists, cleanupOrphanedAccountDbs } from '../services/accounts-runtime';
-import { disablePipelineAIIfProviderRemoved } from '../services/unified-pipeline-service';
 import {
   listRegistryAccounts,
   readRegistryAccounts,
@@ -33,9 +32,11 @@ import {
   deleteAppSetting,
   type RegistryAccount,
 } from '../services/accounts-registry';
+import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accountInboxUnread, rekeyAccount, deleteAccountData, legacyDbExists, cleanupOrphanedAccountDbs } from '../services/accounts-runtime';
 import { rebindOutboxStorage } from '../services/outbox-service';
+import { disablePipelineAIIfProviderRemoved } from '../services/unified-pipeline-service';
 import { setCurrentAccount, hasAccountRuntime, getCurrentAccountId } from '../shared';
-import { createLogger } from '@sarvinbox/core';
+
 const logger = createLogger('accounts-handlers');
 
 /** Resolve an account's INBOX folder (by canonical path, then name fallback). */

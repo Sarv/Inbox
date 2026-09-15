@@ -17,7 +17,13 @@ module.exports = {
   ],
   plugins: ['@typescript-eslint', 'import', 'react-hooks'],
   rules: {
-    '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    // `_name` marks a binding that exists only to be discarded. It already
+    // worked for parameters; `varsIgnorePattern` extends the same convention to
+    // the `const { a: _a, ...rest }` idiom used to omit keys from an object.
+    '@typescript-eslint/no-unused-vars': [
+      'error',
+      { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+    ],
     '@typescript-eslint/no-explicit-any': 'warn',
     // Some modules use intentional lazy `require()` to break import cycles
     // (e.g. storage-node ↔ email-repository tag helpers); keep it visible as a

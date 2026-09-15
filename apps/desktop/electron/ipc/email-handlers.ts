@@ -4,9 +4,14 @@
  * Handles email operations: listing, getting, searching, marking, moving, deleting.
  */
 
-import { ipcMain, dialog, shell } from 'electron';
 import * as fs from 'fs';
+
+import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { ipcMain, dialog, shell } from 'electron';
 import ICAL from 'ical.js';
+
+import { resolveAccountTarget } from '../services/account-target';
+import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
 import {
   deferBodyPrefetch,
   startManualBodyDownload,
@@ -14,10 +19,9 @@ import {
   getManualBodyDownloadState,
 } from '../services/body-prefetch-scheduler';
 import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine } from '../shared';
-import { resolveAccountTarget } from '../services/account-target';
-import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
+
 import { logUserAction } from './agent-handlers';
-import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+
 const logger = createLogger('email-handlers');
 
 

@@ -5,20 +5,22 @@
  * These handlers power the Email Agent's learning and autonomous capabilities.
  */
 
+import type { UserActionType, ActionSource } from '@sarvinbox/core';
+import { createLogger } from '@sarvinbox/core';
 import { cleanBodyExpression } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
+
+import { resolveAccountEmail } from '../services/accounts-registry';
+import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
+import { getIntelligence, getUnifiedPipeline, setPipelineUserProfile, getPipelineAIConfig } from '../services/unified-pipeline-service';
 import { requireStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId } from '../shared';
-import type { UserActionType, ActionSource } from '@sarvinbox/core';
 // Static imports (NOT require()): the app bundles into a single dist-electron/
 // main.js, so a runtime require('../services/...') has no file to resolve and
 // throws "Cannot find module" — which silently broke every agent config/enable
 // handler. esbuild bundles static imports correctly.
-import { getIntelligence, getUnifiedPipeline, setPipelineUserProfile, getPipelineAIConfig } from '../services/unified-pipeline-service';
 // Static import (not require()) so esbuild reliably bundles the CURRENT
 // agent-config-store — a dynamic require here was picking up a stale copy.
-import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
-import { resolveAccountEmail } from '../services/accounts-registry';
-import { createLogger } from '@sarvinbox/core';
+
 const logger = createLogger('agent-handlers');
 
 /**
