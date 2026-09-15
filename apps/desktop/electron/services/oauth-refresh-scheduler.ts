@@ -33,13 +33,13 @@
  * `REFRESH_AT_FRACTION` buffer absorbs modest delays and the lazy gate covers a
  * late fire; true immunity would need a worker thread (overkill here).
  */
-import { Notification, powerMonitor } from 'electron';
 
 import { createLogger, isOAuthServerUnreachableError } from '@sarvinbox/core';
 import type { OAuthProviderId } from '@sarvinbox/core';
+import { Notification, powerMonitor } from 'electron';
 
 import { getMainWindow } from '../shared';
-import { listAccounts, getAccount } from './oauth-token-store';
+
 import {
   getValidAccessToken,
   msUntilRefresh,
@@ -47,6 +47,7 @@ import {
   isAccountGoneError,
   isRefreshDeferredError,
 } from './oauth-service';
+import { listAccounts, getAccount } from './oauth-token-store';
 import {
   markReauthRequired,
   clearReauthRequired,

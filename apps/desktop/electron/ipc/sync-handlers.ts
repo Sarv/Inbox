@@ -4,9 +4,9 @@
  * Handles IMAP connection, sync operations, and real-time updates.
  */
 
-import { ipcMain } from 'electron';
 import type { IMAPConfig, SyncEngineOptions } from '@sarvinbox/core';
 import { withTimeout, resolveTlsOptions, accountIdFor, ImapFlowClient, isAuthError, isQuotaError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift } from '@sarvinbox/core';
+import { ipcMain } from 'electron';
 
 // Per-account connection back-off after a "too many simultaneous connections"
 // quota error (or a connect timeout, usually the same saturated condition). ONE
@@ -14,25 +14,25 @@ import { withTimeout, resolveTlsOptions, accountIdFor, ImapFlowClient, isAuthErr
 // `imap:resetAndReconnect`, and background sync — parks the same account for the
 // same window; otherwise the active path kept re-hammering a cap the background
 // path was already waiting out (the reconnect storm). See quota-backoff.ts.
-import { createQuotaBackoff } from '../services/quota-backoff';
 const quotaBackoff = createQuotaBackoff();
-import { getStorage, getSyncEngine, getMainWindow, requireSyncEngine, requireStorage, sendToWindow, getCurrentAccountId, getStorageFor, getSyncEngineFor, getIsQuitting, getSystemSuspended, setCurrentAccount } from '../shared';
+import { identifyClient } from '../sentry';
 import { ensureAccountRuntime, accountInboxUnread, accountDbExists } from '../services/accounts-runtime';
-import { getValidAccessToken, attachImapBearer } from '../services/oauth-service';
 // Static import (not require()): the bundled main.js has no on-disk services
 // file, so a runtime require() throws "Cannot find module".
-import { kickBodyPrefetchScheduler } from '../services/body-prefetch-scheduler';
 import { kickBackfillScheduler } from '../services/backfill-scheduler';
+import { kickBodyPrefetchScheduler } from '../services/body-prefetch-scheduler';
 import { markConnectionUnstable } from '../services/connection-health';
 import { saveImapAccount, loadImapAccount, clearImapAccount } from '../services/imap-account-store';
+import { getValidAccessToken, attachImapBearer } from '../services/oauth-service';
+import { createQuotaBackoff } from '../services/quota-backoff';
 import { getAccountSecrets } from '../services/secure-credential-store';
-import { identifyClient } from '../sentry';
 import {
   getPipelineUserEmail,
   setPipelineUserProfile,
   provisionCategoryLabelsOnConnect,
   retryPipelineInitOnConnect,
 } from '../services/unified-pipeline-service';
+import { getStorage, getSyncEngine, getMainWindow, requireSyncEngine, requireStorage, sendToWindow, getCurrentAccountId, getStorageFor, getSyncEngineFor, getIsQuitting, getSystemSuspended, setCurrentAccount } from '../shared';
 const logger = createLogger('sync-handlers');
 
 // IDLE event logging is aggregated, never per-event. The server emits one

@@ -4,19 +4,23 @@
  * Handles SMTP connection and email sending operations.
  */
 
-import { ipcMain, dialog } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
+
 import { SMTPClient, emailContentHash, findFolderByType, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
-import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
+import { ipcMain, dialog } from 'electron';
+
+import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { getValidAccessToken } from '../services/oauth-service';
+import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
+import { getPipelineUserName } from '../services/unified-pipeline-service';
+import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
+
 // Static import (not require()): the bundled main.js has no on-disk services
 // file, so a runtime require() throws "Cannot find module".
-import { getPipelineUserName } from '../services/unified-pipeline-service';
 import { deleteDraftsForThread } from './draft-handlers';
-import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
-import { ensureAccountRuntime } from '../services/accounts-runtime';
+
 const logger = createLogger('smtp-handlers');
 
 const MIME_TYPES: Record<string, string> = {

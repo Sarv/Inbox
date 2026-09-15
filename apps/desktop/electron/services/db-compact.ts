@@ -26,8 +26,6 @@ import { statfs } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
-import { app } from 'electron';
-
 import {
   compactionEstimate,
   formatBytes,
@@ -36,6 +34,11 @@ import {
   createLogger,
   type CompactionEstimate,
 } from '@sarvinbox/core';
+import { app } from 'electron';
+
+
+import { getAccountRuntime } from '../shared';
+import type { CompactWorkerResult } from '../workers/db-compact.worker';
 
 import {
   PRIMARY_DB_FILE,
@@ -47,9 +50,7 @@ import {
 } from './accounts-runtime';
 import { getDbEncryptionKey } from './db-key-store';
 
-import { getAccountRuntime } from '../shared';
 
-import type { CompactWorkerResult } from '../workers/db-compact.worker';
 
 const logger = createLogger('db-compact');
 

@@ -4,9 +4,10 @@
  * Handles: signatures, importance processing, sender stats, snooze, spammers.
  */
 
-import { ipcMain } from 'electron';
 import { calculateImportanceScore, type SenderContext, createLogger } from '@sarvinbox/core';
 import type { SenderStats } from '@sarvinbox/storage-node';
+import { ipcMain } from 'electron';
+
 import { requireStorage, getMainWindow } from '../shared';
 const logger = createLogger('misc-handlers');
 

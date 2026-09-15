@@ -5,18 +5,80 @@
  * Handles app lifecycle, window management, and initialization.
  */
 
-import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
-import { join } from 'path';
+
+// Every import in this file is evaluated before ANY statement below it —
+// that is how ES modules work, regardless of where the import is written. The
+// import block used to be split in two around the startup statements, which
+// read as if the statements ran between them; they never did. Kept in one
+// block so `import/order` can sort it and the real startup order is the one
+// visible below.
 import { existsSync, readFileSync } from 'fs';
-import { SQLiteStorage } from '@sarvinbox/storage-node';
+import { join } from 'path';
+
 import { SyncEngine, ExtensionManager, createLogger, getLogLevel, setLogLevel, isConnectionError } from '@sarvinbox/core';
+import { SQLiteStorage } from '@sarvinbox/storage-node';
+import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
+
+import { registerAllHandlers } from './ipc';
+import { sendEmailFromMain, appendSentCopy } from './ipc/smtp-handlers';
+import { initSentryMain, captureFatal } from './sentry';
+import {
+  seedAccountRegistryFromDurableStores,
+  getRegistryActiveAccountId,
+  readRegistryAccounts,
+  cleanupMigratedLegacyFiles,
+  resolveAccountEmail,
+} from './services/accounts-registry';
+import {
+  PRIMARY_DB_FILE,
+  ensureAccountRuntime,
+  loadPrimaryAccountId,
+  savePrimaryAccountId,
+  legacyDbExists,
+  accountDbExists,
+  cleanupOrphanedAccountDbs,
+  cleanupStaleUserDataArtifacts,
+} from './services/accounts-runtime';
+import { loadAgentConfig } from './services/agent-config-store';
+import { getAllAiSecrets } from './services/ai-secret-store';
 import {
   ATTACHMENT_SCHEME_PRIVILEGES,
   registerAttachmentProtocol,
 } from './services/attachment-protocol';
+import { startAvatarDiscoveryScheduler, stopAvatarDiscoveryScheduler } from './services/avatar-discovery-scheduler';
+import { startBackfillScheduler, stopBackfillScheduler } from './services/backfill-scheduler';
+import { startBodyPrefetchScheduler, stopBodyPrefetchScheduler } from './services/body-prefetch-scheduler';
+import { startBodyRehealScheduler, stopBodyRehealScheduler } from './services/body-reheal-scheduler';
+import { startContactEnrichmentScheduler, stopContactEnrichmentScheduler } from './services/contact-enrichment-scheduler';
+import { startConversationScheduler, stopConversationScheduler } from './services/conversation-extraction-scheduler';
+import { backupCoreDb } from './services/core-db';
+import { getDbEncryptionKey } from './services/db-key-store';
+import { describeDevSessionReset, resetDevSessionCaches } from './services/dev-session-reset';
 import { installEmailImageRequestHandlers } from './services/email-image-requests';
-
-// Shared state management
+import { describeStall, startEventLoopMonitor } from './services/event-loop-monitor';
+import { createExtensionAIBackend } from './services/extension-ai-backend';
+import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
+import { startNotificationService, stopNotificationService } from './services/notification-service';
+import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
+import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
+import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
+import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
+import { startPipelineEventPersister, stopPipelineEventPersister } from './services/pipeline-event-persister';
+import { migrateSecureCredsFromFile } from './services/secure-credential-store';
+import {
+  defaultDevReclaimDeps,
+  defaultHeartbeatDeps,
+  defaultKillDeps,
+  evaluateLockContention,
+  reclaimPids,
+  reclaimSingleDevInstance,
+  startHeartbeat,
+  tagMainProcess,
+} from './services/single-child';
+import { decideSecondInstanceAction, isOrphanedFromLauncher, mainProcessTitle, shouldKillLauncherOnQuit } from './services/single-instance';
+import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
+import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
+import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
 import {
   setMainWindow,
   getMainWindow,
@@ -37,40 +99,8 @@ import {
   setCurrentAccount,
   hasAccountRuntime,
 } from './shared';
-
-// Services
-import { createExtensionAIBackend } from './services/extension-ai-backend';
-import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
-import { startConversationScheduler, stopConversationScheduler } from './services/conversation-extraction-scheduler';
-import { startContactEnrichmentScheduler, stopContactEnrichmentScheduler } from './services/contact-enrichment-scheduler';
-import { startBodyPrefetchScheduler, stopBodyPrefetchScheduler } from './services/body-prefetch-scheduler';
-import { decideSecondInstanceAction, isOrphanedFromLauncher, mainProcessTitle, shouldKillLauncherOnQuit } from './services/single-instance';
-import { describeDevSessionReset, resetDevSessionCaches } from './services/dev-session-reset';
-import { describeStall, startEventLoopMonitor } from './services/event-loop-monitor';
-import {
-  defaultDevReclaimDeps,
-  defaultHeartbeatDeps,
-  defaultKillDeps,
-  evaluateLockContention,
-  reclaimPids,
-  reclaimSingleDevInstance,
-  startHeartbeat,
-  tagMainProcess,
-} from './services/single-child';
-import { startBackfillScheduler, stopBackfillScheduler } from './services/backfill-scheduler';
-import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
-import { startAvatarDiscoveryScheduler, stopAvatarDiscoveryScheduler } from './services/avatar-discovery-scheduler';
-import { startBodyRehealScheduler, stopBodyRehealScheduler } from './services/body-reheal-scheduler';
-import { startPipelineEventPersister, stopPipelineEventPersister } from './services/pipeline-event-persister';
-import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
-import { startNotificationService, stopNotificationService } from './services/notification-service';
-import { loadAgentConfig } from './services/agent-config-store';
-import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
-import { getAllAiSecrets } from './services/ai-secret-store';
-import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
-import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
+import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
-import { initSentryMain, captureFatal } from './sentry';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -146,35 +176,6 @@ initSentryMain();
 // visible result was that `<img>`/`<video>`/the PDF viewer worked while the text
 // pane's `fetch()` failed with "Failed to fetch" before the handler ever ran.
 protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES]);
-
-// IPC handlers
-import { registerAllHandlers } from './ipc';
-import { sendEmailFromMain, appendSentCopy } from './ipc/smtp-handlers';
-import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
-
-// Utils
-import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
-import { getDbEncryptionKey } from './services/db-key-store';
-import {
-  PRIMARY_DB_FILE,
-  ensureAccountRuntime,
-  loadPrimaryAccountId,
-  savePrimaryAccountId,
-  legacyDbExists,
-  accountDbExists,
-  cleanupOrphanedAccountDbs,
-  cleanupStaleUserDataArtifacts,
-} from './services/accounts-runtime';
-import {
-  seedAccountRegistryFromDurableStores,
-  getRegistryActiveAccountId,
-  readRegistryAccounts,
-  cleanupMigratedLegacyFiles,
-  resolveAccountEmail,
-} from './services/accounts-registry';
-import { migrateSecureCredsFromFile } from './services/secure-credential-store';
-import { backupCoreDb } from './services/core-db';
-import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 const logger = createLogger('main');
 
 // Read version from package.json

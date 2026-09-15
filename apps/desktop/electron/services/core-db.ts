@@ -25,10 +25,10 @@
 import { existsSync, copyFileSync } from 'fs';
 import { join } from 'path';
 
-import { app } from 'electron';
-import Database from 'better-sqlite3';
-
 import { createLogger } from '@sarvinbox/core';
+import Database from 'better-sqlite3';
+import { app } from 'electron';
+
 
 import { getDbEncryptionKey } from './db-key-store';
 

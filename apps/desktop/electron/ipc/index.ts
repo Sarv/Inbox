@@ -6,27 +6,27 @@
 
 import { installNodeSignatureSplitter, createLogger } from '@sarvinbox/core';
 
-import { registerAppHandlers } from './app-handlers';
-import { registerSyncHandlers } from './sync-handlers';
-import { registerFolderHandlers } from './folder-handlers';
-import { registerEmailHandlers } from './email-handlers';
-import { registerSmtpHandlers } from './smtp-handlers';
-import { registerContactsHandlers } from './contacts-handlers';
-import { registerAIHandlers } from './ai-handlers';
-import { registerExtensionHandlers } from './extension-handlers';
-import { registerMiscHandlers } from './misc-handlers';
-import { registerAICategorizationHandlers } from './ai-categorization-handlers';
-import { registerDraftHandlers } from './draft-handlers';
-import { registerAgentHandlers } from './agent-handlers';
-import { registerOAuthHandlers } from './oauth-handlers';
-import { registerContactEnrichmentHandlers } from './contact-enrichment-handlers';
-import { registerQueueHandlers } from './queue-handlers';
-import { registerFilterHandlers } from './filter-handlers';
-import { registerLabelHandlers } from './label-handlers';
 import { registerAccountsHandlers } from './accounts-handlers';
-import { registerSecureCredentialsHandlers } from './secure-credentials-handlers';
+import { registerAgentHandlers } from './agent-handlers';
+import { registerAICategorizationHandlers } from './ai-categorization-handlers';
+import { registerAIHandlers } from './ai-handlers';
+import { registerAppHandlers } from './app-handlers';
+import { registerContactEnrichmentHandlers } from './contact-enrichment-handlers';
+import { registerContactsHandlers } from './contacts-handlers';
+import { registerDraftHandlers } from './draft-handlers';
+import { registerEmailHandlers } from './email-handlers';
+import { registerExtensionHandlers } from './extension-handlers';
+import { registerFilterHandlers } from './filter-handlers';
+import { registerFolderHandlers } from './folder-handlers';
+import { registerLabelHandlers } from './label-handlers';
+import { registerMiscHandlers } from './misc-handlers';
 import { registerNotificationHandlers } from './notification-handlers';
+import { registerOAuthHandlers } from './oauth-handlers';
+import { registerQueueHandlers } from './queue-handlers';
+import { registerSecureCredentialsHandlers } from './secure-credentials-handlers';
+import { registerSmtpHandlers } from './smtp-handlers';
 import { registerStorageHandlers } from './storage-handlers';
+import { registerSyncHandlers } from './sync-handlers';
 
 /**
  * Register all IPC handlers

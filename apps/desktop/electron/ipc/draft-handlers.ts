@@ -4,13 +4,14 @@
  * Handles saving, deleting, and managing drafts on the IMAP server.
  */
 
+import { emailContentHash, findFolderByType, createLogger, withFolderSelected } from '@sarvinbox/core';
+import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import pLimit from 'p-limit';
-import { emailContentHash, findFolderByType, createLogger, withFolderSelected } from '@sarvinbox/core';
-import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
-import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
+
 import { resolveAccountTarget } from '../services/account-target';
+import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
 const logger = createLogger('draft-handlers');
 
 // Draft diagnostic log (from the "immortal draft" investigation). Kept as a

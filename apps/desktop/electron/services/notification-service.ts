@@ -18,8 +18,8 @@
  * Send-failures / reauth / sync-state stay on the in-app banner channel — this
  * service is ONLY for new inbound mail.
  */
-import { Notification } from 'electron';
 import { createLogger, getEventBus } from '@sarvinbox/core';
+import { Notification } from 'electron';
 
 import { getMainWindow } from '../shared';
 

@@ -5,9 +5,10 @@
  * like storage, sync engine, extension manager, and the main window.
  */
 
-import type { BrowserWindow } from 'electron';
-import type { SQLiteStorage } from '@sarvinbox/storage-node';
 import type { SyncEngine, SMTPClient, ExtensionManager } from '@sarvinbox/core';
+import type { SQLiteStorage } from '@sarvinbox/storage-node';
+import type { BrowserWindow } from 'electron';
+
 import type { AICategorizationService } from './services/ai-categorization-service';
 
 // Process-global singletons (not per-account).

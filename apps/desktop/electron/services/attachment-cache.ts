@@ -1,4 +1,3 @@
-import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -9,6 +8,7 @@ import {
   safeFilename,
   type AttachmentRef,
 } from '@sarvinbox/core';
+import { app } from 'electron';
 
 import { resolveAccountTarget } from './account-target';
 
@@ -201,7 +201,25 @@ export async function getOrCacheAttachment(
   folderPath: string,
   uid: number,
   filename: string,
-  syncEngine: { isConnected(): boolean; fetchAttachmentPart: Function; fetchAttachment: Function } | null,
+  // Structurally typed rather than `SyncEngine` so the tests can pass a fake.
+  // These mirror SyncEngine.fetchAttachmentPart / .fetchAttachment; they were
+  // `Function`, which accepts any callable and silently allowed a fake with the
+  // wrong arity through.
+  syncEngine: {
+    isConnected(): boolean;
+    fetchAttachmentPart(
+      emailId: string,
+      folderPath: string,
+      uid: number,
+      filename: string
+    ): Promise<{ filename: string; content: Buffer } | null>;
+    fetchAttachment(
+      emailId: string,
+      folderPath: string,
+      uid: number,
+      filename: string
+    ): Promise<{ filename: string; contentType: string; content: Buffer }>;
+  } | null,
 ): Promise<string> {
   // IPC input validation: a compromised/misbehaving renderer could pass non-string
   // args, which would throw deep inside path/basename. Fail fast and clearly.

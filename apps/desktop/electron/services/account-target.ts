@@ -1,4 +1,5 @@
 import { getSyncEngine, requireStorage, getStorageFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
+
 import { ensureAccountRuntime } from './accounts-runtime';
 
 /**

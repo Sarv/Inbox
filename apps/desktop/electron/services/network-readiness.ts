@@ -15,9 +15,9 @@
  * value is for logging what we saw.
  */
 
+import { createLogger } from '@sarvinbox/core';
 import { net } from 'electron';
 
-import { createLogger } from '@sarvinbox/core';
 
 const logger = createLogger('network-readiness');
 

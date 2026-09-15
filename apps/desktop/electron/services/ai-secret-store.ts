@@ -17,11 +17,11 @@
  * Envelope: `ENC1:<safeStorage ciphertext of {"<providerId>":"<apiKey>",…}>`, or
  * a clearly-marked `PLAIN1:` fallback when no OS keychain exists.
  */
-import { app, safeStorage } from 'electron';
 import { promises as fs, renameSync } from 'fs';
 import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
+import { app, safeStorage } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
 import { createWriteQueue } from './write-queue';

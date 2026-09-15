@@ -4,6 +4,7 @@
  * writing IMAP/SMTP passwords to plaintext localStorage, and to rehydrate them
  * in-memory just before connecting.
  */
+import { createLogger } from '@sarvinbox/core';
 import { ipcMain, systemPreferences } from 'electron';
 
 import {
@@ -14,7 +15,6 @@ import {
   isSecureStorageAvailable,
   type AccountSecrets,
 } from '../services/secure-credential-store';
-import { createLogger } from '@sarvinbox/core';
 const logger = createLogger('secure-credentials-handlers');
 
 export function registerSecureCredentialsHandlers(): void {

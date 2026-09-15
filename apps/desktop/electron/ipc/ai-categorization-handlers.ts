@@ -5,11 +5,12 @@
  * running in the main process.
  */
 
+import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
+
 import { AICategorizationService } from '../services/ai-categorization-service';
 import { attachOAuthBearer } from '../services/oauth-service';
 import { getAICategorizationService, setAICategorizationService } from '../shared';
-import { createLogger } from '@sarvinbox/core';
 const logger = createLogger('ai-categorization-handlers');
 
 export function registerAICategorizationHandlers(): void {

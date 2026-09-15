@@ -5,8 +5,9 @@
  * through IPC to the renderer process which has the AI service.
  */
 
-import { ipcMain } from 'electron';
 import type { ExtensionAIBackend } from '@sarvinbox/core';
+import { ipcMain } from 'electron';
+
 import { getMainWindow } from '../shared';
 
 /**

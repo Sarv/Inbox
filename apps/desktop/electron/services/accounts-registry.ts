@@ -15,15 +15,16 @@
 import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
+import { accountIdFor, oauthImapPreset, createLogger } from '@sarvinbox/core';
 import { app } from 'electron';
 
-import { accountIdFor, oauthImapPreset, createLogger } from '@sarvinbox/core';
 
-import { getCoreDb, getMeta, setMeta, coreDbExists, hasBlob } from './core-db';
-import { loadAccounts as loadOAuthAccounts } from './oauth-token-store';
-import { loadImapAccount } from './imap-account-store';
-import { loadPrimaryAccountId } from './accounts-runtime';
 import { getAccountIdForStorage } from '../shared';
+
+import { loadPrimaryAccountId } from './accounts-runtime';
+import { getCoreDb, getMeta, setMeta, coreDbExists, hasBlob } from './core-db';
+import { loadImapAccount } from './imap-account-store';
+import { loadAccounts as loadOAuthAccounts } from './oauth-token-store';
 
 // Re-exported so existing importers (accounts-handlers, main) keep one import
 // site. These now live in core-db (shared across all core-DB-backed stores).

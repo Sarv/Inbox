@@ -16,8 +16,9 @@
 import { createLogger } from '@sarvinbox/core';
 
 import { getStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId } from '../shared';
-import { getMeta, setMeta } from './core-db';
+
 import { resolveAccountEmail } from './accounts-registry';
+import { getMeta, setMeta } from './core-db';
 import {
   THREADING_REPAIR_VERSION,
   recordThreadRepairPass,

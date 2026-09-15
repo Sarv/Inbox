@@ -13,10 +13,10 @@
  * The key arrives in `workerData` and is never logged, never returned, and never
  * put in an error message.
  */
-import Database from 'better-sqlite3';
 import { parentPort, workerData } from 'node:worker_threads';
 
 import type { DatabasePageStats } from '@sarvinbox/core';
+import Database from 'better-sqlite3';
 
 export interface CompactWorkerInput {
   dbPath: string;

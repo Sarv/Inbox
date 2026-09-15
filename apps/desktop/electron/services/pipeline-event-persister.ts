@@ -7,6 +7,7 @@
 
 import { getEventBus, createLogger } from '@sarvinbox/core';
 import type { PipelineEvent } from '@sarvinbox/core';
+
 import { getStorage } from '../shared';
 const logger = createLogger('pipeline-event-persister');
 
@@ -52,8 +53,11 @@ function extractThreadId(event: PipelineEvent): string | null {
 
 function serializeEventData(event: PipelineEvent): string | null {
   try {
-    // Strip non-serializable fields (Error objects, large content)
-    const { type, timestamp, ...rest } = event as any;
+    // Strip non-serializable fields (Error objects, large content). `type` and
+    // `timestamp` are destructured only to drop them from `rest` — they are
+    // stored in their own columns — hence the underscore names, which is how
+    // no-unused-vars is told a binding exists to be discarded.
+    const { type: _type, timestamp: _timestamp, ...rest } = event as any;
     const sanitized: Record<string, any> = {};
 
     for (const [key, value] of Object.entries(rest)) {
