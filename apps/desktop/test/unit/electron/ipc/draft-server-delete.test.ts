@@ -45,9 +45,9 @@ vi.mock('../../../../electron/services/outbox-service', () => ({
   notifyOutboxChanged: vi.fn(),
 }));
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
-vi.mock('../../../../electron/ipc/email-handlers', () => ({ resolveAccountTarget: vi.fn() }));
+vi.mock('../../../../electron/services/account-target', () => ({ resolveAccountTarget: vi.fn() }));
 
-import { resolveAccountTarget } from '../../../../electron/ipc/email-handlers';
+import { resolveAccountTarget } from '../../../../electron/services/account-target';
 import { registerDraftHandlers, serverDeletableUids } from '../../../../electron/ipc/draft-handlers';
 
 describe('serverDeletableUids', () => {

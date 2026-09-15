@@ -5,7 +5,6 @@ import {
   Reply,
   ReplyAll,
   Forward,
-  Download,
   Paperclip,
   MoreHorizontal,
   FileSignature,
@@ -17,6 +16,7 @@ import { useMemo, useState } from 'react';
 import { isSignatureDetectionEnabled, buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
 import { qualifiesForSafeAutoLoad } from '../../store/helpers';
+import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { SandboxedEmailBody } from '../SandboxedEmailBody';
@@ -24,8 +24,9 @@ import { SandboxedEmailBody } from '../SandboxedEmailBody';
 import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
+import { PhishingWarningBanner } from './PhishingWarningBanner';
 import type { EmailDetailContext } from './types';
-import { getInitials, getAvatarColor, getFileIcon, getFileType, isPreviewableAttachment, formatRelativeDate, stripQuotedContent, stripSignatureFromHtml, parseAttachments } from './utils';
+import { getInitials, getAvatarColor, formatRelativeDate, stripQuotedContent, stripSignatureFromHtml, parseAttachments } from './utils';
 
 
 interface ThreadListProps {
@@ -72,8 +73,6 @@ export function ThreadList({ ctx }: ThreadListProps) {
     setInlineReplyMode,
   } = ctx;
 
-  const [downloadingAttachments, setDownloadingAttachments] = useState<Set<string>>(new Set());
-
   // Thread transcript for the reply polish feature — same wiring as
   // ThreadChatView/EmailDetail so list-view replies get context too.
   const currentUserEmail = useMemo(
@@ -84,58 +83,6 @@ export function ThreadList({ ctx }: ThreadListProps) {
     () => buildPolishThreadContext({ conversationMessages, threadEmails, currentUserEmail }),
     [conversationMessages, threadEmails, currentUserEmail]
   );
-
-  const handleSaveAttachment = async (emailId: string, filename: string) => {
-    const key = `${emailId}:${filename}`;
-    setDownloadingAttachments(prev => new Set(prev).add(key));
-    try {
-      const result = await window.electronAPI.emails.downloadAttachment(emailId, filename);
-      if (!result.success && result.error !== 'Save cancelled') {
-        console.error('[Attachment] Download failed:', result.error);
-      }
-    } catch (error) {
-      console.error('[Attachment] Download error:', error);
-    } finally {
-      setDownloadingAttachments(prev => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-    }
-  };
-
-  const handlePreviewAttachment = async (emailId: string, filename: string) => {
-    const key = `${emailId}:${filename}`;
-    setDownloadingAttachments(prev => new Set(prev).add(key));
-    try {
-      const result = await window.electronAPI.emails.previewAttachment(emailId, filename);
-      if (!result.success) {
-        console.error('[Attachment] Preview failed:', result.error);
-      }
-    } catch (error) {
-      console.error('[Attachment] Preview error:', error);
-    } finally {
-      setDownloadingAttachments(prev => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-    }
-  };
-
-  const handleAttachmentClick = (emailId: string, filename: string) => {
-    if (isPreviewableAttachment(filename)) {
-      handlePreviewAttachment(emailId, filename);
-    } else {
-      handleSaveAttachment(emailId, filename);
-    }
-  };
-
-  const handleDownloadAllAttachments = async (emailId: string, attachmentList: { name: string }[]) => {
-    for (const att of attachmentList) {
-      await handleSaveAttachment(emailId, att.name);
-    }
-  };
 
   // Per-reply "Show details" toggle (full From/To/Cc/Date/Subject header).
   const [detailsOpen, setDetailsOpen] = useState<Set<string>>(new Set());
@@ -300,6 +247,17 @@ export function ThreadList({ ctx }: ThreadListProps) {
 
                 return (
                   <div className="border-t border-border p-4 bg-background/50">
+                    {/* Every reply gets its own check. The assessment is per
+                        message and sender-based, so it does not depend on the
+                        body — but it used to be rendered ONLY on the anchor
+                        card (the thread's OLDEST mail), which means a newly
+                        arrived spoof, the exact case worth warning about,
+                        showed nothing at all. */}
+                    <PhishingWarningBanner
+                      fromName={email.fromName}
+                      fromAddress={email.fromAddress}
+                      html={email.rawBody}
+                    />
                     <div className="max-w-none">
                       {isHtml ? (
                         <SandboxedEmailBody key={`${(displayContent || '').length}:${(displayContent || '').slice(0, 32)}`} html={displayContent || '(no content)'} safeAutoLoad={qualifiesForSafeAutoLoad(email.tags)} senderAddress={email.fromAddress} />
@@ -333,60 +291,13 @@ export function ThreadList({ ctx }: ThreadListProps) {
                     {/* Attachments */}
                     {email.hasAttachments && threadAttachments.length > 0 && (
                       <div className="mt-4 pt-3 border-t border-border">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <Paperclip className="h-3.5 w-3.5" />
-                            <span>{threadAttachments.length} attachment{threadAttachments.length > 1 ? 's' : ''}</span>
-                          </div>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleDownloadAllAttachments(email.id, threadAttachments); }}
-                            className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-colors"
-                            title="Download all"
-                          >
-                            <Download className="h-3 w-3" />
-                            <span>Download all</span>
-                          </button>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {threadAttachments.map((att: { name: string }, i: number) => {
-                            const dlKey = `${email.id}:${att.name}`;
-                            const isDownloading = downloadingAttachments.has(dlKey);
-                            const previewable = isPreviewableAttachment(att.name);
-                            return (
-                              <div
-                                key={i}
-                                onClick={(e) => { e.stopPropagation(); if (!isDownloading) handleAttachmentClick(email.id, att.name); }}
-                                className="relative flex flex-col items-center p-2 border border-border rounded-lg bg-background hover:bg-accent/50 hover:border-primary/30 transition-all cursor-pointer group min-w-[100px] max-w-[130px]"
-                              >
-                                {/* Save-as icon for previewable files */}
-                                {previewable && !isDownloading && (
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); handleSaveAttachment(email.id, att.name); }}
-                                    className="absolute top-1 right-1 p-0.5 rounded bg-background/80 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-accent"
-                                    title="Save as..."
-                                  >
-                                    <Download className="h-3 w-3 text-muted-foreground" />
-                                  </button>
-                                )}
-                                <div className="mb-1.5 p-1.5 rounded-lg bg-muted/50 group-hover:bg-background transition-colors">
-                                  {isDownloading ? (
-                                    <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                                  ) : (
-                                    getFileIcon(att.name)
-                                  )}
-                                </div>
-                                <div className="w-full text-center">
-                                  <div className="text-[11px] font-medium truncate" title={att.name}>
-                                    {att.name}
-                                  </div>
-                                  <div className="text-[10px] text-muted-foreground">
-                                    {isDownloading ? 'Opening...' : previewable ? 'Click to preview' : getFileType(att.name)}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
+                        <AttachmentChips
+                          emailId={email.id}
+                          accountId={(email as any).accountId}
+                          attachments={threadAttachments}
+                          size="sm"
+                          stopPropagation
+                        />
                       </div>
                     )}
                     {/* Reply/Forward buttons - hide if inline reply is active for this email */}

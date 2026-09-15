@@ -8,6 +8,8 @@ import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
 import { hasTag } from '../../utils/tags';
+import { AttachmentViewer, type ViewerAttachment } from '../attachment-viewer/AttachmentViewer';
+import { useAttachmentActions } from '../attachment-viewer/useAttachmentActions';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
@@ -16,6 +18,7 @@ import { chatMessagesFromConversation, chatMessagesFromThread } from './chat-mes
 import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
 import { EmailMenu } from './EmailMenu';
 import type { EmailDetailContext } from './types';
+import { parseAttachments } from './utils';
 
 // getCurrentUserEmail used to live here; it moved to ai-service so
 // EmailDetail can share it (priority: IMAP username > profile email > fallback).
@@ -172,23 +175,34 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [emailsById],
   );
 
+  // The chat surface has no chip strip of its own, so it opens the SAME viewer
+  // the classic card opens, keyed by the message's source email.
+  const [viewerTarget, setViewerTarget] = useState<{
+    emailId: string;
+    accountId?: string;
+    attachments: ViewerAttachment[];
+    index: number;
+  } | null>(null);
+
+  const { saveCopy } = useAttachmentActions();
+
   const runAttachmentAction = useCallback(
-    async (attachment: Attachment, message: ChatMessage, action: 'preview' | 'download') => {
+    (attachment: Attachment, message: ChatMessage, action: 'preview' | 'download') => {
       const email = emailFor(message);
       if (!email) return;
-      try {
-        if (action === 'preview') {
-          await window.electronAPI.emails.previewAttachment(email.id, attachment.filename);
-        } else {
-          await window.electronAPI.emails.downloadAttachment(email.id, attachment.filename);
-        }
-      } catch (err) {
-        // Renderer logs go through console.* on purpose — see
-        // bootstrap/renderer-logging.ts, which forwards them into app.log.
-        console.error(`[ThreadChatView] attachment ${action} failed:`, err);
+      const accountId = (email as { accountId?: string }).accountId;
+      if (action === 'download') {
+        void saveCopy({ emailId: email.id, filename: attachment.filename, accountId });
+        return;
       }
+      // Open every attachment on the message, positioned at the one clicked, so
+      // the viewer's next/previous arrows work here exactly as they do elsewhere.
+      const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes);
+      const names = attachments.length > 0 ? attachments : [{ name: attachment.filename, size: null }];
+      const index = Math.max(names.findIndex((a) => a.name === attachment.filename), 0);
+      setViewerTarget({ emailId: email.id, accountId, attachments: names, index });
     },
-    [emailFor],
+    [emailFor, saveCopy],
   );
 
   const openLink = useCallback((url: string) => {
@@ -399,6 +413,16 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
             embedded
           />
         </div>
+      )}
+
+      {viewerTarget && (
+        <AttachmentViewer
+          emailId={viewerTarget.emailId}
+          accountId={viewerTarget.accountId}
+          attachments={viewerTarget.attachments}
+          initialIndex={viewerTarget.index}
+          onClose={() => setViewerTarget(null)}
+        />
       )}
     </div>
   );

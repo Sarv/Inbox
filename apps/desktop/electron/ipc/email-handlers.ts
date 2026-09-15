@@ -4,9 +4,8 @@
  * Handles email operations: listing, getting, searching, marking, moving, deleting.
  */
 
-import { ipcMain, dialog, shell, app } from 'electron';
+import { ipcMain, dialog, shell } from 'electron';
 import * as fs from 'fs';
-import * as path from 'path';
 import ICAL from 'ical.js';
 import {
   deferBodyPrefetch,
@@ -14,12 +13,48 @@ import {
   stopManualBodyDownload,
   getManualBodyDownloadState,
 } from '../services/body-prefetch-scheduler';
-import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine, getStorageFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
-import { ensureAccountRuntime } from '../services/accounts-runtime';
+import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine } from '../shared';
+import { resolveAccountTarget } from '../services/account-target';
+import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
 import { logUserAction } from './agent-handlers';
-import { fetchBodyQueued, withFolderSelected, safeFilename, resolveWithinDir, sanitizeIcsText, createLogger, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
 const logger = createLogger('email-handlers');
 
+
+/**
+ * Emails whose body was re-fetched this session to repair a `cid:` image.
+ *
+ * A `cid:` reference that survives a parse is usually unresolvable — the sender
+ * referenced a part that isn't in the message — so without this the mail would
+ * re-download its full source on EVERY open, forever, and never look different.
+ * Session-scoped on purpose: a new launch runs new parsing code, which is the
+ * only thing that could change the outcome.
+ */
+const cidRepairAttempts = new Set<string>();
+
+/** Cap on the set above; a long session must not accumulate ids without bound. */
+export const CID_REPAIR_MEMORY = 500;
+
+/**
+ * Decide whether this stored body is worth re-fetching to resolve a `cid:`
+ * image, RECORDING the attempt so it is only ever made once per email.
+ *
+ * Mutates `attempted` — that bookkeeping is the point. Exported (with the set
+ * passed in) so the once-only rule can be tested without a module singleton.
+ */
+export function claimCidRepairAttempt(
+  rawBody: string | null | undefined,
+  emailId: string,
+  attempted: Set<string>,
+): boolean {
+  if (!hasCidRefs(rawBody)) return false;
+  if (attempted.has(emailId)) return false;
+  // Simplest bound that cannot leak: at the cap, forget everything. The cost of
+  // being wrong is one extra re-fetch of a mail opened 500 opens ago.
+  if (attempted.size >= CID_REPAIR_MEMORY) attempted.clear();
+  attempted.add(emailId);
+  return true;
+}
 
 // Sentinel stored in `emails.calendar_ics` meaning "inspected for a calendar
 // invite, found none" — so a non-invite email is checked once, never refetched.
@@ -93,164 +128,6 @@ const VIRTUAL_FOLDER_COUNTERS = {
 } as const;
 
 type VirtualFolderCountKey = keyof typeof VIRTUAL_FOLDER_COUNTERS;
-
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50 MB
-
-/**
- * Resolve the storage + sync engine for an operation, honoring a per-row
- * `accountId` when acting on a message from the unified "All Inboxes" view (whose
- * rows can belong to non-active accounts). Falls back to the active account when
- * no accountId is given (the normal single-account path). Ensures the target
- * account's runtime exists first, so we never silently hit the wrong DB — the
- * root cause of the mark-read "Email not found" loop across accounts.
- */
-export async function resolveAccountTarget(
-  accountId?: string,
-): Promise<{ storage: ReturnType<typeof requireStorage>; syncEngine: ReturnType<typeof getSyncEngine> }> {
-  if (accountId && accountId !== getCurrentAccountId()) {
-    let storage = getStorageFor(accountId);
-    let syncEngine = getSyncEngineFor(accountId);
-    if (!storage) {
-      const rt = await ensureAccountRuntime(accountId);
-      storage = rt?.storage ?? null;
-      syncEngine = rt?.syncEngine ?? null;
-    }
-    if (storage) return { storage, syncEngine };
-  }
-  return { storage: requireStorage(), syncEngine: getSyncEngine() };
-}
-
-// Bound the on-disk attachment cache. Attachments are cached per email under
-// userData/attachment-cache/<emailId>/ and were never pruned — so the folder
-// grew without limit for every attachment ever opened. Enforce a total-size
-// cap by evicting least-recently-modified files. Throttled so opening several
-// attachments in a row doesn't re-scan the tree each time.
-const ATTACHMENT_CACHE_MAX_BYTES = 500 * 1024 * 1024; // 500 MB
-const ATTACHMENT_CACHE_PRUNE_INTERVAL_MS = 5 * 60 * 1000; // at most every 5 min
-let lastAttachmentPruneAt = 0;
-
-async function pruneAttachmentCache(): Promise<void> {
-  const now = Date.now();
-  if (now - lastAttachmentPruneAt < ATTACHMENT_CACHE_PRUNE_INTERVAL_MS) return;
-  lastAttachmentPruneAt = now;
-
-  const root = path.join(app.getPath('userData'), 'attachment-cache');
-  let emailDirs: string[];
-  try {
-    emailDirs = await fs.promises.readdir(root);
-  } catch {
-    return; // Cache dir doesn't exist yet — nothing to prune.
-  }
-
-  const files: { path: string; size: number; mtimeMs: number }[] = [];
-  let totalBytes = 0;
-  for (const dir of emailDirs) {
-    const dirPath = path.join(root, dir);
-    let names: string[];
-    try {
-      names = await fs.promises.readdir(dirPath);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      const filePath = path.join(dirPath, name);
-      try {
-        const stat = await fs.promises.stat(filePath);
-        if (!stat.isFile()) continue;
-        files.push({ path: filePath, size: stat.size, mtimeMs: stat.mtimeMs });
-        totalBytes += stat.size;
-      } catch {
-        // File vanished mid-scan — ignore.
-      }
-    }
-  }
-
-  if (totalBytes <= ATTACHMENT_CACHE_MAX_BYTES) return;
-
-  // Evict oldest-modified first until back under the cap.
-  files.sort((a, b) => a.mtimeMs - b.mtimeMs);
-  for (const file of files) {
-    if (totalBytes <= ATTACHMENT_CACHE_MAX_BYTES) break;
-    try {
-      await fs.promises.rm(file.path, { force: true });
-      totalBytes -= file.size;
-    } catch {
-      // Couldn't delete (in use / permissions) — skip it.
-    }
-  }
-
-  // Remove now-empty per-email dirs so the tree doesn't accumulate stubs.
-  for (const dir of emailDirs) {
-    const dirPath = path.join(root, dir);
-    try {
-      const remaining = await fs.promises.readdir(dirPath);
-      if (remaining.length === 0) await fs.promises.rmdir(dirPath);
-    } catch {
-      // Ignore.
-    }
-  }
-}
-
-/**
- * Cache an attachment to disk, fetching from IMAP if not already cached.
- * Returns the absolute path to the cached file.
- */
-async function getOrCacheAttachment(
-  emailId: string,
-  folderPath: string,
-  uid: number,
-  filename: string,
-): Promise<string> {
-  // IPC input validation: a compromised/misbehaving renderer could pass non-string
-  // args, which would throw deep inside path/basename. Fail fast and clearly.
-  if (typeof emailId !== 'string' || typeof filename !== 'string' || !emailId || !filename) {
-    throw new Error('Invalid attachment request: emailId and filename must be non-empty strings');
-  }
-
-  // SECURITY: `filename` (and even `emailId`) are attacker-controllable — the
-  // filename comes straight from the email's MIME headers. Reduce each to a safe
-  // basename and assert the resolved path stays inside the cache dir, so a
-  // crafted name like "../../../db-key.bin" can't escape and clobber files.
-  const cacheRoot = path.join(app.getPath('userData'), 'attachment-cache');
-  const cacheDir = resolveWithinDir(cacheRoot, safeFilename(emailId));
-  const safeName = safeFilename(filename);
-  const cachedPath = resolveWithinDir(cacheDir, safeName);
-
-  // Return cached file if it exists
-  try {
-    await fs.promises.access(cachedPath);
-    return cachedPath;
-  } catch {
-    // Not cached yet — fetch from IMAP
-  }
-
-  const syncEngine = requireSyncEngine();
-  if (!syncEngine.isConnected()) {
-    throw new Error('Not connected to IMAP');
-  }
-
-  // Prefer fetching JUST this attachment's MIME part (BODY[part]) — far less data
-  // than the whole message. Falls back to the full-message parse when the part
-  // can't be resolved (e.g. server without the metadata, or a name mismatch).
-  const partContent = await syncEngine.fetchAttachmentPart(emailId, folderPath, uid, filename);
-  const content = partContent?.content
-    ?? (await syncEngine.fetchAttachment(emailId, folderPath, uid, filename)).content;
-  if (content.length > MAX_ATTACHMENT_BYTES) {
-    throw new Error(
-      `Attachment "${safeName}" is ${Math.round(content.length / (1024 * 1024))} MB, ` +
-        `over the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB limit`,
-    );
-  }
-  // 0o700 dir / 0o600 file: keep cached attachments non-world-readable on
-  // macOS/Linux (no-op on Windows NTFS, harmless).
-  await fs.promises.mkdir(cacheDir, { recursive: true, mode: 0o700 });
-  await fs.promises.writeFile(cachedPath, content, { mode: 0o600 });
-  // Keep the on-disk cache bounded (throttled, best-effort — never block the
-  // attachment the user asked for on cache housekeeping).
-  void pruneAttachmentCache().catch(() => {});
-  return cachedPath;
-
-}
 
 /**
  * Parse search operators from query string
@@ -662,17 +539,33 @@ export function registerEmailHandlers(): void {
       // until the source has been parsed by the current code) so legacy rows
       // whose filename is the bogus "SIZE" still refresh and downloads match.
       const needsAttachmentMeta = email.hasAttachments && !email.attachmentSizes;
-      if (email.rawBody && !needsAttachmentMeta) {
+
+      // A stored body still carrying `cid:` references was parsed before cid
+      // resolution existed, or by a mailparser that declined the part (see
+      // cid-images.ts). The raw source is not kept, so the substitution can only
+      // happen on a fresh parse — which means a re-fetch is the only repair.
+      const repairingCid =
+        !!email.rawBody &&
+        !needsAttachmentMeta &&
+        claimCidRepairAttempt(email.rawBody, emailId, cidRepairAttempts);
+
+      if (email.rawBody && !needsAttachmentMeta && !repairingCid) {
         return { success: true, data: email };
       }
 
+      // When the re-fetch exists ONLY to repair an image, its failure must never
+      // take away a body the user already has: fall back to the stored one, with
+      // one broken image, rather than an error where the mail used to be.
+      const failed = (error: string) =>
+        repairingCid ? { success: true, data: email } : { success: false, error };
+
       if (!syncEngine || !syncEngine.isConnected()) {
-        return { success: false, error: 'Not connected to IMAP' };
+        return failed('Not connected to IMAP');
       }
 
       const folder = await storage.getFolder(email.folderId);
       if (!folder || !email.uid) {
-        return { success: false, error: 'Cannot determine folder/UID' };
+        return failed('Cannot determine folder/UID');
       }
 
       const fetchResult = await syncEngine.fetchBody(emailId, folder.path, email.uid);
@@ -680,7 +573,7 @@ export function registerEmailHandlers(): void {
         // Don't use "not found" / "deleted" / "moved" in error — the store interprets
         // those keywords as "deleted on server" and removes the email locally.
         // A null result could be a transient fetch issue, not necessarily deletion.
-        return { success: false, error: 'Body fetch returned empty result' };
+        return failed('Body fetch returned empty result');
       }
 
       const updatedEmail = await storage.getEmail(emailId);
@@ -1828,22 +1721,13 @@ export function registerEmailHandlers(): void {
   /**
    * Download an email attachment — cache on disk, then show save dialog
    */
-  ipcMain.handle('emails:downloadAttachment', async (_event, emailId: string, filename: string) => {
+  ipcMain.handle(
+    'emails:downloadAttachment',
+    async (_event, emailId: string, filename: string, accountId?: string) => {
     try {
-      const storage = requireStorage();
       const mainWindow = getMainWindow();
 
-      const email = await storage.getEmail(emailId);
-      if (!email) {
-        return { success: false, error: 'Email not found' };
-      }
-
-      const folder = await storage.getFolder(email.folderId);
-      if (!folder || !email.uid) {
-        return { success: false, error: 'Cannot determine folder/UID for email' };
-      }
-
-      const cachedPath = await getOrCacheAttachment(emailId, folder.path, email.uid, filename);
+      const { filePath: cachedPath } = await resolveAttachmentFile({ emailId, filename, accountId });
 
       // Show save dialog and copy from cache
       const dialogOptions: Electron.SaveDialogOptions = {
@@ -1864,36 +1748,28 @@ export function registerEmailHandlers(): void {
       return { success: true, filePath: result.filePath };
     } catch (error) {
       logger.error('[Main] Download attachment error:', error);
-      return { success: false, error: (error as Error).message };
+      return { success: false, error: attachmentErrorMessage(error) };
     }
-  });
+  },
+  );
 
   /**
    * Get attachment as base64 string for forwarding
    */
-  ipcMain.handle('emails:getAttachmentBase64', async (_event, emailId: string, filename: string) => {
-    try {
-      const storage = requireStorage();
+  ipcMain.handle(
+    'emails:getAttachmentBase64',
+    async (_event, emailId: string, filename: string, accountId?: string) => {
+      try {
+        const { filePath } = await resolveAttachmentFile({ emailId, filename, accountId });
+        const buffer = await fs.promises.readFile(filePath);
 
-      const email = await storage.getEmail(emailId);
-      if (!email) {
-        return { success: false, error: 'Email not found' };
+        return { success: true, base64: buffer.toString('base64') };
+      } catch (error) {
+        logger.error('Get attachment base64 error:', error);
+        return { success: false, error: attachmentErrorMessage(error) };
       }
-
-      const folder = await storage.getFolder(email.folderId);
-      if (!folder || !email.uid) {
-        return { success: false, error: 'Cannot determine folder/UID for email' };
-      }
-
-      const cachedPath = await getOrCacheAttachment(emailId, folder.path, email.uid, filename);
-      const buffer = await fs.promises.readFile(cachedPath);
-
-      return { success: true, base64: buffer.toString('base64') };
-    } catch (error) {
-      logger.error('Get attachment base64 error:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
+    },
+  );
 
   /**
    * Get the raw iCalendar (.ics) text for an email's calendar invite, so the
@@ -2001,10 +1877,7 @@ export function registerEmailHandlers(): void {
       const crlf = published.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
       const body = crlf.endsWith('\r\n') ? crlf : `${crlf}\r\n`;
 
-      const cacheDir = resolveWithinDir(
-        path.join(app.getPath('userData'), 'attachment-cache'),
-        safeFilename(emailId),
-      );
+      const cacheDir = attachmentCacheDir(emailId);
       await fs.promises.mkdir(cacheDir, { recursive: true, mode: 0o700 });
       // Dedicated filename (not the attachment's invite.ics) so a stale/corrupt
       // cached attachment is never reused; always overwrite with fresh text.
@@ -2423,30 +2296,31 @@ export function registerEmailHandlers(): void {
   /**
    * Preview an email attachment — cache on disk, then open with OS default viewer
    */
-  ipcMain.handle('emails:previewAttachment', async (_event, emailId: string, filename: string) => {
-    try {
-      const storage = requireStorage();
+  ipcMain.handle(
+    'emails:previewAttachment',
+    async (_event, emailId: string, filename: string, accountId?: string) => {
+      try {
+        // SECURITY: handing a path to `shell.openPath` asks the OS to LAUNCH it,
+        // so an executable, installer or script would run with the user's
+        // privileges on a single click. The renderer already only offers this for
+        // allow-listed types; re-check it here, because the main process must not
+        // trust the renderer to be the only gate. Anything else can still be
+        // saved by the user to a location they chose — saving opens nothing.
+        if (!isPreviewableAttachment(filename)) {
+          return { success: false, error: 'This file type cannot be opened from Sarv Inbox' };
+        }
 
-      const email = await storage.getEmail(emailId);
-      if (!email) {
-        return { success: false, error: 'Email not found' };
+        const { filePath } = await resolveAttachmentFile({ emailId, filename, accountId });
+        const errorMessage = await shell.openPath(filePath);
+        if (errorMessage) {
+          return { success: false, error: errorMessage };
+        }
+
+        return { success: true };
+      } catch (error) {
+        logger.error('[Main] Preview attachment error:', error);
+        return { success: false, error: attachmentErrorMessage(error) };
       }
-
-      const folder = await storage.getFolder(email.folderId);
-      if (!folder || !email.uid) {
-        return { success: false, error: 'Cannot determine folder/UID for email' };
-      }
-
-      const cachedPath = await getOrCacheAttachment(emailId, folder.path, email.uid, filename);
-      const errorMessage = await shell.openPath(cachedPath);
-      if (errorMessage) {
-        return { success: false, error: errorMessage };
-      }
-
-      return { success: true };
-    } catch (error) {
-      logger.error('[Main] Preview attachment error:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
+    },
+  );
 }

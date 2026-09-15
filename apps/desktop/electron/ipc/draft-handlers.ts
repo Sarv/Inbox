@@ -10,7 +10,7 @@ import pLimit from 'p-limit';
 import { emailContentHash, findFolderByType, createLogger, withFolderSelected } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
-import { resolveAccountTarget } from './email-handlers';
+import { resolveAccountTarget } from '../services/account-target';
 const logger = createLogger('draft-handlers');
 
 // Draft diagnostic log (from the "immortal draft" investigation). Kept as a
