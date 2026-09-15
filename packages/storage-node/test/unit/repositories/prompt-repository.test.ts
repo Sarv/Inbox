@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 import { PromptRepository } from '../../../src/repositories/prompt-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 // These rows ARE the AI agent's system prompts, and seedDefault runs on EVERY
 // app start. If the upsert ever overwrote `content`, every startup would silently

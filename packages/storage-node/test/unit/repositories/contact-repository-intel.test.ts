@@ -15,12 +15,12 @@ import type { ContactEnrichment } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
-
 import {
   ContactRepository,
   SQL_ENRICHMENT_CANDIDATES,
 } from '../../../src/repositories/contact-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
+
 
 const NOW_MS = Date.UTC(2026, 5, 15, 12, 0, 0);
 const NOW = Math.floor(NOW_MS / 1000);

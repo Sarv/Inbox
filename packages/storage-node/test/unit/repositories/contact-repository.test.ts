@@ -13,9 +13,9 @@ import type { EmailRecord } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ContactRepository } from '../../../src/repositories/contact-repository';
 import { newMigratedDb } from '../../../src/test-support/test-db';
 
-import { ContactRepository } from '../../../src/repositories/contact-repository';
 
 // Frozen clock. The repository stamps first_seen/last_seen/last_received from
 // Date.now() and computes the 90-day SenderContext window from it, so every

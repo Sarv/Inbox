@@ -14,7 +14,7 @@
     "type-check": "tsc --noEmit",
     "test": "node ../../scripts/native-abi.mjs node && vitest run",
     "test:coverage": "node ../../scripts/native-abi.mjs node && vitest run --coverage",
-    "lint": "eslint electron src --ext .ts,.tsx",
+    "lint": "eslint electron src test vite --ext .ts,.tsx",
     "check:renderer-bundle": "vite build --config vite/check-renderer-bundle.config.ts",
     "clean": "rm -rf dist dist-electron node_modules/.vite && node ../../scripts/clean-stale-js.mjs src electron",
     "electron:dev": "node ../../scripts/native-abi.mjs electron && pnpm clean && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",

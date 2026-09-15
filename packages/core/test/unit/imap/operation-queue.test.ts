@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { OperationQueue } from '../../../src/imap/operation-queue';
 import { FakeImapServer, type FakeImapServerOptions } from '../../../src/test-support/fake-imap-server';
 import { setLogLevel } from '../../../src/utils/logger';
 
-import { OperationQueue } from '../../../src/imap/operation-queue';
 
 // The operation queue is the at-least-once pipeline behind EVERY user action
 // (read/unread/star/move/archive/delete/label). A regression here silently loses

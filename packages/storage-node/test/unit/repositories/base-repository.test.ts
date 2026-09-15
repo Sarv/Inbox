@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
-import { setSlowQueryReporter, type SlowQueryEvent } from '../../../src/slow-query-reporter';
 import { BaseRepository, type DatabaseAccessor } from '../../../src/repositories/base-repository';
+import { setSlowQueryReporter, type SlowQueryEvent } from '../../../src/slow-query-reporter';
+import { newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
 
 // BaseRepository is the shared plumbing under EVERY repository, so a bug here is
 // a bug everywhere: safeOrderBy is the only thing standing between a

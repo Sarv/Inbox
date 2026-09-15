@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { FakeImapServer, type FakeImapServerOptions } from '../../../src/test-support/fake-imap-server';
-import { setLogLevel } from '../../../src/utils/logger';
-
 import {
   SARV_LABEL_PARENT,
   folderPathForCategory,
@@ -10,6 +7,9 @@ import {
   keywordForCategory,
   resolveLabelStrategy,
 } from '../../../src/imap/label-strategy';
+import { FakeImapServer, type FakeImapServerOptions } from '../../../src/test-support/fake-imap-server';
+import { setLogLevel } from '../../../src/utils/logger';
+
 
 // Category mirroring writes into the user's real mailbox, so the mechanism must
 // be picked from LIVE CAPABILITIES (not the provider's name) and must never

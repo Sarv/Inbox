@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { applyQresyncVanished } from '../../../src/imap/qresync-reconcile';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { FolderRecord } from '../../../src/types/models';
 
-import { applyQresyncVanished } from '../../../src/imap/qresync-reconcile';
 
 // applyQresyncVanished is the ONLY authoritative deletion signal we have: a
 // resynchronising SELECT makes the server name the exact UIDs expunged since our

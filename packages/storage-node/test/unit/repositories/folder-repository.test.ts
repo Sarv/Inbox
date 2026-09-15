@@ -2,9 +2,9 @@ import type { FolderRecord } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { FolderRepository } from '../../../src/repositories/folder-repository';
 import { newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
 
-import { FolderRepository } from '../../../src/repositories/folder-repository';
 
 // Covers the folder repository's persistence and counting contracts. The three
 // sibling files (folder-unread-delta, folder-invalidate, folder-move-back)

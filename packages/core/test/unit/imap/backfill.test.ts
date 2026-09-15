@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { BACKFILL_UID_SPAN } from '../../../src/config/sync';
-
 import { FolderSyncer } from '../../../src/imap/folder-syncer';
 
 // Unit tests for FolderSyncer.backfillChunk — the downward UID paging that the

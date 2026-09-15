@@ -1,6 +1,6 @@
+import { OAuthError } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { OAuthError } from '@sarvinbox/core';
 
 /**
  * The refresh-timing maths and error classification from `oauth-service` — the

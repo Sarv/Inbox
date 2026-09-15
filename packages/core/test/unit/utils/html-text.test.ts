@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { htmlMiningWindow, htmlToPlainText, repairedCleanBody } from '../../../src/utils/html-text';
 import { MAX_HTML_PARSE_BYTES } from '../../../src/utils/mail-parse';
 
-import { htmlMiningWindow, htmlToPlainText, repairedCleanBody } from '../../../src/utils/html-text';
 
 // This helper is what stands between a marketing mail and a blank row in the
 // list. `clean_body` feeds the list snippet, the filter engine and every AI

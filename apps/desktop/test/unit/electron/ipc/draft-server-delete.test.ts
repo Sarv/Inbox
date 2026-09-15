@@ -47,8 +47,8 @@ vi.mock('../../../../electron/services/outbox-service', () => ({
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
 vi.mock('../../../../electron/services/account-target', () => ({ resolveAccountTarget: vi.fn() }));
 
-import { resolveAccountTarget } from '../../../../electron/services/account-target';
 import { registerDraftHandlers, serverDeletableUids } from '../../../../electron/ipc/draft-handlers';
+import { resolveAccountTarget } from '../../../../electron/services/account-target';
 
 describe('serverDeletableUids', () => {
   // Breaks: rows whose draft really is on the server are skipped, so nothing is

@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
-import { EmailRepository } from '../../../src/repositories/email-repository';
 import { ReadModelMaintainer } from '../../../src/read-model-maintainer';
+import { EmailRepository } from '../../../src/repositories/email-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // Proves the read-model fast path (thread_folders) returns the SAME thread set as
 // the legacy GROUP BY path for every section + a quick-filter — the parity that

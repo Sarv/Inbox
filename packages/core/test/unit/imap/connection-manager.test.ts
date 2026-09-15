@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+import { ConnectionManager, type ConnectionManagerConfig } from '../../../src/imap/connection-manager';
 import {
   FakeImapServer,
   type FakeConnectOutcome,
   type FakeImapServerOptions,
 } from '../../../src/test-support/fake-imap-server';
 
-import { ConnectionManager, type ConnectionManagerConfig } from '../../../src/imap/connection-manager';
 
 // The ConnectionManager owns the reconnect ladder, so its bugs are always the
 // same shape: MORE connections than intended (parallel ladders, stacked

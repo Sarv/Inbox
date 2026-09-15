@@ -1,7 +1,6 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import {
   buildRollupContext,
   computeThreadRollup,
@@ -12,6 +11,7 @@ import {
   type RollupContext,
   type RollupEmailRow,
 } from '../../../src/repositories/thread-rollup';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // ---------------------------------------------------------------------------
 // Pure derivation tests (deriveRollup) — no DB

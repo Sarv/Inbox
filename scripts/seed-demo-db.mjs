@@ -20,10 +20,10 @@
  *   3. Launch: sh scripts/dev.sh   (see printed DevTools snippet to unlock the UI)
  *   4. To restore your real inbox: quit the app and run the printed restore cmd.
  */
-import { dirname, join } from 'node:path';
-import { existsSync, mkdirSync, renameSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, renameSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 import { appDataBase } from './lib/userdata-dirs.mjs';
 

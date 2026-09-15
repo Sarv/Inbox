@@ -1,19 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MessageProcessor } from '../../../src/imap/message-processor';
 import { getEventBus } from '../../../src/pipeline/event-bus';
+import type { Unsubscribe } from '../../../src/pipeline/types';
+import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
+import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
+import type { FilterRule } from '../../../src/types/filters';
+import type { IMAPMessage } from '../../../src/types/imap';
 import {
   NO_BODY_CONTENT_HASH_PREFIX,
   bodyContentHash,
   generateContentHash,
   noBodyContentHash,
 } from '../../../src/utils/id';
-import type { FilterRule } from '../../../src/types/filters';
-import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
-import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
-import type { IMAPMessage } from '../../../src/types/imap';
-import type { Unsubscribe } from '../../../src/pipeline/types';
 
-import { MessageProcessor } from '../../../src/imap/message-processor';
 
 // Ingest tests for MessageProcessor.processBatch / convertMessage — the one path
 // every message in the app enters through. The invariants pinned here are the
@@ -120,7 +120,7 @@ describe('processBatch — insert + idempotence', () => {
     // Identity is the Message-ID, never the UID: a server that renumbers (or a
     // re-delivered copy) must heal the row's uid in place. Inserting a second row
     // is how the same mail showed up twice in one folder.
-    const { server, db, mp } = setup();
+    const { db, mp } = setup();
     const seeded = db.seedEmail({
       folderId: db.folderId(INBOX), uid: 5, tags: `|${INBOX}|`, messageId: '<dup@test.local>',
     });

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import { FolderSyncer } from '../../../src/imap/folder-syncer';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IMAPFolder } from '../../../src/types/imap';
 import type { IEmailStorage } from '../../../src/types/storage';
 
-import { FolderSyncer } from '../../../src/imap/folder-syncer';
 
 /**
  * `syncFolder` selects the folder ONCE at the top and then runs a long sequence

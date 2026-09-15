@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 
+import { mapEnvelopeFields } from '../../../src/imap/envelope-mapper';
 import type { IMAPMessage } from '../../../src/types/imap';
 
-import { mapEnvelopeFields } from '../../../src/imap/envelope-mapper';
 
 // mapEnvelopeFields is the SINGLE source of truth for turning an IMAP ENVELOPE
 // into the address/subject columns of an EmailRecord — used by both the ingest

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { LARGE_MAILBOX_THRESHOLD } from '../../../src/config/sync';
-
 import { MessageProcessor } from '../../../src/imap/message-processor';
 
 // Safety tests for the Phase-1 windowed flag reconcile in syncFlags. The bug this

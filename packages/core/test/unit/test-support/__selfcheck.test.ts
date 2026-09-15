@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import type { IIMAPClient } from '../../../src/types/imap';
+
 import { FakeImapServer } from '../../../src/test-support/fake-imap-server';
+import type { IIMAPClient } from '../../../src/types/imap';
 
 describe('FakeImapServer satisfies IIMAPClient', () => {
   it('models basic mailbox behaviour', async () => {

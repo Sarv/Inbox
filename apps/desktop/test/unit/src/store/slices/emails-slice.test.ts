@@ -7,8 +7,8 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
   clearCategoryBadgeCache: vi.fn(),
 }));
 
-import { buildEmailReplacementPatch, createEmailsSlice, sectionRowsPatch, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
 import { getPageSizeForView } from '../../../../../src/store/helpers';
+import { buildEmailReplacementPatch, createEmailsSlice, sectionRowsPatch, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
 
 /** The vitest env is 'node'; buildThreads (called through the patch) reads the
  *  Smart-Prioritize flag from localStorage on every rebuild. */

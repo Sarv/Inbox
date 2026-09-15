@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import { EmailRepository } from '../../../src/repositories/email-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // Regression: an IN-APP move (updateEmail with a folder_id change) must invalidate
 // the row's old server UID. A UID is scoped to its PRIMARY folder; carried into the

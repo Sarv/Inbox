@@ -2,9 +2,9 @@ import type { AgentDecision, PipelineEventLog, SenderDailyMetrics, UserActionLog
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AgentRepository } from '../../../src/repositories/agent-repository';
 import { newMigratedDb } from '../../../src/test-support/test-db';
 
-import { AgentRepository } from '../../../src/repositories/agent-repository';
 
 
 // AgentRepository owns the WRITE side of every learning table (user_action_log,

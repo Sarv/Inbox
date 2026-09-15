@@ -3,9 +3,9 @@ import { generateThreadId, normalizeSubject } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { ThreadRepository } from '../../../src/repositories/thread-repository';
 import { newMigratedDb } from '../../../src/test-support/test-db';
 
-import { ThreadRepository } from '../../../src/repositories/thread-repository';
 
 // The threads table is the read model the list views render, and emails.thread_id
 // is ON DELETE CASCADE — so a careless thread write is an email-deleting write.

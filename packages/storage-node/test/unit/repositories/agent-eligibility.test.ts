@@ -1,13 +1,13 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 
 import {
   agentEligibleClause,
   extractionEligibleClause,
 } from '../../../src/repositories/agent-eligibility';
 import { AgentRepository } from '../../../src/repositories/agent-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 // AI categorization silently stopping mid-run is the regression this file
 // exists for. It never looked like a crash: the progress bar parked below 100%

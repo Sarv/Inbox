@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { act, render } from '../../../../helpers/render';
 import {
   attachmentKey,
   useAttachmentActions,
   type AttachmentActions,
 } from '../../../../../src/components/attachment-viewer/useAttachmentActions';
+import { act, render } from '../../../../helpers/render';
 
 /**
  * The one implementation of "what happens when you touch an attachment".

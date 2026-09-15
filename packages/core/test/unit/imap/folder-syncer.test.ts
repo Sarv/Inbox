@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FolderSyncer } from '../../../src/imap/folder-syncer';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IMAPFolder } from '../../../src/types/imap';
 import type { FolderRecord } from '../../../src/types/models';
 import type { IEmailStorage } from '../../../src/types/storage';
 
-import { FolderSyncer } from '../../../src/imap/folder-syncer';
 
 // FolderSyncer surface that the flow tests (sync-flows.test.ts) and the backfill
 // tests (backfill.test.ts) don't reach: folder-list ingest, sync ordering, the

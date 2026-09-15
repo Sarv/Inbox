@@ -18,10 +18,10 @@
 // Best-effort by design: failures log actionable guidance and exit 0 so they
 // never block installs on CI or platforms where the desktop app isn't built.
 
-import { existsSync, readFileSync, readdirSync, mkdtempSync, cpSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, renameSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
 
 import { rebuildBetterSqlite3 } from './lib/native-abi.mjs';
 

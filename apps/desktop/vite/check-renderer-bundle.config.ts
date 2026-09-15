@@ -1,7 +1,9 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
+
+import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite';
+import renderer from 'vite-plugin-electron-renderer';
+
 
 import { forbidNodeOnlyInRenderer } from './forbid-node-only-renderer';
 import { rendererAliases } from './renderer-aliases';

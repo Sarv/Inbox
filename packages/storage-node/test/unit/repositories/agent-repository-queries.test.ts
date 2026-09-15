@@ -2,8 +2,6 @@ import type { ContactType, UserActionType } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
-
 import {
   AgentRepository,
   mergeNewestFirst,
@@ -11,6 +9,8 @@ import {
   SQL_LABEL_PENDING_LEGACY,
   SQL_LABEL_RECENT_CUTOFF,
 } from '../../../src/repositories/agent-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
+
 
 
 // The READ side of AgentRepository: the pipeline work-queues that decide which

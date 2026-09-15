@@ -13,10 +13,10 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 
 import { AIRepository } from '../../../src/repositories/ai-repository';
 import { EmailRepository } from '../../../src/repositories/email-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 const FIXED_NOW_MS = Date.UTC(2026, 7, 18, 12, 0, 0);
 

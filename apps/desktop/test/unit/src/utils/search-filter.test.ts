@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
 import type { SearchQuery } from '../../../../src/services/ai-service';
-
 import { emailMatchesLiveSearchFilter, hasLiveSearchFilterTokens } from '../../../../src/utils/search-filter';
 
 const q = (over: Partial<SearchQuery> = {}): SearchQuery => over as SearchQuery;

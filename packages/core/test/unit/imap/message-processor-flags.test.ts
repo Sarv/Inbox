@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LARGE_MAILBOX_THRESHOLD } from '../../../src/config/sync';
+import { MessageProcessor } from '../../../src/imap/message-processor';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IEmailStorage } from '../../../src/types/storage';
 
-import { MessageProcessor } from '../../../src/imap/message-processor';
 
 // syncFlags is where "server state wins" is decided, and it is the single most
 // dangerous function in the sync: it MATCHES SERVER STATE TO LOCAL ROWS BY UID
@@ -614,7 +614,7 @@ describe('syncFlags — Phase 2: addition reconcile (mid-range holes)', () => {
    */
   it('reports a fetch-but-place-nothing pass as unchanged, and does not recount', async () => {
     const ctx = setup();
-    const inboxId = ctx.db.folderId(INBOX);
+    const _inboxId = ctx.db.folderId(INBOX);
     // Three messages the server lists, all ALREADY present locally and already
     // tagged into INBOX — but seeded under another folder's id, so they are
     // absent from this folder's own UID space and look "missing" to Phase 2.

@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import type { IIMAPClient } from '../../../src/types/imap';
-import { FakeImapServer } from '../../../src/test-support/fake-imap-server';
-import { TimeoutError } from '../../../src/utils/timeout';
-
 import { IMAPConnectionPool, PoolConnectionParkedError } from '../../../src/imap/connection-pool';
+import { FakeImapServer } from '../../../src/test-support/fake-imap-server';
+import type { IIMAPClient } from '../../../src/types/imap';
+import { TimeoutError } from '../../../src/utils/timeout';
 
 // The pool is what stands between us and Gmail's ~15-connections-per-account cap,
 // so the rules it must never break are: never exceed maxConnections (including

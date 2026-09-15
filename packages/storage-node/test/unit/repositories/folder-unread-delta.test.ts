@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import { FolderRepository } from '../../../src/repositories/folder-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // Proves the scan-free per-flip unread delta (applyReadFlagDelta) keeps
 // folders.unread_count IDENTICAL to a full recalculateFolderCounts across a

@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { newMigratedDb } from '../../../src/test-support/test-db';
 import { LabelRepository } from '../../../src/repositories/label-repository';
+import { newMigratedDb } from '../../../src/test-support/test-db';
 
 // Labels are user-created taxonomy: the row here is the ONLY record that a tag
 // name is a label (and what colour it renders in). Losing/duplicating a row

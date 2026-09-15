@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+
+import { describe, expect, it } from 'vitest';
 
 /**
  * Where `registerSchemesAsPrivileged` sits in `main.ts` — a source-order guard.

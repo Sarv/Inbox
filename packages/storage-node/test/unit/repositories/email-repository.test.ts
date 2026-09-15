@@ -12,8 +12,6 @@ import type { EmailRecord } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
-
 import {
   EmailRepository,
   PRIMARY_FOLDER_WITH_UID_SQL,
@@ -27,6 +25,8 @@ import {
   removeTag,
   tagsToImapFlags,
 } from '../../../src/repositories/email-repository';
+import { newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
+
 
 /** Insert the folders the repo resolves paths through, plus a parent thread row
  *  (emails.thread_id is a real FK — foreign_keys is ON in this suite). */

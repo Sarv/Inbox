@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { openTestDb } from '../../../src/test-support/test-db';
 import { AIRepository } from '../../../src/repositories/ai-repository';
+import { openTestDb } from '../../../src/test-support/test-db';
 
 // A category surfaces TWO deliberately different numbers, both from
 // getDynamicCategoryCounts:

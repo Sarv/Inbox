@@ -24,8 +24,7 @@ import {
   type Migration,
 } from '../../src/migrations';
 import { ContactRepository } from '../../src/repositories/contact-repository';
-import { SHARED_SCHEMA } from '../../src/shared-contacts';
-import { attachSharedContacts } from '../../src/shared-contacts';
+import { SHARED_SCHEMA , attachSharedContacts } from '../../src/shared-contacts';
 import { createLegacyContactsTable } from '../../src/test-support/legacy-contacts';
 import { newMigratedDb, openTestDb } from '../../src/test-support/test-db';
 

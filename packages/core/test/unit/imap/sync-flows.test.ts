@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FolderSyncer } from '../../../src/imap/folder-syncer';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IMAPFolder } from '../../../src/types/imap';
 
-import { FolderSyncer } from '../../../src/imap/folder-syncer';
 
 // END-TO-END sync flows: the real FolderSyncer + the real MessageProcessor driven
 // against the in-memory server and DB. Where the unit files pin one function's

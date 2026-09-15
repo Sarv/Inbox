@@ -4,7 +4,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { applyEmailCategories, clearCategoryBadgeCache, getCachedCategorySlugs, warmCategoryDefs } from '../../../../src/components/email-list/CategoryBadges';
 import { DEFAULT_SECTIONS } from '../../../../src/config/inbox-types';
 import { getDefaultProvider, reportAIHealthy, reportAIUnhealthy, syncAIProviderToMain } from '../../../../src/services/ai-service';
-
 import {
   ACCOUNT_COLORS,
   ALL_MAIL_PAGE_SIZE,

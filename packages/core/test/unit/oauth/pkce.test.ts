@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';
+
+import { describe, it, expect } from 'vitest';
 
 import { generatePkcePair, generateState } from '../../../src/oauth/pkce';
 

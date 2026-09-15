@@ -24,6 +24,8 @@ class FakeFlow extends EventEmitter {
   capabilities = new Map<string, boolean>();
   constructor(_opts: unknown) {
     super();
+    // The test needs a handle on the instance the client constructs internally.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     lastInstance = this;
   }
   connect(): Promise<void> { return connectImpl(); }
