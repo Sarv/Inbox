@@ -34,6 +34,7 @@ import {
   transcodeDetectedCharset,
 } from './charset-repair';
 import { mapEnvelopeFields } from './envelope-mapper';
+import { attachmentSizesFromSource } from './raw-mime-part';
 import { withFolderSelected } from './with-folder';
 
 // Deletion-detection throttle for the CONDSTORE delta path. Flag deltas
@@ -1162,7 +1163,17 @@ export class MessageProcessor {
       update.hasAttachments = true;
       update.attachmentCount = parsed.attachments.length;
       update.attachmentNames = JSON.stringify(parsed.attachments.map((a) => a.name));
-      update.attachmentSizes = JSON.stringify(parsed.attachments.map((a) => a.size));
+      // Sizes come from the DECODED part, which is wrong for a part whose
+      // Content-Transfer-Encoding header lies: raw text claiming `base64`
+      // collapses to a handful of junk bytes, and the row then advertised a
+      // 400-byte .txt as "7 B" forever — even after the download path started
+      // recovering the real content. Cross-check each against the part's raw
+      // length in the source we just parsed. Not against the server's
+      // BODYSTRUCTURE: mailboxes exist that return every parameter with its
+      // value missing, so neither the filename nor the size is there to compare.
+      update.attachmentSizes = JSON.stringify(
+        await attachmentSizesFromSource(Buffer.from(message.body, 'latin1'), parsed.attachments),
+      );
     } else {
       update.hasAttachments = false;
       update.attachmentCount = 0;

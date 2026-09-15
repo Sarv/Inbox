@@ -59,6 +59,50 @@ const withAttachment = (messageId: string): string => crlf([
   '',
 ]);
 
+/**
+ * A message whose .txt attachment declares base64 but carries RAW HTML text —
+ * the shape of the real message this was found on. A base64 decoder keeps only
+ * alphabet characters and stops at the first `=`, so mailparser decodes this to
+ * a handful of junk bytes.
+ */
+const withLyingBase64Attachment = (messageId: string, encoding = 'base64'): string => crlf([
+  `Message-ID: ${messageId}`,
+  'Subject: Decorated',
+  'From: sender@test.local',
+  'MIME-Version: 1.0',
+  'Content-Type: multipart/mixed; boundary=BOUND',
+  '',
+  '--BOUND',
+  'Content-Type: text/plain; charset=utf-8',
+  '',
+  'See attached.',
+  '--BOUND',
+  'Content-Type: text/plain; name="note.txt"',
+  'Content-Disposition: attachment; filename="note.txt"',
+  `Content-Transfer-Encoding: ${encoding}`,
+  '',
+  '<p><span style="font-family: sans-serif;">Hello World</span></p>',
+  '--BOUND--',
+  '',
+]);
+
+/** The bodystructure the server reports for that same message. */
+const lyingStructure = (declaredSize: number, encoding = 'base64'): IMAPMessage['bodyStructure'] => ({
+  type: 'multipart', subtype: 'mixed', params: {}, id: null, description: null,
+  encoding: '7bit', size: 0, disposition: null,
+  parts: [
+    {
+      type: 'text', subtype: 'plain', params: {}, id: null, description: null,
+      encoding: '7bit', size: 13, disposition: null, part: '1',
+    },
+    {
+      type: 'text', subtype: 'plain', params: { name: 'note.txt' }, id: null, description: null,
+      encoding, size: declaredSize, part: '2',
+      disposition: { type: 'attachment', params: { filename: 'note.txt' } },
+    },
+  ],
+} as IMAPMessage['bodyStructure']);
+
 const ICS = crlf([
   'BEGIN:VCALENDAR',
   'VERSION:2.0',
@@ -305,6 +349,106 @@ describe('fetchBody', () => {
     expect(JSON.parse(stored.attachmentSizes!)[0]).toBeGreaterThan(0);
   });
 
+  // Stored sizes come from the DECODED part, so a part whose
+  // Content-Transfer-Encoding header lies poisons them: raw text claiming
+  // `base64` collapses to junk and a 64-byte .txt was listed as "7 B" on the
+  // chip and in the viewer header — the size the real message showed. The
+  // honest number is the part's RAW length in the source just parsed, and
+  // deliberately NOT the size the server declared in BODYSTRUCTURE (400 here):
+  // mailboxes exist that return every bodystructure parameter with its value
+  // missing, so neither the filename nor the size is there to compare against.
+  // Breaks if the source cross-check is dropped: the row advertises the junk
+  // size again even though the download path now recovers the real content.
+  it('stores the part’s RAW source length when it lies about being base64', async () => {
+    const ctx = setup();
+    const messageId = '<lying@test.local>';
+    const row = ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX), uid: 5, tags: `|${INBOX}|`, messageId,
+    });
+    vi.spyOn(ctx.server, 'fetchMessagesByUID').mockResolvedValue([{
+      uid: 5, body: withLyingBase64Attachment(messageId),
+      envelope: { messageId }, bodyStructure: lyingStructure(400),
+    } as unknown as IMAPMessage]);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, 5, ctx.db.asStorage(), row.id);
+
+    const stored = ctx.db.row(row.id)!;
+    expect(JSON.parse(stored.attachmentNames!)).toEqual(['note.txt']);
+    // 64 = the part's body in the source. Not 7 (the collapsed decode) and not
+    // 400 (what the server claimed).
+    expect(JSON.parse(stored.attachmentSizes!)).toEqual([64]);
+  });
+
+  it('does NOT override the decoded size when the part never claimed base64', async () => {
+    // Breaks if the correction keys off size alone: a genuinely tiny attachment
+    // would be re-labelled with the size of its MIME part, headers included.
+    // The SOURCE is what decides this now, so it is the source's CTE that is
+    // varied here — the bodystructure below still says base64 and must not matter.
+    const ctx = setup();
+    const messageId = '<7bit@test.local>';
+    const row = ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX), uid: 6, tags: `|${INBOX}|`, messageId,
+    });
+    vi.spyOn(ctx.server, 'fetchMessagesByUID').mockResolvedValue([{
+      uid: 6, body: withLyingBase64Attachment(messageId, '7bit'),
+      envelope: { messageId }, bodyStructure: lyingStructure(400),
+    } as unknown as IMAPMessage]);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, 6, ctx.db.asStorage(), row.id);
+
+    // A 7bit part decodes to itself: the 64 source bytes, unchanged.
+    expect(JSON.parse(ctx.db.row(row.id)!.attachmentSizes!)).toEqual([64]);
+  });
+
+  it('corrects the size even when the server sends a bodystructure with no values', async () => {
+    // THE reason this moved off BODYSTRUCTURE. The mailbox that produced the
+    // report returns every parameter with its VALUE missing — `("NAME" )`,
+    // `("FILENAME" )`, `("BOUNDARY" )` — so there is no filename to match and no
+    // size to compare, and three successive fixes keyed off it did nothing at
+    // all. Breaks if the size correction ever consults the server's structure
+    // again: the chip goes back to showing "7 B" for a 1 KB attachment.
+    const ctx = setup();
+    const messageId = '<stripped@test.local>';
+    const row = ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX), uid: 8, tags: `|${INBOX}|`, messageId,
+    });
+    const stripped = {
+      type: 'multipart/mixed',
+      parts: [
+        { type: 'text/plain', part: '1', params: {} },
+        { type: 'text/plain', part: '2', encoding: '', size: 0, params: {}, disposition: null },
+      ],
+    };
+    vi.spyOn(ctx.server, 'fetchMessagesByUID').mockResolvedValue([{
+      uid: 8, body: withLyingBase64Attachment(messageId),
+      envelope: { messageId }, bodyStructure: stripped,
+    } as unknown as IMAPMessage]);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, 8, ctx.db.asStorage(), row.id);
+
+    expect(JSON.parse(ctx.db.row(row.id)!.attachmentSizes!)).toEqual([64]);
+  });
+
+  it('leaves a healthy base64 attachment at its decoded size', async () => {
+    // Breaks if the heuristic fires on normal mail: every attachment would be
+    // listed at its ENCODED size, ~33% larger than the file the user gets.
+    const ctx = setup();
+    const messageId = '<healthy@test.local>';
+    const row = ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX), uid: 7, tags: `|${INBOX}|`, messageId,
+    });
+    const structure = lyingStructure(20);
+    structure!.parts![1].disposition!.params.filename = 'invoice.pdf';
+    vi.spyOn(ctx.server, 'fetchMessagesByUID').mockResolvedValue([{
+      uid: 7, body: withAttachment(messageId), envelope: { messageId }, bodyStructure: structure,
+    } as unknown as IMAPMessage]);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, 7, ctx.db.asStorage(), row.id);
+
+    // '%PDF-1.4 fake' is 13 bytes decoded from 20 of base64 — plausible, kept.
+    expect(JSON.parse(ctx.db.row(row.id)!.attachmentSizes!)).toEqual([13]);
+  });
+
   it('CORRECTS a body-structure over-count when the source has no attachments', async () => {
     // The BODYSTRUCTURE walk counts inline images as attachments; left uncorrected
     // the paperclip stays and every open re-triggers a source re-fetch.
@@ -513,6 +657,114 @@ describe('parseBody — cleanBody for an HTML-only mail', () => {
 
     expect(parsed.cleanBody).toBe('');
     expect(parsed.rawBody).toContain('<img');
+  });
+});
+
+// The reported bug: one avatar in a Bitbucket notification rendered broken in
+// this app and fine in Gmail. mailparser rewrites `cid:` references to `data:`
+// URIs, but skips any part whose type fails its own `/^image\/[\w]+$/` test —
+// `image/x-png` and friends. What it leaves behind can never render: no scheme
+// in the app answers `cid:`, the body iframe's CSP drops it without a console
+// message, and the "remote images blocked" banner only looks for `http(s):`. So
+// the failure is completely silent, which is why it went unnoticed. parseBody is
+// the last place holding both the HTML and the part bytes — if these fail, the
+// image is broken by the time anything is stored.
+describe('parseBody — cid: images mailparser leaves behind', () => {
+  const mp = new MessageProcessor({ headersOnly: false });
+
+  const PNG_B64 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  ).toString('base64');
+
+  /** multipart/related: HTML plus inline parts addressed by Content-ID. */
+  const withRelated = (parts: string[][], html: string): string => crlf([
+    'Message-ID: <rel@test.local>',
+    'Subject: Pull request #455',
+    'From: notifications@test.local',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/related; type="text/html"; boundary=BOUND',
+    '',
+    '--BOUND',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    html,
+    ...parts.flatMap((lines) => ['--BOUND', ...lines]),
+    '--BOUND--',
+    '',
+  ]);
+
+  /** One inline image part, declared however the sender felt like declaring it. */
+  const imagePart = (cid: string, contentType: string, filename: string): string[] => [
+    `Content-Type: ${contentType}; name="${filename}"`,
+    `Content-ID: <${cid}>`,
+    `Content-Disposition: inline; filename="${filename}"`,
+    'Content-Transfer-Encoding: base64',
+    '',
+    PNG_B64,
+  ];
+
+  it('inlines a part typed image/x-png, which mailparser refuses to rewrite', async () => {
+    const parsed = await mp.parseBody(withRelated(
+      [imagePart('avatar@test.local', 'image/x-png', 'avatar.png')],
+      '<p>Ramesh commented</p><img src="cid:avatar@test.local" width="32">',
+    ));
+
+    expect(parsed.rawBody).toContain(`data:image/x-png;base64,${PNG_B64}`);
+    expect(parsed.rawBody).not.toContain('cid:');
+  });
+
+  // Breaks: the repair replaces mailparser's work instead of completing it, and
+  // the ordinary inline image (the 99% case) regresses to broken.
+  it('leaves the parts mailparser DID rewrite intact, alongside the repaired one', async () => {
+    const parsed = await mp.parseBody(withRelated(
+      [
+        imagePart('ok@test.local', 'image/png', 'ok.png'),
+        imagePart('odd@test.local', 'image/x-icon', 'favicon.ico'),
+      ],
+      '<img src="cid:ok@test.local"><img src=cid:odd@test.local>',
+    ));
+
+    expect(parsed.rawBody).toContain(`data:image/png;base64,${PNG_B64}`);
+    expect(parsed.rawBody).toContain(`data:image/x-icon;base64,${PNG_B64}`);
+    expect(parsed.rawBody).not.toContain('cid:');
+  });
+
+  // Breaks: a sender whose parts genuinely don't line up gets a mangled body
+  // instead of one broken image — and (see email-handlers) the mail would
+  // re-download its whole source on every single open, forever.
+  it('leaves a reference that names no part exactly where it was', async () => {
+    const html = '<img src="cid:gone@test.local">';
+    const parsed = await mp.parseBody(withRelated(
+      [imagePart('avatar@test.local', 'image/x-png', 'avatar.png')],
+      html,
+    ));
+
+    expect(parsed.rawBody).toContain('cid:gone@test.local');
+  });
+
+  // Breaks: a repaired inline image starts showing up in the attachment chips
+  // and the download menu. An inline image is part of the body, not a file the
+  // user attached — Gmail lists neither, and the paperclip would be wrong.
+  it('does not turn a repaired inline image into a listed attachment', async () => {
+    const parsed = await mp.parseBody(withRelated(
+      [imagePart('avatar@test.local', 'image/x-png', 'avatar.png')],
+      '<img src="cid:avatar@test.local">',
+    ));
+
+    expect(parsed.attachments).toHaveLength(0);
+  });
+
+  // Breaks: cleanBody (the list snippet, the filters and every AI prompt) is
+  // derived from the html BEFORE substitution — or worse, from the base64.
+  it('keeps base64 image bytes out of cleanBody', async () => {
+    const parsed = await mp.parseBody(withRelated(
+      [imagePart('avatar@test.local', 'image/x-png', 'avatar.png')],
+      '<p>Ramesh commented on your pull request</p><img src="cid:avatar@test.local">',
+    ));
+
+    expect(parsed.cleanBody).toContain('Ramesh commented');
+    expect(parsed.cleanBody).not.toContain('base64');
   });
 });
 

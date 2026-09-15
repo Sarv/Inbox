@@ -120,6 +120,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redirecting a redirect to a different site is something the browser refuses
   outright, which failed those images harder than the proxy ever did. They load
   through the proxy, with the referer above getting them past its `429`.
+- An attachment whose part declares `base64` but actually carries plain text came
+  through as a handful of junk bytes — a `.txt` holding HTML arrived as 7 bytes,
+  which is what the app cached, showed as its size, and handed to the system
+  viewer, while other mail clients showed a full kilobyte of text. A base64
+  decoder keeps only alphabet characters and stops at the first `=`, so text
+  mislabelled that way collapses. Sarv Inbox now measures such a part against its
+  real length in the message itself and serves the part's own bytes when the
+  decode has collapsed. Deliberately the message and not the server's
+  `BODYSTRUCTURE` description of it: mailboxes exist that answer with every
+  parameter's value missing — no filename, no size — and against those there was
+  nothing to compare, which is why this attachment stayed broken through several
+  attempts at it. The repair applies on both fetch paths: the per-attachment one
+  and the whole-message fallback used whenever a sync is in progress, which is
+  where most opens actually land. Sizes heal too — recorded at import from the
+  part's true length, and corrected from the bytes on disk the next time an
+  attachment is opened, so mail already in the mailbox stops being listed as
+  "7 B" on the message and in the viewer header. Attachments cached before this
+  fix are re-fetched once, since the collapsed bytes were otherwise served from
+  the cache forever. Genuine base64 mail is untouched, and an attachment that
+  cannot be repaired still opens exactly as it did before.
 - Mail that was never deleted could be deleted from the app. A folder's deletion
   reconcile asks the server for that folder's full list of message numbers and
   removes anything local that is missing from it — but the reply carries no
