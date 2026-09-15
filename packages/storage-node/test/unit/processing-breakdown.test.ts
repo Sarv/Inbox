@@ -258,3 +258,69 @@ describe('processingBreakdown — the agent pipeline', () => {
     expect(processingBreakdown(db).agentPending).toBe(1);
   });
 });
+
+/**
+ * ONE number for "what does the AI still owe me".
+ *
+ * THE complaint: the panel showed "0 pending" from the categorizer beside
+ * "agent: 196 to go" from the agent. Both mean outstanding work; they disagreed
+ * because they measure different pipelines; and a user looking at a progress
+ * bar does not care which internal queue owes the work. Two numbers for one
+ * question is the same defect as the mislabelled "eligible pool" row.
+ */
+describe('processingBreakdown — one merged pending count', () => {
+  it('counts work the categorizer still owes', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello' }); // never processed
+    expect(processingBreakdown(db).pending).toBe(1);
+  });
+
+  it('counts work the agent still owes', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', aiProcessed: true, agentStatus: 'pending' });
+    expect(processingBreakdown(db).pending).toBe(1);
+  });
+
+  // THE arithmetic that matters. An email owed work by BOTH pipelines is ONE
+  // pending email — summing the two rows would double-count it and make the
+  // progress bar move at half speed for the rest of the run.
+  it('counts an email owed by both pipelines exactly once', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', agentStatus: 'pending' }); // neither done
+
+    const b = processingBreakdown(db);
+
+    expect(b.eligibleNow).toBe(1);
+    expect(b.agentPending).toBe(1);
+    expect(b.pending).toBe(1); // …not 2
+  });
+
+  it('is zero when both pipelines are finished', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', aiProcessed: true, agentStatus: 'done' });
+    expect(processingBreakdown(db).pending).toBe(0);
+  });
+
+  // Deleted and read mail is not outstanding work — the headline must not
+  // report a backlog the pipelines will never touch. This is the bug that made
+  // the "eligible pool" row look permanently stuck.
+  it('ignores mail neither pipeline will ever process', () => {
+    const db = fresh();
+    seed(db, '|Trash|', { body: 'hello', agentStatus: 'pending' });
+    seed(db, '|INBOX|read|', { body: 'hello', agentStatus: 'pending' });
+    seed(db, '|INBOX|', { agentStatus: 'pending' }); // no body
+
+    expect(processingBreakdown(db).pending).toBe(0);
+  });
+
+  // The agent half honours the user's window; the headline must too, or it
+  // shows a backlog the poll cannot reach — the never-moving number again.
+  it('respects the window for the agent half', () => {
+    const db = fresh();
+    seed(db, '|INBOX|', { body: 'hello', aiProcessed: true, agentStatus: 'pending', old: true });
+    seed(db, '|INBOX|', { body: 'hello', aiProcessed: true, agentStatus: 'pending' });
+
+    expect(processingBreakdown(db, { recentWindow: 1 }).pending).toBe(1);
+    expect(processingBreakdown(db, { recentWindow: 500 }).pending).toBe(2);
+  });
+});
