@@ -91,6 +91,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use that mailbox.
 
 ### Fixed
+- Some remote images in email — avatars in Bitbucket/Jira notifications among
+  them — never loaded, even with "Load images" on, because the hosting server
+  answered `429 Too Many Requests` to every request. The cause was not volume: a
+  request carrying no `Referer` header was being refused outright, and email
+  images are deliberately loaded without one (a packaged build sends none in any
+  case). Sarv Inbox now sends the image's OWN address as the referer, which is
+  what such a server checks for and reveals nothing it does not already know —
+  not you, not which message is open, not that the request came from a mail app.
+  This also fixes ordinary hotlink protection, which refuses images the same way.
+- Images a sender routed through the WordPress.com image proxy (`i0.wp.com` and
+  friends) are now fetched from the original server instead. The proxy was the
+  thing returning `429` above, and skipping it also means one fewer third party
+  learning that you opened the message. Only proxy links that already specify
+  HTTPS are unwrapped, so no request is silently downgraded to plain HTTP — and
+  only where the message itself names the proxy link. When a server redirects us
+  to the proxy instead (Bitbucket avatars do), the link is left as it is:
+  redirecting a redirect to a different site is something the browser refuses
+  outright, which failed those images harder than the proxy ever did. They load
+  through the proxy, with the referer above getting them past its `429`.
 - Mail that was never deleted could be deleted from the app. A folder's deletion
   reconcile asks the server for that folder's full list of message numbers and
   removes anything local that is missing from it — but the reply carries no

@@ -10,6 +10,7 @@ import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { SyncEngine, ExtensionManager, createLogger, getLogLevel, setLogLevel, isConnectionError } from '@sarvinbox/core';
+import { installEmailImageRequestHandlers } from './services/email-image-requests';
 
 // Shared state management
 import {
@@ -775,43 +776,11 @@ app.whenReady().then(async () => {
       }
     }
 
-    // Strip Cross-Origin-Resource-Policy on image responses so email content
-    // (and newsletter CDN images like claude.ai/images/..., Substack media,
-    // etc.) loads in the sandboxed email body iframe. Chromium's default
-    // blocks `same-origin`/`same-site` CORP resources from being embedded
-    // cross-origin; for a mail reader we need to relax this for IMG/MEDIA
-    // subresources. Without this, emails render with broken images.
-    try {
-      session.defaultSession.webRequest.onHeadersReceived(
-        { urls: ['*://*/*'] },
-        (details, callback) => {
-          const resourceType = (details as any).resourceType;
-          if (
-            resourceType === 'image' ||
-            resourceType === 'media' ||
-            resourceType === 'font'
-          ) {
-            const headers = { ...(details.responseHeaders || {}) };
-            // Strip the blocking headers (case variants vary by server).
-            for (const key of Object.keys(headers)) {
-              const lower = key.toLowerCase();
-              if (
-                lower === 'cross-origin-resource-policy' ||
-                lower === 'cross-origin-embedder-policy' ||
-                lower === 'cross-origin-opener-policy'
-              ) {
-                delete headers[key];
-              }
-            }
-            callback({ cancel: false, responseHeaders: headers });
-            return;
-          }
-          callback({ cancel: false, responseHeaders: details.responseHeaders });
-        },
-      );
-    } catch (err) {
-      logger.warn('[Main] Failed to install CORP header stripper:', err);
-    }
+    // Everything that has to happen at the network layer for the images in an
+    // email to appear: unwrap sender-chosen image proxies, send a referer hosts
+    // will accept, and drop the cross-origin embedding blocks Chromium honours.
+    // Without these, whole newsletters render with broken pictures.
+    installEmailImageRequestHandlers(session.defaultSession.webRequest);
 
     // BEFORE anything opens a database: prove the native SQLite module actually
     // loads in this process. It dlopens lazily and every core-DB read swallows
