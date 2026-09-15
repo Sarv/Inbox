@@ -101,6 +101,7 @@ import {
 } from './shared';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
+import { classifyNavigation, type NavigationScope } from './utils/navigation-policy';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -398,15 +399,21 @@ function createWindow(): void {
     return { action: 'deny' };
   });
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    // Allow navigation to the dev server or the app's own pages
-    const appOrigin = VITE_DEV_SERVER_URL || 'file://';
-    if (!url.startsWith(appOrigin)) {
-      event.preventDefault();
-      if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mailto:')) {
-        shell.openExternal(url);
-      }
+  // Both guards below share one decision (electron/utils/navigation-policy.ts)
+  // so a rule can never be added to one and forgotten in the other.
+  const applyNavigationPolicy = (event: Electron.Event, url: string, scope: NavigationScope) => {
+    const verdict = classifyNavigation(url, VITE_DEV_SERVER_URL || 'file://', scope);
+    if (verdict === 'allow') return;
+    event.preventDefault();
+    if (verdict === 'external') {
+      shell.openExternal(url).catch((err) => logger.warn('[Main] openExternal failed:', err));
+    } else {
+      logger.warn(`[Main] Blocked ${scope}-level navigation to an unsupported scheme:`, url);
     }
+  };
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    applyNavigationPolicy(event, url, 'top');
   });
 
   // Same rule for a navigation started INSIDE a frame. `will-navigate` fires
@@ -421,15 +428,7 @@ function createWindow(): void {
   if (typeof (mainWindow.webContents as { on?: unknown }).on === 'function') {
     try {
       mainWindow.webContents.on('will-frame-navigate' as never, ((event: Electron.Event, url: string) => {
-        const appOrigin = VITE_DEV_SERVER_URL || 'file://';
-        // about:srcdoc / about:blank are the email iframe being (re)built by us.
-        if (url.startsWith(appOrigin) || url.startsWith('about:')) return;
-        event.preventDefault();
-        if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mailto:')) {
-          shell.openExternal(url).catch((err) => logger.warn('[Main] openExternal failed:', err));
-        } else {
-          logger.warn('[Main] Blocked in-frame navigation to an unsupported scheme:', url);
-        }
+        applyNavigationPolicy(event, url, 'frame');
       }) as never);
     } catch (err) {
       logger.warn('[Main] will-frame-navigate unavailable on this Electron:', err);
