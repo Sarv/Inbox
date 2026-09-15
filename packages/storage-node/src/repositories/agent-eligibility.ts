@@ -269,6 +269,16 @@ export interface ProcessingBreakdown {
    */
   agentPending: number;
   agentDone: number;
+  /**
+   * ONE number for "work the AI still owes you", across both pipelines.
+   *
+   * The panel used to show two: "0 pending" from the categorizer beside
+   * "agent: 196 to go". Both mean outstanding work, they disagreed, and the
+   * user reasonably read the pair as a contradiction — the same complaint the
+   * mislabelled "eligible pool" row produced. An email counts once here however
+   * many pipelines still owe work on it.
+   */
+  pending: number;
 }
 
 /**
@@ -348,5 +358,24 @@ export function processingBreakdown(
         WHERE ${agentEligibleClause('e', { bodyLengthsReady: ready })}
       `),
     agentDone: get(`SELECT COUNT(*) AS n FROM emails WHERE agent_status = 'done'`),
+    // Union, not sum: an email owed work by BOTH pipelines is one pending
+    // email, not two. Mirrors each pipeline's own selector so the headline
+    // cannot drift from the rows beneath it.
+    pending: recentWindow > 0
+      ? getWith(
+        `SELECT COUNT(*) AS n FROM emails e
+         WHERE (
+             (e.ai_processed_at IS NULL AND ${hasBodyClause('e', ready)} AND ${notExcludedByTagsClause('e')})
+             OR ${agentEligibleClause('e', { recentWindow: true, bodyLengthsReady: ready })}
+         )`,
+        [recentWindow],
+      )
+      : get(`
+        SELECT COUNT(*) AS n FROM emails e
+        WHERE (
+            (e.ai_processed_at IS NULL AND ${hasBodyClause('e', ready)} AND ${notExcludedByTagsClause('e')})
+            OR ${agentEligibleClause('e', { bodyLengthsReady: ready })}
+        )
+      `),
   };
 }

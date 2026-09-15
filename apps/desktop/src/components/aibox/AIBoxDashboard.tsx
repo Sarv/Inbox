@@ -45,6 +45,7 @@ export function AIBoxDashboard() {
     unreadNoBody: number;
     agentPending: number;
     agentDone: number;
+    pending: number;
   } | null>(null);
 
   // Load category definitions
@@ -161,7 +162,12 @@ export function AIBoxDashboard() {
   }, [breakdown?.unreadNoBody, choose]);
 
   const totalCategorized = Object.values(categoryCounts).reduce((a, b) => a + b, 0);
-  const totalEmails = totalCategorized + unprocessedCount;
+  // ONE outstanding number. The panel used to carry two — the categorizer's
+  // "0 pending" next to the agent's "196 to go" — which are the same idea with
+  // different scopes, and reading as a contradiction was the whole complaint.
+  // Falls back to the categorizer's own count until the breakdown loads.
+  const pendingCount = breakdown?.pending ?? unprocessedCount;
+  const totalEmails = totalCategorized + pendingCount;
   const progressPercent = totalEmails > 0 ? Math.round((totalCategorized / totalEmails) * 100) : 0;
 
   return (
@@ -204,17 +210,10 @@ export function AIBoxDashboard() {
               </span>
               <span className="flex items-center gap-1">
                 <CircleDashed className="h-3.5 w-3.5 text-amber-500" />
-                {unprocessedCount} pending
+                {pendingCount.toLocaleString()} pending
               </span>
             </div>
-            <span>
-              {progressPercent}% categorised
-              {(breakdown?.agentPending ?? 0) > 0 && (
-                <span className="ml-2 text-blue-600 dark:text-blue-400">
-                  · agent: {breakdown!.agentPending.toLocaleString()} to go
-                </span>
-              )}
-            </span>
+            <span>{progressPercent}% complete</span>
           </div>
 
           {/* Transparency breakdown — explains why "100% complete" can
