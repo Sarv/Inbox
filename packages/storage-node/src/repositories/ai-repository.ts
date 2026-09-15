@@ -14,7 +14,7 @@ import type {
   DynamicCategoryCounts,
 } from '../sqlite-storage';
 
-import { hasBodyClause, notExcludedByTagsClause } from './agent-eligibility';
+import { hasBodyClause, notExcludedByTagsClause, notInExcludedFolderClause } from './agent-eligibility';
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
 import { addTag, removeTag, parseTags, hasTag } from './email-repository';
 const logger = createLogger('ai-repository');
@@ -30,13 +30,18 @@ export class AIRepository extends BaseRepository {
     super(getDb);
   }
 
-  /** SQL fragment to exclude Trash/Spam/Drafts/Sent folders */
+  /**
+   * SQL fragment excluding the never-categorized folders, as a run of `AND`
+   * terms ready to drop into an existing WHERE.
+   *
+   * Built from the SHARED list rather than a second hand-written copy: this one
+   * decides what the category chips and views SHOW, while the pipeline's
+   * selector decides what the AI SPENDS A CALL ON. When the two lists drifted,
+   * the AI categorised drafts and sent mail that these queries then filtered
+   * straight back out — work paid for and never seen.
+   */
   private get excludeSpecialFolders(): string {
-    return [
-      'Trash', 'Spam', 'Drafts', 'Sent',
-      '[Gmail]/Trash', '[Gmail]/Spam', '[Gmail]/Drafts', '[Gmail]/Sent Mail',
-      'Junk', 'Junk Email', 'Deleted Items', 'Sent Items',
-    ].map(f => `AND instr(tags, '|${f}|') = 0`).join('\n      ');
+    return `AND ${notInExcludedFolderClause().split(' AND ').join('\n      AND ')}`;
   }
 
   // ========== AI Categories (via tags) ==========
