@@ -85,6 +85,25 @@ describe('element per kind', () => {
     expect(mounted.find('embed')).toBeNull();
   });
 
+  // Breaks: the first open of an attachment fetches it from the mail server
+  // before a byte reaches the element, so a PDF or a large image sat as a blank
+  // white panel for seconds with nothing saying the app was working — the exact
+  // complaint the viewer was supposed to answer. The element's own load event is
+  // what clears it, so both halves are pinned.
+  it.each([
+    ['report.pdf', 'iframe'],
+    ['photo.png', 'img'],
+  ])('covers %s with a spinner until its %s loads', (name, tag) => {
+    mounted = view([name]);
+
+    expect(mounted.byLabel('Loading attachment')).not.toBeNull();
+
+    fire(mounted.find(tag), 'load');
+
+    expect(mounted.byLabel('Loading attachment')).toBeNull();
+    expect(mounted.find(tag)).not.toBeNull();
+  });
+
   it('draws audio and video with native controls', () => {
     mounted = view(['song.mp3']);
     expect(mounted.find('audio')?.hasAttribute('controls')).toBe(true);

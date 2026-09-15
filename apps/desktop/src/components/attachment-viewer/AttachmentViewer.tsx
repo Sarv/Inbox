@@ -252,30 +252,7 @@ function AttachmentBody({
   filename: string;
   onError: () => void;
 }) {
-  if (kind === 'pdf') {
-    return (
-      // Chromium's own PDF viewer, and it will not run inside a sandboxed frame:
-      // ANY `sandbox` attribute — `allow-scripts` included — fails the load with
-      // ERR_BLOCKED_BY_CLIENT and leaves the panel blank, because the internal
-      // viewer is an extension that needs an origin of its own. Verified on a
-      // real 499 KB PDF: sandboxed frames were refused, the plain frame rendered.
-      //
-      // What contains this frame is the RESPONSE, not the attribute. The protocol
-      // handler derives `Content-Type` from the sanitized extension alone (never
-      // the sender's declared type) and sends `X-Content-Type-Options: nosniff`,
-      // so a `.pdf` that actually carries HTML is still handed to the PDF plugin
-      // instead of being parsed as a document — this frame cannot become a
-      // script-executing one. Only the `pdf` kind reaches here; every other kind
-      // renders through <img>/<pre>/<audio>/<video>, never a frame.
-      <iframe
-        src={url}
-        title={filename}
-        referrerPolicy="no-referrer"
-        className="h-full w-full border-0 bg-white"
-        onError={onError}
-      />
-    );
-  }
+  if (kind === 'pdf') return <PdfBody url={url} filename={filename} onError={onError} />;
 
   if (kind === 'image') return <ImageBody url={url} filename={filename} onError={onError} />;
   if (kind === 'text') return <TextBody url={url} />;
@@ -295,6 +272,67 @@ function AttachmentBody({
   );
 }
 
+/**
+ * Shown over an element that loads its own bytes, until that element says it is
+ * done. The FIRST open of an attachment fetches it from the mail server before a
+ * single byte reaches the element — seconds, for a big PDF on a slow mailbox —
+ * and with nothing on top the user is looking at a blank white panel with no
+ * sign the app is doing anything. `bg-card` rather than a translucent wash so a
+ * half-paged PDF doesn't show through underneath it.
+ */
+function PendingOverlay() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading attachment"
+      className="absolute inset-0 flex items-center justify-center bg-card"
+    >
+      <Loader2 className="h-6 w-6 animate-spin text-primary" />
+    </div>
+  );
+}
+
+function PdfBody({
+  url,
+  filename,
+  onError,
+}: {
+  url: string;
+  filename: string;
+  onError: () => void;
+}) {
+  const [ready, setReady] = useState(false);
+
+  return (
+    <div className="relative h-full w-full">
+      {/* Chromium's own PDF viewer, and it will not run inside a sandboxed
+          frame: ANY `sandbox` attribute — `allow-scripts` included — fails the
+          load with ERR_BLOCKED_BY_CLIENT and leaves the panel blank, because the
+          internal viewer is an extension that needs an origin of its own.
+          Verified on a real 499 KB PDF: sandboxed frames were refused, the plain
+          frame rendered.
+
+          What contains this frame is the RESPONSE, not the attribute. The
+          protocol handler derives `Content-Type` from the sanitized extension
+          alone (never the sender's declared type) and sends
+          `X-Content-Type-Options: nosniff`, so a `.pdf` that actually carries
+          HTML is still handed to the PDF plugin instead of being parsed as a
+          document — this frame cannot become a script-executing one. Only the
+          `pdf` kind reaches here; every other kind renders through
+          <img>/<pre>/<audio>/<video>, never a frame. */}
+      <iframe
+        src={url}
+        title={filename}
+        referrerPolicy="no-referrer"
+        className="h-full w-full border-0 bg-white"
+        onLoad={() => setReady(true)}
+        onError={onError}
+      />
+      {!ready && <PendingOverlay />}
+    </div>
+  );
+}
+
 function ImageBody({
   url,
   filename,
@@ -305,6 +343,7 @@ function ImageBody({
   onError: () => void;
 }) {
   const [actualSize, setActualSize] = useState(false);
+  const [ready, setReady] = useState(false);
   return (
     <div className="relative flex h-full items-center justify-center overflow-auto p-4">
       <Tooltip content={actualSize ? 'Fit to window' : 'Actual size'} delayMs={40}>
@@ -322,9 +361,11 @@ function ImageBody({
       <img
         src={url}
         alt={filename}
+        onLoad={() => setReady(true)}
         onError={onError}
         className={actualSize ? 'max-w-none' : 'max-h-full max-w-full object-contain'}
       />
+      {!ready && <PendingOverlay />}
     </div>
   );
 }
