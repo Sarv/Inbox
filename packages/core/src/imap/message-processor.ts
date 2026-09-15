@@ -11,6 +11,7 @@ import type { IMAPMessage, IIMAPClient } from '../types/imap';
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { sanitizeIcsText } from '../utils/calendar';
+import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
 import { collectFilterActions, computeFilterActionResult } from '../utils/filters';
 import { refreshCountsForFolders } from '../utils/folder-counts';
@@ -866,14 +867,18 @@ export class MessageProcessor {
       .filter((att) => !(att.name === 'attachment' && /calendar|ics/i.test(att.contentType)));
 
     if (parsed.html) {
+      // Put back any `cid:` image mailparser declined to rewrite (see
+      // cid-images.ts) BEFORE the HTML is stored, so the repaired body flows
+      // through inline-image relocation and the renderer like any other.
+      const html = this.resolveInlineCids(parsed.html, rawAttachments);
       // An HTML-only mail (no text/plain alternative) leaves mailparser's
       // `text` undefined, which used to store cleanBody EMPTY — measured on
       // 205 of 26,185 real rows. cleanBody is what the list snippet, the
       // filters and every AI prompt read, so those mails looked bodyless even
       // though the HTML was fully downloaded. Derive the text from the HTML.
       return {
-        rawBody: parsed.html,
-        cleanBody: parsed.text || htmlToPlainText(parsed.html),
+        rawBody: html,
+        cleanBody: parsed.text || htmlToPlainText(html),
         contentType: 'html',
         attachments,
         calendarIcs,
@@ -882,6 +887,30 @@ export class MessageProcessor {
       return { rawBody: parsed.text, cleanBody: parsed.text, contentType: 'text', attachments, calendarIcs };
     }
     return { rawBody: body, cleanBody: body, contentType: 'text', attachments, calendarIcs };
+  }
+
+  /**
+   * Substitute `cid:` references mailparser left in the HTML with the bytes of
+   * the parts they name. A no-op for the overwhelming majority of mail, which
+   * has no leftover references at all.
+   *
+   * Every part is offered, not just the ones filtered into `attachments` above:
+   * a cid image is `related`/`inline` by definition, which is exactly what that
+   * filter removes.
+   */
+  private resolveInlineCids(html: string, rawAttachments: ParsedMail['attachments']): string {
+    if (!hasCidRefs(html)) return html;
+    const parts: CidImagePart[] = (rawAttachments || []).map((attachment) => ({
+      cid: attachment.cid,
+      contentType: attachment.contentType,
+      filename: attachment.filename,
+      toBase64: () => Buffer.from(attachment.content).toString('base64'),
+    }));
+    const resolved = resolveCidImages(html, parts);
+    if (resolved !== html) {
+      logger.info(`Resolved cid: image reference(s) mailparser left unlinked (${parts.length} parts)`);
+    }
+    return resolved;
   }
 
   /**

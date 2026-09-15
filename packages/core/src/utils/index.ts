@@ -28,6 +28,7 @@ export * from './safe-path';
 export * from './mail-parse';
 export * from './html-text';
 export * from './sarv-api-error';
+export * from './cid-images';
 export * from './inline-images';
 export * from './remote-image-requests';
 export * from './lru-cache';
