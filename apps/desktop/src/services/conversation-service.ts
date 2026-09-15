@@ -2,6 +2,7 @@
 // from quoted/forwarded email content for unified conversation view
 
 import type { EmailRecord } from '@sarvinbox/core';
+import { jsonrepair } from 'jsonrepair';
 
 import { parseHumanDateToEpochSec } from '../utils/human-date';
 import { cleanLLMJsonResponse, truncate } from '../utils/llm-json';
@@ -3143,6 +3144,55 @@ function unescapeDoubleEscapedLLMBody(body: string): string {
 }
 
 /**
+ * Pull the `body` field out of a body-rewrite response that is not valid JSON.
+ *
+ * Models are unreliable at writing a large HTML document into a JSON string.
+ * Across 36 real failures in one mailbox every one was a variation of that:
+ *
+ *   22  a quote escaped on the way in but not on the way out —
+ *       `style=\"max-width:100%;">` ends the JSON string mid-attribute
+ *   10  escapes JSON does not define — `</div\>`, `&quot;\;`
+ *    2  a literal control character inside the string
+ *    1  trailing junk after the object
+ *    1  the key separator missing entirely — `{"body"<html dir="ltr">`
+ *
+ * A stricter parser cannot help, because the damage is in the delimiters a
+ * parser relies on. What DOES hold is the schema: the prompt asks for exactly
+ * `{"body":"…"}` and nothing else, so the key is an unambiguous anchor. Take
+ * everything after it, drop the closer if the response got that far, and undo
+ * the escaping by hand — including dropping backslashes JSON gives no meaning,
+ * which is exactly what the model over-produces.
+ *
+ * Because there is only ever ONE field, reading to the end cannot swallow a
+ * sibling key; and because it needs no closing quote, it recovers a response
+ * cut off mid-HTML — the case a repair pass handles worst.
+ *
+ * Exported for tests. Returns null when the anchor is absent, so it can never
+ * "rescue" a response of some other shape.
+ */
+export function recoverBodyField(text: string): string | null {
+  // Tolerate a missing colon AND a missing opening quote: `"body"` itself is
+  // the signal, and one real response omitted both.
+  const m = /"body"\s*:?\s*"?/.exec(text);
+  if (!m) return null;
+  const raw = text
+    .slice(m.index + m[0].length)
+    // The closing `"}`, when the response was not truncated.
+    .replace(/"\s*\}?\s*$/, '');
+  if (!raw) return null;
+  return raw
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\b/g, '\b')
+    .replace(/\\f/g, '\f')
+    // Whatever is still escaped is either \" \\ \/ — drop the backslash, keep
+    // the character — or an escape the model invented, same treatment.
+    .replace(/\\(.)/g, '$1');
+}
+
+/**
  * True when the MOST RECENT parseJsonResponse call had to salvage a
  * truncated response via tryRepairTruncatedJson — i.e. the model hit
  * its output cap and we kept a valid prefix. Callers read this
@@ -3211,6 +3261,40 @@ function parseJsonResponse(response: string): any {
         // fall through
       }
     }
+    // Hand the mess to a parser built for it. `jsonrepair` fixes the
+    // malformations a model makes when it writes a large HTML document into a
+    // JSON string: invalid escapes (it emits `</div\>` and `&quot;\;`),
+    // literal control characters, trailing junk, missing closers. Measured on
+    // the 36 real failures in one user's log it recovered 24 on its own — but
+    // see recoverBodyField below for why it is not used alone.
+    try {
+      const viaRepair = JSON.parse(jsonrepair(cleaned));
+      const rescued = recoverBodyField(cleaned);
+      // jsonrepair terminates a string at the first UNESCAPED quote, which in
+      // HTML (`style=\"…"`) can be 30 characters in. Twice in that sample it
+      // returned a 34-character body where the email was 10,713 — a silently
+      // truncated message saved as if complete, which is worse than a clean
+      // failure. When the field-level rescue recovers more, it wins.
+      if (rescued && (typeof viaRepair?.body !== 'string' || rescued.length > viaRepair.body.length)) {
+        lastParseRepairedTruncation = true;
+        return { ...viaRepair, body: rescued };
+      }
+      return viaRepair;
+    } catch {
+      // fall through — recoverBodyField still gets its turn below
+    }
+
+    // Last structural resort for the body-rewrite shape. The prompt asks for
+    // exactly {"body":"…"} and nothing else, so the key is an unambiguous
+    // anchor: take everything after it and drop the closer if one arrived.
+    // This is what handles a response cut off mid-HTML, where there IS no
+    // closing quote to find.
+    const bodyOnly = recoverBodyField(cleaned);
+    if (bodyOnly) {
+      lastParseRepairedTruncation = true;
+      return { body: bodyOnly };
+    }
+
     // Try to repair truncated JSON (LLM output cut off mid-value)
     const repaired = tryRepairTruncatedJson(cleaned);
     if (repaired) {
