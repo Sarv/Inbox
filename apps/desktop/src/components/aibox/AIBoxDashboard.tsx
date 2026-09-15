@@ -166,7 +166,16 @@ export function AIBoxDashboard() {
   // "0 pending" next to the agent's "196 to go" — which are the same idea with
   // different scopes, and reading as a contradiction was the whole complaint.
   // Falls back to the categorizer's own count until the breakdown loads.
-  const pendingCount = breakdown?.pending ?? unprocessedCount;
+  // Falling back to the categorizer's count ALONE was wrong, and wrong in the
+  // worst direction: in dev the renderer hot-reloads while the main process
+  // keeps an older bundle, so `pending` goes missing exactly when the two
+  // halves disagree — and the panel then showed "0 pending · 100% complete"
+  // beside "Waiting for priority + actions: 99", which is the contradiction
+  // this whole change exists to remove. Sum both queues instead: it slightly
+  // over-counts an email owed by both, and over-reporting outstanding work is
+  // the safe direction for a progress bar.
+  const pendingCount = breakdown?.pending
+    ?? ((breakdown?.agentPending ?? 0) + unprocessedCount);
   const totalEmails = totalCategorized + pendingCount;
   const progressPercent = totalEmails > 0 ? Math.round((totalCategorized / totalEmails) * 100) : 0;
 
