@@ -103,6 +103,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use that mailbox.
 
 ### Fixed
+- Designed mail — the daily digest, a newsletter, anything built from a template
+  — no longer loses parts of itself in the chat view. The digest arrived with
+  "Hello, <name>" and its section headings simply MISSING, its header and its app
+  badges stacked one item per line, and an avatar's two initials broken across
+  two lines, while the same message read correctly in the standard view. The chat
+  view renders a designed mail inside a sandboxed frame, and the sanitizer that
+  runs first keeps the message body but removes its `<style>` — so every size and
+  width the template kept in a class was gone. That is not a cosmetic downgrade
+  for a modern template: it wraps each column in a cell set to `font-size:0px` to
+  kill stray whitespace and puts the real sizes in the stylesheet, so text sized
+  that way rendered at zero height and was not there at all, and each column fell
+  back to its full-width phone layout. The mail's own rules are now written onto
+  the elements they match before the body reaches the frame, the same step a
+  newsletter build runs before sending. Width media queries are resolved for a
+  desktop reading pane, so the wide layout wins; a mail's dark-mode rules stay
+  off, as they already do in the standard view.
+- The chat view no longer shows a message twice, and no longer hangs one
+  message's attachments under another person's name. A thread of six mails was
+  drawing eight bubbles: the view recovers messages that survive only as a quote
+  inside a later reply, which is what lets it show a message nobody in the
+  mailbox actually holds — but it was also recovering mails the thread already
+  had, so the same message appeared once as itself and once as the copy a
+  colleague quoted back. The two copies are rarely byte-identical (a quoted mail
+  picks up the sender's "Confidential" banner, loses its footer, is re-wrapped),
+  which is why the old exact-prefix match let them through; they are now matched
+  by content regardless of what was prepended, with a length floor so a genuinely
+  short reply can never be mistaken for a duplicate and deleted. Separately, a
+  bubble recovered from a quote was being handed the *quoting* mail's
+  attachments, reply/forward actions and star — so a file Bob attached appeared
+  under Alice's message, and downloading it fetched something that bubble never
+  carried. A recovered message now carries only what it actually came with.
 - "Copy to Clipboard" in Show original now says whether it worked. The clipboard
   is invisible, so a button that looked identical before and after the click was
   indistinguishable from a dead one — people clicked it repeatedly with no way to
@@ -111,6 +142,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Copy failed" when the write is refused (an unfocused window, or a context with
   no clipboard access) instead of silently pretending it succeeded. The button is
   now one shared component, so every future copy affordance behaves the same way.
+- Notifications and other machine-sent mail now render in the chat view exactly
+  as they were sent. The view runs every body through a conversational clean-up
+  — unwrap the layout, cut what reads like a signature, normalize the fonts —
+  and on a designed template that is destruction, not tidying: a Keka daily
+  digest arrived with its whole footer table, the company logo and the QR code
+  deleted, and nothing on screen said anything had been removed. A designed body
+  owns its own layout, so it is now handed to the bubble untouched, and the
+  bubble stops painting its per-sender tint over it. It is still a bubble in the
+  same chat, in the same thread, with the same header, attachments and actions —
+  only its content is left alone. A thread stays in the ordinary chat treatment
+  the moment anybody replies to it, so nothing about a human conversation, long
+  or short, changes. Where the view recognises a quoted turn inside one of these
+  mails, the turn it carved out is folded back into the single bubble that shows
+  the mail whole; a login notification that repeats the previous one used to
+  arrive as two copies of itself, both stripped of the header card and the
+  striped detail rows that carry all of its meaning.
+- An ordinary mail no longer arrives in the chat view dressed as a document. The
+  chat library marks a message as a document whenever its body contains any
+  embedded media at all — one `img` or one `table` is enough — and drew it with a
+  3px coloured rule down its side and a fill of its own. A plain typed mail with
+  a signature card tripped that, so a normal message looked like it was being
+  flagged for something. Those bubbles now match every other bubble in the
+  thread, while still being rendered through the frame that keeps their layout
+  intact. Mail shown exactly as it was sent keeps the document treatment, which
+  is the one case it was meant for.
+- The phishing warning no longer appears in the chat view. It belongs to the
+  standard view, where a reader checks who a message is really from; repeated
+  under every bubble of a thread it was noise, and noise is how a warning stops
+  being read where it counts. Nothing about the check itself changed — the
+  standard view and the thread list still show it.
 - Bulk/marketing mail is now recognised from its **headers**, not its body, so a
   long human conversation is no longer mistaken for a newsletter. The classifier
   used to score the whole raw body — and a reply carries the entire quoted
@@ -125,6 +186,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   importance scorer, one standalone — have been folded into a single shared set
   of rules, so they can no longer disagree about the same message. The scorer's
   copy was missing `Feedback-ID` and `Auto-Submitted` entirely.
+- The rule-based importance scorer was being handed the message BODY where it
+  expected raw headers, so every header-based check it makes — SPF/DKIM/DMARC
+  authentication, `List-Unsubscribe`, `Precedence`, campaign headers — was
+  reading body prose and scoring whatever happened to contain the words. Stored
+  messages carry no raw headers, so those checks now correctly report nothing and
+  the bulk verdict falls back to the `|bulk|` tag recorded at sync time.
 - Images a sender embedded in the message itself (a `cid:` reference — signature
   logos, avatars in notification mail) could render as a broken image while the
   same email looked fine in Gmail. The mail parser only inlines such a part when
