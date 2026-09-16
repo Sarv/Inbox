@@ -2,6 +2,7 @@ import { Code, Download, Loader2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useEmailStore } from '../../store/email-store';
+import { CopyButton } from '../CopyButton';
 
 interface ShowOriginalModalProps {
   email: any;
@@ -254,13 +255,12 @@ export function ShowOriginalModal({ email, onClose }: ShowOriginalModalProps) {
             Download Original
           </button>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigator.clipboard.writeText(rawText)}
+            <CopyButton
+              value={() => rawText}
+              label="Copy to Clipboard"
+              copiedLabel="Copied to clipboard"
               disabled={loading}
-              className="px-4 py-2 text-sm bg-muted hover:bg-accent rounded-md transition-colors disabled:opacity-50"
-            >
-              Copy to Clipboard
-            </button>
+            />
             <button
               onClick={onClose}
               className="px-4 py-2 text-sm bg-primary text-primary-foreground hover:bg-primary/90 rounded-md transition-colors"
