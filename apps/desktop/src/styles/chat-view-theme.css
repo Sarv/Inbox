@@ -88,3 +88,146 @@
 .dark {
   --sec-tooltip-bg: #374151;
 }
+
+/*
+ * The app renders the attachment strip, so the library's is hidden.
+ *
+ * The library's chips are plain `<span>`s: not focusable, and with no element
+ * the app owns to hang a tooltip on. `AttachmentPills` draws real `<button>`s
+ * instead (reusing the `.sec-chip*` classes below, so the pill keeps the
+ * library's exact shape and follows the bubble's colour), and ThreadChatView
+ * renders it from `renderFooter` — a sibling of this strip inside the same
+ * bubble. Hiding rather than not populating `message.attachments`: the library
+ * reads that array for more than the strip (bubble classification), and a
+ * message that claims no attachments would be classified wrong.
+ */
+.sec-bubble .sec-attachments {
+  display: none;
+}
+
+/*
+ * The app's own strip, in place of the hidden one. Same three declarations the
+ * library uses for `.sec-attachments`, in the library's own tokens, so the row
+ * wraps and spaces identically — there is no second spacing scale to keep in
+ * sync.
+ */
+.sarv-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sec-gap-sm);
+  margin-block-start: var(--sec-gap);
+}
+
+/*
+ * The pill is a `<button>` now, so its own chrome has to be undone: a button
+ * brings a border, a background and a font of its own, none of which the
+ * surrounding `.sec-chip` expects. Everything visual still comes from the
+ * library's classes — this only stops the button element from fighting them.
+ */
+.sarv-chip__open {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sec-gap-sm);
+  overflow: hidden;
+  /* See the padding note below. */
+  padding: var(--sec-gap-sm) 0 var(--sec-gap-sm) var(--sec-gap);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/*
+ * The pill's padding moves onto its two buttons.
+ *
+ * The library puts it on `.sec-chip`, which was fine for a strip of inert spans
+ * but would now be the one band of the pill that is NOT a click target — an
+ * edge that looks pressable and does nothing. Split across the two children
+ * (left half above, right half here) it adds up to the same pill, to the pixel,
+ * with no dead zone; `.sec-chip`'s own `gap` still separates them.
+ */
+.sarv-attachments .sec-chip {
+  padding: 0;
+}
+
+.sarv-attachments .sec-chip__btn {
+  padding: var(--sec-gap-sm) var(--sec-gap) var(--sec-gap-sm) 0;
+}
+
+/*
+ * Hovering anywhere on the pill tints it: all of it opens the attachment,
+ * except the save button, which is part of the same control.
+ *
+ * An inset shadow rather than a `background`, because the pill already has two
+ * different ones — `--sec-surface-2` on an incoming bubble, transparent on a
+ * sent one — and replacing either would change the pill's colour rather than
+ * shade it. A `currentColor` overlay reads correctly on both: it follows the
+ * bubble's own ink, which is dark on one and white on the other. The huge
+ * spread is just how an inset shadow fills a box, and it takes the pill's
+ * border-radius, so it stays pill-shaped.
+ */
+.sarv-attachments .sec-chip:hover {
+  box-shadow: inset 0 0 0 999px color-mix(in srgb, currentColor 8%, transparent);
+}
+
+/* The library already rings `.sec-chip__btn` on focus, in this token. The open
+   button is new, so it needs the same treatment to match it. */
+.sarv-chip__open:focus-visible {
+  outline: 2px solid var(--sec-focus-ring);
+  outline-offset: 1px;
+}
+
+/*
+ * A bubble showing a mail EXACTLY as it was sent paints nothing of its own.
+ *
+ * The library tints every incoming bubble with a per-sender pastel and leaves
+ * the framed body transparent so the tint shows through — lovely on a typed
+ * message, a green wash over a designed email. The marker comes from
+ * `AS_SENT_MARKER` in chat-message-adapter.ts, which the library forwards to
+ * the DOM as `data-sec-applied`.
+ *
+ * `!important` is not a shortcut here: that tint is an INLINE style on the
+ * bubble element, and an inline declaration can only be beaten by an important
+ * one. `--sec-doc-page` is neutralised in the same rule because the framed
+ * body's background and the wash behind it are both derived from it.
+ */
+.sec-bubble[data-sec-applied~='as-sent'] {
+  --sec-doc-page: hsl(var(--card)) !important;
+  background: hsl(var(--card)) !important;
+  border-color: hsl(var(--border)) !important;
+}
+
+/*
+ * An ordinary mail is an ordinary bubble, whatever it happens to contain.
+ *
+ * The library marks a bubble `--doc` when the body carries ANY embedded media
+ * — its own selector is `img,table,iframe,svg,video,audio,object,embed,canvas`
+ * — and then draws it as a document: a 3px inline-start rule, and on the
+ * reader's own side a brand-coloured one over a brand-soft fill. A sign-off
+ * logo is enough to trip that, so a plain typed mail with a signature card
+ * arrives looking like a newsletter. In a single-sender thread even a bare
+ * layout table counts, because the library only relaxes that test once a second
+ * person has replied.
+ *
+ * `--doc` is still right about the RENDERING — the body goes through the frame
+ * host, which is what keeps its layout intact — so only the chrome is undone
+ * here, and only where the app has not already claimed the bubble as sent
+ * verbatim. That is the one case where the document look is earned.
+ *
+ * Specificity rather than `!important`: three compound selectors beat the
+ * library's two, so this wins whichever stylesheet the bundler emits first. The
+ * per-sender pastel on an INCOMING bubble is an inline style and is left alone
+ * — it is the same tint that bubble would have had without any media in it.
+ */
+.sec-bubble--doc:not([data-sec-applied~='as-sent']) {
+  border-inline-start-width: 1px;
+}
+
+.sec-bubble--doc.sec-bubble--mine:not([data-sec-applied~='as-sent']) {
+  border-color: var(--sec-bubble-mine-border);
+  background: var(--sec-bubble-mine-bg);
+  /* Transparent, not a colour of its own: the framed body then sits directly on
+     the bubble's tint, exactly where the text of a plain bubble sits. */
+  --sec-doc-page: transparent;
+}

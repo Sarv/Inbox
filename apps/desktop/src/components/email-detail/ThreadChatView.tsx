@@ -1,4 +1,4 @@
-import { MailChatView, type Attachment, type ChatMessage } from '@sarv-in/email-chat-view';
+import { MailChatView, type ChatMessage } from '@sarv-in/email-chat-view';
 import type { EmailRecord } from '@sarvinbox/core';
 import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
@@ -8,8 +8,7 @@ import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
 import { hasTag } from '../../utils/tags';
-import { AttachmentViewer, type ViewerAttachment } from '../attachment-viewer/AttachmentViewer';
-import { useAttachmentActions } from '../attachment-viewer/useAttachmentActions';
+import { AttachmentPills } from '../attachment-viewer/AttachmentPills';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
@@ -176,36 +175,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [emailsById],
   );
 
-  // The chat surface has no chip strip of its own, so it opens the SAME viewer
-  // the classic card opens, keyed by the message's source email.
-  const [viewerTarget, setViewerTarget] = useState<{
-    emailId: string;
-    accountId?: string;
-    attachments: ViewerAttachment[];
-    index: number;
-  } | null>(null);
-
-  const { saveCopy } = useAttachmentActions();
-
-  const runAttachmentAction = useCallback(
-    (attachment: Attachment, message: ChatMessage, action: 'preview' | 'download') => {
-      const email = emailFor(message);
-      if (!email) return;
-      const accountId = (email as { accountId?: string }).accountId;
-      if (action === 'download') {
-        void saveCopy({ emailId: email.id, filename: attachment.filename, accountId });
-        return;
-      }
-      // Open every attachment on the message, positioned at the one clicked, so
-      // the viewer's next/previous arrows work here exactly as they do elsewhere.
-      const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes);
-      const names = attachments.length > 0 ? attachments : [{ name: attachment.filename, size: null }];
-      const index = Math.max(names.findIndex((a) => a.name === attachment.filename), 0);
-      setViewerTarget({ emailId: email.id, accountId, attachments: names, index });
-    },
-    [emailFor, saveCopy],
-  );
-
   const openLink = useCallback((url: string) => {
     // `#` is an in-document jump with nowhere to go once the body is framed,
     // and mailto: is the compose window's job, not the browser's.
@@ -259,21 +228,43 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     ],
   );
 
-  // The phishing check is per message and body-independent, so every bubble
-  // gets it — not just the thread's anchor card, which is the OLDEST message
-  // and therefore never the newly arrived one a reader is looking at. The
-  // library offers no slot above a bubble's body, so it sits under it.
+  /**
+   * The attachment strip for each bubble, rendered by the app rather than by
+   * the library (whose own strip chat-view-theme.css hides).
+   *
+   * The library draws its chips as plain `<span>`s with no identity and no slot
+   * to replace them, so reaching one meant delegating off its class name and
+   * recovering the filename from a `title` attribute. That worked, but left the
+   * pill unreachable by keyboard and left "this is clickable" to the mouse
+   * cursor alone — no tooltip, because a tooltip needs an element we own.
+   * `AttachmentPills` renders real buttons, so both come for free.
+   *
+   * The phishing check below is per message and body-independent, so every
+   * bubble gets it — not just the thread's anchor card, which is the OLDEST
+   * message and therefore never the newly arrived one a reader is looking at.
+   * The library offers no slot above a bubble's body, so it sits under it.
+   */
   const renderFooter = useCallback(
     (message: ChatMessage) => {
       const email = emailFor(message);
       if (!email) return null;
+      const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes);
       return (
-        <PhishingWarningBanner
-          fromName={email.fromName}
-          fromAddress={email.fromAddress}
-          html={email.rawBody}
-          className="mt-2"
-        />
+        <>
+          {attachments.length > 0 && (
+            <AttachmentPills
+              emailId={email.id}
+              accountId={(email as { accountId?: string }).accountId}
+              attachments={attachments}
+            />
+          )}
+          <PhishingWarningBanner
+            fromName={email.fromName}
+            fromAddress={email.fromAddress}
+            html={email.rawBody}
+            className="mt-2"
+          />
+        </>
       );
     },
     [emailFor],
@@ -384,12 +375,9 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
           const email = emailFor(message);
           if (email) retryBody(email.id);
         }}
-        onPreviewAttachment={(attachment, message) =>
-          runAttachmentAction(attachment, message, 'preview')
-        }
-        onDownloadAttachment={(attachment, message) =>
-          runAttachmentAction(attachment, message, 'download')
-        }
+        // No `onPreviewAttachment` / `onDownloadAttachment`: passing either is
+        // what draws the library's own chips, which the app replaces with its
+        // own buttons (see renderFooter).
         renderActions={renderActions}
         renderFooter={renderFooter}
         emptyState={
@@ -435,16 +423,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
             embedded
           />
         </div>
-      )}
-
-      {viewerTarget && (
-        <AttachmentViewer
-          emailId={viewerTarget.emailId}
-          accountId={viewerTarget.accountId}
-          attachments={viewerTarget.attachments}
-          initialIndex={viewerTarget.index}
-          onClose={() => setViewerTarget(null)}
-        />
       )}
     </div>
   );
