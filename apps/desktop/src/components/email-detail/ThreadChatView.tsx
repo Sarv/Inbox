@@ -13,10 +13,14 @@ import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
 
-import { chatMessagesFromConversation, chatMessagesFromThread } from './chat-message-adapter';
+import {
+  carrierEmailOf,
+  chatMessagesFromConversation,
+  chatMessagesFromThread,
+  ownerEmailOf,
+} from './chat-message-adapter';
 import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
 import { EmailMenu } from './EmailMenu';
-import { PhishingWarningBanner } from './PhishingWarningBanner';
 import type { EmailDetailContext } from './types';
 import { parseAttachments } from './utils';
 
@@ -170,8 +174,12 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [conversationMessages, threadEmails, currentUserEmail],
   );
 
+  // NOT `emailsById.get(message.sourceId)`: on a bubble recovered from a quote
+  // that is the mail which QUOTED it, so the actions and the attachment strip
+  // below would belong to a different message than the one being read. See
+  // `ownerEmailOf` — a quote simply has no email to act on, and gets neither.
   const emailFor = useCallback(
-    (message: ChatMessage) => emailsById.get(message.sourceId || message.id),
+    (message: ChatMessage) => ownerEmailOf(message, emailsById),
     [emailsById],
   );
 
@@ -239,32 +247,23 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
    * cursor alone — no tooltip, because a tooltip needs an element we own.
    * `AttachmentPills` renders real buttons, so both come for free.
    *
-   * The phishing check below is per message and body-independent, so every
-   * bubble gets it — not just the thread's anchor card, which is the OLDEST
-   * message and therefore never the newly arrived one a reader is looking at.
-   * The library offers no slot above a bubble's body, so it sits under it.
+   * Deliberately NOT the phishing warning. That belongs to the standard view
+   * (EmailCard, ThreadList), which is where a reader checks who a mail is
+   * really from; a banner under every bubble turns the chat into a wall of
+   * warnings and is how people learn to ignore the one that matters.
    */
   const renderFooter = useCallback(
     (message: ChatMessage) => {
       const email = emailFor(message);
       if (!email) return null;
       const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes);
+      if (attachments.length === 0) return null;
       return (
-        <>
-          {attachments.length > 0 && (
-            <AttachmentPills
-              emailId={email.id}
-              accountId={(email as { accountId?: string }).accountId}
-              attachments={attachments}
-            />
-          )}
-          <PhishingWarningBanner
-            fromName={email.fromName}
-            fromAddress={email.fromAddress}
-            html={email.rawBody}
-            className="mt-2"
-          />
-        </>
+        <AttachmentPills
+          emailId={email.id}
+          accountId={(email as { accountId?: string }).accountId}
+          attachments={attachments}
+        />
       );
     },
     [emailFor],
@@ -369,7 +368,10 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         // has no way to know the reader's setting — so the app answers, per
         // message, with the same rule the classic card uses. Without this a
         // reader who chose "always load" still saw the banner here.
-        blockRemoteImages={(message) => blockRemoteImagesFor(emailFor(message))}
+        // `carrierEmailOf`, not `emailFor`: this asks whose bytes these are, not
+        // whose message it is. A recovered quote's images live in the reply that
+        // carried it, so the reader's choice about THAT sender is the one to honour.
+        blockRemoteImages={(message) => blockRemoteImagesFor(carrierEmailOf(message, emailsById))}
         onOpenLink={openLink}
         onRetryBody={(message) => {
           const email = emailFor(message);

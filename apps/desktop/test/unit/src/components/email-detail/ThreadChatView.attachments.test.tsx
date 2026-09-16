@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../../../helpers/render';
 
-import { email, TEN_AM } from './email-fixture';
+import { email, ELEVEN_AM, TEN_AM } from './email-fixture';
 
 /**
  * Opening an attachment from the chat view.
@@ -25,7 +25,12 @@ const handed: { onPreviewAttachment?: unknown; onDownloadAttachment?: unknown } 
 // A stand-in for the chat library. `renderFooter` is where the app's strip
 // lands (in the real library it is the last child of the bubble, directly after
 // the strip this app hides), so the mock only has to call it.
-vi.mock('@sarv-in/email-chat-view', () => ({
+vi.mock('@sarv-in/email-chat-view', async (importOriginal) => ({
+  // Only the view is stubbed. The rest of the module is real, because the
+  // adapter asks it the same questions the view would — whether the thread
+  // reads as a conversation, whether a body is designed — and a stub that
+  // answered them differently would test a pipeline the app does not have.
+  ...(await importOriginal<Record<string, unknown>>()),
   MailChatView: ({
     messages,
     renderFooter,
@@ -262,5 +267,43 @@ describe('ThreadChatView attachments', () => {
   it('renders no strip for a message with no attachments', () => {
     const view = mount(<ThreadChatView ctx={context([NO_FILES])} />);
     expect(view.all('.sarv-attachments')).toHaveLength(0);
+  });
+
+  // Regression: THE attachment bug. A message recovered from a quote belongs to
+  // whoever wrote it, but the mail it was carved out of is the one that QUOTED
+  // it — so reading the email off `sourceId` hangs the quoting mail's files
+  // under the quoted author's name, and the reader downloads a file that bubble
+  // never carried.
+  it('renders no strip on a bubble recovered from a quote', () => {
+    const carrier = email({
+      id: 'carrier-1',
+      fromAddress: 'bob@acme.example',
+      fromName: 'Bob Ray',
+      date: ELEVEN_AM,
+      hasAttachments: true,
+      attachmentNames: 'bobs-copy.txt',
+      attachmentSizes: '[7]',
+      rawBody: [
+        '<div dir="ltr">Attached, as promised.</div>',
+        '<div class="gmail_quote">',
+        '<div dir="ltr" class="gmail_attr">',
+        'On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br>',
+        '</div>',
+        '<blockquote class="gmail_quote"><div dir="ltr">Could you send over the',
+        ' signed copy before Friday? Legal need it for the review.</div></blockquote>',
+        '</div>',
+      ].join(''),
+    } as Partial<EmailRecord> & { id: string });
+
+    const view = mount(<ThreadChatView ctx={context([carrier])} />);
+    const strips = view.all('.sarv-attachments');
+
+    // Two bubbles — Alice's recovered message and Bob's own — and only Bob's
+    // carries the file.
+    expect(view.all('[data-message-id]')).toHaveLength(2);
+    expect(strips).toHaveLength(1);
+    expect(strips[0]!.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe(
+      'carrier-1',
+    );
   });
 });

@@ -1,16 +1,23 @@
 // @vitest-environment happy-dom
 // The library splits bodies with the DOM, so these tests need a real
 // DOMParser. Everything else in this file is a pure function over strings.
+import type { ChatMessage } from '@sarv-in/email-chat-view';
 import type { EmailRecord } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  AS_SENT_MARKER,
+  asSentEmailIds,
   attachmentsOf,
+  carrierEmailOf,
   chatMessagesFromConversation,
   bodyOf,
   chatMessagesFromThread,
   draftIdsIn,
+  dropDuplicateQuotes,
   isFromMe,
+  normalizedContent,
+  ownerEmailOf,
   isThreadSegmentWarm,
   mailsFromEmails,
   toEpochMs,
@@ -220,9 +227,12 @@ describe('chatMessagesFromConversation', () => {
   // Regression: inline images are stored as `sarv-image:<id>` refs, not data
   // URLs. Unresolved, every inline image in the thread renders broken.
   it('resolves inline image refs through the host’s cache', () => {
-    const [message] = convert([conversationMessage({ id: 'm1', body: '<img src="sarv-image:ab">' })], {
-      resolveImages: (html) => html.replace('sarv-image:ab', 'data:image/png;base64,AA'),
-    });
+    const [message] = convert(
+      [conversationMessage({ id: 'm1', body: '<img src="sarv-image:ab">' })],
+      {
+        resolveImages: (html) => html.replace('sarv-image:ab', 'data:image/png;base64,AA'),
+      }
+    );
     expect(message!.body).toBe('<img src="data:image/png;base64,AA">');
   });
 
@@ -325,9 +335,7 @@ describe('mailsFromEmails', () => {
   // library requires a string, so the null has to stop here — the cast is the
   // point of the test, not an oversight.
   it('never hands the library a null sender', () => {
-    const [mail] = mailsFromEmails([
-      email({ id: 'e1', fromAddress: null as unknown as string }),
-    ]);
+    const [mail] = mailsFromEmails([email({ id: 'e1', fromAddress: null as unknown as string })]);
     expect(mail!.fromAddress).toBe('');
   });
 });
@@ -348,7 +356,13 @@ describe('chatMessagesFromThread', () => {
     '</div>',
   ].join('');
 
-  function convert(emails: EmailRecord[], extra: Partial<{ resolveImages: (html: string) => string; failedBodies: ReadonlySet<string> }> = {}) {
+  function convert(
+    emails: EmailRecord[],
+    extra: Partial<{
+      resolveImages: (html: string) => string;
+      failedBodies: ReadonlySet<string>;
+    }> = {}
+  ) {
     return chatMessagesFromThread(emails, { currentUserEmail: ME, ...extra });
   }
 
@@ -390,7 +404,9 @@ describe('chatMessagesFromThread', () => {
   // which is about to be thrown away — and the call count is the only thing
   // that can tell the two orders apart.
   it('resolves inline image refs on each split body, not on the raw mail', () => {
-    const resolveImages = vi.fn((html: string) => html.replace('sarv-image:ab', 'data:image/png;base64,AA'));
+    const resolveImages = vi.fn((html: string) =>
+      html.replace('sarv-image:ab', 'data:image/png;base64,AA')
+    );
     const messages = convert(
       [email({ id: 'e2', fromAddress: 'bob@acme.example', date: ELEVEN_AM, rawBody: BOB_REPLY })],
       { resolveImages },
@@ -435,14 +451,466 @@ describe('chatMessagesFromThread', () => {
   });
 });
 
+/**
+ * Which stored mail a bubble belongs to.
+ *
+ * What breaks if this block goes red: the bubble showing a message recovered
+ * from a quote goes back to acting on the mail that QUOTED it — it shows that
+ * mail's attachments under the quoted author's name, and its star, archive and
+ * delete reach a message the reader is not looking at.
+ */
+describe('ownerEmailOf', () => {
+  const CARRIER = email({ id: 'e2', fromAddress: 'bob@acme.example', date: ELEVEN_AM });
+
+  // Regression: a mail's own turn loses its actions and its attachment strip.
+  it('gives a mail’s own bubble its mail', () => {
+    expect(ownerEmailOf({ id: 'e2', fromAddress: 'bob@acme.example' }, mapOf(CARRIER))).toBe(
+      CARRIER
+    );
+  });
+
+  // Regression: THE bug. `sourceId` on a recovered quote is the carrier, so a
+  // straight lookup hands Alice's bubble Bob's mail.
+  it('gives a quote recovered from a mail no email at all', () => {
+    expect(
+      ownerEmailOf(
+        { id: 'e2#1', sourceId: 'e2', fromAddress: 'alice@acme.example' },
+        mapOf(CARRIER)
+      )
+    ).toBeUndefined();
+  });
+
+  // Regression: the AI view loses every action. An extracted turn's id is the
+  // model's, never the mail's, so id equality alone cannot answer for it — the
+  // sender does.
+  it('gives an extracted turn the mail it was carved from when the senders agree', () => {
+    expect(
+      ownerEmailOf({ id: 'm-7', sourceId: 'e2', fromAddress: 'BOB@Acme.Example ' }, mapOf(CARRIER))
+    ).toBe(CARRIER);
+    expect(
+      ownerEmailOf({ id: 'm-8', sourceId: 'e2', fromAddress: 'alice@acme.example' }, mapOf(CARRIER))
+    ).toBeUndefined();
+  });
+
+  it('has no email for a bubble whose mail is not in the thread', () => {
+    expect(
+      ownerEmailOf({ id: 'gone', fromAddress: 'bob@acme.example' }, mapOf(CARRIER))
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * Which mail a bubble's BYTES came out of — a different question, deliberately.
+ *
+ * What breaks if this goes red: a reader who chose to load remote images from
+ * this sender sees the blocked-images banner on every quoted bubble, because
+ * the decision was made with no mail to check.
+ */
+describe('carrierEmailOf', () => {
+  const CARRIER = email({ id: 'e2', fromAddress: 'bob@acme.example', date: ELEVEN_AM });
+
+  it('follows a recovered quote back to the mail that carried it', () => {
+    expect(carrierEmailOf({ id: 'e2#1', sourceId: 'e2' }, mapOf(CARRIER))).toBe(CARRIER);
+    expect(carrierEmailOf({ id: 'e2' }, mapOf(CARRIER))).toBe(CARRIER);
+  });
+});
+
+/**
+ * The same message, sent once and quoted back once.
+ *
+ * What breaks if this block goes red: a thread renders more turns than it has
+ * messages — the reader sees the same mail twice under one sender header, the
+ * second copy carrying whatever the reply that quoted it happened to attach.
+ * The library's own dedupe compares the first 150 characters for EQUALITY,
+ * which a confidentiality banner on one copy and not the other defeats.
+ */
+describe('duplicate recovered quotes', () => {
+  /** Alice's mail as she sent it — her client stamps a banner on every one. */
+  const ALICE_SENT = [
+    '<div>Acme Confidential</div>',
+    '<div dir="ltr">Can we move the Q3 review to Friday? The room is booked all',
+    ' Thursday and half the team is out.</div>',
+  ].join('');
+
+  /** The same message as Bob's client quoted it back — banner gone. */
+  const BOB_QUOTING_ALICE = [
+    '<div dir="ltr">Friday works.</div>',
+    '<div class="gmail_quote">',
+    '<div dir="ltr" class="gmail_attr">',
+    'On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br>',
+    '</div>',
+    '<blockquote class="gmail_quote"><div dir="ltr">Can we move the Q3 review to',
+    ' Friday? The room is booked all Thursday and half the team is out.</div></blockquote>',
+    '</div>',
+  ].join('');
+
+  const convert = (emails: EmailRecord[]) =>
+    chatMessagesFromThread(emails, { currentUserEmail: ME });
+
+  // Regression: THE duplicate. Both copies render, one above the other, and the
+  // view looks like it invented a message.
+  it('drops the quoted copy of a mail the thread already shows', () => {
+    const messages = convert([
+      email({ id: 'e1', fromAddress: 'alice@acme.example', date: TEN_AM, rawBody: ALICE_SENT }),
+      email({
+        id: 'e2',
+        fromAddress: 'bob@acme.example',
+        date: ELEVEN_AM,
+        rawBody: BOB_QUOTING_ALICE,
+      }),
+    ]);
+
+    expect(messages.map((each) => each.id)).toEqual(['e1', 'e2']);
+    // The stored mail is the copy that survives, banner and all — never the
+    // second-hand one.
+    expect(messages[0]!.body).toContain('Acme Confidential');
+  });
+
+  // Regression: the fix eats the feature. A message that exists ONLY inside a
+  // reply is the whole reason the split recovers quotes at all.
+  it('still recovers a quote of a message that is not in the thread', () => {
+    const messages = convert([
+      email({
+        id: 'e2',
+        fromAddress: 'bob@acme.example',
+        date: ELEVEN_AM,
+        rawBody: BOB_QUOTING_ALICE,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ fromAddress: 'alice@acme.example', sourceId: 'e2' });
+  });
+
+  // Regression: one message quoted by three separate replies renders three
+  // times — the library's exact key misses them for the same reason.
+  it('recovers a message quoted by two different replies exactly once', () => {
+    const second = BOB_QUOTING_ALICE.replace('Friday works.', 'Agreed, Friday.');
+    const messages = convert([
+      email({
+        id: 'e2',
+        fromAddress: 'bob@acme.example',
+        date: ELEVEN_AM,
+        rawBody: BOB_QUOTING_ALICE,
+      }),
+      email({ id: 'e3', fromAddress: 'carol@acme.example', date: ELEVEN_AM + 60, rawBody: second }),
+    ]);
+
+    expect(messages.filter((each) => each.fromAddress === 'alice@acme.example')).toHaveLength(1);
+  });
+
+  // Regression: the compare is unanchored, so without a length floor a one-line
+  // "Ship it." somewhere in the thread would delete any quoted message that
+  // merely opens with those words — mail vanishing silently, the worst failure
+  // this view has.
+  it('keeps a recovered quote that merely opens with a short mail’s words', () => {
+    const quoting = [
+      '<div dir="ltr">Will do.</div>',
+      '<div class="gmail_quote">',
+      '<div dir="ltr" class="gmail_attr">',
+      'On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br>',
+      '</div>',
+      '<blockquote class="gmail_quote"><div dir="ltr">Ship it on Friday once the',
+      ' release notes are signed off by legal and by marketing.</div></blockquote>',
+      '</div>',
+    ].join('');
+
+    const messages = convert([
+      email({
+        id: 'e1',
+        fromAddress: 'carol@acme.example',
+        date: TEN_AM,
+        rawBody: '<p>Ship it.</p>',
+      }),
+      email({ id: 'e2', fromAddress: 'bob@acme.example', date: ELEVEN_AM, rawBody: quoting }),
+    ]);
+
+    expect(messages.filter((each) => each.fromAddress === 'alice@acme.example')).toHaveLength(1);
+  });
+});
+
+describe('dropDuplicateQuotes', () => {
+  const bubble = (over: Partial<ChatMessage> & { id: string }): ChatMessage =>
+    ({ fromAddress: 'alice@acme.example', date: TEN_AM * 1000, body: '', ...over }) as ChatMessage;
+
+  // Regression: a stored mail disappears because another mail in the thread
+  // repeats it. Only quotes are ever dropped — a mail is a fact.
+  it('never drops a mail’s own turn, however much it repeats another', () => {
+    const body = '<p>The migration window is Saturday 02:00 to 06:00 UTC, as agreed.</p>';
+    const kept = dropDuplicateQuotes([bubble({ id: 'e1', body }), bubble({ id: 'e2', body })]);
+    expect(kept.map((each) => each.id)).toEqual(['e1', 'e2']);
+  });
+});
+
+describe('normalizedContent', () => {
+  // Regression: the compare stops seeing through the cosmetic differences
+  // between a message and the copy a client quoted back — an entity for a
+  // space, a mention that became a link, a re-wrapped line.
+  it('reduces a body to the letters and digits that survive being quoted', () => {
+    expect(
+      normalizedContent('<p>Hi&nbsp;<a href="mailto:a@b.c">@Ankur D</a>, ship&#8203;</p>')
+    ).toBe(normalizedContent('Hi @Ankur D,\n ship'));
+  });
+});
+
 describe('bodyOf', () => {
   // Regression: the segment cache is keyed on this string. If the warm and the
   // render ever disagree about which column the body comes from, every warmed
   // entry is a miss and nothing says so — the view just does the work twice.
   it('prefers the original HTML and falls back to the stripped preview', () => {
-    expect(bodyOf(email({ id: 'e1', rawBody: '<p>raw</p>', cleanBody: 'clean' }))).toBe('<p>raw</p>');
+    expect(bodyOf(email({ id: 'e1', rawBody: '<p>raw</p>', cleanBody: 'clean' }))).toBe(
+      '<p>raw</p>'
+    );
     expect(bodyOf(email({ id: 'e2', rawBody: '', cleanBody: 'clean' }))).toBe('clean');
     expect(bodyOf(email({ id: 'e3', rawBody: '', cleanBody: '' }))).toBe('');
+  });
+});
+
+/**
+ * Mail the reader must see EXACTLY as it was sent.
+ *
+ * What breaks if this block goes red: a notification is run through the
+ * conversational strip chain again and reaches the reader as a wireframe. The
+ * digest below is the shape that proved it — `signature:logo-strip` deletes its
+ * whole app-badge footer, both images and 60% of its bytes, with nothing in the
+ * UI to say anything was removed.
+ */
+describe('as-sent mail', () => {
+  /** A designed notification: a layout table on a white card, then an
+   *  app-badge footer — the block the strip chain eats. */
+  const DIGEST = [
+    '<table width="600" bgcolor="#ffffff" role="presentation"><tr><td>',
+    '<h2>Daily Email Digest</h2>',
+    '<p>You have 3 pending approvals.</p>',
+    '</td></tr></table>',
+    '<table role="presentation"><tr><td>',
+    '<a href="https://example.test/ios"><img src="https://cdn.example.test/appstore.png" alt="App Store"></a>',
+    '<a href="https://example.test/android"><img src="https://cdn.example.test/play.png" alt="Google Play"></a>',
+    '</td></tr></table>',
+  ].join('');
+
+  const digest = (overrides: Partial<EmailRecord> = {}) =>
+    email({
+      id: 'keka-1',
+      date: TEN_AM,
+      fromName: 'Sarv.com',
+      fromAddress: 'no-reply@kekamail.com',
+      messageId: '<k1@kekamail.com>',
+      rawBody: DIGEST,
+      tags: '|INBOX|bulk|',
+      ...overrides,
+    });
+
+  // Regression: the content loss itself. Byte-for-byte, because "most of it
+  // survived" is exactly the failure — the footer, the logo and the QR code
+  // were the part that went.
+  it('hands the bubble a machine-sent designed mail byte for byte', () => {
+    const [message] = chatMessagesFromThread([digest()], { currentUserEmail: ME });
+    expect(message!.body).toBe(DIGEST);
+  });
+
+  /** The daily digest as MJML really emits it: the sizes that make the text
+   *  visible live in a class, the wide layout lives in a min-width query, and
+   *  the wrapper cell sets `font-size:0px` to kill inline-block whitespace. */
+  const MJML_DIGEST = [
+    '<!doctype html><html><head><style type="text/css">',
+    '@media only screen and (min-width:480px){.mj-column-per-50{width:50%!important}}',
+    '.employee-name{font-size:28px}',
+    '</style></head><body style="word-spacing:normal;">',
+    '<table role="presentation"><tbody><tr><td style="font-size:0px;text-align:center;">',
+    '<div class="mj-column-per-50" style="display:inline-block;width:100%;">',
+    '<img src="https://cdn.example.test/keka.png" alt="keka"></div>',
+    '<div class="employee-name">Hello, Ankur Dubey</div>',
+    '</td></tr></tbody></table></body></html>',
+  ].join('');
+
+  // Regression: the digest reached the chat view with "Hello, Ankur Dubey" and
+  // its section headings MISSING and its header and footer rows stacked one
+  // item per line, while the standard view drew it correctly. The frame's
+  // sanitizer removes `<style>`, so a size that lived in a class was inherited
+  // from a `font-size:0px` cell instead — the text rendered at zero.
+  it('writes a designed mail’s own stylesheet onto the mail before the frame drops it', () => {
+    const [message] = chatMessagesFromThread([digest({ rawBody: MJML_DIGEST })], {
+      currentUserEmail: ME,
+    });
+    expect(message!.body).toContain('font-size: 28px');
+    expect(message!.body).toContain('width: 50%');
+    expect(message!.body).toContain('Hello, Ankur Dubey');
+    // Left in place the sanitizer keeps the CSS as TEXT and prints it above the
+    // message, so the stylesheet itself must be gone.
+    expect(message!.body).not.toContain('<style');
+  });
+
+  // Regression: without the marker the library's per-sender pastel paints
+  // straight over the email — `data-sec-applied` is the only per-bubble hook
+  // the app's stylesheet has. Replaced, not appended: nothing shaped this body.
+  it('marks the bubble as untouched so the view can style it', () => {
+    const [message] = chatMessagesFromThread([digest()], { currentUserEmail: ME });
+    expect(message!.applied).toEqual([AS_SENT_MARKER]);
+  });
+
+  // The fixture has to be one the strip chain really does mangle, or the test
+  // above passes for the wrong reason and protects nothing.
+  it('is a body the ordinary split would have mangled', () => {
+    const [message] = chatMessagesFromThread(
+      [
+        digest({
+          tags: '|INBOX|',
+          fromAddress: 'alice@acme.example',
+          messageId: '<a1@mail.gmail.com>',
+        }),
+      ],
+      {
+        currentUserEmail: ME,
+      }
+    );
+    expect(message!.body).not.toBe(DIGEST);
+    expect(message!.body).not.toContain('appstore.png');
+  });
+
+  // Regression: THE long-thread guarantee. One reply makes this a conversation,
+  // and a conversation gets the chat treatment — all of it, so a thread never
+  // renders half one way and half the other.
+  it('gives up on the whole thread as soon as a second sender appears', () => {
+    const messages = chatMessagesFromThread(
+      [digest(), email({ id: 'reply-1', date: ELEVEN_AM, rawBody: '<p>Got it.</p>' })],
+      { currentUserEmail: ME },
+    );
+    expect(asSentEmailIds([digest(), email({ id: 'reply-1' })]).size).toBe(0);
+    expect(messages.every((each) => each.applied?.includes(AS_SENT_MARKER))).toBe(false);
+    expect(messages.find((each) => each.id === 'keka-1')!.body).not.toBe(DIGEST);
+  });
+
+  // Regression: a person's reply carrying a signature logo passes BOTH of the
+  // per-mail rules — `looksDesigned` fires on the one image, and the `|bulk|`
+  // tag is set from headers a corporate server puts on ordinary mail. Without
+  // the thread gate it was restored to its full raw source, quoted history and
+  // all, and rendered beside the clean bubble of the very same message.
+  it('never claims a person\u2019s signed reply in a thread somebody answered', () => {
+    const signedReply = email({
+      id: 'shikhar-1',
+      date: TEN_AM,
+      fromName: 'Shikhar Khanna',
+      fromAddress: 'shikhar@acme.example',
+      // Enough to trip `isBulkMail` on its own — one of the several ways an
+      // ordinary reply picks up the tag (a server-set `Precedence`, a
+      // `List-Unsubscribe` on a corporate footer, an ESP-shaped Message-ID).
+      tags: '|INBOX|bulk|',
+      rawBody: [
+        '<p>Hello Rakesh,</p><p>I havent received anything yet</p><p><b>Regards,</b></p>',
+        '<img src="https://cdn.acme.example/sarv-logo.png" alt="Sarv">',
+        '<div class="gmail_quote"><div dir="ltr" class="gmail_attr">',
+        'On Sat, Jul 18, 2026 at 3:06 PM, rakesh kumawat &lt;rakesh@acme.example&gt; wrote:<br>',
+        '</div><blockquote class="gmail_quote"><div dir="ltr">',
+        'As I mentioned, all possible logic will be handled on the backend.',
+        '</div></blockquote></div>',
+      ].join(''),
+    });
+    const rakesh = email({
+      id: 'rakesh-1',
+      date: ELEVEN_AM,
+      fromAddress: 'rakesh@acme.example',
+      rawBody: '<p>As I mentioned, all possible logic will be handled on the backend.</p>',
+    });
+
+    // Both per-mail rules really do pass on this mail, or the gate below is
+    // being credited for a decision something else already made.
+    expect(asSentEmailIds([signedReply]).size).toBe(1);
+
+    expect(asSentEmailIds([signedReply, rakesh]).size).toBe(0);
+    const messages = chatMessagesFromThread([signedReply, rakesh], { currentUserEmail: ME });
+    expect(messages.some((each) => each.applied?.includes(AS_SENT_MARKER))).toBe(false);
+  });
+
+  // Regression: `looksDesigned` is true of any mail carrying ONE image, a
+  // signature logo included. Only the machine-sent test keeps a person's mail —
+  // even a single-sender run of them — out of the as-sent path.
+  it('leaves a person’s designed-looking mail in the chat treatment', () => {
+    const fromAlice = digest({
+      id: 'alice-1',
+      tags: '|INBOX|',
+      fromAddress: 'alice@acme.example',
+      fromName: 'Alice Chen',
+      messageId: '<a1@mail.gmail.com>',
+    });
+    expect(asSentEmailIds([fromAlice]).size).toBe(0);
+  });
+
+  // Regression: a designed mail the split read as quoting something used to be
+  // abandoned — it reached the reader as several mangled turns, which is how a
+  // login alert arrived as two stripped copies of itself. The extra turns are
+  // dropped instead, because the restored body already contains every one of
+  // them: one bubble, showing the mail whole.
+  it('collapses a designed mail back to one bubble when the split recovered extra turns', () => {
+    const quotedBody = `${DIGEST}<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br></div><blockquote class="gmail_quote"><div dir="ltr">Can we move Q3 to Friday?</div></blockquote></div>`;
+    const quoting = digest({ id: 'keka-2', rawBody: quotedBody });
+
+    // The split really does carve this body into more than one turn — proven on
+    // the same body sent by a person, which the as-sent path never claims — or
+    // the assertions below pass for the wrong reason and protect nothing.
+    const fromAlice = chatMessagesFromThread(
+      [
+        digest({
+          id: 'alice-2',
+          rawBody: quotedBody,
+          tags: '|INBOX|',
+          fromAddress: 'alice@acme.example',
+          messageId: '<a2@mail.gmail.com>',
+        }),
+      ],
+      { currentUserEmail: ME }
+    );
+    expect(fromAlice.length).toBeGreaterThan(1);
+
+    const messages = chatMessagesFromThread([quoting], { currentUserEmail: ME });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.id).toBe('keka-2');
+    expect(messages[0]!.body).toBe(quotedBody);
+    expect(messages[0]!.applied).toEqual([AS_SENT_MARKER]);
+  });
+
+  // A notification is not the whole thread: collapsing its extra turns must
+  // leave every other mail's bubbles standing.
+  it('drops only the claimed mail’s extra turns, not the rest of the thread', () => {
+    const quoting = digest({
+      id: 'keka-2',
+      rawBody: `${DIGEST}<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Tue, 3 Mar 2026 at 10:00, Alice Chen &lt;alice@acme.example&gt; wrote:<br></div><blockquote class="gmail_quote"><div dir="ltr">Can we move Q3 to Friday?</div></blockquote></div>`,
+    });
+    // Same sender, so the thread still qualifies — but plain, so the as-sent
+    // path leaves it alone and it stays an ordinary bubble.
+    const plain = digest({ id: 'keka-3', date: ELEVEN_AM, rawBody: '<p>Your build passed.</p>' });
+    const messages = chatMessagesFromThread([quoting, plain], { currentUserEmail: ME });
+    expect(messages.map((each) => each.id)).toEqual(['keka-2', 'keka-3']);
+  });
+
+  // An as-sent body is still the app's own HTML: its `sarv-image:` refs have to
+  // be resolved or every inline image in a notification renders broken.
+  it('still resolves inline image refs on an as-sent body', () => {
+    const withRef = digest({
+      rawBody: DIGEST.replace('https://cdn.example.test/appstore.png', 'sarv-image:ab'),
+    });
+    const [message] = chatMessagesFromThread([withRef], {
+      currentUserEmail: ME,
+      resolveImages: (html) => html.replace('sarv-image:ab', 'data:image/png;base64,AA'),
+    });
+    expect(message!.body).toContain('data:image/png;base64,AA');
+    expect(message!.body).toContain('play.png');
+  });
+
+  // Regression: a bulk mail with nothing designed about it is a plain message,
+  // and skipping the split would leave its quoted history and signature in.
+  it('does not claim a plain-text notification', () => {
+    expect(asSentEmailIds([digest({ rawBody: '<p>Your build passed.</p>' })]).size).toBe(0);
+  });
+
+  // A mail whose body has not arrived has nothing to render as sent, and
+  // claiming it would replace the bubble's pending spinner with an empty box.
+  it('does not claim a mail whose body never arrived', () => {
+    expect(asSentEmailIds([digest({ rawBody: '', cleanBody: '' })]).size).toBe(0);
+  });
+
+  it('has nothing to claim in an empty thread', () => {
+    expect(asSentEmailIds([]).size).toBe(0);
   });
 });
 

@@ -9,16 +9,23 @@ import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
 /**
  * The thread's messages, in the chat view.
  *
- * What breaks if this file goes red: the phishing warning goes back to being
- * rendered in exactly ONE place — the anchor card, which shows the thread's
- * OLDEST message — so a spoofed message anywhere else in the conversation
- * warned about nothing at all.
+ * What breaks if this file goes red: the chat view stops being a reading
+ * surface. Either the app's own phishing banner comes back under every bubble
+ * — noise that teaches people to ignore the warning where it counts, in the
+ * standard view — or a machine-sent designed mail goes back to being run
+ * through the conversational strip chain and reaches the reader as a wireframe
+ * with its footer, logo and QR code deleted.
  */
 
 // A stand-in for the chat library: it renders the messages it is handed and
 // calls the per-message slots, which is all this component asks of it. The real
 // one builds sandboxed frames and measures them.
-vi.mock('@sarv-in/email-chat-view', () => ({
+vi.mock('@sarv-in/email-chat-view', async (importOriginal) => ({
+  // Only the view is stubbed. The rest of the module is real, because the
+  // adapter asks it the same questions the view would — whether the thread
+  // reads as a conversation, whether a body is designed — and a stub that
+  // answered them differently would test a pipeline the app does not have.
+  ...(await importOriginal<Record<string, unknown>>()),
   MailChatView: ({
     messages,
     renderFooter,
@@ -75,10 +82,18 @@ vi.mock('../../../../../src/store/email-store', () => ({
 
 const { ThreadChatView } = await import('../../../../../src/components/email-detail/ThreadChatView');
 
-/** A designed template: a fixed-width layout table on a white card — exactly
- *  the shape the bubble treatment destroys. */
-const KEKA_BODY =
-  '<table width="600" bgcolor="#ffffff"><tr><td>Daily Email Digest for 15 Sep</td></tr></table>';
+/** A designed template: a layout table on a white card, then the app-badge
+ *  footer — the exact block `signature:logo-strip` deletes, which is what made
+ *  this mail arrive in the chat as a wireframe. */
+const KEKA_BODY = [
+  '<table width="600" bgcolor="#ffffff" role="presentation"><tr><td>',
+  'Daily Email Digest for 15 Sep',
+  '</td></tr></table>',
+  '<table role="presentation"><tr><td>',
+  '<a href="https://example.test/ios"><img src="https://cdn.example.test/appstore.png" alt="App Store"></a>',
+  '<a href="https://example.test/android"><img src="https://cdn.example.test/play.png" alt="Google Play"></a>',
+  '</td></tr></table>',
+].join('');
 
 const KEKA = email({
   id: 'keka-1',
@@ -123,55 +138,90 @@ const context = (threadEmails: EmailRecord[]) =>
   ) as never;
 
 describe('ThreadChatView', () => {
-  // Regression: the warning used to exist only on the thread's anchor card, so
-  // a spoofed message anywhere else in the chat showed nothing. Every bubble
-  // now carries its own.
-  it('warns inside the bubble of a spoofed message', () => {
-    const spoof = email({
-      id: 'spoof-1',
-      date: ELEVEN_AM,
-      // A display name naming a domain the mail did not come from.
-      fromName: 'security@paypal.com',
-      fromAddress: 'bob@acme.example',
-      messageId: '<s1@mail.gmail.com>',
-      rawBody: '<p>Confirm your account.</p>',
-    });
-    const view = render(<ThreadChatView ctx={context([HUMAN, spoof])} />);
-    const alert = view.find('[role="alert"]')!;
-    expect(alert).not.toBeNull();
-    expect(alert.textContent).toContain('paypal.com');
+  /** A spoof: a display name naming a domain the mail did not come from. */
+  const SPOOF = email({
+    id: 'spoof-1',
+    date: ELEVEN_AM,
+    fromName: 'security@paypal.com',
+    fromAddress: 'bob@acme.example',
+    messageId: '<s1@mail.gmail.com>',
+    rawBody: '<p>Confirm your account.</p>',
+  });
+
+  // Regression: the app's phishing banner used to render under every bubble
+  // here. The chat view is the reading surface and the standard view is where a
+  // reader checks who a mail is really from — a warning under each of forty
+  // bubbles is how people learn to ignore it there.
+  it('shows no phishing warning, not even on a spoofed message', () => {
+    const view = render(<ThreadChatView ctx={context([HUMAN, SPOOF])} />);
+    expect(view.all('[role="alert"]')).toHaveLength(0);
     view.unmount();
   });
 
-  // Per message, not per thread: the genuine messages around it must stay
-  // unmarked, or the warning stops naming anything.
-  it('warns on the spoofed message only', () => {
-    const spoof = email({
-      id: 'spoof-1',
-      date: ELEVEN_AM,
-      fromName: 'security@paypal.com',
-      fromAddress: 'bob@acme.example',
-      messageId: '<s1@mail.gmail.com>',
-      rawBody: '<p>Confirm your account.</p>',
-    });
-    const view = render(<ThreadChatView ctx={context([HUMAN, spoof])} />);
-    expect(view.all('[role="alert"]')).toHaveLength(1);
+  // Dropping the banner must not drop the message with it: the spoofed mail is
+  // still shown, it is just no longer annotated in this view.
+  it('still renders the spoofed message as an ordinary bubble', () => {
+    const view = render(<ThreadChatView ctx={context([HUMAN, SPOOF])} />);
+    expect(view.all('[data-testid="bubble"]')).toHaveLength(2);
     view.unmount();
   });
 
-  // A banner that fires on ordinary mail is a banner people stop reading.
-  it('shows no warning on an ordinary thread', () => {
-    const view = render(<ThreadChatView ctx={context([HUMAN])} />);
-    expect(view.find('[role="alert"]')).toBeNull();
-    expect(view.all('[data-testid="bubble"]').length).toBeGreaterThan(0);
-    view.unmount();
-  });
-
-  // A notification is a bubble like everything else: the as-sent treatment was
-  // reverted, so nothing in this view may special-case a bulk sender.
-  it('leaves a no-reply notification in the chat like any other message', () => {
+  // Regression: the strip chain used to run on this body and delete its footer
+  // table, logo and QR code — content vanishing with no explanation. A
+  // machine-sent designed mail reaches the bubble byte for byte.
+  it('renders a no-reply notification as sent, inside the chat', () => {
     const view = render(<ThreadChatView ctx={context([KEKA])} />);
-    expect(view.all('[data-testid="bubble"]').length).toBeGreaterThan(0);
+    const bubble = view.find('[data-message-id="keka-1"]')!;
+    expect(bubble).not.toBeNull();
+    // Still a bubble in the same chat, not a separate full-width reader.
+    expect(view.all('[data-testid="bubble"]')).toHaveLength(1);
+    expect(bubble.querySelector('table[bgcolor]')).not.toBeNull();
+    expect(bubble.textContent).toContain('Daily Email Digest');
+    // The footer the strip chain used to delete, images and all.
+    expect(bubble.querySelectorAll('img')).toHaveLength(2);
+    view.unmount();
+  });
+
+  /** A login alert: the header card and the striped detail table that carry all
+   *  of its meaning, followed by a block the splitter reads as a quoted turn. */
+  const LOGIN_BODY = [
+    '<table width="600" bgcolor="#ffffff" role="presentation"><tr><td bgcolor="#2563eb">',
+    '<h1>New Login Detected</h1>',
+    '</td></tr><tr><td>',
+    '<table role="presentation"><tr bgcolor="#f5f5f5"><th>Time</th><td>11:57 am IST</td></tr>',
+    '<tr><th>IP address</th><td>103.255.103.3</td></tr>',
+    '<tr bgcolor="#f5f5f5"><th>Device</th><td>Chrome on macOS</td></tr></table>',
+    '</td></tr></table>',
+    // The attribution line the splitter reads as the start of a quoted turn —
+    // a notification that repeats the previous one really does carry it.
+    '<div class="gmail_quote"><div dir="ltr" class="gmail_attr">',
+    'On Tue, 3 Mar 2026 at 09:00, Sarv Digital &lt;no-reply@digtalmarketing.in&gt; wrote:<br>',
+    '</div><blockquote class="gmail_quote">',
+    '<div dir="ltr">A previous login was detected from another device in another city.</div>',
+    '</blockquote></div>',
+  ].join('');
+
+  const LOGIN = email({
+    id: 'login-1',
+    date: TEN_AM,
+    fromName: 'Sarv Digital',
+    fromAddress: 'no-reply@digtalmarketing.in',
+    messageId: '<l1@digtalmarketing.in>',
+    rawBody: LOGIN_BODY,
+    tags: '|INBOX|bulk|',
+  });
+
+  // Regression: this mail reached the reader as TWO bubbles, both stripped to
+  // bare headings and text lines — the splitter found a quoted turn in it, and
+  // a designed mail that split was abandoned rather than restored. One bubble,
+  // carrying the header card and the striped detail table the alert is made of.
+  it('renders a login notification that quotes itself as one as-sent bubble', () => {
+    const view = render(<ThreadChatView ctx={context([LOGIN])} />);
+    const bubbles = view.all('[data-testid="bubble"]');
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0]!.querySelector('td[bgcolor="#2563eb"]')).not.toBeNull();
+    expect(bubbles[0]!.querySelectorAll('th')).toHaveLength(3);
+    expect(bubbles[0]!.textContent).toContain('103.255.103.3');
     view.unmount();
   });
 

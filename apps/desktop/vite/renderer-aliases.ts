@@ -43,10 +43,9 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/attachment-kind.ts',
     ),
-    // Pure (imports only the equally pure role-address + tags helpers) — the
-    // "is this a blast rather than a person" predicate. Deep-imported for the
-    // same reason as the others, and shared so the renderer cannot grow its own
-    // no-reply regex beside core's.
+    // Pure (html-to-text, which is browser-safe) — the chat view decides which
+    // mail to render as sent with the SAME predicate the sync layer tags with,
+    // so the two can never disagree about what a blast is.
     '@sarvinbox/core/bulk-mail': resolve(
       desktopDir,
       '../../packages/core/src/utils/bulk-mail.ts',
