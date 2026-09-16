@@ -8,6 +8,7 @@ import { createLogger } from '@sarvinbox/core';
 import { processingBreakdown } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 
+import { getAutoBacklogCap, setAutoBacklogCap } from '../services/ai-backlog-cap';
 import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
 import { setAIProviderConfigured } from '../services/conversation-extraction-scheduler';
 import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
@@ -349,7 +350,9 @@ export function registerAIHandlers(): void {
       // it is built from, so this handler cannot drift from what the worker
       // treats as eligible — and so the counts are testable against a real
       // migrated database instead of only through the IPC surface.
-      const data = processingBreakdown(db);
+      // Pass the user's "AI Processing Limit" so the agent backlog row counts
+      // what the poll can actually REACH, not merely what exists.
+      const data = processingBreakdown(db, { recentWindow: getAutoBacklogCap() });
       return { success: true, data };
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -366,6 +369,33 @@ export function registerAIHandlers(): void {
       return { success: true };
     } catch (error) {
       logger.error('AI updateThreadExtraction error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /**
+   * Push the user's "AI Processing Limit" setting into the main process.
+   *
+   * The setting lives in the renderer's localStorage, but the BACKGROUND poll
+   * runs here — so before this existed, raising the limit changed the manual
+   * run's batch size and nothing else, while the background window stayed
+   * hardcoded at 500. A user with 252 fully-eligible older emails set it to
+   * "All" and watched nothing happen.
+   */
+  ipcMain.handle('ai:setBacklogCap', async (_event, cap: number) => {
+    try {
+      return { success: true, data: { cap: setAutoBacklogCap(cap) } };
+    } catch (error) {
+      logger.error('AI setBacklogCap error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /** The window the background pipeline is currently using. */
+  ipcMain.handle('ai:getBacklogCap', async () => {
+    try {
+      return { success: true, data: { cap: getAutoBacklogCap() } };
+    } catch (error) {
       return { success: false, error: (error as Error).message };
     }
   });

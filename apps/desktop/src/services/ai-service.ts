@@ -5,7 +5,7 @@
 import type { EmailRecord } from '@sarvinbox/core';
 
 import { DEFAULT_AI_FEATURES } from '../components/settings/types';
-import { cleanLLMJsonResponse, truncate } from '../utils/llm-json';
+import { parseLLMJson, truncate } from '../utils/llm-json';
 
 // Type-only imports — erased at compile time, so neither creates a runtime
 // edge: '@sarvinbox/core' can't be runtime-imported in the renderer (the
@@ -856,11 +856,7 @@ export async function polishText(
     // Parse JSON response
     try {
       // Clean up response - strip thinking blocks and markdown code fences.
-      const cleanResponse = cleanLLMJsonResponse(responseText);
-
-      console.log('[AI Service] Clean response:', cleanResponse);
-
-      const parsed = JSON.parse(cleanResponse);
+      const parsed: any = parseLLMJson(responseText);
       console.log('[AI Service] Parsed response:', parsed);
 
       const result = {
@@ -1702,9 +1698,7 @@ export async function detectSignature(
     }
 
     // Parse JSON response
-    const cleanResponse = cleanLLMJsonResponse(responseText);
-
-    const parsed = JSON.parse(cleanResponse);
+    const parsed: any = parseLLMJson(responseText);
     console.log('[Signature Detection] Parsed response:', parsed);
 
     const result: SignatureDetectionResult = {
@@ -2159,9 +2153,7 @@ export async function parseSearchQuery(query: string): Promise<AISearchResult> {
     console.log('[AI Search] Raw response:', responseText.substring(0, 500));
 
     // Clean and parse response
-    const cleanResponse = cleanLLMJsonResponse(responseText);
-
-    const parsed = JSON.parse(cleanResponse);
+    const parsed: any = parseLLMJson(responseText);
 
     // Build SearchQuery from parsed response
     const searchQuery: SearchQuery = {};
@@ -2337,9 +2329,7 @@ ${emailsText}`;
     console.log('[Thread Summary] Raw response:', responseText.substring(0, 300));
 
     // Clean and parse response
-    const cleanResponse = cleanLLMJsonResponse(responseText);
-
-    const parsed = JSON.parse(cleanResponse);
+    const parsed: any = parseLLMJson(responseText);
 
     return {
       summary: parsed.summary || '',

@@ -43,6 +43,9 @@ export function AIBoxDashboard() {
     eligibleNow: number;
     unreadWithBody: number;
     unreadNoBody: number;
+    agentPending: number;
+    agentDone: number;
+    pending: number;
   } | null>(null);
 
   // Load category definitions
@@ -159,7 +162,21 @@ export function AIBoxDashboard() {
   }, [breakdown?.unreadNoBody, choose]);
 
   const totalCategorized = Object.values(categoryCounts).reduce((a, b) => a + b, 0);
-  const totalEmails = totalCategorized + unprocessedCount;
+  // ONE outstanding number. The panel used to carry two — the categorizer's
+  // "0 pending" next to the agent's "196 to go" — which are the same idea with
+  // different scopes, and reading as a contradiction was the whole complaint.
+  // Falls back to the categorizer's own count until the breakdown loads.
+  // Falling back to the categorizer's count ALONE was wrong, and wrong in the
+  // worst direction: in dev the renderer hot-reloads while the main process
+  // keeps an older bundle, so `pending` goes missing exactly when the two
+  // halves disagree — and the panel then showed "0 pending · 100% complete"
+  // beside "Waiting for priority + actions: 99", which is the contradiction
+  // this whole change exists to remove. Sum both queues instead: it slightly
+  // over-counts an email owed by both, and over-reporting outstanding work is
+  // the safe direction for a progress bar.
+  const pendingCount = breakdown?.pending
+    ?? ((breakdown?.agentPending ?? 0) + unprocessedCount);
+  const totalEmails = totalCategorized + pendingCount;
   const progressPercent = totalEmails > 0 ? Math.round((totalCategorized / totalEmails) * 100) : 0;
 
   return (
@@ -202,7 +219,7 @@ export function AIBoxDashboard() {
               </span>
               <span className="flex items-center gap-1">
                 <CircleDashed className="h-3.5 w-3.5 text-amber-500" />
-                {unprocessedCount} pending
+                {pendingCount.toLocaleString()} pending
               </span>
             </div>
             <span>{progressPercent}% complete</span>
@@ -227,10 +244,17 @@ export function AIBoxDashboard() {
                 <BreakdownRow label="Bodies actually downloaded"      value={breakdown.withBody} />
                 <BreakdownRow label="Bodies NOT downloaded yet"       value={breakdown.noBody} tone={breakdown.noBody > 0 ? 'warn' : undefined} />
                 <BreakdownRow label="Read emails (skipped by policy)" value={breakdown.readSkipped} />
-                <BreakdownRow label="Unread + with body (eligible pool)" value={breakdown.unreadWithBody} />
-                <BreakdownRow label="Unread + no body yet"            value={breakdown.unreadNoBody} tone={breakdown.unreadNoBody > 0 ? 'warn' : undefined} />
-                <BreakdownRow label="Already AI-processed"            value={breakdown.aiProcessed} />
-                <BreakdownRow label="Eligible right now"              value={breakdown.eligibleNow} tone={breakdown.eligibleNow > 0 ? 'info' : undefined} />
+                {/* NOT a queue — it counts unread mail with a body whether or
+                    not the AI has finished with it, so it does not fall as work
+                    completes. Labelling it "eligible pool" made it contradict
+                    the 100% bar directly above: 212 "remaining" next to "0
+                    pending". "Waiting for the AI" is the row below. */}
+                <BreakdownRow label="Unread, body downloaded"         value={breakdown.unreadWithBody} />
+                <BreakdownRow label="Unread, body still missing"      value={breakdown.unreadNoBody} tone={breakdown.unreadNoBody > 0 ? 'warn' : undefined} />
+                <BreakdownRow label="Finished by the AI"              value={breakdown.aiProcessed} />
+                <BreakdownRow label="Waiting to be categorised"       value={breakdown.eligibleNow} tone={breakdown.eligibleNow > 0 ? 'info' : undefined} />
+                <BreakdownRow label="Waiting for priority + actions"  value={breakdown.agentPending} tone={breakdown.agentPending > 0 ? 'info' : undefined} />
+                <BreakdownRow label="Scored + actioned by the agent"  value={breakdown.agentDone} />
               </div>
               {breakdown.unreadNoBody > 0 && (
                 <div className="mt-3 flex items-start justify-between gap-3">

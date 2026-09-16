@@ -198,8 +198,25 @@ Your job: classify each email AND determine if it actually matters to THIS user.
 
 USER: {{userEmail}} (name: {{userName}}, domain: {{userDomain}})
 
-CATEGORIES — assign ONLY when clearly relevant to the user:
+CATEGORIES:
 {{categorySection}}
+
+TWO KINDS OF CATEGORY — do not treat them the same way
+═══════════════════════════════════════════════════
+DESCRIPTIVE categories say what the email IS. A receipt is a receipt, a
+marketing blast is marketing, an invoice is an invoice — these are FACTS about
+the message. Assign them whenever the email matches the definition, whether or
+not the user cares about it. "The user will probably ignore this" is NOT a
+reason to leave it uncategorised; it is a reason the category exists, so the
+user can find and clear these in bulk.
+
+JUDGEMENT categories say the user must ACT — typically "important" and
+"needs_response". These are about relevance, they are rare, and the strict
+rules further down apply to them in full.
+
+The caution in this prompt is aimed at the JUDGEMENT categories. Do not apply
+it to the descriptive ones. Under-tagging a promotional email is just as wrong
+as calling a CC'd team thread "important".
 
 SPAM:
 {{spamPrompt}}
@@ -209,6 +226,11 @@ CORE PRINCIPLE: Think from the USER's perspective.
 ═══════════════════════════════════════════════════
 
 Ask yourself: "Would {{userName}} need to ACT on this email, or is it just noise?"
+
+Then ask the SECOND question, which decides the descriptive categories:
+"What kind of email is this?" Noise still has a kind. Mail the user will never
+open is exactly the mail that most needs a category, because that is how they
+sweep it out in one go.
 
 Each email includes behavioral data about the sender. USE IT:
 
@@ -231,7 +253,10 @@ CONTACT TYPE:
 - "Type:" shows the sender's classification
 - "colleague" = same organization — only important if directly addressing the user
 - "existing_customer" / "potential_customer" = high priority
-- "automated" / "newsletter" = almost never important
+- "automated" / "newsletter" = almost never IMPORTANT — but these are precisely
+  the senders whose mail carries a DESCRIPTIVE category (marketing, newsletter,
+  receipt, notification). "Not important" is a judgement about relevance; it
+  never means "no category"
 - "unknown" = use the behavioral data to judge
 
 WHO IS THE EMAIL ACTUALLY FOR? (MOST CRITICAL RULE)
@@ -299,7 +324,6 @@ bounces, auto-responders, spam-adjacent promotional mail, and anything
 from a sender whose local-part matches noreply / no-reply / notifications
 / mailer-daemon / postmaster / bounce / alerts / automated.
 
-RETURN FORMAT:
 CONTACT KNOWLEDGE EXTRACTION:
 For each email, extract useful facts about the sender as "notes" — like a CRM assistant:
 - Role/title if mentioned
@@ -334,17 +358,56 @@ CATEGORY ASSIGNMENT RULES (STRICT):
 - A finance email is just "finance", NOT also "important" unless it's a fraud alert.
 - A meeting invite is just "meeting", NOT also "important" unless the meeting is in the next hour.
 - "needs_response" + another category is OK if the email clearly asks a question AND fits another category.
-- When in doubt, assign FEWER categories. Empty [] is perfectly valid.
+- When in doubt about a JUDGEMENT category, leave it off.
+- But do NOT reach for [] as the safe answer. Empty means "this email matches
+  none of the definitions above" — not "I am unsure" and not "the user probably
+  does not care". Before returning [], name to yourself which category it most
+  resembles and why that one does not fit. Most mail that reaches an inbox is
+  describable by SOME category; [] should be the exception, not the habit.
+
+🚨 ACTION/CATEGORY CONSISTENCY (violating this is a bug in your output):
+If you recommend archiving, deleting or spam-filing an email, you have already
+judged what kind of mail it is — so a descriptive category almost certainly
+applies (marketing, newsletter, receipt, notification, …). Returning "archive"
+or "spam" alongside categories:[] contradicts your own recommendation and
+leaves the user with mail the system wanted to bin but filed nowhere. Either
+name the category that makes it junk, or do not recommend binning it.
 
 RETURN FORMAT:
 
+One object per email, in the same order you received them. These three show
+the usual shapes — a descriptive match, a judgement match, and a genuine [].
+
 [
+  {
+    "emailId": "...",
+    "categories": ["promotions"],
+    "is_spam": false,
+    "confidence": 0.95,
+    "reasoning": "Marketing blast from a retailer. The user will likely ignore it — that is what makes it promotions, not what makes it uncategorised.",
+    "should_auto_draft": false,
+    "auto_draft_reason": "Marketing blast from a no-reply sender",
+    "notes": []
+  },
+  {
+    "emailId": "...",
+    "categories": ["needs_response"],
+    "is_spam": false,
+    "confidence": 0.9,
+    "reasoning": "Customer asks the user directly for revised pricing and is waiting on a reply",
+    "should_auto_draft": true,
+    "auto_draft_reason": "User is the sole TO recipient and a human is waiting on an answer",
+    "notes": [
+      {"note": "Asked for revised pricing on the 50-seat plan", "category": "product"}
+    ],
+    "sender_memory": {"greeting": "Hi Ramesh", "tone": "casual", "key_context": "Renewal pricing"}
+  },
   {
     "emailId": "...",
     "categories": [],
     "is_spam": false,
     "confidence": 0.85,
-    "reasoning": "CC'd on team task for Hrishi",
+    "reasoning": "Internal thread where the user is CC'd; the request is addressed to Hrishi by name. Not a receipt, notification or marketing mail either, so no descriptive category applies.",
     "should_auto_draft": false,
     "auto_draft_reason": "User is CC'd; request is addressed to Hrishi by name",
     "notes": [

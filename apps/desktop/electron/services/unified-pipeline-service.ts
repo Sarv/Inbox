@@ -51,6 +51,7 @@ import { getStorage, getStorageFor, getAllAccountRuntimes, getAccountRuntime, ge
 
 import { resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
 import { loadAgentConfig } from './agent-config-store';
+import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
 import { isAIProviderConfigured } from './conversation-extraction-scheduler';
 import { getMeta, setMeta } from './core-db';
@@ -497,10 +498,15 @@ const POLLING_INTERVAL_MS = 30_000;
 const POLL_MAINTENANCE_INTERVAL_MS = 120_000; // 2 min
 // Background auto-categorization only reaches into the N most-recent emails.
 // New mail always falls inside this window (so it's categorized in real time),
-// while a large historical backlog is left to the user-triggered bulk run —
-// we never bombard the AI with more than the recent N unattended. Mirrors the
-// manual bulk cap (maxAIProcessingEmails, default 500).
-const AUTO_BACKLOG_RECENT_CAP = 500;
+// while a large historical backlog is left alone rather than spending LLM calls
+// on it unattended.
+//
+// N is the user's "AI Processing Limit" setting, pushed in from the renderer and
+// persisted — see ai-backlog-cap.ts. It was a hardcoded 500 whose comment
+// claimed it mirrored that setting; it did not, and raising the setting moved
+// nothing. Read through a function (not captured once) so a change takes effect
+// on the next tick instead of at the next restart.
+const AUTO_BACKLOG_RECENT_CAP = (): number => getAutoBacklogCap();
 
 // How old a body-less 'pending' email must be before the poll gives up on it
 // and finalizes it uncategorized. Long enough that a body still in the download
@@ -2534,9 +2540,9 @@ async function triggerCategorizeFor(emailId: string, hintAccountId?: string, sou
   // categorise history on demand — identical to how the poll treats it.
   const withinWindow = (storage as any).db?.prepare?.(
     `SELECT 1 FROM emails WHERE id = ? AND date >= (SELECT MIN(date) FROM (SELECT date FROM emails ORDER BY date DESC LIMIT ?)) LIMIT 1`,
-  )?.get(emailId, AUTO_BACKLOG_RECENT_CAP);
+  )?.get(emailId, AUTO_BACKLOG_RECENT_CAP());
   if (!withinWindow) {
-    logger.debug(`[Pipeline:Event] ${source} → ${emailId} outside newest-${AUTO_BACKLOG_RECENT_CAP} window — body kept for search, categorization skipped`);
+    logger.debug(`[Pipeline:Event] ${source} → ${emailId} outside newest-${AUTO_BACKLOG_RECENT_CAP()} window — body kept for search, categorization skipped`);
     return;
   }
 
@@ -2620,8 +2626,8 @@ function startPollingTrigger(): void {
         // counted rows the worker skips (no body, extraction not done,
         // read/spam/trash) — so the bar could sit at "1 pending" forever with
         // no phase ever starting and no error anywhere.
-        aggExtPending += repos.agent.countExtractionEligible(AUTO_BACKLOG_RECENT_CAP);
-        aggAgentPending += repos.agent.countAgentEligible(AUTO_BACKLOG_RECENT_CAP);
+        aggExtPending += repos.agent.countExtractionEligible(AUTO_BACKLOG_RECENT_CAP());
+        aggAgentPending += repos.agent.countAgentEligible(AUTO_BACKLOG_RECENT_CAP());
       } catch { /* best effort */ }
 
       if (runMaintenance) {
@@ -2639,7 +2645,7 @@ function startPollingTrigger(): void {
           }
           // Anything still stuck is a NEW shape we have not accounted for.
           // Name it rather than let it silently park the progress bar again.
-          const stillStuck = repos.agent.getStuckPipelineRows(3, AUTO_BACKLOG_RECENT_CAP);
+          const stillStuck = repos.agent.getStuckPipelineRows(3, AUTO_BACKLOG_RECENT_CAP());
           if (stillStuck.length > 0) {
             logger.warn(`[Pipeline:Poll] ${stillStuck.length} row(s) still stuck after heal: ` +
               stillStuck.map((r: { id: string; reason: string }) => `${r.id}(${r.reason})`).join(', '));
@@ -2664,7 +2670,7 @@ function startPollingTrigger(): void {
 
       // Phase 1: Pending extraction — bounded to the recent-mail window so the
       // background pipeline never chews through the whole historical mailbox.
-      const pendingExt = repos.agent.getEmailsPendingExtraction(5, AUTO_BACKLOG_RECENT_CAP);
+      const pendingExt = repos.agent.getEmailsPendingExtraction(5, AUTO_BACKLOG_RECENT_CAP());
       for (const e of pendingExt) {
         if (!processingLock.has(e.id)) {
           if (traceEnabled()) logger.trace(`[Pipeline:Poll] P1 start: ${e.id} thread=${e.threadId}`);
@@ -2673,7 +2679,7 @@ function startPollingTrigger(): void {
       }
 
       // Phase 2: Pending agent (extraction done) — same recent-window cap.
-      const pendingAgent = repos.agent.getEmailsPendingAgent(10, AUTO_BACKLOG_RECENT_CAP);
+      const pendingAgent = repos.agent.getEmailsPendingAgent(10, AUTO_BACKLOG_RECENT_CAP());
       for (const e of pendingAgent) {
         if (!processingLock.has(e.id)) {
           // With no live provider this is a local-score-only finalize pass, not
@@ -2695,7 +2701,7 @@ function startPollingTrigger(): void {
         const labelEngine: any = getSyncEngineForStorage(storage);
         if (labelEngine?.isConnected?.() && labelEngine.operationQueue) {
           const slugSet = getCategorySlugSet(storage);
-          const pendingLabel = repos.agent.getEmailsPendingLabel(LABEL_DRAIN_BATCH, AUTO_BACKLOG_RECENT_CAP);
+          const pendingLabel = repos.agent.getEmailsPendingLabel(LABEL_DRAIN_BATCH, AUTO_BACKLOG_RECENT_CAP());
           for (const e of pendingLabel) {
             // The AI's VERDICT, never the tag string. Reading tags here is what
             // wrote our own `Sarv Inbox/Important` label onto mail whose only
