@@ -49,8 +49,10 @@ interface AttachmentViewerProps {
 }
 
 /** Human-readable size. Local (and tiny) because the core barrel's `formatBytes`
- *  is not renderer-importable — the barrel pulls Node-only transports. */
-function formatSize(size?: number | string | null): string {
+ *  is not renderer-importable — the barrel pulls Node-only transports.
+ *  Exported so the chip strips render a size the same way the viewer header
+ *  does; a second copy would drift on the first unit or rounding change. */
+export function formatSize(size?: number | string | null): string {
   // Some callers already formatted it ("1.2 MB"), some pass raw bytes, and
   // legacy rows have no size at all and pass the literal 'Unknown'.
   if (typeof size === 'string') return size === 'Unknown' ? '' : size;
