@@ -8,7 +8,17 @@
 // losing its place in the conversation.
 import { describe, it, expect } from 'vitest';
 
-import { assessBulkMail, isBulkMail, isConversationMail } from '../../../src/utils/bulk-mail';
+import {
+  assessBulkMail,
+  BULK_HEADER_NAMES,
+  bulkHeaderSignals,
+  hasBulkHeaderSignal,
+  headerLookupFromText,
+  headerValueFromText,
+  isBulkMail,
+  isConversationMail,
+  senderOwnText,
+} from '../../../src/utils/bulk-mail';
 
 describe('assessBulkMail', () => {
   // A hand-written reply is the case the whole chat view exists for. If this
@@ -81,13 +91,78 @@ describe('assessBulkMail', () => {
     expect(isBulkMail({ fromAddress: 'newsome@company.com' })).toBe(false);
   });
 
-  it('flags a 1x1 tracking pixel', () => {
+  // REPLACES a rule that flagged any 1x1 <img>. Ordinary signature templates
+  // use 1x1 spacer gifs for layout, so that rule condemned human mail; the
+  // header arms name the same senders without reading markup. A campaign is now
+  // recognised by its CLICK-COUNTING links, which a person's own mail does not
+  // contain.
+  it('flags links rewritten through a click tracker', () => {
     const result = assessBulkMail({
-      rawBody: '<p>Sale!</p><img src="https://t.example/o.gif" width="1" height="1">',
+      rawBody: '<p>Sale!</p><a href="https://shop.us1.list-manage.com/track/click?u=9">Shop now</a>',
       fromAddress: 'deals@shop.com',
     });
     expect(result.isBulk).toBe(true);
-    expect(result.signals).toContain('tracking-pixel');
+    expect(result.signals).toContain('tracker-domain-links');
+  });
+
+  // The regression that made the previous version unusable: a person replying
+  // ON TOP of a quoted newsletter inherits every tracker link and UTM parameter
+  // in it. The quoted chain is cut before anything is scored, so the reply is
+  // judged on the sender's own two lines. Longer thread, more quoted history —
+  // which is why this failed worse the longer a conversation ran.
+  it('does NOT condemn a human reply for the newsletter quoted under it', () => {
+    const result = assessBulkMail({
+      fromAddress: 'mitali@example.com',
+      messageId: '<x@mail.gmail.com>',
+      rawBody:
+        '<p>Yes, let us go with option B. Thanks!</p>' +
+        '<p>On Wed, Sep 10, 2026 at 9:02 AM, Deals &lt;news@brand.com&gt; wrote:</p>' +
+        '<blockquote><p>Hello {{first_name}}, unsubscribe any time</p>' +
+        '<a href="https://shop.us1.list-manage.com/track/click?u=9&utm_source=news">Shop</a>' +
+        '</blockquote>',
+    });
+    expect(result.isBulk).toBe(false);
+    expect(result.signals).toEqual([]);
+  });
+
+  // A UTM link is something a person can legitimately paste into their own
+  // message, so it must need a companion signal rather than deciding alone.
+  it('does NOT decide on a pasted UTM link alone (below threshold)', () => {
+    const result = assessBulkMail({
+      fromAddress: 'colleague@company.com',
+      messageId: '<x@mail.gmail.com>',
+      rawBody: '<p>Worth a read: <a href="https://blog.example.com/post?utm_source=twitter">this</a></p>',
+    });
+    expect(result.isBulk).toBe(false);
+    expect(result.signals).toEqual(['utm-campaign-links']);
+    expect(result.score).toBeLessThan(3);
+  });
+
+  // A UTM link and unsubscribe copy in the sender's OWN content combine past
+  // the threshold — neither is enough by itself.
+  it('combines two medium signals into a bulk verdict', () => {
+    const result = assessBulkMail({
+      // A sender and Message-ID that say nothing either way, so the verdict has
+      // to come from the two content signals alone.
+      fromAddress: 'hello@brand.example',
+      messageId: '<x@mail.brand.example>',
+      rawBody:
+        '<p>Our September picks: <a href="https://brand.example/p?utm_campaign=sept">see them</a></p>' +
+        '<p><a href="https://brand.example/u">Unsubscribe</a></p>',
+    });
+    expect(result.isBulk).toBe(true);
+    expect(result.signals).toEqual(['utm-campaign-links', 'unsubscribe-copy']);
+  });
+
+  // Reading a body means converting HTML to text, per message. Once the cheap
+  // signals have decided, that work must not happen at all.
+  it('skips the body entirely once a header/sender signal has decided', () => {
+    const result = assessBulkMail({
+      tags: '|bulk|',
+      rawBody: '<p>Hello {{first_name}}</p>',
+    });
+    expect(result.signals).toEqual(['bulk-header']);
+    expect(result.score).toBe(3);
   });
 
   it('flags an unrendered template placeholder', () => {
@@ -116,15 +191,23 @@ describe('assessBulkMail', () => {
     expect(result.score).toBeLessThan(3);
   });
 
-  it('flags a real marketing email (tracking pixel + unsubscribe)', () => {
+  // The same real marketing email as before, judged on its links and its
+  // unsubscribe copy now that the pixel rule is gone.
+  it('flags a real marketing email', () => {
     const result = assessBulkMail({
       rawBody:
         '<table role="presentation"><tr><td>Big Sale</td></tr></table>' +
-        '<img src="https://t.brand/open.gif" width="1" height="1">' +
-        '<a href="https://x/u">Unsubscribe</a> · <a href="https://x/p">Manage preferences</a>',
+        '<a href="https://click.rs6.net/x?utm_medium=email">Shop</a> · ' +
+        '<a href="https://x.example/u">Unsubscribe</a> · <a href="https://x.example/p">Manage preferences</a>',
       fromAddress: 'news@brand.com',
     });
     expect(result.isBulk).toBe(true);
+  });
+
+  // A plain-text mail has no tags to convert; feeding it to an HTML parser
+  // would swallow anything shaped like one.
+  it('reads a plain-text body without an HTML parse', () => {
+    expect(senderOwnText('Hi there, see https://x.example/a > and let me know')).toContain('https://x.example/a');
   });
 
   // Nothing supplied at all must not throw and must not accuse.
@@ -135,5 +218,101 @@ describe('assessBulkMail', () => {
   it('isConversationMail is the inverse predicate', () => {
     expect(isConversationMail({ rawBody: '<p>See you tomorrow.</p>', messageId: '<x@mail.gmail.com>' })).toBe(true);
     expect(isConversationMail({ rawBody: '<p>Hi {{name}}</p>' })).toBe(false);
+  });
+});
+
+describe('bulkHeaderSignals', () => {
+  const from = (headers: string) => bulkHeaderSignals(headerLookupFromText(headers));
+
+  // The two RFC list headers and Precedence are what sync has always read; they
+  // decide the stored |bulk| tag, which in turn keeps recurring same-subject
+  // newsletters out of the subject-based thread fallback.
+  it('reads the RFC list headers and Precedence', () => {
+    expect(from('List-Id: <news.brand.com>\r\n').listId).toBe(true);
+    expect(from('List-Unsubscribe: <https://x.example/u>\r\n').listUnsubscribe).toBe(true);
+    expect(from('Precedence: bulk\r\n').precedenceBulk).toBe(true);
+    expect(from('Precedence: list\r\n').precedenceBulk).toBe(true);
+    expect(from('Precedence: junk\r\n').precedenceBulk).toBe(true);
+  });
+
+  // NEW ARM. RFC 3834: `no` is the single value meaning a person sent it, so
+  // the test is "present and not no" — not "present". Reading it as presence
+  // alone would flag every auto-reply-suppressed human message.
+  it('treats Auto-Submitted as bulk unless it is exactly "no"', () => {
+    expect(from('Auto-Submitted: auto-generated\r\n').autoSubmitted).toBe(true);
+    expect(from('Auto-Submitted: auto-replied\r\n').autoSubmitted).toBe(true);
+    expect(from('Auto-Submitted: no\r\n').autoSubmitted).toBe(false);
+    expect(from('Subject: hi\r\n').autoSubmitted).toBe(false);
+  });
+
+  // The value may carry RFC 3834 parameters after a semicolon; the token before
+  // it is the one that decides.
+  it('ignores Auto-Submitted parameters after the semicolon', () => {
+    expect(from('Auto-Submitted: auto-generated; owner-email=x@y.example\r\n').autoSubmitted).toBe(true);
+    expect(from('Auto-Submitted: no; nothing-to-see\r\n').autoSubmitted).toBe(false);
+  });
+
+  // NEW ARM. Feedback-ID is added by bulk senders for Google Postmaster Tools;
+  // presence alone is the signal.
+  it('reads Feedback-ID', () => {
+    expect(from('Feedback-ID: 123:campaign:brand\r\n').feedbackId).toBe(true);
+    expect(from('Subject: hi\r\n').feedbackId).toBe(false);
+  });
+
+  // Vendor tracing headers only exist in a full header block. The ingest fetch
+  // does not ask for them, so this arm must stay quiet rather than mis-report.
+  it('reads vendor tracing headers, and an ESP X-Mailer but not an ordinary one', () => {
+    expect(from('X-Campaign: autumn\r\n').espTrace).toBe(true);
+    expect(from('X-SES-Outgoing: 2026.09.15\r\n').espTrace).toBe(true);
+    expect(from('X-Mailer: Mailchimp Mailer\r\n').espTrace).toBe(true);
+    expect(from('X-Mailer: Apple Mail (2.3774.600.62)\r\n').espTrace).toBe(false);
+  });
+
+  // A person's mail carries none of them, and must come back clean on every arm
+  // — this is the direction that costs a real conversation when it is wrong.
+  it('says nothing about an ordinary personal message', () => {
+    const signals = from(
+      'From: Mitali <mitali@example.com>\r\nSubject: Re: API doc\r\nX-Mailer: Apple Mail (2.3774)\r\n',
+    );
+    expect(Object.values(signals).some(Boolean)).toBe(false);
+    expect(hasBulkHeaderSignal(headerLookupFromText(
+      'From: Mitali <mitali@example.com>\r\nSubject: Re: API doc\r\n',
+    ))).toBe(false);
+  });
+
+  // Any one arm is enough for the stored tag.
+  it('hasBulkHeaderSignal fires on any single arm', () => {
+    expect(hasBulkHeaderSignal(headerLookupFromText('Feedback-ID: 1:c:b\r\n'))).toBe(true);
+    expect(hasBulkHeaderSignal(headerLookupFromText('Auto-Submitted: auto-generated\r\n'))).toBe(true);
+  });
+
+  // The fetch list and the detector must name the same headers: one the
+  // detector reads but the fetch omits is a rule that silently never fires.
+  it('names every header it reads in BULK_HEADER_NAMES', () => {
+    for (const name of ['list-id', 'list-unsubscribe', 'precedence', 'auto-submitted', 'feedback-id']) {
+      expect(BULK_HEADER_NAMES).toContain(name);
+    }
+  });
+});
+
+describe('headerValueFromText', () => {
+  // Regression the `m`-flag comment describes: a folded value must come back
+  // whole. A List-Unsubscribe with a mailto AND an https entry wraps in real
+  // mail, and truncating it to the first line loses half the header.
+  it('unfolds a value wrapped across lines', () => {
+    const headers = 'List-Unsubscribe: <mailto:u@x.example>,\r\n <https://x.example/u>\r\nSubject: hi\r\n';
+    expect(headerValueFromText(headers, 'list-unsubscribe')).toBe('<mailto:u@x.example>, <https://x.example/u>');
+  });
+
+  it('returns null for an absent or empty header', () => {
+    expect(headerValueFromText('Subject: hi\r\n', 'list-id')).toBeNull();
+    expect(headerValueFromText('List-Id:\r\nSubject: hi\r\n', 'list-id')).toBeNull();
+    expect(headerValueFromText('', 'list-id')).toBeNull();
+  });
+
+  // The name is interpolated into a RegExp; a caller passing something with
+  // regex punctuation must not silently match the wrong header.
+  it('does not treat the header name as a pattern', () => {
+    expect(headerValueFromText('X-A-B: yes\r\n', 'x.a.b')).toBeNull();
   });
 });

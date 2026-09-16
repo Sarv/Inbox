@@ -10,6 +10,8 @@
  */
 
 import type { EmailRecord } from '../types/models';
+import { bulkHeaderSignals, headerLookupFromText } from '../utils/bulk-mail';
+import { hasTag } from '../utils/tags';
 
 /**
  * Authentication status parsed from email headers
@@ -80,6 +82,7 @@ export const IMPORTANCE_WEIGHTS = {
   HAS_LIST_UNSUBSCRIBE: -2,
   HAS_PRECEDENCE_BULK: -2,
   HAS_BULK_HEADERS: -1,
+  BULK_TAGGED: -2,
 
   // Subject keywords
   URGENT_KEYWORD: 1,
@@ -161,35 +164,27 @@ export function parseAuthenticationHeaders(rawHeaders: string | null | undefined
 }
 
 /**
- * Check if email has bulk mail headers
+ * Check if email has bulk mail headers.
+ *
+ * The rules are NOT here — they live in `bulkHeaderSignals`, the same set the
+ * IMAP client applies at sync time to decide the stored `|bulk|` tag. This
+ * function only maps them onto the three buckets the importance weights are
+ * expressed in, so the scorer and the sync verdict can never disagree about
+ * what a bulk header is.
  */
 export function hasBulkHeaders(rawHeaders: string | null | undefined): {
   hasListUnsubscribe: boolean;
   hasPrecedenceBulk: boolean;
   hasOtherBulkIndicators: boolean;
 } {
-  const result = {
-    hasListUnsubscribe: false,
-    hasPrecedenceBulk: false,
-    hasOtherBulkIndicators: false,
+  const signals = bulkHeaderSignals(headerLookupFromText(rawHeaders));
+  return {
+    hasListUnsubscribe: signals.listUnsubscribe || signals.listId,
+    hasPrecedenceBulk: signals.precedenceBulk,
+    // Auto-Submitted and Feedback-ID join the vendor tracing headers: all of
+    // them say "a machine sent this" without the RFC list headers being set.
+    hasOtherBulkIndicators: signals.espTrace || signals.feedbackId || signals.autoSubmitted,
   };
-
-  if (!rawHeaders) {
-    return result;
-  }
-
-  const headers = rawHeaders.toLowerCase();
-
-  result.hasListUnsubscribe = headers.includes('list-unsubscribe');
-  result.hasPrecedenceBulk = headers.includes('precedence: bulk') ||
-                              headers.includes('precedence:bulk') ||
-                              headers.includes('precedence: list');
-  result.hasOtherBulkIndicators = headers.includes('x-campaign') ||
-                                   headers.includes('x-mailer: mailchimp') ||
-                                   headers.includes('x-mailer: sendgrid') ||
-                                   headers.includes('feedback-id:');
-
-  return result;
 }
 
 /**
@@ -349,6 +344,18 @@ export function calculateImportanceScore(
 
   // 8. Bulk mail indicators
   const bulkIndicators = hasBulkHeaders(rawHeaders);
+
+  // Most callers store rows, not header blocks. For them the verdict is already
+  // on the row: sync ran the same rules once and stamped `|bulk|`. Without this
+  // the whole bulk arm silently scored nothing for every such caller.
+  if (!rawHeaders && hasTag(email.tags || '', 'bulk')) {
+    score += IMPORTANCE_WEIGHTS.BULK_TAGGED;
+    factors.push({
+      name: 'bulk_tagged',
+      weight: IMPORTANCE_WEIGHTS.BULK_TAGGED,
+      reason: 'Classified as list/bulk mail at sync',
+    });
+  }
 
   if (bulkIndicators.hasListUnsubscribe) {
     score += IMPORTANCE_WEIGHTS.HAS_LIST_UNSUBSCRIBE;
