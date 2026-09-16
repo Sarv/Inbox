@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, (...a: any[]) => any>(),
+  /** The scorer itself, so its ARGUMENTS can be asserted, not just its result. */
+  score_fn: vi.fn(),
   /** Score the mocked scorer returns; high enough to trip the old threshold. */
   score: 10,
   isImportant: true,
@@ -36,12 +38,10 @@ vi.mock('../../../../electron/shared', () => ({
 }));
 vi.mock('@sarvinbox/core', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  calculateImportanceScore: () => ({
-    score: h.score,
-    factors: [],
-    isImportant: h.isImportant,
-    authStatus: { overall: 'pass' },
-  }),
+  calculateImportanceScore: (...args: unknown[]) => {
+    h.score_fn(...args);
+    return { score: h.score, factors: [], isImportant: h.isImportant, authStatus: { overall: 'pass' } };
+  },
 }));
 
 import { registerMiscHandlers } from '../../../../electron/ipc/misc-handlers';
@@ -62,6 +62,7 @@ const tagWrites = () =>
 
 beforeEach(() => {
   h.handlers.clear();
+  h.score_fn.mockReset();
   h.score = 10;
   h.isImportant = true;
   for (const fn of Object.values(h.storage)) fn.mockReset();
@@ -125,5 +126,33 @@ describe('processor:processEmails — the rule scorer never authors the importan
     expect(result.data.processed).toBe(1);
     expect(h.storage.getEmailsNeedingProcessing).not.toHaveBeenCalled();
     expect(tagWrites()).toEqual([]);
+  });
+});
+
+describe('processor:processEmails — what the scorer is actually handed', () => {
+  // THE REGRESSION: both call sites passed `email.cleanBody` as the SIXTH
+  // argument, which is `rawHeaders`. Every header arm of the scorer — SPF/DKIM/
+  // DMARC, List-Unsubscribe, Precedence, Feedback-ID, Auto-Submitted — was then
+  // reading body prose, so a mail whose text happened to say "unsubscribe" or
+  // "dkim=pass" scored as though its headers said it. A stored row has no raw
+  // headers; the honest value is null.
+  it('passes null for rawHeaders, never the body', async () => {
+    await processEmails()({}, {});
+
+    expect(h.score_fn).toHaveBeenCalledTimes(1);
+    const rawHeaders = h.score_fn.mock.calls[0][5];
+    expect(rawHeaders).toBeNull();
+    expect(rawHeaders).not.toBe('please respond immediately');
+  });
+
+  // The explicit-ids entry point is the second call site and had the same bug;
+  // fixing one and not the other leaves the scorer lying on half the traffic.
+  it('passes null for rawHeaders on the explicit-ids path too', async () => {
+    h.storage.getEmail.mockResolvedValue(anEmail({ id: 'e2' }));
+
+    await processEmails()({}, { emailIds: ['e2'] });
+
+    expect(h.score_fn).toHaveBeenCalledTimes(1);
+    expect(h.score_fn.mock.calls[0][5]).toBeNull();
   });
 });
