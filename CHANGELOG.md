@@ -103,6 +103,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use that mailbox.
 
 ### Fixed
+- "Copy to Clipboard" in Show original now says whether it worked. The clipboard
+  is invisible, so a button that looked identical before and after the click was
+  indistinguishable from a dead one — people clicked it repeatedly with no way to
+  tell whether the message source had been copied. It now confirms with a check
+  and "Copied to clipboard" for a moment, and — just as important — says
+  "Copy failed" when the write is refused (an unfocused window, or a context with
+  no clipboard access) instead of silently pretending it succeeded. The button is
+  now one shared component, so every future copy affordance behaves the same way.
 - Images a sender embedded in the message itself (a `cid:` reference — signature
   logos, avatars in notification mail) could render as a broken image while the
   same email looked fine in Gmail. The mail parser only inlines such a part when
