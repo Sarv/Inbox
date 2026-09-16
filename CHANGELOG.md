@@ -111,6 +111,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Copy failed" when the write is refused (an unfocused window, or a context with
   no clipboard access) instead of silently pretending it succeeded. The button is
   now one shared component, so every future copy affordance behaves the same way.
+- Bulk/marketing mail is now recognised from its **headers**, not its body, so a
+  long human conversation is no longer mistaken for a newsletter. The classifier
+  used to score the whole raw body — and a reply carries the entire quoted
+  history under it, so quoting a newsletter, a corporate footer, or an ordinary
+  spacer image was enough to condemn the reply. The false-positive rate therefore
+  grew with every reply in the thread. The verdict now comes from the message's
+  own headers (`List-Id`, `List-Unsubscribe`, `Precedence`, plus two new signals:
+  `Feedback-ID` and RFC 3834 `Auto-Submitted`), and the remaining content checks
+  (bulk click-tracker domains, UTM campaign links) look only at the part of the
+  message the sender actually wrote, with quoted and forwarded text cut away.
+- Three separate copies of "is this bulk mail?" — one in sync, one in the
+  importance scorer, one standalone — have been folded into a single shared set
+  of rules, so they can no longer disagree about the same message. The scorer's
+  copy was missing `Feedback-ID` and `Auto-Submitted` entirely.
 - Images a sender embedded in the message itself (a `cid:` reference — signature
   logos, avatars in notification mail) could render as a broken image while the
   same email looked fine in Gmail. The mail parser only inlines such a part when

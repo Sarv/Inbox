@@ -40,6 +40,11 @@ import type {
   FlagChange,
 } from '../types/imap';
 import { IMAPError } from '../types/imap';
+import {
+  BULK_HEADER_NAMES,
+  hasBulkHeaderSignal,
+  headerValueFromText,
+} from '../utils/bulk-mail';
 import { logger } from '../utils/logger';
 import { createMutex, type Mutex } from '../utils/mutex';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
@@ -915,7 +920,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
           // from/subject and a synthetic message-id. toIMAPMessage falls back
           // to these raw headers. (References is also envelope-omitted and
           // needed for threading.)
-          headers: ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'in-reply-to', 'references', 'list-id', 'list-unsubscribe', 'precedence'],
+          // The bulk-mail names come from BULK_HEADER_NAMES rather than being
+          // spelled out again: a header the detector reads but the fetch does
+          // not ask for is a signal that silently never fires.
+          headers: ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'in-reply-to', 'references', ...BULK_HEADER_NAMES],
         },
         { uid: useUid },
       );
@@ -1058,32 +1066,23 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   }
 
   /**
-   * True when the message carries mailing-list / bulk-mail headers (RFC 2919
-   * List-Id, RFC 2369 List-Unsubscribe, or a bulk/list/junk Precedence). Used to
-   * suppress the subject-based thread fallback for newsletters/digests (Gmail
-   * parity), so many same-subject bulk mails never merge into one thread.
+   * True when the message carries mailing-list / bulk-mail headers. The rules
+   * live in `bulkHeaderSignals` so the importance scorer cannot drift from what
+   * sync decided; this end only supplies the lookup over its own Buffer.
+   *
+   * Used to suppress the subject-based thread fallback for newsletters/digests
+   * (Gmail parity), so many same-subject bulk mails never merge into one thread.
    */
   private detectBulk(headers: Buffer | undefined): boolean {
     if (!headers) return false;
-    if (this.headerValue(headers, 'list-id')) return true;
-    if (this.headerValue(headers, 'list-unsubscribe')) return true;
-    const prec = (this.headerValue(headers, 'precedence') || '').toLowerCase();
-    return prec === 'bulk' || prec === 'list' || prec === 'junk';
+    return hasBulkHeaderSignal((name) => this.headerValue(headers, name));
   }
 
+  /** One header's unfolded value. The parsing lives in `headerValueFromText`,
+   *  shared with the callers that hold headers as text rather than a Buffer. */
   private headerValue(headers: Buffer | undefined, name: string): string | null {
     if (!headers) return null;
-    const text = headers.toString('utf8');
-    // Anchor the header name at the start of the block or after a newline, but
-    // do NOT use the `m` flag: with `m`, `$` matches every physical line-end, so
-    // the lazy capture stops at the FIRST line and a folded multi-line value
-    // (e.g. a To/Cc list wrapped across lines) is truncated to its first
-    // recipient. Without `m`, the capture runs until the next UNFOLDED newline
-    // (a `\n` not followed by whitespace = the next header) or end of input, so
-    // continuation lines are captured and then unfolded below.
-    const match = text.match(new RegExp(`(?:^|\\r?\\n)${name}:\\s*([\\s\\S]*?)(?:\\r?\\n(?!\\s)|$)`, 'i'));
-    if (!match) return null;
-    return match[1].replace(/\r?\n\s+/g, ' ').trim() || null;
+    return headerValueFromText(headers.toString('utf8'), name);
   }
 
   private parseReferences(headers?: Buffer): string[] {
