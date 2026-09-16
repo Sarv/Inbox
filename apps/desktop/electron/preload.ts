@@ -418,6 +418,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getUnprocessedEmailCount: (limit?: number, skipRead?: boolean) =>
       ipcRenderer.invoke('ai:getUnprocessedEmailCount', limit, skipRead ?? true),
     getProcessingBreakdown: () => ipcRenderer.invoke('ai:getProcessingBreakdown'),
+    setBacklogCap: (cap: number) => ipcRenderer.invoke('ai:setBacklogCap', cap),
+    getBacklogCap: () => ipcRenderer.invoke('ai:getBacklogCap'),
     saveCategoriesBatch: (categories: any[]) =>
       ipcRenderer.invoke('ai:saveCategoriesBatch', categories),
     search: (searchQuery: SearchQuery) =>
@@ -1133,6 +1135,14 @@ export interface ElectronAPI {
       Promise<{ success: boolean; data?: any[]; error?: string }>;
     getUnprocessedEmailCount: (limit?: number, skipRead?: boolean) =>
       Promise<{ success: boolean; data?: number; error?: string }>;
+    /** The breakdown behind the AI dashboard's "processing breakdown" panel. */
+    getProcessingBreakdown: () =>
+      Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
+    /** Push the "AI Processing Limit" setting to the background pipeline. */
+    setBacklogCap: (cap: number) =>
+      Promise<{ success: boolean; data?: { cap: number }; error?: string }>;
+    getBacklogCap: () =>
+      Promise<{ success: boolean; data?: { cap: number }; error?: string }>;
     saveCategoriesBatch: (categories: any[]) =>
       Promise<{ success: boolean; data?: { saved: number }; error?: string }>;
     search: (searchQuery: SearchQuery) =>

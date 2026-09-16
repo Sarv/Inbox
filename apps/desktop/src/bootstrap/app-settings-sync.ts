@@ -104,6 +104,7 @@ function initAppSettingsSync(): void {
   localStorage.setItem = function patchedSetItem(key: string, value: string): void {
     nativeSet(key, value);
     if (MANAGED.has(key)) { try { void api.set(key, value); } catch { /* ignore */ } }
+    if (key === 'sarvinbox-settings') pushBacklogCap(value);
   };
   localStorage.removeItem = function patchedRemoveItem(key: string): void {
     nativeRemove(key);
@@ -111,4 +112,29 @@ function initAppSettingsSync(): void {
   };
 }
 
+/**
+ * Mirror the user's "AI Processing Limit" into the main process.
+ *
+ * The background AI poll runs in main and needs this number to size its
+ * newest-N window, but the setting lives here in localStorage. Without this
+ * push the window stayed at its hardcoded default: a user who raised the limit
+ * to "All" saw the manual run's batch size change and nothing else, while
+ * hundreds of fully-eligible older emails stayed outside a window their setting
+ * could not move.
+ *
+ * Fired from the setItem mirror (so every writer is covered) and once at boot.
+ * Best-effort — a failed push just leaves the last persisted value in place.
+ */
+function pushBacklogCap(rawSettings: string | null): void {
+  try {
+    const cap = rawSettings ? JSON.parse(rawSettings)?.maxAIProcessingEmails : undefined;
+    if (typeof cap !== 'number') return;
+    void (window as any)?.electronAPI?.ai?.setBacklogCap?.(cap);
+  } catch { /* a malformed settings blob must not break boot */ }
+}
+
 initAppSettingsSync();
+// Boot push: main persists the cap, but a profile restored from the DB (or a
+// value changed while main was down) would otherwise not reach it until the
+// next time the user opened Settings.
+try { pushBacklogCap(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
