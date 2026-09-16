@@ -29,6 +29,7 @@ export * from './bulk-mail';
 export * from './safe-path';
 export * from './mail-parse';
 export * from './html-text';
+export * from './quoted-text';
 export * from './sarv-api-error';
 export * from './cid-images';
 export * from './inline-images';
