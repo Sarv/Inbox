@@ -144,7 +144,11 @@ export function registerMiscHandlers(): void {
               '',
               '',
               myMessageIds,
-              email.cleanBody || ''
+              // No raw headers on a stored row — the scorer falls back to the
+              // `|bulk|` tag sync stamped from those same headers. This used to
+              // pass `cleanBody`, so the auth and bulk-header arms were reading
+              // body prose and scoring whatever happened to contain the words.
+              null
             );
 
             await storage.updateEmailImportance(email.id, result.score, 'rule');
@@ -209,7 +213,8 @@ export function registerMiscHandlers(): void {
         userEmail,
         userDomain,
         myMessageIds,
-        email.cleanBody || ''
+        // See above: `rawHeaders`, which a stored row does not carry.
+        null
       );
 
       await storage.updateEmailImportance(email.id, result.score, 'rule');
