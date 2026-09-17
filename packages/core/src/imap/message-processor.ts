@@ -6,6 +6,7 @@ import { simpleParser, type ParsedMail } from 'mailparser';
 import { findFolderByType, type ClassifiableFolder } from '../config/folder-mapping';
 import { LARGE_MAILBOX_THRESHOLD, STALE_FLAG_VERIFY_MAX, SYNC_RECENT_WINDOW_DAYS, recentWindowCutoffDate } from '../config/sync';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
+import { parseAuthenticationHeaders } from '../processor/email-processor';
 import type { FilterRule } from '../types/filters';
 import type { IMAPMessage, IIMAPClient } from '../types/imap';
 import type { EmailRecord, FolderRecord } from '../types/models';
@@ -790,6 +791,14 @@ export class MessageProcessor {
       // Calendar invite (captured here only when the body is downloaded at sync;
       // the headers-only path fills it later on body fetch).
       calendarIcs,
+
+      // Mail authentication (SPF / DKIM / DMARC) as the receiving server
+      // recorded it. NULL when the server sent no verdict — that is a real
+      // state ("unverifiable"), distinct from "checked and failed", and the
+      // security level treats the two differently.
+      authStatus: message.authHeaders
+        ? JSON.stringify(parseAuthenticationHeaders(message.authHeaders))
+        : undefined,
 
       // AI
       hasEmbedding: false,

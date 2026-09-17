@@ -477,6 +477,18 @@ export interface IMAPMessage {
    */
   labels?: string[];
 
+  /**
+   * The raw `Authentication-Results` / `Received-SPF` / `ARC-Authentication-Results`
+   * header block, verbatim, when the server sent it. This is the ONLY evidence
+   * of SPF / DKIM / DMARC the client ever sees: the receiving MTA evaluates them
+   * and records the verdict here. Before this field existed the headers were
+   * fetched for nothing, the stored `auth_status` was parsed from an empty
+   * string, and every message read "unknown" — the phishing banner's own
+   * comment called the column "security theatre". Now it is the fact the
+   * security level is built on.
+   */
+  authHeaders?: string;
+
   // Headers
   envelope: {
     messageId: string;

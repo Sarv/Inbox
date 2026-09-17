@@ -153,9 +153,13 @@ export function registerMiscHandlers(): void {
 
             await storage.updateEmailImportance(email.id, result.score, 'rule');
 
-            if (result.authStatus) {
-              await storage.updateEmailAuthStatus(email.id, JSON.stringify(result.authStatus));
-            }
+            // auth_status is NOT written here any more. This scorer never receives raw
+
+            // headers, so its verdict is always all-"unknown" — and writing that back
+
+            // clobbered the real SPF/DKIM/DMARC result the sync now records from the
+
+            // server's Authentication-Results header. Sync owns the column.
 
             // The rule score is STORED (source 'rule') but must never write the
             // `important` tag: that tag drives the "Important" chip and section,
@@ -219,9 +223,13 @@ export function registerMiscHandlers(): void {
 
       await storage.updateEmailImportance(email.id, result.score, 'rule');
 
-      if (result.authStatus) {
-        await storage.updateEmailAuthStatus(email.id, JSON.stringify(result.authStatus));
-      }
+      // auth_status is NOT written here any more. This scorer never receives raw
+
+      // headers, so its verdict is always all-"unknown" — and writing that back
+
+      // clobbered the real SPF/DKIM/DMARC result the sync now records from the
+
+      // server's Authentication-Results header. Sync owns the column.
 
       return { success: true, data: result };
     } catch (error) {
