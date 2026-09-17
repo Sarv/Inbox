@@ -87,11 +87,15 @@ describe('processor:processEmails — the rule scorer never authors the importan
 
   // The score itself is still useful (sorting, agent context) and is recorded
   // under source 'rule' — removing the tag write must not silence the score.
-  it('still stores the score and auth status under the rule source', async () => {
+  it('stores the score under the rule source, and leaves auth_status to the sync', async () => {
     await processEmails()({}, {});
 
     expect(h.storage.updateEmailImportance).toHaveBeenCalledWith('e1', 10, 'rule');
-    expect(h.storage.updateEmailAuthStatus).toHaveBeenCalledWith('e1', JSON.stringify({ overall: 'pass' }));
+    // Deliberately NOT written here any more. This scorer never receives raw
+    // headers, so its verdict was always all-"unknown" — and writing that back
+    // overwrote the real SPF/DKIM/DMARC result the sync records from the
+    // server's Authentication-Results header. The sync owns the column.
+    expect(h.storage.updateEmailAuthStatus).not.toHaveBeenCalled();
   });
 
   // An email the AI HAS marked important keeps its tag: this handler only stops

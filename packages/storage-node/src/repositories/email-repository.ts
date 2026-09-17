@@ -446,7 +446,8 @@ export class EmailRepository extends BaseRepository {
         importance_score, importance_source,
         ai_processed_at, ai_confidence, ai_reasoning,
         snooze_until, snooze_original_tags,
-        has_embedding, embedding_last_generated
+        has_embedding, embedding_last_generated,
+        auth_status
       ) VALUES (
         @id, @messageId, @threadId, @folderId, @uid, @tags,
         @subject, @fromAddress, @fromName, @toAddress, @toNames,
@@ -474,7 +475,8 @@ export class EmailRepository extends BaseRepository {
         @importanceScore, @importanceSource,
         @aiProcessedAt, @aiConfidence, @aiReasoning,
         @snoozeUntil, @snoozeOriginalTags,
-        @hasEmbedding, @embeddingLastGenerated
+        @hasEmbedding, @embeddingLastGenerated,
+        @authStatus
       )
     `);
 
@@ -519,6 +521,7 @@ export class EmailRepository extends BaseRepository {
       snoozeOriginalTags: email.snoozeOriginalTags || null,
       hasEmbedding: email.hasEmbedding ? 1 : 0,
       embeddingLastGenerated: email.embeddingLastGenerated,
+      authStatus: email.authStatus ?? null,
     });
 
     // The body itself, in the side table. Must follow the `emails` insert: the

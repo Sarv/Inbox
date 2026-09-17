@@ -49,6 +49,7 @@ import { logger } from '../utils/logger';
 import { createMutex, type Mutex } from '../utils/mutex';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
+import { extractAuthHeaderBlock } from './auth-headers';
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { isConnectionError, isAuthError } from './imap-errors';
 
@@ -923,7 +924,15 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
           // The bulk-mail names come from BULK_HEADER_NAMES rather than being
           // spelled out again: a header the detector reads but the fetch does
           // not ask for is a signal that silently never fires.
-          headers: ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'in-reply-to', 'references', ...BULK_HEADER_NAMES],
+          headers: [
+            'from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'in-reply-to', 'references',
+            ...BULK_HEADER_NAMES,
+            // Mail authentication verdicts, written by the receiving server. A
+            // header-only sync is the common path, so unless these ride along
+            // with the envelope the client never learns whether SPF / DKIM /
+            // DMARC passed — see IMAPMessage.authHeaders.
+            'authentication-results', 'arc-authentication-results', 'received-spf',
+          ],
         },
         { uid: useUid },
       );
@@ -987,6 +996,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // digests with identical subjects never collapse into one giant thread.
       // We carry the flag through to threading (see thread-resolver Path 3).
       isBulk: this.detectBulk(headers),
+      authHeaders: extractAuthHeaderBlock(headers),
       // Gmail labels, when the server sent them. ImapFlow surfaces X-GM-LABELS
       // as a Set; normalise to a plain array so downstream code (and the fake
       // server in tests) can treat it as data. Absent on non-Gmail servers.
