@@ -7,13 +7,14 @@ import {
   Puzzle,
   Wand2,
   Bot,
+  ShieldCheck,
 } from 'lucide-react';
 import { useState } from 'react';
 
 // Logo asset path (from public folder)
 const sarvLogo = './sarv.png';
 
-type AppSection = 'mail' | 'teams' | 'chat' | 'meet' | 'webinar' | 'drive' | 'calendar' | 'contacts' | 'extensions' | 'ai-settings' | 'agent' | 'settings';
+type AppSection = 'mail' | 'teams' | 'chat' | 'meet' | 'webinar' | 'drive' | 'calendar' | 'contacts' | 'extensions' | 'ai-settings' | 'agent' | 'settings' | 'security';
 
 interface AppSidebarProps {
   activeSection: AppSection;
@@ -158,6 +159,23 @@ export function AppSidebar({ activeSection, onSectionChange }: AppSidebarProps) 
           <Settings className="h-5 w-5 flex-shrink-0" />
           {isExpanded && (
             <span className="text-sm font-medium truncate">Settings</span>
+          )}
+        </button>
+        <button
+          onClick={() => onSectionChange('security')}
+          className={`w-full flex items-center gap-3 px-4 py-3 transition-colors relative ${
+            activeSection === 'security'
+              ? 'bg-primary/10 text-primary'
+              : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+          }`}
+          title={!isExpanded ? 'Security' : undefined}
+        >
+          {activeSection === 'security' && (
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full" />
+          )}
+          <ShieldCheck className="h-5 w-5 flex-shrink-0" />
+          {isExpanded && (
+            <span className="text-sm font-medium truncate">Security</span>
           )}
         </button>
 

@@ -45,6 +45,7 @@ import {
   ATTACHMENT_SCHEME_PRIVILEGES,
   registerAttachmentProtocol,
 } from './services/attachment-protocol';
+import { startAuthHeaderBackfill, stopAuthHeaderBackfill } from './services/auth-header-backfill';
 import { startAvatarDiscoveryScheduler, stopAvatarDiscoveryScheduler } from './services/avatar-discovery-scheduler';
 import { startBackfillScheduler, stopBackfillScheduler } from './services/backfill-scheduler';
 import { startBodyPrefetchScheduler, stopBodyPrefetchScheduler } from './services/body-prefetch-scheduler';
@@ -206,6 +207,7 @@ function stopBackgroundTimers(): void {
   try { stopConversationScheduler(); } catch {}
   try { stopContactEnrichmentScheduler(); } catch {}
   try { stopBodyPrefetchScheduler(); } catch {}
+  try { stopAuthHeaderBackfill(); } catch {}
   try { stopBackfillScheduler(); } catch {}
   try { stopStartupThreadRepair(); } catch {}
   try { stopAvatarDiscoveryScheduler(); } catch {}
@@ -836,6 +838,7 @@ app.whenReady().then(async () => {
     startConversationScheduler();
     startContactEnrichmentScheduler();
     startBodyPrefetchScheduler();
+    startAuthHeaderBackfill();
     startBackfillScheduler();
     startStartupThreadRepair();
     startAvatarDiscoveryScheduler();
