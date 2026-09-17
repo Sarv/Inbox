@@ -1503,6 +1503,46 @@ export class SQLiteStorage implements IEmailStorage {
     return this.aiRepo.updateImportance(emailId, score, source);
   }
 
+  // ---- auth-header backfill ------------------------------------------------
+
+  /** Messages still without an authentication verdict AND fetchable (a uid). */
+  countEmailsMissingAuthStatus(): number {
+    this.ensureInitialized();
+    return (this.db!.prepare(
+      `SELECT COUNT(*) AS n FROM emails WHERE auth_status IS NULL AND uid IS NOT NULL AND uid > 0`,
+    ).get() as { n: number }).n;
+  }
+
+  /**
+   * The next slice of the backfill backlog, newest first, with the folder path
+   * the fetch needs. Rows with no uid — NULL, or 0 for a locally-appended Sent
+   * or Drafts copy the server never numbered — cannot be fetched by uid, so
+   * they are excluded rather than retried forever. Seven such rows kept a live
+   * mailbox's status line at "7 to go" after everything else had drained.
+   */
+  getEmailsMissingAuthStatus(limit: number): Array<{ id: string; uid: number; folderPath: string }> {
+    this.ensureInitialized();
+    return this.db!.prepare(
+      `SELECT e.id, e.uid, f.path AS folderPath
+       FROM emails e JOIN folders f ON f.id = e.folder_id
+       WHERE e.auth_status IS NULL AND e.uid IS NOT NULL AND e.uid > 0
+       ORDER BY e.date DESC LIMIT ?`,
+    ).all(limit) as Array<{ id: string; uid: number; folderPath: string }>;
+  }
+
+  /** One transaction for a whole backfill batch — 200 rows, not 200 fsyncs. */
+  updateEmailAuthStatusBatch(rows: Array<{ id: string; authStatus: string }>): number {
+    this.ensureInitialized();
+    if (rows.length === 0) return 0;
+    const stmt = this.db!.prepare('UPDATE emails SET auth_status = ? WHERE id = ? AND auth_status IS NULL');
+    const run = this.db!.transaction((batch: Array<{ id: string; authStatus: string }>) => {
+      let n = 0;
+      for (const r of batch) n += stmt.run(r.authStatus, r.id).changes;
+      return n;
+    });
+    return run(rows);
+  }
+
   async updateEmailAuthStatus(emailId: string, authStatus: string): Promise<void> {
     this.ensureInitialized();
     return this.aiRepo.updateAuthStatus(emailId, authStatus);
@@ -2040,6 +2080,54 @@ export class SQLiteStorage implements IEmailStorage {
     const addr = (email || '').trim().toLowerCase();
     if (!addr) return;
     this.db!.prepare('INSERT OR IGNORE INTO image_allowed_senders (email) VALUES (?)').run(addr);
+  }
+
+  // ---- link trust/block rules (see migration v85) --------------------------
+
+  /** Every rule, newest first. */
+  async listLinkDomainRules(): Promise<Array<{ id: number; senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block'; createdAt: number }>> {
+    this.ensureInitialized();
+    const rows = this.db!.prepare(
+      `SELECT id, sender_domain, shown_domain, actual_domain, verdict, created_at
+       FROM link_domain_rules ORDER BY created_at DESC, id DESC`,
+    ).all() as Array<{ id: number; sender_domain: string; shown_domain: string; actual_domain: string; verdict: 'trust' | 'block'; created_at: number }>;
+    return rows.map((r) => ({
+      id: r.id, senderDomain: r.sender_domain, shownDomain: r.shown_domain,
+      actualDomain: r.actual_domain, verdict: r.verdict, createdAt: r.created_at,
+    }));
+  }
+
+  /**
+   * Record a verdict on one (sender, shown → actual) triple. Re-recording the
+   * same triple REPLACES the verdict — trusting a pair you had blocked, or the
+   * reverse, is a change of mind, not a second row.
+   */
+  async addLinkDomainRule(rule: { senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block' }): Promise<void> {
+    this.ensureInitialized();
+    const norm = (v: string) => (v || '').trim().toLowerCase();
+    const sender = norm(rule.senderDomain);
+    const shown = norm(rule.shownDomain);
+    const actual = norm(rule.actualDomain);
+    if (!shown || !actual) return;
+    this.db!.prepare(
+      `INSERT INTO link_domain_rules (sender_domain, shown_domain, actual_domain, verdict)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(sender_domain, shown_domain, actual_domain)
+       DO UPDATE SET verdict = excluded.verdict, created_at = unixepoch()`,
+    ).run(sender, shown, actual, rule.verdict);
+  }
+
+  async removeLinkDomainRule(id: number): Promise<void> {
+    this.ensureInitialized();
+    this.db!.prepare('DELETE FROM link_domain_rules WHERE id = ?').run(id);
+  }
+
+  /** Forget a sender's remote-image allowance (the Security page's revoke). */
+  async disallowSenderImages(email: string): Promise<void> {
+    this.ensureInitialized();
+    const addr = (email || '').trim().toLowerCase();
+    if (!addr) return;
+    this.db!.prepare('DELETE FROM image_allowed_senders WHERE email = ?').run(addr);
   }
 
   async getImageAllowedSenders(): Promise<string[]> {

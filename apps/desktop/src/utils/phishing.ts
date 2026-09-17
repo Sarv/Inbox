@@ -127,7 +127,20 @@ export function assessSender(fromName: string | null | undefined, fromAddress: s
  * Skips wrapper/tracker domains (see LINK_WRAPPER_DOMAINS) and non-web schemes.
  * Requires a DOM parser (renderer only). Returns at most a few, de-duplicated.
  */
-export function assessLinks(html: string | null | undefined): PhishingReason[] {
+/** One deceptive link: the domain the text shows vs the domain the href goes to. */
+export interface LinkMismatch {
+  shown: string;
+  actual: string;
+}
+
+/**
+ * Every anchor whose visible text names one registrable domain while its href
+ * goes to another — the structured form, so callers can act on the PAIR (trust
+ * it, block it, list it) rather than only render a sentence about it.
+ * `assessLinks` is built on this. Skips wrapper/tracker domains and non-web
+ * schemes; de-duplicated; capped at a few per message.
+ */
+export function linkMismatches(html: string | null | undefined): LinkMismatch[] {
   if (!html || typeof DOMParser === 'undefined') return [];
   let doc: Document;
   try {
@@ -135,14 +148,12 @@ export function assessLinks(html: string | null | undefined): PhishingReason[] {
   } catch {
     return [];
   }
-
   const seen = new Set<string>();
-  const mismatches: Array<{ shown: string; actual: string }> = [];
-
+  const out: LinkMismatch[] = [];
   doc.querySelectorAll('a[href]').forEach((a) => {
-    if (mismatches.length >= 3) return;
+    if (out.length >= 3) return;
     const href = a.getAttribute('href') || '';
-    if (!/^https?:\/\//i.test(href)) return; // ignore mailto:, tel:, #anchor, relative
+    if (!/^https?:\/\//i.test(href)) return;
     let actual: string | null = null;
     try {
       actual = registrableDomain(new URL(href).hostname);
@@ -150,23 +161,25 @@ export function assessLinks(html: string | null | undefined): PhishingReason[] {
       return;
     }
     if (!actual || LINK_WRAPPER_DOMAINS.has(actual)) return;
-
-    const textDomains = domainsInText(a.textContent);
-    for (const shown of textDomains) {
+    for (const shown of domainsInText(a.textContent)) {
       if (shown === actual || LINK_WRAPPER_DOMAINS.has(shown)) continue;
       const key = `${shown}->${actual}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      mismatches.push({ shown, actual });
+      out.push({ shown, actual });
       break;
     }
   });
+  return out;
+}
 
-  return mismatches.map(({ shown, actual }) => ({
+export function assessLinks(html: string | null | undefined): PhishingReason[] {
+  return linkMismatches(html).map(({ shown, actual }) => ({
     severity: 'caution' as const,
     text: `A link that appears to go to ${shown} actually points to ${actual}.`,
   }));
 }
+
 
 /**
  * Combine every signal into one assessment. `level` is the max severity present

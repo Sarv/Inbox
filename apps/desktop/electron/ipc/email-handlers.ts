@@ -12,6 +12,7 @@ import ICAL from 'ical.js';
 
 import { resolveAccountTarget } from '../services/account-target';
 import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
+import { getAuthBackfillState, kickAuthHeaderBackfill } from '../services/auth-header-backfill';
 import {
   deferBodyPrefetch,
   startManualBodyDownload,
@@ -361,6 +362,37 @@ export function registerEmailHandlers(): void {
   });
   ipcMain.handle('images:getAllowedSenders', async () => {
     try { return { success: true, data: await requireStorage().getImageAllowedSenders() }; }
+    catch (error) { return { success: false, error: (error as Error).message }; }
+  });
+  ipcMain.handle('images:disallowSender', async (_event, address: string) => {
+    try { await requireStorage().disallowSenderImages(address); return { success: true }; }
+    catch (error) { return { success: false, error: (error as Error).message }; }
+  });
+
+  // Link trust/block rules (per active account) — the security indicator and
+  // the phishing banner consult these; the Security page lists and revokes them.
+  ipcMain.handle('security:listLinkRules', async () => {
+    try { return { success: true, data: await requireStorage().listLinkDomainRules() }; }
+    catch (error) { return { success: false, error: (error as Error).message }; }
+  });
+  ipcMain.handle('security:addLinkRule', async (_event, rule: { senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block' }) => {
+    try {
+      if (rule?.verdict !== 'trust' && rule?.verdict !== 'block') return { success: false, error: 'verdict must be trust or block' };
+      await requireStorage().addLinkDomainRule(rule);
+      return { success: true };
+    } catch (error) { return { success: false, error: (error as Error).message }; }
+  });
+  // Auth-header backfill: progress for the Security page, and a manual kick.
+  ipcMain.handle('security:getAuthBackfillState', async () => {
+    try { return { success: true, data: getAuthBackfillState() }; }
+    catch (error) { return { success: false, error: (error as Error).message }; }
+  });
+  ipcMain.handle('security:kickAuthBackfill', async () => {
+    try { kickAuthHeaderBackfill(); return { success: true, data: getAuthBackfillState() }; }
+    catch (error) { return { success: false, error: (error as Error).message }; }
+  });
+  ipcMain.handle('security:removeLinkRule', async (_event, id: number) => {
+    try { await requireStorage().removeLinkDomainRule(Number(id)); return { success: true }; }
     catch (error) { return { success: false, error: (error as Error).message }; }
   });
 

@@ -262,6 +262,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Remote-image sender allowlist (per active account).
     allowImagesForSender: (address: string) => ipcRenderer.invoke('images:allowSender', address),
     getImageAllowedSenders: () => ipcRenderer.invoke('images:getAllowedSenders'),
+    disallowImagesForSender: (address: string) => ipcRenderer.invoke('images:disallowSender', address),
+  },
+
+  // Security: the user's link trust/block rules (see Security page).
+  security: {
+    listLinkRules: () => ipcRenderer.invoke('security:listLinkRules'),
+    addLinkRule: (rule: { senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block' }) =>
+      ipcRenderer.invoke('security:addLinkRule', rule),
+    removeLinkRule: (id: number) => ipcRenderer.invoke('security:removeLinkRule', id),
+    getAuthBackfillState: () => ipcRenderer.invoke('security:getAuthBackfillState'),
+    kickAuthBackfill: () => ipcRenderer.invoke('security:kickAuthBackfill'),
+    onAuthBackfillProgress: (cb: (state: AuthBackfillState) => void) => {
+      const listener = (_e: unknown, state: AuthBackfillState) => cb(state);
+      ipcRenderer.on('auth-backfill:progress', listener);
+      return () => ipcRenderer.removeListener('auth-backfill:progress', listener);
+    },
   },
 
   // Storage operations
@@ -847,6 +863,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 // Type definitions for the exposed API
+/** Progress of the auth-header backfill over older mail (see auth-header-backfill.ts). */
+export interface AuthBackfillState {
+  /** Messages still without a verdict. */
+  remaining: number;
+  /** Verdicts written since the app started. */
+  done: number;
+  /** A tick is currently fetching. */
+  running: boolean;
+  /** Nothing left to fetch. */
+  drained: boolean;
+}
+
 /** Progress of a manual body download (see `emails:startBodyDownload`). */
 export interface BodyDownloadState {
   active: boolean;
@@ -986,6 +1014,16 @@ export interface ElectronAPI {
     bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => Promise<{ success: boolean; error?: string }>;
     allowImagesForSender: (address: string) => Promise<{ success: boolean; error?: string }>;
     getImageAllowedSenders: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
+    disallowImagesForSender: (address: string) => Promise<{ success: boolean; error?: string }>;
+  };
+  security: {
+    listLinkRules: () => Promise<{ success: boolean; data?: Array<{ id: number; senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block'; createdAt: number }>; error?: string }>;
+    addLinkRule: (rule: { senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block' }) => Promise<{ success: boolean; error?: string }>;
+    removeLinkRule: (id: number) => Promise<{ success: boolean; error?: string }>;
+    getAuthBackfillState: () => Promise<{ success: boolean; data?: AuthBackfillState; error?: string }>;
+    kickAuthBackfill: () => Promise<{ success: boolean; data?: AuthBackfillState; error?: string }>;
+    /** Subscribe to backfill progress. Returns an unsubscribe fn. */
+    onAuthBackfillProgress: (cb: (state: AuthBackfillState) => void) => () => void;
   };
   storage: {
     getStats: () => Promise<{ success: boolean; data?: any; error?: string }>;

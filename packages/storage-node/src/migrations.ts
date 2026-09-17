@@ -2952,6 +2952,41 @@ export const allMailThreadIndexes: Migration = {
 };
 
 /**
+ * v85 — the user's trust/block rules for deceptive-looking links.
+ *
+ * The phishing check flags an anchor whose text names one domain while its
+ * href goes to another. Legitimate senders do this constantly (a bank's
+ * "paypal.com" text behind a tracking redirect), and until now the only way
+ * to stop the warning was to stop reading the warning. One row records a
+ * verdict on one (sender domain, shown domain, actual domain) triple.
+ *
+ * Scoped to the SENDER on purpose. Trusting "x.com → y.com" for everyone
+ * would let any sender use that redirect unflagged, and a compromised
+ * familiar account is the usual way phishing arrives from a known name.
+ */
+export const linkDomainRules: Migration = {
+  version: 85,
+  name: 'link_domain_rules',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS link_domain_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_domain TEXT NOT NULL,
+        shown_domain TEXT NOT NULL,
+        actual_domain TEXT NOT NULL,
+        verdict TEXT NOT NULL CHECK(verdict IN ('trust', 'block')),
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        UNIQUE(sender_domain, shown_domain, actual_domain)
+      );
+    `);
+    logger.info('link_domain_rules (v85): table created');
+  },
+  down: (db) => {
+    db.exec('DROP TABLE IF EXISTS link_domain_rules;');
+  },
+};
+
+/**
  * v84 — re-key the search index by rowid so maintaining it stops scanning it.
  *
  * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
@@ -3185,5 +3220,6 @@ export function createMigrationManager(
   manager.register(flagViewThreadIndexes);
   manager.register(allMailThreadIndexes);
   manager.register(ftsRowidAlignment);
+  manager.register(linkDomainRules);
   return manager;
 }

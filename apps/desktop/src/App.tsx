@@ -16,6 +16,7 @@ import { NoAccountEmptyState } from './components/NoAccountEmptyState';
 import { OAuthSessionBanner } from './components/OAuthSessionBanner';
 import { Onboarding } from './components/onboarding/Onboarding';
 import { ReauthBanner } from './components/ReauthBanner';
+import { Security } from './components/security/Security';
 import { SecurityStatusBanner } from './components/SecurityStatusBanner';
 import { Settings } from './components/settings';
 import { AISettings } from './components/settings/ai';
@@ -811,6 +812,8 @@ function App() {
         />;
       case 'settings':
         return <Settings initialTab={settingsInitialTab as any} openAddAccount={openAddAccountOnMount} onAddAccountConsumed={() => setOpenAddAccountOnMount(false)} onDirtyChange={(d) => { settingsDirtyRef.current = d; }} />;
+      case 'security':
+        return <Security />;
       case 'ai-settings':
         return <AISettings initialTab={aiSettingsInitialTab as any} onDirtyChange={(d) => { settingsDirtyRef.current = d; }} />;
       case 'agent':

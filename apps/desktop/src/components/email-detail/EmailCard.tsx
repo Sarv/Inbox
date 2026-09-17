@@ -21,6 +21,7 @@ import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
 import { PhishingWarningBanner } from './PhishingWarningBanner';
+import { SecurityIndicator } from './SecurityIndicator';
 import type { EmailDetailContext } from './types';
 import { stripSignatureFromHtml, formatRelativeDate } from './utils';
 
@@ -87,8 +88,14 @@ export function EmailCard({ ctx }: EmailCardProps) {
                 className="flex-1 min-w-0 cursor-pointer"
                 onClick={() => setMainEmailExpanded(!mainEmailExpanded)}
               >
-                <div className="font-semibold text-base text-foreground">
-                  {displayEmail.fromName || displayEmail.fromAddress}
+                <div className="font-semibold text-base text-foreground flex items-center gap-1.5">
+                  <span className="truncate">{displayEmail.fromName || displayEmail.fromAddress}</span>
+                  <SecurityIndicator
+                    fromName={displayEmail.fromName}
+                    fromAddress={displayEmail.fromAddress}
+              authStatus={displayEmail.authStatus}
+                    html={displayEmail.rawBody}
+                  />
                 </div>
                 {displayEmail.fromName && (
                   <div className="text-sm text-muted-foreground">
@@ -179,6 +186,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
             <PhishingWarningBanner
               fromName={displayEmail.fromName}
               fromAddress={displayEmail.fromAddress}
+              authStatus={displayEmail.authStatus}
               html={displayEmail.rawBody}
             />
             {/* Calendar invite card (Gmail-style) — rendered above the body when

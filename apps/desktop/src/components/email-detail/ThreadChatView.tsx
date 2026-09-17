@@ -21,6 +21,7 @@ import {
 } from './chat-message-adapter';
 import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
 import { EmailMenu } from './EmailMenu';
+import { SecurityIndicator } from './SecurityIndicator';
 import type { EmailDetailContext } from './types';
 import { parseAttachments } from './utils';
 
@@ -251,19 +252,37 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
    * (EmailCard, ThreadList), which is where a reader checks who a mail is
    * really from; a banner under every bubble turns the chat into a wall of
    * warnings and is how people learn to ignore the one that matters.
+   *
+   * The security SHIELD is different and does render under every bubble: it
+   * is a per-message level (green through red) with the evidence on hover,
+   * not a warning — the same icon that sits beside the sender in the
+   * standard view. It renders whether or not the bubble has attachments, so
+   * the footer no longer bails out early on an attachment-less message.
    */
   const renderFooter = useCallback(
     (message: ChatMessage) => {
       const email = emailFor(message);
       if (!email) return null;
       const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes);
-      if (attachments.length === 0) return null;
       return (
-        <AttachmentPills
-          emailId={email.id}
-          accountId={(email as { accountId?: string }).accountId}
-          attachments={attachments}
-        />
+        <div className="mt-1.5 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <SecurityIndicator
+              fromName={email.fromName}
+              fromAddress={email.fromAddress}
+              html={email.rawBody}
+              authStatus={email.authStatus}
+            />
+            <span className="truncate">{email.fromAddress}</span>
+          </div>
+          {attachments.length > 0 && (
+          <AttachmentPills
+            emailId={email.id}
+            accountId={(email as { accountId?: string }).accountId}
+            attachments={attachments}
+          />
+          )}
+        </div>
       );
     },
     [emailFor],

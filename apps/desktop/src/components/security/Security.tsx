@@ -1,0 +1,344 @@
+import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+
+import { getRemoteImageMode } from '../../store/helpers';
+import { LEVEL_COPY, type SecurityLevel } from '../../utils/email-security';
+import { removeLinkRule, useLinkRules, type LinkRule } from '../../utils/security-rules';
+import { useConfirm } from '../ConfirmDialog';
+import { BlockedSendersPanel } from '../settings/BlockedSendersPanel';
+import { Tooltip } from '../Tooltip';
+
+type SecurityTab = 'overview' | 'links' | 'senders' | 'images';
+
+const tabs: { id: SecurityTab; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'links', label: 'Trusted & blocked links' },
+  { id: 'senders', label: 'Blocked senders' },
+  { id: 'images', label: 'Remote images' },
+];
+
+const LEVEL_ICON: Record<SecurityLevel, typeof Shield> = {
+  verified: ShieldCheck, authenticated: Shield, unverified: ShieldQuestion, caution: ShieldAlert, danger: ShieldX,
+};
+const LEVEL_TONE: Record<SecurityLevel, string> = {
+  verified: 'text-green-600 dark:text-green-400',
+  authenticated: 'text-blue-600 dark:text-blue-400',
+  unverified: 'text-muted-foreground',
+  caution: 'text-amber-600 dark:text-amber-400',
+  danger: 'text-red-600 dark:text-red-400',
+};
+const LEVEL_ORDER: SecurityLevel[] = ['verified', 'authenticated', 'unverified', 'caution', 'danger'];
+
+/**
+ * Security — one place for everything that decides whether a message is
+ * trusted, and every allowance the user has granted. The shield beside each
+ * sender is the per-message view; this is the whole picture.
+ */
+export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
+  const [activeTab, setActiveTab] = useState<SecurityTab>(initialTab ?? 'overview');
+
+  return (
+    <div className="flex flex-col h-full bg-background">
+      <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-5 w-5 text-primary" />
+          <h1 className="text-xl font-semibold">Security</h1>
+        </div>
+      </div>
+
+      <div className="px-6 border-b border-border">
+        <nav className="flex gap-1 -mb-px overflow-x-auto" aria-label="Security sections">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {activeTab === 'overview' && <OverviewTab />}
+        {activeTab === 'links' && <LinksTab />}
+        {activeTab === 'senders' && (
+          <div className="p-6"><BlockedSendersPanel /></div>
+        )}
+        {activeTab === 'images' && <ImagesTab />}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- Overview */
+
+const PROTECTIONS: Array<{ title: string; detail: string }> = [
+  { title: 'Isolated message rendering', detail: 'Every email body renders inside a sandboxed frame. Scripts, stylesheets, fonts and imports are stripped before it loads.' },
+  { title: 'Links open in your browser', detail: 'Clicking a link never navigates inside the app — it hands the address to your system browser with referrer and opener stripped.' },
+  { title: 'Sender authentication', detail: 'SPF, DKIM and DMARC verdicts are read from the receiving server’s Authentication-Results header and shown on the shield beside each sender.' },
+  { title: 'Impersonation checks', detail: 'A display name that names one domain while the message came from another, and links whose text says one domain while pointing to another, are flagged.' },
+  { title: 'Encrypted mail cache', detail: 'The local mailbox database is encrypted at rest; the key lives in the operating system keychain.' },
+  { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
+];
+
+function AuthBackfillStatus() {
+  const [state, setState] = useState<{ remaining: number; done: number; running: boolean; drained: boolean } | null>(null);
+  useEffect(() => {
+    const api = window.electronAPI.security;
+    api.getAuthBackfillState?.().then((r) => { if (r?.success && r.data) setState(r.data); }).catch(() => { /* best-effort */ });
+    const off = api.onAuthBackfillProgress?.((s) => setState(s));
+    return () => { off?.(); };
+  }, []);
+  if (!state) return null;
+  const total = state.remaining + state.done;
+  if (state.drained && state.done === 0) return null; // nothing ever needed doing
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 flex items-center gap-3 text-sm">
+      {state.drained
+        ? <ShieldCheck className="h-4 w-4 text-green-600 dark:text-green-400 flex-shrink-0" />
+        : <Loader2 className="h-4 w-4 animate-spin text-primary flex-shrink-0" />}
+      <div className="min-w-0 flex-1">
+        {state.drained ? (
+          <span>Older mail verified — {state.done.toLocaleString()} message{state.done === 1 ? '' : 's'} given an authentication verdict.</span>
+        ) : (
+          <span>
+            Verifying older mail: <b>{state.done.toLocaleString()}</b> of {total.toLocaleString()} done,
+            {' '}{state.remaining.toLocaleString()} to go. Messages show <i>Unverified</i> until their turn.
+          </span>
+        )}
+      </div>
+      {!state.drained && !state.running && (
+        <button
+          onClick={() => { void window.electronAPI.security.kickAuthBackfill?.(); }}
+          className="shrink-0 px-2.5 py-1 rounded-md border border-border text-xs hover:bg-muted/60 transition-colors"
+        >
+          Run now
+        </button>
+      )}
+    </div>
+  );
+}
+
+function OverviewTab() {
+  return (
+    <div className="p-6 max-w-4xl space-y-8">
+      <AuthBackfillStatus />
+      <section>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Security levels</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          Every message gets a level, shown as the shield beside the sender. Hover it to see each check.
+        </p>
+        <div className="space-y-2">
+          {LEVEL_ORDER.map((level) => {
+            const Icon = LEVEL_ICON[level];
+            return (
+              <div key={level} className="flex items-start gap-3 rounded-lg border border-border bg-card p-3">
+                <Icon className={`h-5 w-5 mt-0.5 flex-shrink-0 ${LEVEL_TONE[level]}`} />
+                <div className="min-w-0">
+                  <div className={`font-medium ${LEVEL_TONE[level]}`}>{LEVEL_COPY[level].title}</div>
+                  <div className="text-sm text-muted-foreground">{LEVEL_COPY[level].summary}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">What is always on</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {PROTECTIONS.map((p) => (
+            <div key={p.title} className="rounded-lg border border-border bg-card p-3">
+              <div className="flex items-center gap-2 font-medium">
+                <ShieldCheck className="h-4 w-4 text-green-600 dark:text-green-400" />
+                {p.title}
+              </div>
+              <div className="mt-1 text-sm text-muted-foreground">{p.detail}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- Links */
+
+function LinksTab() {
+  const { rules } = useLinkRules();
+  const { confirm, confirmDialog } = useConfirm();
+  const trusted = rules.filter((r) => r.verdict === 'trust');
+  const blocked = rules.filter((r) => r.verdict === 'block');
+
+  const revoke = async (rule: LinkRule) => {
+    const ok = await confirm({
+      title: rule.verdict === 'trust' ? 'Stop trusting this link?' : 'Unblock this link?',
+      message: `${rule.shownDomain} → ${rule.actualDomain}\nfrom ${rule.senderDomain || 'any sender'}\n\n`
+        + (rule.verdict === 'trust'
+          ? 'Messages with this link will be flagged again.'
+          : 'Messages with this link will no longer be marked dangerous.'),
+      confirmLabel: rule.verdict === 'trust' ? 'Stop trusting' : 'Unblock',
+      destructive: rule.verdict === 'trust',
+    });
+    if (ok) await removeLinkRule(rule.id);
+  };
+
+  return (
+    <div className="p-6 max-w-4xl space-y-8">
+      {confirmDialog}
+      <p className="text-sm text-muted-foreground flex items-start gap-2">
+        <Info className="h-4 w-4 mt-0.5 flex-shrink-0" />
+        <span>
+          A rule applies to one <b>sender domain</b> and one <b>text → destination</b> pair. Trusting a pair for one
+          sender does not trust it for anyone else — a compromised familiar account is the usual way phishing arrives
+          from a known name. Add rules from the warning banner on a message.
+        </span>
+      </p>
+
+      <RuleList
+        title="Trusted links"
+        empty="No trusted links yet. When a message shows a link warning you recognise as legitimate, choose “I trust this link”."
+        rules={trusted}
+        tone="text-green-600 dark:text-green-400"
+        onRevoke={revoke}
+        revokeLabel="Stop trusting"
+      />
+      <RuleList
+        title="Blocked links"
+        empty="No blocked links. From a link warning, choose “Block this link” to mark any message carrying it as dangerous."
+        rules={blocked}
+        tone="text-red-600 dark:text-red-400"
+        onRevoke={revoke}
+        revokeLabel="Unblock"
+      />
+    </div>
+  );
+}
+
+function RuleList({ title, empty, rules, tone, onRevoke, revokeLabel }: {
+  title: string; empty: string; rules: LinkRule[]; tone: string;
+  onRevoke: (r: LinkRule) => void; revokeLabel: string;
+}) {
+  return (
+    <section>
+      <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+        {title} <span className="text-muted-foreground/70 font-normal">({rules.length})</span>
+      </h2>
+      {rules.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">{empty}</div>
+      ) : (
+        <div className="rounded-lg border border-border divide-y divide-border">
+          {rules.map((r) => (
+            <div key={r.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+              <Link2 className={`h-4 w-4 flex-shrink-0 ${tone}`} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate">
+                  <span className="font-medium">{r.shownDomain}</span>
+                  <span className="text-muted-foreground"> → </span>
+                  <span className="font-medium">{r.actualDomain}</span>
+                </div>
+                <div className="text-xs text-muted-foreground truncate">from {r.senderDomain || 'any sender'}</div>
+              </div>
+              <Tooltip content={revokeLabel} delayMs={40}>
+                <button
+                  onClick={() => onRevoke(r)}
+                  className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                  aria-label={`${revokeLabel}: ${r.shownDomain} to ${r.actualDomain}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </Tooltip>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ Images */
+
+const MODE_COPY: Record<'block' | 'safe' | 'always', { title: string; detail: string }> = {
+  block: { title: 'Block remote images', detail: 'Nothing is fetched until you click “Load images”. Senders cannot tell when you open their mail.' },
+  safe: { title: 'Load except promotions and spam', detail: 'Images load automatically unless the AI has filed the message as promotional or spam.' },
+  always: { title: 'Always load', detail: 'Every remote image loads on open. Senders with tracking pixels learn when and where you read.' },
+};
+
+function ImagesTab() {
+  const [mode, setMode] = useState<'block' | 'safe' | 'always'>('safe');
+  const [allowed, setAllowed] = useState<string[]>([]);
+  const { confirm, confirmDialog } = useConfirm();
+
+  const load = async () => {
+    setMode(getRemoteImageMode());
+    try {
+      const res = await window.electronAPI.emails.getImageAllowedSenders();
+      if (res?.success && Array.isArray(res.data)) setAllowed([...res.data].sort());
+    } catch { /* best-effort */ }
+  };
+  useEffect(() => { void load(); }, []);
+
+  const revoke = async (address: string) => {
+    const ok = await confirm({
+      title: 'Stop auto-loading images?',
+      message: `${address}\n\nImages from this sender will be blocked again until you choose “Load images” on a message.`,
+      confirmLabel: 'Stop auto-loading',
+    });
+    if (!ok) return;
+    await window.electronAPI.emails.disallowImagesForSender?.(address);
+    await load();
+  };
+
+  const m = MODE_COPY[mode];
+  return (
+    <div className="p-6 max-w-4xl space-y-8">
+      {confirmDialog}
+      <section>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Current policy</h2>
+        <div className="rounded-lg border border-border bg-card p-4 flex items-start gap-3">
+          <ImageIcon className="h-5 w-5 mt-0.5 text-primary flex-shrink-0" />
+          <div>
+            <div className="font-medium">{m.title}</div>
+            <div className="text-sm text-muted-foreground">{m.detail}</div>
+            <div className="mt-2 text-xs text-muted-foreground">Change this under Settings → Inbox → Remote images.</div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+          Senders allowed to load images <span className="text-muted-foreground/70 font-normal">({allowed.length})</span>
+        </h2>
+        {allowed.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
+            No per-sender allowances. Clicking “Load images” on a message adds its sender here.
+          </div>
+        ) : (
+          <div className="rounded-lg border border-border divide-y divide-border">
+            {allowed.map((a) => (
+              <div key={a} className="flex items-center gap-3 px-3 py-2 text-sm">
+                <UserX className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                <span className="flex-1 truncate">{a}</span>
+                <Tooltip content="Stop auto-loading" delayMs={40}>
+                  <button
+                    onClick={() => revoke(a)}
+                    className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                    aria-label={`Stop auto-loading images from ${a}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}

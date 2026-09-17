@@ -16,6 +16,8 @@ import { useMemo, useState } from 'react';
 import { isSignatureDetectionEnabled, buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
 import { qualifiesForSafeAutoLoad } from '../../store/helpers';
+import { firstFlaggedEmailId } from '../../utils/email-security';
+import { useLinkRules } from '../../utils/security-rules';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
@@ -94,6 +96,15 @@ export function ThreadList({ ctx }: ThreadListProps) {
       return next;
     });
   };
+
+  // Which message carries the thread's single warning banner (see the comment
+  // at the render site). Includes the anchor, so a clean anchor with a spoofed
+  // reply puts the banner on the reply — and a spoofed anchor keeps it there.
+  const { sets: linkRuleSets } = useLinkRules();
+  const firstFlaggedId = useMemo(
+    () => firstFlaggedEmailId(threadEmails, linkRuleSets),
+    [threadEmails, linkRuleSets],
+  );
 
   return (
     <div className="space-y-2">
@@ -247,17 +258,22 @@ export function ThreadList({ ctx }: ThreadListProps) {
 
                 return (
                   <div className="border-t border-border p-4 bg-background/50">
-                    {/* Every reply gets its own check. The assessment is per
-                        message and sender-based, so it does not depend on the
-                        body — but it used to be rendered ONLY on the anchor
-                        card (the thread's OLDEST mail), which means a newly
-                        arrived spoof, the exact case worth warning about,
-                        showed nothing at all. */}
-                    <PhishingWarningBanner
-                      fromName={email.fromName}
-                      fromAddress={email.fromAddress}
-                      html={email.rawBody}
-                    />
+                    {/* ONE banner per thread, on the first message (by date)
+                        that trips a check. Every message is still ASSESSED —
+                        the shield beside each sender shows its own level — but
+                        repeating the same banner down a 20-message thread
+                        trained readers to ignore it. It must still be the
+                        OFFENDING message that carries it: pinning it to the
+                        oldest mail once hid a newly arrived spoof entirely
+                        (see firstFlaggedEmailId). */}
+                    {email.id === firstFlaggedId && (
+                      <PhishingWarningBanner
+                        fromName={email.fromName}
+                        fromAddress={email.fromAddress}
+                        authStatus={email.authStatus}
+                        html={email.rawBody}
+                      />
+                    )}
                     <div className="max-w-none">
                       {isHtml ? (
                         <SandboxedEmailBody key={`${(displayContent || '').length}:${(displayContent || '').slice(0, 32)}`} html={displayContent || '(no content)'} safeAutoLoad={qualifiesForSafeAutoLoad(email.tags)} senderAddress={email.fromAddress} />

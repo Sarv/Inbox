@@ -1483,6 +1483,47 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Fetch ONLY the mail-authentication headers for a set of UIDs in one folder.
+   *
+   * Powers the auth-header backfill: every message synced before the client
+   * kept Authentication-Results has `auth_status = NULL`, so its security level
+   * reads "Unverified" whatever the server actually recorded. This re-reads
+   * just those headers — a few hundred bytes per message, no body — so history
+   * gets a real SPF / DKIM / DMARC verdict.
+   *
+   * Same isolation rules as classifyBulkUids: runs ONLY on a pool connection
+   * (no IDLE/selection race with the primary), and returns an empty map when no
+   * pool is available so the caller simply retries later.
+   *
+   * @returns uid → raw auth-header block, or undefined when the server has no
+   *   such header for that message. A uid ABSENT from the map was not fetched
+   *   (connection trouble) and must stay NULL for the next pass.
+   */
+  async fetchAuthHeaders(folderPath: string, uids: number[]): Promise<Map<number, string | undefined>> {
+    const out = new Map<number, string | undefined>();
+    if (!this.isConnected() || uids.length === 0) return out;
+    if (!this.connectionPool?.isInitialized()) return out; // pool-only for safety
+    const doFetch = async (client: IIMAPClient): Promise<Map<number, string | undefined>> => {
+      const msgs = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(uids, {
+        fetchHeaders: true,
+        fetchBody: false,
+        fetchBodyStructure: false,
+      }));
+      const map = new Map<number, string | undefined>();
+      for (const m of msgs) if (typeof m.uid === 'number') map.set(m.uid, m.authHeaders);
+      return map;
+    };
+    try {
+      return await this.connectionPool.withConnection(doFetch);
+    } catch (error) {
+      if (!this.connectionManager.isConnectionError(error)) {
+        logger.warn(`[AuthBackfill] fetch ${folderPath} failed: ${(error as Error).message}`);
+      }
+      return out;
+    }
+  }
+
   // ========== Real-time ==========
 
   /**
