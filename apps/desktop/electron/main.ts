@@ -58,6 +58,7 @@ import { describeDevSessionReset, resetDevSessionCaches } from './services/dev-s
 import { installEmailImageRequestHandlers } from './services/email-image-requests';
 import { describeStall, startEventLoopMonitor } from './services/event-loop-monitor';
 import { createExtensionAIBackend } from './services/extension-ai-backend';
+import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 import { startNotificationService, stopNotificationService } from './services/notification-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
@@ -96,6 +97,7 @@ import {
   getIsQuitting,
   getSystemSuspended,
   setSystemSuspended,
+  getAccountIdForStorage,
   sendToWindow,
   setCurrentAccount,
   hasAccountRuntime,
@@ -484,6 +486,12 @@ async function initializeStorage(): Promise<void> {
 
   await storage.initialize();
   setStorage(storage);
+  // Same wiring as the per-account runtimes: a badge the drain repairs must
+  // reach the sidebar without waiting for the user's next action.
+  wireFolderCountBroadcast(storage, {
+    send: sendToWindow,
+    accountId: () => getAccountIdForStorage(storage),
+  });
   logger.info('[Main] Storage initialized:', dbPath);
 }
 
