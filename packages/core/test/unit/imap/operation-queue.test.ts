@@ -1184,7 +1184,26 @@ describe('OperationQueue — category / user labels', () => {
     expect(server.messageCount('INBOX')).toBe(3); // the message itself is untouched
   });
 
-  it('applies the category as an in-place keyword on a keyword-capable server', async () => {
+  // Breaks: our own server starts receiving `Sarv Inbox/Needs Response`
+  // mailboxes instead of the bare keyword its webmail renders as a category.
+  it('applies the category as a bare in-place keyword on OUR OWN host', async () => {
+    const h = await makeHarness({ server: await makeServer({ host: 'imap.sarv.com' }) });
+    expect(await h.queue.applyCategoryLabels('INBOX', 1, {
+      categories: [{ slug: 'needs_response', name: 'Needs Response' }],
+      host: 'imap.sarv.com',
+      mode: 'copy',
+    })).toBe('success');
+
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['needs_response']); // no prefix
+    expect(h.server.callCount('createMailbox')).toBe(0);
+    expect(h.server.callCount('copyMessages')).toBe(0); // in place: no copy, no move
+    expect(h.server.callCount('moveMessages')).toBe(0);
+  });
+
+  // Breaks: a third-party account gets a bare keyword nobody named. Keyword
+  // CAPABILITY is not enough — only our own webmail creates the categories a
+  // keyword stands for, so every other host gets the prefixed mailbox.
+  it('prefixes the category on a keyword-capable host that is NOT ours', async () => {
     const h = await makeHarness(); // FakeImapServer supports keywords by default
     expect(await h.queue.applyCategoryLabels('INBOX', 1, {
       categories: [{ slug: 'needs_response', name: 'Needs Response' }],
@@ -1192,9 +1211,8 @@ describe('OperationQueue — category / user labels', () => {
       mode: 'copy',
     })).toBe('success');
 
-    expect(h.server.flagsOf('INBOX', 1)).toEqual(['needs_response']);
-    expect(h.server.callCount('copyMessages')).toBe(0); // in place: no copy, no move
-    expect(h.server.callCount('moveMessages')).toBe(0);
+    expect(h.server.flagsOf('INBOX', 1)).toEqual([]); // no keyword written
+    expect(h.server.messageCount('Sarv Inbox/Needs Response')).toBe(1);
   });
 
   it('removeGmailLabels sends ONE STORE -X-GM-LABELS, and no-ops for an empty label list', async () => {
@@ -1328,8 +1346,11 @@ describe('OperationQueue — category / user labels', () => {
     expect(await server.listMailboxPaths()).not.toContain('Sarv Inbox/Finance');
   });
 
-  it('removeSarvInboxLabels is a no-op on a keyword server and tolerates a refused DELETE', async () => {
-    const keyword = await makeHarness();
+  it('removeSarvInboxLabels is a no-op on OUR OWN host and tolerates a refused DELETE', async () => {
+    // Our host never received a `Sarv Inbox/*` tree from the current scheme, so
+    // the cleanup action has nothing to remove there — only `migrate()` prunes
+    // the interim scheme's leftovers, and only what the server confirms is empty.
+    const keyword = await makeHarness({ server: await makeServer({ host: 'imap.sarv.com' }) });
     keyword.server.addFolder('Sarv Inbox');
     expect(await keyword.queue.removeSarvInboxLabels('copy')).toBe(0);
 

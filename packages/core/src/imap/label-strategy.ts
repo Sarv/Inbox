@@ -1,26 +1,33 @@
 // Category-label strategies — mirror an AI category onto the mail server so it
 // is visible in the provider's own UI (Gmail, sarv webmail, Thunderbird, …),
 // WITHOUT duplicating mail or removing it from the Inbox where the server
-// allows. The right mechanism is chosen from live capabilities, not the
-// provider name:
+// allows. The mechanism is chosen by WHOSE server it is first, capability
+// second:
 //
-//   A. Keyword   — STORE +FLAGS (<slug>) in place. Servers with `\*` in
-//                  PERMANENTFLAGS (sarv confirmed, Fastmail, most Dovecot).
-//                  In-place, no move, no copy, no duplication — and nothing
-//                  created: the keyword IS the label, the server renders it.
+//   A. Keyword   — OUR OWN HOST ONLY (sarv.com). STORE +FLAGS (<slug>) in
+//                  place: no move, no copy, no duplication, and NOTHING
+//                  created — the bare category name IS the label and the sarv
+//                  webmail team owns creating and rendering it. No
+//                  `Sarv Inbox/` prefix is ever sent to our own server.
 //   B. Gmail     — COPY to `Sarv Inbox/<Category>` label mailbox. Gmail treats
 //                  copy-to-a-label as "add label": the message keeps its INBOX
 //                  label and is NOT duplicated. (Colors are applied separately,
 //                  main-side, via the Gmail REST API when the account is OAuth.)
-//   C. Folder    — no keyword support and not Gmail (Outlook, Yahoo, iCloud web,
-//                  unknown servers): create `Sarv Inbox/<Category>` and MOVE
-//                  (leaves Inbox) or COPY (keeps Inbox, but a real duplicate) —
-//                  the user picks the trade-off via a setting.
+//   C. Folder    — EVERY other host (Outlook, Yahoo, iCloud, Fastmail,
+//                  Dovecot, unknown servers): create `Sarv Inbox/<Category>`
+//                  and MOVE (leaves Inbox) or COPY (keeps Inbox, but a real
+//                  duplicate) — the user picks the trade-off via a setting.
+//
+// So the `Sarv Inbox/` prefix is sent to EVERY host except our own. On a
+// third-party server nobody is going to create our categories for us, and the
+// prefix is what keeps the labels we do create from passing as the user's own
+// folders. A bare keyword there would land in whatever corner of that webmail
+// shows custom flags, named by no one — which is why keyword capability alone
+// no longer earns the keyword strategy.
 //
 // Pure IMAP: works with password OR OAuth. Idempotent at the IMAP layer
 // (re-applying a keyword / re-copying to an existing Gmail label is a no-op);
 // the caller additionally guards re-runs with a local "mirrored" marker.
-
 import type { IIMAPClient } from '../types/imap';
 import { logger } from '../utils/logger';
 import { detectProvider } from '../utils/provider';
@@ -38,6 +45,22 @@ export interface CategoryLabel {
 
 /** Parent label/folder everything nests under. */
 export const SARV_LABEL_PARENT = 'Sarv Inbox';
+
+/**
+ * Is this account on OUR OWN mail server?
+ *
+ * The single question the label mechanism turns on: our host gets bare
+ * keywords (the sarv webmail team creates and renders the categories), every
+ * other host gets the `Sarv Inbox/` prefix. It also gates the one-time cleanup
+ * of the leftover `Sarv Inbox/*` folders an earlier scheme created, because
+ * nothing else's mailboxes are ours to remove.
+ *
+ * Matched against the sarv.com domain EXACTLY — anchored so `mysarv.com`,
+ * `sarvodaya.com` and `sarv.com.evil.test` can never trip it.
+ */
+export function isSarvHost(host: string): boolean {
+  return /(^|\.)sarv\.com$/i.test((host || '').trim().toLowerCase());
+}
 
 /**
  * Matches the shared parent itself and anything nested under it, whatever the
@@ -113,27 +136,29 @@ export interface LabelStrategy {
   rename(oldCat: CategoryLabel, newCat: CategoryLabel): Promise<void>;
 }
 
-// ---- A: in-place keyword ---------------------------------------------------
+// ---- A: in-place keyword — OUR OWN HOST ONLY -------------------------------
 // The category is applied as an IMAP keyword (STORE +FLAGS) — in place, no move,
-// no copy, and NOTHING is created. Keyword-capable servers (Sarv, Fastmail, most
-// Dovecot) render the keyword as a label on their own, so there is no folder to
-// register: we flag the mail, the webmail shows the flag. On Sarv — our own
-// product — those labels are the bare category names (`important`,
-// `needs_response`, `invoices`), and its webmail already knows them.
+// no copy, and NOTHING is created. The label is the bare category name
+// (`important`, `needs_response`, `invoices`) with NO `Sarv Inbox/` prefix,
+// because on our own server the webmail team creates those categories and
+// renders the keyword against them. We flag the mail; they show it.
 //
 // Every OTHER provider goes through the Gmail or folder strategy, where the
 // label IS a mailbox and carries the `Sarv Inbox/` prefix — there the prefix is
-// what stops our labels from passing as the user's own folders.
+// what stops our labels from passing as the user's own folders, and there is no
+// one on the far side to name a bare keyword.
+//
+// Reached only via `resolveLabelStrategy`, which constructs this strategy for a
+// sarv host and nothing else — so every method here may assume it is on ours.
 //
 // An interim scheme did CREATE registration folders on Sarv, nested under
 // "Sarv Inbox" (e.g. "Sarv Inbox/Finance"). They matched no keyword, so they
 // surfaced nothing and only littered the sidebar. `migrate()` prunes that tree
-// on our own host — but only mailboxes the server CONFIRMS are empty (see
-// deleteIfEmpty).
+// — but only mailboxes the server CONFIRMS are empty (see deleteIfEmpty).
 class KeywordStrategy implements LabelStrategy {
   readonly kind = 'keyword' as const;
   private delimiter?: string;
-  constructor(private client: IIMAPClient, private isSarvHost = false) {}
+  constructor(private client: IIMAPClient) {}
   async apply(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
     // UIDs are only meaningful in the mailbox they came from, so the STORE must
     // land in the mailbox this select opened — hence the held selection rather
@@ -158,7 +183,6 @@ class KeywordStrategy implements LabelStrategy {
    * message stays a single STORE and never pays for a one-time cleanup.
    */
   async migrate(cat: CategoryLabel): Promise<void> {
-    if (!this.isSarvHost) return; // only ours to tidy
     if (this.delimiter === undefined) this.delimiter = (await this.client.getHierarchyDelimiter?.()) ?? '/';
     const nested = folderPathForCategory(cat, this.delimiter);
     if (await deleteIfEmpty(this.client, nested)) {
@@ -264,9 +288,16 @@ class FolderStrategy implements LabelStrategy {
 }
 
 /**
- * Pick the best label mechanism for this account. Gmail → native labels;
- * else a server that accepts custom keywords → in-place keyword; else folders
+ * Pick the label mechanism for this account: Gmail → native labels; OUR OWN
+ * host → in-place keyword, no prefix; every other host → `Sarv Inbox/` folders
  * (move/copy per the user's setting).
+ *
+ * The keyword strategy is gated on the HOST, not on `supportsKeywords`. Plenty
+ * of third-party servers accept custom keywords (Fastmail, most Dovecot), but
+ * only our own webmail turns one into a category the user can see — anywhere
+ * else the keyword is a flag nobody named, so those accounts get the prefixed
+ * mailbox instead. `supportsKeywords` stays on the client as a capability
+ * probe; the label choice no longer consults it.
  */
 export async function resolveLabelStrategy(
   client: IIMAPClient,
@@ -277,13 +308,8 @@ export async function resolveLabelStrategy(
   if (provider === 'gmail' || client.supportsGmailLabels?.()) {
     return new GmailLabelStrategy(client);
   }
-  if (client.supportsKeywords && (await client.supportsKeywords('INBOX'))) {
-    // Is this our own host? Only there may `migrate()` delete the leftover
-    // "Sarv Inbox" folders an earlier scheme created. Match the sarv.com IMAP
-    // domain EXACTLY — anchored so `mysarv.com` / `sarvodaya.com` etc. never
-    // trip it — because nothing else's mailboxes are ours to remove.
-    const isSarv = /(^|\.)sarv\.com$/i.test((host || '').trim().toLowerCase());
-    return new KeywordStrategy(client, isSarv);
+  if (isSarvHost(host)) {
+    return new KeywordStrategy(client);
   }
   return new FolderStrategy(client, folderMode);
 }

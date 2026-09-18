@@ -93,7 +93,35 @@ export interface KnownCategory {
   name?: string;
 }
 
-const slugify = (s: string): string => s.trim().toLowerCase().replace(/[\s-]+/g, '_');
+/**
+ * Slug form of a category's display name: trimmed, lowercased, runs of spaces
+ * and dashes collapsed to `_`. "Needs Response" and "needs-response" both land
+ * on `needs_response`, which is how definitions store their slug.
+ */
+export const categoryNameSlug = (name: string): string =>
+  String(name ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+/**
+ * Resolve a BARE category label — a leaf with no `Sarv Inbox` parent — against
+ * the app's own category definitions. Matched by display NAME first, then by
+ * slug, because the mirror leaf is built from the display name
+ * (`folderPathForCategory`) while everything else keys off the slug.
+ *
+ * Returns the definition's slug, or null when nothing matches — an unresolved
+ * leaf is the user's own label, never an invented category.
+ */
+export function matchKnownCategory(
+  leaf: string,
+  knownCategories: readonly KnownCategory[] | null | undefined,
+): string | null {
+  if (!knownCategories?.length) return null;
+  const target = categoryNameSlug(leaf);
+  if (!target) return null;
+  const match = knownCategories.find(
+    (c) => (c.name && categoryNameSlug(c.name) === target) || categoryNameSlug(c.slug) === target,
+  );
+  return match ? match.slug : null;
+}
 
 /**
  * Turn a mirror label into its category slug, or null when it isn't one.
@@ -122,14 +150,8 @@ export function categorySlugFromLabel(
   const leaf = rest.slice(1).trim();
   if (!leaf) return null;
 
-  if (knownCategories?.length) {
-    const target = slugify(leaf);
-    const match = knownCategories.find(
-      (c) => (c.name && slugify(c.name) === target) || slugify(c.slug) === target,
-    );
-    return match ? match.slug : null;
-  }
-  return slugify(leaf);
+  if (knownCategories?.length) return matchKnownCategory(leaf, knownCategories);
+  return categoryNameSlug(leaf);
 }
 
 /**

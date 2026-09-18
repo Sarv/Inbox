@@ -59,6 +59,7 @@ export {
   folderPathForCategory,
   SARV_LABEL_PARENT,
   isSarvLabelPath,
+  isSarvHost,
   type LabelStrategy,
   type CategoryLabel,
   type FolderLabelMode,

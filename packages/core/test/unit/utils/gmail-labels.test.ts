@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { categorySlugFromLabel, mapGmailLabels } from '../../../src/utils/gmail-labels';
+import {
+  categoryNameSlug,
+  categorySlugFromLabel,
+  mapGmailLabels,
+  matchKnownCategory,
+} from '../../../src/utils/gmail-labels';
 
 /**
  * Gmail label mapping. This is what makes a message downloaded via the All Mail
@@ -186,5 +191,75 @@ describe('categorySlugFromLabel', () => {
   it('accepts any single delimiter after the parent', () => {
     expect(categorySlugFromLabel('Sarv Inbox.Promotions')).toBe('promotions');
     expect(categorySlugFromLabel('Sarv Inbox/Promotions')).toBe('promotions');
+  });
+});
+
+/**
+ * The bare-name matcher, lifted out of `categorySlugFromLabel` so the sidebar
+ * can reuse it: on our own host (sarv.com) the server names the category
+ * mailboxes with no `Sarv Inbox` parent at all, so the only thing to match on
+ * is the leaf.
+ */
+describe('categoryNameSlug', () => {
+  // Regression: a definition stores `needs_response` while the server folder
+  // reads "Needs Response". Any normaliser that misses the space/dash forms
+  // stops the two from ever meeting, and the folder shows twice in the UI.
+  it('collapses spaces and dashes to underscores, case-insensitively', () => {
+    expect(categoryNameSlug('Needs Response')).toBe('needs_response');
+    expect(categoryNameSlug('needs-response')).toBe('needs_response');
+    expect(categoryNameSlug('NEEDS   RESPONSE')).toBe('needs_response');
+    expect(categoryNameSlug('  Promotions  ')).toBe('promotions');
+  });
+
+  // Regression: a null/undefined name from a half-written definition must not
+  // throw inside a render path.
+  it('is total — blank and non-string input slug to an empty string', () => {
+    expect(categoryNameSlug('')).toBe('');
+    expect(categoryNameSlug('   ')).toBe('');
+    expect(categoryNameSlug(undefined as unknown as string)).toBe('');
+    expect(categoryNameSlug(null as unknown as string)).toBe('');
+  });
+});
+
+describe('matchKnownCategory', () => {
+  const categories = [
+    { slug: 'needs_response', name: 'Needs Response' },
+    { slug: 'promotions', name: 'Promotions' },
+    { slug: 'finance' },
+  ];
+
+  // Regression: the mirror leaf is built from the DISPLAY NAME, so matching on
+  // slug alone would fail every multi-word category.
+  it('matches on display name first, then on slug', () => {
+    expect(matchKnownCategory('Needs Response', categories)).toBe('needs_response');
+    expect(matchKnownCategory('needs-response', categories)).toBe('needs_response');
+    expect(matchKnownCategory('finance', categories)).toBe('finance');
+    expect(matchKnownCategory('Finance', categories)).toBe('finance');
+  });
+
+  // Regression: this is what decides whether a folder DISAPPEARS from the
+  // sidebar. An over-eager match hides the user's own mail.
+  it('returns null for anything that is not one of our categories', () => {
+    expect(matchKnownCategory('Newsletters', categories)).toBeNull();
+    expect(matchKnownCategory('Promotional', categories)).toBeNull();
+    expect(matchKnownCategory('', categories)).toBeNull();
+    expect(matchKnownCategory('   ', categories)).toBeNull();
+  });
+
+  // Regression: no definitions loaded (IPC failed, first run) must hide nothing
+  // rather than fall back to a guessed slug.
+  it('matches nothing when there are no definitions to match against', () => {
+    expect(matchKnownCategory('Promotions', [])).toBeNull();
+    expect(matchKnownCategory('Promotions', undefined)).toBeNull();
+    expect(matchKnownCategory('Promotions', null)).toBeNull();
+  });
+
+  // Regression: extracting the matcher must not change what the label path
+  // resolves to — the Gmail read-back depends on it.
+  it('still backs categorySlugFromLabel unchanged', () => {
+    expect(categorySlugFromLabel('Sarv Inbox/Needs Response', 'Sarv Inbox', categories))
+      .toBe('needs_response');
+    expect(categorySlugFromLabel('Sarv Inbox/Newsletters', 'Sarv Inbox', categories))
+      .toBeNull();
   });
 });
