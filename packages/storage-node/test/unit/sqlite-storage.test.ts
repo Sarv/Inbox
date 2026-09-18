@@ -1259,3 +1259,108 @@ describe('SQLiteStorage pending sends (outbox)', () => {
     expect(await storage.getPendingSendCounts()).toEqual({ pending: 0, failed: 0 });
   });
 });
+
+// ===========================================================================
+// Read-model drain -> unread badge -> host notification
+// ===========================================================================
+
+// The sidebar badge bug, end to end through the REAL facade: mail is marked read,
+// the `emails` triggers dirty the thread, the maintainer drains, the badge is
+// re-derived from `thread_folders` (the same projection the unread list reads),
+// and the host is told which folders moved so it can push a refresh. If any link
+// in that chain breaks the badge keeps counting threads the list no longer shows
+// — the "Inbox 7 over an empty list" report this whole path exists to prevent.
+//
+// Nothing here calls the maintainer or the repository by hand: the only inputs
+// are public facade writes, which is the point — a future write path that
+// forgets to maintain a count is still covered, because no write path can avoid
+// the triggers.
+describe('SQLiteStorage badge refresh from the read-model drain', () => {
+  const ctx = withStorage(async (storage) => {
+    await storage.syncFolders([makeFolder('f-inbox', 'INBOX', { specialUse: '\\Inbox' })]);
+    await storage.insertEmail(makeEmail({ id: 'rm1', threadId: 't-rm1' }));
+    await storage.insertEmail(makeEmail({ id: 'rm2', threadId: 't-rm2' }));
+  });
+
+  /** Collect every folder-count notification the host would receive. */
+  function listen(storage: SQLiteStorage): { paths: string[][]; stop: () => void } {
+    const paths: string[][] = [];
+    storage.setFolderCountsListener((folderPaths) => { paths.push(folderPaths); });
+    return { paths, stop: () => storage.setFolderCountsListener(null) };
+  }
+
+  const unreadBadge = async (storage: SQLiteStorage): Promise<number | undefined> =>
+    (await storage.getFolderByPath('INBOX'))?.unreadCount;
+
+  // The whole chain in one: a plain updateEmail must move the badge AND wake the
+  // host, without the caller touching a counter or the read model.
+  it('marking mail read lowers the badge and notifies the host', async () => {
+    const storage = ctx.get();
+    const { paths, stop } = listen(storage);
+    try {
+      await storage.updateEmail('rm1', { tags: '|INBOX|read|' });
+
+      // Under the maintainer's 5s safety pump, so this passes only if the WRITE
+      // scheduled the drain — the difference between a badge that settles on the
+      // next tick and one the user watches stay wrong for five seconds.
+      await vi.waitFor(async () => {
+        expect(await unreadBadge(storage)).toBe(1);
+      }, { timeout: 4000, interval: 10 });
+      expect(paths.flat()).toContain('INBOX');
+    } finally {
+      stop();
+    }
+  });
+
+  // The repair is symmetric: mark-unread (an unsnooze, a user un-reading a
+  // thread) has to push the badge back UP, or the sidebar under-reports instead
+  // of over-reporting — the same disagreement, opposite sign.
+  it('marking mail unread raises the badge again and notifies', async () => {
+    const storage = ctx.get();
+    const { paths, stop } = listen(storage);
+    try {
+      await storage.updateEmail('rm1', { tags: '|INBOX|' });
+
+      await vi.waitFor(async () => {
+        expect(await unreadBadge(storage)).toBe(2);
+      }, { timeout: 4000, interval: 10 });
+      expect(paths.flat()).toContain('INBOX');
+    } finally {
+      stop();
+    }
+  });
+
+  // A drain that changes no badge must stay silent: a notification per tag write
+  // would re-run the renderer's folder query on every star, every label, every
+  // sync — the churn that makes a "just refresh everything" design unusable.
+  it('stays silent when a write moves no badge', async () => {
+    const storage = ctx.get();
+    const { paths, stop } = listen(storage);
+    try {
+      await storage.updateEmail('rm2', { tags: '|INBOX|starred|' });
+
+      // Give the drain the same budget the passing cases needed, then assert on
+      // the badge being untouched rather than on a bare timeout.
+      await vi.waitFor(async () => {
+        expect(await storage.getEmail('rm2')).toMatchObject({ tags: '|INBOX|starred|' });
+      }, { timeout: 4000, interval: 10 });
+      expect(await unreadBadge(storage)).toBe(2);
+      expect(paths.flat()).not.toContain('INBOX');
+    } finally {
+      stop();
+    }
+  });
+
+  // Detaching is a real state (the host tears its window down before storage
+  // closes). The maintainer must keep repairing the badge with nobody listening.
+  it('keeps repairing the badge after the listener is detached', async () => {
+    const storage = ctx.get();
+    storage.setFolderCountsListener(null);
+
+    await storage.updateEmail('rm2', { tags: '|INBOX|starred|read|' });
+
+    await vi.waitFor(async () => {
+      expect(await unreadBadge(storage)).toBe(1);
+    }, { timeout: 4000, interval: 10 });
+  });
+});

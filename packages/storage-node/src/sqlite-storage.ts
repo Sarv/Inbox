@@ -114,6 +114,10 @@ export class SQLiteStorage implements IEmailStorage {
   // Repositories
   private _emailRepo: EmailRepository | null = null;
   private _folderRepo: FolderRepository | null = null;
+  /** Notified when the read-model drain MOVES a folder's unread badge. Set by
+   *  the host process (the Electron main process pushes it to the renderer);
+   *  null in tests and in any host that polls instead. */
+  private folderCountsListener: ((folderPaths: string[]) => void) | null = null;
   private _threadRepo: ThreadRepository | null = null;
   private _contactRepo: ContactRepository | null = null;
   private _aiRepo: AIRepository | null = null;
@@ -266,7 +270,17 @@ export class SQLiteStorage implements IEmailStorage {
     // Start read-model upkeep AFTER init completes. It seeds the one-time backfill
     // and drains the dirty queue on later ticks, so it never blocks startup. Inert
     // to reads until the cutover — safe to run now to keep the tables warm.
-    this.readModel = new ReadModelMaintainer(() => this.db);
+    // The drained hook is what makes the sidebar badges self-maintaining: the
+    // `emails` triggers dirty a thread on every tag write, so draining the queue
+    // is the one moment no read/unread change — from any code path, present or
+    // future — can slip past. It no-ops until the backfill is complete.
+    this.readModel = new ReadModelMaintainer(
+      () => this.db,
+      () => {
+        const { changed } = this.folderRepo.refreshUnreadFromReadModel();
+        if (changed.length > 0) this.emitFolderCountsChanged(changed);
+      },
+    );
     this.readModel.start();
 
     // Same deal for the body layout: a no-op on a fresh DB, and on an upgraded
@@ -692,7 +706,8 @@ export class SQLiteStorage implements IEmailStorage {
       }
     }
 
-    return this.emailRepo.update(id, updates);
+    await this.emailRepo.update(id, updates);
+    this.scheduleReadModelDrain();
   }
 
   /**
@@ -728,6 +743,8 @@ export class SQLiteStorage implements IEmailStorage {
         await new Promise((resolve) => setImmediate(resolve));
       }
     }
+
+    this.scheduleReadModelDrain();
 
     // Aggregate net read-count deltas per sender (best-effort; never blocks).
     const deltas = new Map<string, number>();
@@ -778,12 +795,14 @@ export class SQLiteStorage implements IEmailStorage {
 
   async deleteEmail(id: string): Promise<void> {
     this.ensureInitialized();
-    return this.emailRepo.delete(id);
+    await this.emailRepo.delete(id);
+    this.scheduleReadModelDrain();
   }
 
   async deleteEmails(ids: string[]): Promise<void> {
     this.ensureInitialized();
-    return this.emailRepo.deleteMany(ids);
+    await this.emailRepo.deleteMany(ids);
+    this.scheduleReadModelDrain();
   }
 
   /**
@@ -1108,6 +1127,46 @@ export class SQLiteStorage implements IEmailStorage {
   async recalculateFolderCounts(folderPaths?: string[]): Promise<void> {
     this.ensureInitialized();
     return this.folderRepo.recalculateFolderCounts(folderPaths);
+  }
+
+  /**
+   * Subscribe to badge changes made by the read-model drain.
+   *
+   * The drain repairs `folders.unread_count` behind the app's back — that is the
+   * point of it — so without a push the corrected number sits in the database
+   * while the sidebar keeps showing the stale one until some unrelated action
+   * happens to reload folders. This is the wire that closes that gap.
+   *
+   * One listener, replaceable; pass null to detach. The host decides what to do
+   * with it (the Electron main process sends the renderer a badge refresh).
+   */
+  setFolderCountsListener(listener: ((folderPaths: string[]) => void) | null): void {
+    this.folderCountsListener = listener;
+  }
+
+  /**
+   * Ask the read model to catch up NOW instead of on the next safety pump.
+   *
+   * The triggers make the rebuild inevitable either way, but "inevitable" was up
+   * to 5 SECONDS away: the pump is the only thing that noticed a write nobody
+   * scheduled. That is the gap between marking mail read and the badge derived
+   * from it settling, so every facade method that writes tags or removes rows
+   * calls this. Cheap and idempotent — a drain already running or queued ignores
+   * it (see ReadModelMaintainer.schedule).
+   */
+  private scheduleReadModelDrain(): void {
+    this.readModel?.schedule();
+  }
+
+  /** Fire the listener. Never allowed to escape: a host whose notification fails
+   *  must not break the maintainer that keeps the read model itself correct. */
+  private emitFolderCountsChanged(folderPaths: string[]): void {
+    if (!this.folderCountsListener) return;
+    try {
+      this.folderCountsListener(folderPaths);
+    } catch (error) {
+      log.warn('Folder-counts listener threw:', error);
+    }
   }
 
   /** Scan-free unread_count maintenance for a single read-flag flip (hot path).
@@ -1841,6 +1900,7 @@ export class SQLiteStorage implements IEmailStorage {
       snoozeUntil,
       snoozeOriginalTags: originalTags,
     } as any);
+    this.scheduleReadModelDrain();
 
     return {
       id: `snooze-${emailId}`,
@@ -1870,6 +1930,7 @@ export class SQLiteStorage implements IEmailStorage {
       snoozeUntil: null,
       snoozeOriginalTags: null,
     } as any);
+    this.scheduleReadModelDrain();
   }
 
   /**
