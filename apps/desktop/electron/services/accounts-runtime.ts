@@ -20,10 +20,12 @@ import { app } from 'electron';
 
 
 import type { AccountRuntime } from '../shared';
-import { claimDefaultRuntime, getAccountRuntime, hasAccountRuntime, registerAccountRuntime, rekeyRuntime, unregisterRuntime } from '../shared';
+import { claimDefaultRuntime, getAccountIdForStorage, getAccountRuntime, hasAccountRuntime, registerAccountRuntime, rekeyRuntime, sendToWindow, unregisterRuntime } from '../shared';
+
 
 import { getMeta, setMeta } from './core-db';
 import { getDbEncryptionKey } from './db-key-store';
+import { wireFolderCountBroadcast } from './folder-count-broadcast';
 import { deleteAccountSecrets, rekeyAccountSecrets } from './secure-credential-store';
 const logger = createLogger('accounts-runtime');
 
@@ -97,6 +99,12 @@ export async function createAccountRuntime(
     ...(accountId ? { accountId } : {}),
   });
   await storage.initialize();
+  // The read-model drain repairs this account's badges on its own; this is what
+  // makes the sidebar show the repair immediately instead of at the next action.
+  wireFolderCountBroadcast(storage, {
+    send: sendToWindow,
+    accountId: () => getAccountIdForStorage(storage),
+  });
   const syncEngine = new SyncEngine(storage);
   logger.info('[Accounts] Created runtime ->', dbPath);
   return { storage, syncEngine, smtpClient: null };

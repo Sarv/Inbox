@@ -20,7 +20,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 const h = vi.hoisted(() => ({
   userData: '',
   dbKey: 'deadbeef',
-  storages: [] as Array<{ opts: Record<string, unknown>; initialized: boolean; closed: boolean; closeThrows: boolean }>,
+  storages: [] as Array<{
+    opts: Record<string, unknown>; initialized: boolean; closed: boolean; closeThrows: boolean;
+    /** Listener the runtime attached for read-model badge repairs, if any. */
+    folderCountsListener: ((folderPaths: string[]) => void) | null;
+  }>,
+  /** Every sendToWindow(channel, payload) the runtime made. */
+  sent: [] as Array<[string, unknown]>,
   runtimes: new Map<string, { storage: unknown; syncEngine: unknown; smtpClient: unknown }>(),
   claimSucceeds: true,
   claimed: [] as string[],
@@ -53,13 +59,16 @@ vi.mock('@sarvinbox/storage-node', async () => ({
     .SHARED_CONTACTS_FILE,
   SQLiteStorage: class {
     opts: Record<string, unknown>;
-    entry: { opts: Record<string, unknown>; initialized: boolean; closed: boolean; closeThrows: boolean };
+    entry: (typeof h.storages)[number];
     constructor(opts: Record<string, unknown>) {
       this.opts = opts;
-      this.entry = { opts, initialized: false, closed: false, closeThrows: false };
+      this.entry = { opts, initialized: false, closed: false, closeThrows: false, folderCountsListener: null };
       h.storages.push(this.entry);
     }
     async initialize(): Promise<void> { this.entry.initialized = true; }
+    setFolderCountsListener(listener: ((folderPaths: string[]) => void) | null): void {
+      this.entry.folderCountsListener = listener;
+    }
     async close(): Promise<void> {
       if (this.entry.closeThrows) throw new Error('close failed');
       this.entry.closed = true;
@@ -94,6 +103,11 @@ vi.mock('../../../../electron/shared', () => ({
     h.runtimes.set(accountId, rt);
   },
   rekeyRuntime: (oldId: string, newId: string) => { h.rekeyedRuntimes.push([oldId, newId]); },
+  getAccountIdForStorage: (storage: unknown) => {
+    for (const [accountId, runtime] of h.runtimes) if (runtime.storage === storage) return accountId;
+    return null;
+  },
+  sendToWindow: (channel: string, payload: unknown) => { h.sent.push([channel, payload]); },
   unregisterRuntime: (accountId: string) => { h.unregistered.push(accountId); h.runtimes.delete(accountId); },
 }));
 
@@ -142,6 +156,7 @@ beforeAll(() => {
 beforeEach(() => {
   resetFakeCoreDb();
   h.storages.length = 0;
+  h.sent.length = 0;
   h.runtimes.clear();
   h.claimSucceeds = true;
   h.claimed.length = 0;
@@ -219,6 +234,20 @@ describe('createAccountRuntime', () => {
     expect(h.storages[0].initialized).toBe(true);
     expect(rt.smtpClient).toBeNull();
     expect(rt.syncEngine).toBeTruthy();
+  });
+
+  // Every account's storage must be wired to push a badge refresh: the read
+  // model repairs `folders.unread_count` in the background, and without this the
+  // sidebar keeps rendering the stale number until something else happens to
+  // reload folders — the "Inbox 7 over an empty list" report, one layer up.
+  it('wires the read-model badge repair to a renderer refresh', async () => {
+    const rt = await createAccountRuntime('sarvinbox-abc.db');
+    h.runtimes.set('acct-owner', { storage: rt.storage, syncEngine: {}, smtpClient: null });
+
+    expect(h.storages[0].folderCountsListener).toBeTypeOf('function');
+    h.storages[0].folderCountsListener!(['INBOX']);
+
+    expect(h.sent).toEqual([['folders:updated', { accountId: 'acct-owner' }]]);
   });
 
   it('gives the legacy primary DB the big page cache and everyone else the modest one', async () => {
