@@ -6,7 +6,7 @@
  */
 
 import type { UserActionType, ActionSource } from '@sarvinbox/core';
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, setEmailReadFlag } from '@sarvinbox/core';
 import { cleanBodyExpression } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 
@@ -562,9 +562,10 @@ export function registerAgentHandlers(): void {
       // Reverse the action
       switch (action.actionType) {
         case 'read': {
-          // Undo read → mark unread
-          const tagList = tags.split('|').filter((t: string) => t.length > 0 && t !== 'read');
-          await storage.updateEmail(action.emailId, { tags: tagList.length > 0 ? '|' + tagList.join('|') + '|' : '||' });
+          // Undo read -> mark unread. Through the shared helper so the sidebar
+          // badge is incremented with the tag: an undo that only rewrites tags
+          // leaves the folder counting one unread thread fewer than the list shows.
+          await setEmailReadFlag(storage, action.emailId, false, 'agent undo read');
           break;
         }
         case 'star': {
@@ -961,12 +962,9 @@ export function registerAgentHandlers(): void {
 
       switch (action) {
         case 'read': {
-          const tags = email.tags || '||';
-          if (!tags.includes('|read|')) {
-            const tagList = tags.split('|').filter((t: string) => t.length > 0);
-            tagList.push('read');
-            await storage.updateEmail(emailId, { tags: '|' + tagList.join('|') + '|' });
-          }
+          // Shared helper: flips the tag AND decrements the folder's unread
+          // badge, which a bare updateEmail here did not (see setEmailReadFlag).
+          await setEmailReadFlag(storage, emailId, true, 'agent execute read');
           if (syncEngine?.isConnected() && email.uid) {
             const folder = await storage.getFolder(email.folderId);
             if (folder) syncEngine.markAsRead(folder.path, email.uid).catch(console.error);

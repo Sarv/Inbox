@@ -27,6 +27,7 @@ import {
   labelDrainDecision,
   mirrorableCategories,
   parseTags,
+  setEmailReadFlag,
   createLogger,
   type AIProviderConfig,
   type ContactType,
@@ -2439,10 +2440,12 @@ async function executeAgentAction(emailId: string, action: UserActionType, _valu
   const testMode = serviceConfig.testMode || false;
   const tags = email.tags || '||';
 
-  // Update local DB
-  if (action === 'read' && !tags.includes('|read|')) {
-    const tl = tags.split('|').filter((t: string) => t.length > 0); tl.push('read');
-    await storage.updateEmail(emailId, { tags: '|' + tl.join('|') + '|' });
+  // Update local DB. The read flip goes through the shared helper so the sidebar
+  // badge is decremented with it: writing the `|read|` tag here and leaving
+  // `folders.unread_count` alone is what left INBOX showing 7 over an empty
+  // unread list after the pipeline auto-read seven promotional messages.
+  if (action === 'read') {
+    await setEmailReadFlag(storage, emailId, true, 'pipeline auto-read');
   } else if (action === 'star' && !tags.includes('|starred|')) {
     const tl = tags.split('|').filter((t: string) => t.length > 0); tl.push('starred');
     await storage.updateEmail(emailId, { tags: '|' + tl.join('|') + '|' });

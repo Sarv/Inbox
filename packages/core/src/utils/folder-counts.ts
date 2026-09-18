@@ -1,11 +1,13 @@
-// Folder count maintenance shared by the sync paths that change folder
-// MEMBERSHIP (as opposed to flags), where the caller's own recount gate can't
-// see the change.
+// Folder count maintenance shared by every path that moves mail without the
+// caller's own recount gate being able to see it: folder MEMBERSHIP changes
+// (a label repair, a relink) and READ-FLAG flips written outside the sync
+// engine (the mark-read IPC, the agent, the triage pipeline).
 
 import { duplicateRoleCandidates, type ClassifiableFolder } from '../config/folder-mapping';
 import type { IEmailStorage } from '../types/storage';
 
 import { logger } from './logger';
+import { addTag, hasTag, removeTag } from './tags';
 
 /** Just the slice of storage a recount needs, so callers can pass a fake. */
 export type FolderCountRecounter = Pick<IEmailStorage, 'recalculateFolderCounts'>;
@@ -89,4 +91,79 @@ export async function withFiledCounts<T extends ClassifiableFolder & { id: strin
   return folders.map((folder) =>
     filed.has(folder.id) ? { ...folder, ownedCount: filed.get(folder.id) } : folder,
   );
+}
+
+/** Just the slice of storage a read-flag flip needs, so callers can pass a fake. */
+export type ReadFlagWriter = Pick<
+  IEmailStorage,
+  'getEmail' | 'updateEmail' | 'recalculateFolderCounts' | 'applyReadFlagToFolderCountsBatch'
+>;
+
+/** The tag that encodes `\Seen`. Named so no caller spells it as a literal. */
+const READ_TAG = 'read';
+
+/**
+ * Keep `folders.unread_count` in step with read-flag flips that have already
+ * been written to the rows — the scan-free ±1 delta, with a full recount as the
+ * fallback for a storage impl that does not offer it.
+ *
+ * Best effort by design: the badge is cosmetic, the flip is not. A recount that
+ * throws must not fail the mark-read that caused it (and must not roll back the
+ * IMAP op queued alongside), so this warns and returns. The periodic recount
+ * and the drift sweep's recount remain the backstops.
+ */
+export async function applyReadFlagCountDelta(
+  storage: Pick<ReadFlagWriter, 'recalculateFolderCounts' | 'applyReadFlagToFolderCountsBatch'>,
+  flips: Array<{ emailId: string; nowRead: boolean }>,
+  context: string,
+): Promise<void> {
+  if (flips.length === 0) return;
+  try {
+    if (typeof storage.applyReadFlagToFolderCountsBatch === 'function') {
+      await storage.applyReadFlagToFolderCountsBatch(flips);
+    } else {
+      await storage.recalculateFolderCounts();
+    }
+  } catch (error) {
+    logger.warn(`[FolderCounts] unread delta after ${context} failed: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Flip one email's `read` tag AND maintain the unread badge — the ONLY way any
+ * caller should set a read flag locally.
+ *
+ * Why it exists: `unread_count` is a stored scalar, not a live query, so every
+ * writer of the `|read|` tag owes it a ±1 delta. Four call sites hand-rolled the
+ * tag edit (mark-read IPC, the agent's execute/undo, the triage pipeline's
+ * auto-read) and only ONE of them paid that debt. The three that did not left
+ * the sidebar counting threads the unread-filtered list no longer shows — a
+ * badge saying 7 over an empty list, which never heals inside a session because
+ * the full recount runs only when a sync reports a mutation. Observed in the
+ * field: the triage pipeline auto-read seven promotional messages and the INBOX
+ * badge stayed at 7 with zero unread rows left.
+ *
+ * Returns whether the tag actually MOVED. It is deliberately not an error to
+ * ask for the state the email is already in (a replayed action, a double click,
+ * a server flag we already applied): nothing is written, no delta is applied —
+ * a second `+1` for an already-read message is exactly how a badge drifts the
+ * other way — and the caller still decides whether to (re)queue the IMAP op.
+ */
+export async function setEmailReadFlag(
+  storage: ReadFlagWriter,
+  emailId: string,
+  read: boolean,
+  context: string,
+): Promise<boolean> {
+  const email = await storage.getEmail(emailId);
+  if (!email) return false;
+
+  const tags = email.tags || '||';
+  if (hasTag(tags, READ_TAG) === read) return false;
+
+  await storage.updateEmail(emailId, {
+    tags: read ? addTag(tags, READ_TAG) : removeTag(tags, READ_TAG),
+  });
+  await applyReadFlagCountDelta(storage, [{ emailId, nowRead: read }], context);
+  return true;
 }
