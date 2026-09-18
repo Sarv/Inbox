@@ -264,6 +264,89 @@ export function isAiLabelFolder(path: string): boolean {
 }
 
 /**
+ * Our own AI categories when the SERVER hands them back as bare-named folders.
+ *
+ * On our own host (sarv.com) the webmail team creates the category mailboxes
+ * themselves, under their plain display names — "Promotions", "Needs Response" —
+ * with no `Sarv Inbox` parent, so `isAiLabelFolder` above never sees them.
+ * (core's `resolveLabelStrategy`: sarv.com gets the keyword strategy, every
+ * other host gets the `Sarv Inbox/` prefix.) The app already shows those
+ * categories as pills in the top bar, so the same folder in the sidebar is the
+ * same thing listed twice.
+ *
+ * Two deliberate limits, both of which protect the user's own mail:
+ * - **sarv.com accounts only.** On Gmail/Fastmail/anywhere else a mailbox
+ *   called "Promotions" is the USER'S folder and must stay visible.
+ * - **System categories only.** A user-created category named after one of
+ *   their own folders must never make that folder disappear.
+ *
+ * `isSarvHost` (core `imap/label-strategy.ts`) and `categoryNameSlug` /
+ * `matchKnownCategory` (core `utils/gmail-labels.ts`) are the source of truth;
+ * these are browser-safe copies because the renderer bundle may import only
+ * TYPES from `@sarvinbox/core`. `test/unit/src/config/folder-mapping.test.ts`
+ * pins the copies against the originals so they cannot drift silently.
+ */
+export function isSarvHost(host: string | null | undefined): boolean {
+  return /(^|\.)sarv\.com$/i.test(String(host ?? '').trim().toLowerCase());
+}
+
+/** Slug form of a category display name — mirrors core's `categoryNameSlug`. */
+export function categoryNameSlug(name: string): string {
+  return String(name ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+/** A category as the sidebar knows it — mirrors core's `KnownCategory`. */
+export interface KnownCategoryRef {
+  slug: string;
+  name?: string;
+}
+
+/**
+ * Top-level mailbox, or one directly under the INBOX namespace root that some
+ * IMAP servers put every folder beneath (`INBOX.Promotions`). A NESTED folder
+ * such as "Work/Promotions" is the user's own and is deliberately not matched —
+ * we never created it, and hiding it would lose access to its mail.
+ */
+const BARE_FOLDER_NAME = /^(?:INBOX[\\/.])?([^\\/.]+)$/i;
+
+/**
+ * The categories whose bare-named server folders this ACCOUNT should hide —
+ * the whole rule in one pure step, so the Sidebar effect holds no policy.
+ *
+ * Empty for every host but our own, and empty for anything the user created:
+ * only `isSystem` definitions can hide a folder. An empty or unreadable
+ * definition list also lands here as `[]`, which hides nothing — the safe
+ * reading when we cannot tell a missing list from an empty one.
+ */
+export function hideableSystemCategories(
+  host: string | null | undefined,
+  definitions: readonly { slug: string; name?: string; isSystem?: boolean }[] | null | undefined,
+): KnownCategoryRef[] {
+  if (!isSarvHost(host) || !definitions?.length) return [];
+  return definitions
+    .filter((d) => d?.isSystem && d.slug)
+    .map((d) => ({ slug: d.slug, name: d.name }));
+}
+
+/**
+ * Is this server folder one of OUR system categories, listed under its bare
+ * name? Callers must gate on `isSarvHost` first — see the note above.
+ */
+export function isSystemCategoryFolder(
+  path: string,
+  systemCategories: readonly KnownCategoryRef[],
+): boolean {
+  if (!systemCategories?.length) return false;
+  const leaf = BARE_FOLDER_NAME.exec(String(path ?? '').trim())?.[1];
+  if (!leaf) return false;
+  const target = categoryNameSlug(leaf);
+  if (!target) return false;
+  return systemCategories.some(
+    (c) => (c.name && categoryNameSlug(c.name) === target) || categoryNameSlug(c.slug) === target,
+  );
+}
+
+/**
  * Virtual folder definitions
  * These are computed locally, not from IMAP
  */

@@ -24,6 +24,10 @@ import { useEffect, useState } from 'react';
 import {
   shouldHideFolder,
   isAiLabelFolder,
+  hideableSystemCategories,
+  isSarvHost,
+  isSystemCategoryFolder,
+  type KnownCategoryRef,
   classifyFolder,
   findFolderByType,
   folderDisplayName,
@@ -79,6 +83,34 @@ export function Sidebar() {
   // server folders) — dedupe them out of the FOLDERS section so they show once,
   // under Labels. Selector kept separate to avoid touching the big destructure.
   const labels = useEmailStore((s) => s.labels);
+  // Active account's IMAP host — decides whether the bare-named category
+  // mailboxes below are ours to hide or the user's own folders.
+  const activeHost = useEmailStore((s) => s.imapConfig?.host as string | undefined);
+
+  // On our own host the webmail team creates the system categories as real
+  // mailboxes named after the category ("Promotions"). The top bar already
+  // shows them, so they'd otherwise be listed twice; load the SYSTEM
+  // definitions so categorizedFolders can drop the duplicates. A failed load
+  // just means nothing extra is hidden — never a missing user folder.
+  const [systemCategories, setSystemCategories] = useState<KnownCategoryRef[]>([]);
+  const categoryDefsVersion = useEmailStore((s) => s.aiCategoryCountsLastUpdate);
+  useEffect(() => {
+    // Nothing to hide off our own host — skip the IPC entirely.
+    if (!isSarvHost(activeHost)) { setSystemCategories([]); return; }
+    let cancelled = false;
+    const loadDefs = async () => {
+      try {
+        const result = await window.electronAPI?.ai?.getCategoryDefinitions();
+        if (cancelled) return;
+        const defs = (result?.success && Array.isArray(result.data) ? result.data : []) as Array<{
+          slug: string; name?: string; isSystem?: boolean;
+        }>;
+        setSystemCategories(hideableSystemCategories(activeHost, defs));
+      } catch { /* leave the list empty: hide nothing rather than hide wrongly */ }
+    };
+    loadDefs();
+    return () => { cancelled = true; };
+  }, [activeHost, categoryDefsVersion]);
 
   // Per-account unread badges for "All Inboxes". Refresh on mount, when the set
   // of accounts changes, and whenever the active account's folder counts change
@@ -244,7 +276,11 @@ export function Sidebar() {
         !syncedLabelPaths.has(f.path.toLowerCase()) &&
         // Our own AI-category labels ("Sarv Inbox/…") are shown at the top of
         // the app, not in the sidebar — only real user folders belong here.
-        !isAiLabelFolder(f.path),
+        !isAiLabelFolder(f.path) &&
+        // Same idea on our own host, where the server names those mailboxes
+        // bare ("Promotions"). `systemCategories` is empty off sarv.com, so a
+        // folder of that name on any other account stays visible.
+        !isSystemCategoryFolder(f.path, systemCategories),
     );
 
     // Sort user folders alphabetically
