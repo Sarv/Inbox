@@ -46,10 +46,24 @@ type DbAccessor = () => Database.Database | null;
 export class ReadModelMaintainer {
   private pumping = false;
   private scheduled = false;
+  /** Set by start(): run the drained hook ONCE on launch even if the queue is
+   *  empty (see notifyDrained). */
+  private startupRefreshDue = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = true;
 
-  constructor(private getDb: DbAccessor) {}
+  /**
+   * @param getDb     the live database, or null while it is closed/reopening.
+   * @param onDrained called once the queue has been drained EMPTY after doing
+   *   real work — the structural hook for anything derived from the read model
+   *   (today: the folders' unread badges). It belongs here, not at each write
+   *   site, because the `emails` triggers dirty a thread on every tag write
+   *   whether or not that write's author knew a derived value existed; draining
+   *   is therefore the one point no read/unread change can get past. Drained-
+   *   empty rather than per-chunk so it sees a CONSISTENT projection and costs
+   *   once per burst instead of once per 100 threads.
+   */
+  constructor(private getDb: DbAccessor, private onDrained?: () => void) {}
 
   /** Begin maintaining: seed the backfill if needed, drain, and install a
    *  periodic safety pump. Non-blocking — the first seed/drain runs on the next
@@ -57,6 +71,7 @@ export class ReadModelMaintainer {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.startupRefreshDue = true;
     if (!this.timer) {
       this.timer = setInterval(() => this.schedule(), SAFETY_PUMP_MS);
       this.timer.unref?.();
@@ -116,6 +131,7 @@ export class ReadModelMaintainer {
   private pump(): void {
     if (this.pumping || this.stopped) return;
     this.pumping = true;
+    let drained = 0;
     const step = (): void => {
       if (this.stopped) { this.pumping = false; return; }
       let processed = 0;
@@ -128,8 +144,10 @@ export class ReadModelMaintainer {
         this.pumping = false;
         return;
       }
-      if (processed > 0) setImmediate(step);   // more to do — yield first
-      else this.pumping = false;
+      drained += processed;
+      if (processed > 0) { setImmediate(step); return; }   // more to do — yield first
+      this.pumping = false;
+      this.notifyDrained(drained);
     };
     step();
   }
@@ -180,9 +198,39 @@ export class ReadModelMaintainer {
   /** Drain the entire queue synchronously. For shutdown / tests. */
   flushNow(): void {
     let guard = 0;
+    let drained = 0;
+    let processed = 0;
     // Unpaced on purpose: the caller has asked for the queue to be EMPTY when this
     // returns, and there is no UI left to keep responsive at shutdown.
-    while (this.drainChunk(DRAIN_CHUNK, Number.POSITIVE_INFINITY) > 0 && guard++ < 1_000_000) { /* keep draining */ }
+    while ((processed = this.drainChunk(DRAIN_CHUNK, Number.POSITIVE_INFINITY)) > 0 && guard++ < 1_000_000) {
+      drained += processed;
+    }
+    this.notifyDrained(drained);
+  }
+
+  /**
+   * Run the drained hook, if anything was actually rebuilt.
+   *
+   * Gated on `drained > 0` so the 5-second safety pump — which finds an empty
+   * queue almost every time it fires — doesn't rewrite every folder's badge on a
+   * timer forever. Failures are logged and swallowed: a derived value that can't
+   * be refreshed must never take down the maintainer that keeps the read model
+   * itself correct.
+   */
+  private notifyDrained(drained: number): void {
+    // Once per start(), run even on an empty queue: derived state can be wrong at
+    // LAUNCH through no fault of this process — a badge left drifted by an older
+    // build, or by a write made while the hook wasn't wired. Nothing will dirty
+    // those threads again (the mail is already read), so without this the repair
+    // would wait on unrelated activity.
+    const startup = this.startupRefreshDue;
+    this.startupRefreshDue = false;
+    if ((drained <= 0 && !startup) || !this.onDrained) return;
+    try {
+      this.onDrained();
+    } catch (error) {
+      logger.error('Read-model drained hook failed:', error);
+    }
   }
 
   // --- read_model_state helpers -------------------------------------------

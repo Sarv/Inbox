@@ -2,75 +2,14 @@ import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { ReadModelMaintainer } from '../../src/read-model-maintainer';
-import { openTestDb } from '../../src/test-support/test-db';
+import { insertReadModelEmail, openReadModelTestDb } from '../../src/test-support/read-model-test-db';
 
 // A DB with the read-model tables + the emails dirty triggers (the same DDL the
-// v64/v65 migrations install), so we exercise trigger -> queue -> drain end to end.
-function newDb(): Database.Database {
-  const db = openTestDb();
-  db.exec(`
-    CREATE TABLE folders (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL);
-    CREATE TABLE ai_category_definitions (slug TEXT PRIMARY KEY);
-    CREATE TABLE emails (
-      id TEXT PRIMARY KEY, message_id TEXT NOT NULL, thread_id TEXT NOT NULL,
-      tags TEXT NOT NULL DEFAULT '||', date INTEGER NOT NULL,
-      has_attachments INTEGER NOT NULL DEFAULT 0, priority_score INTEGER,
-      from_name TEXT, from_address TEXT NOT NULL, subject TEXT,
-      updated_at INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE threads (
-      id TEXT PRIMARY KEY, subject TEXT NOT NULL,
-      first_message_id TEXT NOT NULL, last_message_id TEXT NOT NULL,
-      last_message_date INTEGER NOT NULL, message_count INTEGER NOT NULL DEFAULT 1,
-      participants TEXT, has_unread INTEGER NOT NULL DEFAULT 0, has_flagged INTEGER NOT NULL DEFAULT 0,
-      labels TEXT NOT NULL DEFAULT '[]',
-      has_important INTEGER NOT NULL DEFAULT 0, has_important_unread INTEGER NOT NULL DEFAULT 0,
-      has_attachment INTEGER NOT NULL DEFAULT 0, has_draft INTEGER NOT NULL DEFAULT 0,
-      has_category INTEGER NOT NULL DEFAULT 0, max_priority_score INTEGER NOT NULL DEFAULT 0,
-      first_sender TEXT, last_sender TEXT,
-      live_message_count INTEGER NOT NULL DEFAULT 0, state_version INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE thread_folders (
-      folder_id TEXT NOT NULL, thread_id TEXT NOT NULL, last_message_date INTEGER NOT NULL,
-      max_priority_score INTEGER NOT NULL DEFAULT 0,
-      has_unread INTEGER NOT NULL DEFAULT 0, has_important INTEGER NOT NULL DEFAULT 0,
-      has_important_unread INTEGER NOT NULL DEFAULT 0, has_flagged INTEGER NOT NULL DEFAULT 0,
-      has_attachment INTEGER NOT NULL DEFAULT 0, has_draft INTEGER NOT NULL DEFAULT 0,
-      has_category INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (folder_id, thread_id)
-    ) WITHOUT ROWID;
-    CREATE TABLE thread_categories (thread_id TEXT NOT NULL, slug TEXT NOT NULL, PRIMARY KEY (thread_id, slug)) WITHOUT ROWID;
-    CREATE TABLE read_model_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    CREATE TABLE read_model_dirty (thread_id TEXT PRIMARY KEY) WITHOUT ROWID;
-
-    CREATE TRIGGER trg_emails_rm_dirty_insert AFTER INSERT ON emails BEGIN
-      INSERT OR IGNORE INTO read_model_dirty(thread_id) VALUES (NEW.thread_id);
-    END;
-    CREATE TRIGGER trg_emails_rm_dirty_update
-    AFTER UPDATE OF tags, folder_id, has_attachments, priority_score, date, thread_id ON emails BEGIN
-      INSERT OR IGNORE INTO read_model_dirty(thread_id) VALUES (NEW.thread_id);
-      INSERT OR IGNORE INTO read_model_dirty(thread_id) VALUES (OLD.thread_id);
-    END;
-    CREATE TRIGGER trg_emails_rm_dirty_delete AFTER DELETE ON emails BEGIN
-      INSERT OR IGNORE INTO read_model_dirty(thread_id) VALUES (OLD.thread_id);
-    END;
-
-    INSERT INTO folders (id, path) VALUES ('f-inbox','INBOX');
-    INSERT INTO ai_category_definitions (slug) VALUES ('reminders');
-  `);
-  return db;
-}
-
-let n = 0;
-function insertEmail(db: Database.Database, threadId: string, tags: string, over: Record<string, any> = {}): void {
-  n += 1;
-  db.prepare(`INSERT INTO emails (id, message_id, thread_id, tags, date, has_attachments, priority_score, from_name, from_address, subject, updated_at)
-              VALUES (@id,@mid,@tid,@tags,@date,@att,@pri,@fn,@fa,@sub,@ua)`).run({
-    id: over.id ?? `e${n}`, mid: `<e${n}>`, tid: threadId, tags: `|${tags}|`,
-    date: over.date ?? 1000 + n, att: over.att ?? 0, pri: over.pri ?? null,
-    fn: `S${n}`, fa: `s${n}@x.com`, sub: `Sub ${n}`, ua: over.ua ?? 5000 + n,
-  });
-}
+// v64/v65 migrations install), so we exercise trigger -> queue -> drain end to
+// end. The fixture is shared with the folder-badge suite so the two can never
+// test different schemas.
+const newDb = (): Database.Database => openReadModelTestDb();
+const insertEmail = insertReadModelEmail;
 
 const dirtyCount = (db: Database.Database) => (db.prepare('SELECT COUNT(*) c FROM read_model_dirty').get() as any).c;
 const tfCount = (db: Database.Database) => (db.prepare('SELECT COUNT(*) c FROM thread_folders').get() as any).c;
@@ -226,5 +165,105 @@ describe('ReadModelMaintainer', () => {
     m.backfillNow();
     m.backfillNow();
     expect(tfCount(db)).toBe(2); // INBOX + the label, once each
+  });
+});
+
+// The drained hook is how DERIVED state (today: the folders' unread badges) is
+// kept honest without every write site remembering to update it. The triggers
+// dirty a thread on any tag write, so the drain is the one choke point every
+// read/unread change must pass through — these pin that contract.
+describe('ReadModelMaintainer — drained hook', () => {
+  let db: Database.Database;
+
+  beforeEach(() => { db = newDb(); });
+
+  it('fires once after a drain that did work, with the queue already empty', () => {
+    // If it fired mid-drain the hook would read a HALF-rebuilt projection and
+    // store a badge that was never true.
+    const seen: number[] = [];
+    const m = new ReadModelMaintainer(() => db, () => seen.push(dirtyCount(db)));
+    insertEmail(db, 't1', 'INBOX');
+    insertEmail(db, 't2', 'INBOX');
+    m.flushNow();
+    expect(seen).toEqual([0]);
+  });
+
+  it('does NOT fire when the queue was already empty', () => {
+    // The safety pump ticks every 5s forever; firing on it would rewrite every
+    // folder's badge on a timer for the life of the process.
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    m.flushNow();
+    expect(calls).toBe(0);
+  });
+
+  it('fires from the async pump too, not just the synchronous flush', async () => {
+    // start() is the path the app actually uses; a hook wired only into flushNow
+    // would never run outside shutdown and tests.
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    insertEmail(db, 't1', 'INBOX');
+    m.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    m.stop();
+    expect(calls).toBeGreaterThan(0);
+    expect(dirtyCount(db)).toBe(0);
+  });
+
+  it('a throwing hook does not wedge the maintainer or lose the rebuild', () => {
+    // A derived-value failure is not a reason to stop maintaining the read model
+    // itself — the rows are already committed when the hook runs.
+    const m = new ReadModelMaintainer(() => db, () => { throw new Error('badge refresh exploded'); });
+    insertEmail(db, 't1', 'INBOX');
+    expect(() => m.flushNow()).not.toThrow();
+    expect(dirtyCount(db)).toBe(0);
+    expect(tfCount(db)).toBe(1);
+
+    // And the next drain still works (the failure left no latch behind).
+    insertEmail(db, 't2', 'INBOX');
+    expect(() => m.flushNow()).not.toThrow();
+    expect(tfCount(db)).toBe(2);
+  });
+
+  it('is optional — a maintainer built without a hook drains normally', () => {
+    // Production wires one; tests and any future caller may not.
+    const m = new ReadModelMaintainer(() => db);
+    insertEmail(db, 't1', 'INBOX');
+    expect(() => m.flushNow()).not.toThrow();
+    expect(tfCount(db)).toBe(1);
+  });
+});
+
+// Launch-time repair. A badge can be wrong before this process even starts —
+// left drifted by an older build, or by a write made while no hook was wired.
+// Nothing will ever re-dirty those threads (the mail is already read), so the
+// drain alone would wait forever on unrelated activity.
+describe('ReadModelMaintainer — startup refresh', () => {
+  it('runs the hook once on start() even with an empty queue', async () => {
+    const db = newDb();
+    insertEmail(db, 't1', 'INBOX');
+    new ReadModelMaintainer(() => db).flushNow();   // read model already built and drained
+    expect(dirtyCount(db)).toBe(0);
+
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    m.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    m.stop();
+    expect(calls).toBe(1);
+  });
+
+  it('does not repeat it — later empty safety pumps stay silent', async () => {
+    // Otherwise every 5s tick would rewrite every folder's badge forever.
+    const db = newDb();
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    m.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    m.schedule();
+    m.schedule();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    m.stop();
+    expect(calls).toBe(1);
   });
 });
