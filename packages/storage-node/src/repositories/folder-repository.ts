@@ -5,7 +5,13 @@ import { addTag, removeTag, parseTags, buildTags, tagsToImapFlags, imapFlagsToTa
 import type { Statement } from 'better-sqlite3';
 
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
-import { isShadowedInFolder, unreadInFolderPredicate } from './thread-sql';
+import {
+  isShadowedInFolder,
+  READ_MODEL_UNREAD_COUNT_CORRELATED_SQL,
+  READ_MODEL_UNREAD_COUNT_SQL,
+  readModelComplete,
+  unreadInFolderPredicate,
+} from './thread-sql';
 
 const logger = createLogger('FolderRepository');
 
@@ -358,11 +364,82 @@ export class FolderRepository extends BaseRepository {
     const folders = wanted ? allFolders.filter((f) => wanted.has(f.path)) : allFolders;
     if (folders.length === 0) return;
 
+    // ONE definition of "unread in this folder" whenever the read model can give
+    // it (see readModelUnreadUsable): the badge is then counting exactly the rows
+    // the unread-filtered list renders, so the two cannot disagree. The tags scan
+    // below stays as the fallback for a DB whose backfill hasn't finished.
+    const fromReadModel = this.readModelUnreadUsable();
+
     if (folders.length <= FolderRepository.SCOPED_RECOUNT_MAX_FOLDERS) {
-      this.recountFoldersTargeted(folders);
+      this.recountFoldersTargeted(folders, fromReadModel);
     } else {
-      this.recountFoldersFullScan(folders);
+      this.recountFoldersFullScan(folders, fromReadModel);
     }
+  }
+
+  /**
+   * May `unread_count` be taken from the materialized read model?
+   *
+   * Two conditions, both necessary:
+   *  - the backfill is COMPLETE (`readModelComplete`) — a partial projection
+   *    would silently UNDER-report, which is the failure mode that looks like
+   *    "my mail disappeared";
+   *  - the dirty queue is EMPTY — `thread_folders` is rebuilt asynchronously, so
+   *    a pending row means the projection is one drain behind the `emails` table
+   *    and a recount fired right after a write (a move, a bulk action) would
+   *    store a number that was true a moment ago. With rows pending we recount
+   *    from `emails`, which is always current, and the drain's own refresh
+   *    re-states the badge from the read model as soon as it catches up.
+   */
+  private readModelUnreadUsable(): boolean {
+    try {
+      if (!readModelComplete(this.db)) return false;
+      const dirty = this.db.prepare('SELECT EXISTS(SELECT 1 FROM read_model_dirty) AS pending').get() as
+        { pending: number } | undefined;
+      return (dirty?.pending ?? 0) === 0;
+    } catch {
+      // No read-model tables at all (a DB below migration v65, or a fixture that
+      // builds only the tables it needs). "Can't tell" is not "usable" — fall
+      // back to the tags scan rather than counting from a table that isn't there.
+      return false;
+    }
+  }
+
+  /**
+   * Re-state `folders.unread_count` from the materialized read model.
+   *
+   * This is the STRUCTURAL half of keeping the sidebar honest. Every other write
+   * to `unread_count` is a hand-maintained adjustment some author has to remember
+   * (a +/-1 delta when a flag flips, a recount after a sync) and the bug this
+   * exists to end was exactly one forgotten decrement: the INBOX badge sat at 7
+   * over a list that had nothing unread in it, for the rest of the session.
+   *
+   * Driven by the read-model drain instead, it cannot be forgotten: the `emails`
+   * triggers dirty a thread on EVERY write to its tags — repository method or
+   * ad-hoc `UPDATE emails SET tags` alike — and the drain that clears those rows
+   * calls this. So any code path that marks mail read, now or in future, pays the
+   * badge update whether or not its author knew a badge existed.
+   *
+   * `refreshed` is false (and nothing is written) when the read model isn't
+   * usable, so a caller can tell "refreshed" from "left to the tags-based
+   * recount". `changed` names only the folders whose badge ACTUALLY moved —
+   * the `IS NOT` guard skips the rest — because it is what wakes the renderer,
+   * and a refresh that woke it on every drain would re-query the sidebar for
+   * nothing.
+   */
+  refreshUnreadFromReadModel(folderIds?: string[]): { refreshed: boolean; changed: string[] } {
+    if (!this.readModelUnreadUsable()) return { refreshed: false, changed: [] };
+    const scoped = folderIds && folderIds.length > 0;
+    const sql = `UPDATE folders SET unread_count = (${READ_MODEL_UNREAD_COUNT_CORRELATED_SQL})`
+      + (scoped ? ` WHERE id IN (${folderIds!.map(() => '?').join(',')}) AND` : ' WHERE')
+      + ` unread_count IS NOT (${READ_MODEL_UNREAD_COUNT_CORRELATED_SQL})`
+      + ' RETURNING path';
+    let changed: string[] = [];
+    this.timed('refreshUnreadFromReadModel', () => {
+      changed = (this.db.prepare(sql).all(...(scoped ? folderIds! : [])) as { path: string }[])
+        .map((row) => row.path);
+    }, { folderCount: scoped ? folderIds!.length : 'all' });
+    return { refreshed: true, changed };
   }
 
   /**
@@ -374,7 +451,7 @@ export class FolderRepository extends BaseRepository {
    * `|Work/Reports|`), so a folder that is a path-prefix of another is counted
    * correctly.
    */
-  private recountFoldersTargeted(folders: Array<{ id: string; path: string }>): void {
+  private recountFoldersTargeted(folders: Array<{ id: string; path: string }>, fromReadModel = false): void {
     const updateStmt = this.db.prepare('UPDATE folders SET total_count = ?, unread_count = ? WHERE id = ?');
     // total_count = messages tagged with the folder (one per copy, read or not).
     const totalStmt = this.db.prepare(
@@ -391,13 +468,20 @@ export class FolderRepository extends BaseRepository {
          AND ${unreadInFolderPredicate(path)}
          AND thread_id IS NOT NULL`,
     );
+    // The read-model alternative: count the folder's unread threads straight out
+    // of the partial index the list reads, one constant (cache-friendly)
+    // statement for every folder. Prepared only when it will be used — a store
+    // below migration v64 has no `thread_folders` to prepare against.
+    const readModelUnreadStmt = fromReadModel ? this.db.prepare(READ_MODEL_UNREAD_COUNT_SQL) : null;
     this.timed('recalculateFolderCounts', () => {
       for (const folder of folders) {
         const total = (totalStmt.get(folder.path) as { c: number }).c;
-        const unread = (unreadStmtFor(folder.path).get(folder.path) as { c: number }).c;
+        const unread = readModelUnreadStmt
+          ? (readModelUnreadStmt.get(folder.id) as { c: number }).c
+          : (unreadStmtFor(folder.path).get(folder.path) as { c: number }).c;
         updateStmt.run(total, unread, folder.id);
       }
-    }, { folderCount: folders.length, mode: 'targeted' });
+    }, { folderCount: folders.length, mode: fromReadModel ? 'targeted-readmodel' : 'targeted' });
   }
 
   /**
@@ -408,7 +492,7 @@ export class FolderRepository extends BaseRepository {
    * tags-per-email)). Used when enough folders are requested that the single pass
    * wins over {@link recountFoldersTargeted}.
    */
-  private recountFoldersFullScan(folders: Array<{ id: string; path: string }>): void {
+  private recountFoldersFullScan(folders: Array<{ id: string; path: string }>, fromReadModel = false): void {
     const updateStmt = this.db.prepare('UPDATE folders SET total_count = ?, unread_count = ? WHERE id = ?');
     this.timed('recalculateFolderCounts', () => {
       const byToken = new Map<string, { id: string; total: number; unreadThreads: Set<string> }>();
@@ -440,8 +524,14 @@ export class FolderRepository extends BaseRepository {
         }
       }
 
-      for (const t of byToken.values()) updateStmt.run(t.total, t.unreadThreads.size, t.id);
-    }, { folderCount: folders.length, mode: 'full-scan' });
+      const readModelUnreadStmt = fromReadModel ? this.db.prepare(READ_MODEL_UNREAD_COUNT_SQL) : null;
+      for (const t of byToken.values()) {
+        const unread = readModelUnreadStmt
+          ? (readModelUnreadStmt.get(t.id) as { c: number }).c
+          : t.unreadThreads.size;
+        updateStmt.run(t.total, unread, t.id);
+      }
+    }, { folderCount: folders.length, mode: fromReadModel ? 'full-scan-readmodel' : 'full-scan' });
   }
 
   /** Above this many flips a single full recount is cheaper than N thread-scoped

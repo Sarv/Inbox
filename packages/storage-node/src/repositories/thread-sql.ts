@@ -4,6 +4,8 @@
 // participants, or starred/important state. The outer query must expose the
 // base table as `emails` — every fragment correlates on `emails.thread_id`.
 
+import type Database from 'better-sqlite3';
+
 /** Folders whose copies don't count toward thread-level state (deleted/junk). */
 export const THREAD_STATE_EXCLUDED_FOLDERS = [
   'Trash', 'Spam', '[Gmail]/Trash', '[Gmail]/Spam', 'Junk', 'Junk Email', 'Deleted Items',
@@ -144,3 +146,45 @@ export const THREAD_META_SHARED = `
   ${THREAD_FIRST_SENDER_SQL} as thread_first_sender,
   ${THREAD_LAST_SENDER_SQL} as thread_last_sender
 `;
+
+/**
+ * `unread_count` for one folder, taken from the MATERIALIZED read model.
+ *
+ * This is the same `thread_folders` projection the unread-filtered list scans
+ * (`tf.has_unread = 1`), so a badge computed from it cannot disagree with the
+ * list it labels — the disagreement being the whole class of bug this replaces:
+ * `folders.unread_count` is a stored scalar that several local paths adjust by
+ * hand, and one missed decrement left INBOX badged 7 over an empty list.
+ *
+ * Cheap enough to run on every read-model drain: `idx_tf_unread` is a PARTIAL
+ * index over exactly the `has_unread = 1` rows, so this counts index entries for
+ * the unread threads only — not a scan of the folder, let alone of `emails`.
+ */
+const readModelUnreadCountSql = (folderIdExpression: string): string =>
+  `SELECT COUNT(*) AS c FROM thread_folders WHERE folder_id = ${folderIdExpression} AND has_unread = 1`;
+
+/** Bound form: one folder id as a parameter, so the statement text is constant
+ *  across folders and stays in the prepared-statement cache. */
+export const READ_MODEL_UNREAD_COUNT_SQL = readModelUnreadCountSql('?');
+
+/** Correlated form, for `UPDATE folders SET unread_count = (...)` — same count,
+ *  same definition, one statement for any number of folders. */
+export const READ_MODEL_UNREAD_COUNT_CORRELATED_SQL = readModelUnreadCountSql('folders.id');
+
+/**
+ * True when `thread_folders` is a complete, authoritative projection of
+ * `emails` — the one gate for "may I read the materialized model instead of
+ * deriving from rows". False while the one-time backfill is still running (the
+ * projection is partial, so counting from it would UNDER-report) and false under
+ * the `SARVINBOX_READMODEL_READS=0` kill-switch.
+ *
+ * Shared by the list reads and the badge recount deliberately: if the two ever
+ * disagreed about which source is authoritative, the badge and the list would go
+ * back to being computed from different tables.
+ */
+export function readModelComplete(db: Database.Database): boolean {
+  if (process.env.SARVINBOX_READMODEL_READS === '0') return false; // kill-switch: force legacy
+  const row = db.prepare("SELECT value FROM read_model_state WHERE key = 'status'").get() as
+    { value: string } | undefined;
+  return row?.value === 'complete';
+}
