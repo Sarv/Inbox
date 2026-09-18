@@ -195,7 +195,7 @@ const lastServerUnseen = new Map<string, number>();
 const FLAG_RECONCILE_TIMEOUT_MS = 60_000;
 
 /**
- * STATUS-then-reconcile sweep across an engine's NON-INBOX folders: STATUS each (a
+ * STATUS-then-reconcile sweep across an engine's folders: STATUS each (a
  * cheap count query — NO download), then reconcile what the counts say drifted —
  * flags when the server's unread moved, content when the server holds FEWER
  * messages than we do (which runs the safety-guarded deletion detection).
@@ -205,8 +205,15 @@ const FLAG_RECONCILE_TIMEOUT_MS = 60_000;
  * a webmail delete, a mail read or STARRED/UNSTARRED in webmail, a retention
  * auto-expiry, or a Trash→Inbox move in another folder is invisible to us until
  * this sweep polls it.
- * Per-folder try/catch + timeout so one slow/bad folder never stalls the cycle;
- * INBOX is skipped (IDLE + its own sync cover it).
+ * Per-folder try/catch + timeout so one slow/bad folder never stalls the cycle.
+ *
+ * INBOX takes part too, but ONLY for the plan's local half. Its rows are already
+ * covered by IDLE and its own sync, so re-reconciling them here would duplicate
+ * work — but its stored `unread_count` is not covered by anything: it is a scalar
+ * that local paths adjust by hand, and a single missed decrement leaves the badge
+ * counting mail the unread-filtered list no longer shows for the rest of the
+ * session. One STATUS per sweep is enough to notice that and recount from the
+ * rows; no FETCH is issued.
  *
  * It deliberately does NOT write the server's `unseen` into our `unreadCount`: that
  * is a message count where ours is a distinct-thread count, so it disagreed with
@@ -215,7 +222,7 @@ const FLAG_RECONCILE_TIMEOUT_MS = 60_000;
  * which folder moved so an open list re-runs its query instead of showing
  * pre-reconcile read state under a fresh badge.
  */
-async function reconcileNonInboxDeletions(
+async function reconcileFolderDrift(
   engine: NonNullable<ReturnType<typeof getSyncEngine>>,
   storage: NonNullable<ReturnType<typeof getStorage>>,
   accountId?: string,
@@ -223,11 +230,10 @@ async function reconcileNonInboxDeletions(
   const folders = await storage.getFolders();
   for (const f of folders) {
     const isInbox = f.specialUse === '\\Inbox' || (f.path || '').toLowerCase() === 'inbox';
-    if (isInbox) continue;
     try {
       const st = await withTimeout(engine.getFolderStatus(f.path), 15_000, 'STATUS timed out');
       const seenKey = `${accountId ?? '__active__'}:${f.id}`;
-      const plan = planFolderDrift({
+      const polled = planFolderDrift({
         previousUnseen: lastServerUnseen.get(seenKey),
         currentUnseen: st.unseen ?? 0,
         serverMessages: st.messages ?? 0,
@@ -244,10 +250,21 @@ async function reconcileNonInboxDeletions(
         localUidValidity: f.uidValidity,
       });
       lastServerUnseen.set(seenKey, st.unseen ?? 0);
+      // INBOX: keep only the local recount (see the header) — IDLE owns its rows.
+      const plan = isInbox
+        ? { reconcileFlags: false, reconcileDeletions: false, recountFromRows: polled.recountFromRows }
+        : polled;
       if (plan.reconcileFlags) {
         logger.info(
           `[Accounts] flag drift in ${f.path} (server unseen ${st.unseen ?? 0}, ` +
           `modseq ${st.highestModseq ?? '-'} vs synced ${f.highestModseq ?? '-'}) — reconciling`,
+        );
+      } else if (plan.recountFromRows) {
+        // Named in the log: a badge that outlived its mail is invisible from the
+        // outside, and this line is the only place it leaves a trace.
+        logger.info(
+          `[Accounts] unread badge for ${f.path} disagrees with the server ` +
+          `(stored ${f.unreadCount ?? 0} thread(s) vs server unseen ${st.unseen ?? 0}) — recounting from rows`,
         );
       }
 
@@ -320,7 +337,7 @@ export function registerSyncHandlers(): void {
   };
 
   // ---- Active-account non-INBOX deletion reconcile (main-process timer) -----------
-  // backgroundSync runs reconcileNonInboxDeletions for BACKGROUND accounts but SKIPS
+  // backgroundSync runs reconcileFolderDrift for BACKGROUND accounts but SKIPS
   // the active one (its getCurrentAccountId guard). The active account only has IDLE
   // (INBOX-only) + the renderer's folder-open sync, which is skipped whenever a sync
   // is in progress — so its non-INBOX folders (Trash especially) would NEVER learn
@@ -337,7 +354,7 @@ export function registerSyncHandlers(): void {
     if (!engine.isConnected() || engine.isSyncing()) return; // don't fight an active sync
     activeReconcileRunning = true;
     try {
-      await reconcileNonInboxDeletions(engine, storage, getCurrentAccountId() ?? undefined);
+      await reconcileFolderDrift(engine, storage, getCurrentAccountId() ?? undefined);
     } catch (e) {
       logger.warn('[Accounts] active-account reconcile sweep failed:', (e as Error).message);
     } finally {
@@ -1325,9 +1342,9 @@ export function registerSyncHandlers(): void {
 
       // STATUS-then-reconcile sweep across this account's non-INBOX folders (fresh
       // unread badges + server-side deletion detection). Shared with the active-
-      // account timer — see reconcileNonInboxDeletions.
+      // account timer — see reconcileFolderDrift.
       try {
-        await reconcileNonInboxDeletions(engine, rt.storage, accountId);
+        await reconcileFolderDrift(engine, rt.storage, accountId);
       } catch (e) {
         logger.warn('[Accounts] STATUS sweep failed for', accountId, (e as Error).message);
       }

@@ -35,6 +35,14 @@
  *     ANY unread mail at all, which is wrong no matter how you count it, and
  *     which self-clears after one reconcile.
  *
+ * Separately from the network half, every sweep answers one purely LOCAL
+ * question: does our stored badge disagree with the server about this folder
+ * holding any unread mail at all? If so the counts are recomputed from our own
+ * rows (`recountFromRows`) — no FETCH, one indexed query — because
+ * `folders.unread_count` is a hand-maintained scalar and a single write path
+ * that forgets its decrement strands the sidebar badge above an empty list for
+ * the rest of the session.
+ *
  * Pure and side-effect free, so the policy is unit-testable without an IMAP
  * server; the caller owns the polling, the timeouts and the previous-value map.
  */
@@ -78,6 +86,25 @@ export interface FolderDriftPlan {
    * the server holds FEWER messages than we do.
    */
   reconcileDeletions: boolean;
+  /**
+   * Recompute this folder's stored counts FROM our own rows — no network.
+   *
+   * Set whenever the server and we disagree about the folder holding ANY unread
+   * mail, on EVERY sweep rather than only the first look. `folders.unread_count`
+   * is a stored scalar that many local paths adjust by hand, so a single missed
+   * decrement leaves the sidebar badge counting threads the unread-filtered list
+   * no longer shows, and nothing recomputes it until a sync happens to report a
+   * mutation — which a quiet mailbox never does. A recount is one indexed local
+   * query, so it is cheap enough to run on every disagreeing sweep, and it is
+   * the exact repair for a badge that disagrees with the rows the list reads.
+   *
+   * Deliberately NOT a reason to reconcile flags in steady state: a disagreement
+   * that survives the recount is a genuine row-level divergence, and re-FETCHing
+   * a folder's flags on every sweep forever is the runaway this module exists to
+   * prevent. The first-look reconcile and the modseq/unseen triggers still own
+   * the network half.
+   */
+  recountFromRows: boolean;
 }
 
 /**
@@ -121,11 +148,15 @@ export function planFolderDrift(input: FolderDriftInput): FolderDriftPlan {
   const modseqAhead =
     isUsable(serverModseq) && isUsable(syncedModseq) && serverModseq > syncedModseq;
 
+  // Unit-independent, so it is the one comparison worth making across the two
+  // counts: "some" vs "none" means the same in messages as in threads.
+  const anyUnreadDisagrees = disagreeOnAnyUnread(currentUnseen, localUnread);
+
   const unseenDrift = previousUnseen === undefined
     // First look this session: no like-for-like baseline yet, so act only on the
     // disagreement that cannot be a unit artefact. One reconcile fixes the rows
     // and the counts agree again, so this cannot loop.
-    ? disagreeOnAnyUnread(currentUnseen, localUnread)
+    ? anyUnreadDisagrees
     // Steady state: the server's own number moved since we last asked, so
     // someone read or unread something in another client.
     : currentUnseen !== previousUnseen;
@@ -135,6 +166,7 @@ export function planFolderDrift(input: FolderDriftInput): FolderDriftPlan {
     // be caught by the count comparison, and vice versa.
     reconcileFlags: uidValidityChanged || modseqAhead || unseenDrift,
     reconcileDeletions: uidValidityChanged || serverMessages < localTotal,
+    recountFromRows: anyUnreadDisagrees,
   };
 }
 
@@ -157,7 +189,7 @@ export interface FolderDriftTargets {
   /** Tell the renderer THIS folder moved, so it re-runs the folder's list query. */
   notify(folderPath: string): void;
   /** One reconcile failing must never sink the sweep — report and carry on. */
-  onError(stage: 'flags' | 'deletions', folderPath: string, error: Error): void;
+  onError(stage: 'flags' | 'deletions' | 'counts', folderPath: string, error: Error): void;
 }
 
 export interface FolderDriftSubject {
@@ -175,6 +207,19 @@ export interface FolderDriftSubject {
  * and never notify without a real change, or a quiet folder would re-run the
  * renderer's list query on every sweep.
  */
+/** Did the recount actually move either stored count? Only then is the renderer
+ *  worth waking: a quiet folder must not re-run the list query every sweep. */
+async function countsMoved(
+  folder: FolderDriftSubject,
+  targets: Pick<FolderDriftTargets, 'readCounts'>,
+): Promise<boolean> {
+  const after = await targets.readCounts(folder.path);
+  return (
+    (after?.unreadCount ?? 0) !== (folder.unreadCount ?? 0) ||
+    (after?.totalCount ?? 0) !== (folder.totalCount ?? 0)
+  );
+}
+
 export async function applyFolderDrift(
   plan: FolderDriftPlan,
   folder: FolderDriftSubject,
@@ -187,13 +232,25 @@ export async function applyFolderDrift(
       // `updated` counts rows whose flags moved; the count comparison also
       // catches a QRESYNC VANISHED pass, which removes rows without touching a
       // single flag.
-      const after = await targets.readCounts(folder.path);
-      const countsMoved =
-        (after?.unreadCount ?? 0) !== (folder.unreadCount ?? 0) ||
-        (after?.totalCount ?? 0) !== (folder.totalCount ?? 0);
-      if (updated > 0 || countsMoved) targets.notify(folder.path);
+      // Read the counts back BEFORE the `updated > 0` shortcut would skip it:
+      // the comparison is the only thing that catches a QRESYNC VANISHED pass,
+      // which removes rows without touching a single flag.
+      const moved = await countsMoved(folder, targets);
+      if (updated > 0 || moved) targets.notify(folder.path);
     } catch (error) {
       targets.onError('flags', folder.path, error as Error);
+    }
+  } else if (plan.recountFromRows) {
+    // No network half to run, but our stored badge and the server disagree about
+    // this folder holding any unread mail at all — recompute the badge from our
+    // own rows, which is what the list reads. Costs one indexed local query and
+    // is idempotent, so a disagreement the rows themselves carry cannot turn
+    // this into a loop that does work.
+    try {
+      await targets.recount(folder.path);
+      if (await countsMoved(folder, targets)) targets.notify(folder.path);
+    } catch (error) {
+      targets.onError('counts', folder.path, error as Error);
     }
   }
 
