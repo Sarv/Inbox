@@ -44,6 +44,7 @@ import {
   liveUnreadSum,
   listingExclusion,
   LISTING_EXCLUDED_FOLDERS,
+  readModelComplete,
 } from './thread-sql';
 
 const log = createLogger('EmailRepo');
@@ -1781,9 +1782,7 @@ export class EmailRepository extends BaseRepository {
   /** True when reads should use the materialized read-model. Default ON once the
    *  backfill is complete; SARVINBOX_READMODEL_READS=0 is the kill-switch. */
   readModelReadsEnabled(): boolean {
-    if (process.env.SARVINBOX_READMODEL_READS === '0') return false; // kill-switch: force legacy
-    const row = this.db.prepare("SELECT value FROM read_model_state WHERE key = 'status'").get() as { value: string } | undefined;
-    return row?.value === 'complete';
+    return readModelComplete(this.db);
   }
 
   /** Resolve a folder path to its id (the read-model is folder-id keyed). */
