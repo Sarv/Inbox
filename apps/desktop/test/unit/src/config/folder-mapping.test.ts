@@ -1,3 +1,8 @@
+import {
+  categoryNameSlug as coreCategoryNameSlug,
+  isSarvHost as coreIsSarvHost,
+  matchKnownCategory as coreMatchKnownCategory,
+} from '@sarvinbox/core';
 import { describe, it, expect } from 'vitest';
 
 import {
@@ -10,12 +15,16 @@ import {
   findFolderByType,
   folderDisplayName,
   folderTypeMatchStrength,
+  categoryNameSlug,
+  hideableSystemCategories,
   isAiLabelFolder,
   isArchiveFolder,
   isDraftsFolder,
   isInboxFolder,
   isSentFolder,
+  isSarvHost,
   isSpamFolder,
+  isSystemCategoryFolder,
   isTrashFolder,
   shouldHideFolder,
 } from '../../../../src/config/folder-mapping';
@@ -316,5 +325,197 @@ describe('folderDisplayName', () => {
   it('falls back to the server name for a role with no canonical label', () => {
     expect(folderDisplayName({ path: '[Gmail]/Starred', name: '[Gmail]/Starred' })).toBe('Starred');
     expect(folderDisplayName({ path: 'Important', name: 'Important' })).toBe('Important');
+  });
+});
+
+/**
+ * Hiding our own system categories from the sidebar's FOLDERS list.
+ *
+ * On sarv.com the webmail team creates the category mailboxes themselves, under
+ * their bare display names, so nothing carries the `Sarv Inbox` parent that
+ * `isAiLabelFolder` keys off. The app shows those categories as pills in the
+ * top bar; without this the user sees every one of them twice.
+ */
+describe('isSarvHost (renderer copy)', () => {
+  // Regression: this gate is the ONLY thing standing between "hide our own
+  // duplicate" and "hide a Gmail user's real Promotions folder".
+  it('accepts sarv.com and its subdomains, and nothing that merely looks like it', () => {
+    expect(isSarvHost('sarv.com')).toBe(true);
+    expect(isSarvHost('imap.sarv.com')).toBe(true);
+    expect(isSarvHost('MAIL.SARV.COM')).toBe(true);
+    expect(isSarvHost('  imap.sarv.com  ')).toBe(true);
+
+    expect(isSarvHost('notsarv.com')).toBe(false);
+    expect(isSarvHost('sarv.com.br')).toBe(false);
+    expect(isSarvHost('sarv.co')).toBe(false);
+    expect(isSarvHost('imap.gmail.com')).toBe(false);
+  });
+
+  // Regression: an account added before the host was recorded must not throw
+  // inside the sidebar render.
+  it('treats a missing host as not ours', () => {
+    expect(isSarvHost('')).toBe(false);
+    expect(isSarvHost(null)).toBe(false);
+    expect(isSarvHost(undefined)).toBe(false);
+  });
+});
+
+describe('isSystemCategoryFolder', () => {
+  const systemCategories = [
+    { slug: 'needs_response', name: 'Needs Response' },
+    { slug: 'promotions', name: 'Promotions' },
+    { slug: 'finance' },
+  ];
+
+  // Regression: the whole point — a server folder named after one of our
+  // system categories is the duplicate of a top-bar pill.
+  it('matches a bare category mailbox by display name or slug', () => {
+    expect(isSystemCategoryFolder('Promotions', systemCategories)).toBe(true);
+    expect(isSystemCategoryFolder('Needs Response', systemCategories)).toBe(true);
+    expect(isSystemCategoryFolder('needs-response', systemCategories)).toBe(true);
+    expect(isSystemCategoryFolder('finance', systemCategories)).toBe(true);
+  });
+
+  // Regression: servers that root every mailbox under the INBOX namespace
+  // (Courier, some Dovecot configs) report "INBOX.Promotions" — the same
+  // top-level folder, one namespace down.
+  it('matches a category directly under the INBOX namespace root', () => {
+    expect(isSystemCategoryFolder('INBOX.Promotions', systemCategories)).toBe(true);
+    expect(isSystemCategoryFolder('INBOX/Promotions', systemCategories)).toBe(true);
+  });
+
+  // Regression: hiding a folder we did not create loses the user access to its
+  // mail — the top bar shows CATEGORISED mail, not that folder's contents.
+  it('never matches a nested folder the user made themselves', () => {
+    expect(isSystemCategoryFolder('Work/Promotions', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder('INBOX.Work.Promotions', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder('Promotions/2024', systemCategories)).toBe(false);
+  });
+
+  // Regression: a near-miss name is the user's own folder.
+  it('does not match a folder that merely resembles a category', () => {
+    expect(isSystemCategoryFolder('Promotional', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder('Newsletters', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder('Response', systemCategories)).toBe(false);
+  });
+
+  // Regression: the definitions arrive over IPC. A failed or empty load must
+  // hide NOTHING — an empty list and an unreadable list look the same here, so
+  // the safe reading is "hide nothing", never "hide everything".
+  it('hides nothing when no system categories are known', () => {
+    expect(isSystemCategoryFolder('Promotions', [])).toBe(false);
+    expect(isSystemCategoryFolder('Promotions', undefined as unknown as [])).toBe(false);
+  });
+
+  // Regression: blank/odd paths must not throw inside a render path.
+  it('is total for blank and malformed paths', () => {
+    expect(isSystemCategoryFolder('', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder('   ', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder('INBOX.', systemCategories)).toBe(false);
+    expect(isSystemCategoryFolder(undefined as unknown as string, systemCategories)).toBe(false);
+  });
+
+  // Regression: a USER-created category named after one of their own folders
+  // must not make that folder vanish. The isSystem filter is the CALLER's job
+  // (the Sidebar applies it before calling), so what this pins is that the
+  // decision follows the list it is handed — nothing else.
+  it('follows the list it is given, so a non-system category hides nothing', () => {
+    const withUserCategory = [...systemCategories, { slug: 'receipts', name: 'Receipts' }];
+    expect(isSystemCategoryFolder('Receipts', withUserCategory)).toBe(true);
+    expect(isSystemCategoryFolder('Receipts', systemCategories)).toBe(false);
+  });
+});
+
+describe('hideableSystemCategories', () => {
+  const defs = [
+    { slug: 'promotions', name: 'Promotions', isSystem: true },
+    { slug: 'needs_response', name: 'Needs Response', isSystem: true },
+    { slug: 'receipts', name: 'Receipts', isSystem: false },
+    { slug: 'my_stuff', name: 'My Stuff' },
+  ];
+
+  // Regression: a Gmail/Fastmail user's own "Promotions" folder disappearing
+  // from their sidebar. Only our own host names those mailboxes for us.
+  it('hides nothing on any host but ours', () => {
+    expect(hideableSystemCategories('imap.gmail.com', defs)).toEqual([]);
+    expect(hideableSystemCategories('imap.fastmail.com', defs)).toEqual([]);
+    expect(hideableSystemCategories('sarv.com.br', defs)).toEqual([]);
+    expect(hideableSystemCategories(null, defs)).toEqual([]);
+  });
+
+  // Regression: a USER-created category named after one of their own folders
+  // must never make that folder vanish — only built-in ones can.
+  it('keeps only the system categories on our own host', () => {
+    expect(hideableSystemCategories('imap.sarv.com', defs)).toEqual([
+      { slug: 'promotions', name: 'Promotions' },
+      { slug: 'needs_response', name: 'Needs Response' },
+    ]);
+  });
+
+  // Regression: the definitions arrive over IPC, which can fail or answer
+  // late. An unreadable list and an empty list look identical here, so both
+  // must mean "hide nothing" — never "hide everything".
+  it('hides nothing when the definitions are missing, empty or malformed', () => {
+    expect(hideableSystemCategories('sarv.com', [])).toEqual([]);
+    expect(hideableSystemCategories('sarv.com', null)).toEqual([]);
+    expect(hideableSystemCategories('sarv.com', undefined)).toEqual([]);
+    expect(hideableSystemCategories('sarv.com', [{ slug: '', isSystem: true }])).toEqual([]);
+    expect(
+      hideableSystemCategories('sarv.com', [null as unknown as { slug: string }]),
+    ).toEqual([]);
+  });
+
+  // Regression: the two halves have to compose — what this returns is exactly
+  // what decides whether a folder is dropped from the FOLDERS list.
+  it('composes with isSystemCategoryFolder to drop only our own duplicates', () => {
+    const ours = hideableSystemCategories('imap.sarv.com', defs);
+    expect(isSystemCategoryFolder('Promotions', ours)).toBe(true);
+    expect(isSystemCategoryFolder('Needs Response', ours)).toBe(true);
+    // The user's own folders — one named after a non-system category, one
+    // nested, one unrelated — all survive.
+    expect(isSystemCategoryFolder('Receipts', ours)).toBe(false);
+    expect(isSystemCategoryFolder('Work/Promotions', ours)).toBe(false);
+    expect(isSystemCategoryFolder('Travel', ours)).toBe(false);
+
+    const gmail = hideableSystemCategories('imap.gmail.com', defs);
+    expect(isSystemCategoryFolder('Promotions', gmail)).toBe(false);
+  });
+});
+
+/**
+ * These helpers are browser-safe COPIES: the renderer bundle can import only
+ * types from @sarvinbox/core (a value import pulls mailparser and breaks the
+ * bundle). The tests run in Node, so here — and only here — both can be loaded
+ * and compared. If this block fails, the copy has drifted from the original and
+ * the two processes now disagree about what is one of our categories.
+ */
+describe('renderer copies agree with @sarvinbox/core', () => {
+  it('isSarvHost decides identically', () => {
+    const hosts = [
+      'sarv.com', 'imap.sarv.com', 'MAIL.SARV.COM', '  sarv.com  ',
+      'notsarv.com', 'sarv.com.br', 'sarv.co', 'imap.gmail.com', '',
+    ];
+    for (const host of hosts) {
+      expect([host, isSarvHost(host)]).toEqual([host, coreIsSarvHost(host)]);
+    }
+  });
+
+  it('categoryNameSlug normalises identically', () => {
+    const names = ['Needs Response', 'needs-response', 'NEEDS   RESPONSE', '  Promotions  ', ''];
+    for (const name of names) {
+      expect([name, categoryNameSlug(name)]).toEqual([name, coreCategoryNameSlug(name)]);
+    }
+  });
+
+  it('matches the same bare leaves against the same definitions', () => {
+    const categories = [
+      { slug: 'needs_response', name: 'Needs Response' },
+      { slug: 'finance' },
+    ];
+    const leaves = ['Needs Response', 'needs-response', 'finance', 'Finance', 'Newsletters', ''];
+    for (const leaf of leaves) {
+      expect([leaf, isSystemCategoryFolder(leaf, categories)])
+        .toEqual([leaf, coreMatchKnownCategory(leaf, categories) !== null]);
+    }
   });
 });
