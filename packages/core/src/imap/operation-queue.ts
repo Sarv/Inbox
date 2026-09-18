@@ -293,8 +293,9 @@ export class OperationQueue {
 
   /**
    * Pre-create the (empty) category labels/folders on providers that support
-   * blank labels (Gmail, folder-based). No-op on KEYWORD providers (sarv) — a
-   * keyword can't exist before it's on a message. Direct (not persist-first):
+   * blank labels (Gmail, folder-based) — i.e. every host but our own. No-op on
+   * the KEYWORD strategy (sarv.com only) — a keyword can't exist before it's on
+   * a message. Direct (not persist-first):
    * a failure just defers to lazy creation on first tag. Returns how many were
    * ensured (0 on keyword providers).
    */
@@ -350,10 +351,11 @@ export class OperationQueue {
     if (!this.client) return 0;
     const strategy = await resolveLabelStrategy(this.client, this.client.host ?? '', mode);
     // Provision (register) each label up front. For folder/Gmail this CREATEs the
-    // `Sarv Inbox/<Category>` mailbox. For the keyword strategy (Sarv included)
-    // `ensure()` is a no-op: the keyword IS the label, so there is nothing to
-    // create — we flag the mail and the webmail renders it. The loop still runs
-    // so every strategy answers for itself.
+    // `Sarv Inbox/<Category>` mailbox — which is EVERY host but our own. For the
+    // keyword strategy (sarv.com only) `ensure()` is a no-op: the keyword IS the
+    // label, so there is nothing to create — we flag the mail and the sarv
+    // webmail renders it. The loop still runs so every strategy answers for
+    // itself.
     //
     // `migrate()` runs HERE and not on the apply path: it is the one-time
     // cleanup of an older scheme (the "Sarv Inbox/<Category>" folders we used to

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   SARV_LABEL_PARENT,
   folderPathForCategory,
+  isSarvHost,
   isSarvLabelPath,
   keywordForCategory,
   resolveLabelStrategy,
@@ -11,11 +12,13 @@ import { FakeImapServer, type FakeImapServerOptions } from '../../../src/test-su
 import { setLogLevel } from '../../../src/utils/logger';
 
 
-// Category mirroring writes into the user's real mailbox, so the mechanism must
-// be picked from LIVE CAPABILITIES (not the provider's name) and must never
-// duplicate or lose mail. This suite pins:
+// Category mirroring writes into the user's real mailbox, so it must never
+// duplicate or lose mail — and WHERE the label lives turns on whose server it
+// is: our own host gets a bare keyword (the sarv webmail team creates and
+// renders those categories), EVERY other host gets the `Sarv Inbox/` prefix.
+// This suite pins:
 //
-//   - which strategy each server shape resolves to, including the deliberately
+//   - which strategy each host resolves to, including the deliberately
 //     anchored `sarv.com` match (mysarv.com must NOT be treated as ours)
 //   - keyword = in place (STORE +FLAGS): no copy, no move, no duplicate
 //   - Gmail = COPY to the label mailbox (Gmail reads that as "add label"), and
@@ -24,13 +27,15 @@ import { setLogLevel } from '../../../src/utils/logger';
 //   - label provisioning is idempotent and survives "already exists" / denied /
 //     absent-optional-method, because it runs opportunistically on every apply
 //
-// Where the label LIVES matters too, and the two answers are deliberate: on a
-// keyword server (Sarv included) the keyword IS the label, so NOTHING is created
-// — we flag the mail and the webmail renders it; every other provider gets a
+// Where the label LIVES matters too, and the two answers are deliberate: on OUR
+// host the keyword IS the label, so NOTHING is created and NO prefix is sent —
+// we flag the mail and the sarv webmail renders it; every other provider gets a
 // real `Sarv Inbox/<Category>` mailbox, and that prefix is what keeps our labels
-// from passing as the user's folders. An interim scheme created registration
-// folders on Sarv too; `migrate()` prunes them, WITHOUT ever deleting a mailbox
-// the server hasn't confirmed is empty.
+// from passing as the user's folders. Keyword CAPABILITY no longer earns the
+// keyword strategy: Fastmail and Dovecot accept custom keywords too, but nobody
+// there turns one into a category the user can see. An interim scheme created
+// registration folders on Sarv too; `migrate()` prunes them, WITHOUT ever
+// deleting a mailbox the server hasn't confirmed is empty.
 
 setLogLevel('error'); // provisioning logs an INFO line per CREATE
 
@@ -81,26 +86,48 @@ describe('folderPathForCategory', () => {
   });
 });
 
-describe('resolveLabelStrategy — capability, not guesswork', () => {
+describe('resolveLabelStrategy — whose server is it', () => {
   it('a Gmail host takes the native-label path even though keywords are supported', async () => {
     const server = await makeServer({ keywords: true });
     const strategy = await resolveLabelStrategy(server as any, 'imap.gmail.com', 'copy');
     expect(strategy.kind).toBe('gmail');
   });
 
-  it('the Gmail IMAP extension wins on an unknown host, without consulting keywords', async () => {
+  it('the Gmail IMAP extension wins on an unknown host', async () => {
     const server = await makeServer({ gmailLabels: true, keywords: true });
-    const keywordProbe = vi.spyOn(server, 'supportsKeywords');
-
     const strategy = await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy');
-
     expect(strategy.kind).toBe('gmail');
-    expect(keywordProbe).not.toHaveBeenCalled();
   });
 
-  it('a keyword-capable non-Gmail server tags in place', async () => {
+  // Breaks: a third-party account gets a bare `promotions` keyword again,
+  // landing in whatever corner of that webmail shows custom flags, named by no
+  // one. Fastmail and most Dovecot servers DO accept custom keywords — the
+  // whole point of this test is that accepting them no longer earns the keyword
+  // strategy. Only our own webmail creates the categories a keyword stands for.
+  it.each(['imap.fastmail.com', 'mail.dovecot.test', 'imap.somewhere.test'])(
+    'a keyword-CAPABLE server that is not ours (%s) still gets the Sarv Inbox/ prefix',
+    async (host) => {
+      const server = await makeServer({ keywords: true });
+      const strategy = await resolveLabelStrategy(server as any, host, 'copy');
+
+      expect(strategy.kind).toBe('folder');
+
+      await strategy.ensure(FINANCE);
+      expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
+    },
+  );
+
+  // Breaks: the label choice starts costing a SELECT round-trip again on every
+  // account, to answer a question that no longer changes the answer.
+  it('never probes keyword support — the host decides, not the capability', async () => {
     const server = await makeServer({ keywords: true });
-    expect((await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy')).kind).toBe('keyword');
+    const keywordProbe = vi.spyOn(server, 'supportsKeywords');
+
+    await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
+    await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy');
+    await resolveLabelStrategy(server as any, 'imap.gmail.com', 'copy');
+
+    expect(keywordProbe).not.toHaveBeenCalled();
   });
 
   it('falls back to folders when the server takes neither Gmail labels nor keywords', async () => {
@@ -108,28 +135,32 @@ describe('resolveLabelStrategy — capability, not guesswork', () => {
     expect((await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'move')).kind).toBe('folder');
   });
 
-  it('falls back to folders for a client that cannot even be asked about keywords', async () => {
+  it('resolves for a client that cannot even be asked about keywords', async () => {
     const server = await makeServer({ keywords: true });
     (server as any).supportsKeywords = undefined;
     expect((await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy')).kind).toBe('folder');
+    expect((await resolveLabelStrategy(server as any, 'sarv.com', 'copy')).kind).toBe('keyword');
   });
 
-  it('treats an unknown (empty) host as "not ours" — nothing created, nothing deleted', async () => {
+  // Breaks: an account whose host we never learned is treated as ours — no
+  // prefix sent, and `migrate()` starts DELETING "Sarv Inbox" mailboxes on a
+  // stranger's server. An unknown host is not our host.
+  it('treats an unknown (empty) host as "not ours" — prefixed, and nothing deleted', async () => {
     const server = await makeServer({ keywords: true });
     server.addFolder('Sarv Inbox/Finance');
     const strategy = await resolveLabelStrategy(server as any, '', 'copy');
     await strategy.ensure(FINANCE);
-    await strategy.migrate!(FINANCE);
 
-    expect(strategy.kind).toBe('keyword');
-    expect(server.callCount('createMailbox')).toBe(0);
+    expect(strategy.kind).toBe('folder');
+    expect(strategy.migrate).toBeUndefined();
     expect(server.callCount('deleteMailbox')).toBe(0);
   });
 
-  // Only OUR server's leftovers are ours to delete, so the host match is
-  // anchored — a look-alike domain must never have mailboxes removed from it.
+  // Only OUR server takes the bare keyword — and only its leftovers are ours to
+  // delete, so the host match is anchored. A look-alike domain must never have
+  // mailboxes removed from it.
   it.each(['sarv.com', 'imap.sarv.com', 'IMAP.SARV.COM', '  mail.sarv.com  '])(
-    'recognises the sarv.com domain (%s) for the leftover-folder cleanup',
+    'recognises the sarv.com domain (%s): bare keyword, and the leftover folders go',
     async (host) => {
       const server = await makeServer({ keywords: true });
       server.addFolder('Sarv Inbox/Finance');
@@ -141,22 +172,42 @@ describe('resolveLabelStrategy — capability, not guesswork', () => {
   );
 
   it.each(['mysarv.com', 'sarvodaya.com', 'sarv.com.evil.test', 'imap.notsarv.com'])(
-    'deletes nothing on a look-alike host (%s)',
+    'a look-alike host (%s) is prefixed like any stranger, and deletes nothing',
     async (host) => {
       const server = await makeServer({ keywords: true });
       server.addFolder('Sarv Inbox/Finance');
       const strategy = await resolveLabelStrategy(server as any, host, 'copy');
-      await strategy.migrate!(FINANCE);
-      expect(strategy.kind).toBe('keyword');
+      expect(strategy.kind).toBe('folder');
+      expect(strategy.migrate).toBeUndefined();
       expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
     },
   );
 });
 
+// The host predicate on its own — it is the whole branch now, so its edges are
+// pinned here rather than only through the strategies it selects.
+describe('isSarvHost', () => {
+  it.each(['sarv.com', 'imap.sarv.com', 'IMAP.SARV.COM', '  mail.sarv.com  ', 'a.b.sarv.com'])(
+    'accepts our own domain (%s)',
+    (host) => expect(isSarvHost(host)).toBe(true),
+  );
+
+  // Breaks: a stranger's server is mistaken for ours — it stops getting the
+  // prefix AND becomes eligible for mailbox deletion.
+  it.each([
+    'mysarv.com', 'sarvodaya.com', 'sarv.com.evil.test', 'imap.notsarv.com',
+    'sarv.co', 'sarv.com.br', '', '   ',
+  ])('rejects everything else (%s)', (host) => expect(isSarvHost(host)).toBe(false));
+
+  it('tolerates a missing host without throwing', () => {
+    expect(isSarvHost(undefined as unknown as string)).toBe(false);
+  });
+});
+
 describe('keyword strategy — in place, no duplication', () => {
   it('applies the keyword with a STORE and leaves the mailbox untouched otherwise', async () => {
     const server = await makeServer({ keywords: true });
-    const strategy = await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
 
     await strategy.apply('INBOX', [1, 2], FINANCE);
 
@@ -164,13 +215,13 @@ describe('keyword strategy — in place, no duplication', () => {
     expect(server.callCount('addFlags')).toBe(1);   // one STORE for both UIDs
     expect(server.callCount('copyMessages')).toBe(0);
     expect(server.callCount('moveMessages')).toBe(0);
-    expect(server.callCount('createMailbox')).toBe(0); // no folder clutter off-Sarv
+    expect(server.callCount('createMailbox')).toBe(0); // no folder clutter on Sarv
     expect(server.messageCount('INBOX')).toBe(2);
   });
 
   it('removes the keyword again', async () => {
     const server = await makeServer({ keywords: true });
-    const strategy = await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy');
+    const strategy = await resolveLabelStrategy(server as any, 'sarv.com', 'copy');
     await strategy.apply('INBOX', [1], FINANCE);
 
     await strategy.remove('INBOX', [1], FINANCE);
@@ -379,16 +430,18 @@ describe('migrate — undoing the interim nested scheme, without losing mail', (
     expect(deleted).not.toHaveBeenCalled();
   });
 
-  // Breaks: we start deleting mailboxes on servers that were never ours to
-  // tidy — a Fastmail/Dovecot account with a folder called "Sarv Inbox".
-  it('does nothing at all on a keyword server that is not ours', async () => {
+  // Breaks: we start deleting mailboxes on servers that were never ours to tidy
+  // — a Fastmail/Dovecot account with a folder called "Sarv Inbox". Since the
+  // keyword strategy is reachable only on sarv.com, a stranger's server cannot
+  // even obtain the object that does the deleting.
+  it('a keyword-capable server that is not ours has no migration to run', async () => {
     const server = await makeServer({ keywords: true });
     server.addFolder('Sarv Inbox/Finance');
     const deleted = vi.spyOn(server, 'deleteMailbox');
-    const strategy = await resolveLabelStrategy(server as any, 'imap.somewhere.test', 'copy');
+    const strategy = await resolveLabelStrategy(server as any, 'imap.fastmail.com', 'copy');
 
-    await strategy.migrate!(FINANCE);
-
+    expect(strategy.kind).toBe('folder');
+    expect(strategy.migrate).toBeUndefined();
     expect(deleted).not.toHaveBeenCalled();
     expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Finance');
   });
@@ -398,7 +451,8 @@ describe('migrate — undoing the interim nested scheme, without losing mail', (
   it.each([
     ['gmail', 'imap.gmail.com', { gmailLabels: true } as FakeImapServerOptions],
     ['folder', 'imap.outlook.test', { keywords: false } as FakeImapServerOptions],
-  ])('the %s strategy has nothing to migrate', async (kind, host, options) => {
+    ['folder', 'imap.fastmail.com', { keywords: true } as FakeImapServerOptions],
+  ])('the %s strategy has nothing to migrate (%s)', async (kind, host, options) => {
     const server = await makeServer(options);
     const strategy = await resolveLabelStrategy(server as any, host, 'copy');
 

@@ -117,6 +117,13 @@ export interface FakeImapServerOptions {
   hierarchyDelimiter?: string;
   capabilities?: string[];
   /**
+   * Host this server reports while connected. Defaults to a neutral
+   * third-party host; pass a sarv.com host to exercise the paths that only run
+   * on OUR OWN server (the bare-keyword label strategy and its one-time
+   * `Sarv Inbox/*` cleanup).
+   */
+  host?: string;
+  /**
    * Opt-in socket-event support. When true, on/off/once/removeAllListeners
    * delegate to a real EventEmitter so a test can drive the low-level
    * 'end'/'error' events the ConnectionManager listens for (and assert that a
@@ -200,6 +207,7 @@ export class FakeImapServer {
       hierarchyDelimiter: options.hierarchyDelimiter ?? '/',
       capabilities: options.capabilities ?? ['IMAP4rev1'],
       events: options.events ?? false,
+      host: options.host ?? 'imap.test.local',
       ...(options.noop ? { noop: options.noop } : {}),
     };
     if (options.noop) this.setNoop(options.noop);
@@ -429,7 +437,7 @@ export class FakeImapServer {
   // ── IIMAPClient ───────────────────────────────────────────────────────
 
   get host(): string | null {
-    return this.connected ? 'imap.test.local' : null;
+    return this.connected ? (this.opts.host ?? 'imap.test.local') : null;
   }
 
   async connect(_config?: IMAPConfig): Promise<void> {
