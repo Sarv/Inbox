@@ -2229,11 +2229,13 @@ export async function backfillCategoryLabels(limit = 50): Promise<{ accounts: nu
  * Proactively create the (empty) category labels on every provider that can
  * register a blank label up front:
  *  - Gmail — nested + coloured via the API for OAuth, else plain IMAP.
- *  - Folder providers — the "Sarv Inbox/<Category>" mailbox tree.
- *  - Keyword providers (Sarv) — `ensure()` now CREATEs the registering folder
- *    NESTED under "Sarv Inbox" (e.g. "Sarv Inbox/finance") and prunes the legacy
- *    flat top-level one. (Previously skipped, so Sarv labels only appeared as
- *    mail was tagged; they're now provisioned up front like the others.)
+ *  - Folder providers — EVERY host but our own: the "Sarv Inbox/<Category>"
+ *    mailbox tree.
+ *  - Our own host (sarv.com) — nothing to provision. The category IS the bare
+ *    keyword and the sarv webmail team owns the mailboxes that render it, so
+ *    `ensure()` is a no-op; `migrate()` only prunes the `Sarv Inbox/*` tree an
+ *    earlier scheme created here, and only where the server confirms it empty
+ *    (see label-strategy.ts).
  * Idempotent; safe to re-run. Runs when mirroring is enabled and from the
  * "Apply to recent mail" action.
  */
