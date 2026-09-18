@@ -6,7 +6,7 @@
 
 import * as fs from 'fs';
 
-import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
 import { ipcMain, dialog, shell } from 'electron';
 import ICAL from 'ical.js';
 
@@ -1072,35 +1072,14 @@ export function registerEmailHandlers(): void {
         return { success: false, error: 'Email not found' };
       }
 
-      const tags = email.tags || '||';
-      const isCurrentlyRead = tags.includes('|read|');
-
-      let flipped = false;
-      if (read && !isCurrentlyRead) {
-        const tagList = tags.split('|').filter((t: string) => t.length > 0);
-        tagList.push('read');
-        await storage.updateEmail(emailId, { tags: '|' + tagList.join('|') + '|' });
-        flipped = true;
-      } else if (!read && isCurrentlyRead) {
-        const tagList = tags.split('|').filter((t: string) => t.length > 0 && t !== 'read');
-        await storage.updateEmail(emailId, { tags: tagList.length > 0 ? '|' + tagList.join('|') + '|' : '||' });
-        flipped = true;
-      }
-
-      // Maintain folder unread badges with a precise, scan-free delta: a read
-      // toggle only moves this email's thread in/out of the unread set of the
-      // folders it's tagged in, and never changes a message count — so we adjust
-      // just those folders' unread_count by ±1 (indexed, thread-scoped) instead
-      // of a full-table recount. Only when the flag actually flipped. Awaited so
-      // the renderer's follow-up loadFolders() reads the fresh counts. The full
-      // recount on sync remains the self-healing backstop.
-      if (flipped) {
-        try {
-          await (storage as any).applyReadFlagToFolderCounts(emailId, read);
-        } catch (err) {
-          logger.error('[email-handlers] applyReadFlagToFolderCounts failed:', err);
-        }
-      }
+      // Flip the tag AND maintain the folder unread badge in one shared step: a
+      // read toggle only moves this email's thread in/out of the unread set of
+      // the folders it's tagged in, and never changes a message count, so the
+      // helper adjusts just those folders' unread_count by +/-1 (indexed,
+      // thread-scoped) instead of a full-table recount — and only when the flag
+      // actually flipped. Awaited so the renderer's follow-up loadFolders()
+      // reads the fresh counts. The full recount on sync stays the backstop.
+      await setEmailReadFlag(storage, emailId, read, 'markRead IPC');
 
       // Log action for agent learning
       logUserAction(emailId, read ? 'read' : 'unread', {
@@ -2302,13 +2281,18 @@ export function registerEmailHandlers(): void {
       const MOVE_ACTIONS = new Set(['delete', 'archive', 'spam', 'notspam', 'trash']);
       const isReadAction = action === 'markRead' || action === 'markUnread';
       try {
-        if (isReadAction && flippedReadIds.length > 0 && typeof (storage as any).applyReadFlagToFolderCountsBatch === 'function') {
+        if (isReadAction && flippedReadIds.length > 0) {
           // Read flips change only unread_count (never a message count) — apply a
           // precise, scan-free ±1 delta per affected folder instead of a
-          // full-table recount. The batch method itself falls back to a full
-          // recount above its threshold.
+          // full-table recount. Same shared helper the single-email path uses, so
+          // there is one place that decides delta-vs-recount; the batch method
+          // itself falls back to a full recount above its threshold.
           const nowRead = action === 'markRead';
-          await (storage as any).applyReadFlagToFolderCountsBatch(flippedReadIds.map((emailId) => ({ emailId, nowRead })));
+          await applyReadFlagCountDelta(
+            storage,
+            flippedReadIds.map((emailId) => ({ emailId, nowRead })),
+            'bulk markRead',
+          );
         } else if (isReadAction && flippedReadIds.length === 0) {
           // Nothing actually flipped → no count change; skip the recount.
         } else {
