@@ -150,7 +150,7 @@ describe('planFolderDrift', () => {
     // A star change is flags-only — it must NOT drag in the expensive content sync.
     it('does not trigger the content sync for a modseq-only change', () => {
       const plan = planFolderDrift({ ...base, serverModseq: 4210, syncedModseq: 4207 });
-      expect(plan).toEqual({ reconcileFlags: true, reconcileDeletions: false });
+      expect(plan).toEqual({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false });
     });
   });
 
@@ -166,7 +166,7 @@ describe('planFolderDrift', () => {
       const plan = planFolderDrift({
         ...base, serverUidValidity: 99, localUidValidity: 42, serverModseq: 2, syncedModseq: 5000,
       });
-      expect(plan).toEqual({ reconcileFlags: true, reconcileDeletions: true });
+      expect(plan).toEqual({ reconcileFlags: true, reconcileDeletions: true, recountFromRows: false });
     });
 
     // The normal case must stay quiet, or every sweep reconciles every folder.
@@ -205,14 +205,54 @@ describe('planFolderDrift', () => {
     });
   });
 
+
+  /**
+   * The LOCAL half of the sweep. `folders.unread_count` is a stored scalar that
+   * several non-sync paths adjust by hand (the mark-read IPC, the agent, the
+   * triage pipeline's auto-read); one missed decrement strands the sidebar badge
+   * above an unread-filtered list that is empty, and nothing recomputes it until
+   * a sync happens to report a mutation — which a quiet mailbox never does.
+   */
+  describe('local recount from rows', () => {
+    // THE regression this exists for: mid-session the badge said 7 while every
+    // INBOX row was read and the server reported unseen=0. Before this, the
+    // disagreement was only consulted on the FIRST look of a session, so the
+    // stale badge survived until the app was restarted.
+    it('recounts in steady state when we show unread mail and the server has none', () => {
+      const plan = planFolderDrift({ ...base, previousUnseen: 0, currentUnseen: 0, localUnread: 7 });
+      expect(plan.recountFromRows).toBe(true);
+      // Local repair only — re-FETCHing flags every sweep is the runaway loop.
+      expect(plan.reconcileFlags).toBe(false);
+    });
+
+    // The mirror case: the server holds unread mail and our badge says none.
+    it('recounts in steady state when the server has unread mail and we show none', () => {
+      const plan = planFolderDrift({ ...base, previousUnseen: 4, currentUnseen: 4, localUnread: 0 });
+      expect(plan.recountFromRows).toBe(true);
+    });
+
+    // Regression (the loop this module exists to prevent): agreeing on "some
+    // unread" must never schedule work, however far apart the two NUMBERS are —
+    // they are different units (messages vs distinct threads).
+    it('does NOT recount when both sides agree the folder has unread mail', () => {
+      expect(planFolderDrift({ ...base, previousUnseen: 9, currentUnseen: 9, localUnread: 1 }).recountFromRows).toBe(false);
+    });
+
+    // A fully-read folder that we also show as fully read is the common case:
+    // it must cost nothing at all.
+    it('does NOT recount when both sides agree the folder is fully read', () => {
+      expect(planFolderDrift({ ...base, previousUnseen: 0, currentUnseen: 0, localUnread: 0 }).recountFromRows).toBe(false);
+    });
+  });
+
   // Regression: the two decisions are independent. A folder where mail was both
   // read and deleted in webmail must get both, and a flag-only change must not
   // drag in the far more expensive content sync.
   it('decides the two reconciles independently', () => {
     expect(planFolderDrift({ previousUnseen: 5, currentUnseen: 1, serverMessages: 8, localTotal: 10, localUnread: 3 }))
-      .toEqual({ reconcileFlags: true, reconcileDeletions: true });
+      .toEqual({ reconcileFlags: true, reconcileDeletions: true, recountFromRows: false });
     expect(planFolderDrift({ previousUnseen: 5, currentUnseen: 1, serverMessages: 10, localTotal: 10, localUnread: 3 }))
-      .toEqual({ reconcileFlags: true, reconcileDeletions: false });
+      .toEqual({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false });
   });
 });
 
@@ -246,7 +286,7 @@ describe('applyFolderDrift', () => {
   // a count that disagrees with what the list would return.
   it('reconciles rows, recounts, then notifies — in that order', async () => {
     const { targets, calls } = makeTargets();
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(calls).toEqual(['flags', 'recount', 'read', 'notify']);
   });
 
@@ -257,7 +297,7 @@ describe('applyFolderDrift', () => {
       refreshFolderFlags: vi.fn(async () => 0),
       readCounts: vi.fn(async () => ({ unreadCount: 5, totalCount: 100 })), // identical to before
     });
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(targets.recount).toHaveBeenCalledTimes(1); // still cheap-recounted
     expect(targets.notify).not.toHaveBeenCalled();
   });
@@ -270,7 +310,7 @@ describe('applyFolderDrift', () => {
       refreshFolderFlags: vi.fn(async () => 0),
       readCounts: vi.fn(async () => ({ unreadCount: 5, totalCount: 92 })), // 8 rows vanished
     });
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(targets.notify).toHaveBeenCalledWith('Archive');
   });
 
@@ -279,7 +319,7 @@ describe('applyFolderDrift', () => {
       refreshFolderFlags: vi.fn(async () => 4),
       readCounts: vi.fn(async () => ({ unreadCount: 5, totalCount: 100 })), // e.g. 4 stars toggled
     });
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(targets.notify).toHaveBeenCalledWith('Archive');
   });
 
@@ -289,7 +329,7 @@ describe('applyFolderDrift', () => {
     const { targets } = makeTargets({
       refreshFolderFlags: vi.fn(async () => { throw new Error('flag reconcile timed out'); }),
     });
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: true }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: true, recountFromRows: false }, folder, targets as any);
     expect(targets.onError).toHaveBeenCalledWith('flags', 'Archive', expect.any(Error));
     expect(targets.notify).not.toHaveBeenCalled(); // nothing was reconciled — don't claim it was
     expect(targets.syncFolderContent).toHaveBeenCalledWith('Archive');
@@ -301,7 +341,7 @@ describe('applyFolderDrift', () => {
     const { targets } = makeTargets({
       recount: vi.fn(async () => { throw new Error('db busy'); }),
     });
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(targets.onError).toHaveBeenCalledWith('flags', 'Archive', expect.any(Error));
     expect(targets.notify).not.toHaveBeenCalled();
   });
@@ -310,7 +350,7 @@ describe('applyFolderDrift', () => {
     const { targets } = makeTargets({
       syncFolderContent: vi.fn(async () => { throw new Error('deletion-reconcile timed out'); }),
     });
-    await applyFolderDrift({ reconcileFlags: false, reconcileDeletions: true }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: false, reconcileDeletions: true, recountFromRows: false }, folder, targets as any);
     expect(targets.onError).toHaveBeenCalledWith('deletions', 'Archive', expect.any(Error));
   });
 
@@ -318,11 +358,11 @@ describe('applyFolderDrift', () => {
   // content sync (a full folder UID diff), and vice versa.
   it('runs only the pass the plan asked for', async () => {
     const flagsOnly = makeTargets();
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, flagsOnly.targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, flagsOnly.targets as any);
     expect(flagsOnly.targets.syncFolderContent).not.toHaveBeenCalled();
 
     const deletionsOnly = makeTargets();
-    await applyFolderDrift({ reconcileFlags: false, reconcileDeletions: true }, folder, deletionsOnly.targets as any);
+    await applyFolderDrift({ reconcileFlags: false, reconcileDeletions: true, recountFromRows: false }, folder, deletionsOnly.targets as any);
     expect(deletionsOnly.targets.refreshFolderFlags).not.toHaveBeenCalled();
     expect(deletionsOnly.targets.recount).not.toHaveBeenCalled();
   });
@@ -331,7 +371,7 @@ describe('applyFolderDrift', () => {
   // nothing beyond the STATUS the caller already did.
   it('does nothing at all for an empty plan', async () => {
     const { targets, calls } = makeTargets();
-    await applyFolderDrift({ reconcileFlags: false, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: false, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(calls).toEqual([]);
     expect(targets.onError).not.toHaveBeenCalled();
   });
@@ -356,8 +396,87 @@ describe('applyFolderDrift', () => {
       refreshFolderFlags: vi.fn(async () => 0),
       readCounts: vi.fn(async () => null),
     });
-    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false }, folder, targets as any);
+    await applyFolderDrift({ reconcileFlags: true, reconcileDeletions: false, recountFromRows: false }, folder, targets as any);
     expect(targets.onError).not.toHaveBeenCalled();
     expect(targets.notify).toHaveBeenCalledWith('Archive');
+  });
+
+  /**
+   * The local-recount branch: no network, no flag reconcile, just recompute the
+   * badge from the rows the list reads. This is what heals a badge that a local
+   * write path forgot to decrement, without waiting for a restart.
+   */
+  describe('recountFromRows (local repair)', () => {
+    // THE regression: a stale badge with no server-side drift must still be
+    // repaired from our own rows, and the renderer told, WITHOUT a FETCH.
+    it('recounts and notifies without touching the network', async () => {
+      const { targets, calls } = makeTargets();
+      await applyFolderDrift(
+        { reconcileFlags: false, reconcileDeletions: false, recountFromRows: true },
+        folder,
+        targets as any,
+      );
+      expect(calls).toEqual(['recount', 'read', 'notify']);
+      expect(targets.refreshFolderFlags).not.toHaveBeenCalled();
+      expect(targets.syncFolderContent).not.toHaveBeenCalled();
+    });
+
+    // Regression: a folder whose counts did not actually move must not wake the
+    // renderer, or every disagreeing sweep re-runs that folder's list query.
+    it('does not notify when the recount changed nothing', async () => {
+      const { targets } = makeTargets({
+        readCounts: vi.fn(async () => ({ unreadCount: 5, totalCount: 100 })),
+      });
+      await applyFolderDrift(
+        { reconcileFlags: false, reconcileDeletions: false, recountFromRows: true },
+        folder,
+        targets as any,
+      );
+      expect(targets.recount).toHaveBeenCalledTimes(1);
+      expect(targets.notify).not.toHaveBeenCalled();
+    });
+
+    // Regression: the flags branch already recounts. Doing it twice would be
+    // pure waste on every reconciling sweep.
+    it('does not recount twice when the flag reconcile already ran', async () => {
+      const { targets } = makeTargets();
+      await applyFolderDrift(
+        { reconcileFlags: true, reconcileDeletions: false, recountFromRows: true },
+        folder,
+        targets as any,
+      );
+      expect(targets.recount).toHaveBeenCalledTimes(1);
+    });
+
+    // Transient failure: a recount that throws (DB busy) must be reported and
+    // swallowed, never sink the rest of the sweep.
+    it('reports a failing recount without throwing', async () => {
+      const { targets } = makeTargets({
+        recount: vi.fn(async () => { throw new Error('database is locked'); }),
+      });
+      await expect(applyFolderDrift(
+        { reconcileFlags: false, reconcileDeletions: false, recountFromRows: true },
+        folder,
+        targets as any,
+      )).resolves.toBeUndefined();
+      expect(targets.onError).toHaveBeenCalledWith('counts', 'Archive', expect.any(Error));
+      expect(targets.notify).not.toHaveBeenCalled();
+    });
+
+    // Idempotent re-run: sweeping twice repairs once and then stays quiet,
+    // because the second recount finds the badge already correct.
+    it('is quiet on the second sweep once the badge is repaired', async () => {
+      let unread = 7;
+      const { targets } = makeTargets({
+        recount: vi.fn(async () => { unread = 0; }),
+        readCounts: vi.fn(async () => ({ unreadCount: unread, totalCount: 100 })),
+      });
+      const stale = { path: 'Archive', unreadCount: 7, totalCount: 100 };
+      const plan = { reconcileFlags: false, reconcileDeletions: false, recountFromRows: true };
+      await applyFolderDrift(plan, stale, targets as any);
+      expect(targets.notify).toHaveBeenCalledTimes(1);
+      await applyFolderDrift(plan, { ...stale, unreadCount: 0 }, targets as any);
+      expect(targets.notify).toHaveBeenCalledTimes(1);
+    });
   });
 });
