@@ -15,6 +15,7 @@ import {
   hasBulkHeaderSignal,
   headerLookupFromText,
   headerValueFromText,
+  headerValuesFromText,
   isBulkMail,
   isConversationMail,
   senderOwnText,
@@ -314,5 +315,33 @@ describe('headerValueFromText', () => {
   // regex punctuation must not silently match the wrong header.
   it('does not treat the header name as a pattern', () => {
     expect(headerValueFromText('X-A-B: yes\r\n', 'x.a.b')).toBeNull();
+  });
+});
+
+describe('headerValuesFromText', () => {
+  // THE regression: a terminator that CONSUMED the newline left the next
+  // occurrence with nothing to anchor on, so of two adjacent Received lines
+  // only the first was ever found — and the origin-IP fallback silently read
+  // an internal hop as the sender.
+  it('finds every occurrence, including adjacent ones, in header order', () => {
+    const headers = 'Received: from a\r\nReceived: from b\r\nSubject: hi\r\nReceived: from c\r\n';
+    expect(headerValuesFromText(headers, 'received')).toEqual(['from a', 'from b', 'from c']);
+  });
+
+  it('unfolds each value on its own', () => {
+    const headers = 'Received: from a\r\n by b\r\nReceived: from c\r\n\twith d\r\n';
+    expect(headerValuesFromText(headers, 'received')).toEqual(['from a by b', 'from c with d']);
+  });
+
+  it('is empty for an absent header or an empty block, and skips empty values', () => {
+    expect(headerValuesFromText('Subject: hi\r\n', 'received')).toEqual([]);
+    expect(headerValuesFromText('', 'received')).toEqual([]);
+    expect(headerValuesFromText('Received:\r\nReceived: from a\r\n', 'received')).toEqual(['from a']);
+  });
+
+  // The single-value helper is the first of the many — one regex, one rule.
+  it('agrees with headerValueFromText on the first value', () => {
+    const headers = 'Received: from a\r\nReceived: from b\r\n';
+    expect(headerValueFromText(headers, 'received')).toBe(headerValuesFromText(headers, 'received')[0]);
   });
 });

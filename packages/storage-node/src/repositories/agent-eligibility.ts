@@ -53,6 +53,14 @@ export const EXCLUDED_FOLDER_TAGS = [
   '|[Gmail]/Trash|',
   '|[Gmail]/Drafts|',
   '|[Gmail]/Sent Mail|',
+  // Not a folder: the lowercase CLASSIFICATION tag. Written by the spam
+  // filter at sync time and by the AI's own `isSpam` verdict, on a message
+  // that may still sit in INBOX (no spam folder on the account, or a
+  // historical row that was scored but not moved). `instr` is case-sensitive,
+  // so `|Spam|` above does not cover it, and without this line the pipeline
+  // spent LLM calls categorising mail one of its own stages had already
+  // called spam.
+  '|spam|',
 ] as const;
 
 /**

@@ -185,6 +185,12 @@ export class RealtimeManager extends EventEmitter {
     this.messageProcessor.setPendingUidsProvider(fn);
   }
 
+  /** Forward the server-side spam move so mail that arrives over IDLE and is
+   * filed as spam is moved on the server too, not only locally. */
+  setSpamMover(fn: (folderPath: string, uid: number) => Promise<unknown>): void {
+    this.messageProcessor.setSpamMover(fn);
+  }
+
   /**
    * Initialize with dependencies
    */

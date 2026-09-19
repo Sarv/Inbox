@@ -12,6 +12,9 @@ interface PhishingWarningBannerProps {
   html?: string | null;
   /** Stored SPF/DKIM/DMARC verdict JSON (emails.auth_status), when known. */
   authStatus?: string | null;
+  /** Stored spam filter score / reasons (emails.spam_score, emails.spam_reasons). */
+  spamScore?: number | null;
+  spamReasons?: string | null;
   /** Outer spacing. Defaults to `mb-4` (banner above a body); a caller that
    *  renders it BELOW a body — the chat bubble, whose library gives no slot
    *  above one — passes its own margin instead. */
@@ -40,11 +43,13 @@ export function PhishingWarningBanner({
   html,
   className = 'mb-4',
   authStatus,
+  spamScore,
+  spamReasons,
 }: PhishingWarningBannerProps) {
   const { sets } = useLinkRules();
   const assessment = useMemo(
-    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, rules: sets }),
-    [fromName, fromAddress, html, authStatus, sets],
+    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, rules: sets }),
+    [fromName, fromAddress, html, authStatus, spamScore, spamReasons, sets],
   );
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -75,7 +80,9 @@ export function PhishingWarningBanner({
 
   const title = isDanger
     ? 'This message may not be from who it claims to be'
-    : 'Be careful with this message';
+    : assessment.spam.verdict === 'spam'
+      ? 'The spam filter flagged this message'
+      : 'Be careful with this message';
 
   return (
     <div className={`${className} rounded-lg border ${shell} overflow-hidden`} role="alert">

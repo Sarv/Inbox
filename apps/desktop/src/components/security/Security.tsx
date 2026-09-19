@@ -83,6 +83,7 @@ const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Links open in your browser', detail: 'Clicking a link never navigates inside the app — it hands the address to your system browser with referrer and opener stripped.' },
   { title: 'Sender authentication', detail: 'SPF, DKIM and DMARC verdicts are read from the receiving server’s Authentication-Results header and shown on the shield beside each sender.' },
   { title: 'Impersonation checks', detail: 'A display name that names one domain while the message came from another, and links whose text says one domain while pointing to another, are flagged.' },
+  { title: 'Spam filter', detail: 'Every arriving message is scored from its headers before the AI sees it — failed authentication, a spoofed sender name, a forged reply, missing or mis-dated headers, bulk mail with no unsubscribe, your mail server’s own spam verdict, and senders you have reported. A message over the line is filed as spam with its reasons shown on the shield.' },
   { title: 'Encrypted mail cache', detail: 'The local mailbox database is encrypted at rest; the key lives in the operating system keychain.' },
   { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
 ];

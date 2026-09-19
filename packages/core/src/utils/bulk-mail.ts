@@ -122,7 +122,8 @@ export function hasBulkHeaderSignal(get: HeaderLookup): boolean {
 }
 
 /**
- * One header's value out of a raw header block, unfolded.
+ * EVERY value of one header out of a raw header block, unfolded, in the order
+ * they appear (newest hop first for trace headers such as `Received`).
  *
  * Anchored at the start of the block or after a newline, but WITHOUT the `m`
  * flag: with `m`, `$` matches every physical line-end, so the lazy capture stops
@@ -130,13 +131,24 @@ export function hasBulkHeaderSignal(get: HeaderLookup): boolean {
  * lines, a long `List-Unsubscribe`) is truncated to its first entry. Without
  * `m`, the capture runs until the next UNFOLDED newline — a `\n` not followed by
  * whitespace, i.e. the next header — and the continuation lines are joined here.
+ * The terminator is a LOOKAHEAD so the newline stays available as the next
+ * occurrence's anchor: two adjacent `Received:` lines must both be found.
  */
-export function headerValueFromText(headers: string, name: string): string | null {
-  if (!headers) return null;
+export function headerValuesFromText(headers: string, name: string): string[] {
+  if (!headers) return [];
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = headers.match(new RegExp(`(?:^|\\r?\\n)${escaped}:[^\\S\\r\\n]*([\\s\\S]*?)(?:\\r?\\n(?!\\s)|$)`, 'i'));
-  if (!match) return null;
-  return match[1].replace(/\r?\n\s+/g, ' ').trim() || null;
+  const re = new RegExp(`(?:^|\\r?\\n)${escaped}:[^\\S\\r\\n]*([\\s\\S]*?)(?=\\r?\\n(?!\\s)|$)`, 'gi');
+  const values: string[] = [];
+  for (const match of headers.matchAll(re)) {
+    const value = match[1].replace(/\r?\n\s+/g, ' ').trim();
+    if (value) values.push(value);
+  }
+  return values;
+}
+
+/** The FIRST value of one header out of a raw header block, unfolded — see {@link headerValuesFromText}. */
+export function headerValueFromText(headers: string, name: string): string | null {
+  return headerValuesFromText(headers, name)[0] ?? null;
 }
 
 /** A {@link HeaderLookup} over a raw header block. */

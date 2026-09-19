@@ -40,6 +40,15 @@ describe('the AI folder-exclusion list', () => {
     }
   });
 
+  // Not a folder: the classification tag the spam filter and the AI's own
+  // isSpam verdict write. `instr` is case-sensitive, so `|Spam|` did not cover
+  // it, and the pipeline categorised mail one of its own stages had already
+  // called spam — on a message still sitting in INBOX because the account has
+  // no spam folder, or because it was scored but not moved.
+  it('excludes mail the spam filter tagged, wherever it sits', () => {
+    expect(EXCLUDED_FOLDER_TAGS).toContain('|spam|');
+  });
+
   // The pipeline's list is the folder list PLUS read mail. Stated as a test so
   // a tag added to one can never quietly fail to reach the other.
   it('is exactly the pipeline list, minus the read-state test', () => {
@@ -105,6 +114,20 @@ describe('the exclusion clauses against a real database', () => {
     expect(count(db, notExcludedByTagsClause())).toBe(1);
     // The view wants both — it filters unread separately when it needs to.
     expect(count(db, notInExcludedFolderClause())).toBe(2);
+  });
+
+  // THE spam-filter contract: a message tagged spam at sync time is out of
+  // the pipeline AND out of the eligible pool the dashboard counts, even
+  // though it is still filed in INBOX. Before this, "Unread + with body" and
+  // "pending" both counted it and the worker spent a call on it.
+  it('keeps spam-tagged mail out of the pipeline and the eligible pool, even in INBOX', () => {
+    const db = fresh();
+    seed(db, '|INBOX|');
+    seed(db, '|INBOX|spam|');
+    seed(db, '|Spam|');
+
+    expect(count(db, notExcludedByTagsClause())).toBe(1);
+    expect(count(db, notInExcludedFolderClause())).toBe(1);
   });
 
   // Archive is a normal folder. Excluding it would silently drop most of a

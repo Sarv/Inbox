@@ -265,6 +265,9 @@ importers:
       email-reply-parser:
         specifier: ^2.3.9
         version: 2.3.9
+      free-email-domains:
+        specifier: ^1.12.1
+        version: 1.12.1
       html-to-text:
         specifier: ^10.0.0
         version: 10.0.0
@@ -274,6 +277,9 @@ importers:
       imapflow:
         specifier: ^1.4.2
         version: 1.4.2
+      ipaddr.js:
+        specifier: ^2.2.0
+        version: 2.5.0
       libmime:
         specifier: ^5.3.7
         version: 5.3.7
@@ -298,6 +304,9 @@ importers:
       sanitize-html:
         specifier: ^2.13.1
         version: 2.17.6
+      tldts:
+        specifier: ^7.4.10
+        version: 7.4.10
       turndown:
         specifier: ^7.1.2
         version: 7.2.2
@@ -6640,6 +6649,12 @@ packages:
     resolution: {integrity: sha512-1X1NTtiJphryn/uLQz3whtY6jK3fTqoE3ohKs0tT+Ujr1W59oopxmoEh7Lu5p6vBaPbgoM0bzveAW4Qi5RyWDQ==}
     dev: true
 
+  /free-email-domains@1.12.1:
+    resolution: {integrity: sha512-P1FRN8rVzke6b0T/hk2ADJtTz51vwlHnFtiNxrZ6HR2yRIRdMzpxFFrRMVL7D1lR2YTCnXL+9W3ey/rVj0Xb1w==}
+    engines: {node: '>= 18'}
+    requiresBuild: true
+    dev: false
+
   /fresh@0.5.2:
     resolution: {integrity: sha512-zJ2mQYM18rEFOudeV4GShTGIQ7RbzA7ozbU9I/XBpm7kqgMywgmylMwXHxZJmkVoYkna9d2pVXVXPdYTP9ej8Q==}
     engines: {node: '>= 0.6'}
@@ -7306,6 +7321,11 @@ packages:
   /ip-address@10.2.0:
     resolution: {integrity: sha512-/+S6j4E9AHvW9SWMSEY9Xfy66O5PWvVEJ08O0y5JGyEKQpojb0K0GKpz/v5HJ/G0vi3D2sjGK78119oXZeE0qA==}
     engines: {node: '>= 12'}
+
+  /ipaddr.js@2.5.0:
+    resolution: {integrity: sha512-aq+t5NAc+cS6rZQQVWC2x98CPqGtKKTMDd4Gaodv0wShnItdKg/51djkGJ1hqH+Oy0ivDftCbSLCQob8zso01w==}
+    engines: {node: '>= 10'}
+    dev: false
 
   /is-array-buffer@3.0.5:
     resolution: {integrity: sha512-DDfANUiiG2wC1qawP66qlTugJeL5HyzMpfr8lLK+jMQirGzNod0B12cFB/9q838Ru27sBwfw78/rdoU7RERz6A==}

@@ -17,6 +17,13 @@
 //   HEURISTICS — display-name impersonation and links whose text names one
 //   domain while the href goes to another. High-signal tells, but tells, not
 //   proof; the user's trust list can retire a pair they have vetted.
+//
+//   SPAM FILTER — the header-stage score the sync computed when the message
+//   arrived (core utils/spam-signals), read back from the row. Not recomputed
+//   here: the headers it needs are not stored, and the verdict shown must be
+//   the verdict that filed the message.
+
+import { parseSpamReasons, spamVerdict, type SpamReason, type SpamVerdict } from '@sarvinbox/core/spam-verdict';
 
 import type { LinkMismatch } from './phishing';
 import { assessSender, linkMismatches, registrableDomain } from './phishing';
@@ -47,7 +54,7 @@ export type CheckStatus = 'pass' | 'fail' | 'warn' | 'unknown';
 
 /** One line of the tooltip: what was checked and how it came out. */
 export interface SecurityCheck {
-  id: 'spf' | 'dkim' | 'dmarc' | 'sender' | 'links';
+  id: 'spf' | 'dkim' | 'dmarc' | 'sender' | 'links' | 'spam';
   label: string;
   status: CheckStatus;
   /** Plain-language detail, e.g. "Text says x.com, link goes to y.com". */
@@ -70,6 +77,8 @@ export interface SecurityAssessment {
   blockedLinks: LinkMismatch[];
   /** Registrable domain of the sender, or null when the address is unusable. */
   senderDomain: string | null;
+  /** The spam filter's stored verdict; `verdict` is null when the row was never scored. */
+  spam: { verdict: SpamVerdict | null; score: number | null; reasons: SpamReason[] };
 }
 
 /**
@@ -120,6 +129,8 @@ const authCheck = (
  * Decide the level for one message.
  *
  * @param input.authStatus the stored emails.auth_status JSON, if any
+ * @param input.spamScore the stored emails.spam_score, if the row was scored
+ * @param input.spamReasons the stored emails.spam_reasons JSON, if any
  * @param input.rules the user's trust/block rules (defaults to none)
  */
 export function assessEmailSecurity(input: {
@@ -127,6 +138,8 @@ export function assessEmailSecurity(input: {
   fromAddress?: string | null;
   html?: string | null;
   authStatus?: string | null;
+  spamScore?: number | null;
+  spamReasons?: string | null;
   rules?: LinkRuleSets;
 }): SecurityAssessment {
   const rules = input.rules ?? EMPTY_RULES;
@@ -182,6 +195,25 @@ export function assessEmailSecurity(input: {
         : 'Link domains match what they show' });
   }
 
+  // The spam filter's verdict, as stored when the message arrived. Shown with
+  // its reasons so "filed as spam" is never a bare adjective either.
+  const spamScore = typeof input.spamScore === 'number' && Number.isFinite(input.spamScore) ? input.spamScore : null;
+  const verdict = spamVerdict(spamScore);
+  const spamReasons = parseSpamReasons(input.spamReasons);
+  const spam = { verdict, score: spamScore, reasons: spamReasons };
+  const spamSummary = spamReasons.map((r) => r.detail).join('; ');
+  if (verdict === 'spam') {
+    checks.push({ id: 'spam', label: 'Spam filter', status: 'fail', detail: `Scored ${spamScore} — ${spamSummary}` });
+  } else if (verdict === 'suspicious') {
+    checks.push({ id: 'spam', label: 'Spam filter', status: 'warn', detail: `Scored ${spamScore} — ${spamSummary}` });
+  } else if (verdict === 'clean') {
+    checks.push({ id: 'spam', label: 'Spam filter', status: 'pass',
+      detail: spamReasons.length ? `Scored ${spamScore} — ${spamSummary}` : 'No spam signals in the headers' });
+  } else {
+    checks.push({ id: 'spam', label: 'Spam filter', status: 'unknown',
+      detail: 'Not scored — synced before the spam filter existed, or your own outgoing mail' });
+  }
+
   // ---- the level ---------------------------------------------------------
   // Hard failures first: an authoritative FAIL, an impersonating display
   // name, or a link the user explicitly blocked. Nothing below can soften these.
@@ -197,14 +229,17 @@ export function assessEmailSecurity(input: {
   const authFailed = auth?.dmarc === 'fail'
     || (!dmarcKnown && auth?.spf === 'fail' && auth?.dkim === 'fail');
   if (authFailed || spoof.length > 0 || blockedLinks.length > 0) {
-    return { level: 'danger', checks, untrustedLinks, blockedLinks, senderDomain };
+    return { level: 'danger', checks, untrustedLinks, blockedLinks, senderDomain, spam };
   }
   // Soft signals: an unvetted deceptive link, a policy that declined to vouch,
-  // or a single failed input with no DMARC verdict to settle the question.
+  // a single failed input with no DMARC verdict to settle the question — or
+  // the spam filter having filed it. Spam is caution, not danger: the reasons
+  // that make spam DANGEROUS (a failed DMARC, a spoofed name) already score
+  // danger on their own above; the rest is unwanted, not impersonation.
   const softAuth = auth?.spf === 'softfail' || auth?.spf === 'neutral'
     || (!dmarcKnown && (auth?.spf === 'fail' || auth?.dkim === 'fail'));
-  if (untrustedLinks.length > 0 || softAuth) {
-    return { level: 'caution', checks, untrustedLinks, blockedLinks, senderDomain };
+  if (untrustedLinks.length > 0 || softAuth || verdict === 'spam') {
+    return { level: 'caution', checks, untrustedLinks, blockedLinks, senderDomain, spam };
   }
   // Clean. Now: how STRONGLY do we know who sent it? DMARC pass settles it;
   // without a DMARC verdict, SPF and DKIM both passing is the next best thing.
@@ -217,10 +252,10 @@ export function assessEmailSecurity(input: {
     const linksStayHome = linkDomainsAllMatch(input.html, senderDomain);
     return {
       level: linksStayHome ? 'verified' : 'authenticated',
-      checks, untrustedLinks, blockedLinks, senderDomain,
+      checks, untrustedLinks, blockedLinks, senderDomain, spam,
     };
   }
-  return { level: 'unverified', checks, untrustedLinks, blockedLinks, senderDomain };
+  return { level: 'unverified', checks, untrustedLinks, blockedLinks, senderDomain, spam };
 }
 
 /**
@@ -288,13 +323,23 @@ export const LEVEL_COPY: Record<SecurityLevel, { title: string; summary: string 
  * or worse. Null when nothing in the thread warrants one.
  */
 export function firstFlaggedEmailId(
-  emails: Array<{ id: string; date: number; fromName?: string | null; fromAddress?: string | null; rawBody?: string | null; authStatus?: string | null }>,
+  emails: Array<{
+    id: string;
+    date: number;
+    fromName?: string | null;
+    fromAddress?: string | null;
+    rawBody?: string | null;
+    authStatus?: string | null;
+    spamScore?: number | null;
+    spamReasons?: string | null;
+  }>,
   rules: LinkRuleSets = EMPTY_RULES,
 ): string | null {
   const sorted = [...emails].sort((a, b) => a.date - b.date);
   for (const e of sorted) {
     const { level } = assessEmailSecurity({
-      fromName: e.fromName, fromAddress: e.fromAddress, html: e.rawBody, authStatus: e.authStatus, rules,
+      fromName: e.fromName, fromAddress: e.fromAddress, html: e.rawBody, authStatus: e.authStatus,
+      spamScore: e.spamScore, spamReasons: e.spamReasons, rules,
     });
     if (LEVEL_RANK[level] >= LEVEL_RANK.caution) return e.id;
   }

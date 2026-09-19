@@ -448,7 +448,8 @@ export class EmailRepository extends BaseRepository {
         ai_processed_at, ai_confidence, ai_reasoning,
         snooze_until, snooze_original_tags,
         has_embedding, embedding_last_generated,
-        auth_status
+        auth_status,
+        spam_score, spam_reasons, origin_ip
       ) VALUES (
         @id, @messageId, @threadId, @folderId, @uid, @tags,
         @subject, @fromAddress, @fromName, @toAddress, @toNames,
@@ -477,7 +478,8 @@ export class EmailRepository extends BaseRepository {
         @aiProcessedAt, @aiConfidence, @aiReasoning,
         @snoozeUntil, @snoozeOriginalTags,
         @hasEmbedding, @embeddingLastGenerated,
-        @authStatus
+        @authStatus,
+        @spamScore, @spamReasons, @originIp
       )
     `);
 
@@ -523,6 +525,9 @@ export class EmailRepository extends BaseRepository {
       hasEmbedding: email.hasEmbedding ? 1 : 0,
       embeddingLastGenerated: email.embeddingLastGenerated,
       authStatus: email.authStatus ?? null,
+      spamScore: email.spamScore ?? null,
+      spamReasons: email.spamReasons ?? null,
+      originIp: email.originIp ?? null,
     });
 
     // The body itself, in the side table. Must follow the `emails` insert: the
@@ -2140,6 +2145,11 @@ export class EmailRepository extends BaseRepository {
       importanceScore: row.importance_score,
       importanceSource: row.importance_source,
       authStatus: row.auth_status,
+
+      // Spam filter (header stage) + origin IP for the reputation stage
+      spamScore: row.spam_score ?? null,
+      spamReasons: row.spam_reasons ?? null,
+      originIp: row.origin_ip ?? null,
 
       // AI metadata
       aiProcessedAt: row.ai_processed_at,

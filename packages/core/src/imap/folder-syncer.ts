@@ -120,6 +120,12 @@ export class FolderSyncer {
     this.messageProcessor.setPendingUidsProvider(fn);
   }
 
+  /** Forward the server-side spam move so mail this syncer files as spam is
+   * moved on the server too, not only in the local projection. */
+  setSpamMover(fn: (folderPath: string, uid: number) => Promise<unknown>): void {
+    this.messageProcessor.setSpamMover(fn);
+  }
+
   /**
    * Register a callback invoked once per email that this syncer
    * INSERTS (not updates, not skips). The SyncEngine wires this to
