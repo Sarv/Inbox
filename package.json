@@ -72,6 +72,9 @@
   },
   "packageManager": "pnpm@8.15.0",
   "pnpm": {
+    "neverBuiltDependencies": [
+      "free-email-domains"
+    ],
     "overrides": {
       "node-abi": "^4.33.0",
       "linkify-it": "^5.0.2"

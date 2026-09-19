@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+neverBuiltDependencies:
+  - free-email-domains
+
 overrides:
   node-abi: ^4.33.0
   linkify-it: ^5.0.2
@@ -298,6 +301,9 @@ importers:
       p-retry:
         specifier: ^4.6.2
         version: 4.6.2
+      reflect-metadata:
+        specifier: ^0.2.2
+        version: 0.2.2
       sanitize-filename:
         specifier: ^1.6.4
         version: 1.6.4
@@ -6652,7 +6658,6 @@ packages:
   /free-email-domains@1.12.1:
     resolution: {integrity: sha512-P1FRN8rVzke6b0T/hk2ADJtTz51vwlHnFtiNxrZ6HR2yRIRdMzpxFFrRMVL7D1lR2YTCnXL+9W3ey/rVj0Xb1w==}
     engines: {node: '>= 18'}
-    requiresBuild: true
     dev: false
 
   /fresh@0.5.2:
@@ -9789,6 +9794,10 @@ packages:
 
   /real-require@1.0.0:
     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
+    dev: false
+
+  /reflect-metadata@0.2.2:
+    resolution: {integrity: sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q==}
     dev: false
 
   /reflect.getprototypeof@1.0.10:

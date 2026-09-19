@@ -54,7 +54,7 @@ export type CheckStatus = 'pass' | 'fail' | 'warn' | 'unknown';
 
 /** One line of the tooltip: what was checked and how it came out. */
 export interface SecurityCheck {
-  id: 'spf' | 'dkim' | 'dmarc' | 'sender' | 'links' | 'spam';
+  id: 'spf' | 'dkim' | 'dmarc' | 'sender' | 'links' | 'spam' | 'brand';
   label: string;
   status: CheckStatus;
   /** Plain-language detail, e.g. "Text says x.com, link goes to y.com". */
@@ -66,6 +66,14 @@ export interface LinkRuleSets {
   trusted: ReadonlySet<string>;
   /** Keys from {@link linkRuleKey} the user has chosen to block. */
   blocked: ReadonlySet<string>;
+}
+
+/** The domain's BIMI standing as the main process cached it (see sender-identity). */
+export interface BimiIdentity {
+  status: 'verified' | 'logo' | 'declined' | 'none' | 'invalid' | 'error';
+  organization?: string | null;
+  issuer?: string | null;
+  detail?: string | null;
 }
 
 export interface SecurityAssessment {
@@ -131,6 +139,9 @@ const authCheck = (
  * @param input.authStatus the stored emails.auth_status JSON, if any
  * @param input.spamScore the stored emails.spam_score, if the row was scored
  * @param input.spamReasons the stored emails.spam_reasons JSON, if any
+ * @param input.bimi the domain's BIMI standing when the caller has looked it
+ *   up: null = not known yet, an object = the cached standing. Omit it entirely
+ *   when brand identity is not part of this view, and no check line appears.
  * @param input.rules the user's trust/block rules (defaults to none)
  */
 export function assessEmailSecurity(input: {
@@ -140,6 +151,7 @@ export function assessEmailSecurity(input: {
   authStatus?: string | null;
   spamScore?: number | null;
   spamReasons?: string | null;
+  bimi?: BimiIdentity | null;
   rules?: LinkRuleSets;
 }): SecurityAssessment {
   const rules = input.rules ?? EMPTY_RULES;
@@ -212,6 +224,28 @@ export function assessEmailSecurity(input: {
   } else {
     checks.push({ id: 'spam', label: 'Spam filter', status: 'unknown',
       detail: 'Not scored — synced before the spam filter existed, or your own outgoing mail' });
+  }
+
+  // Brand identity (BIMI). The logo and the tick are shown only on a DMARC
+  // pass — the certificate says who owns the brand, DMARC says this message
+  // came from them. Reported here so the shield explains a tick's absence.
+  if (input.bimi !== undefined) {
+    const b = input.bimi;
+    const dmarcPass = auth?.dmarc === 'pass';
+    const brand = (status: CheckStatus, detail: string): SecurityCheck => ({ id: 'brand', label: 'Brand identity', status, detail });
+    if (!b) checks.push(brand('unknown', 'Not looked up yet'));
+    else if (b.status === 'verified') {
+      checks.push(dmarcPass
+        ? brand('pass', `${b.organization ?? 'The brand'} proved ownership of ${senderDomain ?? 'this domain'} with a Verified Mark Certificate from ${b.issuer ?? 'a Mark Verifying Authority'}`)
+        : brand('warn', 'The domain publishes a verified logo, but this message did not pass DMARC — logo and tick withheld'));
+    } else if (b.status === 'logo') {
+      checks.push(dmarcPass
+        ? brand('pass', 'The domain publishes a BIMI logo, without a Verified Mark Certificate')
+        : brand('warn', 'The domain publishes a logo, but this message did not pass DMARC — logo withheld'));
+    } else if (b.status === 'declined') checks.push(brand('unknown', 'The domain declines to show a logo'));
+    else if (b.status === 'none') checks.push(brand('unknown', 'The domain publishes no BIMI record'));
+    else if (b.status === 'invalid') checks.push(brand('unknown', `BIMI record unusable: ${b.detail ?? 'see Security → Sender identity'}`));
+    else checks.push(brand('unknown', 'Brand lookup failed; it will be retried'));
   }
 
   // ---- the level ---------------------------------------------------------

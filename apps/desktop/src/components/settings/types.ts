@@ -29,6 +29,14 @@ export interface AppSettings {
    *   - 'always' : auto-load everywhere
    *  New installs default to 'safe'. Legacy 'important' migrates to 'safe'. */
   remoteImageMode: 'block' | 'safe' | 'always';
+  /** Show the sender domain's BIMI brand logo as the avatar (DMARC-passing
+   *  mail only), and the blue verified tick when its Verified Mark
+   *  Certificate checks out. One DNS lookup plus one fetch from the brand's
+   *  own server per domain, in the background, in the main process. */
+  senderLogos: boolean;
+  /** When a sender has no photo or logo, use the domain's favicon. One fetch
+   *  per domain, which tells that domain a client here looked, once. */
+  senderFavicons: boolean;
 
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
@@ -92,6 +100,8 @@ export const defaultSettings: AppSettings = {
   previewPane: 'right',
   markAsReadDelay: 3,
   remoteImageMode: 'safe',
+  senderLogos: true,
+  senderFavicons: true,
   categoryLabels: { enabled: true, folderMode: 'copy' },
   inboxType: 'priority_first',
   showImportanceMarkers: true,

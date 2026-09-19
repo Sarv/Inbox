@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 
 import { assessEmailSecurity, LEVEL_COPY, type SecurityLevel, type SecurityCheck } from '../../utils/email-security';
 import { useLinkRules } from '../../utils/security-rules';
+import { useSenderIdentity } from '../../utils/sender-identity';
 import { Tooltip } from '../Tooltip';
 
 interface SecurityIndicatorProps {
@@ -58,9 +59,11 @@ const STATUS_TONE: Record<SecurityCheck['status'], string> = {
  */
 export function SecurityIndicator({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, className = '' }: SecurityIndicatorProps) {
   const { sets } = useLinkRules();
+  const identity = useSenderIdentity(fromAddress);
+  const bimi = identity ? identity.bimi : null;
   const assessment = useMemo(
-    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, rules: sets }),
-    [fromName, fromAddress, html, authStatus, spamScore, spamReasons, sets],
+    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, bimi, rules: sets }),
+    [fromName, fromAddress, html, authStatus, spamScore, spamReasons, bimi, sets],
   );
   const Icon = ICON[assessment.level];
   const copy = LEVEL_COPY[assessment.level];

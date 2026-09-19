@@ -18,6 +18,7 @@ import { registerEmailHandlers } from './email-handlers';
 import { registerExtensionHandlers } from './extension-handlers';
 import { registerFilterHandlers } from './filter-handlers';
 import { registerFolderHandlers } from './folder-handlers';
+import { registerIdentityHandlers } from './identity-handlers';
 import { registerLabelHandlers } from './label-handlers';
 import { registerMiscHandlers } from './misc-handlers';
 import { registerNotificationHandlers } from './notification-handlers';
@@ -59,6 +60,7 @@ export function registerAllHandlers(): void {
   registerSecureCredentialsHandlers();
   registerNotificationHandlers();
   registerStorageHandlers();
+  registerIdentityHandlers();
 
   logger.info('[IPC] All handlers registered');
 }

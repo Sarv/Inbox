@@ -1,5 +1,5 @@
-import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2, BadgeCheck, RefreshCw } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { getRemoteImageMode } from '../../store/helpers';
 import { LEVEL_COPY, type SecurityLevel } from '../../utils/email-security';
@@ -8,13 +8,14 @@ import { useConfirm } from '../ConfirmDialog';
 import { BlockedSendersPanel } from '../settings/BlockedSendersPanel';
 import { Tooltip } from '../Tooltip';
 
-type SecurityTab = 'overview' | 'links' | 'senders' | 'images';
+type SecurityTab = 'overview' | 'links' | 'senders' | 'images' | 'identity';
 
 const tabs: { id: SecurityTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'links', label: 'Trusted & blocked links' },
   { id: 'senders', label: 'Blocked senders' },
   { id: 'images', label: 'Remote images' },
+  { id: 'identity', label: 'Sender identity' },
 ];
 
 const LEVEL_ICON: Record<SecurityLevel, typeof Shield> = {
@@ -71,6 +72,7 @@ export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
           <div className="p-6"><BlockedSendersPanel /></div>
         )}
         {activeTab === 'images' && <ImagesTab />}
+        {activeTab === 'identity' && <IdentityTab />}
       </div>
     </div>
   );
@@ -83,6 +85,7 @@ const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Links open in your browser', detail: 'Clicking a link never navigates inside the app — it hands the address to your system browser with referrer and opener stripped.' },
   { title: 'Sender authentication', detail: 'SPF, DKIM and DMARC verdicts are read from the receiving server’s Authentication-Results header and shown on the shield beside each sender.' },
   { title: 'Impersonation checks', detail: 'A display name that names one domain while the message came from another, and links whose text says one domain while pointing to another, are flagged.' },
+  { title: 'Brand verification (BIMI)', detail: 'A sender domain’s published logo is shown only on mail that passed DMARC, and the blue verified tick only when its Verified Mark Certificate chains to a pinned Mark Verifying Authority for that exact logo and domain. Details per domain under Sender identity.' },
   { title: 'Spam filter', detail: 'Every arriving message is scored from its headers before the AI sees it — failed authentication, a spoofed sender name, a forged reply, missing or mis-dated headers, bulk mail with no unsubscribe, your mail server’s own spam verdict, and senders you have reported. A message over the line is filed as spam with its reasons shown on the shield.' },
   { title: 'Encrypted mail cache', detail: 'The local mailbox database is encrypted at rest; the key lives in the operating system keychain.' },
   { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
@@ -340,6 +343,145 @@ function ImagesTab() {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- Identity */
+
+interface IdentityRow {
+  domain: string;
+  bimiStatus: 'verified' | 'logo' | 'declined' | 'none' | 'invalid' | 'error' | null;
+  bimiLogo: string | null;
+  bimiOrganization: string | null;
+  bimiIssuer: string | null;
+  bimiExpires: number | null;
+  bimiDetail: string | null;
+  dmarcPolicy: string | null;
+  bimiCheckedAt: number | null;
+  favicon: string | null;
+  faviconStatus: 'found' | 'none' | 'error' | null;
+  faviconDetail: string | null;
+  faviconCheckedAt: number | null;
+  updatedAt: number;
+}
+
+const BIMI_PILL: Record<NonNullable<IdentityRow['bimiStatus']>, { label: string; tone: string }> = {
+  verified: { label: 'Verified mark', tone: 'bg-blue-500/15 text-blue-700 dark:text-blue-300' },
+  logo: { label: 'Logo, no certificate', tone: 'bg-green-500/15 text-green-700 dark:text-green-300' },
+  declined: { label: 'Declined', tone: 'bg-muted text-muted-foreground' },
+  none: { label: 'No BIMI', tone: 'bg-muted text-muted-foreground' },
+  invalid: { label: 'Unusable', tone: 'bg-amber-500/15 text-amber-700 dark:text-amber-300' },
+  error: { label: 'Lookup failed', tone: 'bg-red-500/15 text-red-700 dark:text-red-300' },
+};
+
+const when = (sec: number | null) => (sec ? new Date(sec * 1000).toLocaleString() : 'never');
+
+/**
+ * Every domain whose identity has been looked up: the logo or favicon the
+ * avatar draws from, the BIMI standing with its reason, and the certificate's
+ * organisation and issuer. "Refresh" re-runs the lookup now; "Forget" drops
+ * the cache so the next message from the domain starts from nothing.
+ */
+function IdentityTab() {
+  const [rows, setRows] = useState<IdentityRow[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await window.electronAPI.identity?.list?.(200);
+      if (r?.success && Array.isArray(r.data)) setRows(r.data as IdentityRow[]);
+    } catch { /* best-effort */ }
+  }, []);
+  useEffect(() => {
+    void load();
+    const off = window.electronAPI.identity?.onUpdated?.(() => { void load(); });
+    return () => { off?.(); };
+  }, [load]);
+
+  const refresh = async (domain: string) => {
+    setBusy(domain);
+    try { await window.electronAPI.identity?.refresh?.(domain); } finally { setBusy(null); await load(); }
+  };
+  const forget = async (domain: string) => {
+    setBusy(domain);
+    try { await window.electronAPI.identity?.forget?.(domain); } finally { setBusy(null); await load(); }
+  };
+
+  return (
+    <div className="p-6 max-w-5xl space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Sender pictures come from, in order: the domain’s BIMI brand logo (only on mail that passed DMARC), the contact’s
+        confirmed photo, the domain’s favicon, then initials. A domain whose Verified Mark Certificate chains to a Mark
+        Verifying Authority for that logo earns the <BadgeCheck className="inline h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden /> verified
+        tick. Lookups run once per domain in the background; turn them off under Settings → General.
+      </p>
+      {rows.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground flex items-center gap-2">
+          <Info className="h-4 w-4" /> No sender domains have been looked up yet. Open a message and its domain appears here.
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">Domain</th>
+                <th className="px-3 py-2 font-medium">Brand (BIMI)</th>
+                <th className="px-3 py-2 font-medium">Favicon</th>
+                <th className="px-3 py-2 font-medium">Checked</th>
+                <th className="px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const pill = r.bimiStatus ? BIMI_PILL[r.bimiStatus] : null;
+                return (
+                  <tr key={r.domain} className="border-t border-border align-top">
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        {(r.bimiLogo || r.favicon) ? (
+                          <img src={r.bimiLogo ?? r.favicon ?? undefined} alt="" className="h-7 w-7 rounded-full bg-white object-contain p-0.5 border border-border" />
+                        ) : (
+                          <span className="h-7 w-7 rounded-full bg-muted inline-block" />
+                        )}
+                        <span className="font-medium break-all">{r.domain}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2">
+                      {pill ? <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${pill.tone}`}>{pill.label}</span> : <span className="text-muted-foreground">Not looked up</span>}
+                      {r.bimiOrganization && <div className="mt-1 text-xs">{r.bimiOrganization}{r.bimiIssuer ? ` — issued by ${r.bimiIssuer}` : ''}</div>}
+                      {r.bimiDetail && <div className="mt-0.5 text-xs text-muted-foreground break-words">{r.bimiDetail}</div>}
+                      {r.dmarcPolicy && <div className="mt-0.5 text-xs text-muted-foreground">DMARC p={r.dmarcPolicy}</div>}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">
+                      {r.faviconStatus === 'found' ? 'Found' : r.faviconStatus === 'none' ? 'None' : r.faviconStatus === 'error' ? 'Unreachable' : 'Not looked up'}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">
+                      <div>BIMI: {when(r.bimiCheckedAt)}</div>
+                      <div>Favicon: {when(r.faviconCheckedAt)}</div>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        <Tooltip content="Look this domain up again now" delayMs={40}>
+                          <button onClick={() => void refresh(r.domain)} disabled={busy !== null} aria-label={`Refresh ${r.domain}`}
+                            className="p-1.5 rounded-md border border-border hover:bg-muted/60 disabled:opacity-50 transition-colors">
+                            {busy === r.domain ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                          </button>
+                        </Tooltip>
+                        <Tooltip content="Forget what is cached for this domain" delayMs={40}>
+                          <button onClick={() => void forget(r.domain)} disabled={busy !== null} aria-label={`Forget ${r.domain}`}
+                            className="p-1.5 rounded-md border border-border hover:bg-muted/60 disabled:opacity-50 transition-colors">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </Tooltip>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
