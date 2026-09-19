@@ -44,6 +44,15 @@ export async function readRawMimeParts(
   source: Buffer,
   collectFilename?: string,
 ): Promise<RawMimePart[]> {
+  // Refuse anything but a Buffer HERE, synchronously, so the caller's try/catch
+  // sees a rejected promise. Fed to the streams below, a non-Buffer chunk is
+  // rejected by the splitter's write() — on Node 24 that throws inside pipe()
+  // and lands in the same rejection, but on Node 22 it surfaces a tick later
+  // as an UNCAUGHT exception that no caller can catch. CI (Node 22) failed the
+  // whole core suite on exactly that while every test passed.
+  if (!Buffer.isBuffer(source)) {
+    throw new TypeError('readRawMimeParts: source must be a Buffer');
+  }
   const wanted = collectFilename?.trim().toLowerCase();
   const parts: RawMimePart[] = [];
   let current: RawMimePart | null = null;
