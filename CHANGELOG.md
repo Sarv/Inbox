@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Brand logos and a verified-sender tick, Gmail-style. A sender domain's BIMI
+  record is looked up once, in the background, and its logo becomes the avatar
+  on mail that passed DMARC. When the domain's Verified Mark Certificate chains
+  to a pinned Mark Verifying Authority root (DigiCert, Entrust, GlobalSign) for
+  that exact logo and domain, a blue tick appears beside the sender, with the
+  organisation and issuer on hover; the shield gains a "Brand identity" line
+  saying the same, or why not. Sender pictures now fall back in order: BIMI
+  logo, the contact's confirmed photo, the domain's favicon, initials. Both
+  lookups are per domain, never per message, and can be turned off under
+  Settings → General; Security → Sender identity lists every cached domain
+  with Refresh and Forget.
 - A spam filter that runs before the AI. Every arriving message is scored from
   its headers alone — a failed DMARC, a display name that names another domain,
   a "Re:" that replies to nothing, a missing or mis-dated Message-ID/Date,

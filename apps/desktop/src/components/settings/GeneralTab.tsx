@@ -342,6 +342,38 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
 
         <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
           <div>
+            <div className="font-medium">Sender logos and favicons</div>
+            <div className="text-sm text-muted-foreground">
+              Brand logos come from the sender domain’s BIMI record and appear only on mail that passed DMARC; a domain whose
+              Verified Mark Certificate checks out also gets the blue verified tick beside the sender. When a sender has no
+              photo or logo, the domain’s favicon is used instead. Each is looked up once per domain in the background —
+              never per message, and never from inside a message.
+            </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.senderLogos !== false}
+                onChange={(e) => updateSetting('senderLogos', e.target.checked)}
+                className="w-4 h-4"
+              />
+              <span className="text-sm whitespace-nowrap">Brand logos and verified tick (BIMI)</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.senderFavicons !== false}
+                onChange={(e) => updateSetting('senderFavicons', e.target.checked)}
+                className="w-4 h-4"
+              />
+              <span className="text-sm whitespace-nowrap">Domain favicons</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
+          <div>
             <div className="font-medium">Mirror AI categories to my mailbox</div>
             <div className="text-sm text-muted-foreground">
               Show your AI categories as labels in your provider (Gmail, sarv webmail, other clients).

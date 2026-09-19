@@ -9,6 +9,9 @@ import '@sentry/electron/preload';
 import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer } from 'electron';
 
+import type { DomainIdentityRow } from './services/domain-identity-store';
+import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
+
 /**
  * A toast mirrored into the renderer when native OS notifications can't be
  * shown (dev, or a platform with no notification daemon). Mirrors the payload
@@ -277,6 +280,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const listener = (_e: unknown, state: AuthBackfillState) => cb(state);
       ipcRenderer.on('auth-backfill:progress', listener);
       return () => ipcRenderer.removeListener('auth-backfill:progress', listener);
+    },
+  },
+
+  // Sender identity: the domain's BIMI logo / verified mark, its favicon, and the
+  // contact's confirmed photo — cached in main, never fetched by the renderer.
+  identity: {
+    getSender: (address: string) => ipcRenderer.invoke('identity:getSender', address),
+    getPolicy: () => ipcRenderer.invoke('identity:getPolicy'),
+    setPolicy: (policy: SenderIdentityPolicy) => ipcRenderer.invoke('identity:setPolicy', policy),
+    list: (limit?: number) => ipcRenderer.invoke('identity:list', limit),
+    refresh: (domain: string) => ipcRenderer.invoke('identity:refresh', domain),
+    forget: (domain: string) => ipcRenderer.invoke('identity:forget', domain),
+    onUpdated: (cb: (event: { domain: string }) => void) => {
+      const listener = (_e: unknown, payload: { domain: string }) => cb(payload);
+      ipcRenderer.on('identity:updated', listener);
+      return () => ipcRenderer.removeListener('identity:updated', listener);
     },
   },
 
@@ -1024,6 +1043,16 @@ export interface ElectronAPI {
     kickAuthBackfill: () => Promise<{ success: boolean; data?: AuthBackfillState; error?: string }>;
     /** Subscribe to backfill progress. Returns an unsubscribe fn. */
     onAuthBackfillProgress: (cb: (state: AuthBackfillState) => void) => () => void;
+  };
+  identity: {
+    getSender: (address: string) => Promise<{ success: boolean; data?: SenderIdentity; error?: string }>;
+    getPolicy: () => Promise<{ success: boolean; data?: SenderIdentityPolicy; error?: string }>;
+    setPolicy: (policy: SenderIdentityPolicy) => Promise<{ success: boolean; data?: SenderIdentityPolicy; error?: string }>;
+    list: (limit?: number) => Promise<{ success: boolean; data?: DomainIdentityRow[]; error?: string }>;
+    refresh: (domain: string) => Promise<{ success: boolean; data?: DomainIdentityRow | null; error?: string }>;
+    forget: (domain: string) => Promise<{ success: boolean; error?: string }>;
+    /** Fired when a domain's lookup lands. Returns an unsubscribe fn. */
+    onUpdated: (cb: (event: { domain: string }) => void) => () => void;
   };
   storage: {
     getStats: () => Promise<{ success: boolean; data?: any; error?: string }>;

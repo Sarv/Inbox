@@ -42,3 +42,6 @@ export * from './sender-spoof';
 export * from './origin-ip';
 export * from './spam-verdict';
 export * from './spam-signals';
+export * from './bimi-roots';
+export * from './bimi';
+export * from './favicon';

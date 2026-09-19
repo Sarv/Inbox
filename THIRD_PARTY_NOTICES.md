@@ -37,6 +37,16 @@ under `node_modules/` after `pnpm install`.
 - **dompurify** 3.4.12 — DOMPurify is a DOM-only, super-fast, uber-tolerant XSS sanitizer for H  
   https://github.com/cure53/DOMPurify
 
+### Apache-2.0
+
+- **reflect-metadata** 0.2.2 — Polyfill for Metadata Reflection API  
+  https://github.com/rbuckton/reflect-metadata
+
+### BSD-3-Clause
+
+- **asn1js** 3.0.10 — asn1js is a pure JavaScript library implementing this standard. ASN.1 is the basis of all X.509 related data structures.  
+  https://github.com/PeculiarVentures/ASN1.js
+
 ### ISC
 
 - **lru-cache** 10.4.3 — A cache object that deletes the least-recently-used items.  
@@ -48,6 +58,8 @@ under `node_modules/` after `pnpm install`.
 
 - **@op-engineering/op-sqlite** 7.4.3 — Next generation SQLite for React Native  
   https://github.com/OP-Engineering/op-sqlite
+- **@peculiar/x509** 2.1.0 — @peculiar/x509 is an easy to use TypeScript/Javascript library based on @peculiar/asn1-schema that makes generating, parsing, and validating X509 certificates.  
+  https://github.com/PeculiarVentures/x509
 - **@sentry/electron** 7.15.0 — Official Sentry SDK for Electron  
   https://github.com/getsentry/sentry-electron
 - **@tiptap/extension-color** 3.15.1 — text color extension for tiptap  
@@ -86,6 +98,8 @@ under `node_modules/` after `pnpm install`.
   https://github.com/Kikobeats/free-email-domains
 - **html-to-text** 10.0.0 — Advanced html to plain text converter  
   https://github.com/html-to-text/node-html-to-text
+- **htmlparser2** 10.1.0 — Fast & forgiving HTML/XML parser  
+  https://github.com/fb55/htmlparser2
 - **iconv-lite** 0.7.2 — Convert character encodings in pure javascript.  
   https://github.com/pillarjs/iconv-lite
 - **imapflow** 1.4.2 — IMAP Client for Node  

@@ -67,6 +67,7 @@ import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-s
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
 import { startPipelineEventPersister, stopPipelineEventPersister } from './services/pipeline-event-persister';
 import { migrateSecureCredsFromFile } from './services/secure-credential-store';
+import { startSenderIdentityScheduler, stopSenderIdentityScheduler } from './services/sender-identity-service';
 import {
   defaultDevReclaimDeps,
   defaultHeartbeatDeps,
@@ -213,6 +214,7 @@ function stopBackgroundTimers(): void {
   try { stopBackfillScheduler(); } catch {}
   try { stopStartupThreadRepair(); } catch {}
   try { stopAvatarDiscoveryScheduler(); } catch {}
+  try { stopSenderIdentityScheduler(); } catch {}
   try { stopBodyRehealScheduler(); } catch {}
   // Returns a promise: its final flush is a DB write, so the shutdown path must
   // await it or the last batch of pipeline events dies in the buffer. Captured
@@ -850,6 +852,7 @@ app.whenReady().then(async () => {
     startBackfillScheduler();
     startStartupThreadRepair();
     startAvatarDiscoveryScheduler();
+    startSenderIdentityScheduler();
     startBodyRehealScheduler();
     startPipelineEventPersister();
     startNotificationService();

@@ -594,6 +594,24 @@ export class ContactRepository extends BaseRepository {
   }
 
   /**
+   * Distinct sender domains, most recently heard from first — the queue the
+   * sender-identity lookups (BIMI logo, favicon) work through, so the domains
+   * the user actually sees get resolved first.
+   */
+  async getRecentSenderDomains(limit: number): Promise<string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT domain FROM sender_stats
+         WHERE domain IS NOT NULL AND domain != ''
+         GROUP BY domain
+         ORDER BY MAX(COALESCE(last_received, first_seen)) DESC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.floor(limit))) as Array<{ domain: string }>;
+    return rows.map((r) => r.domain.toLowerCase());
+  }
+
+  /**
    * Get sender stats by domain
    */
   async getSenderStatsByDomain(domain: string): Promise<SenderStats[]> {

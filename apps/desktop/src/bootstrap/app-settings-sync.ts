@@ -104,7 +104,7 @@ function initAppSettingsSync(): void {
   localStorage.setItem = function patchedSetItem(key: string, value: string): void {
     nativeSet(key, value);
     if (MANAGED.has(key)) { try { void api.set(key, value); } catch { /* ignore */ } }
-    if (key === 'sarvinbox-settings') pushBacklogCap(value);
+    if (key === 'sarvinbox-settings') { pushBacklogCap(value); pushSenderIdentityPolicy(value); }
   };
   localStorage.removeItem = function patchedRemoveItem(key: string): void {
     nativeRemove(key);
@@ -133,8 +133,29 @@ function pushBacklogCap(rawSettings: string | null): void {
   } catch { /* a malformed settings blob must not break boot */ }
 }
 
+/**
+ * Mirror the sender-identity toggles (BIMI logos, domain favicons) into main,
+ * which owns the lookups and the cache. Off must mean off — no fetch, and
+ * nothing cached shown — so main has to know, and the renderer's own identity
+ * cache is cleared once main has acknowledged the change.
+ */
+function pushSenderIdentityPolicy(rawSettings: string | null): void {
+  try {
+    const parsed = rawSettings ? JSON.parse(rawSettings) : null;
+    if (!parsed || typeof parsed !== 'object') return;
+    const logos = typeof parsed.senderLogos === 'boolean' ? parsed.senderLogos : true;
+    const favicons = typeof parsed.senderFavicons === 'boolean' ? parsed.senderFavicons : true;
+    const api = (window as any)?.electronAPI?.identity;
+    if (!api?.setPolicy) return;
+    void Promise.resolve(api.setPolicy({ logos, favicons })).then(() => {
+      window.dispatchEvent(new Event('sarvinbox:identity-policy-changed'));
+    }).catch(() => { /* best-effort */ });
+  } catch { /* a malformed settings blob must not break boot */ }
+}
+
 initAppSettingsSync();
 // Boot push: main persists the cap, but a profile restored from the DB (or a
 // value changed while main was down) would otherwise not reach it until the
 // next time the user opened Settings.
 try { pushBacklogCap(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
+try { pushSenderIdentityPolicy(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }

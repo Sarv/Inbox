@@ -1496,6 +1496,12 @@ export class SQLiteStorage implements IEmailStorage {
     return this.contactRepo.getSenderStatsByDomain(domain);
   }
 
+  /** Distinct sender domains, most recent first — see ContactRepository.getRecentSenderDomains. */
+  async getRecentSenderDomains(limit: number): Promise<string[]> {
+    this.ensureInitialized();
+    return this.contactRepo.getRecentSenderDomains(limit);
+  }
+
   async upsertSenderStats(stats: { email: string; receivedCount?: number; repliedCount?: number; sentToCount?: number; readCount?: number; deletedCount?: number; authPass?: boolean; eventDate?: number }): Promise<SenderStats> {
     this.ensureInitialized();
     return this.contactRepo.upsertSenderStats(stats);

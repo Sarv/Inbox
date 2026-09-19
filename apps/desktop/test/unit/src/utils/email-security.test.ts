@@ -326,3 +326,48 @@ describe('assessEmailSecurity — the spam filter’s stored verdict', () => {
     expect(id).toBe('spam');
   });
 });
+
+describe('assessEmailSecurity — brand identity (BIMI)', () => {
+  const verified = { status: 'verified' as const, organization: 'Example Inc', issuer: 'DigiCert Verified Mark RSA4096 SHA256 2021 CA1' };
+
+  // The tick's evidence line: who vouched, for which domain.
+  it('passes with the organisation and issuer when the certificate verified and the message passed DMARC', () => {
+    const a = assessEmailSecurity({ fromAddress: 'news@brand.example', authStatus: PASS, bimi: verified });
+    const brand = a.checks.find((c) => c.id === 'brand')!;
+    expect(brand.status).toBe('pass');
+    expect(brand.detail).toContain('Example Inc');
+    expect(brand.detail).toContain('brand.example');
+    expect(brand.detail).toContain('DigiCert');
+  });
+
+  // THE rule: the certificate says who owns the brand; only DMARC says this
+  // message came from them. Without the pass, the tick and logo are withheld.
+  it('warns, and withholds, when the certificate verified but this message did not pass DMARC', () => {
+    const a = assessEmailSecurity({ fromAddress: 'news@brand.example', authStatus: FAIL, bimi: verified });
+    expect(a.checks.find((c) => c.id === 'brand')).toMatchObject({ status: 'warn', detail: expect.stringContaining('withheld') });
+  });
+
+  it('reports a logo without a certificate as published, not verified', () => {
+    const a = assessEmailSecurity({ fromAddress: 'news@brand.example', authStatus: PASS, bimi: { status: 'logo' } });
+    expect(a.checks.find((c) => c.id === 'brand')).toMatchObject({ status: 'pass', detail: expect.stringContaining('without a Verified Mark Certificate') });
+  });
+
+  it('explains the absence of a mark for the other standings', () => {
+    const detail = (bimi: Parameters<typeof assessEmailSecurity>[0]['bimi']) =>
+      assessEmailSecurity({ fromAddress: 'a@x.example', authStatus: PASS, bimi }).checks.find((c) => c.id === 'brand');
+    expect(detail(null)).toMatchObject({ status: 'unknown', detail: 'Not looked up yet' });
+    expect(detail({ status: 'none' })).toMatchObject({ status: 'unknown', detail: expect.stringContaining('no BIMI record') });
+    expect(detail({ status: 'declined' })).toMatchObject({ status: 'unknown', detail: expect.stringContaining('declines') });
+    expect(detail({ status: 'invalid', detail: 'p=none' })).toMatchObject({ status: 'unknown', detail: expect.stringContaining('p=none') });
+    expect(detail({ status: 'error' })).toMatchObject({ status: 'unknown', detail: expect.stringContaining('retried') });
+  });
+
+  // Callers that do not deal in brand identity (the thread banner, old tests)
+  // must not gain a line — and the level is never moved by it.
+  it('adds no brand line when the caller did not ask, and never changes the level', () => {
+    const without = assessEmailSecurity({ fromAddress: 'a@x.example', authStatus: PASS });
+    expect(without.checks.some((c) => c.id === 'brand')).toBe(false);
+    const withBrand = assessEmailSecurity({ fromAddress: 'a@x.example', authStatus: PASS, bimi: verified });
+    expect(withBrand.level).toBe(without.level);
+  });
+});

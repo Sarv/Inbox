@@ -23,9 +23,14 @@ interface AvatarProps {
   className?: string;
   /** A confirmed, locally-cached photo (a `data:` URI). No network is made. */
   photoUrl?: string | null;
+  /** `cover` fills the circle (a photo); `contain` shows the whole image on
+   *  white (a brand logo or favicon, which must not be cropped). */
+  fit?: 'cover' | 'contain';
+  /** Pass-through data attribute naming where the picture came from (tests, styling). */
+  'data-avatar-source'?: string;
 }
 
-export function Avatar({ email, name, size, className = '', photoUrl }: AvatarProps) {
+export function Avatar({ email, name, size, className = '', photoUrl, fit = 'cover', 'data-avatar-source': source }: AvatarProps) {
   const [broken, setBroken] = useState(false);
   // A new photo (e.g. list row reused for another contact) is worth another try.
   useEffect(() => { setBroken(false); }, [photoUrl]);
@@ -41,13 +46,14 @@ export function Avatar({ email, name, size, className = '', photoUrl }: AvatarPr
       style={{ width: size, height: size }}
       aria-label={name || safeEmail || undefined}
       title={name || safeEmail || undefined}
+      data-avatar-source={source}
     >
       <span style={{ fontSize: Math.max(10, Math.round(size * 0.4)) }}>{initials}</span>
       {showPhoto && (
         <img
           src={photoUrl as string}
           alt=""
-          className="absolute inset-0 h-full w-full object-cover"
+          className={fit === 'contain' ? 'absolute inset-0 h-full w-full object-contain bg-white p-[10%]' : 'absolute inset-0 h-full w-full object-cover'}
           onError={() => setBroken(true)}
         />
       )}

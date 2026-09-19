@@ -24,6 +24,7 @@ import { EmailMenu } from './EmailMenu';
 import { SecurityIndicator } from './SecurityIndicator';
 import type { EmailDetailContext } from './types';
 import { parseAttachments } from './utils';
+import { VerifiedBadge } from './VerifiedBadge';
 
 // getCurrentUserEmail used to live here; it moved to ai-service so
 // EmailDetail can share it (priority: IMAP username > profile email > fallback).
@@ -275,6 +276,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
               spamScore={email.spamScore}
               spamReasons={email.spamReasons}
             />
+            <VerifiedBadge email={email.fromAddress} authStatus={email.authStatus} />
             <span className="truncate">{email.fromAddress}</span>
           </div>
           {attachments.length > 0 && (

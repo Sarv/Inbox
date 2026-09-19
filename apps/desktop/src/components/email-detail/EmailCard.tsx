@@ -22,8 +22,10 @@ import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
 import { PhishingWarningBanner } from './PhishingWarningBanner';
 import { SecurityIndicator } from './SecurityIndicator';
+import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
 import { stripSignatureFromHtml, formatRelativeDate } from './utils';
+import { VerifiedBadge } from './VerifiedBadge';
 
 
 
@@ -36,8 +38,6 @@ export function EmailCard({ ctx }: EmailCardProps) {
     displayEmail,
     duplicatesByEmailId,
     isStarred,
-    senderInitials,
-    avatarColor,
     attachments,
     mainEmailExpanded,
     setMainEmailExpanded,
@@ -73,12 +73,15 @@ export function EmailCard({ ctx }: EmailCardProps) {
       {/* Header Section - Clickable to expand/collapse */}
       <div className="w-full p-4 text-left hover:bg-accent/30 transition-colors">
         <div className="flex items-start gap-4">
-          {/* Avatar */}
-          <div
-            onClick={() => setMainEmailExpanded(!mainEmailExpanded)}
-            className={`w-12 h-12 rounded-full ${avatarColor} flex items-center justify-center text-white font-semibold text-lg flex-shrink-0 cursor-pointer`}
-          >
-            {senderInitials}
+          {/* Avatar: BIMI logo (DMARC-passing mail only) → confirmed contact photo → domain favicon → initials */}
+          <div onClick={() => setMainEmailExpanded(!mainEmailExpanded)} className="flex-shrink-0 cursor-pointer">
+            <SenderAvatar
+              email={displayEmail.fromAddress}
+              name={displayEmail.fromName}
+              size={48}
+              authStatus={displayEmail.authStatus}
+              className="text-lg font-semibold"
+            />
           </div>
 
           {/* Sender Info */}
@@ -90,6 +93,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
               >
                 <div className="font-semibold text-base text-foreground flex items-center gap-1.5">
                   <span className="truncate">{displayEmail.fromName || displayEmail.fromAddress}</span>
+                  <VerifiedBadge email={displayEmail.fromAddress} authStatus={displayEmail.authStatus} />
                   <SecurityIndicator
                     fromName={displayEmail.fromName}
                     fromAddress={displayEmail.fromAddress}
