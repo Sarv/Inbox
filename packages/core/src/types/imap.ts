@@ -489,6 +489,24 @@ export interface IMAPMessage {
    */
   authHeaders?: string;
 
+  /**
+   * The header fields the fetch asked for, verbatim and unparsed (the
+   * `BODY.PEEK[HEADER.FIELDS (...)]` text). Feeds the header-only stages that
+   * run at ingest — the spam signals read the upstream filter's verdict and
+   * the bulk-mail headers from it, the origin-IP extractor reads `Received`.
+   * Only the requested fields, never the whole message; absent when the fetch
+   * asked for no headers.
+   */
+  rawHeaders?: string;
+
+  /**
+   * Set by the processor when the message arrived with NO Message-ID and one
+   * was synthesised into `envelope.messageId` for deduplication. The spam
+   * signals need to know the header was missing; the synthesised id would
+   * otherwise pass for a real one.
+   */
+  messageIdSynthesized?: boolean;
+
   // Headers
   envelope: {
     messageId: string;

@@ -3,7 +3,7 @@
 import libmime from 'libmime';
 import { simpleParser, type ParsedMail } from 'mailparser';
 
-import { findFolderByType, type ClassifiableFolder } from '../config/folder-mapping';
+import { classifyFolder, findFolderByType, type ClassifiableFolder } from '../config/folder-mapping';
 import { LARGE_MAILBOX_THRESHOLD, STALE_FLAG_VERIFY_MAX, SYNC_RECENT_WINDOW_DAYS, recentWindowCutoffDate } from '../config/sync';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
 import { parseAuthenticationHeaders } from '../processor/email-processor';
@@ -11,6 +11,7 @@ import type { FilterRule } from '../types/filters';
 import type { IMAPMessage, IIMAPClient } from '../types/imap';
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
+import { headerLookupFromText, headerValuesFromText } from '../utils/bulk-mail';
 import { sanitizeIcsText } from '../utils/calendar';
 import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
@@ -21,9 +22,12 @@ import { htmlToPlainText } from '../utils/html-text';
 import { emailContentHash, generateId, generateThreadId, synthesizedMessageId } from '../utils/id';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
+import { extractOriginIp } from '../utils/origin-ip';
 import {
   isStarredSourceFolder,
 } from '../utils/provider';
+import { assessSpamSignals } from '../utils/spam-signals';
+import { isSpamScore } from '../utils/spam-verdict';
 import { selectStaleFlagCandidates } from '../utils/stale-flags';
 import { buildTags, parseTags, hasTag, addTag, imapFlagsToTags, FLAG_TAG_NAMES } from '../utils/tags';
 import { normalizeSubject } from '../utils/validators';
@@ -37,6 +41,12 @@ import {
 import { mapEnvelopeFields } from './envelope-mapper';
 import { attachmentSizesFromSource } from './raw-mime-part';
 import { withFolderSelected } from './with-folder';
+
+/** A Date as unix seconds, or null when absent or unparseable (an invalid Date has a NaN time). */
+function toUnixSeconds(d: Date | null | undefined): number | null {
+  const t = d?.getTime?.();
+  return typeof t === 'number' && Number.isFinite(t) ? Math.floor(t / 1000) : null;
+}
 
 // Deletion-detection throttle for the CONDSTORE delta path. Flag deltas
 // (fetchFlagsChangedSince) run every sync — cheap. But the full server UID set
@@ -230,9 +240,23 @@ export class MessageProcessor {
   // blip does not. Session-only; cleared on any non-empty read.
   private foldersSeenEmpty = new Set<string>();
 
+  // Queues the SERVER-side move for a message the spam filter files. Wired by
+  // SyncEngine to its OperationQueue — the persisted, replayed-on-reconnect
+  // path "Report spam" already uses. Without it the re-file is local only, and
+  // the next reconcile of the source folder finds the server's copy still
+  // there, reads it as an external move-back, and relinks it: the spam
+  // reappears in INBOX within minutes. The queued op is also what registers
+  // the UID as pending, which is the guard that reconcile honours.
+  private spamMover?: (folderPath: string, uid: number) => Promise<unknown>;
+
   /** Wire the pending-op source (see SyncEngine). */
   setPendingUidsProvider(fn: (folderPath: string) => Promise<Set<number>>): void {
     this.pendingUidsProvider = fn;
+  }
+
+  /** Wire the server-side spam move (see SyncEngine). */
+  setSpamMover(fn: (folderPath: string, uid: number) => Promise<unknown>): void {
+    this.spamMover = fn;
   }
 
   constructor(config: Partial<MessageProcessorConfig> = {}) {
@@ -284,6 +308,11 @@ export class MessageProcessor {
     const relinkedFrom = new Set<string>();
     const isSentFolder = this.isSentFolder(folderPath);
     const isStarredFolder = isStarredSourceFolder(folderPath);
+    // The user's own outgoing mail is never spam-scored: a draft has no
+    // Message-ID yet, a sent copy carries no authentication verdict, and a
+    // `spam` tag on your own words would hide them from the Spam filter view.
+    const folderType = classifyFolder(folder);
+    const ownMail = isSentFolder || folderType === 'sent' || folderType === 'drafts';
 
     // UIDs in THIS folder with a pending/executing local op (move/delete/flag) not
     // yet confirmed by the server. Used to tell a genuine external move-BACK into
@@ -329,6 +358,10 @@ export class MessageProcessor {
           // in a second folder — every Gmail message is in All Mail as well as
           // its label — was minted a different id and stored a SECOND time, and
           // a UIDVALIDITY reset re-ingested the lot as new mail.
+          //
+          // Remember that it WAS synthesised: the spam signals score a missing
+          // Message-ID, and the stand-in must not pass for the real header.
+          message.messageIdSynthesized = true;
           message.envelope.messageId = synthesizedMessageId({
             fromAddress: message.envelope.from?.[0]?.address,
             internalDate: message.date,
@@ -407,8 +440,23 @@ export class MessageProcessor {
             continue;
           }
 
+          // Has the user reported this sender? Looked up BEFORE conversion so
+          // the verdict lands in the stored spam score with its own reason,
+          // instead of a separate re-file the score knew nothing about. Skipped
+          // in quiet/backfill mode with the rest of the reactive work; a
+          // failing lookup is "unknown", never a failed message.
+          let knownSpammer = false;
+          const fromAddress = message.envelope.from?.[0]?.address;
+          if (!quiet && fromAddress) {
+            try {
+              knownSpammer = await storage.isSpammer(fromAddress);
+            } catch (err) {
+              logger.error(`[AutoSpam] Check failed for ${fromAddress}:`, err);
+            }
+          }
+
           // Convert to EmailRecord
-          const email = await this.convertMessage(message, folder.id, folderPath, labelCtx);
+          const email = await this.convertMessage(message, folder.id, folderPath, labelCtx, { knownSpammer, ownMail });
 
           // Apply folder-specific settings
           if (isSentFolder && !hasTag(email.tags, 'read')) {
@@ -437,59 +485,64 @@ export class MessageProcessor {
         // convertMessage), so linkEmail would recompute identical tags and
         // never update — a redundant SELECT+addTag per email.
 
-        // Auto-spam: move emails from known spammers to the spam folder. The
-        // spam folder is invariant across the batch, so resolve getFolders()
-        // ONCE — lazily, only when the first known spammer appears — and
-        // memoize it, instead of re-querying + re-scanning inside the loop.
-        let spamFolderResolved = false;
-        let spamFolder: FolderRecord | undefined;
-        const resolveSpamFolder = async (): Promise<FolderRecord | undefined> => {
-          if (spamFolderResolved) return spamFolder;
-          spamFolderResolved = true;
-          const folders = await storage.getFolders();
-          spamFolder = folders.find((f) =>
-            f.path.toLowerCase().includes('spam') ||
-            f.path === '[Gmail]/Spam' ||
-            f.path === 'Junk Email'
-          );
-          return spamFolder;
-        };
-
-        if (!quiet) for (const email of emailRecords) {
-          if (!email.fromAddress) continue;
-          try {
-            const isKnownSpammer = await storage.isSpammer(email.fromAddress);
-            if (!isKnownSpammer) continue;
-            const spam = await resolveSpamFolder();
-            if (spam && spam.id !== folder.id) {
-              let tags = email.tags || '';
-              if (folder.path && tags.includes('|' + folder.path + '|')) {
-                tags = tags.replace('|' + folder.path + '|', '|');
-              }
-              if (!tags.includes('|' + spam.path + '|')) {
-                const list = tags.split('|').filter(Boolean);
-                list.push(spam.path);
-                tags = '|' + list.join('|') + '|';
-              }
-              await storage.updateEmail(email.id, { folderId: spam.id, tags });
-              logger.info(`[AutoSpam] Moved email from ${email.fromAddress} to spam`);
-            }
-          } catch (err) {
-            // Non-fatal — don't break sync for spammer check failures
-            logger.error(`[AutoSpam] Check failed for ${email.fromAddress}:`, err);
-          }
-        }
-
-        // User filter rules: evaluate each new email and apply local tag/folder
-        // actions (consistent with the auto-spam block above — no server-side
-        // IMAP move at ingest). Rules + folder list are invariant across the
-        // batch, so both are loaded once, lazily, only if any rules exist.
-        let filterRules: FilterRule[] | null = null;
+        // Folder list, loaded once per batch and only if something needs it —
+        // the spam re-file below and the user's filter rules both do.
         let allFolders: FolderRecord[] | null = null;
         const getAllFolders = async (): Promise<FolderRecord[]> => {
           if (allFolders === null) allFolders = await storage.getFolders();
           return allFolders;
         };
+
+        // Spam: a message whose stored score crossed the line — header signals,
+        // an upstream filter's verdict, or a sender the user reported — is
+        // filed into the spam folder locally (no server-side IMAP move at
+        // ingest, same as the filter rules below). The move goes through the
+        // filter engine's own `moveToSpam`, so the two paths cannot disagree
+        // about which folder is spam or how a move rewrites the tags. The row
+        // keeps its `spam` tag either way: with no spam folder at all it still
+        // stays out of the AI pipeline and says why on the shield. Skipped in
+        // quiet/backfill mode with the rest of the reactive work.
+        if (!quiet) {
+          let filed = 0;
+          for (const email of emailRecords) {
+            if (!isSpamScore(email.spamScore)) continue;
+            try {
+              const folders = await getAllFolders();
+              const moved = computeFilterActionResult(email, [{ type: 'moveToSpam' }], folders);
+              if (!moved.changed) continue;
+              await storage.updateEmail(email.id, { folderId: moved.folderId, tags: moved.tags });
+              // Mirror the move on the server through the operation queue —
+              // persisted, replayed on reconnect, and registered as a pending
+              // op on this UID so the next reconcile of this folder does not
+              // read the server's still-present copy as an external move-back
+              // and relink it here. Fire-and-forget, exactly as "Report spam"
+              // does; a failure is logged, never a failed sync. The uid is
+              // read BEFORE the in-memory update below, while it still names
+              // the message in the folder the server has it in.
+              if (this.spamMover && email.uid > 0) {
+                const { uid } = email;
+                this.spamMover(folder.path, uid).catch((err: unknown) => {
+                  logger.warn(`[AutoSpam] Server-side move failed for uid ${uid} in ${folder.path}: ${(err as Error)?.message ?? err}`);
+                });
+              }
+              // Keep the in-memory record current: the filter rules and the
+              // email:synced event below read it, and must see the re-file.
+              email.folderId = moved.folderId;
+              email.tags = moved.tags;
+              filed += 1;
+            } catch (err) {
+              // Non-fatal — a failed re-file must not break the sync.
+              logger.error(`[AutoSpam] Re-file failed for ${email.fromAddress}:`, err);
+            }
+          }
+          if (filed > 0) logger.info(`[AutoSpam] Filed ${filed} message(s) into the spam folder`);
+        }
+
+        // User filter rules: evaluate each new email and apply local tag/folder
+        // actions (consistent with the spam re-file above — no server-side
+        // IMAP move at ingest). Rules are invariant across the batch, so they
+        // are loaded once, lazily, only if any exist.
+        let filterRules: FilterRule[] | null = null;
 
         try {
           filterRules = quiet ? [] : await storage.getEnabledFilterRules();
@@ -664,6 +717,12 @@ export class MessageProcessor {
     folderId: string,
     folderPath?: string,
     labelCtx?: GmailLabelContext,
+    opts?: {
+      /** The user has reported this sender (a `spammers` row). */
+      knownSpammer?: boolean;
+      /** The user's own outgoing mail (Sent / Drafts) — never spam-scored. */
+      ownMail?: boolean;
+    },
   ): Promise<EmailRecord> {
     const messageId = message.envelope.messageId;
 
@@ -743,6 +802,34 @@ export class MessageProcessor {
     // A plain non-flag/non-folder tag: it survives flag sync and never renders as
     // a folder or label, mirroring how AI-category slugs live in the tag string.
     if (message.isBulk) tagList.push('bulk');
+
+    // Mail authentication and the header-only spam signals, both from the
+    // headers this fetch already carried. `auth` is parsed once here and
+    // shared: the spam score keys on the same DMARC verdict the shield does.
+    const auth = message.authHeaders ? parseAuthenticationHeaders(message.authHeaders) : null;
+    const headers = message.rawHeaders ? headerLookupFromText(message.rawHeaders) : null;
+    const spam = opts?.ownMail
+      ? null
+      : assessSpamSignals({
+          fromAddress: envelopeFields.fromAddress,
+          fromName: envelopeFields.fromName,
+          replyTo: envelopeFields.replyTo,
+          toAddress: envelopeFields.toAddress,
+          ccAddress: envelopeFields.ccAddress,
+          subject,
+          // The id AS RECEIVED: a synthesised stand-in would hide the missing header.
+          messageId: message.messageIdSynthesized ? '' : messageId,
+          inReplyTo,
+          references,
+          date: toUnixSeconds(message.envelope?.date),
+          internalDate: toUnixSeconds(message.date),
+          auth,
+          headers,
+          knownSpammer: opts?.knownSpammer === true,
+        });
+    // The classification tag the AI pipeline excludes on and the Spam filter
+    // view lists — the same lowercase `spam` the AI's own verdict writes.
+    if (spam?.isSpam) tagList.push('spam');
     const tags = buildTags(tagList);
 
     return {
@@ -796,9 +883,17 @@ export class MessageProcessor {
       // recorded it. NULL when the server sent no verdict — that is a real
       // state ("unverifiable"), distinct from "checked and failed", and the
       // security level treats the two differently.
-      authStatus: message.authHeaders
-        ? JSON.stringify(parseAuthenticationHeaders(message.authHeaders))
-        : undefined,
+      authStatus: auth ? JSON.stringify(auth) : undefined,
+
+      // Spam filter, header stage. NULL when not scored — the user's own
+      // outgoing mail — so "not judged" and "judged clean" stay distinct.
+      spamScore: spam ? spam.score : null,
+      spamReasons: spam ? JSON.stringify(spam.reasons) : null,
+      // The connecting client's address, for the reputation stage.
+      originIp: extractOriginIp({
+        authHeaders: message.authHeaders,
+        received: message.rawHeaders ? headerValuesFromText(message.rawHeaders, 'received') : null,
+      }),
 
       // AI
       hasEmbedding: false,

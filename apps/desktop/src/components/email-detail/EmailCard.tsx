@@ -93,7 +93,9 @@ export function EmailCard({ ctx }: EmailCardProps) {
                   <SecurityIndicator
                     fromName={displayEmail.fromName}
                     fromAddress={displayEmail.fromAddress}
-              authStatus={displayEmail.authStatus}
+                    authStatus={displayEmail.authStatus}
+                    spamScore={displayEmail.spamScore}
+                    spamReasons={displayEmail.spamReasons}
                     html={displayEmail.rawBody}
                   />
                 </div>
@@ -187,6 +189,8 @@ export function EmailCard({ ctx }: EmailCardProps) {
               fromName={displayEmail.fromName}
               fromAddress={displayEmail.fromAddress}
               authStatus={displayEmail.authStatus}
+              spamScore={displayEmail.spamScore}
+              spamReasons={displayEmail.spamReasons}
               html={displayEmail.rawBody}
             />
             {/* Calendar invite card (Gmail-style) — rendered above the body when

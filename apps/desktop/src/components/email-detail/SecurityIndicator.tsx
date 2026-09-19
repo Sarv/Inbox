@@ -10,6 +10,9 @@ interface SecurityIndicatorProps {
   fromAddress?: string | null;
   html?: string | null;
   authStatus?: string | null;
+  /** Stored spam filter score / reasons (emails.spam_score, emails.spam_reasons). */
+  spamScore?: number | null;
+  spamReasons?: string | null;
   className?: string;
 }
 
@@ -53,11 +56,11 @@ const STATUS_TONE: Record<SecurityCheck['status'], string> = {
  * and the green shield on a bank statement is the thing that makes the red one
  * on a fake bank statement mean something.
  */
-export function SecurityIndicator({ fromName, fromAddress, html, authStatus, className = '' }: SecurityIndicatorProps) {
+export function SecurityIndicator({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, className = '' }: SecurityIndicatorProps) {
   const { sets } = useLinkRules();
   const assessment = useMemo(
-    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, rules: sets }),
-    [fromName, fromAddress, html, authStatus, sets],
+    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, rules: sets }),
+    [fromName, fromAddress, html, authStatus, spamScore, spamReasons, sets],
   );
   const Icon = ICON[assessment.level];
   const copy = LEVEL_COPY[assessment.level];

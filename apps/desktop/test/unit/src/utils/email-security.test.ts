@@ -57,7 +57,10 @@ describe('assessEmailSecurity — the level', () => {
   it('is unverified when no auth verdict exists and nothing is wrong', () => {
     const a = assessEmailSecurity({ fromName: 'Ravi', fromAddress: 'ravi@example.org', html: '<p>hi</p>' });
     expect(a.level).toBe('unverified');
-    expect(a.checks.filter((c) => c.status === 'unknown')).toHaveLength(3);
+    // SPF, DKIM and DMARC unknown — and the spam filter's "not scored" line,
+    // which is also unknown rather than pass: an unscored row must never read
+    // as clean.
+    expect(a.checks.filter((c) => c.status === 'unknown').map((c) => c.id).sort()).toEqual(['dkim', 'dmarc', 'spam', 'spf']);
   });
 
   // The classic tell: text names one domain, href goes to another.
@@ -249,5 +252,77 @@ describe('assessEmailSecurity — DMARC is the authoritative verdict', () => {
       authStatus: auth('pass', 'pass', 'none', 'pass'), html: '<a href="https://cdn.x.io/a">go</a>',
     });
     expect(a.level).toBe('authenticated');
+  });
+});
+
+describe('assessEmailSecurity — the spam filter’s stored verdict', () => {
+  // The score is read back from the row, never recomputed: the headers it
+  // needs are not stored, and the verdict shown must be the one that filed
+  // the message.
+  const spamReasons = JSON.stringify([
+    { id: 'auth-failed', points: 3, detail: 'DMARC failed' },
+    { id: 'fake-reply', points: 2, detail: 'Looks like a reply, but it is not replying to anything' },
+  ]);
+
+  // Filed as spam → the shield is at least caution, and the tooltip carries
+  // the score with every reason, so "spam" is never a bare adjective.
+  it('floors the level at caution and lists the reasons when the row was filed as spam', () => {
+    const a = assessEmailSecurity({ fromName: 'X', fromAddress: 'x@shop.com', authStatus: PASS, spamScore: 5, spamReasons });
+    expect(a.level).toBe('caution');
+    expect(a.spam).toEqual({ verdict: 'spam', score: 5, reasons: JSON.parse(spamReasons) });
+    const check = a.checks.find((c) => c.id === 'spam')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('Scored 5');
+    expect(check.detail).toContain('DMARC failed');
+    expect(check.detail).toContain('not replying to anything');
+  });
+
+  // Spam is caution, not danger: what makes spam DANGEROUS (a failed DMARC, a
+  // spoofed name) already scores danger on its own; the rest is unwanted, not
+  // impersonation. A red shield on every newsletter blast would teach the
+  // reader to ignore red.
+  it('does not escalate spam to danger on its own, but never softens a danger either', () => {
+    expect(assessEmailSecurity({ fromAddress: 'x@shop.com', authStatus: PASS, spamScore: 9, spamReasons: '[]' }).level).toBe('caution');
+    expect(assessEmailSecurity({ fromAddress: 'x@shop.com', authStatus: FAIL, spamScore: 9, spamReasons: '[]' }).level).toBe('danger');
+  });
+
+  // A suspicious score is shown as a warning line without changing the level:
+  // the filter did not file it, so the shield should not look like it did.
+  it('shows a suspicious score as a warning without lowering the level', () => {
+    const a = assessEmailSecurity({ fromAddress: 'billing@sarv.com', authStatus: PASS, spamScore: 3, spamReasons: '[]' });
+    expect(a.level).toBe('verified');
+    expect(a.checks.find((c) => c.id === 'spam')).toMatchObject({ status: 'warn', detail: expect.stringContaining('Scored 3') });
+  });
+
+  it('reports a clean score as a pass', () => {
+    const a = assessEmailSecurity({ fromAddress: 'billing@sarv.com', authStatus: PASS, spamScore: 0, spamReasons: '[]' });
+    expect(a.checks.find((c) => c.id === 'spam')).toMatchObject({ status: 'pass', detail: 'No spam signals in the headers' });
+    expect(a.spam.verdict).toBe('clean');
+  });
+
+  // NULL means "never scored" (synced before the filter existed, or the
+  // user's own outgoing mail) and must not read as clean OR as suspicious.
+  it('says "not scored" for a row without a score, and never lowers the level for it', () => {
+    const a = assessEmailSecurity({ fromAddress: 'billing@sarv.com', authStatus: PASS });
+    expect(a.level).toBe('verified');
+    expect(a.spam).toEqual({ verdict: null, score: null, reasons: [] });
+    expect(a.checks.find((c) => c.id === 'spam')).toMatchObject({ status: 'unknown', detail: expect.stringContaining('Not scored') });
+  });
+
+  // One bad row must not crash the detail pane.
+  it('tolerates malformed stored reasons', () => {
+    const a = assessEmailSecurity({ fromAddress: 'x@shop.com', authStatus: PASS, spamScore: 5, spamReasons: 'not json' });
+    expect(a.level).toBe('caution');
+    expect(a.spam.reasons).toEqual([]);
+  });
+
+  // The thread banner lands on the first message that warrants one; a filed
+  // spam message warrants one.
+  it('makes firstFlaggedEmailId pick a spam-filed message', () => {
+    const id = firstFlaggedEmailId([
+      { id: 'clean', date: 1, fromAddress: 'a@sarv.com', authStatus: PASS },
+      { id: 'spam', date: 2, fromAddress: 'b@shop.com', authStatus: PASS, spamScore: 5, spamReasons: '[]' },
+    ]);
+    expect(id).toBe('spam');
   });
 });

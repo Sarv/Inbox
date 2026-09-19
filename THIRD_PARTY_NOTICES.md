@@ -82,12 +82,16 @@ under `node_modules/` after `pnpm install`.
   https://github.com/jackbearheart/email-addresses
 - **email-reply-parser** 2.3.9 — Node library for parsing plain text email content. Based on https://gi  
   https://github.com/crisp-oss/email-reply-parser
+- **free-email-domains** 1.12.1 — A list of free email domains  
+  https://github.com/Kikobeats/free-email-domains
 - **html-to-text** 10.0.0 — Advanced html to plain text converter  
   https://github.com/html-to-text/node-html-to-text
 - **iconv-lite** 0.7.2 — Convert character encodings in pure javascript.  
   https://github.com/pillarjs/iconv-lite
 - **imapflow** 1.4.2 — IMAP Client for Node  
   https://github.com/postalsys/imapflow
+- **ipaddr.js** 2.5.0 — A library for manipulating IPv4 and IPv6 addresses in JavaScript.  
+  https://github.com/whitequark/ipaddr.js
 - **libmime** 5.3.8 — Encode and decode quoted printable and base64 strings  
   https://github.com/nodemailer/libmime
 - **libphonenumber-js** 1.13.8 — A simpler (and smaller) rewrite of Google Android's libphonenumber lib  

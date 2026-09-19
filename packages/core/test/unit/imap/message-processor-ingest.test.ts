@@ -305,7 +305,10 @@ describe('processBatch — trivial and degenerate inputs', () => {
     expect(db.calls).toEqual([]); // not even a lookup query
   });
 
-  it('leaves a spammer\'s mail where it is when there is NO spam folder', async () => {
+  // No spam folder to file into: the row stays put but still carries the
+  // classification tag, so it stays out of the AI pipeline and the shield can
+  // say why. (Was: left completely unmarked.)
+  it('leaves a spammer\'s mail where it is when there is NO spam folder, but tags it', async () => {
     const { db, mp } = setup();
     db.markSpammer('spammer@test.local');
 
@@ -314,7 +317,9 @@ describe('processBatch — trivial and degenerate inputs', () => {
       db.folder(INBOX), db.asStorage(),
     );
 
-    expect(db.tagsOf(db.allRows()[0].id)).toEqual([INBOX]);
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId(INBOX));
+    expect(db.tagsOf(row.id).sort()).toEqual([INBOX, 'spam']);
   });
 
   it('a FAILING spammer check does not break the sync', async () => {
@@ -542,7 +547,8 @@ describe('processBatch — quiet (historical backfill) mode', () => {
 
     const row = db.allRows()[0];
     expect(row.folderId).toBe(db.folderId('Spam'));
-    expect(db.tagsOf(row.id)).toEqual(['Spam']); // INBOX membership dropped
+    // INBOX membership dropped; the folder tag AND the classification tag remain.
+    expect(db.tagsOf(row.id).sort()).toEqual(['Spam', 'spam']);
   });
 });
 
@@ -676,5 +682,183 @@ describe('convertMessage', () => {
       expect(sameMessage.contentHash).toBe(first.contentHash);
       expect(again.contentHash).not.toBe(first.contentHash);
     });
+  });
+});
+
+
+describe('processBatch — spam filter (header stage)', () => {
+  // The score is computed in convertMessage from the fetched headers and
+  // stored with the INSERT; the re-file and the server-side move are the
+  // reactive part. Pinned end to end here because a regression looks like
+  // nothing: spam simply keeps arriving in INBOX, and the AI keeps paying for
+  // it.
+  const spamHeaders = 'X-Spam-Flag: YES\r\nReceived: from mta.example.net (mta.example.net [185.199.108.1]) by mx.test.local with ESMTPS id 1\r\n';
+  const reasonIds = (row: { spamReasons?: string | null }): string[] =>
+    (JSON.parse(row.spamReasons ?? '[]') as Array<{ id: string }>).map((r) => r.id).sort();
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('scores every inserted row from its headers and stores the score, the reasons and the origin IP', async () => {
+    const { db, mp } = setup(); // no spam folder in the default setup
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(5);
+    expect(reasonIds(row)).toEqual(['upstream-spam']);
+    expect(row.originIp).toBe('185.199.108.1');
+    // Nowhere to file it: stays in INBOX, tagged.
+    expect(row.folderId).toBe(db.folderId(INBOX));
+    expect(db.tagsOf(row.id).sort()).toEqual([INBOX, 'spam']);
+  });
+
+  // THE false-positive guard at the integration level: an ordinary message
+  // must come out with a score of 0 — not NULL (that means "not scored").
+  it('scores a clean message 0, with no reasons and no spam tag', async () => {
+    const { db, mp } = setup();
+
+    await mp.processBatch([msg({ uid: 1 })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(0);
+    expect(row.spamReasons).toBe('[]');
+    expect(db.tagsOf(row.id)).toEqual([INBOX]);
+  });
+
+  it('the classic phish — a spoofed name on a DMARC failure — is filed as spam locally AND queued for the server', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    const mover = vi.fn().mockResolvedValue(undefined);
+    mp.setSpamMover(mover);
+
+    await mp.processBatch([msg({
+      uid: 7,
+      envelope: { from: [{ address: 'x@evil.example', name: 'support@paypal.com' }] } as never,
+      authHeaders: 'Authentication-Results: mx.test.local; spf=fail; dkim=fail; dmarc=fail',
+    })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(6);
+    expect(reasonIds(row)).toEqual(['auth-failed', 'display-name-spoof']);
+    expect(row.folderId).toBe(db.folderId('Spam'));
+    expect(db.tagsOf(row.id).sort()).toEqual(['Spam', 'spam']);
+    // The server-side move names the SOURCE folder and the uid the message has there.
+    expect(mover).toHaveBeenCalledTimes(1);
+    expect(mover).toHaveBeenCalledWith(INBOX, 7);
+  });
+
+  it('a sender the user reported is scored as such and filed', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markSpammer('spammer@test.local');
+
+    await mp.processBatch(
+      [msg({ uid: 1, envelope: { from: [{ address: 'spammer@test.local', name: '' }] } as never })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    const row = db.allRows()[0];
+    expect(reasonIds(row)).toEqual(['known-spammer']);
+    expect(row.spamScore).toBe(5);
+    expect(row.folderId).toBe(db.folderId('Spam'));
+  });
+
+  // Historical backfill must not re-file or touch the server (a lakh of old
+  // spam is not a lakh of IMAP moves) — but the verdict is still stored, so
+  // the AI exclusion and the shield are right for old mail too.
+  it('quiet mode scores and tags, but neither re-files nor queues a server move', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    const mover = vi.fn().mockResolvedValue(undefined);
+    mp.setSpamMover(mover);
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(INBOX), db.asStorage(), undefined, { quiet: true });
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(5);
+    expect(db.tagsOf(row.id).sort()).toEqual([INBOX, 'spam']);
+    expect(row.folderId).toBe(db.folderId(INBOX));
+    expect(mover).not.toHaveBeenCalled();
+  });
+
+  // Your own words are never spam. A draft has no Message-ID yet and a sent
+  // copy carries no authentication verdict — scored, they would look like
+  // forgeries. NULL, not 0: "not judged".
+  it('never scores the user\'s own Sent or Drafts mail', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Drafts');
+    db.addFolder('Spam');
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(SENT), db.asStorage());
+    await mp.processBatch([msg({ uid: 2, rawHeaders: spamHeaders })], db.folder('Drafts'), db.asStorage());
+
+    for (const row of db.allRows()) {
+      expect(row.spamScore).toBeNull();
+      expect(row.spamReasons).toBeNull();
+      expect(db.tagsOf(row.id)).not.toContain('spam');
+      expect(row.folderId).not.toBe(db.folderId('Spam'));
+    }
+  });
+
+  it('a failing server-side move is logged, not a failed sync or a lost local re-file', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    mp.setSpamMover(vi.fn().mockRejectedValue(new Error('socket closed')));
+
+    const res = await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(INBOX), db.asStorage());
+    await new Promise((r) => setTimeout(r, 0)); // let the rejected promise settle
+
+    expect(res.inserted).toBe(1);
+    expect(res.errors).toBe(0);
+    expect(db.allRows()[0].folderId).toBe(db.folderId('Spam'));
+  });
+
+  it('a failing local re-file does not break the sync, and the row keeps its verdict', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    vi.spyOn(db, 'updateEmail').mockRejectedValue(new Error('db busy'));
+
+    const res = await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(INBOX), db.asStorage());
+
+    expect(res.inserted).toBe(1);
+    expect(res.errors).toBe(0);
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(5); // stored with the INSERT, before the re-file
+    expect(db.tagsOf(row.id)).toContain('spam');
+  });
+
+  it('records the connecting IP from the SPF verdict ahead of the Received trace', async () => {
+    const { db, mp } = setup();
+
+    await mp.processBatch([
+      msg({ uid: 1, authHeaders: 'Received-SPF: pass client-ip=209.85.220.41;', rawHeaders: spamHeaders }),
+      msg({ uid: 2 }), // no headers at all
+    ], db.folder(INBOX), db.asStorage());
+
+    const byUid = new Map(db.allRows().map((r) => [r.uid, r]));
+    expect(byUid.get(1)?.originIp).toBe('209.85.220.41');
+    expect(byUid.get(2)?.originIp).toBeNull();
+  });
+
+  // THE reason the server-side move exists. Locally the message now lives in
+  // Spam and lost its INBOX tag; the server still has it in INBOX until the
+  // queued move lands. The next INBOX reconcile fetches that UID again and
+  // finds the row "moved away" — which reads as an external move-BACK unless
+  // a pending op on the UID says otherwise. The queued spam move IS that
+  // pending op. Without it the filed spam sprang back into INBOX.
+  it('a re-sync of a filed message does not move it back while its server move is pending', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    mp.setSpamMover(vi.fn().mockResolvedValue(undefined));
+    mp.setPendingUidsProvider(async () => new Set([1])); // the queued move, as the op queue reports it
+    const message = msg({ uid: 1, rawHeaders: spamHeaders });
+
+    await mp.processBatch([message], db.folder(INBOX), db.asStorage());
+    await mp.processBatch([message], db.folder(INBOX), db.asStorage());
+
+    expect(db.allRows()).toHaveLength(1);
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId('Spam'));
+    expect(db.tagsOf(row.id)).not.toContain(INBOX);
   });
 });

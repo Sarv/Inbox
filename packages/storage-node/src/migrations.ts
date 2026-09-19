@@ -2987,6 +2987,36 @@ export const linkDomainRules: Migration = {
 };
 
 /**
+ * v86 — the spam filter's header-stage verdict and the connecting IP.
+ *
+ * `spam_score` / `spam_reasons` are written once at ingest by the processor
+ * (core utils/spam-signals) and read by the shield to say WHY a message was
+ * filed. `origin_ip` is the address that handed the message to the recipient's
+ * mail system, recorded now so the reputation stage (blocklists, reverse DNS)
+ * has something to look up without re-fetching headers. All three are NULL on
+ * rows synced before this version — "not scored", which is distinct from a
+ * score of 0 and is what a later backfill selects on. ADD COLUMN is O(1)
+ * metadata in SQLite; no rewrite of the mail table.
+ */
+export const emailSpamColumns: Migration = {
+  version: 86,
+  name: 'email_spam_columns',
+  up: (db) => {
+    const colNames = new Set(
+      (db.prepare('PRAGMA table_info(emails)').all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!colNames.has('spam_score')) db.exec('ALTER TABLE emails ADD COLUMN spam_score REAL;');
+    if (!colNames.has('spam_reasons')) db.exec('ALTER TABLE emails ADD COLUMN spam_reasons TEXT;');
+    if (!colNames.has('origin_ip')) db.exec('ALTER TABLE emails ADD COLUMN origin_ip TEXT;');
+    logger.info('email spam columns (v86): spam_score, spam_reasons, origin_ip ready');
+  },
+  down: () => {
+    // Dropping columns rewrites the table on older SQLite builds; the columns
+    // are harmless when unused, so leave them.
+  },
+};
+
+/**
  * v84 — re-key the search index by rowid so maintaining it stops scanning it.
  *
  * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
@@ -3221,5 +3251,6 @@ export function createMigrationManager(
   manager.register(allMailThreadIndexes);
   manager.register(ftsRowidAlignment);
   manager.register(linkDomainRules);
+  manager.register(emailSpamColumns);
   return manager;
 }

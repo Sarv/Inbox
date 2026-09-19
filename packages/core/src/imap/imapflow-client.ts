@@ -47,6 +47,7 @@ import {
 } from '../utils/bulk-mail';
 import { logger } from '../utils/logger';
 import { createMutex, type Mutex } from '../utils/mutex';
+import { SPAM_HEADER_NAMES } from '../utils/spam-signals';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
 import { extractAuthHeaderBlock } from './auth-headers';
@@ -932,6 +933,11 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
             // with the envelope the client never learns whether SPF / DKIM /
             // DMARC passed — see IMAPMessage.authHeaders.
             'authentication-results', 'arc-authentication-results', 'received-spf',
+            // The spam filter's header stage: an upstream filter's verdict, and
+            // the Received trace for the connecting client's address when the
+            // SPF headers above do not name it — see spam-signals / origin-ip.
+            ...SPAM_HEADER_NAMES,
+            'received',
           ],
         },
         { uid: useUid },
@@ -997,6 +1003,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // We carry the flag through to threading (see thread-resolver Path 3).
       isBulk: this.detectBulk(headers),
       authHeaders: extractAuthHeaderBlock(headers),
+      // The fetched header fields, verbatim, for the header-only stages that
+      // run at ingest (spam signals, origin IP). Only the fields asked for
+      // above — a few hundred bytes — never the whole message.
+      rawHeaders: headers ? headers.toString('utf8') : undefined,
       // Gmail labels, when the server sent them. ImapFlow surfaces X-GM-LABELS
       // as a Set; normalise to a plain array so downstream code (and the fake
       // server in tests) can treat it as data. Absent on non-Gmail servers.

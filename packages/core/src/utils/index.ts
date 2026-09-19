@@ -38,3 +38,7 @@ export * from './lru-cache';
 export * from './ai-categories';
 export * from './single-flight';
 export * from './mutex';
+export * from './sender-spoof';
+export * from './origin-ip';
+export * from './spam-verdict';
+export * from './spam-signals';

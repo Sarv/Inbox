@@ -80,6 +80,16 @@ export interface EmailRecord {
   importanceSource?: 'none' | 'provider' | 'ai' | 'user' | 'rule';
   authStatus?: string; // JSON string of AuthStatus (SPF/DKIM/DMARC)
 
+  // Spam filter, header stage (see core utils/spam-signals). Scored once at
+  // ingest; NULL means "not scored" (synced before the filter existed, or the
+  // user's own outgoing mail), which is distinct from a score of 0.
+  spamScore?: number | null;
+  spamReasons?: string | null; // JSON array of SpamReason
+  // The address that handed the message to the recipient's mail system, for
+  // the reputation stage (blocklists, reverse DNS). NULL when no header names
+  // a public one.
+  originIp?: string | null;
+
   // AI processing metadata
   aiProcessedAt?: number | null;
   aiConfidence?: number;

@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A spam filter that runs before the AI. Every arriving message is scored from
+  its headers alone — a failed DMARC, a display name that names another domain,
+  a "Re:" that replies to nothing, a missing or mis-dated Message-ID/Date,
+  bulk mail with no way to unsubscribe, a Reply-To pointing at a free webmail
+  address, your own mail server's spam verdict, and senders you have reported.
+  A message over the line is tagged `spam`, moved to the account's spam folder
+  (on the server too, through the same queue "Report spam" uses, so it does not
+  spring back on the next sync) and kept out of AI categorisation; the shield
+  beside the sender lists the score and every reason. Nothing leaves the
+  machine: this stage is deterministic and offline. The connecting server's IP
+  address is recorded per message for the reputation stage (blocklists, reverse
+  DNS) that follows. Your own Sent and Drafts mail is never scored.
 - Attachments now open **inside** Sarv Inbox. Clicking an attachment shows it in
   an in-app viewer — PDFs, images (including SVG), text/CSV/JSON/Markdown/log
   files, audio and video — instead of writing a copy to disk and handing the file

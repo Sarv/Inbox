@@ -255,6 +255,18 @@ export class SyncEngine {
     this.folderSyncer.setPendingUidsProvider(pendingUids);
     this.realtimeManager.setPendingUidsProvider(pendingUids);
 
+    // Mail the spam filter files at ingest is moved on the server through the
+    // same persisted queue "Report spam" uses. Persisting first is what makes
+    // the UID show up in `pendingUids` above, so the source folder's next
+    // reconcile does not read the server's not-yet-moved copy as an external
+    // move-back and relink it — a local-only re-file sprang back within one
+    // reconcile. Mid-sync the op waits in the queue and runs when the sync
+    // finishes, exactly like a user action taken during a sync.
+    const spamMover = (folderPath: string, uid: number) => this.operationQueue.moveToSpam(folderPath, uid);
+    this.messageProcessor.setSpamMover(spamMover);
+    this.folderSyncer.setSpamMover(spamMover);
+    this.realtimeManager.setSpamMover(spamMover);
+
     // Hook folder-sync inserts into the same event stream realtime
     // uses, so manual / periodic syncs that insert new emails get
     // surfaced to the renderer (otherwise the realtime polling that

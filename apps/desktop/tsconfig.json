@@ -37,7 +37,12 @@
       "@sarvinbox/core/attachment-kind": ["../../packages/core/src/utils/attachment-kind.ts"],
       // Same: pure bulk/notification predicate, shared so the renderer and the
       // sync layer agree on what a blast is.
-      "@sarvinbox/core/bulk-mail": ["../../packages/core/src/utils/bulk-mail.ts"]
+      "@sarvinbox/core/bulk-mail": ["../../packages/core/src/utils/bulk-mail.ts"],
+      // Same: display-name impersonation, one rule for the shield and the
+      // sync-time spam filter.
+      "@sarvinbox/core/sender-spoof": ["../../packages/core/src/utils/sender-spoof.ts"],
+      // Same: the spam filter's thresholds and stored-reason parser.
+      "@sarvinbox/core/spam-verdict": ["../../packages/core/src/utils/spam-verdict.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],

@@ -2,50 +2,14 @@ import { describe, it, expect } from 'vitest';
 
 import { assessSender, assessPhishing, registrableDomain } from '../../../../src/utils/phishing';
 
-describe('registrableDomain', () => {
-  it('collapses subdomains to eTLD+1, including multi-part TLDs', () => {
+// registrableDomain / assessSender are re-exported from core's sender-spoof
+// module and pinned in packages/core/test/unit/utils/sender-spoof.test.ts. What
+// stays here is the renderer's own roll-up and the fact that the re-export
+// still answers to this module's name — callers and the shield import it here.
+describe('re-exports from core', () => {
+  it('still exposes registrableDomain and assessSender', () => {
     expect(registrableDomain('mail.paypal.com')).toBe('paypal.com');
-    expect(registrableDomain('a.b.company.co.uk')).toBe('company.co.uk');
-  });
-  it('returns null for non-domains', () => {
-    expect(registrableDomain('Advik')).toBeNull();
-    expect(registrableDomain('')).toBeNull();
-    expect(registrableDomain(null)).toBeNull();
-  });
-});
-
-describe('assessSender', () => {
-  it('flags DANGER when the display name references a different registrable domain', () => {
-    const r = assessSender('support@paypal.com', 'attacker@evil.ru');
-    expect(r).toHaveLength(1);
-    expect(r[0].severity).toBe('danger');
-    expect(r[0].text).toContain('paypal.com');
-    expect(r[0].text).toContain('evil.ru');
-  });
-
-  it('does NOT flag a subdomain of the sender domain in the name', () => {
-    expect(assessSender('Amazon.com', 'ship@mail.amazon.com')).toEqual([]);
-  });
-
-  it('does NOT flag ordinary human display names', () => {
-    expect(assessSender('Advik Dutta', 'advik.d@sarv.com')).toEqual([]);
-    expect(assessSender('Meghna Kotak', 'meghna.k@sarv.com')).toEqual([]);
-  });
-
-  it('does NOT flag a brand word with no domain in the name', () => {
-    // Conservative by design: a name like "PayPal Service" with no embedded
-    // domain is NOT treated as impersonation (avoids false positives).
-    expect(assessSender('PayPal Service', 'no-reply@paypal.com')).toEqual([]);
-  });
-
-  it('flags CAUTION for a punycode/IDN sender domain', () => {
-    const r = assessSender('', 'billing@xn--paypa-9qa.com');
-    expect(r).toHaveLength(1);
-    expect(r[0].severity).toBe('caution');
-  });
-
-  it('returns nothing when the address has no parseable domain', () => {
-    expect(assessSender('Somebody', 'not-an-email')).toEqual([]);
+    expect(assessSender('support@paypal.com', 'attacker@evil.ru')[0]?.severity).toBe('danger');
   });
 });
 

@@ -272,6 +272,8 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
               fromAddress={email.fromAddress}
               html={email.rawBody}
               authStatus={email.authStatus}
+              spamScore={email.spamScore}
+              spamReasons={email.spamReasons}
             />
             <span className="truncate">{email.fromAddress}</span>
           </div>
