@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Sender reputation as a spam signal. After a message arrives, its sending
+  server's address and its sender and Reply-To domains are looked up — through
+  Sarv's reputation service with your own Sarv sign-in (the default once its
+  address is set), or local DNS blocklists if you choose — and a listing adds
+  to the spam score; a message that crosses the line only then is tagged and
+  filed exactly as the header stage would have. Fail-open throughout: a
+  refused, unreachable or unauthenticated lookup adds nothing. Answers are
+  cached per address for six hours. Settings → General chooses the provider;
+  Security → Overview shows what is waiting and anything a provider refused.
 - Brand logos and a verified-sender tick, Gmail-style. A sender domain's BIMI
   record is looked up once, in the background, and its logo becomes the avatar
   on mail that passed DMARC. When the domain's Verified Mark Certificate chains
@@ -57,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NOTICE`, [`TRADEMARKS.md`](./TRADEMARKS.md),
   [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and
   [`docs/LICENSING-FAQ.md`](./docs/LICENSING-FAQ.md).
+
+### Fixed
+- Filter rules that move or flag mail no longer spring back. A rule's move
+  used to be a local projection only, so the next sync found the server's copy
+  still in place and relinked it; a rule's "mark read" met the same fate at
+  the next flag sync. Every rule action now queues its server-side operation
+  through the same persisted queue user actions use — flags first, then the
+  one move the message ends up making.
 
 ### Changed
 - Category labels are no longer prefixed on Sarv accounts, and no longer create

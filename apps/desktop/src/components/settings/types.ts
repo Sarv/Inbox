@@ -37,6 +37,14 @@ export interface AppSettings {
   /** When a sender has no photo or logo, use the domain's favicon. One fetch
    *  per domain, which tells that domain a client here looked, once. */
   senderFavicons: boolean;
+  /** The spam filter's reputation stage: who is asked about sender IPs and
+   *  domains after a message arrives. 'sarv' = the Sarv-hosted service (needs
+   *  its endpoint; nothing happens until it is set), 'local' = DNS blocklists
+   *  queried from this machine (Spamhaus and URIBL refuse public resolvers),
+   *  'off' = judge from headers only. */
+  spamReputationMode: 'off' | 'local' | 'sarv';
+  /** Origin of the Sarv reputation service, e.g. https://reputation.sarv.com. */
+  spamReputationEndpoint: string;
 
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
@@ -102,6 +110,8 @@ export const defaultSettings: AppSettings = {
   remoteImageMode: 'safe',
   senderLogos: true,
   senderFavicons: true,
+  spamReputationMode: 'sarv',
+  spamReputationEndpoint: '',
   categoryLabels: { enabled: true, folderMode: 'copy' },
   inboxType: 'priority_first',
   showImportanceMarkers: true,

@@ -26,6 +26,7 @@ import { registerOAuthHandlers } from './oauth-handlers';
 import { registerQueueHandlers } from './queue-handlers';
 import { registerSecureCredentialsHandlers } from './secure-credentials-handlers';
 import { registerSmtpHandlers } from './smtp-handlers';
+import { registerSpamHandlers } from './spam-handlers';
 import { registerStorageHandlers } from './storage-handlers';
 import { registerSyncHandlers } from './sync-handlers';
 
@@ -61,6 +62,7 @@ export function registerAllHandlers(): void {
   registerNotificationHandlers();
   registerStorageHandlers();
   registerIdentityHandlers();
+  registerSpamHandlers();
 
   logger.info('[IPC] All handlers registered');
 }

@@ -29,7 +29,11 @@ export type SpamReasonId =
   | 'fake-reply'
   | 'no-recipient'
   | 'bulk-no-unsubscribe'
-  | 'precedence-junk';
+  | 'precedence-junk'
+  // Reputation stage (spam-reputation.ts): network signals added after insert.
+  | 'ip-blocklisted'
+  | 'domain-blocklisted'
+  | 'user-reported';
 
 export interface SpamReason {
   id: SpamReasonId;

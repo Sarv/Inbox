@@ -80,6 +80,7 @@ import {
 } from './services/single-child';
 import { decideSecondInstanceAction, isOrphanedFromLauncher, mainProcessTitle, shouldKillLauncherOnQuit } from './services/single-instance';
 import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
+import { startSpamReputationScheduler, stopSpamReputationScheduler } from './services/spam-reputation-service';
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
 import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
 import {
@@ -215,6 +216,7 @@ function stopBackgroundTimers(): void {
   try { stopStartupThreadRepair(); } catch {}
   try { stopAvatarDiscoveryScheduler(); } catch {}
   try { stopSenderIdentityScheduler(); } catch {}
+  try { stopSpamReputationScheduler(); } catch {}
   try { stopBodyRehealScheduler(); } catch {}
   // Returns a promise: its final flush is a DB write, so the shutdown path must
   // await it or the last batch of pipeline events dies in the buffer. Captured
@@ -853,6 +855,7 @@ app.whenReady().then(async () => {
     startStartupThreadRepair();
     startAvatarDiscoveryScheduler();
     startSenderIdentityScheduler();
+    startSpamReputationScheduler();
     startBodyRehealScheduler();
     startPipelineEventPersister();
     startNotificationService();
