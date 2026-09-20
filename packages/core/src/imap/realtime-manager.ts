@@ -9,7 +9,7 @@ import { createMutex, type Mutex } from '../utils/mutex';
 
 import { isConnectionError } from './imap-errors';
 import { fetchNewMessagesWindowed } from './incremental-fetch';
-import { MessageProcessor } from './message-processor';
+import { MessageProcessor, type IngestServerActions } from './message-processor';
 import { withFolderSelected } from './with-folder';
 
 /**
@@ -185,10 +185,10 @@ export class RealtimeManager extends EventEmitter {
     this.messageProcessor.setPendingUidsProvider(fn);
   }
 
-  /** Forward the server-side spam move so mail that arrives over IDLE and is
-   * filed as spam is moved on the server too, not only locally. */
-  setSpamMover(fn: (folderPath: string, uid: number) => Promise<unknown>): void {
-    this.messageProcessor.setSpamMover(fn);
+  /** Forward the server-side actions so what ingest decides for mail arriving
+   * over IDLE — a spam re-file, a rule's move or flag — happens on the server too. */
+  setServerActions(actions: Partial<IngestServerActions>): void {
+    this.messageProcessor.setServerActions(actions);
   }
 
   /**

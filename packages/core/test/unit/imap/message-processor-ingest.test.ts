@@ -729,7 +729,7 @@ describe('processBatch — spam filter (header stage)', () => {
     const { db, mp } = setup();
     db.addFolder('Spam');
     const mover = vi.fn().mockResolvedValue(undefined);
-    mp.setSpamMover(mover);
+    mp.setServerActions({ moveToSpam: mover });
 
     await mp.processBatch([msg({
       uid: 7,
@@ -770,7 +770,7 @@ describe('processBatch — spam filter (header stage)', () => {
     const { db, mp } = setup();
     db.addFolder('Spam');
     const mover = vi.fn().mockResolvedValue(undefined);
-    mp.setSpamMover(mover);
+    mp.setServerActions({ moveToSpam: mover });
 
     await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(INBOX), db.asStorage(), undefined, { quiet: true });
 
@@ -803,7 +803,7 @@ describe('processBatch — spam filter (header stage)', () => {
   it('a failing server-side move is logged, not a failed sync or a lost local re-file', async () => {
     const { db, mp } = setup();
     db.addFolder('Spam');
-    mp.setSpamMover(vi.fn().mockRejectedValue(new Error('socket closed')));
+    mp.setServerActions({ moveToSpam: vi.fn().mockRejectedValue(new Error('socket closed')) });
 
     const res = await mp.processBatch([msg({ uid: 1, rawHeaders: spamHeaders })], db.folder(INBOX), db.asStorage());
     await new Promise((r) => setTimeout(r, 0)); // let the rejected promise settle
@@ -849,7 +849,7 @@ describe('processBatch — spam filter (header stage)', () => {
   it('a re-sync of a filed message does not move it back while its server move is pending', async () => {
     const { db, mp } = setup();
     db.addFolder('Spam');
-    mp.setSpamMover(vi.fn().mockResolvedValue(undefined));
+    mp.setServerActions({ moveToSpam: vi.fn().mockResolvedValue(undefined) });
     mp.setPendingUidsProvider(async () => new Set([1])); // the queued move, as the op queue reports it
     const message = msg({ uid: 1, rawHeaders: spamHeaders });
 
@@ -860,5 +860,147 @@ describe('processBatch — spam filter (header stage)', () => {
     const row = db.allRows()[0];
     expect(row.folderId).toBe(db.folderId('Spam'));
     expect(db.tagsOf(row.id)).not.toContain(INBOX);
+  });
+});
+
+describe('processBatch — filter rules are mirrored on the server', () => {
+  // THE spring-back. A rule's move used to be a local projection only: the
+  // server still had the message in INBOX, the next reconcile of INBOX found
+  // the local row "moved away" with no pending op to explain it, and relinked
+  // it — filed mail was back within minutes. A rule's "mark read" met the same
+  // fate at the next flag sync. Every action now has its server op, queued in
+  // the order the server needs: flags while the uid is still valid here, then
+  // the ONE move the message ends up making.
+  type Actions = Parameters<MessageProcessor['setServerActions']>[0];
+  const wired = () => ({
+    markRead: vi.fn().mockResolvedValue(undefined),
+    star: vi.fn().mockResolvedValue(undefined),
+    moveToSpam: vi.fn().mockResolvedValue(undefined),
+    archive: vi.fn().mockResolvedValue(undefined),
+    moveToTrash: vi.fn().mockResolvedValue(undefined),
+    move: vi.fn().mockResolvedValue(undefined),
+  }) satisfies Actions;
+  /** Every server op in the order it was queued: [name, ...args]. */
+  const queued = (a: ReturnType<typeof wired>) =>
+    Object.entries(a)
+      .flatMap(([name, fn]) => fn.mock.calls.map((args, i) => ({ order: fn.mock.invocationCallOrder[i], op: [name, ...args] })))
+      .sort((x, y) => x.order - y.order)
+      .map((x) => x.op);
+  const rule = (actions: FilterRule['actions']): FilterRule => ({
+    id: 'r1', name: 'r', enabled: true, priority: 1, matchType: 'all',
+    conditions: [{ field: 'from', operator: 'contains', value: 'news@' }],
+    actions, stopProcessing: false, createdAt: 0, updatedAt: 0,
+  });
+  const newsletter = (uid = 1, over: Partial<IMAPMessage> = {}) =>
+    msg({ uid, envelope: { from: [{ address: 'news@test.local', name: '' }] } as never, ...over });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('mirrors read and star, then the ONE move the message ends up making', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Archive');
+    const a = wired();
+    mp.setServerActions(a);
+    db.setFilterRules([rule([{ type: 'markRead' }, { type: 'star' }, { type: 'archive' }, { type: 'delete' }])]);
+
+    await mp.processBatch([newsletter(7)], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId(TRASH)); // archive, then delete: ends in Trash
+    expect(db.tagsOf(row.id)).toEqual(expect.arrayContaining(['read', 'starred', TRASH]));
+    // Flags first (the uid is still INBOX's), then one move to where it ended up — not two.
+    expect(queued(a)).toEqual([['markRead', INBOX, 7], ['star', INBOX, 7], ['moveToTrash', INBOX, 7]]);
+  });
+
+  it('mirrors a move to a named folder, a spam rule and an archive rule as their own ops', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Projects'); db.addFolder('Spam'); db.addFolder('Archive');
+    const a = wired();
+    mp.setServerActions(a);
+    db.setFilterRules([
+      { ...rule([{ type: 'moveToFolder', value: 'Projects' }]), id: 'p', conditions: [{ field: 'subject', operator: 'contains', value: 'project' }] },
+      { ...rule([{ type: 'moveToSpam' }]), id: 's', conditions: [{ field: 'subject', operator: 'contains', value: 'junky' }] },
+      { ...rule([{ type: 'archive' }]), id: 'a', conditions: [{ field: 'subject', operator: 'contains', value: 'archive-me' }] },
+    ]);
+
+    await mp.processBatch([
+      msg({ uid: 1, envelope: { subject: 'project plan' } as never }),
+      msg({ uid: 2, envelope: { subject: 'junky offer' } as never }),
+      msg({ uid: 3, envelope: { subject: 'archive-me please' } as never }),
+    ], db.folder(INBOX), db.asStorage());
+
+    expect(queued(a)).toEqual([['move', INBOX, 1, 'Projects'], ['moveToSpam', INBOX, 2], ['archive', INBOX, 3]]);
+  });
+
+  // Spam wins: a message the spam filter already filed keeps a rule's flags
+  // but is not moved a second time — locally or on the server.
+  it('does not move a message the spam filter already filed, but still flags it', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam'); db.addFolder('Archive');
+    const a = wired();
+    mp.setServerActions(a);
+    db.setFilterRules([rule([{ type: 'markRead' }, { type: 'archive' }])]);
+
+    await mp.processBatch([newsletter(4, { rawHeaders: 'X-Spam-Flag: YES\r\n' })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId('Spam'));
+    expect(db.tagsOf(row.id)).toContain('read');
+    expect(queued(a)).toEqual([['moveToSpam', INBOX, 4], ['markRead', INBOX, 4]]);
+  });
+
+  // Labels are a local concept here (the UI's own emails:setLabel writes no
+  // server op either), so a rule's label queues nothing.
+  it('has no server op for a label, and none for a move to a folder that does not exist', async () => {
+    const { db, mp } = setup();
+    const a = wired();
+    mp.setServerActions(a);
+    db.setFilterRules([rule([{ type: 'applyLabel', value: 'reading' }, { type: 'moveToFolder', value: 'Nope' }])]);
+
+    await mp.processBatch([newsletter()], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId(INBOX));
+    expect(db.tagsOf(row.id)).toEqual(expect.arrayContaining([INBOX, 'reading']));
+    expect(queued(a)).toEqual([]);
+  });
+
+  it('a failing server op is logged, never a failed sync or a lost local change', async () => {
+    const { db, mp } = setup();
+    const a = wired();
+    a.markRead.mockRejectedValue(new Error('socket closed'));
+    mp.setServerActions(a);
+    db.setFilterRules([rule([{ type: 'markRead' }])]);
+
+    const res = await mp.processBatch([newsletter()], db.folder(INBOX), db.asStorage());
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(res).toMatchObject({ inserted: 1, errors: 0 });
+    expect(db.tagsOf(db.allRows()[0].id)).toContain('read');
+  });
+
+  // A flag the message already carries (the server said \\Seen) is not re-sent.
+  it('does not re-send a flag the message arrived with', async () => {
+    const { db, mp } = setup();
+    const a = wired();
+    mp.setServerActions(a);
+    db.setFilterRules([rule([{ type: 'markRead' }])]);
+
+    await mp.processBatch([newsletter(1, { flags: ['\\Seen'] })], db.folder(INBOX), db.asStorage());
+
+    expect(queued(a)).toEqual([]);
+  });
+
+  it('mirrors nothing in quiet (backfill) mode', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Archive');
+    const a = wired();
+    mp.setServerActions(a);
+    db.setFilterRules([rule([{ type: 'markRead' }, { type: 'archive' }])]);
+
+    await mp.processBatch([newsletter()], db.folder(INBOX), db.asStorage(), undefined, { quiet: true });
+
+    expect(queued(a)).toEqual([]);
+    expect(db.allRows()[0].folderId).toBe(db.folderId(INBOX));
   });
 });
