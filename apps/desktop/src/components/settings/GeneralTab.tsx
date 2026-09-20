@@ -374,6 +374,45 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
 
         <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
           <div>
+            <div className="font-medium">Sender reputation checks</div>
+            <div className="text-sm text-muted-foreground">
+              After a message arrives, its sending server’s address and its sender domains can be checked against spam
+              blocklists; a listing adds to the spam score. <span className="font-medium">Sarv service</span> asks Sarv’s
+              own reputation service with your Sarv sign-in, so lookups never go to list operators from your machine
+              (needs the service address). <span className="font-medium">Local DNS blocklists</span> queries Spamhaus,
+              SpamCop, Barracuda, SURBL and URIBL directly from here — note that Spamhaus and URIBL refuse queries made
+              through public resolvers such as Google or Cloudflare DNS. <span className="font-medium">Off</span> judges
+              from headers alone.
+            </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="radio" checked={settings.spamReputationMode === 'off'} onChange={() => updateSetting('spamReputationMode', 'off')} className="w-4 h-4" />
+              <span className="text-sm">Off</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="radio" checked={settings.spamReputationMode === 'local'} onChange={() => updateSetting('spamReputationMode', 'local')} className="w-4 h-4" />
+              <span className="text-sm whitespace-nowrap">Local DNS blocklists</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="radio" checked={(settings.spamReputationMode ?? 'sarv') === 'sarv'} onChange={() => updateSetting('spamReputationMode', 'sarv')} className="w-4 h-4" />
+              <span className="text-sm whitespace-nowrap">Sarv service</span>
+            </label>
+            {(settings.spamReputationMode ?? 'sarv') === 'sarv' && (
+              <input
+                type="url"
+                value={settings.spamReputationEndpoint ?? ''}
+                onChange={(e) => updateSetting('spamReputationEndpoint', e.target.value)}
+                placeholder="https://reputation.sarv.com"
+                aria-label="Sarv reputation service address"
+                className="w-64 rounded-md border border-border bg-background px-2 py-1 text-sm"
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
+          <div>
             <div className="font-medium">Mirror AI categories to my mailbox</div>
             <div className="text-sm text-muted-foreground">
               Show your AI categories as labels in your provider (Gmail, sarv webmail, other clients).

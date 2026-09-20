@@ -11,6 +11,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
 import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
+import type { SpamReputationPolicy, SpamReputationState } from './services/spam-reputation-service';
 
 /**
  * A toast mirrored into the renderer when native OS notifications can't be
@@ -296,6 +297,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const listener = (_e: unknown, payload: { domain: string }) => cb(payload);
       ipcRenderer.on('identity:updated', listener);
       return () => ipcRenderer.removeListener('identity:updated', listener);
+    },
+  },
+
+  // Spam filter, reputation stage: which provider judges senders, and its progress.
+  spam: {
+    getReputationPolicy: () => ipcRenderer.invoke('spam:getReputationPolicy'),
+    setReputationPolicy: (policy: SpamReputationPolicy) => ipcRenderer.invoke('spam:setReputationPolicy', policy),
+    getReputationState: () => ipcRenderer.invoke('spam:getReputationState'),
+    kickReputation: () => ipcRenderer.invoke('spam:kickReputation'),
+    onReputationProgress: (cb: (state: SpamReputationState) => void) => {
+      const listener = (_e: unknown, state: SpamReputationState) => cb(state);
+      ipcRenderer.on('spam:reputation-progress', listener);
+      return () => ipcRenderer.removeListener('spam:reputation-progress', listener);
     },
   },
 
@@ -1053,6 +1067,14 @@ export interface ElectronAPI {
     forget: (domain: string) => Promise<{ success: boolean; error?: string }>;
     /** Fired when a domain's lookup lands. Returns an unsubscribe fn. */
     onUpdated: (cb: (event: { domain: string }) => void) => () => void;
+  };
+  spam: {
+    getReputationPolicy: () => Promise<{ success: boolean; data?: SpamReputationPolicy; error?: string }>;
+    setReputationPolicy: (policy: SpamReputationPolicy) => Promise<{ success: boolean; data?: SpamReputationPolicy; error?: string }>;
+    getReputationState: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
+    kickReputation: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
+    /** Subscribe to reputation-pass progress. Returns an unsubscribe fn. */
+    onReputationProgress: (cb: (state: SpamReputationState) => void) => () => void;
   };
   storage: {
     getStats: () => Promise<{ success: boolean; data?: any; error?: string }>;

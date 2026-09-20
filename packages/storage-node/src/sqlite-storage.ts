@@ -1608,6 +1608,60 @@ export class SQLiteStorage implements IEmailStorage {
     return run(rows);
   }
 
+  // ---- Spam filter, reputation stage --------------------------------------
+
+  /**
+   * Rows the reputation stage has not judged yet, newest first — a row the
+   * header stage scored (spam_score set) that still has no
+   * reputation_checked_at. Only rows with a server uid: the re-file needs it.
+   */
+  getEmailsPendingReputation(limit: number): Array<{
+    id: string; uid: number; folderId: string; folderPath: string; tags: string;
+    fromAddress: string; replyTo: string | null; originIp: string | null;
+    spamScore: number; spamReasons: string | null;
+  }> {
+    this.ensureInitialized();
+    return this.db!.prepare(
+      `SELECT e.id, e.uid, e.folder_id AS folderId, f.path AS folderPath, e.tags,
+              e.from_address AS fromAddress, e.reply_to AS replyTo, e.origin_ip AS originIp,
+              e.spam_score AS spamScore, e.spam_reasons AS spamReasons
+       FROM emails e JOIN folders f ON f.id = e.folder_id
+       WHERE e.reputation_checked_at IS NULL AND e.spam_score IS NOT NULL
+         AND e.uid IS NOT NULL AND e.uid > 0
+       ORDER BY e.date DESC LIMIT ?`,
+    ).all(limit) as ReturnType<SQLiteStorage['getEmailsPendingReputation']>;
+  }
+
+  countEmailsPendingReputation(): number {
+    this.ensureInitialized();
+    const row = this.db!.prepare(
+      `SELECT COUNT(*) AS n FROM emails
+       WHERE reputation_checked_at IS NULL AND spam_score IS NOT NULL AND uid IS NOT NULL AND uid > 0`,
+    ).get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Stamp a batch as judged, writing the (possibly unchanged) score and
+   * reasons — one transaction. Tag and folder changes are NOT written here:
+   * they go through updateEmail so counts and the read model stay right.
+   * `AND reputation_checked_at IS NULL` makes a re-run of the same batch a
+   * no-op rather than a second set of points.
+   */
+  applyReputationBatch(rows: Array<{ id: string; spamScore: number; spamReasons: string }>, checkedAtSec: number): number {
+    this.ensureInitialized();
+    if (rows.length === 0) return 0;
+    const stmt = this.db!.prepare(
+      'UPDATE emails SET spam_score = ?, spam_reasons = ?, reputation_checked_at = ? WHERE id = ? AND reputation_checked_at IS NULL',
+    );
+    const run = this.db!.transaction((batch: typeof rows) => {
+      let n = 0;
+      for (const r of batch) n += stmt.run(r.spamScore, r.spamReasons, checkedAtSec, r.id).changes;
+      return n;
+    });
+    return run(rows);
+  }
+
   async updateEmailAuthStatus(emailId: string, authStatus: string): Promise<void> {
     this.ensureInitialized();
     return this.aiRepo.updateAuthStatus(emailId, authStatus);

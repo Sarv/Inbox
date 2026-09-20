@@ -86,6 +86,7 @@ const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Sender authentication', detail: 'SPF, DKIM and DMARC verdicts are read from the receiving server’s Authentication-Results header and shown on the shield beside each sender.' },
   { title: 'Impersonation checks', detail: 'A display name that names one domain while the message came from another, and links whose text says one domain while pointing to another, are flagged.' },
   { title: 'Brand verification (BIMI)', detail: 'A sender domain’s published logo is shown only on mail that passed DMARC, and the blue verified tick only when its Verified Mark Certificate chains to a pinned Mark Verifying Authority for that exact logo and domain. Details per domain under Sender identity.' },
+  { title: 'Sender reputation', detail: 'After a message arrives, its sending server’s address and its sender domains are checked against spam blocklists — through Sarv’s reputation service with your own sign-in, or local DNS blocklists if you choose — and a listing adds to the spam score. Off, local or Sarv under Settings → General.' },
   { title: 'Spam filter', detail: 'Every arriving message is scored from its headers before the AI sees it — failed authentication, a spoofed sender name, a forged reply, missing or mis-dated headers, bulk mail with no unsubscribe, your mail server’s own spam verdict, and senders you have reported. A message over the line is filed as spam with its reasons shown on the shield.' },
   { title: 'Encrypted mail cache', detail: 'The local mailbox database is encrypted at rest; the key lives in the operating system keychain.' },
   { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
@@ -129,10 +130,56 @@ function AuthBackfillStatus() {
   );
 }
 
+/**
+ * Where the spam filter's reputation stage stands: which provider, how many
+ * messages still await a verdict, and anything a provider said it could not
+ * answer — a Spamhaus refusal through a public resolver, no Sarv sign-in.
+ */
+function ReputationStatus() {
+  const [state, setState] = useState<{ pending: number; judged: number; filed: number; provider: string | null; notes: string[]; running: boolean; lastRun: number | null } | null>(null);
+  useEffect(() => {
+    const api = window.electronAPI.spam;
+    api?.getReputationState?.().then((r) => { if (r?.success && r.data) setState(r.data); }).catch(() => { /* best-effort */ });
+    const off = api?.onReputationProgress?.((s) => setState(s));
+    return () => { off?.(); };
+  }, []);
+  if (!state) return null;
+  const providerLabel = state.provider === 'sarv' ? 'Sarv reputation service' : state.provider === 'local-dnsbl' ? 'local DNS blocklists' : null;
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 flex items-start gap-3 text-sm">
+      {state.running ? <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-primary flex-shrink-0" /> : <ShieldCheck className="h-4 w-4 mt-0.5 text-green-600 dark:text-green-400 flex-shrink-0" />}
+      <div className="min-w-0 flex-1">
+        {providerLabel ? (
+          <span>
+            Sender reputation via <b>{providerLabel}</b>: {state.judged.toLocaleString()} message{state.judged === 1 ? '' : 's'} judged this session,
+            {' '}{state.filed.toLocaleString()} filed as spam by it, {state.pending.toLocaleString()} waiting.
+          </span>
+        ) : (
+          <span>Sender reputation checks are off, or the Sarv service address is not set — messages are judged from their headers alone. Change this under Settings → General.</span>
+        )}
+        {state.notes.length > 0 && (
+          <ul className="mt-1 text-xs text-muted-foreground list-disc pl-4">
+            {state.notes.map((n) => <li key={n}>{n}</li>)}
+          </ul>
+        )}
+      </div>
+      {providerLabel && (
+        <button
+          onClick={() => { void window.electronAPI.spam?.kickReputation?.(); }}
+          className="shrink-0 px-2.5 py-1 rounded-md border border-border text-xs hover:bg-muted/60 transition-colors"
+        >
+          Run now
+        </button>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab() {
   return (
     <div className="p-6 max-w-4xl space-y-8">
       <AuthBackfillStatus />
+      <ReputationStatus />
       <section>
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Security levels</h2>
         <p className="text-sm text-muted-foreground mb-4">

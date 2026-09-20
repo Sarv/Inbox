@@ -3017,6 +3017,35 @@ export const emailSpamColumns: Migration = {
 };
 
 /**
+ * v87 — the spam filter's reputation stage: when a row was last judged by the
+ * network (blocklists, the Sarv reputation service).
+ *
+ * NULL means "not yet"; the stage's scheduler selects on it, newest first, and
+ * stamps it whether or not anything was found, so a row is judged once. The
+ * partial index is what keeps that selection cheap on a large mailbox: it
+ * holds only the rows still waiting, and shrinks to nothing as they drain.
+ */
+export const emailReputationColumns: Migration = {
+  version: 87,
+  name: 'email_reputation_columns',
+  up: (db) => {
+    const colNames = new Set(
+      (db.prepare('PRAGMA table_info(emails)').all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!colNames.has('reputation_checked_at')) db.exec('ALTER TABLE emails ADD COLUMN reputation_checked_at INTEGER;');
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_emails_reputation_pending
+        ON emails(date DESC)
+        WHERE reputation_checked_at IS NULL AND spam_score IS NOT NULL;
+    `);
+    logger.info('email reputation columns (v87): reputation_checked_at ready');
+  },
+  down: (db) => {
+    db.exec('DROP INDEX IF EXISTS idx_emails_reputation_pending;');
+  },
+};
+
+/**
  * v84 — re-key the search index by rowid so maintaining it stops scanning it.
  *
  * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
@@ -3252,5 +3281,6 @@ export function createMigrationManager(
   manager.register(ftsRowidAlignment);
   manager.register(linkDomainRules);
   manager.register(emailSpamColumns);
+  manager.register(emailReputationColumns);
   return manager;
 }
