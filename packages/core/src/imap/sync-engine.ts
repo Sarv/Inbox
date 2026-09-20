@@ -23,7 +23,7 @@ import { mapEnvelopeFields } from './envelope-mapper';
 import { isFolderSyncEnabled, folderHeadersOnly } from './folder-sync-policy';
 import { FolderSyncer, type FolderSyncResult } from './folder-syncer';
 import { getSuggestedBackoffMs } from './imap-errors';
-import { MessageProcessor, isExpectedMessage } from './message-processor';
+import { MessageProcessor, isExpectedMessage, type IngestServerActions } from './message-processor';
 import { OperationQueue, type OperationResult } from './operation-queue';
 import { applyQresyncVanished } from './qresync-reconcile';
 import { attachmentBytesFromSource } from './raw-mime-part';
@@ -255,17 +255,27 @@ export class SyncEngine {
     this.folderSyncer.setPendingUidsProvider(pendingUids);
     this.realtimeManager.setPendingUidsProvider(pendingUids);
 
-    // Mail the spam filter files at ingest is moved on the server through the
-    // same persisted queue "Report spam" uses. Persisting first is what makes
-    // the UID show up in `pendingUids` above, so the source folder's next
-    // reconcile does not read the server's not-yet-moved copy as an external
-    // move-back and relink it — a local-only re-file sprang back within one
-    // reconcile. Mid-sync the op waits in the queue and runs when the sync
-    // finishes, exactly like a user action taken during a sync.
-    const spamMover = (folderPath: string, uid: number) => this.operationQueue.moveToSpam(folderPath, uid);
-    this.messageProcessor.setSpamMover(spamMover);
-    this.folderSyncer.setSpamMover(spamMover);
-    this.realtimeManager.setSpamMover(spamMover);
+    // What ingest decides locally — the spam filter's re-file, a rule's move,
+    // read or star — is mirrored on the server through the same persisted
+    // queue every user action takes. Persisting first is what makes the UID
+    // show up in `pendingUids` above, so the source folder's next reconcile
+    // does not read the server's not-yet-moved copy as an external move-back
+    // and relink it, and syncFlags does not read its still-unread copy as the
+    // truth — a local-only re-file sprang back within one reconcile, a local
+    // "mark read" on the next flag sync. Mid-sync the ops wait in the queue
+    // and run when the sync finishes, exactly like a user action taken during
+    // a sync.
+    const ingestActions: IngestServerActions = {
+      markRead: (folderPath, uid) => this.operationQueue.markAsRead(folderPath, uid),
+      star: (folderPath, uid) => this.operationQueue.star(folderPath, uid),
+      moveToSpam: (folderPath, uid) => this.operationQueue.moveToSpam(folderPath, uid),
+      archive: (folderPath, uid) => this.operationQueue.archive(folderPath, uid),
+      moveToTrash: (folderPath, uid) => this.operationQueue.moveToTrash(folderPath, uid),
+      move: (sourcePath, uid, destPath) => this.operationQueue.move(sourcePath, uid, destPath),
+    };
+    this.messageProcessor.setServerActions(ingestActions);
+    this.folderSyncer.setServerActions(ingestActions);
+    this.realtimeManager.setServerActions(ingestActions);
 
     // Hook folder-sync inserts into the same event stream realtime
     // uses, so manual / periodic syncs that insert new emails get

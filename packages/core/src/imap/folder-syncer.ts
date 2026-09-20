@@ -9,7 +9,7 @@ import { logger } from '../utils/logger';
 import { isWatermarkImpossible } from '../utils/sync-watermark';
 
 import { fetchNewMessagesWindowed } from './incremental-fetch';
-import { MessageProcessor } from './message-processor';
+import { MessageProcessor, type IngestServerActions } from './message-processor';
 import { withFolderSelected } from './with-folder';
 
 
@@ -120,10 +120,10 @@ export class FolderSyncer {
     this.messageProcessor.setPendingUidsProvider(fn);
   }
 
-  /** Forward the server-side spam move so mail this syncer files as spam is
-   * moved on the server too, not only in the local projection. */
-  setSpamMover(fn: (folderPath: string, uid: number) => Promise<unknown>): void {
-    this.messageProcessor.setSpamMover(fn);
+  /** Forward the server-side actions so what this syncer's ingest decides —
+   * a spam re-file, a rule's move or flag — happens on the server too. */
+  setServerActions(actions: Partial<IngestServerActions>): void {
+    this.messageProcessor.setServerActions(actions);
   }
 
   /**

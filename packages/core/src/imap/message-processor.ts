@@ -42,6 +42,9 @@ import { mapEnvelopeFields } from './envelope-mapper';
 import { attachmentSizesFromSource } from './raw-mime-part';
 import { withFolderSelected } from './with-folder';
 
+/** Filter actions that relocate a message. Labels and flags are not moves. */
+const MOVE_ACTIONS: ReadonlySet<string> = new Set(['archive', 'delete', 'moveToSpam', 'moveToFolder']);
+
 /** A Date as unix seconds, or null when absent or unparseable (an invalid Date has a NaN time). */
 function toUnixSeconds(d: Date | null | undefined): number | null {
   const t = d?.getTime?.();
@@ -190,6 +193,21 @@ export interface ProcessResult {
  * - Threading detection
  * - Body parsing (lazy loading support)
  */
+/**
+ * The server-side operations ingest can mirror, keyed like the OperationQueue
+ * methods they are wired to. Every one takes the SOURCE folder and the
+ * message's uid there — the coordinates the server knows the message by until
+ * the op itself moves it.
+ */
+export interface IngestServerActions {
+  markRead(folderPath: string, uid: number): Promise<unknown>;
+  star(folderPath: string, uid: number): Promise<unknown>;
+  moveToSpam(folderPath: string, uid: number): Promise<unknown>;
+  archive(folderPath: string, uid: number): Promise<unknown>;
+  moveToTrash(folderPath: string, uid: number): Promise<unknown>;
+  move(sourcePath: string, uid: number, destPath: string): Promise<unknown>;
+}
+
 export class MessageProcessor {
   private config: MessageProcessorConfig;
   // Supplies UIDs (per folder) that have a pending local flag op not yet sent to
@@ -240,23 +258,44 @@ export class MessageProcessor {
   // blip does not. Session-only; cleared on any non-empty read.
   private foldersSeenEmpty = new Set<string>();
 
-  // Queues the SERVER-side move for a message the spam filter files. Wired by
-  // SyncEngine to its OperationQueue — the persisted, replayed-on-reconnect
-  // path "Report spam" already uses. Without it the re-file is local only, and
+  // Queues the SERVER-side counterpart of what ingest decides locally — the
+  // spam filter's re-file and the user's filter rules. Wired by SyncEngine to
+  // its OperationQueue: the persisted, replayed-on-reconnect path every user
+  // action already takes. Without it a re-file or a flag is local only, and
   // the next reconcile of the source folder finds the server's copy still
-  // there, reads it as an external move-back, and relinks it: the spam
-  // reappears in INBOX within minutes. The queued op is also what registers
-  // the UID as pending, which is the guard that reconcile honours.
-  private spamMover?: (folderPath: string, uid: number) => Promise<unknown>;
+  // there (or still unread), reads it as an external change, and reverts it:
+  // filed mail reappeared in INBOX within minutes, a rule's "mark read" sprang
+  // back to unread. The queued op is also what registers the UID as pending,
+  // which is the guard reconcile and syncFlags honour.
+  private serverActions: Partial<IngestServerActions> = {};
 
   /** Wire the pending-op source (see SyncEngine). */
   setPendingUidsProvider(fn: (folderPath: string) => Promise<Set<number>>): void {
     this.pendingUidsProvider = fn;
   }
 
-  /** Wire the server-side spam move (see SyncEngine). */
-  setSpamMover(fn: (folderPath: string, uid: number) => Promise<unknown>): void {
-    this.spamMover = fn;
+  /** Wire the server-side actions ingest mirrors (see SyncEngine). */
+  setServerActions(actions: Partial<IngestServerActions>): void {
+    this.serverActions = actions;
+  }
+
+  /**
+   * Fire one server-side op for a message ingest just changed locally.
+   * Fire-and-forget, exactly as a user action is: a failure is logged, never a
+   * failed sync. Silently a no-op when the action is not wired (tests, a
+   * storage with no engine) or the message has no server uid.
+   */
+  private queueServerAction<K extends keyof IngestServerActions>(
+    action: K,
+    uid: number,
+    args: Parameters<IngestServerActions[K]>,
+  ): boolean {
+    const fn = this.serverActions[action] as ((...a: Parameters<IngestServerActions[K]>) => Promise<unknown>) | undefined;
+    if (!fn || !(uid > 0)) return false;
+    fn(...args).catch((err: unknown) => {
+      logger.warn(`[Ingest] Server-side ${action} failed for uid ${uid} in ${String(args[0])}: ${(err as Error)?.message ?? err}`);
+    });
+    return true;
   }
 
   constructor(config: Partial<MessageProcessorConfig> = {}) {
@@ -502,6 +541,9 @@ export class MessageProcessor {
         // keeps its `spam` tag either way: with no spam folder at all it still
         // stays out of the AI pipeline and says why on the shield. Skipped in
         // quiet/backfill mode with the rest of the reactive work.
+        // Ids the spam filter re-filed: a user rule may still flag or label
+        // them, but must not move them a second time — spam wins.
+        const spamFiled = new Set<string>();
         if (!quiet) {
           let filed = 0;
           for (const email of emailRecords) {
@@ -511,24 +553,14 @@ export class MessageProcessor {
               const moved = computeFilterActionResult(email, [{ type: 'moveToSpam' }], folders);
               if (!moved.changed) continue;
               await storage.updateEmail(email.id, { folderId: moved.folderId, tags: moved.tags });
-              // Mirror the move on the server through the operation queue —
-              // persisted, replayed on reconnect, and registered as a pending
-              // op on this UID so the next reconcile of this folder does not
-              // read the server's still-present copy as an external move-back
-              // and relink it here. Fire-and-forget, exactly as "Report spam"
-              // does; a failure is logged, never a failed sync. The uid is
-              // read BEFORE the in-memory update below, while it still names
-              // the message in the folder the server has it in.
-              if (this.spamMover && email.uid > 0) {
-                const { uid } = email;
-                this.spamMover(folder.path, uid).catch((err: unknown) => {
-                  logger.warn(`[AutoSpam] Server-side move failed for uid ${uid} in ${folder.path}: ${(err as Error)?.message ?? err}`);
-                });
-              }
+              // Mirror the move on the server — see queueServerAction. The uid
+              // still names the message in the folder the server has it in.
+              this.queueServerAction('moveToSpam', email.uid, [folder.path, email.uid]);
               // Keep the in-memory record current: the filter rules and the
               // email:synced event below read it, and must see the re-file.
               email.folderId = moved.folderId;
               email.tags = moved.tags;
+              spamFiled.add(email.id);
               filed += 1;
             } catch (err) {
               // Non-fatal — a failed re-file must not break the sync.
@@ -538,10 +570,13 @@ export class MessageProcessor {
           if (filed > 0) logger.info(`[AutoSpam] Filed ${filed} message(s) into the spam folder`);
         }
 
-        // User filter rules: evaluate each new email and apply local tag/folder
-        // actions (consistent with the spam re-file above — no server-side
-        // IMAP move at ingest). Rules are invariant across the batch, so they
-        // are loaded once, lazily, only if any exist.
+        // User filter rules: evaluate each new email, apply the local tag/folder
+        // projection, then mirror it on the server through the operation queue
+        // — flags first, then the ONE move the message ends up making. Without
+        // the mirror a rule's move sprang back on the next reconcile and its
+        // "mark read" on the next flag sync, exactly as the spam re-file used
+        // to. Rules are invariant across the batch, so they are loaded once,
+        // lazily, only if any exist.
         let filterRules: FilterRule[] | null = null;
 
         try {
@@ -556,11 +591,33 @@ export class MessageProcessor {
             try {
               const actions = collectFilterActions(email, filterRules);
               if (actions.length === 0) continue;
-              // Local projection only (matches auto-spam above); the email is
-              // still being ingested so there's no server-side move here.
-              const { tags, folderId, changed } = computeFilterActionResult(email, actions, folders);
+              // A message the spam filter already filed keeps its flag and
+              // label actions but is not moved again: spam wins over a rule.
+              const applicable = spamFiled.has(email.id) ? actions.filter((a) => !MOVE_ACTIONS.has(a.type)) : actions;
+              const before = { folderId: email.folderId, tags: email.tags || '' };
+              const { tags, folderId, changed } = computeFilterActionResult(email, applicable, folders);
               if (changed) await storage.updateEmail(email.id, { tags, folderId });
-              logger.info(`[Filters] Applied ${actions.length} action(s) to email from ${email.fromAddress}`);
+
+              // Server side. Flags first, while the uid still names the message
+              // in this folder; then the move — mirrored from the RESULT of the
+              // projection rather than re-deriving each action, so two moves in
+              // one rule (archive, then delete) become the single move the
+              // server needs, to wherever the message actually ended up.
+              const { uid } = email;
+              if (hasTag(tags, 'read') && !hasTag(before.tags, 'read')) this.queueServerAction('markRead', uid, [folder.path, uid]);
+              if (hasTag(tags, 'starred') && !hasTag(before.tags, 'starred')) this.queueServerAction('star', uid, [folder.path, uid]);
+              if (folderId !== before.folderId) {
+                const target = folders.find((f) => f.id === folderId);
+                const kind = target ? classifyFolder(target) : null;
+                if (kind === 'spam') this.queueServerAction('moveToSpam', uid, [folder.path, uid]);
+                else if (kind === 'trash') this.queueServerAction('moveToTrash', uid, [folder.path, uid]);
+                else if (kind === 'archive') this.queueServerAction('archive', uid, [folder.path, uid]);
+                else if (target) this.queueServerAction('move', uid, [folder.path, uid, target.path]);
+              }
+              // Keep the in-memory record current for the email:synced event.
+              email.tags = tags;
+              email.folderId = folderId;
+              logger.info(`[Filters] Applied ${applicable.length} action(s) to email from ${email.fromAddress}`);
             } catch (err) {
               // Non-fatal — a bad rule must not break sync.
               logger.error(`[Filters] Failed to apply rules for ${email.id}:`, err);
