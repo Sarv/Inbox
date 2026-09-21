@@ -18,6 +18,7 @@ import {
   type ExtensionStorageBackend,
   type ExtensionAIBackend,
   type ExtensionSettingsBackend,
+  type ExtensionUIBackend,
   toWorkflowResult,
 } from './extension-api';
 import type { LoadedExtension } from './extension-loader';
@@ -57,9 +58,20 @@ export interface ExtensionHostOptions {
   /** Settings backend for extensions */
   settingsBackend: ExtensionSettingsBackend;
 
+  /** UI notification backend (omit for a host that renders no UI) */
+  uiBackend?: ExtensionUIBackend;
+
   /** Base path for extension storage */
   extensionStoragePath: string;
 }
+
+/**
+ * Which pass over a message is running.
+ *
+ * 'arrival' — the message just synced; headers are present, the body may not be.
+ * 'body'    — the body finished fetching; only body-reading workflows re-run.
+ */
+export type WorkflowStage = 'arrival' | 'body';
 
 /**
  * Active extension info
@@ -80,6 +92,7 @@ export class ExtensionHost {
   private storageBackend: ExtensionStorageBackend;
   private aiBackend?: ExtensionAIBackend;
   private settingsBackend: ExtensionSettingsBackend;
+  private uiBackend?: ExtensionUIBackend;
   private extensionStoragePath: string;
 
   private activeExtensions: Map<string, ActiveExtension> = new Map();
@@ -91,6 +104,7 @@ export class ExtensionHost {
     this.storageBackend = options.storageBackend;
     this.aiBackend = options.aiBackend;
     this.settingsBackend = options.settingsBackend;
+    this.uiBackend = options.uiBackend;
     this.extensionStoragePath = options.extensionStoragePath;
   }
 
@@ -155,6 +169,7 @@ export class ExtensionHost {
         storageBackend: this.storageBackend,
         aiBackend: this.aiBackend,
         settingsBackend: this.settingsBackend,
+        uiBackend: this.uiBackend,
       });
 
       // Load the extension module
@@ -338,17 +353,26 @@ export class ExtensionHost {
   }
 
   /**
-   * Process an email through all extension workflows
+   * Process an email through all extension workflows.
+   *
+   * `stage` selects which workflows run. Bodies are fetched lazily after
+   * `email:synced`, so the host makes two passes over a message: 'arrival' runs
+   * every enabled workflow (a body-reading one still gets its shot at the
+   * subject), and 'body' re-runs only those that asked for the body. Without
+   * the split, the second pass would re-run header-only workflows for no
+   * reason — doubling the per-message cost on every sync.
    */
   async processEmail(
     email: EmailRecord,
-    context: WorkflowContext
+    context: WorkflowContext,
+    stage: WorkflowStage = 'arrival'
   ): Promise<Map<string, WorkflowResult>> {
     const results = new Map<string, WorkflowResult>();
 
     // Get workflows sorted by priority
     const adapters = this.getAllWorkflowAdapters()
       .filter((a) => a.enabled)
+      .filter((a) => (stage === 'body' ? a.requiresBody : true))
       .sort((a, b) => a.priority - b.priority);
 
     for (const adapter of adapters) {
@@ -407,6 +431,7 @@ export class ExtensionWorkflowAdapter implements EmailWorkflow {
   readonly description: string;
   readonly priority: number;
   readonly requiresAI: boolean;
+  readonly requiresBody: boolean;
   readonly runInBackground: boolean;
   enabled: boolean;
 
@@ -426,6 +451,7 @@ export class ExtensionWorkflowAdapter implements EmailWorkflow {
     this.description = workflow.description || '';
     this.priority = workflow.priority ?? WorkflowPriority.NORMAL;
     this.requiresAI = workflow.requiresAI ?? false;
+    this.requiresBody = workflow.requiresBody ?? false;
     this.runInBackground = workflow.runInBackground ?? false;
     this.enabled = workflow.enabled ?? true;
 

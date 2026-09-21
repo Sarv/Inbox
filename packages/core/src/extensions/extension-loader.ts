@@ -194,6 +194,7 @@ export function validateManifest(manifest: ExtensionManifest): ValidationResult 
       'network:fetch',
       'settings:read',
       'settings:write',
+      'ui:notify',
     ]);
 
     for (const permission of manifest.permissions) {
@@ -251,7 +252,9 @@ function validateContributions(
       errors.push('contributes.events must be an array');
     } else {
       const validEvents = [
+        'email:received',
         'email:synced',
+        'email:body-ready',
         'email:processed',
         'email:labeled',
         'email:flagged',

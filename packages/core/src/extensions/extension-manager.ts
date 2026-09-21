@@ -17,10 +17,12 @@ import type {
   ExtensionStorageBackend,
   ExtensionAIBackend,
   ExtensionSettingsBackend,
+  ExtensionUIBackend,
 } from './extension-api';
 import {
   ExtensionHost,
   createExtensionHost,
+  type WorkflowStage,
 } from './extension-host';
 import {
   ExtensionRegistry,
@@ -50,6 +52,9 @@ export interface ExtensionManagerOptions {
 
   /** Optional: settings backend */
   settingsBackend?: ExtensionSettingsBackend;
+
+  /** Optional: UI notification backend (omit for a host that renders no UI) */
+  uiBackend?: ExtensionUIBackend;
 
   /** Optional: event bus (shared with pipeline) */
   eventBus?: EventBus;
@@ -101,6 +106,7 @@ export class ExtensionManager {
       storageBackend,
       aiBackend: options.aiBackend,
       settingsBackend,
+      uiBackend: options.uiBackend,
       extensionStoragePath: this.storageDir,
     });
   }
@@ -375,13 +381,18 @@ export class ExtensionManager {
   async processEmail(
     email: EmailRecord,
     previousResults?: Map<string, WorkflowResult>,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    stage: WorkflowStage = 'arrival'
   ): Promise<Map<string, WorkflowResult>> {
-    return this.host.processEmail(email, {
-      storage: null, // Extensions use their own storage
-      previousResults: previousResults || new Map(),
-      abortSignal,
-    });
+    return this.host.processEmail(
+      email,
+      {
+        storage: null, // Extensions use their own storage
+        previousResults: previousResults || new Map(),
+        abortSignal,
+      },
+      stage
+    );
   }
 
   /**

@@ -101,6 +101,16 @@ export interface WorkflowContribution {
   /** Whether this workflow requires AI */
   requiresAI?: boolean;
 
+  /**
+   * Re-run this workflow once the message body has been fetched.
+   *
+   * Bodies are fetched lazily AFTER `email:synced`, so a workflow that reads
+   * `cleanBody`/`rawBody` sees an empty body on the arrival pass. Setting this
+   * makes the host run the workflow again on `email:body-ready`. Such a
+   * workflow MUST be idempotent — it will see the same message twice.
+   */
+  requiresBody?: boolean;
+
   /** Whether to run in background */
   runInBackground?: boolean;
 
@@ -151,7 +161,8 @@ export type ExtensionPermission =
   | 'storage:local'   // Store extension-specific data
   | 'network:fetch'   // Make HTTP requests (restricted domains)
   | 'settings:read'   // Read user settings
-  | 'settings:write'; // Modify user settings
+  | 'settings:write'  // Modify user settings
+  | 'ui:notify';      // Surface a notification card in the app window
 
 /**
  * Permission metadata
@@ -237,6 +248,13 @@ export const PERMISSION_INFO: Record<ExtensionPermission, PermissionInfo> = {
     description: 'Modify user preferences and settings',
     dangerous: true,
     requiresConfirmation: true,
+  },
+  'ui:notify': {
+    id: 'ui:notify',
+    name: 'Show Notifications',
+    description: 'Show a notification card in the app window',
+    dangerous: false,
+    requiresConfirmation: false,
   },
 };
 
@@ -330,11 +348,26 @@ export interface ExtensionContext {
   /** Settings access */
   readonly settings: ExtensionSettings;
 
+  /** Notification cards shown in the app window (if ui:notify granted) */
+  readonly ui: ExtensionUI;
+
   /** Logger */
   readonly log: ExtensionLogger;
 
   /** Disposables to clean up on deactivation */
   subscriptions: Unsubscribe[];
+
+  /**
+   * API this extension offers to the rest of the app, set during `activate`.
+   *
+   * Reached by the host through `getExtensionExports(id)` — that is how an IPC
+   * handler calls into an extension on demand (see `extension:summarizeThread`)
+   * rather than waiting for a workflow to run over a message. Declared here and
+   * not only on the implementation class because an extension is written
+   * against THIS interface: without it, assigning exports needs a cast, and a
+   * cast is where the export contract stops being checked.
+   */
+  exports: Record<string, unknown>;
 }
 
 /**
@@ -355,6 +388,13 @@ export interface ExtensionWorkflow {
 
   /** Whether this workflow requires AI */
   requiresAI?: boolean;
+
+  /**
+   * Re-run once the body has been fetched (see WorkflowContribution). The
+   * workflow must be idempotent: it sees the message on arrival AND again when
+   * the body lands.
+   */
+  requiresBody?: boolean;
 
   /** Whether to run in background */
   runInBackground?: boolean;
@@ -529,6 +569,80 @@ export interface ExtensionLogger {
   info(message: string, ...args: unknown[]): void;
   warn(message: string, ...args: unknown[]): void;
   error(message: string, ...args: unknown[]): void;
+}
+
+// ============================================================
+// Extension UI Types
+// ============================================================
+
+/**
+ * One labelled value on a notification card.
+ *
+ * `copyable` renders a copy button next to the value — the reason this exists:
+ * an extension that extracts something the user must paste elsewhere (a
+ * one-time passcode, a tracking number, a reference id) should not make them
+ * open the mail and select the text by hand.
+ */
+export interface ExtensionUIField {
+  /** Field label, e.g. "Code" */
+  label: string;
+
+  /** Field value, rendered verbatim (never as HTML) */
+  value: string;
+
+  /** Show a copy-to-clipboard button for this value */
+  copyable?: boolean;
+
+  /** Render in a larger monospace face — for codes and reference numbers */
+  emphasis?: boolean;
+}
+
+/**
+ * A notification card an extension asks the app to show.
+ *
+ * This is the ONLY way an extension reaches the renderer. It is deliberately
+ * declarative (no markup, no scripts, no styling) so the app can render it with
+ * its own design system and an extension can never inject DOM into the window.
+ */
+export interface ExtensionUINotification {
+  /** Stable id — re-notifying with the same id replaces the visible card */
+  id: string;
+
+  /** Card title, e.g. "Verification code" */
+  title: string;
+
+  /** Optional supporting line, e.g. the sender name */
+  body?: string;
+
+  /** Labelled values rendered as rows on the card */
+  fields?: ExtensionUIField[];
+
+  /**
+   * UTC epoch milliseconds at which the information stops being useful. The
+   * card renders a live countdown to this moment and dismisses itself when it
+   * passes. Omit for a card that has no natural expiry.
+   */
+  expiresAt?: number;
+
+  /** Auto-dismiss after this many ms. Ignored when `expiresAt` is set. */
+  timeoutMs?: number;
+
+  /** Email this card refers to; clicking the card opens it */
+  emailId?: string;
+
+  /** Account owning `emailId`, for the cross-account open path */
+  accountId?: string;
+}
+
+/**
+ * Notification API exposed to extensions (requires `ui:notify`)
+ */
+export interface ExtensionUI {
+  /** Show (or replace) a notification card */
+  notify(notification: ExtensionUINotification): void;
+
+  /** Dismiss a card early by id */
+  dismiss(notificationId: string): void;
 }
 
 // ============================================================
