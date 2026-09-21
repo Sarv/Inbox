@@ -13,7 +13,7 @@ export {
   type DynamicCategoryCounts,
 } from './sqlite-storage';
 export { SQLiteVectorStorage } from './vector-storage';
-export { createMigrationManager, type Migration } from './migrations';
+export { createMigrationManager, HEADER_STAGE_MAX_ATTEMPTS, type Migration } from './migrations';
 // The shared contact directory's filename. Exported because the desktop app's
 // orphan-DB sweep has to know this file is not an account DB — it deleted the
 // whole address book once by assuming it was.
