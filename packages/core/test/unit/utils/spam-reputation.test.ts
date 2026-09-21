@@ -25,7 +25,7 @@ import {
  * fail-open behaviour of the Sarv client.
  *
  * The code tables and the query-name arithmetic are the library's now
- * (`@sarv-in/email-spam-scan/reputation`, where they have their own suite);
+ * (`@sarv-in/mailguard/reputation`, where they have their own suite);
  * what is pinned here is what Inbox owns: the resolver-error contract, the
  * roll-up from per-zone answers to one listed/clean/unknown per item, the
  * operator names the shield shows, and the scoring seam.

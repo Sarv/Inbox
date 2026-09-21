@@ -118,8 +118,8 @@ processes, data flow, and core subsystems.
 The mail-security rules — SPF/DKIM/DMARC reading, display-name impersonation,
 the header-stage spam score, deceptive links and the security levels — are
 maintained as a separate open-source library,
-[`@sarv-in/email-spam-scan`](https://github.com/Sarv/email-spam-scan). See
-[docs/email-spam-scan.md](docs/email-spam-scan.md) for what stayed behind and
+[`@sarv-in/mailguard`](https://github.com/Sarv/mailguard). See
+[docs/mailguard.md](docs/mailguard.md) for what stayed behind and
 how to switch the dependency between the local checkout and the registry.
 
 ### Design principles

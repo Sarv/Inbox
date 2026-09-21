@@ -9,7 +9,7 @@
  * re-file, just a little later than insert.
  *
  * The blocklist catalogue, the return-code tables and the scoring all live in
- * `@sarv-in/email-spam-scan/reputation` now. What stays here is the part that
+ * `@sarv-in/mailguard/reputation` now. What stays here is the part that
  * is Inbox's rather than the library's: TWO PROVIDERS BEHIND ONE INTERFACE,
  * so the main process can cache and swap them.
  *
@@ -44,8 +44,8 @@ import {
   type DnsQuery,
   type ReputationResult as BlocklistReport,
   type ReputationTarget,
-} from '@sarv-in/email-spam-scan/reputation';
-import type { SpamReason } from '@sarv-in/email-spam-scan/verdict';
+} from '@sarv-in/mailguard/reputation';
+import type { SpamReason } from '@sarv-in/mailguard/verdict';
 
 /** The zones the local provider asks by default, and how to read their answers. */
 export { BLOCKLISTS as DEFAULT_DNSBL_LISTS };
