@@ -1,4 +1,4 @@
-import { parseSpamReasons, spamVerdict } from '@sarv-in/email-spam-scan/verdict';
+import { parseSpamReasons, spamVerdict } from '@sarv-in/mailguard/verdict';
 import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 

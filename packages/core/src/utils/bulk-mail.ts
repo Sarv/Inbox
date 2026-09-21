@@ -10,7 +10,7 @@
  *
  * Two layers, deliberately kept apart:
  *
- *   * HEADERS ({@link bulkHeaderSignals}, now in `@sarv-in/email-spam-scan`
+ *   * HEADERS ({@link bulkHeaderSignals}, now in `@sarv-in/mailguard`
  *     and re-exported here) — what a bulk sender is REQUIRED to
  *     set: RFC 2919 `List-Id`, RFC 2369 `List-Unsubscribe`, `Precedence`, RFC
  *     3834 `Auto-Submitted`, and the `Feedback-ID` bulk senders add for
@@ -47,14 +47,14 @@ import {
   headerValuesFromText,
   type BulkHeaderSignals,
   type HeaderLookup,
-} from '@sarv-in/email-spam-scan/headers';
+} from '@sarv-in/mailguard/headers';
 
 import { htmlToPlainText } from './html-text';
 import { stripQuotedTail } from './quoted-text';
 import { isNoReplyAddress } from './role-address';
 import { hasTag } from './tags';
 
-// The HEADER layer described above now lives in `@sarv-in/email-spam-scan`,
+// The HEADER layer described above now lives in `@sarv-in/mailguard`,
 // which is where the spam filter it feeds went. Re-exported from here because
 // the rule it encodes is the same one this module's CONTENT layer defers to,
 // and because every caller in this repo already knows it by this module's
@@ -177,8 +177,7 @@ export function senderOwnText(rawBody: string | null | undefined): string {
   return stripQuotedTail(text);
 }
 
-/** The URLs in a piece of text, parsed. Unparseable candidates are dropped.
- *  Shared with the spam filter's body stage (link-domains.ts). */
+/** The URLs in a piece of text, parsed. Unparseable candidates are dropped. */
 export function urlsIn(text: string): URL[] {
   const found: URL[] = [];
   for (const candidate of text.match(URL_CANDIDATE_RE) || []) {

@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The mail-security rules now come from
-  [`@sarv-in/email-spam-scan`](https://github.com/Sarv/email-spam-scan), a new
+  [`@sarv-in/mailguard`](https://github.com/Sarv/mailguard), a new
   open-source library, instead of living in this repository. SPF/DKIM/DMARC
   header reading, display-name impersonation, origin-IP extraction, the
   header-stage spam score and its stored verdict, deceptive-link detection and
@@ -122,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What stayed behind is what the library has no business owning: this app's
   wording for each level, and the thread-view rule that puts one warning banner
   on the first message that warrants it. See
-  [docs/email-spam-scan.md](docs/email-spam-scan.md).
+  [docs/mailguard.md](docs/mailguard.md).
 - Category labels are no longer prefixed on Sarv accounts, and no longer create
   folders there. Sarv is our own product and its webmail already knows these
   labels, so a categorised message is simply flagged with the bare category name
