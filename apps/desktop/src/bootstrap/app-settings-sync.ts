@@ -163,7 +163,7 @@ function pushSpamReputationPolicy(rawSettings: string | null): void {
     if (!parsed || typeof parsed !== 'object') return;
     const api = (window as any)?.electronAPI?.spam;
     if (!api?.setReputationPolicy) return;
-    void Promise.resolve(api.setReputationPolicy({ mode: parsed.spamReputationMode ?? 'sarv', endpoint: parsed.spamReputationEndpoint ?? '' }))
+    void Promise.resolve(api.setReputationPolicy({ mode: parsed.spamReputationMode ?? 'sarv', endpoint: parsed.spamReputationEndpoint ?? '', reports: parsed.spamReputationReports === true }))
       .catch(() => { /* best-effort */ });
   } catch { /* a malformed settings blob must not break boot */ }
 }

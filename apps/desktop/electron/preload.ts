@@ -6,7 +6,7 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter } from '@sarvinbox/core';
+import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
@@ -306,6 +306,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setReputationPolicy: (policy: SpamReputationPolicy) => ipcRenderer.invoke('spam:setReputationPolicy', policy),
     getReputationState: () => ipcRenderer.invoke('spam:getReputationState'),
     kickReputation: () => ipcRenderer.invoke('spam:kickReputation'),
+    listJudged: (limit?: number, accountId?: string) => ipcRenderer.invoke('spam:listJudged', limit, accountId),
+    setUserVerdict: (emailId: string, verdict: SpamUserVerdict, accountId?: string) =>
+      ipcRenderer.invoke('spam:setUserVerdict', emailId, verdict, accountId),
     onReputationProgress: (cb: (state: SpamReputationState) => void) => {
       const listener = (_e: unknown, state: SpamReputationState) => cb(state);
       ipcRenderer.on('spam:reputation-progress', listener);
@@ -896,6 +899,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 // Type definitions for the exposed API
+/** A row of the Security page's Spam tab: what the filter had an opinion on. */
+export interface SpamJudgedRow {
+  id: string;
+  subject: string | null;
+  fromAddress: string;
+  fromName: string | null;
+  date: number;
+  folderPath: string;
+  tags: string;
+  spamScore: number | null;
+  spamReasons: string | null;
+  spamUserVerdict: SpamUserVerdict | null;
+}
+
 /** Progress of the auth-header backfill over older mail (see auth-header-backfill.ts). */
 export interface AuthBackfillState {
   /** Messages still without a verdict. */
@@ -1073,6 +1090,8 @@ export interface ElectronAPI {
     setReputationPolicy: (policy: SpamReputationPolicy) => Promise<{ success: boolean; data?: SpamReputationPolicy; error?: string }>;
     getReputationState: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
     kickReputation: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
+    listJudged: (limit?: number, accountId?: string) => Promise<{ success: boolean; data?: SpamJudgedRow[]; error?: string }>;
+    setUserVerdict: (emailId: string, verdict: SpamUserVerdict, accountId?: string) => Promise<{ success: boolean; data?: { moved: boolean }; error?: string }>;
     /** Subscribe to reputation-pass progress. Returns an unsubscribe fn. */
     onReputationProgress: (cb: (state: SpamReputationState) => void) => () => void;
   };

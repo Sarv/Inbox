@@ -33,7 +33,9 @@ export type SpamReasonId =
   // Reputation stage (spam-reputation.ts): network signals added after insert.
   | 'ip-blocklisted'
   | 'domain-blocklisted'
-  | 'user-reported';
+  | 'user-reported'
+  // Body stage: a domain the message LINKS to is on a blocklist.
+  | 'link-blocklisted';
 
 export interface SpamReason {
   id: SpamReasonId;
@@ -77,3 +79,11 @@ export function parseSpamReasons(json: string | null | undefined): SpamReason[] 
     return [];
   }
 }
+
+/**
+ * The user's own word on a message, which outranks every score: 'ham' means
+ * "not spam, and do not file it again whatever the filter finds"; 'spam' means
+ * "spam, whatever the score said". Stored in emails.spam_user_verdict; null
+ * when the user has not said.
+ */
+export type SpamUserVerdict = 'spam' | 'ham';

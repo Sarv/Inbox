@@ -1,4 +1,5 @@
-import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2, BadgeCheck, RefreshCw } from 'lucide-react';
+import { parseSpamReasons, spamVerdict } from '@sarvinbox/core/spam-verdict';
+import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { getRemoteImageMode } from '../../store/helpers';
@@ -8,7 +9,7 @@ import { useConfirm } from '../ConfirmDialog';
 import { BlockedSendersPanel } from '../settings/BlockedSendersPanel';
 import { Tooltip } from '../Tooltip';
 
-type SecurityTab = 'overview' | 'links' | 'senders' | 'images' | 'identity';
+type SecurityTab = 'overview' | 'links' | 'senders' | 'images' | 'identity' | 'spam';
 
 const tabs: { id: SecurityTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -16,6 +17,7 @@ const tabs: { id: SecurityTab; label: string }[] = [
   { id: 'senders', label: 'Blocked senders' },
   { id: 'images', label: 'Remote images' },
   { id: 'identity', label: 'Sender identity' },
+  { id: 'spam', label: 'Spam' },
 ];
 
 const LEVEL_ICON: Record<SecurityLevel, typeof Shield> = {
@@ -73,6 +75,7 @@ export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
         )}
         {activeTab === 'images' && <ImagesTab />}
         {activeTab === 'identity' && <IdentityTab />}
+        {activeTab === 'spam' && <SpamTab />}
       </div>
     </div>
   );
@@ -520,6 +523,137 @@ function IdentityTab() {
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         </Tooltip>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- Spam */
+
+interface JudgedRow {
+  id: string;
+  subject: string | null;
+  fromAddress: string;
+  fromName: string | null;
+  date: number;
+  folderPath: string;
+  tags: string;
+  spamScore: number | null;
+  spamReasons: string | null;
+  spamUserVerdict: 'spam' | 'ham' | null;
+}
+
+/**
+ * Everything the spam filter had an opinion on — filed, merely suspicious, or
+ * overruled by you — with the score and every reason, so a verdict is never a
+ * bare adjective. "Not spam" un-files the message and stores your word, which
+ * the filter respects from then on; "Spam" files it and adds the sender to
+ * your blocked list. Both go through the same action as the message menu.
+ */
+function SpamTab() {
+  const [rows, setRows] = useState<JudgedRow[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await window.electronAPI.spam?.listJudged?.(200);
+      if (r?.success && Array.isArray(r.data)) setRows(r.data as JudgedRow[]);
+    } catch { /* best-effort */ }
+  }, []);
+  useEffect(() => {
+    void load();
+    const off = window.electronAPI.spam?.onReputationProgress?.(() => { void load(); });
+    return () => { off?.(); };
+  }, [load]);
+
+  const decide = async (id: string, verdict: 'spam' | 'ham') => {
+    setBusy(id);
+    try { await window.electronAPI.spam?.setUserVerdict?.(id, verdict); } finally { setBusy(null); await load(); }
+  };
+
+  const filed = rows.filter((r) => r.tags.includes('|spam|') && r.spamUserVerdict !== 'ham').length;
+  const overruled = rows.filter((r) => r.spamUserVerdict === 'ham').length;
+
+  return (
+    <div className="p-6 max-w-5xl space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Messages the spam filter scored as suspicious or spam, and the ones you have ruled on. Scores come from the headers
+        (authentication, a spoofed name, a forged reply…), then from sender and link reputation once the network has been asked.
+        Your verdict outranks any score: a message you mark <b>Not spam</b> is never filed again.
+      </p>
+      <div className="flex flex-wrap gap-4 text-sm">
+        <span className="rounded-lg border border-border bg-card px-3 py-2"><b>{filed}</b> filed as spam</span>
+        <span className="rounded-lg border border-border bg-card px-3 py-2"><b>{rows.length - filed - overruled}</b> suspicious, left in place</span>
+        <span className="rounded-lg border border-border bg-card px-3 py-2"><b>{overruled}</b> overruled by you</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground flex items-center gap-2">
+          <Info className="h-4 w-4" /> Nothing yet — the filter has had no reason to doubt any message it has seen.
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">Message</th>
+                <th className="px-3 py-2 font-medium">Score</th>
+                <th className="px-3 py-2 font-medium">Why</th>
+                <th className="px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const verdict = spamVerdict(r.spamScore);
+                const reasons = parseSpamReasons(r.spamReasons);
+                const isFiled = r.tags.includes('|spam|') && r.spamUserVerdict !== 'ham';
+                const scoreTone = r.spamUserVerdict === 'ham' ? 'bg-muted text-muted-foreground'
+                  : verdict === 'spam' || r.spamUserVerdict === 'spam' ? 'bg-red-500/15 text-red-700 dark:text-red-300'
+                  : 'bg-amber-500/15 text-amber-700 dark:text-amber-300';
+                return (
+                  <tr key={r.id} className="border-t border-border align-top">
+                    <td className="px-3 py-2 min-w-0">
+                      <div className="font-medium truncate max-w-[22rem]">{r.subject || '(no subject)'}</div>
+                      <div className="text-xs text-muted-foreground truncate max-w-[22rem]">{r.fromName ? `${r.fromName} <${r.fromAddress}>` : r.fromAddress}</div>
+                      <div className="text-xs text-muted-foreground">{new Date(r.date * 1000).toLocaleString()} · {r.folderPath}</div>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${scoreTone}`}>
+                        {r.spamUserVerdict === 'ham' ? 'Not spam (you)' : r.spamUserVerdict === 'spam' ? 'Spam (you)' : isFiled ? `Spam · ${r.spamScore ?? '–'}` : `Suspicious · ${r.spamScore ?? '–'}`}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">
+                      {reasons.length === 0 ? <span>No stored reasons{r.tags.includes('|spam|') ? ' — tagged by the AI categoriser' : ''}</span> : (
+                        <ul className="space-y-0.5">
+                          {reasons.slice(0, 4).map((x, i) => <li key={`${x.id}-${i}`}><span className="font-medium text-foreground/80">+{x.points}</span> {x.detail}</li>)}
+                          {reasons.length > 4 && <li>+{reasons.length - 4} more</li>}
+                        </ul>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        {r.spamUserVerdict !== 'ham' && (
+                          <Tooltip content="Not spam: un-file it and never file it again" delayMs={40}>
+                            <button onClick={() => void decide(r.id, 'ham')} disabled={busy !== null} aria-label="Not spam"
+                              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted/60 disabled:opacity-50 transition-colors">
+                              {busy === r.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Not spam
+                            </button>
+                          </Tooltip>
+                        )}
+                        {r.spamUserVerdict !== 'spam' && !isFiled && (
+                          <Tooltip content="Spam: file it and block the sender" delayMs={40}>
+                            <button onClick={() => void decide(r.id, 'spam')} disabled={busy !== null} aria-label="Spam"
+                              className="inline-flex items-center gap-1 rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-700 dark:text-red-300 hover:bg-red-500/10 disabled:opacity-50 transition-colors">
+                              <Ban className="h-3.5 w-3.5" /> Spam
+                            </button>
+                          </Tooltip>
+                        )}
                       </div>
                     </td>
                   </tr>

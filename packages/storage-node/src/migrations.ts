@@ -3046,6 +3046,41 @@ export const emailReputationColumns: Migration = {
 };
 
 /**
+ * v88 — the spam filter's body stage and the user's own verdict.
+ *
+ * `link_reputation_checked_at`: when the domains a message LINKS to were last
+ * judged; NULL = not yet. The partial index holds only rows that have a body
+ * and are still waiting, so the pass selects cheaply and the index drains.
+ *
+ * `spam_user_verdict`: 'ham' or 'spam', the user's word. It outranks every
+ * score — a 'ham' row is never filed again however the reputation stages
+ * later score it — and it is what the report loop sends to the Sarv service,
+ * with the user's consent, as one more opinion on that sender.
+ */
+export const emailSpamVerdictColumns: Migration = {
+  version: 88,
+  name: 'email_spam_verdict_columns',
+  up: (db) => {
+    const colNames = new Set(
+      (db.prepare('PRAGMA table_info(emails)').all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!colNames.has('link_reputation_checked_at')) db.exec('ALTER TABLE emails ADD COLUMN link_reputation_checked_at INTEGER;');
+    if (!colNames.has('spam_user_verdict')) {
+      db.exec("ALTER TABLE emails ADD COLUMN spam_user_verdict TEXT CHECK (spam_user_verdict IN ('spam', 'ham'));");
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_emails_link_reputation_pending
+        ON emails(date DESC)
+        WHERE link_reputation_checked_at IS NULL AND spam_score IS NOT NULL AND raw_body_len > 0;
+    `);
+    logger.info('email spam verdict columns (v88): link_reputation_checked_at, spam_user_verdict ready');
+  },
+  down: (db) => {
+    db.exec('DROP INDEX IF EXISTS idx_emails_link_reputation_pending;');
+  },
+};
+
+/**
  * v84 — re-key the search index by rowid so maintaining it stops scanning it.
  *
  * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
@@ -3282,5 +3317,6 @@ export function createMigrationManager(
   manager.register(linkDomainRules);
   manager.register(emailSpamColumns);
   manager.register(emailReputationColumns);
+  manager.register(emailSpamVerdictColumns);
   return manager;
 }

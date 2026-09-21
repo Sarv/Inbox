@@ -43,6 +43,7 @@ export * from './origin-ip';
 export * from './spam-verdict';
 export * from './spam-signals';
 export * from './spam-reputation';
+export * from './link-domains';
 export * from './bimi-roots';
 export * from './bimi';
 export * from './favicon';
