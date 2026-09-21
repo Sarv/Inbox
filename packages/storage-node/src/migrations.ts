@@ -3017,6 +3017,55 @@ export const emailSpamColumns: Migration = {
 };
 
 /**
+ * The two partial indexes the reputation stages are read through, and the
+ * predicates that define them.
+ *
+ * Same contract as the header-stage pair below: ONE definition, shared by the
+ * `CREATE INDEX` and by the queries in sqlite-storage, because SQLite only
+ * uses a partial index when the query's WHERE *implies* the index's — and the
+ * queries name it with `INDEXED BY` rather than leaving the choice to the
+ * planner. Left to choose, the planner takes `idx_emails_uid` for the COUNT
+ * halves, because `uid > 0` is a range it can seek while a partial index it
+ * must scan whole looks more expensive than it is; that "seek" then visits
+ * every row in the mailbox (measured: 12ms against 0.03ms on 26,700 synthetic
+ * rows, and far worse on a real multi-gigabyte mailbox). `ANALYZE` does not
+ * change the choice.
+ *
+ * The uid terms are NOT part of the index predicates: narrowing a published
+ * index means a new version, and they exclude few rows. The callers AND them
+ * on top instead — a query that adds terms to the index's predicate still
+ * implies it, which is all the planner needs.
+ */
+export const REPUTATION_PENDING_INDEX = 'idx_emails_reputation_pending';
+export const LINK_REPUTATION_PENDING_INDEX = 'idx_emails_link_reputation_pending';
+
+/** Rows the SENDER reputation stage has not judged yet. */
+export function reputationPending(prefix = ''): string {
+  return `${prefix}reputation_checked_at IS NULL AND ${prefix}spam_score IS NOT NULL`;
+}
+
+/**
+ * Rows the BODY stage has not judged yet. `raw_body_len > 0` is what makes it
+ * the body stage: a NULL length means "unknown", left for the metrics
+ * backfill, and zero means there is nothing to find links in.
+ */
+export function linkReputationPending(prefix = ''): string {
+  return `${prefix}link_reputation_checked_at IS NULL AND ${prefix}spam_score IS NOT NULL`
+    + ` AND ${prefix}raw_body_len > 0`;
+}
+
+/**
+ * The uid terms both stages add on top of their index predicate.
+ *
+ * A row with no uid — NULL, or 0 for a locally-appended Sent or Drafts copy
+ * the server never numbered — has no server-side identity to file or report
+ * against, so judging it is work with nowhere to go.
+ */
+export function withServerUid(clause: string, prefix = ''): string {
+  return `${clause} AND ${prefix}uid IS NOT NULL AND ${prefix}uid > 0`;
+}
+
+/**
  * v87 — the spam filter's reputation stage: when a row was last judged by the
  * network (blocklists, the Sarv reputation service).
  *
@@ -3034,14 +3083,14 @@ export const emailReputationColumns: Migration = {
     );
     if (!colNames.has('reputation_checked_at')) db.exec('ALTER TABLE emails ADD COLUMN reputation_checked_at INTEGER;');
     db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_emails_reputation_pending
+      CREATE INDEX IF NOT EXISTS ${REPUTATION_PENDING_INDEX}
         ON emails(date DESC)
-        WHERE reputation_checked_at IS NULL AND spam_score IS NOT NULL;
+        WHERE ${reputationPending()};
     `);
     logger.info('email reputation columns (v87): reputation_checked_at ready');
   },
   down: (db) => {
-    db.exec('DROP INDEX IF EXISTS idx_emails_reputation_pending;');
+    db.exec(`DROP INDEX IF EXISTS ${REPUTATION_PENDING_INDEX};`);
   },
 };
 
@@ -3069,14 +3118,14 @@ export const emailSpamVerdictColumns: Migration = {
       db.exec("ALTER TABLE emails ADD COLUMN spam_user_verdict TEXT CHECK (spam_user_verdict IN ('spam', 'ham'));");
     }
     db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_emails_link_reputation_pending
+      CREATE INDEX IF NOT EXISTS ${LINK_REPUTATION_PENDING_INDEX}
         ON emails(date DESC)
-        WHERE link_reputation_checked_at IS NULL AND spam_score IS NOT NULL AND raw_body_len > 0;
+        WHERE ${linkReputationPending()};
     `);
     logger.info('email spam verdict columns (v88): link_reputation_checked_at, spam_user_verdict ready');
   },
   down: (db) => {
-    db.exec('DROP INDEX IF EXISTS idx_emails_link_reputation_pending;');
+    db.exec(`DROP INDEX IF EXISTS ${LINK_REPUTATION_PENDING_INDEX};`);
   },
 };
 

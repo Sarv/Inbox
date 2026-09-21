@@ -37,6 +37,7 @@ vi.mock('node:dns', () => ({
 
 import {
   REPUTATION_ACTIVE_INTERVAL_MS,
+  BODY_BATCH_SIZE,
   REPUTATION_CACHE_TTL_S,
   REPUTATION_CACHE_UNKNOWN_TTL_S,
   REPUTATION_FIRST_TICK_MS,
@@ -584,5 +585,107 @@ describe('more edges', () => {
       stopSpamReputationScheduler();
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * What keeps this pass off the main thread.
+ *
+ * What this protects: nothing here changes a score, so every one of these
+ * failures is invisible to the other tests in this file — they would all stay
+ * green while the pass froze the app. The body stage reads whole MIME bodies
+ * and HTML-parses each one synchronously, which is exactly the shape a CPU
+ * profile named as the beachball in the inline-image pass: the bound has to be
+ * TIME (a body is any size) and the loop has to hand the thread back.
+ */
+describe('runReputationPass — holding the main thread', () => {
+  const pacing = (
+    t: ReturnType<typeof fakeStorage>,
+    provider: ReputationProvider,
+    over: Partial<{ nowMs: () => number; budgetMs: number; yieldFn: () => Promise<void> }> = {},
+  ) => ({
+    targets: () => [{ storage: t.storage, engine: null, label: 'acct' }],
+    provider: () => provider,
+    cache: new ReputationCache(new Database(':memory:')),
+    now: () => T0,
+    ...over,
+  });
+  const bodies = (n: number): BodyRow[] => Array.from({ length: n }, (_, i) => bodyRow({ id: `b${i}` }));
+  const countingReads = (t: ReturnType<typeof fakeStorage>) => {
+    const limits: number[] = [];
+    const real = t.storage.getEmailsPendingLinkReputation;
+    t.storage.getEmailsPendingLinkReputation = (limit) => { limits.push(limit); return real(limit); };
+    return limits;
+  };
+
+  // A body-stage row carries `raw_body`: the whole MIME source, attachments
+  // included. Asking for the sender stage's 200 of those at once is a
+  // multi-hundred-megabyte read before one domain has been extracted.
+  it('reads bodies in bounded chunks, and still drains the backlog', async () => {
+    const t = fakeStorage([], true, bodies(60));
+    const limits = countingReads(t);
+    const s = await runReputationPass(pacing(t, providerOf(answering({}))));
+    expect(Math.max(...limits)).toBe(BODY_BATCH_SIZE);
+    expect(s).toMatchObject({ linkJudged: 60, linkPending: 0 });
+  });
+
+  // A row limit cannot bound a loop whose per-row cost is an HTML parse over a
+  // body of any size; a deadline can. The chunk in flight finishes — it has
+  // already been read and looked up — and no new one starts.
+  it('stops starting chunks once the time budget is spent, leaving the rest pending', async () => {
+    const t = fakeStorage([], true, bodies(60));
+    let ms = 0;
+    const s = await runReputationPass(pacing(t, providerOf(answering({})), {
+      nowMs: () => (ms += 40), // a clock that runs out mid-chunk
+      budgetMs: 1_000,
+      yieldFn: async () => {},
+    }));
+    expect(s).toMatchObject({ linkJudged: BODY_BATCH_SIZE, linkPending: 60 - BODY_BATCH_SIZE });
+  });
+
+  // better-sqlite3 is synchronous, so an `await` around it resolves as a
+  // microtask and the queue drains without ever reaching libuv's poll phase:
+  // a loop that never yields freezes IMAP reads, IPC replies and the renderer
+  // along with itself.
+  it('hands the thread back while parsing bodies and while filing rows', async () => {
+    const t = fakeStorage([row({ id: 'a', spamScore: 3 })], true, bodies(3));
+    let ms = 0;
+    let yields = 0;
+    await runReputationPass(pacing(t, providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') })), {
+      nowMs: () => (ms += 10), // each row costs more than the yielder's budget
+      yieldFn: async () => { yields += 1; },
+    }));
+    expect(yields).toBeGreaterThanOrEqual(4); // at least once per row parsed or filed
+    expect(t.linkStamped).toHaveLength(3);
+  });
+
+  // Nothing left the queue, so the next chunk is this chunk. Re-reading it
+  // until the deadline would burn the whole budget on rows it cannot stamp —
+  // and with the rows in hand it would look like progress in the log.
+  it('stops instead of re-reading the same chunk when nothing leaves the queue', async () => {
+    const stalled = fakeStorage([], true, bodies(3));
+    stalled.storage.applyLinkReputationBatch = () => 0;
+    const stalledReads = countingReads(stalled);
+    expect((await runReputationPass(pacing(stalled, providerOf(answering({}))))).linkJudged).toBe(0);
+    expect(stalledReads).toHaveLength(1);
+
+    const broken = fakeStorage([], true, bodies(3));
+    broken.storage.applyLinkReputationBatch = () => { throw new Error('db locked'); };
+    const brokenReads = countingReads(broken);
+    expect((await runReputationPass(pacing(broken, providerOf(answering({}))))).linkJudged).toBe(0);
+    expect(brokenReads).toHaveLength(1);
+  });
+
+  // The pass can be entered with the budget already gone (a slow tick before
+  // it). It must judge nothing and still report the backlog, or the Security
+  // tab would show zero waiting rows for as long as the app stayed busy.
+  it('starts no account when the budget is already spent, and still reports what is waiting', async () => {
+    const t = fakeStorage([row({ id: 'a' })], true, bodies(2));
+    const s = await runReputationPass(pacing(t, providerOf(answering({})), {
+      nowMs: () => 0,
+      budgetMs: 0,
+      yieldFn: async () => {},
+    }));
+    expect(s).toMatchObject({ judged: 0, linkJudged: 0, pending: 1, linkPending: 2 });
   });
 });

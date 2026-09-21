@@ -177,3 +177,44 @@ describe('the user’s verdict and the Spam tab listing', () => {
     expect(s.getSpamJudgedEmails(1, 3)).toHaveLength(1);
   });
 });
+
+describe('the reputation queries stay off the mail table', () => {
+  // Measured before the pin, on 26,700 synthetic rows with ANALYZE run: both
+  // COUNTs planned `SEARCH emails USING INDEX idx_emails_uid (uid>?)` — a seek
+  // the planner prefers because `uid > 0` is a range, and which then visits
+  // every row in the mailbox — at 12ms against 0.03ms through the partial
+  // index, on the main process, on every pass. The SELECTs happened to plan
+  // right only because `ORDER BY date DESC` matched the index; one dropped
+  // sort would have taken them the same way. Nothing but the plan asserts
+  // this: a drift between the clause helpers and the migration's WHERE would
+  // silently restore the scan, so the plan is what is pinned.
+  it('plans every reputation query through its partial index, never a table scan', () => {
+    const { s, db } = storage();
+    seed(db, { score: 0, body: '<a href="https://x.example">x</a>' });
+    const statements: string[] = [];
+    const realPrepare = db.prepare.bind(db);
+    (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      statements.push(sql);
+      return realPrepare(sql);
+    };
+    s.getEmailsPendingReputation(50);
+    s.countEmailsPendingReputation();
+    s.getEmailsPendingLinkReputation(50);
+    s.countEmailsPendingLinkReputation();
+    (db as unknown as { prepare: unknown }).prepare = realPrepare;
+
+    expect(statements).toHaveLength(4);
+    for (const sql of statements) {
+      const params = new Array((sql.match(/\?/g) ?? []).length).fill(50);
+      const plan = (realPrepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>)
+        .map((step) => step.detail)
+        .join(' | ');
+      expect(plan).toMatch(/idx_emails_(link_)?reputation_pending/);
+      expect(plan).not.toMatch(/idx_emails_uid/);
+      // A scan THROUGH the partial index is the goal (it holds only waiting
+      // rows); a scan of the table itself, under any alias, is the bug.
+      expect(plan).not.toMatch(/SCAN (emails|e)\b(?! USING)/);
+      expect(plan).not.toContain('USE TEMP B-TREE'); // the index already supplies date DESC
+    }
+  });
+});
