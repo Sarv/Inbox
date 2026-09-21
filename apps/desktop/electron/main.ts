@@ -105,6 +105,7 @@ import {
   setCurrentAccount,
   hasAccountRuntime,
 } from './shared';
+import { resolveAppIconPath } from './utils/app-icon';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
 import { classifyNavigation, type NavigationScope } from './utils/navigation-policy';
@@ -367,7 +368,7 @@ function createWindow(): void {
     },
     title: 'Sarv Inbox',
     show: false,
-    icon: join(__dirname, '..', 'build', process.platform === 'darwin' ? 'icon.icns' : 'icons/icon.png'),
+    icon: resolveAppIconPath(__dirname, isDev),
   });
 
   setMainWindow(mainWindow);
@@ -810,11 +811,7 @@ app.whenReady().then(async () => {
     // Set dock icon for macOS
     if (process.platform === 'darwin' && app.dock) {
       try {
-        // In dev: use public/icon.png; in production: use dist/icon.png (inside asar)
-        const iconPath = isDev
-          ? join(__dirname, '..', 'public', 'icon.png')
-          : join(__dirname, '..', 'dist', 'icon.png');
-        app.dock.setIcon(iconPath);
+        app.dock.setIcon(resolveAppIconPath(__dirname, isDev));
       } catch {
         // Ignore - app will use default icon from bundle
       }
