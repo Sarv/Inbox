@@ -24,7 +24,7 @@ import { PhishingWarningBanner } from './PhishingWarningBanner';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
-import { stripSignatureFromHtml, formatRelativeDate } from './utils';
+import { stripSignatureFromHtml, formatRelativeDate, hasLoadedBody } from './utils';
 import { VerifiedBadge } from './VerifiedBadge';
 
 
@@ -101,6 +101,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
                     spamScore={displayEmail.spamScore}
                     spamReasons={displayEmail.spamReasons}
                     html={displayEmail.rawBody}
+                    bodyLoaded={hasLoadedBody(displayEmail)}
                   />
                 </div>
                 {displayEmail.fromName && (
@@ -207,7 +208,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
             />
             {(() => {
               const isBodyLoading = loadingBodies.has(displayEmail.id);
-              const hasBody = displayEmail.rawBody || displayEmail.cleanBody;
+              const hasBody = hasLoadedBody(displayEmail);
 
               if (isBodyLoading) {
                 return (

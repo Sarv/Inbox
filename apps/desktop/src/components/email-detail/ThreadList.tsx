@@ -27,8 +27,11 @@ import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
 import { PhishingWarningBanner } from './PhishingWarningBanner';
+import { SecurityIndicator } from './SecurityIndicator';
+import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
-import { getInitials, getAvatarColor, formatRelativeDate, stripQuotedContent, stripSignatureFromHtml, parseAttachments } from './utils';
+import { formatRelativeDate, hasLoadedBody, stripQuotedContent, stripSignatureFromHtml, parseAttachments } from './utils';
+import { VerifiedBadge } from './VerifiedBadge';
 
 
 interface ThreadListProps {
@@ -116,8 +119,6 @@ export function ThreadList({ ctx }: ThreadListProps) {
         .sort((a, b) => a.date - b.date)
         .map((email) => {
           const isExpanded = expandedThreads.has(email.id);
-          const threadInitials = getInitials(email.fromName, email.fromAddress);
-          const threadAvatarColor = getAvatarColor(email.fromAddress);
           const threadAttachments = parseAttachments(email.attachmentNames, email.attachmentSizes)
             .map((a) => ({ name: a.name, size: a.size != null ? prettyBytes(a.size) : 'Unknown' }));
 
@@ -129,11 +130,22 @@ export function ThreadList({ ctx }: ThreadListProps) {
             >
               {/* Thread Header - Always Visible */}
               <div className="w-full p-4 flex items-start gap-4 hover:bg-accent/50 transition-colors">
-                <div
-                  onClick={() => toggleThread(email.id)}
-                  className={`w-10 h-10 rounded-full ${threadAvatarColor} flex items-center justify-center text-white font-semibold flex-shrink-0 cursor-pointer`}
-                >
-                  {threadInitials}
+                {/* The SAME avatar the anchor card draws (SenderAvatar:
+                    BIMI logo on DMARC-passing mail, then the confirmed contact
+                    photo, then the domain favicon, then initials). This row
+                    used to hand-roll an initials circle, so one message showed
+                    its sender's brand logo and the next message FROM THE SAME
+                    SENDER showed two letters — a difference that looks like a
+                    fact about the mail and is only a fact about which
+                    component drew it. */}
+                <div onClick={() => toggleThread(email.id)} className="flex-shrink-0 cursor-pointer">
+                  <SenderAvatar
+                    email={email.fromAddress}
+                    name={email.fromName}
+                    size={40}
+                    authStatus={email.authStatus}
+                    className="font-semibold"
+                  />
                 </div>
                 <div
                   className="flex-1 min-w-0 cursor-pointer"
@@ -141,8 +153,27 @@ export function ThreadList({ ctx }: ThreadListProps) {
                 >
                   <div className="flex items-start justify-between gap-2 mb-1">
                     <div className="min-w-0">
-                      <div className="font-semibold text-sm text-foreground truncate">
-                        {email.fromName || email.fromAddress}
+                      {/* The shield is PER MESSAGE, on every reply — not only on
+                          the anchor card above. A thread is a list of separately
+                          authenticated messages: the opener can pass DMARC while
+                          reply 14 is a display-name spoof from a look-alike
+                          domain, and until this rendered here the reader saw one
+                          green shield at the top of that thread and nothing else.
+                          The banner still appears once (see firstFlaggedEmailId);
+                          the shield is a level with its evidence on hover, which
+                          is why every message gets one. */}
+                      <div className="font-semibold text-sm text-foreground flex items-center gap-1.5">
+                        <span className="truncate">{email.fromName || email.fromAddress}</span>
+                        <VerifiedBadge email={email.fromAddress} authStatus={email.authStatus} />
+                        <SecurityIndicator
+                          fromName={email.fromName}
+                          fromAddress={email.fromAddress}
+                          authStatus={email.authStatus}
+                          spamScore={email.spamScore}
+                          spamReasons={email.spamReasons}
+                          html={email.rawBody}
+                          bodyLoaded={hasLoadedBody(email)}
+                        />
                       </div>
                       {email.fromName && (
                         <div className="text-sm text-muted-foreground truncate">
@@ -213,7 +244,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
               {/* Expanded Thread Content */}
               {isExpanded && (() => {
                 const isBodyLoading = loadingBodies.has(email.id);
-                const hasBody = email.rawBody || email.cleanBody;
+                const hasBody = hasLoadedBody(email);
 
                 if (isBodyLoading) {
                   return (

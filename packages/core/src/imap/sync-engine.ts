@@ -5,7 +5,7 @@ import { simpleParser } from 'mailparser';
 
 import { buildStandardFolderAliasMap, describeDuplicateRoles, duplicateRoleCandidates } from '../config/folder-mapping';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
-import type { IMAPConfig, IIMAPClient, IMAPFolder, SearchCriteria } from '../types/imap';
+import type { IMAPConfig, IIMAPClient, IMAPFolder, IMAPMessage, SearchCriteria } from '../types/imap';
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
@@ -28,6 +28,7 @@ import { OperationQueue, type OperationResult } from './operation-queue';
 import { applyQresyncVanished } from './qresync-reconcile';
 import { attachmentBytesFromSource } from './raw-mime-part';
 import { RealtimeManager, type RealtimeMode, type RealtimeEvent } from './realtime-manager';
+import type { ReputationLookup } from './reputation-stage';
 import { SyncStateManager, type SyncStatus, type SyncState } from './sync-state';
 import { withFolderSelected } from './with-folder';
 
@@ -277,6 +278,11 @@ export class SyncEngine {
     this.folderSyncer.setServerActions(ingestActions);
     this.realtimeManager.setServerActions(ingestActions);
 
+    // The blocklist lookup is NOT wired here. It is a network call to a third
+    // party about the user's correspondents, so it arrives from outside (see
+    // setReputationLookup) only once the user has switched it on, and the
+    // engine runs perfectly without one.
+
     // Hook folder-sync inserts into the same event stream realtime
     // uses, so manual / periodic syncs that insert new emails get
     // surfaced to the renderer (otherwise the realtime polling that
@@ -437,6 +443,20 @@ export class SyncEngine {
         try { return await pool.acquire(); } catch { return null; }
       },
     });
+  }
+
+  /**
+   * Hand the engine a blocklist lookup, or replace the one it has.
+   *
+   * Injected rather than constructed because the decision to ask a blocklist
+   * operator about the user's mail is the user's, made in Security settings,
+   * and because the cache and circuit breaker behind it are shared across
+   * every account's engine — one process, one set of queries.
+   */
+  setReputationLookup(fn: ReputationLookup): void {
+    this.messageProcessor.setReputationLookup(fn);
+    this.folderSyncer.setReputationLookup(fn);
+    this.realtimeManager.setReputationLookup(fn);
   }
 
   // ========== Connection ==========
@@ -1506,41 +1526,46 @@ export class SyncEngine {
   }
 
   /**
-   * Fetch ONLY the mail-authentication headers for a set of UIDs in one folder.
+   * Re-fetch the HEADERS of a set of UIDs in one folder — no body.
    *
-   * Powers the auth-header backfill: every message synced before the client
-   * kept Authentication-Results has `auth_status = NULL`, so its security level
-   * reads "Unverified" whatever the server actually recorded. This re-reads
-   * just those headers — a few hundred bytes per message, no body — so history
-   * gets a real SPF / DKIM / DMARC verdict.
+   * Powers the header backfill. Two columns depend on it and both were added
+   * after mail had already been synced: `auth_status` (a message with none
+   * reads "Unverified" whatever the server actually recorded) and the spam
+   * filter's `spam_score`. One fetch answers both, because a headers-only
+   * FETCH already returns the envelope, the raw header block and INTERNALDATE
+   * — every input `headerStage` needs. A few hundred bytes per message.
+   *
+   * Returns the whole message rather than one extracted field precisely so a
+   * third column added later costs no new round-trip and no new method.
    *
    * Same isolation rules as classifyBulkUids: runs ONLY on a pool connection
    * (no IDLE/selection race with the primary), and returns an empty map when no
    * pool is available so the caller simply retries later.
    *
-   * @returns uid → raw auth-header block, or undefined when the server has no
-   *   such header for that message. A uid ABSENT from the map was not fetched
-   *   (connection trouble) and must stay NULL for the next pass.
+   * @returns uid → the fetched message. A uid ABSENT from the map was not
+   *   returned by the server this time (connection trouble, or expunged) and
+   *   must stay NULL for the next pass. A uid PRESENT whose `authHeaders` is
+   *   undefined is a real answer: the server recorded no verdict.
    */
-  async fetchAuthHeaders(folderPath: string, uids: number[]): Promise<Map<number, string | undefined>> {
-    const out = new Map<number, string | undefined>();
+  async fetchHeaderMessages(folderPath: string, uids: number[]): Promise<Map<number, IMAPMessage>> {
+    const out = new Map<number, IMAPMessage>();
     if (!this.isConnected() || uids.length === 0) return out;
     if (!this.connectionPool?.isInitialized()) return out; // pool-only for safety
-    const doFetch = async (client: IIMAPClient): Promise<Map<number, string | undefined>> => {
+    const doFetch = async (client: IIMAPClient): Promise<Map<number, IMAPMessage>> => {
       const msgs = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID(uids, {
         fetchHeaders: true,
         fetchBody: false,
         fetchBodyStructure: false,
       }));
-      const map = new Map<number, string | undefined>();
-      for (const m of msgs) if (typeof m.uid === 'number') map.set(m.uid, m.authHeaders);
+      const map = new Map<number, IMAPMessage>();
+      for (const m of msgs) if (typeof m.uid === 'number') map.set(m.uid, m);
       return map;
     };
     try {
       return await this.connectionPool.withConnection(doFetch);
     } catch (error) {
       if (!this.connectionManager.isConnectionError(error)) {
-        logger.warn(`[AuthBackfill] fetch ${folderPath} failed: ${(error as Error).message}`);
+        logger.warn(`[HeaderBackfill] fetch ${folderPath} failed: ${(error as Error).message}`);
       }
       return out;
     }

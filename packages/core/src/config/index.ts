@@ -23,6 +23,7 @@ export {
   isSpamFolder,
   isArchiveFolder,
   isAllMailSuperset,
+  isOwnMailFolder,
 } from './folder-mapping';
 
 export type { VirtualFolder, FolderConfig, StandardFolderType, ClassifiableFolder } from './folder-mapping';

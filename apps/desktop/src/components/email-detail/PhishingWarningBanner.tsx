@@ -1,8 +1,8 @@
+import type { LinkMismatch } from '@sarv-in/email-spam-scan/links';
 import { ShieldAlert, ShieldX, Check, Ban } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { assessEmailSecurity, LEVEL_RANK } from '../../utils/email-security';
-import type { LinkMismatch } from '../../utils/phishing';
 import { addLinkRule, useLinkRules } from '../../utils/security-rules';
 
 interface PhishingWarningBannerProps {

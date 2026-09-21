@@ -17,22 +17,34 @@
  * pre-bundling without watching it still serves stale files, and watching it
  * without excluding it still serves a stale pre-bundle. Both read the same
  * list, so they cannot disagree.
+ *
+ * WHAT THEY DO NOT COVER: a new SUBPATH in the linked package's `exports` map.
+ * Watching re-serves a changed file; it does not re-read the package.json Vite
+ * resolved when the server started, so an import of an entry added since then
+ * fails with `Missing "./<entry>" specifier in "<package>"` however many times
+ * the library is rebuilt. Restart the dev server — that is the whole fix, and
+ * `rm -rf node_modules/.vite` first if it somehow survives one.
  */
 
 /**
  * Packages linked by `file:` path. Add one here and both helpers pick it up.
  *
- * Empty in the normal case, and that is the correct state: `@sarv-in/email-chat-view`
- * now installs from the registry, where Vite's default handling — pre-bundle
- * once, never watch — is exactly right for an immutable published tarball.
- * Excluding it would only cost dev-server startup time.
+ * This list must match the dependencies whose version range starts with
+ * `file:` — a test asserts exactly that, because the failure it prevents is
+ * silent: the dev server keeps serving the previous build of the library with
+ * no error, no warning and no reload.
  *
- * The machinery stays because the moment anyone points that dependency back at
- * `file:../../../@sarv-in/email-chat-view` to work on the library, adding its name here
- * is the difference between seeing their rebuild and silently being served the
- * previous one.
+ * `@sarv-in/email-spam-scan` is the spam filter, extracted from this app and
+ * developed in the sibling checkout; the renderer reaches its `/verdict`,
+ * `/identity`, `/links`, `/security` and `/reputation` entries through the
+ * seams in `src/utils`, and its `/quote` entry through the core modules
+ * aliased in `renderer-aliases.ts`. When it goes back to a registry range, remove it: Vite's
+ * default handling — pre-bundle once, never watch — is exactly right for an
+ * immutable published tarball, and excluding it would only cost dev-server
+ * startup time. `@sarv-in/email-chat-view` is the standing example of that
+ * state; point it back at `file:` to work on it and it belongs here again.
  */
-export const LINKED_PACKAGES: readonly string[] = [];
+export const LINKED_PACKAGES: readonly string[] = ['@sarv-in/email-spam-scan'];
 
 /**
  * `optimizeDeps.exclude` — keep these out of the esbuild pre-bundle.
@@ -42,6 +54,36 @@ export const LINKED_PACKAGES: readonly string[] = [];
  * does not reliably do.
  */
 export function linkedDepsToExclude(packages: readonly string[] = LINKED_PACKAGES): string[] {
+  return [...packages];
+}
+
+/**
+ * CommonJS packages the renderer reaches THROUGH a linked package.
+ *
+ * Excluding a package from pre-bundling excludes its dependencies too, and Vite
+ * then serves them exactly as they sit on disk. An ESM dependency is fine; a
+ * CommonJS one is not — the browser is handed `module.exports = ...` and the
+ * importing module's `import x from 'pkg'` fails with "does not provide an
+ * export named 'default'". The window is blank, and only in dev: the production
+ * build runs the same file through @rollup/plugin-commonjs and converts it, so
+ * `check:renderer-bundle` stays green while `pnpm dev:desktop` is unusable.
+ * That is exactly how `free-email-domains` broke the renderer on 2026-09-19.
+ *
+ * Naming one here puts it back in the pre-bundle on its own, which is where
+ * esbuild converts it to ESM — the fix Vite documents for this case. The list
+ * is short by construction: it holds only what a renderer import actually
+ * reaches, not everything the library depends on.
+ *
+ * `ipaddr.js` arrives with the blocklist catalogue that Security > Blocklists
+ * renders (`@sarv-in/email-spam-scan/reputation`), and is CommonJS with a
+ * default import.
+ */
+export const LINKED_CJS_DEPS: readonly string[] = ['ipaddr.js'];
+
+/**
+ * `optimizeDeps.include` — the counterpart to the exclude above.
+ */
+export function linkedCjsDepsToPrebundle(packages: readonly string[] = LINKED_CJS_DEPS): string[] {
   return [...packages];
 }
 

@@ -38,11 +38,46 @@ export * from './lru-cache';
 export * from './ai-categories';
 export * from './single-flight';
 export * from './mutex';
-export * from './sender-spoof';
-export * from './origin-ip';
-export * from './spam-verdict';
-export * from './spam-signals';
+
+// The email-security rules — sender spoofing, origin IP, the spam scorer and
+// its verdict codec — were extracted to
+// `@sarv-in/email-spam-scan` so they could be maintained (and contributed to)
+// as an open-source library. Re-exported here, under the names they always
+// had, because every caller in this repo imports them from `@sarvinbox/core`
+// and the move changed nothing about what they do.
+export {
+  assessSender,
+  assessSpamSignals,
+  domainOfAddress,
+  domainsInText,
+  extractAuthHeaderBlock,
+  extractOriginIp,
+  isFreemailAddress,
+  isPublicIp,
+  isSpamScore,
+  normalizeIp,
+  originIpFromAuthHeaders,
+  originIpFromReceived,
+  parseSpamReasons,
+  registrableDomain,
+  spamVerdict,
+  DATE_SKEW_SECONDS,
+  SPAM_HEADER_NAMES,
+  SPAM_THRESHOLD,
+  SUSPICIOUS_THRESHOLD,
+  type OriginIpSources,
+  type PhishingReason,
+  type SpamAssessment,
+  type SpamReason,
+  type SpamReasonId,
+  type SpamSignalInput,
+  type SpamVerdict,
+} from '@sarv-in/email-spam-scan';
+
+// The reputation, BIMI and favicon seams post-date the extraction above and
+// keep a module of their own: each is the Inbox side of a library entry —
+// the DNSBL operator names the shield shows, the cached brand-logo contract,
+// the avatar fetch policy — not a bare re-export.
 export * from './spam-reputation';
-export * from './bimi-roots';
 export * from './bimi';
 export * from './favicon';

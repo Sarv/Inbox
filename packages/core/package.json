@@ -27,6 +27,7 @@
     "test:integration": "vitest run test/integration"
   },
   "dependencies": {
+    "@sarv-in/email-spam-scan": "file:../../../email-spam-scan",
     "@zone-eu/mailsplit": "^5.4.8",
     "chardet": "^2.2.0",
     "date-fns": "^3.2.0",
@@ -43,7 +44,6 @@
     "mailparser": "^3.6.5",
     "nodemailer": "^7.0.12",
     "p-retry": "^4.6.2",
-    "reflect-metadata": "^0.2.2",
     "sanitize-filename": "^1.6.4",
     "sanitize-html": "^2.13.1",
     "tldts": "^7.4.10",

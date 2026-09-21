@@ -10,6 +10,7 @@ import { createMutex, type Mutex } from '../utils/mutex';
 import { isConnectionError } from './imap-errors';
 import { fetchNewMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
+import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
 
 /**
@@ -189,6 +190,12 @@ export class RealtimeManager extends EventEmitter {
    * over IDLE — a spam re-file, a rule's move or flag — happens on the server too. */
   setServerActions(actions: Partial<IngestServerActions>): void {
     this.messageProcessor.setServerActions(actions);
+  }
+
+  /** Forward the blocklist lookup. This is the path that matters most: mail
+   * arriving live is scored while the listing is still current. */
+  setReputationLookup(fn: ReputationLookup): void {
+    this.messageProcessor.setReputationLookup(fn);
   }
 
   /**

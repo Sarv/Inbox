@@ -8,6 +8,7 @@ import {
   folderTypeMatchStrength,
   isTrashFolder,
   isSpamFolder,
+  isOwnMailFolder,
 } from '../../../src/config/folder-mapping';
 
 // Regression for the data-loss/mis-routing class where destructive paths matched
@@ -410,5 +411,39 @@ describe('describeDuplicateRoles', () => {
     const summary = describeDuplicateRoles([{ path: 'Sent Mail' }, { path: 'Sent' }]);
     expect(summary).toContain('uidValidity=none');
     expect(summary).toContain('server=unknown');
+  });
+});
+
+/**
+ * Own mail — the folders whose messages are never spam-scored.
+ *
+ * Breaks: the scorer and the header backfill both ask this question, and they
+ * must get the same answer. If the backfill counted a folder as ordinary mail
+ * while the scorer counted it as the user's own, those rows would be fetched,
+ * declined and reselected on every tick — a backlog that never drains.
+ */
+describe('isOwnMailFolder', () => {
+  it('recognises Sent and Drafts however the server spells them', () => {
+    expect(isOwnMailFolder({ path: 'Sent' })).toBe(true);
+    expect(isOwnMailFolder({ path: 'Sent Items' })).toBe(true);
+    expect(isOwnMailFolder({ path: 'INBOX.Sent' })).toBe(true);
+    expect(isOwnMailFolder({ path: '[Gmail]/Sent Mail' })).toBe(true);
+    expect(isOwnMailFolder({ path: 'Drafts' })).toBe(true);
+    expect(isOwnMailFolder({ path: 'Anything', specialUse: '\\Drafts' })).toBe(true);
+  });
+
+  // Deliberately wider than classifyFolder: a user's own "Sent 2019" archive
+  // still holds their own words, and scoring those would file the user's
+  // replies under Spam.
+  it('counts a user folder whose path contains "sent" as own mail', () => {
+    expect(isOwnMailFolder({ path: 'Sent 2019' })).toBe(true);
+    expect(isOwnMailFolder({ path: 'Archive/sent-to-legal' })).toBe(true);
+  });
+
+  it('leaves ordinary incoming mail alone', () => {
+    expect(isOwnMailFolder({ path: 'INBOX' })).toBe(false);
+    expect(isOwnMailFolder({ path: 'Archive' })).toBe(false);
+    expect(isOwnMailFolder({ path: 'Spam' })).toBe(false);
+    expect(isOwnMailFolder({ path: 'Consent Forms' })).toBe(false);
   });
 });

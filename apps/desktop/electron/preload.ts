@@ -275,12 +275,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     addLinkRule: (rule: { senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block' }) =>
       ipcRenderer.invoke('security:addLinkRule', rule),
     removeLinkRule: (id: number) => ipcRenderer.invoke('security:removeLinkRule', id),
-    getAuthBackfillState: () => ipcRenderer.invoke('security:getAuthBackfillState'),
-    kickAuthBackfill: () => ipcRenderer.invoke('security:kickAuthBackfill'),
-    onAuthBackfillProgress: (cb: (state: AuthBackfillState) => void) => {
-      const listener = (_e: unknown, state: AuthBackfillState) => cb(state);
-      ipcRenderer.on('auth-backfill:progress', listener);
-      return () => ipcRenderer.removeListener('auth-backfill:progress', listener);
+    getHeaderBackfillState: () => ipcRenderer.invoke('security:getHeaderBackfillState'),
+    kickHeaderBackfill: () => ipcRenderer.invoke('security:kickHeaderBackfill'),
+    onHeaderBackfillProgress: (cb: (state: HeaderBackfillState) => void) => {
+      const listener = (_e: unknown, state: HeaderBackfillState) => cb(state);
+      ipcRenderer.on('header-backfill:progress', listener);
+      return () => ipcRenderer.removeListener('header-backfill:progress', listener);
     },
   },
 
@@ -896,9 +896,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 // Type definitions for the exposed API
-/** Progress of the auth-header backfill over older mail (see auth-header-backfill.ts). */
-export interface AuthBackfillState {
-  /** Messages still without a verdict. */
+/** Progress of the header backfill over older mail (see header-backfill.ts). */
+export interface HeaderBackfillState {
+  /** Messages still missing an authentication verdict or a spam score. */
   remaining: number;
   /** Verdicts written since the app started. */
   done: number;
@@ -1053,10 +1053,10 @@ export interface ElectronAPI {
     listLinkRules: () => Promise<{ success: boolean; data?: Array<{ id: number; senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block'; createdAt: number }>; error?: string }>;
     addLinkRule: (rule: { senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block' }) => Promise<{ success: boolean; error?: string }>;
     removeLinkRule: (id: number) => Promise<{ success: boolean; error?: string }>;
-    getAuthBackfillState: () => Promise<{ success: boolean; data?: AuthBackfillState; error?: string }>;
-    kickAuthBackfill: () => Promise<{ success: boolean; data?: AuthBackfillState; error?: string }>;
+    getHeaderBackfillState: () => Promise<{ success: boolean; data?: HeaderBackfillState; error?: string }>;
+    kickHeaderBackfill: () => Promise<{ success: boolean; data?: HeaderBackfillState; error?: string }>;
     /** Subscribe to backfill progress. Returns an unsubscribe fn. */
-    onAuthBackfillProgress: (cb: (state: AuthBackfillState) => void) => () => void;
+    onHeaderBackfillProgress: (cb: (state: HeaderBackfillState) => void) => () => void;
   };
   identity: {
     getSender: (address: string) => Promise<{ success: boolean; data?: SenderIdentity; error?: string }>;

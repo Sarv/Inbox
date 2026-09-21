@@ -98,3 +98,27 @@ export {
 
 // Mailbox-scoped critical section (select-then-work on a shared connection)
 export { withFolderSelected } from './with-folder';
+
+// The header stage — the one derivation of `auth_status`, the spam score and
+// the origin IP from a fetched message. Shared by ingest (`convertMessage`)
+// and the header backfill, so mail scored at either moment gets one answer.
+export { headerStage } from './header-stage';
+export type { HeaderStageOptions, HeaderStageResult } from './header-stage';
+export { bodyStage, rescoreWithBody } from './body-stage';
+export type { BodyStageInput } from './body-stage';
+
+// The reputation stage — blocklist lookups for the sender, cached and
+// circuit-broken. Off until zones are configured; see the module header.
+export {
+  ReputationStage,
+  DEFAULT_BREAKER_COOLDOWN_MS,
+  DEFAULT_CACHE_MAX,
+  DEFAULT_CACHE_TTL_MS,
+  DEFAULT_FAILURE_THRESHOLD,
+} from './reputation-stage';
+export type {
+  ReputationLookup,
+  ReputationStageConfig,
+  ReputationStageDeps,
+  ReputationSubject,
+} from './reputation-stage';

@@ -226,6 +226,40 @@ export function classifyFolder(folder: ClassifiableFolder): StandardFolderType |
   return null;
 }
 
+/** "sent" as a whole word anywhere in the path — `Sent Items`, `INBOX.Sent`,
+ *  `sent-to-legal` — but never as part of a longer word like `Consent`. */
+const OWN_MAIL_WORD_RE = /(^|[^a-z])sent([^a-z]|$)/i;
+
+/**
+ * Is this folder the user's OWN outgoing mail — Sent or Drafts?
+ *
+ * The one place that decides it, because two stages act on the answer and a
+ * disagreement between them is not cosmetic. `headerStage` refuses to spam-score
+ * own mail (a draft has no Message-ID yet, a sent copy carries no authentication
+ * verdict, and a `spam` tag on your own words would hide them from the Spam
+ * filter view), and the header backfill excludes the same folders from the spam
+ * half of its backlog. If the backfill thought a folder was ordinary mail while
+ * the scorer thought it was the user's own, it would fetch those rows on every
+ * tick, decline to score them, write nothing, and select them again — a backlog
+ * that never drains.
+ *
+ * Deliberately wider than {@link classifyFolder} alone: any path segment whose
+ * WORDS include "sent" counts, even when the server marks no special-use and
+ * the name is not a standard one. That catches "Sent Items", "INBOX.Sent",
+ * "Sent Mail" and a user's own "Sent 2019" or "sent-to-legal" archive.
+ *
+ * On words, not a bare substring, for the reason the folder classifier already
+ * learned the hard way: "Consent Forms" contains "sent", and a plain
+ * `.includes('sent')` would quietly exempt that mailbox from spam scoring
+ * forever, with nothing on screen to say why.
+ */
+export function isOwnMailFolder(folder: ClassifiableFolder): boolean {
+  if (OWN_MAIL_WORD_RE.test(folder.path)) return true;
+  const type = classifyFolder(folder);
+  return type === 'sent' || type === 'drafts';
+}
+
+
 /**
  * How strongly a folder matches a standard type — LOWER is stronger, `null`
  * when it isn't that type at all. This is `classifyFolder`'s three-tier

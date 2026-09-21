@@ -1,17 +1,22 @@
 // Message Processor - Memory-efficient email processing
 
+import {
+  assessAttachmentSignals,
+  domainOfAddress,
+  isSpamScore,
+  mergeAssessments,
+  type SpamAssessment,
+} from '@sarv-in/email-spam-scan';
 import libmime from 'libmime';
 import { simpleParser, type ParsedMail } from 'mailparser';
 
-import { classifyFolder, findFolderByType, type ClassifiableFolder } from '../config/folder-mapping';
+import { classifyFolder, findFolderByType, isOwnMailFolder, type ClassifiableFolder } from '../config/folder-mapping';
 import { LARGE_MAILBOX_THRESHOLD, STALE_FLAG_VERIFY_MAX, SYNC_RECENT_WINDOW_DAYS, recentWindowCutoffDate } from '../config/sync';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
-import { parseAuthenticationHeaders } from '../processor/email-processor';
 import type { FilterRule } from '../types/filters';
 import type { IMAPMessage, IIMAPClient } from '../types/imap';
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
-import { headerLookupFromText, headerValuesFromText } from '../utils/bulk-mail';
 import { sanitizeIcsText } from '../utils/calendar';
 import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
@@ -22,16 +27,14 @@ import { htmlToPlainText } from '../utils/html-text';
 import { emailContentHash, generateId, generateThreadId, synthesizedMessageId } from '../utils/id';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
-import { extractOriginIp } from '../utils/origin-ip';
 import {
   isStarredSourceFolder,
 } from '../utils/provider';
-import { assessSpamSignals } from '../utils/spam-signals';
-import { isSpamScore } from '../utils/spam-verdict';
 import { selectStaleFlagCandidates } from '../utils/stale-flags';
 import { buildTags, parseTags, hasTag, addTag, imapFlagsToTags, FLAG_TAG_NAMES } from '../utils/tags';
 import { normalizeSubject } from '../utils/validators';
 
+import { bodyStage, rescoreWithBody } from './body-stage';
 import {
   countReplacementChars,
   hasReplacementChar,
@@ -39,17 +42,31 @@ import {
   transcodeDetectedCharset,
 } from './charset-repair';
 import { mapEnvelopeFields } from './envelope-mapper';
+import { headerStage } from './header-stage';
 import { attachmentSizesFromSource } from './raw-mime-part';
+import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
+
+/** A parsed message body in the shape storage keeps it. */
+export interface ShapedBody {
+  rawBody: string;
+  cleanBody: string;
+  contentType: 'text' | 'html' | 'multipart';
+  attachments: { name: string; size: number; contentType: string }[];
+  calendarIcs: string | null;
+}
+
+/** {@link ShapedBody} plus the one verdict only a live parse can produce. */
+export interface ParsedBody extends ShapedBody {
+  /**
+   * The attachment stage's verdict, or null when the message would not parse.
+   * Null is "not judged", not "nothing found" — see `parseBody`.
+   */
+  attachmentSpam: SpamAssessment | null;
+}
 
 /** Filter actions that relocate a message. Labels and flags are not moves. */
 const MOVE_ACTIONS: ReadonlySet<string> = new Set(['archive', 'delete', 'moveToSpam', 'moveToFolder']);
-
-/** A Date as unix seconds, or null when absent or unparseable (an invalid Date has a NaN time). */
-function toUnixSeconds(d: Date | null | undefined): number | null {
-  const t = d?.getTime?.();
-  return typeof t === 'number' && Number.isFinite(t) ? Math.floor(t / 1000) : null;
-}
 
 // Deletion-detection throttle for the CONDSTORE delta path. Flag deltas
 // (fetchFlagsChangedSince) run every sync — cheap. But the full server UID set
@@ -269,6 +286,11 @@ export class MessageProcessor {
   // which is the guard reconcile and syncFlags honour.
   private serverActions: Partial<IngestServerActions> = {};
 
+  // Blocklist lookups for the sender, when the user has configured zones to
+  // ask. Injected rather than constructed here because it makes DNS calls and
+  // owns a cache: one per app, shared across accounts, and absent by default.
+  private reputationLookup?: ReputationLookup;
+
   /** Wire the pending-op source (see SyncEngine). */
   setPendingUidsProvider(fn: (folderPath: string) => Promise<Set<number>>): void {
     this.pendingUidsProvider = fn;
@@ -296,6 +318,11 @@ export class MessageProcessor {
       logger.warn(`[Ingest] Server-side ${action} failed for uid ${uid} in ${String(args[0])}: ${(err as Error)?.message ?? err}`);
     });
     return true;
+  }
+
+  /** Wire the blocklist lookups (see SyncEngine). Absent means the stage is off. */
+  setReputationLookup(fn: ReputationLookup): void {
+    this.reputationLookup = fn;
   }
 
   constructor(config: Partial<MessageProcessorConfig> = {}) {
@@ -347,11 +374,9 @@ export class MessageProcessor {
     const relinkedFrom = new Set<string>();
     const isSentFolder = this.isSentFolder(folderPath);
     const isStarredFolder = isStarredSourceFolder(folderPath);
-    // The user's own outgoing mail is never spam-scored: a draft has no
-    // Message-ID yet, a sent copy carries no authentication verdict, and a
-    // `spam` tag on your own words would hide them from the Spam filter view.
-    const folderType = classifyFolder(folder);
-    const ownMail = isSentFolder || folderType === 'sent' || folderType === 'drafts';
+    // The user's own outgoing mail is never spam-scored — see isOwnMailFolder,
+    // which the header backfill consults for the same decision.
+    const ownMail = isOwnMailFolder(folder);
 
     // UIDs in THIS folder with a pending/executing local op (move/delete/flag) not
     // yet confirmed by the server. Used to tell a genuine external move-BACK into
@@ -495,7 +520,14 @@ export class MessageProcessor {
           }
 
           // Convert to EmailRecord
-          const email = await this.convertMessage(message, folder.id, folderPath, labelCtx, { knownSpammer, ownMail });
+          const email = await this.convertMessage(message, folder.id, folderPath, labelCtx, {
+            knownSpammer,
+            ownMail,
+            // Withheld in quiet/backfill mode with the rest of the reactive
+            // work: a sweep of old mail must not become thousands of DNS
+            // queries sent to an operator on the user's behalf.
+            reputation: quiet ? undefined : this.reputationLookup,
+          });
 
           // Apply folder-specific settings
           if (isSentFolder && !hasTag(email.tags, 'read')) {
@@ -779,6 +811,13 @@ export class MessageProcessor {
       knownSpammer?: boolean;
       /** The user's own outgoing mail (Sent / Drafts) — never spam-scored. */
       ownMail?: boolean;
+      /**
+       * Blocklist lookups for this message's sender. Passed per call rather
+       * than read from the field so the quiet/backfill path can withhold it:
+       * a sweep of old mail must not send thousands of DNS queries to an
+       * operator on the user's behalf.
+       */
+      reputation?: ReputationLookup;
     },
   ): Promise<EmailRecord> {
     const messageId = message.envelope.messageId;
@@ -801,13 +840,17 @@ export class MessageProcessor {
     let cleanBody = '';
     let contentType: 'text' | 'html' | 'multipart' = 'text';
     let calendarIcs: string | null = null;
+    // Kept for the body stage below: null means this fetch carried no body, so
+    // the content and attachment rules did not run and `fetchBody` will run
+    // them when the body is finally downloaded.
+    let parsedBody: ParsedBody | null = null;
 
     if (message.body && !this.config.headersOnly) {
-      const parsed = await this.parseBody(message.body);
-      rawBody = parsed.rawBody;
-      cleanBody = parsed.cleanBody;
-      contentType = parsed.contentType;
-      calendarIcs = parsed.calendarIcs;
+      parsedBody = await this.parseBody(message.body);
+      rawBody = parsedBody.rawBody;
+      cleanBody = parsedBody.cleanBody;
+      contentType = parsedBody.contentType;
+      calendarIcs = parsedBody.calendarIcs;
     }
 
     // Content hash of the BODY, or the explicit no-body marker when this is a
@@ -860,33 +903,59 @@ export class MessageProcessor {
     // a folder or label, mirroring how AI-category slugs live in the tag string.
     if (message.isBulk) tagList.push('bulk');
 
-    // Mail authentication and the header-only spam signals, both from the
-    // headers this fetch already carried. `auth` is parsed once here and
-    // shared: the spam score keys on the same DMARC verdict the shield does.
-    const auth = message.authHeaders ? parseAuthenticationHeaders(message.authHeaders) : null;
-    const headers = message.rawHeaders ? headerLookupFromText(message.rawHeaders) : null;
-    const spam = opts?.ownMail
-      ? null
-      : assessSpamSignals({
-          fromAddress: envelopeFields.fromAddress,
-          fromName: envelopeFields.fromName,
-          replyTo: envelopeFields.replyTo,
-          toAddress: envelopeFields.toAddress,
-          ccAddress: envelopeFields.ccAddress,
-          subject,
-          // The id AS RECEIVED: a synthesised stand-in would hide the missing header.
-          messageId: message.messageIdSynthesized ? '' : messageId,
-          inReplyTo,
-          references,
-          date: toUnixSeconds(message.envelope?.date),
-          internalDate: toUnixSeconds(message.date),
-          auth,
-          headers,
-          knownSpammer: opts?.knownSpammer === true,
-        });
+    // Mail authentication, the header-only spam signals and the connecting IP,
+    // all from the headers this fetch already carried. Derived by the shared
+    // `headerStage` so the backfill that sweeps older mail cannot compute a
+    // different answer for the same message.
+    const { auth, spam, originIp } = headerStage(message, {
+      knownSpammer: opts?.knownSpammer === true,
+      ownMail: opts?.ownMail === true,
+    });
+
+    // What the blocklists say about the sender, added to the header stage's
+    // own signals. This is the only part of the score that costs a network
+    // round trip, which is why it is the only part that is injected, off by
+    // default, and awaited HERE rather than in `headerStage`: that function
+    // stays pure and synchronous so the backfill can keep sharing it.
+    //
+    // It runs before the spam tag and before the caller's re-file decision,
+    // because a listing that arrived after either would show the user a
+    // message land in the inbox and then leave it. Own mail is never scored,
+    // so it is never looked up — the user's own outgoing server has no
+    // business being reported to a blocklist operator.
+    const reputation =
+      spam && opts?.reputation
+        ? await opts.reputation({
+            ip: originIp,
+            // The REGISTRABLE domain, which is what a domain blocklist lists:
+            // `mail.sarv.com` is not an entry, `sarv.com` is.
+            domain: domainOfAddress(envelopeFields.fromAddress ?? ''),
+          })
+        : null;
+    // The body stage — what the message SAYS and what it carries — but only
+    // when this fetch actually brought a body. Most do not: bodies load
+    // lazily here, so for the majority of mail this runs later, in
+    // `fetchBody`, against the verdict this line stores. Own mail (`spam`
+    // null) is not content-scored either, for the same reason it is not
+    // header-scored.
+    const body =
+      spam && parsedBody
+        ? bodyStage({
+            subject,
+            cleanBody,
+            rawBody,
+            contentType,
+            attachments: parsedBody.attachmentSpam,
+          })
+        : null;
+    // One total, from every stage that ran. Added, never overridden: they are
+    // evidence about the same message, and `mergeAssessments` is the only
+    // place the arithmetic lives.
+    const scored = spam ? mergeAssessments(spam, reputation, body) : null;
+
     // The classification tag the AI pipeline excludes on and the Spam filter
     // view lists — the same lowercase `spam` the AI's own verdict writes.
-    if (spam?.isSpam) tagList.push('spam');
+    if (scored?.isSpam) tagList.push('spam');
     const tags = buildTags(tagList);
 
     return {
@@ -942,15 +1011,13 @@ export class MessageProcessor {
       // security level treats the two differently.
       authStatus: auth ? JSON.stringify(auth) : undefined,
 
-      // Spam filter, header stage. NULL when not scored — the user's own
-      // outgoing mail — so "not judged" and "judged clean" stay distinct.
-      spamScore: spam ? spam.score : null,
-      spamReasons: spam ? JSON.stringify(spam.reasons) : null,
+      // Spam filter: every stage that could run on what this fetch carried.
+      // NULL when not scored — the user's own outgoing mail — so "not judged"
+      // and "judged clean" stay distinct.
+      spamScore: scored ? scored.score : null,
+      spamReasons: scored ? JSON.stringify(scored.reasons) : null,
       // The connecting client's address, for the reputation stage.
-      originIp: extractOriginIp({
-        authHeaders: message.authHeaders,
-        received: message.rawHeaders ? headerValuesFromText(message.rawHeaders, 'received') : null,
-      }),
+      originIp,
 
       // AI
       hasEmbedding: false,
@@ -967,13 +1034,7 @@ export class MessageProcessor {
    * message source via mailparser. Inline/related images (cid: references in
    * the HTML) are excluded — only true attachments are reported.
    */
-  async parseBody(body: string): Promise<{
-    rawBody: string;
-    cleanBody: string;
-    contentType: 'text' | 'html' | 'multipart';
-    attachments: { name: string; size: number; contentType: string }[];
-    calendarIcs: string | null;
-  }> {
+  async parseBody(body: string): Promise<ParsedBody> {
     try {
       // `body` is the raw MIME source preserved losslessly as a latin1 string
       // (see ImapFlowClient — one char per byte). Reconstruct the exact bytes so
@@ -981,12 +1042,72 @@ export class MessageProcessor {
       // instead of choking on a pre-UTF-8-mangled string.
       const bytes = Buffer.from(body || '', 'latin1');
       const parsed = await simpleParser(bytes, SIMPLE_PARSER_OPTIONS);
-      return await this.repairMisdeclaredCharset(bytes, this.shapeParsedBody(parsed, body));
+      const shaped = await this.repairMisdeclaredCharset(bytes, this.shapeParsedBody(parsed, body));
+      // The attachment stage runs HERE, and only here, because this is the
+      // only moment the decoded bytes exist. Nothing stores them: an
+      // attachment is re-downloaded when the user asks for it, so a scorer
+      // running later would have to fetch the whole message again to read four
+      // magic bytes. Scored off the first parse — a charset repair changes how
+      // TEXT decodes, never an attachment's bytes.
+      return { ...shaped, attachmentSpam: this.attachmentStage(parsed) };
     } catch (error) {
       logger.warn('Failed to parse email body:', error);
     }
 
-    return { rawBody: body, cleanBody: body, contentType: 'text', attachments: [], calendarIcs: null };
+    // A body that would not parse is not scored either: no parts, no verdict.
+    // Silence, not a clean bill of health — the caller keeps whatever the
+    // header stage decided rather than being told the attachments are fine.
+    return { rawBody: body, cleanBody: body, contentType: 'text', attachments: [], calendarIcs: null, attachmentSpam: null };
+  }
+
+  /**
+   * Score the message's attachments: what each file's name claims, what its
+   * declared type claims, and what its first bytes actually are.
+   *
+   * Nothing is unpacked and nothing is executed — an archive costs a bounded
+   * walk of its directory, not a decompression — so this is cheap enough to
+   * run on every parse. It is not antivirus, and a clean result means "nothing
+   * deceptive", never "safe to open".
+   */
+  private attachmentStage(parsed: ParsedMail): SpamAssessment {
+    return assessAttachmentSignals(
+      this.realAttachments(parsed.attachments || []).map(({ part, name, contentType }) => ({
+        filename: name,
+        mimeType: contentType,
+        content: part.content,
+      })),
+    );
+  }
+
+  /**
+   * The parts that are genuinely attachments — the files a user would see a
+   * paperclip for — with the name and type each one resolves to.
+   *
+   * Shared, because two very different consumers must agree on the list: the
+   * row's `attachment_names`/`attachment_count`, and the attachment stage of
+   * the spam score. Filtered separately they would drift, and the drift is
+   * silent in exactly the direction that matters — a part the scanner skips is
+   * a part nobody looked at.
+   */
+  private realAttachments(
+    rawAttachments: ParsedMail['attachments'],
+  ): Array<{ part: ParsedMail['attachments'][number]; name: string; contentType: string }> {
+    return (rawAttachments || [])
+      // cid: images and `related` parts are the message's own presentation,
+      // not files sent to the reader.
+      .filter((a) => a.contentDisposition !== 'inline' && !a.related)
+      .map((part) => ({
+        part,
+        name: this.resolveAttachmentName(part),
+        contentType: part.contentType || 'application/octet-stream',
+      }))
+      // Drop the invite's inline text/calendar event body. Google Calendar
+      // ships it as an unnamed attachment part alongside the real invite.ics;
+      // mailparser surfaces it (no filename → "attachment") but it isn't a
+      // downloadable file — it's the event, rendered as the card. Gmail lists
+      // only invite.ics. Gated on the generic name so a NAMED calendar file
+      // (invite.ics) is always kept.
+      .filter((att) => !(att.name === 'attachment' && /calendar|ics/i.test(att.contentType)));
   }
 
   /**
@@ -994,16 +1115,7 @@ export class MessageProcessor {
    * of {@link parseBody} so the charset-repair path can shape a SECOND parse of
    * the same message and compare the two.
    */
-  private shapeParsedBody(
-    parsed: ParsedMail,
-    body: string,
-  ): {
-    rawBody: string;
-    cleanBody: string;
-    contentType: 'text' | 'html' | 'multipart';
-    attachments: { name: string; size: number; contentType: string }[];
-    calendarIcs: string | null;
-  } {
+  private shapeParsedBody(parsed: ParsedMail, body: string): ShapedBody {
     const rawAttachments = parsed.attachments || [];
 
     // Capture a calendar invite (text/calendar part or .ics attachment) so the
@@ -1013,20 +1125,11 @@ export class MessageProcessor {
     // checks it; malformed/oversized ICS is dropped (returns null).
     const calendarIcs = this.extractCalendarIcs(rawAttachments);
 
-    const attachments = rawAttachments
-      .filter((a) => a.contentDisposition !== 'inline' && !a.related)
-      .map((a) => ({
-        name: this.resolveAttachmentName(a),
-        size: typeof a.size === 'number' ? a.size : 0,
-        contentType: a.contentType || 'application/octet-stream',
-      }))
-      // Drop the invite's inline text/calendar event body. Google Calendar
-      // ships it as an unnamed attachment part alongside the real invite.ics;
-      // mailparser surfaces it (no filename → "attachment") but it isn't a
-      // downloadable file — it's the event, rendered as the card. Gmail lists
-      // only invite.ics. Gated on the generic name so a NAMED calendar file
-      // (invite.ics) is always kept.
-      .filter((att) => !(att.name === 'attachment' && /calendar|ics/i.test(att.contentType)));
+    const attachments = this.realAttachments(rawAttachments).map(({ part, name, contentType }) => ({
+      name,
+      size: typeof part.size === 'number' ? part.size : 0,
+      contentType,
+    }));
 
     if (parsed.html) {
       // Put back any `cid:` image mailparser declined to rewrite (see
@@ -1345,6 +1448,46 @@ export class MessageProcessor {
     if (parsed.calendarIcs) {
       update.calendarIcs = parsed.calendarIcs;
     }
+
+    // The body stage, finally. This row was scored at sync from its headers
+    // alone, because that is all a sync carries — bodies download lazily, so
+    // for most mail THIS is the first moment the content and attachment rules
+    // have anything to read. Skipped when the row has no score at all: NULL is
+    // the user's own outgoing mail or mail that predates the filter, and
+    // neither becomes judgeable because a body turned up.
+    //
+    // `rescoreWithBody` replaces the previous body reasons instead of adding a
+    // second copy of each, so the re-fetches this path exists to handle — a
+    // repaired UID, a charset re-parse, a re-open — cannot inflate a score by
+    // running twice.
+    if (target && typeof target.spamScore === 'number') {
+      const scored = rescoreWithBody(
+        target,
+        bodyStage({
+          subject: target.subject,
+          cleanBody: parsed.cleanBody,
+          rawBody: parsed.rawBody,
+          contentType: parsed.contentType,
+          attachments: parsed.attachmentSpam,
+        }),
+      );
+      if (scored) {
+        update.spamScore = scored.score;
+        update.spamReasons = JSON.stringify(scored.reasons);
+        // The tag, but deliberately NOT a move. The tag is the
+        // classification: it keeps the message out of the AI pipeline, lists
+        // it in the Spam filter view and is what the shield reads. Filing is
+        // left to ingest and the reputation sweep, which own the folder list
+        // and run in the background — this path also runs when somebody OPENS
+        // a message, and mail must not disappear out of the folder a reader is
+        // looking at. Tagged-but-unmoved is the state a mailbox with no spam
+        // folder is already in, and the shield says why.
+        if (isSpamScore(scored.score) && !hasTag(target.tags, 'spam')) {
+          update.tags = addTag(target.tags, 'spam');
+        }
+      }
+    }
+
     await storage.updateEmail(emailId, update);
 
     // Return the full raw source alongside the parsed body so the caller can

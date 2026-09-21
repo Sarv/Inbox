@@ -863,6 +863,92 @@ describe('processBatch — spam filter (header stage)', () => {
   });
 });
 
+/**
+ * The BODY stage at ingest.
+ *
+ * Whether it runs at all depends on whether the fetch carried a body, which is
+ * a configuration choice: `headersOnly` syncs store headers and leave the body
+ * (and therefore the content and attachment rules) to `fetchBody`. Both halves
+ * are pinned here, because the failure in each direction is silent — a body
+ * scored twice, or a body never scored at all.
+ */
+describe('processBatch — spam filter (body stage)', () => {
+  const crlf = (lines: string[]): string => lines.join('\r\n');
+  const reasonIds = (row: { spamReasons?: string | null }): string[] =>
+    (JSON.parse(row.spamReasons ?? '[]') as Array<{ id: string }>).map((r) => r.id);
+
+  /**
+   * One message carrying both body signals: a link that shows a bank and goes
+   * elsewhere, and a "PDF" whose first two bytes are a Windows program. The
+   * headers are ordinary — everything here is earned by the body.
+   */
+  const deceptiveBody = crlf([
+    'Message-ID: <m1@test.local>',
+    'Subject: Your account',
+    'From: sender@test.local',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary=BOUND',
+    '',
+    '--BOUND',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<p>Confirm below.</p><a href="https://evil.example/x">https://yourbank.example</a>',
+    '--BOUND',
+    'Content-Type: application/pdf; name="report.pdf"',
+    'Content-Disposition: attachment; filename="report.pdf"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]).toString('base64'),
+    '--BOUND--',
+    '',
+  ]);
+
+  it('scores the words, the links and the attachment bytes into ONE verdict with the headers', async () => {
+    const { db } = setup();
+    const mp = new MessageProcessor({ headersOnly: false, batchSize: 10 });
+    db.addFolder('Spam');
+
+    await mp.processBatch([msg({ uid: 1, body: deceptiveBody })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(reasonIds(row)).toEqual([
+      'link-display-mismatch', 'attachment-executable', 'attachment-type-mismatch',
+    ]);
+    expect(row.spamScore).toBe(6);
+    // Ingest DOES file — unlike the deferred body fetch, nobody is reading it yet.
+    expect(row.folderId).toBe(db.folderId('Spam'));
+    expect(db.tagsOf(row.id)).toContain('spam');
+  });
+
+  // Regression: a headers-only fetch has no body, and "no body" must not be
+  // scored as "a body with nothing wrong in it". The row keeps the header
+  // verdict alone until fetchBody downloads the message and re-scores it —
+  // score it clean here and the content rules could never raise it later
+  // without looking like a double charge.
+  it('leaves the body unscored when the sync carried no body', async () => {
+    const { db, mp } = setup(); // headersOnly: true
+
+    await mp.processBatch([msg({ uid: 1, body: deceptiveBody })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(0);
+    expect(reasonIds(row)).toEqual([]);
+  });
+
+  // Regression: the user's own outgoing mail is never scored, and a body is
+  // not a reason to start. NULL has to stay NULL all the way through ingest.
+  it('does not content-score the user\'s own mail', async () => {
+    const { db } = setup();
+    const mp = new MessageProcessor({ headersOnly: false, batchSize: 10 });
+
+    await mp.processBatch([msg({ uid: 1, body: deceptiveBody })], db.folder(SENT), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBeNull();
+    expect(row.spamReasons).toBeNull();
+  });
+});
+
 describe('processBatch — filter rules are mirrored on the server', () => {
   // THE spring-back. A rule's move used to be a local projection only: the
   // server still had the message in INBOX, the next reconcile of INBOX found
@@ -1002,5 +1088,136 @@ describe('processBatch — filter rules are mirrored on the server', () => {
 
     expect(queued(a)).toEqual([]);
     expect(db.allRows()[0].folderId).toBe(db.folderId(INBOX));
+  });
+});
+
+const spamishHeaders =
+  'X-Spam-Flag: YES\r\nReceived: from mta.example.net (mta.example.net [185.199.108.1]) by mx.test.local with ESMTPS id 1\r\n';
+
+describe('processBatch — reputation stage', () => {
+  // The blocklist verdict has to reach the score BEFORE the re-file decision,
+  // or the user watches a message arrive in INBOX and then leave it. These
+  // pin the seam between the stage and ingest; the stage's own behaviour
+  // (cache, breaker, DNS) is covered in reputation-stage.test.ts.
+  const cleanHeaders =
+    'Received: from mta.example.net (mta.example.net [185.199.108.1]) by mx.test.local with ESMTPS id 1\r\n';
+  const reasonIds = (row: { spamReasons?: string | null }): string[] =>
+    (JSON.parse(row.spamReasons ?? '[]') as Array<{ id: string }>).map((r) => r.id).sort();
+
+  /** A lookup that says "listed", worth enough on its own to cross the line. */
+  const listed = (points = 5) =>
+    vi.fn().mockResolvedValue({
+      score: points,
+      reasons: [{ id: 'reputation-ip-listed', points, detail: 'listed by spamhaus-zen' }],
+      isSpam: points >= 5,
+      suspicious: points >= 3,
+    });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('adds the blocklist verdict to the score and stores its reason', async () => {
+    const { db, mp } = setup();
+    mp.setReputationLookup(listed(4));
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: cleanHeaders })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.spamScore).toBe(4);
+    expect(reasonIds(row)).toEqual(['reputation-ip-listed']);
+  });
+
+  // THE reason the lookup is awaited inside convertMessage rather than after
+  // the batch is stored: the score it produces is what the re-file reads. A
+  // listing that arrived a moment later would file the message only on the
+  // NEXT sync, if ever.
+  it('files a message the blocklists condemn, server-side move included', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    const mover = vi.fn().mockResolvedValue(undefined);
+    mp.setServerActions({ moveToSpam: mover });
+    mp.setReputationLookup(listed(5));
+
+    await mp.processBatch([msg({ uid: 3, rawHeaders: cleanHeaders })], db.folder(INBOX), db.asStorage());
+
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId('Spam'));
+    expect(db.tagsOf(row.id)).toContain('spam');
+    expect(mover).toHaveBeenCalledWith(INBOX, 3);
+  });
+
+  it('asks about the origin IP and the registrable sender domain', async () => {
+    const { db, mp } = setup();
+    const lookup = vi.fn().mockResolvedValue(null);
+    mp.setReputationLookup(lookup);
+
+    await mp.processBatch([
+      msg({
+        uid: 1,
+        rawHeaders: cleanHeaders,
+        envelope: { from: [{ address: 'billing@mail.evil.example', name: '' }] } as never,
+      }),
+    ], db.folder(INBOX), db.asStorage());
+
+    // `mail.evil.example` is not what a domain blocklist lists; `evil.example` is.
+    expect(lookup).toHaveBeenCalledWith({ ip: '185.199.108.1', domain: 'evil.example' });
+  });
+
+  // Regression: a lookup that found nothing, failed, or was switched off must
+  // leave the message scored exactly as its own headers scored it — never a
+  // penalty for the silence, and never a discount either.
+  it('scores a message identically when the lookup has no opinion', async () => {
+    const { db, mp } = setup();
+    const withoutLookup = setup();
+
+    mp.setReputationLookup(vi.fn().mockResolvedValue(null));
+    await mp.processBatch([msg({ uid: 1, rawHeaders: spamishHeaders })], db.folder(INBOX), db.asStorage());
+    await withoutLookup.mp.processBatch(
+      [msg({ uid: 1, rawHeaders: spamishHeaders })],
+      withoutLookup.db.folder(INBOX), withoutLookup.db.asStorage(),
+    );
+
+    expect(db.allRows()[0].spamScore).toBe(withoutLookup.db.allRows()[0].spamScore);
+    expect(reasonIds(db.allRows()[0])).toEqual(reasonIds(withoutLookup.db.allRows()[0]));
+  });
+
+  // Regression: the user's own outgoing mail is never scored, so it must
+  // never be looked up either. Reporting your own mail server to a blocklist
+  // operator, one query per sent message, is not something to do by accident.
+  it('never looks up the user\'s own Sent or Drafts mail', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Drafts');
+    const lookup = vi.fn().mockResolvedValue(null);
+    mp.setReputationLookup(lookup);
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: cleanHeaders })], db.folder(SENT), db.asStorage());
+    await mp.processBatch([msg({ uid: 2, rawHeaders: cleanHeaders })], db.folder('Drafts'), db.asStorage());
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(db.allRows().every((row) => row.spamScore === null)).toBe(true);
+  });
+
+  // Regression: paging in a lakh of old mail must not become a lakh of DNS
+  // queries sent to an operator on the user's behalf — the same rule that
+  // already withholds the spammer lookup and the AI pipeline in quiet mode.
+  it('sends no lookups in quiet (historical backfill) mode', async () => {
+    const { db, mp } = setup();
+    const lookup = vi.fn().mockResolvedValue(null);
+    mp.setReputationLookup(lookup);
+
+    await mp.processBatch(
+      [msg({ uid: 1, rawHeaders: cleanHeaders })], db.folder(INBOX), db.asStorage(), undefined, { quiet: true },
+    );
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(db.allRows()[0].spamScore).toBe(0);
+  });
+
+  it('is off, and asks nothing, when no lookup was wired at all', async () => {
+    const { db, mp } = setup();
+
+    const res = await mp.processBatch([msg({ uid: 1, rawHeaders: cleanHeaders })], db.folder(INBOX), db.asStorage());
+
+    expect(res.inserted).toBe(1);
+    expect(db.allRows()[0].spamScore).toBe(0);
   });
 });

@@ -147,7 +147,7 @@ describe('runReputationPass', () => {
     expect(s).toMatchObject({ judged: 3, scored: 2, filed: 0, pending: 0, provider: 'test' });
     const a = t.stamped.find((x) => x.id === 'a')!;
     expect(a.spamScore).toBe(3); // PBL = 3 points, under the line
-    expect(JSON.parse(a.spamReasons)).toEqual([{ id: 'ip-blocklisted', points: 3, detail: expect.stringContaining('5.6.7.8') }]);
+    expect(JSON.parse(a.spamReasons)).toEqual([{ id: 'reputation-ip-listed', points: 3, detail: expect.stringContaining('5.6.7.8') }]);
     expect(t.stamped.find((x) => x.id === 'c')).toMatchObject({ spamScore: 1, spamReasons: '[]' });
     expect(t.updates).toEqual([]); // nothing crossed the line
   });
@@ -164,7 +164,7 @@ describe('runReputationPass', () => {
     expect(engine.moveToSpam).toHaveBeenCalledWith('INBOX', 42);
     const stamped = t.stamped[0];
     expect(stamped.spamScore).toBe(8);
-    expect(JSON.parse(stamped.spamReasons).map((r: { id: string }) => r.id)).toEqual(['auth-failed', 'ip-blocklisted']);
+    expect(JSON.parse(stamped.spamReasons).map((r: { id: string }) => r.id)).toEqual(['auth-failed', 'reputation-ip-listed']);
   });
 
   it('tags but cannot move when the account has no spam folder, and queues no server move', async () => {

@@ -1,6 +1,6 @@
+import { assessSender, domainOfAddress, domainsInText, registrableDomain } from '@sarv-in/email-spam-scan';
 import { describe, expect, it } from 'vitest';
 
-import { assessSender, domainOfAddress, domainsInText, registrableDomain } from '../../../src/utils/sender-spoof';
 
 /**
  * Display-name impersonation — one rule for the shield and the spam filter.

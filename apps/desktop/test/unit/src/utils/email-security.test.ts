@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assessEmailSecurity,
   firstFlaggedEmailId,
+  LEVEL_COPY,
   linkRuleKey,
   parseAuthStatus,
   worstLevel,
@@ -115,13 +116,20 @@ describe('assessEmailSecurity — trust and block rules', () => {
   const key = linkRuleKey('shop.com', 'shop.com', 'mailer.io');
 
   // THE feature: a vetted pair stops being a warning — for this sender.
-  it('a trusted pair no longer flags the message', () => {
+  // CHANGED: this asserted `authenticated`. Trusting the pair lifted the
+  // message out of caution and then withheld the top level for the very link
+  // it had just forgiven, which reads as the setting being ignored. The
+  // library now honours the rule in the level too.
+  it('a trusted pair no longer flags the message, and reaches the top level', () => {
     const a = assessEmailSecurity({
       fromName: 'Shop', fromAddress: 'news@shop.com', authStatus: PASS, html, rules: rules([key]),
     });
-    expect(a.level).toBe('authenticated');
+    expect(a.level).toBe('verified');
     expect(a.untrustedLinks).toEqual([]);
     expect(a.checks.find((c) => c.id === 'links')?.detail).toMatch(/1 pair you trust/);
+    // Regression: it must still SAY the link left shop.com. "Every link stays
+    // on shop.com" would be a plain untruth about a link going to mailer.io.
+    expect(a.checks.find((c) => c.id === 'links')?.detail).toMatch(/1 link leaves shop\.com/);
   });
 
   // Scoped to the sender on purpose: the same redirect from a different
@@ -143,6 +151,37 @@ describe('assessEmailSecurity — trust and block rules', () => {
 
   it('keys are case-insensitive', () => {
     expect(linkRuleKey('Shop.COM', 'Shop.com', 'Mailer.IO')).toBe('shop.com|shop.com|mailer.io');
+  });
+});
+
+describe('the badge and its evidence agree', () => {
+  const SENDER = { fromName: 'Alice', fromAddress: 'alice@acme.example', authStatus: PASS };
+  const linksRow = (html: string): string =>
+    assessEmailSecurity({ ...SENDER, html }).checks.find((c) => c.id === 'links')?.detail ?? '';
+
+  // THE reported bug: two messages, seven identical green ticks, two
+  // different badges — "Verified" on one and "Authenticated" on the next,
+  // with nothing on screen saying which fact separated them. The level turns
+  // on whether links LEAVE the sender's domain; the Links row reported only
+  // whether any link lied about where it goes.
+  it('says which links left the domain, so two tick lists stop looking identical', () => {
+    const home = '<a href="https://acme.example/doc">Our doc</a>';
+    const away = '<a href="https://docs.google.com/d/1">The doc</a>';
+
+    expect(assessEmailSecurity({ ...SENDER, html: home }).level).toBe('verified');
+    expect(assessEmailSecurity({ ...SENDER, html: away }).level).toBe('authenticated');
+
+    expect(linksRow(home)).toContain('every link stays on acme.example');
+    expect(linksRow(away)).toContain('1 link leaves acme.example');
+    expect(linksRow(away)).toContain('google.com');
+  });
+
+  // Regression: the summary asserted "every link stays on the sender's own
+  // domain" over a message that contained no links at all — a check reported
+  // as passed that never ran. Most personal mail is this shape.
+  it('does not claim a link check on a message with no links', () => {
+    expect(linksRow('<p>Just a note.</p>')).toBe('The sender wrote no links in this message');
+    expect(LEVEL_COPY.verified.summary).not.toContain('every link');
   });
 });
 
@@ -369,5 +408,32 @@ describe('assessEmailSecurity — brand identity (BIMI)', () => {
     expect(without.checks.some((c) => c.id === 'brand')).toBe(false);
     const withBrand = assessEmailSecurity({ fromAddress: 'a@x.example', authStatus: PASS, bimi: verified });
     expect(withBrand.level).toBe(without.level);
+  });
+});
+
+describe('assessEmailSecurity — a body that has not been fetched', () => {
+  // Regression: the seam dropped `bodyLoaded` on the floor, so the shield in
+  // a collapsed row was assessed as if its links had been read and found
+  // clean — `verified`, for a message nobody had downloaded. The library owns
+  // the rule; what this pins is that Inbox actually asks for it.
+  it('passes the flag through, and the level stops short of verified', () => {
+    const loaded = assessEmailSecurity({ fromAddress: 'a@x.example', authStatus: PASS });
+    const pending = assessEmailSecurity({
+      fromAddress: 'a@x.example', authStatus: PASS, bodyLoaded: false,
+    });
+    expect(loaded.pending).toBe(false);
+    expect(loaded.level).toBe('verified');
+    expect(pending.pending).toBe(true);
+    expect(pending.level).toBe('authenticated');
+    expect(pending.checks.find((c) => c.id === 'links')?.status).toBe('unknown');
+  });
+
+  // The banner picks the message to warn on before any body is fetched, and a
+  // pending assessment must not make it pick a clean one.
+  it('does not make firstFlaggedEmailId flag an unfetched clean message', () => {
+    expect(firstFlaggedEmailId([
+      { id: 'a', date: 1, fromAddress: 'a@x.example', authStatus: PASS },
+      { id: 'b', date: 2, fromAddress: 'b@x.example', authStatus: PASS },
+    ])).toBeNull();
   });
 });

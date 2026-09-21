@@ -11,6 +11,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { EventEmitter } from 'events';
 
+import { extractAuthHeaderBlock, SPAM_HEADER_NAMES } from '@sarv-in/email-spam-scan';
 import type {
   ImapFlowOptions,
   FetchMessageObject,
@@ -47,10 +48,8 @@ import {
 } from '../utils/bulk-mail';
 import { logger } from '../utils/logger';
 import { createMutex, type Mutex } from '../utils/mutex';
-import { SPAM_HEADER_NAMES } from '../utils/spam-signals';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
-import { extractAuthHeaderBlock } from './auth-headers';
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { isConnectionError, isAuthError } from './imap-errors';
 

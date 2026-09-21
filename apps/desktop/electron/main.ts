@@ -45,7 +45,6 @@ import {
   ATTACHMENT_SCHEME_PRIVILEGES,
   registerAttachmentProtocol,
 } from './services/attachment-protocol';
-import { startAuthHeaderBackfill, stopAuthHeaderBackfill } from './services/auth-header-backfill';
 import { startAvatarDiscoveryScheduler, stopAvatarDiscoveryScheduler } from './services/avatar-discovery-scheduler';
 import { startBackfillScheduler, stopBackfillScheduler } from './services/backfill-scheduler';
 import { startBodyPrefetchScheduler, stopBodyPrefetchScheduler } from './services/body-prefetch-scheduler';
@@ -59,6 +58,7 @@ import { installEmailImageRequestHandlers } from './services/email-image-request
 import { describeStall, startEventLoopMonitor } from './services/event-loop-monitor';
 import { createExtensionAIBackend } from './services/extension-ai-backend';
 import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
+import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 import { startNotificationService, stopNotificationService } from './services/notification-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
@@ -66,6 +66,7 @@ import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-s
 import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
 import { startPipelineEventPersister, stopPipelineEventPersister } from './services/pipeline-event-persister';
+import { attachReputation } from './services/reputation-service';
 import { migrateSecureCredsFromFile } from './services/secure-credential-store';
 import { startSenderIdentityScheduler, stopSenderIdentityScheduler } from './services/sender-identity-service';
 import {
@@ -211,7 +212,7 @@ function stopBackgroundTimers(): void {
   try { stopConversationScheduler(); } catch {}
   try { stopContactEnrichmentScheduler(); } catch {}
   try { stopBodyPrefetchScheduler(); } catch {}
-  try { stopAuthHeaderBackfill(); } catch {}
+  try { stopHeaderBackfill(); } catch {}
   try { stopBackfillScheduler(); } catch {}
   try { stopStartupThreadRepair(); } catch {}
   try { stopAvatarDiscoveryScheduler(); } catch {}
@@ -650,6 +651,7 @@ async function initializeSyncEngine(): Promise<void> {
   }
 
   const syncEngine = new SyncEngine(storage);
+  attachReputation(syncEngine);
   setSyncEngine(syncEngine);
   logger.info('[Main] Sync engine initialized');
 }
@@ -850,7 +852,7 @@ app.whenReady().then(async () => {
     startConversationScheduler();
     startContactEnrichmentScheduler();
     startBodyPrefetchScheduler();
-    startAuthHeaderBackfill();
+    startHeaderBackfill();
     startBackfillScheduler();
     startStartupThreadRepair();
     startAvatarDiscoveryScheduler();

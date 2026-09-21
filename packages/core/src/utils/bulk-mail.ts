@@ -10,7 +10,8 @@
  *
  * Two layers, deliberately kept apart:
  *
- *   * HEADERS ({@link bulkHeaderSignals}) — what a bulk sender is REQUIRED to
+ *   * HEADERS ({@link bulkHeaderSignals}, now in `@sarv-in/email-spam-scan`
+ *     and re-exported here) — what a bulk sender is REQUIRED to
  *     set: RFC 2919 `List-Id`, RFC 2369 `List-Unsubscribe`, `Precedence`, RFC
  *     3834 `Auto-Submitted`, and the `Feedback-ID` bulk senders add for
  *     Google Postmaster. Cheap, unambiguous, available before the body is
@@ -37,125 +38,49 @@
  * perfectly ordinary signature templates, and `List-Unsubscribe` / `Feedback-ID`
  * identify the same senders from the headers without guessing.
  */
+import {
+  bulkHeaderSignals,
+  BULK_HEADER_NAMES,
+  hasBulkHeaderSignal,
+  headerLookupFromText,
+  headerValueFromText,
+  headerValuesFromText,
+  type BulkHeaderSignals,
+  type HeaderLookup,
+} from '@sarv-in/email-spam-scan/headers';
+
 import { htmlToPlainText } from './html-text';
 import { stripQuotedTail } from './quoted-text';
 import { isNoReplyAddress } from './role-address';
 import { hasTag } from './tags';
 
-/**
- * The headers {@link bulkHeaderSignals} reads. Exported so the IMAP fetch asks
- * for exactly these — a header this list names but the fetch omits is a signal
- * that silently never fires.
- */
-export const BULK_HEADER_NAMES: readonly string[] = [
-  'list-id',
-  'list-unsubscribe',
-  'precedence',
-  'auto-submitted',
-  'feedback-id',
-];
-
-/** Reads one header's unfolded value, or null/undefined when it is absent. */
-export type HeaderLookup = (name: string) => string | null | undefined;
-
-export interface BulkHeaderSignals {
-  /** RFC 2919 `List-Id`. */
-  listId: boolean;
-  /** RFC 2369 `List-Unsubscribe`. */
-  listUnsubscribe: boolean;
-  /** `Precedence: bulk | list | junk`. */
-  precedenceBulk: boolean;
-  /** RFC 3834 `Auto-Submitted`, anything but the explicit `no`. */
-  autoSubmitted: boolean;
-  /** `Feedback-ID`, added by bulk senders for Google Postmaster Tools. */
-  feedbackId: boolean;
-  /**
-   * A mass-mailer's own tracing header (`X-Campaign`, `X-Mailgun-Tag`,
-   * `X-MC-User`, `X-SES-Outgoing`, or an ESP `X-Mailer`). Only ever true when
-   * the caller holds the FULL header block — the ingest fetch does not ask for
-   * these, so at sync time this stays false and the RFC headers above decide.
-   */
-  espTrace: boolean;
-}
-
-/** Vendor tracing headers. Presence alone is the signal, except `x-mailer`,
- *  whose value has to name a mass-mailer (every mail client sets `X-Mailer`). */
-const ESP_TRACE_HEADERS: readonly string[] = [
-  'x-campaign',
-  'x-mailgun-tag',
-  'x-mc-user',
-  'x-ses-outgoing',
-  'x-sg-eid',
-];
-const ESP_MAILER_RE = /mailchimp|sendgrid|mailgun|sparkpost|constant\s*contact|hubspot|marketo|klaviyo|braze|iterable/i;
-
-/**
- * Which bulk-mail headers this message carries.
- *
- * Takes a lookup rather than a header blob so the IMAP client (which already
- * unfolds headers out of a Buffer) and the importance scorer (which holds them
- * as text) run the SAME rules over their own storage.
- */
-export function bulkHeaderSignals(get: HeaderLookup): BulkHeaderSignals {
-  const value = (name: string) => (get(name) || '').trim();
-
-  // RFC 3834: `no` is the one value that means "a person sent this". Anything
-  // else — auto-generated, auto-replied, auto-notified — is a machine, and the
-  // value may carry parameters after a semicolon.
-  const autoSubmittedValue = value('auto-submitted').split(';')[0].trim().toLowerCase();
-  const precedence = value('precedence').toLowerCase();
-
-  return {
-    listId: value('list-id') !== '',
-    listUnsubscribe: value('list-unsubscribe') !== '',
-    precedenceBulk: precedence === 'bulk' || precedence === 'list' || precedence === 'junk',
-    autoSubmitted: autoSubmittedValue !== '' && autoSubmittedValue !== 'no',
-    feedbackId: value('feedback-id') !== '',
-    espTrace:
-      ESP_TRACE_HEADERS.some((name) => value(name) !== '') || ESP_MAILER_RE.test(value('x-mailer')),
-  };
-}
-
-/** True when ANY bulk-mail header is present. The stored `|bulk|` tag. */
-export function hasBulkHeaderSignal(get: HeaderLookup): boolean {
-  return Object.values(bulkHeaderSignals(get)).some(Boolean);
-}
-
-/**
- * EVERY value of one header out of a raw header block, unfolded, in the order
- * they appear (newest hop first for trace headers such as `Received`).
- *
- * Anchored at the start of the block or after a newline, but WITHOUT the `m`
- * flag: with `m`, `$` matches every physical line-end, so the lazy capture stops
- * at the first line and a folded multi-line value (a To/Cc list wrapped across
- * lines, a long `List-Unsubscribe`) is truncated to its first entry. Without
- * `m`, the capture runs until the next UNFOLDED newline — a `\n` not followed by
- * whitespace, i.e. the next header — and the continuation lines are joined here.
- * The terminator is a LOOKAHEAD so the newline stays available as the next
- * occurrence's anchor: two adjacent `Received:` lines must both be found.
- */
-export function headerValuesFromText(headers: string, name: string): string[] {
-  if (!headers) return [];
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`(?:^|\\r?\\n)${escaped}:[^\\S\\r\\n]*([\\s\\S]*?)(?=\\r?\\n(?!\\s)|$)`, 'gi');
-  const values: string[] = [];
-  for (const match of headers.matchAll(re)) {
-    const value = match[1].replace(/\r?\n\s+/g, ' ').trim();
-    if (value) values.push(value);
-  }
-  return values;
-}
-
-/** The FIRST value of one header out of a raw header block, unfolded — see {@link headerValuesFromText}. */
-export function headerValueFromText(headers: string, name: string): string | null {
-  return headerValuesFromText(headers, name)[0] ?? null;
-}
-
-/** A {@link HeaderLookup} over a raw header block. */
-export function headerLookupFromText(headers: string | null | undefined): HeaderLookup {
-  const text = headers || '';
-  return (name) => headerValueFromText(text, name);
-}
+// The HEADER layer described above now lives in `@sarv-in/email-spam-scan`,
+// which is where the spam filter it feeds went. Re-exported from here because
+// the rule it encodes is the same one this module's CONTENT layer defers to,
+// and because every caller in this repo already knows it by this module's
+// name. There is exactly one implementation either way.
+//
+// Imported from the `/headers` subpath, NOT the package root, and that is
+// load-bearing: this module is aliased straight into the renderer bundle
+// (see `apps/desktop/vite/renderer-aliases.ts`), so whatever it imports, the
+// browser imports. The root entry pulls in the scorer's address parser and
+// freemail corpus — the latter a CommonJS array with no default export, which
+// the Vite dev server serves unconverted and which blanks the window.
+// `/headers` is zero-dependency by contract, and the library has a test that
+// keeps it that way.
+export {
+  bulkHeaderSignals,
+  // The headers `bulkHeaderSignals` reads. Re-exported so the IMAP fetch asks
+  // for exactly these — a header this list names but the fetch omits is a
+  // signal that silently never fires.
+  BULK_HEADER_NAMES,
+  hasBulkHeaderSignal,
+  headerLookupFromText,
+  headerValueFromText,
+  headerValuesFromText,
+  type BulkHeaderSignals,
+  type HeaderLookup,
+};
 
 export interface BulkMailInput {
   /** The stored `|a|b|c|` tag string. `|bulk|` is the header verdict. */
