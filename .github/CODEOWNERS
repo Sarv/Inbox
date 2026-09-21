@@ -4,8 +4,9 @@
 # touch the matching paths. See:
 # https://docs.github.com/en/repositories/managing-your-repositories-settings-and-configuration/customizing-your-repository/about-code-owners
 #
-# NOTE: create the @Sarv/maintainers team (or replace with GitHub usernames)
-# so these owners resolve.
+# NOTE: @Sarv/maintainers must have WRITE access to this repository, otherwise
+# GitHub silently ignores every rule below and no reviewer is requested. The
+# team existing is not enough (Org -> Teams -> maintainers -> Repositories).
 
 # Default owners for everything in the repo
 *                         @Sarv/maintainers
