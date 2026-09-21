@@ -34,17 +34,14 @@
  * silent: the dev server keeps serving the previous build of the library with
  * no error, no warning and no reload.
  *
- * `@sarv-in/email-spam-scan` is the spam filter, extracted from this app and
- * developed in the sibling checkout; the renderer reaches its `/verdict`,
- * `/identity`, `/links`, `/security` and `/reputation` entries through the
- * seams in `src/utils`, and its `/quote` entry through the core modules
- * aliased in `renderer-aliases.ts`. When it goes back to a registry range, remove it: Vite's
- * default handling — pre-bundle once, never watch — is exactly right for an
- * immutable published tarball, and excluding it would only cost dev-server
- * startup time. `@sarv-in/email-chat-view` is the standing example of that
- * state; point it back at `file:` to work on it and it belongs here again.
+ * Empty today, and that is the healthy state: `@sarv-in/mailguard` was
+ * published to the registry in Sept 2026 and `@sarv-in/email-chat-view`
+ * before it, so both now install as immutable tarballs where Vite's default
+ * handling — pre-bundle once, never watch — is exactly right. Point either
+ * back at `file:` to work on it in the sibling checkout and it belongs here
+ * again; the test below will say so if you forget.
  */
-export const LINKED_PACKAGES: readonly string[] = ['@sarv-in/email-spam-scan'];
+export const LINKED_PACKAGES: readonly string[] = [];
 
 /**
  * `optimizeDeps.exclude` — keep these out of the esbuild pre-bundle.
@@ -75,7 +72,7 @@ export function linkedDepsToExclude(packages: readonly string[] = LINKED_PACKAGE
  * reaches, not everything the library depends on.
  *
  * `ipaddr.js` arrives with the blocklist catalogue that Security > Blocklists
- * renders (`@sarv-in/email-spam-scan/reputation`), and is CommonJS with a
+ * renders (`@sarv-in/mailguard/reputation`), and is CommonJS with a
  * default import.
  */
 export const LINKED_CJS_DEPS: readonly string[] = ['ipaddr.js'];

@@ -66,9 +66,9 @@ importers:
       '@sarv-in/email-chat-view':
         specifier: ^0.2.2
         version: 0.2.2(react-dom@18.3.1)(react@18.3.1)
-      '@sarv-in/email-spam-scan':
-        specifier: file:../../../email-spam-scan
-        version: file:../email-spam-scan
+      '@sarv-in/mailguard':
+        specifier: ^0.1.0
+        version: 0.1.0
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -254,11 +254,29 @@ importers:
         specifier: ^7.2.0
         version: 7.2.0
 
+  extensions/otp-code:
+    devDependencies:
+      '@sarvinbox/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@vitest/coverage-v8':
+        specifier: ^1.2.0
+        version: 1.6.1(vitest@1.6.1)
+      tsup:
+        specifier: ^8.0.1
+        version: 8.5.1(typescript@5.9.3)
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.2.0
+        version: 1.6.1(@types/node@20.19.27)
+
   packages/core:
     dependencies:
-      '@sarv-in/email-spam-scan':
-        specifier: file:../../../email-spam-scan
-        version: file:../email-spam-scan
+      '@sarv-in/mailguard':
+        specifier: ^0.1.0
+        version: 0.1.0
       '@zone-eu/mailsplit':
         specifier: ^5.4.8
         version: 5.4.12
@@ -2704,6 +2722,31 @@ packages:
       email-addresses: 5.0.0
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
+    dev: false
+
+  /@sarv-in/mailguard@0.1.0:
+    resolution: {integrity: sha512-4uGLyhS2Hal/CH6mzJDTKsOIr85UQjtul9pjdOda8eWXWaxZ0p1cPs4cgLsd0Ye5iEVtCp+7oNqUPNMBpDb1Gw==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@peculiar/x509': ^2.1.0
+      asn1js: ^3.0.6
+      mailauth: ^5.0.0
+      reflect-metadata: ^0.2.2
+    peerDependenciesMeta:
+      '@peculiar/x509':
+        optional: true
+      asn1js:
+        optional: true
+      mailauth:
+        optional: true
+      reflect-metadata:
+        optional: true
+    dependencies:
+      email-addresses: 5.0.0
+      htmlparser2: 10.1.0
+      ipaddr.js: 2.5.0
+      postal-mime: 3.0.0
+      tldts: 7.4.10
     dev: false
 
   /@selderee/plugin-htmlparser2@0.11.0:
@@ -11599,30 +11642,4 @@ packages:
       '@types/react': 18.3.27
       react: 18.3.1
       use-sync-external-store: 1.6.0(react@18.3.1)
-    dev: false
-
-  file:../email-spam-scan:
-    resolution: {directory: ../email-spam-scan, type: directory}
-    name: '@sarv-in/email-spam-scan'
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@peculiar/x509': ^2.1.0
-      asn1js: ^3.0.6
-      mailauth: ^5.0.0
-      reflect-metadata: ^0.2.2
-    peerDependenciesMeta:
-      '@peculiar/x509':
-        optional: true
-      asn1js:
-        optional: true
-      mailauth:
-        optional: true
-      reflect-metadata:
-        optional: true
-    dependencies:
-      email-addresses: 5.0.0
-      htmlparser2: 10.1.0
-      ipaddr.js: 2.5.0
-      postal-mime: 3.0.0
-      tldts: 7.4.10
     dev: false
