@@ -44,7 +44,7 @@ describe('linkedDepsToWatch', () => {
   // both together make a library rebuild reach the browser.
   it('covers exactly the packages the exclude list covers', () => {
     const watched = linkedDepsToWatch().map((pattern) =>
-      pattern.replace('!**/node_modules/', '').replace('/**', ''),
+      pattern.replace('!**/node_modules/', '').replace('/**', '')
     );
     expect(watched).toEqual(linkedDepsToExclude());
   });
@@ -70,10 +70,14 @@ describe('LINKED_PACKAGES', () => {
   // A `file:` dep missing from the list is served stale, which reads as "my fix
   // did not work". A registry dep left in the list is excluded from the
   // pre-bundle and watched for changes it will never have, which just costs
-  // dev-server startup. `@sarv-in/email-chat-view` moved from `file:` to the registry in
-  // Sept 2026, which is why the list is empty rather than naming it.
+  // dev-server startup. `@sarv-in/mailguard` and `@sarv-in/email-chat-view`
+  // both moved from `file:` to the registry in Sept 2026, which is why the list
+  // is empty rather than naming either.
   it('names exactly the dependencies installed by file: path', () => {
-    const manifestPath = path.join(fileURLToPath(new URL('.', import.meta.url)), '../../../package.json');
+    const manifestPath = path.join(
+      fileURLToPath(new URL('.', import.meta.url)),
+      '../../../package.json'
+    );
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
@@ -107,7 +111,7 @@ describe('linkedCjsDepsToPrebundle', () => {
     const here = fileURLToPath(new URL('.', import.meta.url));
     const repoRoot = path.join(here, '../../../../..');
     const srcDir = path.join(here, '../../../src');
-    const libraryName = '@sarv-in/email-spam-scan';
+    const libraryName = '@sarv-in/mailguard';
     const libraryDir = path.join(repoRoot, 'node_modules', libraryName);
 
     const sourceFiles = (dir: string): string[] =>
