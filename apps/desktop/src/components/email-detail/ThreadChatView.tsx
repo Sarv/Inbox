@@ -23,7 +23,7 @@ import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './
 import { EmailMenu } from './EmailMenu';
 import { SecurityIndicator } from './SecurityIndicator';
 import type { EmailDetailContext } from './types';
-import { parseAttachments } from './utils';
+import { hasLoadedBody, parseAttachments } from './utils';
 import { VerifiedBadge } from './VerifiedBadge';
 
 // getCurrentUserEmail used to live here; it moved to ai-service so
@@ -272,6 +272,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
               fromName={email.fromName}
               fromAddress={email.fromAddress}
               html={email.rawBody}
+              bodyLoaded={hasLoadedBody(email)}
               authStatus={email.authStatus}
               spamScore={email.spamScore}
               spamReasons={email.spamReasons}

@@ -9,19 +9,18 @@
  * - Bulk mail indicators (List-Unsubscribe, Precedence headers)
  */
 
+import { parseAuthenticationHeaders } from '@sarv-in/email-spam-scan/headers';
+import type { AuthStatus } from '@sarv-in/email-spam-scan/verdict';
+
 import type { EmailRecord } from '../types/models';
 import { bulkHeaderSignals, headerLookupFromText } from '../utils/bulk-mail';
 import { hasTag } from '../utils/tags';
 
 /**
- * Authentication status parsed from email headers
+ * Authentication status parsed from email headers — the library's shape, so
+ * the importance scorer and the spam filter read one verdict, not two.
  */
-export interface AuthStatus {
-  spf: 'pass' | 'fail' | 'softfail' | 'neutral' | 'none' | 'unknown';
-  dkim: 'pass' | 'fail' | 'none' | 'unknown';
-  dmarc: 'pass' | 'fail' | 'none' | 'unknown';
-  overall: 'pass' | 'partial' | 'fail' | 'none';
-}
+export type { AuthStatus } from '@sarv-in/email-spam-scan/verdict';
 
 /**
  * Sender statistics for scoring
@@ -99,69 +98,15 @@ export const IMPORTANCE_THRESHOLDS = {
 };
 
 /**
- * Parse authentication results from email headers
+ * Parse authentication results from email headers.
+ *
+ * The reading is `@sarv-in/email-spam-scan/headers` — the same one the spam
+ * filter scores, so the importance weights and the spam points can never
+ * disagree about whether a message passed DMARC. Re-exported under the name
+ * this module always published: the importance scorer below is only one of its
+ * callers, and the rest import it from here.
  */
-export function parseAuthenticationHeaders(rawHeaders: string | null | undefined): AuthStatus {
-  const result: AuthStatus = {
-    spf: 'unknown',
-    dkim: 'unknown',
-    dmarc: 'unknown',
-    overall: 'none',
-  };
-
-  if (!rawHeaders) {
-    return result;
-  }
-
-  const headers = rawHeaders.toLowerCase();
-
-  // Parse SPF
-  if (headers.includes('spf=pass')) {
-    result.spf = 'pass';
-  } else if (headers.includes('spf=fail')) {
-    result.spf = 'fail';
-  } else if (headers.includes('spf=softfail')) {
-    result.spf = 'softfail';
-  } else if (headers.includes('spf=neutral')) {
-    result.spf = 'neutral';
-  } else if (headers.includes('spf=none')) {
-    result.spf = 'none';
-  }
-
-  // Parse DKIM
-  if (headers.includes('dkim=pass')) {
-    result.dkim = 'pass';
-  } else if (headers.includes('dkim=fail')) {
-    result.dkim = 'fail';
-  } else if (headers.includes('dkim=none')) {
-    result.dkim = 'none';
-  }
-
-  // Parse DMARC
-  if (headers.includes('dmarc=pass')) {
-    result.dmarc = 'pass';
-  } else if (headers.includes('dmarc=fail')) {
-    result.dmarc = 'fail';
-  } else if (headers.includes('dmarc=none')) {
-    result.dmarc = 'none';
-  }
-
-  // Determine overall status
-  const passed = [result.spf, result.dkim, result.dmarc].filter(s => s === 'pass').length;
-  const failed = [result.spf, result.dkim, result.dmarc].filter(s => s === 'fail').length;
-
-  if (failed > 0) {
-    result.overall = 'fail';
-  } else if (passed >= 2) {
-    result.overall = 'pass';
-  } else if (passed >= 1) {
-    result.overall = 'partial';
-  } else {
-    result.overall = 'none';
-  }
-
-  return result;
-}
+export { parseAuthenticationHeaders };
 
 /**
  * Check if email has bulk mail headers.

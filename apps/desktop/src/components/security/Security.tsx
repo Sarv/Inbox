@@ -8,7 +8,9 @@ import { useConfirm } from '../ConfirmDialog';
 import { BlockedSendersPanel } from '../settings/BlockedSendersPanel';
 import { Tooltip } from '../Tooltip';
 
-type SecurityTab = 'overview' | 'links' | 'senders' | 'images' | 'identity';
+import { BlocklistsTab } from './BlocklistsTab';
+
+type SecurityTab = 'overview' | 'links' | 'senders' | 'images' | 'identity' | 'blocklists';
 
 const tabs: { id: SecurityTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -16,6 +18,7 @@ const tabs: { id: SecurityTab; label: string }[] = [
   { id: 'senders', label: 'Blocked senders' },
   { id: 'images', label: 'Remote images' },
   { id: 'identity', label: 'Sender identity' },
+  { id: 'blocklists', label: 'Blocklists' },
 ];
 
 const LEVEL_ICON: Record<SecurityLevel, typeof Shield> = {
@@ -73,6 +76,7 @@ export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
         )}
         {activeTab === 'images' && <ImagesTab />}
         {activeTab === 'identity' && <IdentityTab />}
+        {activeTab === 'blocklists' && <BlocklistsTab />}
       </div>
     </div>
   );
@@ -92,12 +96,12 @@ const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
 ];
 
-function AuthBackfillStatus() {
+function HeaderBackfillStatus() {
   const [state, setState] = useState<{ remaining: number; done: number; running: boolean; drained: boolean } | null>(null);
   useEffect(() => {
     const api = window.electronAPI.security;
-    api.getAuthBackfillState?.().then((r) => { if (r?.success && r.data) setState(r.data); }).catch(() => { /* best-effort */ });
-    const off = api.onAuthBackfillProgress?.((s) => setState(s));
+    api.getHeaderBackfillState?.().then((r) => { if (r?.success && r.data) setState(r.data); }).catch(() => { /* best-effort */ });
+    const off = api.onHeaderBackfillProgress?.((s) => setState(s));
     return () => { off?.(); };
   }, []);
   if (!state) return null;
@@ -110,17 +114,17 @@ function AuthBackfillStatus() {
         : <Loader2 className="h-4 w-4 animate-spin text-primary flex-shrink-0" />}
       <div className="min-w-0 flex-1">
         {state.drained ? (
-          <span>Older mail verified — {state.done.toLocaleString()} message{state.done === 1 ? '' : 's'} given an authentication verdict.</span>
+          <span>Older mail checked — {state.done.toLocaleString()} message{state.done === 1 ? '' : 's'} given an authentication verdict and a spam score.</span>
         ) : (
           <span>
-            Verifying older mail: <b>{state.done.toLocaleString()}</b> of {total.toLocaleString()} done,
-            {' '}{state.remaining.toLocaleString()} to go. Messages show <i>Unverified</i> until their turn.
+            Checking older mail: <b>{state.done.toLocaleString()}</b> of {total.toLocaleString()} done,
+            {' '}{state.remaining.toLocaleString()} to go. Messages show <i>Unverified</i> and <i>Not scored</i> until their turn.
           </span>
         )}
       </div>
       {!state.drained && !state.running && (
         <button
-          onClick={() => { void window.electronAPI.security.kickAuthBackfill?.(); }}
+          onClick={() => { void window.electronAPI.security.kickHeaderBackfill?.(); }}
           className="shrink-0 px-2.5 py-1 rounded-md border border-border text-xs hover:bg-muted/60 transition-colors"
         >
           Run now
@@ -178,7 +182,7 @@ function ReputationStatus() {
 function OverviewTab() {
   return (
     <div className="p-6 max-w-4xl space-y-8">
-      <AuthBackfillStatus />
+      <HeaderBackfillStatus />
       <ReputationStatus />
       <section>
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Security levels</h2>

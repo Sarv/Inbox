@@ -10,7 +10,7 @@ import {
   FileAudio,
   FileCode,
 } from 'lucide-react';
-import React from 'react';
+import * as React from 'react';
 
 
 // Get file icon based on extension
@@ -457,4 +457,19 @@ export function shouldSuppressDraftAutoOpen(
   if (threadKeys.some((key) => dismissedThreads.has(key))) return true;
   const sending = sendingThreadKeys ?? [];
   return threadKeys.some((key) => sending.includes(key));
+}
+
+/**
+ * Is this message's body in hand?
+ *
+ * Bodies are fetched lazily — a row arrives with its headers and gets its body
+ * on demand — so a message with neither part has not been downloaded yet, not
+ * downloaded-and-empty. Everything that reads the body owes the reader that
+ * distinction: the renderer shows a spinner rather than "(no content)", and
+ * the security shield reports its link checks as unrun rather than passed.
+ * One definition, because four views asking it differently is how they end up
+ * disagreeing about the same message.
+ */
+export function hasLoadedBody(email: { rawBody?: string | null; cleanBody?: string | null }): boolean {
+  return Boolean(email.rawBody || email.cleanBody);
 }

@@ -1,11 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
 import {
+  LINKED_CJS_DEPS,
   LINKED_PACKAGES,
+  linkedCjsDepsToPrebundle,
   linkedDepsToExclude,
   linkedDepsToWatch,
 } from '../../../vite/linked-packages';
@@ -81,5 +83,88 @@ describe('LINKED_PACKAGES', () => {
       .map(([name]) => name);
 
     expect([...LINKED_PACKAGES].sort()).toEqual(fileLinked.sort());
+  });
+});
+
+describe('linkedCjsDepsToPrebundle', () => {
+  it('returns a fresh array, not the shared constant', () => {
+    expect(linkedCjsDepsToPrebundle()).not.toBe(LINKED_CJS_DEPS);
+    expect(linkedCjsDepsToPrebundle(['pkg-a'])).toEqual(['pkg-a']);
+  });
+
+  // Regression: THE blank-window bug, twice over. A linked package is excluded
+  // from the pre-bundle, so Vite hands its dependencies to the browser exactly
+  // as they sit on disk — and a CommonJS one arrives as `module.exports = ...`,
+  // which `import x from 'pkg'` cannot read. It fails in dev only: the
+  // production build converts the same file, so `check:renderer-bundle` stays
+  // green and nobody finds out until they run `pnpm dev:desktop`.
+  //
+  // So this walks what the renderer actually imports from the linked scanner,
+  // through its built ESM, and insists every CommonJS package it lands on is
+  // named in LINKED_CJS_DEPS. Adding a renderer import that drags in a new CJS
+  // dependency fails here rather than at the next dev-server start.
+  it('names every CommonJS package the renderer reaches through the scanner', () => {
+    const here = fileURLToPath(new URL('.', import.meta.url));
+    const repoRoot = path.join(here, '../../../../..');
+    const srcDir = path.join(here, '../../../src');
+    const libraryName = '@sarv-in/email-spam-scan';
+    const libraryDir = path.join(repoRoot, 'node_modules', libraryName);
+
+    const sourceFiles = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) return sourceFiles(full);
+        return /\.tsx?$/.test(entry.name) ? [full] : [];
+      });
+
+    const specifiersIn = (code: string): string[] =>
+      [...code.matchAll(/from\s*['"]([^'"]+)['"]/g)].map((match) => match[1]!);
+
+    const exportsMap = (
+      JSON.parse(readFileSync(path.join(libraryDir, 'package.json'), 'utf8')) as {
+        exports: Record<string, { import: { default: string } }>;
+      }
+    ).exports;
+
+    // Where the renderer enters the library, as the browser would resolve it.
+    const entryFiles = new Set<string>();
+    for (const file of sourceFiles(srcDir)) {
+      for (const specifier of specifiersIn(readFileSync(file, 'utf8'))) {
+        if (!specifier.startsWith(libraryName)) continue;
+        const subpath = specifier.slice(libraryName.length) || '.';
+        const entry = exportsMap[subpath === '.' ? '.' : `.${subpath}`];
+        expect(entry, `${libraryName} publishes no "${subpath}" export`).toBeDefined();
+        entryFiles.add(path.join(libraryDir, entry!.import.default));
+      }
+    }
+    expect(entryFiles.size).toBeGreaterThan(0);
+
+    // Everything those entries pull in, following the library's own chunks.
+    const visited = new Set<string>();
+    const bare = new Set<string>();
+    const walk = (file: string): void => {
+      if (visited.has(file) || !existsSync(file)) return;
+      visited.add(file);
+      for (const specifier of specifiersIn(readFileSync(file, 'utf8'))) {
+        if (specifier.startsWith('node:')) continue;
+        if (specifier.startsWith('.')) walk(path.resolve(path.dirname(file), specifier));
+        else bare.add(specifier);
+      }
+    };
+    entryFiles.forEach(walk);
+
+    const isCommonJs = (name: string): boolean => {
+      const manifestPath = path.join(repoRoot, 'node_modules', name, 'package.json');
+      if (!existsSync(manifestPath)) return false;
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        type?: string;
+        module?: string;
+        exports?: unknown;
+      };
+      if (manifest.type === 'module' || manifest.module) return false;
+      return !JSON.stringify(manifest.exports ?? null).includes('"import"');
+    };
+
+    expect([...bare].filter(isCommonJs).sort()).toEqual([...LINKED_CJS_DEPS].sort());
   });
 });

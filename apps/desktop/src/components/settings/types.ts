@@ -53,6 +53,15 @@ export interface AppSettings {
    *  Gmail (labels) and sarv (keywords) keep mail in the Inbox with no dupe. */
   categoryLabels: { enabled: boolean; folderMode: 'copy' | 'move' };
 
+  /** Blocklist (DNSBL) lookups during the spam scan. OFF by default and
+   *  deliberately: it is the only check that leaves the machine, telling a
+   *  third-party operator in real time which addresses are writing to this
+   *  user. `zones` names entries from the scanner's catalogue; `servers` are
+   *  the resolvers to ask, which matters because the large operators refuse
+   *  queries arriving through a public or open resolver — the default on most
+   *  home connections. Absent means never configured, which reads as off. */
+  reputation?: { enabled: boolean; zones: string[]; servers: string[] };
+
   // Inbox settings
   inboxType: InboxType;
   showImportanceMarkers: boolean;
@@ -113,6 +122,7 @@ export const defaultSettings: AppSettings = {
   spamReputationMode: 'sarv',
   spamReputationEndpoint: '',
   categoryLabels: { enabled: true, folderMode: 'copy' },
+  reputation: { enabled: false, zones: [], servers: [] },
   inboxType: 'priority_first',
   showImportanceMarkers: true,
   inboxSections: [],

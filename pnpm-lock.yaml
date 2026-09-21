@@ -66,6 +66,9 @@ importers:
       '@sarv-in/email-chat-view':
         specifier: ^0.2.2
         version: 0.2.2(react-dom@18.3.1)(react@18.3.1)
+      '@sarv-in/email-spam-scan':
+        specifier: file:../../../email-spam-scan
+        version: file:../email-spam-scan
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -253,6 +256,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@sarv-in/email-spam-scan':
+        specifier: file:../../../email-spam-scan
+        version: file:../email-spam-scan
       '@zone-eu/mailsplit':
         specifier: ^5.4.8
         version: 5.4.12
@@ -301,9 +307,6 @@ importers:
       p-retry:
         specifier: ^4.6.2
         version: 4.6.2
-      reflect-metadata:
-        specifier: ^0.2.2
-        version: 0.2.2
       sanitize-filename:
         specifier: ^1.6.4
         version: 1.6.4
@@ -9229,6 +9232,10 @@ packages:
     engines: {node: '>= 0.4'}
     dev: true
 
+  /postal-mime@3.0.0:
+    resolution: {integrity: sha512-Z4a9ar2Bv3YpK3IXag+Yda30k7bMZfpRuUGyqtHnZ2pjHG8Bl62EhZIk4n1dzv00gfzP9g+94e9kd8+XmjVWLA==}
+    dev: false
+
   /postcss-import@15.1.0(postcss@8.5.6):
     resolution: {integrity: sha512-hpr+J05B2FVYUAXHeK1YyI267J/dDDhMU6B6civm8hSY1jYJnBXxzKDKDswzJmtLHryrjhnDjqqp/49t8FALew==}
     engines: {node: '>=14.0.0'}
@@ -9794,10 +9801,6 @@ packages:
 
   /real-require@1.0.0:
     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
-    dev: false
-
-  /reflect-metadata@0.2.2:
-    resolution: {integrity: sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q==}
     dev: false
 
   /reflect.getprototypeof@1.0.10:
@@ -11596,4 +11599,30 @@ packages:
       '@types/react': 18.3.27
       react: 18.3.1
       use-sync-external-store: 1.6.0(react@18.3.1)
+    dev: false
+
+  file:../email-spam-scan:
+    resolution: {directory: ../email-spam-scan, type: directory}
+    name: '@sarv-in/email-spam-scan'
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@peculiar/x509': ^2.1.0
+      asn1js: ^3.0.6
+      mailauth: ^5.0.0
+      reflect-metadata: ^0.2.2
+    peerDependenciesMeta:
+      '@peculiar/x509':
+        optional: true
+      asn1js:
+        optional: true
+      mailauth:
+        optional: true
+      reflect-metadata:
+        optional: true
+    dependencies:
+      email-addresses: 5.0.0
+      htmlparser2: 10.1.0
+      ipaddr.js: 2.5.0
+      postal-mime: 3.0.0
+      tldts: 7.4.10
     dev: false

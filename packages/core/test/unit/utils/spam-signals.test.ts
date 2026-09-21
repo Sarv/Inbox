@@ -1,20 +1,20 @@
-import { describe, expect, it } from 'vitest';
-
-import { headerLookupFromText } from '../../../src/utils/bulk-mail';
 import {
   DATE_SKEW_SECONDS,
   SPAM_HEADER_NAMES,
   assessSpamSignals,
   isFreemailAddress,
   type SpamSignalInput,
-} from '../../../src/utils/spam-signals';
+} from '@sarv-in/email-spam-scan';
 import {
   SPAM_THRESHOLD,
   SUSPICIOUS_THRESHOLD,
   isSpamScore,
   parseSpamReasons,
   spamVerdict,
-} from '../../../src/utils/spam-verdict';
+} from '@sarv-in/email-spam-scan';
+import { describe, expect, it } from 'vitest';
+
+import { headerLookupFromText } from '../../../src/utils/bulk-mail';
 
 /**
  * The header-stage spam filter.

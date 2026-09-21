@@ -10,6 +10,7 @@ import { isWatermarkImpossible } from '../utils/sync-watermark';
 
 import { fetchNewMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
+import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
 
 
@@ -124,6 +125,13 @@ export class FolderSyncer {
    * a spam re-file, a rule's move or flag — happens on the server too. */
   setServerActions(actions: Partial<IngestServerActions>): void {
     this.messageProcessor.setServerActions(actions);
+  }
+
+  /** Forward the blocklist lookup so mail this syncer ingests is scored on the
+   * same evidence the realtime path scores it on — otherwise the same message
+   * would be spam or not depending on which path happened to see it first. */
+  setReputationLookup(fn: ReputationLookup): void {
+    this.messageProcessor.setReputationLookup(fn);
   }
 
   /**

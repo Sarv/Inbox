@@ -1,14 +1,20 @@
-import { defineConfig, loadEnv, type PluginOption } from 'vite';
+import { copyFileSync, mkdirSync, readFileSync } from 'fs';
+import { resolve } from 'path';
+
+import { sentryVitePlugin } from '@sentry/vite-plugin';
 import react from '@vitejs/plugin-react';
+import { defineConfig, loadEnv, type PluginOption } from 'vite';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
-import { sentryVitePlugin } from '@sentry/vite-plugin';
-import { resolve } from 'path';
-import { copyFileSync, mkdirSync, readFileSync } from 'fs';
+
 
 import { injectCspMeta } from './vite/app-csp';
 import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
-import { linkedDepsToExclude, linkedDepsToWatch } from './vite/linked-packages';
+import {
+  linkedCjsDepsToPrebundle,
+  linkedDepsToExclude,
+  linkedDepsToWatch,
+} from './vite/linked-packages';
 import { rendererAliases } from './vite/renderer-aliases';
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -82,7 +88,17 @@ export default defineConfig(({ mode }) => ({
         // Main process entry
         entry: 'electron/main.ts',
         onstart(options) {
-          options.startup();
+          // `INBOX_DEBUG_PORT=9222 pnpm dev:desktop` opens the RENDERER's
+          // inspector so a CPU profile can name the function behind a UI
+          // stall. Electron only reads the switch from its own argv, and
+          // vite-plugin-electron spawns it for us, so the flag has to be
+          // threaded through here; `['.', '--no-sandbox']` is the plugin's
+          // own default argv, repeated because passing any argv replaces it.
+          // Unset, nothing changes: no port is opened in a normal dev run.
+          const port = process.env.INBOX_DEBUG_PORT;
+          options.startup(
+            port ? ['.', '--no-sandbox', `--remote-debugging-port=${port}`] : undefined,
+          );
         },
         vite: {
           define: buildDefines(mode),
@@ -177,6 +193,9 @@ export default defineConfig(({ mode }) => ({
   // see vite/linked-packages.ts for why, and why it fails silently.
   optimizeDeps: {
     exclude: linkedDepsToExclude(),
+    // ...and the CommonJS packages those linked ones import, which the
+    // exclusion above would otherwise leave for the browser to choke on.
+    include: linkedCjsDepsToPrebundle(),
   },
   server: {
     port: 5173,

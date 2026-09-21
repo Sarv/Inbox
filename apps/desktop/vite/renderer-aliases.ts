@@ -50,19 +50,5 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/bulk-mail.ts',
     ),
-    // Pure (tldts, which is browser-safe) — display-name impersonation. The
-    // shield judges a message the user is reading with the SAME rule the spam
-    // filter applied when it arrived; a renderer copy would drift.
-    '@sarvinbox/core/sender-spoof': resolve(
-      desktopDir,
-      '../../packages/core/src/utils/sender-spoof.ts',
-    ),
-    // Pure (zero imports) — the spam filter's thresholds and the parser for
-    // its stored reasons, so the shield reads the verdict exactly as it was
-    // written. The scorer itself stays in the main process.
-    '@sarvinbox/core/spam-verdict': resolve(
-      desktopDir,
-      '../../packages/core/src/utils/spam-verdict.ts',
-    ),
   };
 }

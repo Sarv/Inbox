@@ -22,7 +22,6 @@
  * one is recorded as an error with a short TTL so it is retried soon without
  * ever looping hot.
  */
-import { promises as dns } from 'node:dns';
 
 import {
   createLogger,
@@ -323,7 +322,10 @@ export function getSenderIdentityService(): SenderIdentityService {
   if (!service) {
     service = new SenderIdentityService({
       store: getDomainIdentityStore(),
-      lookupBimi: (domain) => lookupBimi(domain, { resolveTxt: (name) => dns.resolveTxt(name), fetch: timedFetch }),
+      // No resolver injected: the library builds one per lookup with a 5s
+      // c-ares timeout and no retry, and answers a name that does not exist
+      // with "no records" instead of an error — the distinction BIMI turns on.
+      lookupBimi: (domain) => lookupBimi(domain, { fetch: timedFetch }),
       discoverFavicon: (domain) => discoverFavicon(domain, { fetch: timedFetch }),
       policy: getSenderIdentityPolicy,
       now: () => Math.floor(Date.now() / 1000),

@@ -8,7 +8,10 @@
  * that ADD to the header score — the same threshold, the same tag, the same
  * re-file, just a little later than insert.
  *
- * Two providers behind one interface:
+ * The blocklist catalogue, the return-code tables and the scoring all live in
+ * `@sarv-in/email-spam-scan/reputation` now. What stays here is the part that
+ * is Inbox's rather than the library's: TWO PROVIDERS BEHIND ONE INTERFACE,
+ * so the main process can cache and swap them.
  *
  *   - {@link SarvReputationProvider} — the Sarv-hosted service, reached with the
  *     user's Sarv OAuth bearer. One place holds the list licences (Spamhaus DQS
@@ -18,17 +21,39 @@
  *     docs/REPUTATION_SERVICE.md.
  *
  *   - {@link LocalDnsblProvider} — plain DNSBL queries from this machine, for
- *     self-hosters and for running without the service. Honest about its
- *     limits: Spamhaus and URIBL REFUSE queries that arrive through public
- *     resolvers (Google, Cloudflare) and say so with a special return code; a
- *     naive "any A record means listed" would turn that refusal into a spam
- *     verdict for every sender. Every list here has its codes spelled out.
+ *     self-hosters and for running without the service. It is a thin adapter
+ *     over the library's `checkReputationBatch`, which owns the zones, the
+ *     pooling and the codes — including the refusals Spamhaus and URIBL answer
+ *     a public resolver with, which a naive "any A record means listed" would
+ *     turn into a spam verdict for every sender.
  *
  * Both fail OPEN: a provider that is down, slow, unauthorised or rate-limited
  * yields "unknown" — never "clean" (which would be cached as a fact) and never
  * a point. Nothing here caches; the main-process service does.
  */
-import { SPAM_THRESHOLD, type SpamReason } from './spam-verdict';
+import {
+  BLOCKLISTS,
+  REPUTATION_MAX_POINTS,
+  USER_REPORTS_MIN,
+  assessReputation,
+  checkReputationBatch,
+  type Blocklist,
+  type BlocklistCategory,
+  type BlocklistHit,
+  type BlocklistKind,
+  type DnsQuery,
+  type ReputationResult as BlocklistReport,
+  type ReputationTarget,
+} from '@sarv-in/email-spam-scan/reputation';
+import type { SpamReason } from '@sarv-in/email-spam-scan/verdict';
+
+/** The zones the local provider asks by default, and how to read their answers. */
+export { BLOCKLISTS as DEFAULT_DNSBL_LISTS };
+/** Everything the reputation stage can add, so it cannot bury a clean header stage on its own twice over. */
+export { REPUTATION_MAX_POINTS };
+/** Reports from other users needed before it counts. One report is one opinion. */
+export { USER_REPORTS_MIN };
+export type { Blocklist };
 
 // ---------------------------------------------------------------- interface
 
@@ -40,10 +65,14 @@ export interface ReputationQuery {
 export interface ListHit {
   /** The list (zone or service feed) that has the entry. */
   list: string;
+  /** The DNS zone behind that name, when the answer came from one. */
+  zone?: string;
   /** What the list says it is: spam source, exploited host, policy (dynamic range), phishing, malware, abused, unknown. */
   category: string;
   /** One sentence for the shield. */
   detail: string;
+  /** What the operator's own code table says the listing is worth, when it said. */
+  points?: number;
 }
 
 export type ReputationStatus = 'listed' | 'clean' | 'unknown';
@@ -83,7 +112,15 @@ export function unknownResult(provider: string, query: ReputationQuery, note?: s
 
 // ------------------------------------------------------------------ scoring
 
-/** The points a category is worth. Listing categories a list operator uses. */
+/**
+ * What a category is worth when the hit does not say.
+ *
+ * The library's catalogue prices every return code of every zone it knows, so
+ * a local lookup arrives with its own points. This table exists for the OTHER
+ * provider: the Sarv service's wire contract names a category per listing and
+ * no points (docs/REPUTATION_SERVICE.md), and a category has to be worth
+ * something before it can be scored.
+ */
 const CATEGORY_POINTS: Record<string, number> = {
   spam: 5, // a spam source (Spamhaus SBL/CSS, SpamCop, Barracuda, DBL spam)
   exploited: 5, // a compromised host / botnet member (Spamhaus XBL, DROP)
@@ -95,243 +132,188 @@ const CATEGORY_POINTS: Record<string, number> = {
   grey: 2, // URIBL grey: bulk senders of dubious value
   unknown: 3,
 };
-/** Everything the reputation stage can add, so it cannot bury a clean header stage on its own twice over. */
-export const REPUTATION_MAX_POINTS = SPAM_THRESHOLD + 1;
-/** Reports from other users needed before it counts. One report is one opinion. */
-export const USER_REPORTS_MIN = 3;
 
-/** Turn a result into the reasons to add to a message, given the message's own IP and domains. */
-export function reputationReasons(result: ReputationResult, message: { originIp?: string | null; domains: string[] }): SpamReason[] {
-  const reasons: SpamReason[] = [];
-  let total = 0;
-  const add = (id: SpamReason['id'], points: number, detail: string) => {
-    const capped = Math.min(points, REPUTATION_MAX_POINTS - total);
-    if (capped <= 0) return;
-    total += capped;
-    reasons.push({ id, points: capped, detail });
+const KNOWN_CATEGORIES = new Set<string>([
+  'spam', 'exploited', 'phishing', 'malware', 'botnet', 'policy', 'abused', 'grey',
+]);
+
+/** One stored/served hit in the shape the library scores. */
+function blocklistHit(hit: ListHit, kind: BlocklistKind, target: string): BlocklistHit {
+  return {
+    name: hit.list,
+    zone: hit.zone ?? hit.list,
+    kind,
+    target,
+    codes: [],
+    meanings: hit.detail ? [hit.detail] : [],
+    categories: KNOWN_CATEGORIES.has(hit.category) ? [hit.category as BlocklistCategory] : [],
+    points: hit.points ?? CATEGORY_POINTS[hit.category] ?? CATEGORY_POINTS.unknown,
+    text: null,
   };
+}
 
-  if (message.originIp) {
-    const ip = result.ips.get(message.originIp);
-    if (ip?.status === 'listed') {
-      const best = ip.hits.reduce((a, h) => Math.max(a, CATEGORY_POINTS[h.category] ?? CATEGORY_POINTS.unknown), 0);
-      const lists = [...new Set(ip.hits.map((h) => h.list))].join(', ');
-      add('ip-blocklisted', best, `The sending server ${message.originIp} is on ${lists}: ${ip.hits[0].detail}`);
-    }
+/**
+ * Turn a result into the reasons to add to a message, given the message's own
+ * IP and domains.
+ *
+ * The scoring is the library's {@link assessReputation}: the highest hit per
+ * side rather than the sum (the public lists mirror each other, so three zones
+ * naming the same address is one observation, not three), address first, then
+ * domain, then the reports, all under one shared budget. Assembling a single
+ * report for the whole message — rather than scoring each item — is what keeps
+ * that budget shared.
+ */
+export function reputationReasons(result: ReputationResult, message: { originIp?: string | null; domains: string[] }): SpamReason[] {
+  const originIp = message.originIp ?? null;
+  const hits: BlocklistHit[] = [];
+  const consulted: ItemReputation[] = [];
+
+  const ip = originIp ? result.ips.get(originIp) : undefined;
+  if (ip) {
+    consulted.push(ip);
+    if (ip.status === 'listed') hits.push(...ip.hits.map((hit) => blocklistHit(hit, 'ip', originIp as string)));
   }
+
+  // The domain the reports are about: the most-reported one, so a message whose
+  // From is clean and whose Reply-To is notorious is still charged for it.
+  let reportedDomain: string | null = null;
+  let userReports = 0;
   for (const domain of [...new Set(message.domains.map((d) => d.toLowerCase()))]) {
     const rep = result.domains.get(domain);
     if (!rep) continue;
-    if (rep.status === 'listed') {
-      const best = rep.hits.reduce((a, h) => Math.max(a, CATEGORY_POINTS[h.category] ?? CATEGORY_POINTS.unknown), 0);
-      const lists = [...new Set(rep.hits.map((h) => h.list))].join(', ');
-      add('domain-blocklisted', best, `${domain} is on ${lists}: ${rep.hits[0].detail}`);
-    }
-    if ((rep.userReports ?? 0) >= USER_REPORTS_MIN) {
-      add('user-reported', 3, `${rep.userReports} other Sarv Inbox users reported mail from ${domain} as spam`);
+    consulted.push(rep);
+    if (rep.status === 'listed') hits.push(...rep.hits.map((hit) => blocklistHit(hit, 'domain', domain)));
+    if ((rep.userReports ?? 0) > userReports) {
+      userReports = rep.userReports ?? 0;
+      reportedDomain = domain;
     }
   }
-  return reasons;
+
+  const report: BlocklistReport = {
+    ip: originIp,
+    domain: reportedDomain,
+    listed: hits.length > 0,
+    hits,
+    checked: [],
+    errors: [],
+    completed: consulted.length > 0 && consulted.every((item) => item.status !== 'unknown'),
+  };
+  return assessReputation(report, { userReports }).reasons;
 }
 
 // ------------------------------------------------------------ local DNSBL
 
-export interface DnsblList {
-  /** DNS zone the query is appended to. */
-  zone: string;
-  /** Human name for the shield. */
-  name: string;
-  kind: 'ip' | 'domain';
-  /** Whether IPv6 addresses may be queried (nibble format). */
-  ipv6?: boolean;
-  /**
-   * Read the A records the zone answered with. `refused` means the zone
-   * answered but declined to say (public-resolver block, rate limit) — the
-   * answer is unknown, never listed.
-   */
-  interpret(records: string[]): { listed: boolean; refused: boolean; category: string; detail: string };
-}
-
-const lastOctet = (a: string): number => Number.parseInt(a.split('.').pop() ?? '', 10);
-
-/** Spamhaus ZEN return codes (SBL, CSS, XBL, PBL, DROP) and its error codes. */
-function interpretSpamhausZen(records: string[]) {
-  const codes = records.map(lastOctet);
-  const errors = records.filter((r) => r.startsWith('127.255.255.'));
-  if (errors.length && errors.length === records.length) {
-    return { listed: false, refused: true, category: 'unknown', detail: 'Spamhaus refused the query (public resolver or quota)' };
-  }
-  if (codes.some((c) => c === 2 || c === 3)) return { listed: true, refused: false, category: 'spam', detail: 'Spamhaus SBL/CSS lists it as a spam source' };
-  if (codes.some((c) => c >= 4 && c <= 7)) return { listed: true, refused: false, category: 'exploited', detail: 'Spamhaus XBL lists it as an exploited or hijacked host' };
-  if (codes.some((c) => c === 9)) return { listed: true, refused: false, category: 'exploited', detail: 'Spamhaus DROP: a hijacked or criminal network' };
-  if (codes.some((c) => c === 10 || c === 11)) return { listed: true, refused: false, category: 'policy', detail: 'Spamhaus PBL: an address range that should not send mail directly' };
-  return { listed: false, refused: false, category: 'unknown', detail: '' };
-}
-
-/** Spamhaus DBL (domains): 127.0.1.x. */
-function interpretSpamhausDbl(records: string[]) {
-  const codes = records.filter((r) => r.startsWith('127.0.1.')).map(lastOctet);
-  if (records.some((r) => r === '127.0.1.255' || r.startsWith('127.255.255.'))) {
-    return { listed: false, refused: true, category: 'unknown', detail: 'Spamhaus refused the query (public resolver or quota)' };
-  }
-  if (codes.includes(2)) return { listed: true, refused: false, category: 'spam', detail: 'Spamhaus DBL lists it as a spam domain' };
-  if (codes.includes(4)) return { listed: true, refused: false, category: 'phishing', detail: 'Spamhaus DBL lists it as a phishing domain' };
-  if (codes.includes(5)) return { listed: true, refused: false, category: 'malware', detail: 'Spamhaus DBL lists it as a malware domain' };
-  if (codes.includes(6)) return { listed: true, refused: false, category: 'botnet', detail: 'Spamhaus DBL lists it as a botnet command-and-control domain' };
-  if (codes.some((c) => c >= 102 && c <= 106)) return { listed: true, refused: false, category: 'abused', detail: 'Spamhaus DBL lists it as a legitimate domain currently abused by spammers' };
-  return { listed: false, refused: false, category: 'unknown', detail: '' };
-}
-
-/** Lists that answer 127.0.0.2 for "listed" and nothing else meaningful. */
-const interpretSimple = (name: string, detail: string) => (records: string[]) => ({
-  listed: records.some((r) => r.startsWith('127.0.0.') && lastOctet(r) >= 2),
-  refused: false,
-  category: 'spam',
-  detail: records.length ? `${name}: ${detail}` : '',
-});
-
-/** SURBL multi: a bitmask in the last octet. 127.0.0.1 is "query blocked". */
-function interpretSurbl(records: string[]) {
-  const mask = records.filter((r) => r.startsWith('127.0.0.')).reduce((m, r) => m | lastOctet(r), 0);
-  if (records.some((r) => r === '127.0.0.1') && mask === 1) return { listed: false, refused: true, category: 'unknown', detail: 'SURBL blocked the query' };
-  if (mask & 8) return { listed: true, refused: false, category: 'phishing', detail: 'SURBL lists it as a phishing domain' };
-  if (mask & 16) return { listed: true, refused: false, category: 'malware', detail: 'SURBL lists it as a malware domain' };
-  if (mask & (64 | 128)) return { listed: true, refused: false, category: 'spam', detail: 'SURBL lists it as an abused or cracked spam domain' };
-  return { listed: false, refused: false, category: 'unknown', detail: '' };
-}
-
-/** URIBL multi: 2 black, 4 grey, 8 red; 127.0.0.1 is "query refused". */
-function interpretUribl(records: string[]) {
-  const mask = records.filter((r) => r.startsWith('127.0.0.')).reduce((m, r) => m | lastOctet(r), 0);
-  if (records.some((r) => r === '127.0.0.1') && mask === 1) return { listed: false, refused: true, category: 'unknown', detail: 'URIBL refused the query (public resolver or quota)' };
-  if (mask & (2 | 8)) return { listed: true, refused: false, category: 'spam', detail: 'URIBL lists it as a spam domain' };
-  if (mask & 4) return { listed: true, refused: false, category: 'grey', detail: 'URIBL grey: a bulk sender of dubious value' };
-  return { listed: false, refused: false, category: 'unknown', detail: '' };
-}
-
-/** The lists the local provider asks by default. Order = the order results are reported. */
-export const DEFAULT_DNSBL_LISTS: readonly DnsblList[] = [
-  { zone: 'zen.spamhaus.org', name: 'Spamhaus ZEN', kind: 'ip', ipv6: true, interpret: interpretSpamhausZen },
-  { zone: 'bl.spamcop.net', name: 'SpamCop', kind: 'ip', interpret: interpretSimple('SpamCop', 'reported by SpamCop users as a spam source') },
-  { zone: 'b.barracudacentral.org', name: 'Barracuda', kind: 'ip', interpret: interpretSimple('Barracuda', 'listed as a spam source by Barracuda Reputation') },
-  { zone: 'dbl.spamhaus.org', name: 'Spamhaus DBL', kind: 'domain', interpret: interpretSpamhausDbl },
-  { zone: 'multi.surbl.org', name: 'SURBL', kind: 'domain', interpret: interpretSurbl },
-  { zone: 'multi.uribl.com', name: 'URIBL', kind: 'domain', interpret: interpretUribl },
-];
-
-/** `1.2.3.4` → `4.3.2.1`; an IPv6 address → its 32 reversed nibbles. Null for anything else. */
-export function dnsblLabel(ip: string): { label: string; v6: boolean } | null {
-  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) return { label: [v4[4], v4[3], v4[2], v4[1]].join('.'), v6: false };
-  if (!ip.includes(':')) return null;
-  // Expand :: and pad each group to four hex digits.
-  const halves = ip.split('::');
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(':') : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
-  const missing = 8 - head.length - tail.length;
-  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
-  const groups = [...head, ...Array(missing).fill('0'), ...tail];
-  if (groups.some((g) => !/^[0-9a-f]{1,4}$/i.test(g))) return null;
-  const nibbles = groups.map((g) => g.padStart(4, '0')).join('').toLowerCase().split('');
-  return { label: nibbles.reverse().join('.'), v6: true };
-}
-
 export interface DnsblDeps {
-  /** `dns.promises.resolve4` shape. ENOTFOUND / ENODATA = not listed; anything else = unknown. */
+  /** `dns.promises.resolve4` shape. ENOTFOUND / ENODATA / NXDOMAIN = not listed; anything else = unknown. */
   resolve4: (name: string) => Promise<string[]>;
-  lists?: readonly DnsblList[];
+  lists?: readonly Blocklist[];
   /** Queries in flight at once. */
   concurrency?: number;
 }
 
 const NOT_LISTED_CODES = new Set(['ENOTFOUND', 'ENODATA', 'NXDOMAIN']);
 
-/** Run `fn` over `items` with at most `n` in flight. */
-async function pooled<T, R>(items: T[], n: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
-  return out;
+/**
+ * The operator's own name for each zone, for the sentence a reader sees.
+ *
+ * The library reports a stable id (`spamhaus-zen`) because an id is what code
+ * should match on and what survives a rename; "Spamhaus ZEN" is what the
+ * shield has said since the filter shipped, and a reason line is read by a
+ * person. An unknown zone falls back to the id rather than to nothing.
+ */
+const DNSBL_LABELS: Readonly<Record<string, string>> = {
+  'zen.spamhaus.org': 'Spamhaus ZEN',
+  'bl.spamcop.net': 'SpamCop',
+  'b.barracudacentral.org': 'Barracuda',
+  'dbl.spamhaus.org': 'Spamhaus DBL',
+  'multi.surbl.org': 'SURBL',
+  'multi.uribl.com': 'URIBL',
+};
+
+/** What the library made of one target, in the shape the cache and the shield store. */
+function itemFrom(report: BlocklistReport): ItemReputation {
+  const hits: ListHit[] = report.hits.map((hit) => {
+    const list = DNSBL_LABELS[hit.zone] ?? hit.name;
+    return {
+      list,
+      zone: hit.zone,
+      category: hit.categories[0] ?? 'unknown',
+      detail: hit.meanings.join('; ') || `${list} lists it`,
+      points: hit.points,
+    };
+  });
+  // `checked` is the zones that answered usably — a refusal and a timeout are
+  // both errors to the library. One list refusing (Spamhaus answers every
+  // query from a public resolver that way) must not discard the two that DID
+  // say "not listed"; only an item NOBODY could answer for is unknown.
+  const status: ReputationStatus = hits.length
+    ? 'listed'
+    : report.checked.length > 0
+      ? 'clean'
+      : 'unknown';
+  // Same substitution for the diagnostic line: it reaches the log and the
+  // spam-pass summary, where "Spamhaus ZEN" is the name an operator will
+  // recognise from the list's own documentation.
+  const failure = report.errors[0];
+  const note = failure ? `${DNSBL_LABELS[failure.zone] ?? failure.name}: ${failure.error}` : undefined;
+  return { status, hits, ...(note && status !== 'listed' ? { note } : {}) };
 }
 
 /**
- * DNSBL from this machine. One query per (item, list); a list's answer is
- * read through its own code table, so a refusal is unknown, not a listing.
+ * DNSBL from this machine. One query per (item, zone), pooled by the library;
+ * a zone's answer is read through its own code table, so a refusal is unknown,
+ * not a listing.
  */
 export class LocalDnsblProvider implements ReputationProvider {
   readonly name = 'local-dnsbl';
-  private readonly lists: readonly DnsblList[];
+  private readonly lists: readonly Blocklist[];
   private readonly concurrency: number;
+  /**
+   * The injected resolver in the library's terms: a name that does not exist
+   * is an empty answer, and only a genuine failure throws. `includeText` is
+   * never asked for, so `A` is the only record type this is ever called with.
+   */
+  private readonly query: DnsQuery;
 
-  constructor(private readonly deps: DnsblDeps) {
-    this.lists = deps.lists ?? DEFAULT_DNSBL_LISTS;
+  constructor(deps: DnsblDeps) {
+    this.lists = deps.lists ?? BLOCKLISTS;
     this.concurrency = Math.max(1, deps.concurrency ?? 8);
+    this.query = async (name) => {
+      try {
+        return await deps.resolve4(name);
+      } catch (e) {
+        const code = (e as { code?: string })?.code ?? '';
+        if (NOT_LISTED_CODES.has(code)) return [];
+        throw e;
+      }
+    };
   }
 
   async lookup(query: ReputationQuery): Promise<ReputationResult> {
-    const jobs: Array<{ kind: 'ip' | 'domain'; item: string; list: DnsblList; name: string }> = [];
-    for (const ip of new Set(query.ips)) {
-      const label = dnsblLabel(ip);
-      if (!label) continue;
-      for (const list of this.lists) {
-        if (list.kind !== 'ip' || (label.v6 && !list.ipv6)) continue;
-        jobs.push({ kind: 'ip', item: ip, list, name: `${label.label}.${list.zone}` });
-      }
-    }
-    for (const domain of new Set(query.domains.map((d) => d.trim().toLowerCase()).filter(Boolean))) {
-      for (const list of this.lists) {
-        if (list.kind !== 'domain') continue;
-        jobs.push({ kind: 'domain', item: domain, list, name: `${domain}.${list.zone}` });
-      }
-    }
+    const ips = [...new Set(query.ips)];
+    const domains = [...new Set(query.domains.map((d) => d.trim().toLowerCase()).filter(Boolean))];
+    const targets: ReputationTarget[] = [
+      ...ips.map((ip) => ({ ip })),
+      ...domains.map((domain) => ({ domain })),
+    ];
 
-    const answers = await pooled(jobs, this.concurrency, async (job) => {
-      try {
-        const records = await this.deps.resolve4(job.name);
-        return { job, records, error: null as string | null };
-      } catch (e) {
-        const code = (e as { code?: string })?.code ?? '';
-        return { job, records: NOT_LISTED_CODES.has(code) ? [] : null, error: NOT_LISTED_CODES.has(code) ? null : (code || (e as Error).message) };
-      }
+    const reports = await checkReputationBatch(targets, this.lists, {
+      query: this.query,
+      concurrency: this.concurrency,
     });
 
     const result: ReputationResult = { provider: this.name, ips: new Map(), domains: new Map() };
-    const bucket = (job: (typeof jobs)[number]) => (job.kind === 'ip' ? result.ips : result.domains);
-    for (const { job, records, error } of answers) {
-      const map = bucket(job);
-      const cur = map.get(job.item) ?? { status: 'clean' as ReputationStatus, hits: [] as ListHit[], answered: 0, refused: 0 };
-      const item = cur as ItemReputation & { answered?: number; refused?: number };
-      if (records === null) {
-        item.note = item.note ?? `${job.list.name}: ${error}`;
-      } else {
-        const read = job.list.interpret(records);
-        if (read.refused) {
-          item.refused = (item.refused ?? 0) + 1;
-          item.note = item.note ?? read.detail;
-        } else {
-          item.answered = (item.answered ?? 0) + 1;
-          if (read.listed) item.hits.push({ list: job.list.name, category: read.category, detail: read.detail });
-        }
-      }
-      map.set(job.item, item);
-    }
-    for (const map of [result.ips, result.domains]) {
-      for (const [k, v] of map) {
-        const item = v as ItemReputation & { answered?: number; refused?: number };
-        const status: ReputationStatus = item.hits.length ? 'listed' : (item.answered ?? 0) > 0 ? 'clean' : 'unknown';
-        map.set(k, { status, hits: item.hits, ...(item.note && status !== 'listed' ? { note: item.note } : {}) });
-      }
-    }
-    // Items with no eligible list (an IPv6 address on v4-only lists) are unknown.
+    reports.forEach((report, i) => {
+      if (i < ips.length) result.ips.set(ips[i], itemFrom(report));
+      else result.domains.set(domains[i - ips.length], itemFrom(report));
+    });
+    // Anything the caller asked about that never became a target (an unusable
+    // address, an empty domain) still has to answer — as unknown, never clean.
     for (const ip of query.ips) if (!result.ips.has(ip)) result.ips.set(ip, UNKNOWN);
-    for (const d of query.domains) if (!result.domains.has(d.trim().toLowerCase())) result.domains.set(d.trim().toLowerCase(), UNKNOWN);
+    for (const d of query.domains) {
+      const key = d.trim().toLowerCase();
+      if (!result.domains.has(key)) result.domains.set(key, UNKNOWN);
+    }
     return result;
   }
 }

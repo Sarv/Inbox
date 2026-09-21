@@ -36,6 +36,24 @@ export const DEFAULT_FORBIDDEN_RENDERER_PACKAGES: readonly string[] = [
   'email-reply-parser',
   'imap', // legacy node-imap; removed, but guard so it can never return to the renderer
   'node-imap',
+  // The freemail corpus behind the spam scorer's `reply-to-freemail` rule,
+  // reachable only from the ROOT entry of `@sarv-in/email-spam-scan`. Not
+  // Node-only, so it never produces the dynamic-require crash above — it
+  // earns its place here for the second failure this guard exists to prevent.
+  // It is a CommonJS array with no default export: the Vite DEV server serves
+  // it unconverted and the renderer dies with "does not provide an export
+  // named 'default'", a white window and a stack trace naming a file nobody
+  // edited. A production build converts it happily, so without this entry
+  // nothing fails until someone runs `pnpm dev:desktop`.
+  //
+  // The renderer never needs it: it reads a score computed at ingest. Import
+  // the library's narrow entries (`/headers`, `/verdict`, `/identity`,
+  // `/links`, `/security`) and that stays true by construction.
+  //
+  // NOT listed here: `email-addresses`, the scorer's other root-only dep. The
+  // renderer imports it directly and deliberately (`src/utils/email-address.ts`)
+  // because it is a pure, browser-safe parser.
+  'free-email-domains',
 ];
 
 /**

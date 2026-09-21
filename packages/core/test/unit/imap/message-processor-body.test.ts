@@ -843,3 +843,168 @@ describe('convertMessage — attachment indicator from BODYSTRUCTURE', () => {
     expect(record.attachmentCount).toBe(0);
   });
 });
+
+/**
+ * The BODY half of the spam score.
+ *
+ * A sync stores headers, so the verdict written at ingest is a header verdict:
+ * the content rules had no words to read and the attachment rules had no bytes
+ * to sniff. Those only become possible here, when the body finally arrives —
+ * which for most mail in this app is the first time anyone opens it. Without
+ * this the content and attachment stages would be dead code on every message
+ * the user actually reads.
+ *
+ * `fetchBody` re-scores; it deliberately does NOT re-file. Filing belongs to
+ * ingest and the reputation sweep, which run in the background and own the
+ * folder list — a message must not vanish out of the folder a reader is
+ * looking at because they opened it.
+ */
+describe('fetchBody — the body stage', () => {
+  const HEADER_VERDICT = JSON.stringify([
+    { id: 'auth-failed', points: 3, detail: 'SPF, DKIM or DMARC failed' },
+  ]);
+
+  /** An HTML message whose one link shows a bank and goes somewhere else. */
+  const withDeceptiveLink = (messageId: string): string => crlf([
+    `Message-ID: ${messageId}`,
+    'Subject: Your account',
+    'From: sender@test.local',
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<p>Confirm below.</p><a href="https://evil.example/x">https://yourbank.example</a>',
+    '',
+  ]);
+
+  /** A .pdf, declared as a .pdf, whose bytes are a Windows program. */
+  const withDisguisedExecutable = (messageId: string): string => crlf([
+    `Message-ID: ${messageId}`,
+    'Subject: Report',
+    'From: sender@test.local',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary=BOUND',
+    '',
+    '--BOUND',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Report attached.',
+    '--BOUND',
+    'Content-Type: application/pdf; name="report.pdf"',
+    'Content-Disposition: attachment; filename="report.pdf"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]).toString('base64'),
+    '--BOUND--',
+    '',
+  ]);
+
+  const seedScored = (ctx: ReturnType<typeof setup>, uid: number, messageId: string) =>
+    ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX),
+      uid,
+      tags: `|${INBOX}|`,
+      messageId,
+      subject: 'Your account',
+      spamScore: 3,
+      spamReasons: HEADER_VERDICT,
+    });
+
+  it('adds the content verdict to the score the headers already earned', async () => {
+    const ctx = setup();
+    const messageId = '<phish@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, body: withDeceptiveLink(messageId) });
+    const row = seedScored(ctx, uid, messageId);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    const stored = ctx.db.row(row.id)!;
+    expect(stored.spamScore).toBe(5);
+    expect(JSON.parse(stored.spamReasons!).map((r: { id: string }) => r.id))
+      .toEqual(['auth-failed', 'link-display-mismatch']);
+  });
+
+  // Regression: the attachment rules need the decoded BYTES, and nothing in
+  // this app stores them — they exist only for the length of the MIME parse.
+  // Lose them and the one claim a sender cannot fake goes unchecked: here the
+  // filename and the declared Content-Type both say PDF, and only the first
+  // two bytes say otherwise.
+  it('sniffs an attachment whose bytes contradict both its name and its type', async () => {
+    const ctx = setup();
+    const messageId = '<exe@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, body: withDisguisedExecutable(messageId) });
+    const row = seedScored(ctx, uid, messageId);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    const stored = ctx.db.row(row.id)!;
+    expect(JSON.parse(stored.spamReasons!).map((r: { id: string }) => r.id))
+      .toEqual(['auth-failed', 'attachment-executable', 'attachment-type-mismatch']);
+    expect(stored.spamScore).toBe(7);
+  });
+
+  // Regression: a body can be fetched more than once — a repaired UID, a
+  // charset re-parse, a re-open. Appending the body reasons each time would
+  // charge the same rule twice and eventually file ordinary mail as spam,
+  // and a stored total gives nothing away about how it was reached.
+  it('does not charge the body rules twice when the body is fetched again', async () => {
+    const ctx = setup();
+    const messageId = '<phish2@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, body: withDeceptiveLink(messageId) });
+    const row = seedScored(ctx, uid, messageId);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+    const once = ctx.db.row(row.id)!.spamScore;
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    expect(ctx.db.row(row.id)!.spamScore).toBe(once);
+    expect(JSON.parse(ctx.db.row(row.id)!.spamReasons!)).toHaveLength(2);
+  });
+
+  // Regression: NULL spam_score is the user's own outgoing mail, or mail that
+  // predates the filter. Downloading a body is not a reason to start judging
+  // either — "not judged" and "judged clean" are different facts to the shield.
+  it('leaves a row that was never scored unscored', async () => {
+    const ctx = setup();
+    const messageId = '<own@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, body: withDeceptiveLink(messageId) });
+    const row = ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX), uid, tags: `|${INBOX}|`, messageId, spamScore: null,
+    });
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    const stored = ctx.db.row(row.id)!;
+    expect(stored.spamScore).toBeNull();
+    expect(stored.spamReasons ?? null).toBeNull();
+  });
+
+  // Regression: the tag is the classification the AI pipeline excludes on and
+  // the Spam filter view lists; the MOVE is somebody else's job. Filing from
+  // here would take a message out of the folder of a reader who just opened
+  // it — which is exactly when this path runs.
+  it('tags a message the body convicts, without moving it', async () => {
+    const ctx = setup();
+    const messageId = '<exe2@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, body: withDisguisedExecutable(messageId) });
+    const row = seedScored(ctx, uid, messageId);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    expect(ctx.db.tagsOf(row.id)).toContain('spam');
+    expect(ctx.db.row(row.id)!.folderId).toBe(ctx.db.folderId(INBOX));
+  });
+
+  // Regression: a clean body must not gain a tag it did not earn, and must
+  // not lose the header verdict either.
+  it('leaves an innocent body tagged as it was', async () => {
+    const ctx = setup();
+    const messageId = '<ok@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, subject: 'Lunch' });
+    const row = seedScored(ctx, uid, messageId);
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    expect(ctx.db.tagsOf(row.id)).not.toContain('spam');
+    expect(ctx.db.row(row.id)!.spamScore).toBe(3);
+  });
+});

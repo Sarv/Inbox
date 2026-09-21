@@ -45,6 +45,18 @@ describe('forbiddenPackageForId — flags Node-only packages in a module id', ()
     }
   });
 
+  it('flags the spam scorer\'s freemail corpus', () => {
+    // Regression, 2026-09-19: core's bulk-mail.ts is aliased straight into the
+    // renderer, and it was re-pointed at the ROOT entry of
+    // `@sarv-in/email-spam-scan` — which reaches the header rules, and through
+    // them `free-email-domains`, a CommonJS array with no default export. The
+    // production build converted it silently; the dev server did not, and the
+    // window came up blank. It is not Node-only, so nothing else in this repo
+    // would have caught it. The renderer reads a score computed at ingest.
+    const id = '/repo/node_modules/free-email-domains/index.js';
+    expect(forbiddenPackageForId(id, forbidden)).toBe('free-email-domains');
+  });
+
   it('strips a dev ?v= query before matching', () => {
     // In dev, ids carry an optimizeDeps cache-busting query; it must not defeat
     // the match (so the guard behaves identically on any id shape rollup hands it).
@@ -64,6 +76,24 @@ describe('forbiddenPackageForId — leaves renderer-safe ids alone', () => {
     // libphonenumber-js is renderer-safe and shared with core on purpose.
     const id = '/repo/node_modules/libphonenumber-js/index.es6.js';
     expect(forbiddenPackageForId(id, forbidden)).toBeNull();
+  });
+
+  it('does NOT flag the mail-security library or the deps its narrow entries use', () => {
+    // The whole point of the entry above: the library itself is renderer-safe,
+    // and so is `tldts`, which is all its `/headers`, `/verdict`, `/identity`,
+    // `/links` and `/security` entries cost. Only the root entry is off limits,
+    // and it is off limits by way of the two packages it alone reaches.
+    for (const id of [
+      '/repo/node_modules/@sarv-in/email-spam-scan/dist/security.js',
+      '/repo/node_modules/@sarv-in/email-spam-scan/dist/headers.js',
+      '/repo/node_modules/tldts/dist/es6/index.js',
+      // The scorer's OTHER root-only dep, which the renderer imports on
+      // purpose in src/utils/email-address.ts. Forbidding it alongside
+      // free-email-domains would have failed a build that was always correct.
+      '/repo/node_modules/email-addresses/lib/parser.js',
+    ]) {
+      expect(forbiddenPackageForId(id, forbidden)).toBeNull();
+    }
   });
 
   it('does NOT flag a rollup virtual module', () => {

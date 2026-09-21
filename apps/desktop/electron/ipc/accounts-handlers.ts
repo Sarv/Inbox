@@ -34,6 +34,7 @@ import {
 } from '../services/accounts-registry';
 import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accountInboxUnread, rekeyAccount, deleteAccountData, legacyDbExists, cleanupOrphanedAccountDbs } from '../services/accounts-runtime';
 import { rebindOutboxStorage } from '../services/outbox-service';
+import { noteAppSettingChanged } from '../services/reputation-service';
 import { disablePipelineAIIfProviderRemoved } from '../services/unified-pipeline-service';
 import { setCurrentAccount, hasAccountRuntime, getCurrentAccountId } from '../shared';
 
@@ -116,6 +117,9 @@ export function registerAccountsHandlers(): void {
   ipcMain.handle('appSettings:set', async (_event, key: string, value: string) => {
     try {
       setAppSetting(key, value);
+      // The blocklist stage is built from this blob; without this a zone the
+      // user just added would not be queried until the next app start.
+      noteAppSettingChanged(key);
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -126,6 +130,7 @@ export function registerAccountsHandlers(): void {
   ipcMain.handle('appSettings:delete', async (_event, key: string) => {
     try {
       deleteAppSetting(key);
+      noteAppSettingChanged(key);
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };

@@ -1,6 +1,6 @@
+import { extractAuthHeaderBlock } from '@sarv-in/email-spam-scan';
 import { describe, expect, it } from 'vitest';
 
-import { extractAuthHeaderBlock } from '../../../src/imap/auth-headers';
 import { parseAuthenticationHeaders } from '../../../src/processor/email-processor';
 
 /**

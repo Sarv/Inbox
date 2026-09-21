@@ -12,13 +12,13 @@ import ICAL from 'ical.js';
 
 import { resolveAccountTarget } from '../services/account-target';
 import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
-import { getAuthBackfillState, kickAuthHeaderBackfill } from '../services/auth-header-backfill';
 import {
   deferBodyPrefetch,
   startManualBodyDownload,
   stopManualBodyDownload,
   getManualBodyDownloadState,
 } from '../services/body-prefetch-scheduler';
+import { getHeaderBackfillState, kickHeaderBackfill } from '../services/header-backfill';
 import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine } from '../shared';
 
 import { logUserAction } from './agent-handlers';
@@ -383,12 +383,12 @@ export function registerEmailHandlers(): void {
     } catch (error) { return { success: false, error: (error as Error).message }; }
   });
   // Auth-header backfill: progress for the Security page, and a manual kick.
-  ipcMain.handle('security:getAuthBackfillState', async () => {
-    try { return { success: true, data: getAuthBackfillState() }; }
+  ipcMain.handle('security:getHeaderBackfillState', async () => {
+    try { return { success: true, data: getHeaderBackfillState() }; }
     catch (error) { return { success: false, error: (error as Error).message }; }
   });
-  ipcMain.handle('security:kickAuthBackfill', async () => {
-    try { kickAuthHeaderBackfill(); return { success: true, data: getAuthBackfillState() }; }
+  ipcMain.handle('security:kickHeaderBackfill', async () => {
+    try { kickHeaderBackfill(); return { success: true, data: getHeaderBackfillState() }; }
     catch (error) { return { success: false, error: (error as Error).message }; }
   });
   ipcMain.handle('security:removeLinkRule', async (_event, id: number) => {

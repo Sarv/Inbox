@@ -1,12 +1,12 @@
-import { describe, expect, it } from 'vitest';
-
 import {
   extractOriginIp,
   isPublicIp,
   normalizeIp,
   originIpFromAuthHeaders,
   originIpFromReceived,
-} from '../../../src/utils/origin-ip';
+} from '@sarv-in/email-spam-scan';
+import { describe, expect, it } from 'vitest';
+
 
 /**
  * The connecting client's IP, recorded per message for the reputation stage.

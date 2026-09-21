@@ -624,6 +624,54 @@ export const getMaxAIProcessingEmails = (): number => {
   return 500; // matches defaultSettings.maxAIProcessingEmails
 };
 
+/**
+ * Blocklist (DNSBL) settings. The one pair of helpers that read and write
+ * them, so the Security tab and the main process never disagree about the
+ * shape stored in the settings blob.
+ *
+ * Reading defaults to OFF for every malformed or missing case — this setting
+ * decides whether the app tells a third party who is writing to the user, and
+ * the safe reading of "I could not tell" is "do not ask".
+ */
+export interface ReputationPrefs {
+  enabled: boolean;
+  /** Zone names from the scanner's catalogue. */
+  zones: string[];
+  /** Resolvers to query. Empty means the system's. */
+  servers: string[];
+}
+
+export const getReputationPrefs = (): ReputationPrefs => {
+  try {
+    const stored = localStorage.getItem('sarvinbox-settings');
+    const value = stored ? JSON.parse(stored)?.reputation : null;
+    if (value && typeof value === 'object') {
+      return {
+        enabled: value.enabled === true,
+        zones: Array.isArray(value.zones) ? value.zones.filter((z: unknown) => typeof z === 'string') : [],
+        servers: Array.isArray(value.servers) ? value.servers.filter((v: unknown) => typeof v === 'string') : [],
+      };
+    }
+  } catch {
+    // A malformed blob reads as off, never as on.
+  }
+  return { enabled: false, zones: [], servers: [] };
+};
+
+/** Read-modify-write, so saving this one section never drops the signatures,
+ *  profile or anything else sharing the blob. The localStorage write is
+ *  mirrored into the core DB and on to the main process by the app-settings
+ *  bootstrap, which is what makes the change take effect without a restart. */
+export const setReputationPrefs = (prefs: ReputationPrefs): void => {
+  try {
+    const stored = localStorage.getItem('sarvinbox-settings');
+    const settings = stored ? JSON.parse(stored) : {};
+    localStorage.setItem('sarvinbox-settings', JSON.stringify({ ...settings, reputation: prefs }));
+  } catch {
+    // Ignore errors
+  }
+};
+
 // ===== Secret handling (keep passwords/tokens OUT of localStorage) ==========
 // IMAP/SMTP passwords and OAuth tokens must never sit in plaintext on disk in
 // the renderer. They live in the main-process safeStorage vault

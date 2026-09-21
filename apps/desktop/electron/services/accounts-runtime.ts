@@ -26,6 +26,7 @@ import { claimDefaultRuntime, getAccountIdForStorage, getAccountRuntime, hasAcco
 import { getMeta, setMeta } from './core-db';
 import { getDbEncryptionKey } from './db-key-store';
 import { wireFolderCountBroadcast } from './folder-count-broadcast';
+import { attachReputation } from './reputation-service';
 import { deleteAccountSecrets, rekeyAccountSecrets } from './secure-credential-store';
 const logger = createLogger('accounts-runtime');
 
@@ -106,6 +107,9 @@ export async function createAccountRuntime(
     accountId: () => getAccountIdForStorage(storage),
   });
   const syncEngine = new SyncEngine(storage);
+  // Every account's engine shares the one process-wide blocklist stage, so a
+  // second account does not double the queries sent about the same sender.
+  attachReputation(syncEngine);
   logger.info('[Accounts] Created runtime ->', dbPath);
   return { storage, syncEngine, smtpClient: null };
 }

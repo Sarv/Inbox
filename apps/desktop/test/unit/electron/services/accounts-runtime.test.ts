@@ -25,6 +25,8 @@ const h = vi.hoisted(() => ({
     /** Listener the runtime attached for read-model badge repairs, if any. */
     folderCountsListener: ((folderPaths: string[]) => void) | null;
   }>,
+  /** Every SyncEngine the runtime built, oldest first. */
+  engines: [] as Array<{ reputationLookup: unknown }>,
   /** Every sendToWindow(channel, payload) the runtime made. */
   sent: [] as Array<[string, unknown]>,
   runtimes: new Map<string, { storage: unknown; syncEngine: unknown; smtpClient: unknown }>(),
@@ -47,7 +49,18 @@ vi.mock('@sarvinbox/core', () => ({
   }),
   SyncEngine: class {
     storage: unknown;
-    constructor(storage: unknown) { this.storage = storage; }
+    // Recorded, not ignored: every account's engine must be handed the shared
+    // blocklist lookup, or that account's mail is scored on less evidence than
+    // the rest without anything reporting it.
+    reputationLookup: unknown = null;
+    constructor(storage: unknown) { this.storage = storage; h.engines.push(this as never); }
+    setReputationLookup(fn: unknown): void { this.reputationLookup = fn; }
+  },
+  // The blocklist stage itself. Constructed only when the user has switched
+  // blocklists on, which no test here does; present so the import resolves.
+  ReputationStage: class {
+    constructor(public config: unknown) {}
+    async assess(): Promise<null> { return null; }
   },
 }));
 
@@ -156,6 +169,7 @@ beforeAll(() => {
 beforeEach(() => {
   resetFakeCoreDb();
   h.storages.length = 0;
+  h.engines.length = 0;
   h.sent.length = 0;
   h.runtimes.clear();
   h.claimSucceeds = true;
@@ -347,6 +361,19 @@ describe('ensureAccountRuntime', () => {
     const rt = await ensureAccountRuntime('acct-a');
     expect(h.storages[0].opts.dbPath).toBe(join(h.userData, PRIMARY_DB_FILE));
     expect(rt).toBe(h.runtimes.get('acct-a'));
+  });
+
+  // Regression: an account activated after the first one must still get the
+  // blocklist lookup. It is attached at construction rather than pushed later,
+  // so a missing call here means that account's mail is scored on strictly
+  // less evidence than the rest, with nothing anywhere to report it.
+  it('hands every account engine the shared blocklist lookup', async () => {
+    await ensureAccountRuntime('acct-first');
+    await ensureAccountRuntime('acct-second');
+
+    expect(h.engines).toHaveLength(2);
+    expect(h.engines.every((engine) => typeof engine.reputationLookup === 'function')).toBe(true);
+    expect(h.engines[0].reputationLookup).toBe(h.engines[1].reputationLookup);
   });
 
   it('gives a NON-primary account its own hashed DB even when the legacy file exists', async () => {

@@ -6,7 +6,6 @@ import {
   REPUTATION_MAX_POINTS,
   SarvReputationProvider,
   USER_REPORTS_MIN,
-  dnsblLabel,
   messageDomains,
   reputationReasons,
   unknownResult,
@@ -23,6 +22,12 @@ import {
  * The other way round, a service that is down must never be read as "clean"
  * and cached for six hours. Every list's codes are pinned below, as is the
  * fail-open behaviour of the Sarv client.
+ *
+ * The code tables and the query-name arithmetic are the library's now
+ * (`@sarv-in/email-spam-scan/reputation`, where they have their own suite);
+ * what is pinned here is what Inbox owns: the resolver-error contract, the
+ * roll-up from per-zone answers to one listed/clean/unknown per item, the
+ * operator names the shield shows, and the scoring seam.
  */
 const notFound = () => Object.assign(new Error('queryA ENOTFOUND'), { code: 'ENOTFOUND' });
 type Answers = Record<string, string[] | 'timeout'>;
@@ -34,22 +39,9 @@ const resolver = (answers: Answers, calls: string[] = []) => async (name: string
   return a;
 };
 
-describe('dnsblLabel', () => {
-  it('reverses IPv4 octets and expands IPv6 to reversed nibbles', () => {
-    expect(dnsblLabel('1.2.3.4')).toEqual({ label: '4.3.2.1', v6: false });
-    const v6 = dnsblLabel('2001:db8::1');
-    expect(v6?.v6).toBe(true);
-    expect(v6?.label.split('.')).toHaveLength(32);
-    expect(v6?.label.startsWith('1.0.0.0.0.0.0.0')).toBe(true);
-    expect(v6?.label.endsWith('8.b.d.0.1.0.0.2')).toBe(true);
-  });
-  it('rejects hostnames and malformed addresses', () => {
-    expect(dnsblLabel('mail.example.com')).toBeNull();
-    expect(dnsblLabel('1:::2')).toBeNull();
-    expect(dnsblLabel('2001:db8:zz::1')).toBeNull();
-    expect(dnsblLabel('1:2:3:4:5:6:7:8:9')).toBeNull();
-  });
-});
+/** A real, globally routable v6 address — the documentation prefix is not one, and is skipped. */
+const PUBLIC_IPV6 = '2a00:1450:4001:80e::200e';
+const PUBLIC_IPV6_REVERSED = 'e.0.0.2.0.0.0.0.0.0.0.0.0.0.0.0.e.0.8.0.1.0.0.4.0.5.4.1.0.0.a.2';
 
 describe('LocalDnsblProvider — reading the lists', () => {
   const lookup = (answers: Answers, q: { ips?: string[]; domains?: string[] }, lists = DEFAULT_DNSBL_LISTS) =>
@@ -78,7 +70,10 @@ describe('LocalDnsblProvider — reading the lists', () => {
     const only = new LocalDnsblProvider({ resolve4: resolver({ '4.3.2.1.zen.spamhaus.org': ['127.255.255.254'] }), lists: [DEFAULT_DNSBL_LISTS[0]] });
     const alone = (await only.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4')!;
     expect(alone.status).toBe('unknown');
-    expect(alone.note).toContain('refused');
+    // The note reaches the log and the spam-pass summary: the operator's name,
+    // not the library's internal id (`spamhaus-zen`).
+    expect(alone.note).toContain('Spamhaus ZEN');
+    expect(alone.note).toContain('public or open resolver');
   });
 
   it('is clean when every list answers NXDOMAIN, unknown when every list times out', async () => {
@@ -106,7 +101,7 @@ describe('LocalDnsblProvider — reading the lists', () => {
     const one = (zone: string, codes: string[]) => lookup({ [`x.example.${zone}`]: codes }, { domains: ['x.example'] }).then((r) => r.domains.get('x.example')!);
     expect((await one('multi.surbl.org', ['127.0.0.8'])).hits[0]).toMatchObject({ list: 'SURBL', category: 'phishing' });
     expect((await one('multi.surbl.org', ['127.0.0.16'])).hits[0].category).toBe('malware');
-    expect((await one('multi.surbl.org', ['127.0.0.64'])).hits[0].category).toBe('spam');
+    expect((await one('multi.surbl.org', ['127.0.0.64'])).hits[0].category).toBe('abused');  // bit 64 is a cracked site, not a spammer's own domain
     expect((await one('multi.uribl.com', ['127.0.0.2'])).hits[0]).toMatchObject({ list: 'URIBL', category: 'spam' });
     expect((await one('multi.uribl.com', ['127.0.0.4'])).hits[0].category).toBe('grey');
     expect((await one('multi.uribl.com', ['127.0.0.1'])).hits).toEqual([]);
@@ -114,15 +109,43 @@ describe('LocalDnsblProvider — reading the lists', () => {
     expect((await uriblOnly.lookup({ ips: [], domains: ['x.example'] })).domains.get('x.example')).toMatchObject({ status: 'unknown', note: expect.stringContaining('URIBL') });
   });
 
-  it('skips IPv6 on lists that do not support it, and marks an address nobody can answer for as unknown', async () => {
+  // A v6 address asked of a v4-only zone comes back NXDOMAIN from a nameserver
+  // that has never heard of v6 — which reads as "not listed", a clean verdict
+  // nobody actually gave. Only zones that declare v6 are asked.
+  it('asks only the IPv6-capable zones about a v6 address, and is unknown when none can answer', async () => {
     const calls: string[] = [];
     const p = new LocalDnsblProvider({ resolve4: resolver({}, calls) });
-    const r = await p.lookup({ ips: ['2001:db8::1'], domains: [] });
-    expect(calls.every((c) => c.endsWith('zen.spamhaus.org'))).toBe(true);
-    expect(r.ips.get('2001:db8::1')?.status).toBe('clean');
+    const r = await p.lookup({ ips: [PUBLIC_IPV6], domains: [] });
+    expect(calls).toEqual([`${PUBLIC_IPV6_REVERSED}.zen.spamhaus.org`]);
+    expect(r.ips.get(PUBLIC_IPV6)?.status).toBe('clean');
     const v4only = new LocalDnsblProvider({ resolve4: resolver({}), lists: DEFAULT_DNSBL_LISTS.filter((l) => l.zone === 'bl.spamcop.net') });
-    expect((await v4only.lookup({ ips: ['2001:db8::1'], domains: [] })).ips.get('2001:db8::1')).toMatchObject({ status: 'unknown' });
+    expect((await v4only.lookup({ ips: [PUBLIC_IPV6], domains: [] })).ips.get(PUBLIC_IPV6)).toMatchObject({ status: 'unknown' });
     expect((await v4only.lookup({ ips: ['not-an-ip'], domains: [] })).ips.get('not-an-ip')).toMatchObject({ status: 'unknown' });
+  });
+
+  // No operator has anything to say about a documentation, private or loopback
+  // address, and asking one tells them about the network for nothing.
+  it('asks nobody about a non-public address, and answers unknown rather than clean', async () => {
+    const calls: string[] = [];
+    const p = new LocalDnsblProvider({ resolve4: resolver({}, calls) });
+    const r = await p.lookup({ ips: ['2001:db8::1', '10.0.0.4'], domains: [] });
+    expect(calls).toEqual([]);
+    expect(r.ips.get('2001:db8::1')).toMatchObject({ status: 'unknown' });
+    expect(r.ips.get('10.0.0.4')).toMatchObject({ status: 'unknown' });
+  });
+
+  // The resolver contract the library is handed: only these three codes mean
+  // "the zone has no entry". Anything else is a failure, and a failure is
+  // unknown — reading a SERVFAIL as "not listed" caches an outage as clean.
+  it('maps every not-found resolver code to "not listed", and any other error to unknown', async () => {
+    const failWith = (code: string) => new LocalDnsblProvider({
+      resolve4: async () => { throw Object.assign(new Error(`queryA ${code}`), { code }); },
+      lists: DEFAULT_DNSBL_LISTS.filter((l) => l.zone === 'bl.spamcop.net'),
+    }).lookup({ ips: ['1.2.3.4'], domains: [] }).then((r) => r.ips.get('1.2.3.4')!);
+    for (const code of ['ENOTFOUND', 'ENODATA', 'NXDOMAIN']) {
+      expect(await failWith(code), code).toMatchObject({ status: 'clean', hits: [] });
+    }
+    expect(await failWith('SERVFAIL')).toMatchObject({ status: 'unknown', note: expect.stringContaining('SpamCop') });
   });
 
   it('deduplicates items, lower-cases domains and bounds concurrency', async () => {
@@ -143,7 +166,7 @@ describe('reputationReasons', () => {
 
   it('scores a spam-source IP listing at the threshold, a policy listing below it', () => {
     const spam = reputationReasons(result({ ips: new Map([['1.2.3.4', { status: 'listed', hits: [hit('Spamhaus ZEN', 'spam')] }]]) }), { originIp: '1.2.3.4', domains: [] });
-    expect(spam).toEqual([{ id: 'ip-blocklisted', points: 5, detail: expect.stringContaining('1.2.3.4 is on Spamhaus ZEN') }]);
+    expect(spam).toEqual([{ id: 'reputation-ip-listed', points: 5, detail: expect.stringContaining('The sending address 1.2.3.4 is listed by Spamhaus ZEN') }]);
     const policy = reputationReasons(result({ ips: new Map([['1.2.3.4', { status: 'listed', hits: [hit('Spamhaus ZEN', 'policy')] }]]) }), { originIp: '1.2.3.4', domains: [] });
     expect(policy[0].points).toBe(3);
   });
@@ -154,7 +177,9 @@ describe('reputationReasons', () => {
       domains: new Map([['evil.example', { status: 'listed', hits: [hit('Spamhaus DBL', 'phishing')], userReports: 9 }]]),
     });
     const reasons = reputationReasons(r, { originIp: '1.2.3.4', domains: ['evil.example', 'EVIL.example'] });
-    expect(reasons.map((x) => x.id)).toEqual(['ip-blocklisted', 'domain-blocklisted']); // the cap left nothing for the reports
+    expect(reasons.map((x) => x.id)).toEqual(['reputation-ip-listed', 'reputation-domain-listed']); // the cap left nothing for the reports
+    // One reason for the domain side, however many domains carried the listing.
+    expect(reasons[1].detail).toContain('The sender domain evil.example is listed by Spamhaus DBL');
     expect(reasons.reduce((s, x) => s + x.points, 0)).toBe(REPUTATION_MAX_POINTS);
   });
 
@@ -162,7 +187,7 @@ describe('reputationReasons', () => {
     const few = result({ domains: new Map([['x.example', { status: 'clean', hits: [], userReports: USER_REPORTS_MIN - 1 }]]) });
     expect(reputationReasons(few, { originIp: null, domains: ['x.example'] })).toEqual([]);
     const enough = result({ domains: new Map([['x.example', { status: 'clean', hits: [], userReports: USER_REPORTS_MIN }]]) });
-    expect(reputationReasons(enough, { originIp: null, domains: ['x.example'] })).toEqual([{ id: 'user-reported', points: 3, detail: expect.stringContaining(`${USER_REPORTS_MIN} other`) }]);
+    expect(reputationReasons(enough, { originIp: null, domains: ['x.example'] })).toEqual([{ id: 'reputation-user-reported', points: 3, detail: expect.stringContaining(`${USER_REPORTS_MIN} other`) }]);
     const unknown = unknownResult('test', { ips: ['1.2.3.4'], domains: ['x.example'] });
     expect(reputationReasons(unknown, { originIp: '1.2.3.4', domains: ['x.example'] })).toEqual([]);
   });
@@ -230,7 +255,7 @@ describe('edges', () => {
       domains: new Map(),
     };
     const reasons = reputationReasons(r, { originIp: '1.2.3.4', domains: ['unknown.example'] });
-    expect(reasons).toEqual([{ id: 'ip-blocklisted', points: 3, detail: expect.stringContaining('Custom') }]);
+    expect(reasons).toEqual([{ id: 'reputation-ip-listed', points: 3, detail: expect.stringContaining('Custom') }]);
     expect(reputationReasons(r, { originIp: null, domains: [] })).toEqual([]);
   });
 
@@ -239,9 +264,14 @@ describe('edges', () => {
     expect(unknownResult('p', { ips: [], domains: ['d.example'] }, 'why').domains.get('d.example')).toEqual({ status: 'unknown', hits: [], note: 'why' });
   });
 
-  it('reads a SpamCop/Barracuda "not listed" (no records) as clean and 127.0.0.1 there as nothing', async () => {
+  // 127.0.0.1 is not in SpamCop's code table and SpamCop does not declare it a
+  // refusal, so it is an answer nobody can read: a wildcard resolver or a
+  // hijacked zone, and neither may be cached as "clean" for six hours.
+  it('reads an undescribed 127.0.0.1 from SpamCop as unknown, never as a listing and never as clean', async () => {
     const p = new LocalDnsblProvider({ resolve4: resolver({ '4.3.2.1.bl.spamcop.net': ['127.0.0.1'] }), lists: DEFAULT_DNSBL_LISTS.filter((l) => l.zone === 'bl.spamcop.net') });
-    expect((await p.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4')).toMatchObject({ status: 'clean', hits: [] });
+    expect((await p.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', hits: [] });
+    const absent = new LocalDnsblProvider({ resolve4: resolver({}), lists: DEFAULT_DNSBL_LISTS.filter((l) => l.zone === 'bl.spamcop.net') });
+    expect((await absent.lookup({ ips: ['1.2.3.4'], domains: [] })).ips.get('1.2.3.4')).toMatchObject({ status: 'clean', hits: [] });
   });
 
   it('handles an empty query and skips blank domains', async () => {
