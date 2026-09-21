@@ -10,6 +10,7 @@ export * from './role-address';
 export * from './timeout';
 export * from './deferred-fetch-error';
 export * from './event-loop';
+export * from './flush-scheduler';
 export * from './byte-budget';
 export * from './db-compaction';
 export * from './folder-counts';
@@ -41,7 +42,7 @@ export * from './mutex';
 
 // The email-security rules — sender spoofing, origin IP, the spam scorer and
 // its verdict codec — were extracted to
-// `@sarv-in/email-spam-scan` so they could be maintained (and contributed to)
+// `@sarv-in/mailguard` so they could be maintained (and contributed to)
 // as an open-source library. Re-exported here, under the names they always
 // had, because every caller in this repo imports them from `@sarvinbox/core`
 // and the move changed nothing about what they do.
@@ -55,6 +56,7 @@ export {
   isFreemailAddress,
   isPublicIp,
   isSpamScore,
+  linkDomains,
   normalizeIp,
   originIpFromAuthHeaders,
   originIpFromReceived,
@@ -63,9 +65,11 @@ export {
   spamVerdict,
   stageOfReason,
   DATE_SKEW_SECONDS,
+  LINK_DOMAINS_MAX,
   SPAM_HEADER_NAMES,
   SPAM_THRESHOLD,
   SUSPICIOUS_THRESHOLD,
+  type LinkDomainsOptions,
   type OriginIpSources,
   type PhishingReason,
   type SpamAssessment,
@@ -73,13 +77,12 @@ export {
   type SpamReasonId,
   type SpamSignalInput,
   type SpamVerdict,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 
 // The reputation, BIMI and favicon seams post-date the extraction above and
 // keep a module of their own: each is the Inbox side of a library entry —
 // the DNSBL operator names the shield shows, the cached brand-logo contract,
 // the avatar fetch policy — not a bare re-export.
 export * from './spam-reputation';
-export * from './link-domains';
 export * from './bimi';
 export * from './favicon';

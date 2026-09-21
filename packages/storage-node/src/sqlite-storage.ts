@@ -30,7 +30,12 @@ import {
   createMigrationManager,
   headerStageAuthPending,
   headerStageSpamPending,
+  LINK_REPUTATION_PENDING_INDEX,
+  linkReputationPending,
+  REPUTATION_PENDING_INDEX,
+  reputationPending,
   SPAM_PENDING_INDEX,
+  withServerUid,
 } from './migrations';
 import { ReadModelMaintainer } from './read-model-maintainer';
 import {
@@ -1748,18 +1753,25 @@ export class SQLiteStorage implements IEmailStorage {
       `SELECT e.id, e.uid, e.folder_id AS folderId, f.path AS folderPath, e.tags,
               e.from_address AS fromAddress, e.reply_to AS replyTo, e.origin_ip AS originIp,
               e.spam_score AS spamScore, e.spam_reasons AS spamReasons, e.spam_user_verdict AS spamUserVerdict
-       FROM emails e JOIN folders f ON f.id = e.folder_id
-       WHERE e.reputation_checked_at IS NULL AND e.spam_score IS NOT NULL
-         AND e.uid IS NOT NULL AND e.uid > 0
+       FROM emails e INDEXED BY ${REPUTATION_PENDING_INDEX} JOIN folders f ON f.id = e.folder_id
+       WHERE ${withServerUid(reputationPending('e.'), 'e.')}
        ORDER BY e.date DESC LIMIT ?`,
     ).all(limit) as ReturnType<SQLiteStorage['getEmailsPendingReputation']>;
   }
 
+  /**
+   * How many rows still await the sender stage — the number the Security tab
+   * shows and the scheduler sleeps on, so it runs on every pass.
+   *
+   * `INDEXED BY` is not decoration: a COUNT has no ORDER BY to steer the
+   * planner, and left to choose it seeks `idx_emails_uid` on `uid > 0` and
+   * visits the whole mailbox. See the note in migrations.ts.
+   */
   countEmailsPendingReputation(): number {
     this.ensureInitialized();
     const row = this.db!.prepare(
-      `SELECT COUNT(*) AS n FROM emails
-       WHERE reputation_checked_at IS NULL AND spam_score IS NOT NULL AND uid IS NOT NULL AND uid > 0`,
+      `SELECT COUNT(*) AS n FROM emails INDEXED BY ${REPUTATION_PENDING_INDEX}
+       WHERE ${withServerUid(reputationPending())}`,
     ).get() as { n: number };
     return row.n;
   }
@@ -1801,18 +1813,18 @@ export class SQLiteStorage implements IEmailStorage {
       `SELECT e.id, e.uid, e.folder_id AS folderId, f.path AS folderPath, e.tags,
               e.from_address AS fromAddress, e.spam_score AS spamScore, e.spam_reasons AS spamReasons,
               e.spam_user_verdict AS spamUserVerdict, ${rawBodyExpression('e')} AS rawBody
-       FROM emails e JOIN folders f ON f.id = e.folder_id
-       WHERE e.link_reputation_checked_at IS NULL AND e.spam_score IS NOT NULL AND e.raw_body_len > 0
-         AND e.uid IS NOT NULL AND e.uid > 0
+       FROM emails e INDEXED BY ${LINK_REPUTATION_PENDING_INDEX} JOIN folders f ON f.id = e.folder_id
+       WHERE ${withServerUid(linkReputationPending('e.'), 'e.')}
        ORDER BY e.date DESC LIMIT ?`,
     ).all(limit) as ReturnType<SQLiteStorage['getEmailsPendingLinkReputation']>;
   }
 
+  /** How many rows still await the body stage. Pinned for the same reason. */
   countEmailsPendingLinkReputation(): number {
     this.ensureInitialized();
     const row = this.db!.prepare(
-      `SELECT COUNT(*) AS n FROM emails
-       WHERE link_reputation_checked_at IS NULL AND spam_score IS NOT NULL AND raw_body_len > 0 AND uid IS NOT NULL AND uid > 0`,
+      `SELECT COUNT(*) AS n FROM emails INDEXED BY ${LINK_REPUTATION_PENDING_INDEX}
+       WHERE ${withServerUid(linkReputationPending())}`,
     ).get() as { n: number };
     return row.n;
   }

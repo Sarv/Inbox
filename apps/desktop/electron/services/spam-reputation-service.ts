@@ -26,15 +26,17 @@ import {
   addTag,
   computeFilterActionResult,
   createLogger,
-  extractLinkDomains,
+  createLoopYielder,
   hasTag,
   isSpamScore,
+  linkDomains,
   linkReputationReasons,
   messageDomains,
   parseSpamReasons,
   registrableDomain,
   reputationReasons,
   stageOfReason,
+  yieldToEventLoop,
   type FolderRecord,
   type ItemReputation,
   type ReputationProvider,
@@ -214,7 +216,40 @@ export interface ReputationPassDeps {
   now: () => number;
   /** Rows judged per account per pass. */
   batch?: number;
+  /** Rows whose BODY is read at a time — see BODY_BATCH_SIZE. */
+  bodyBatch?: number;
+  /** How long the pass may keep handing out work, in ms. See TICK_BUDGET_MS. */
+  budgetMs?: number;
+  /** Millisecond clock for that budget — `now()` is in seconds. Injected for tests. */
+  nowMs?: () => number;
+  /** Yield primitive, injected for tests. */
+  yieldFn?: () => Promise<void>;
 }
+
+/**
+ * How long one pass may keep starting new work before it stops and leaves the
+ * rest of the backlog to the next one.
+ *
+ * A row limit cannot bound this, because the cost of a row is not fixed: a
+ * body-stage row costs an HTML parse over however much MIME that message
+ * carries, which is anything from a two-line reply to a megabyte of newsletter
+ * markup. A budget in TIME is right whatever one row turns out to cost — the
+ * pass stops handing out work once it has held the main process this long. It
+ * is a ceiling, not a target; a drained mailbox never approaches it.
+ */
+export const TICK_BUDGET_MS = 2_000;
+
+/**
+ * Rows the body stage reads at a time.
+ *
+ * Sender-stage rows are a few hundred bytes of headers. A body-stage row
+ * carries `raw_body` — the whole MIME source, attachments included — so the
+ * same 200-row batch is a multi-hundred-megabyte read held in memory before a
+ * single domain has been extracted from it. Chunking bounds that peak; the
+ * deadline above, not this number, decides how much of the backlog a pass
+ * gets through.
+ */
+export const BODY_BATCH_SIZE = 25;
 
 export interface ReputationPassSummary {
   /** Rows stamped this pass. */
@@ -241,9 +276,18 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
   const summary: ReputationPassSummary = { judged: 0, scored: 0, filed: 0, pending: 0, linkJudged: 0, linkPending: 0, provider: provider?.name ?? null, notes: [] };
   if (!provider) return summary;
   const batch = deps.batch ?? 200;
+  const bodyBatch = deps.bodyBatch ?? BODY_BATCH_SIZE;
+  const nowMs = deps.nowMs ?? Date.now;
+  const yieldFn = deps.yieldFn ?? yieldToEventLoop;
+  const deadline = nowMs() + (deps.budgetMs ?? TICK_BUDGET_MS);
+  // Awaited on every row of every loop below: it returns without yielding
+  // while its own small budget holds, so the common cost is one clock read,
+  // and hands the thread back to libuv the moment the budget is spent.
+  const breathe = createLoopYielder({ now: nowMs, yieldFn });
   const notes = new Set<string>();
 
   for (const target of deps.targets()) {
+    if (nowMs() >= deadline) break;
     let rows: ReturnType<ReputationStorage['getEmailsPendingReputation']>;
     try {
       rows = target.storage.getEmailsPendingReputation(batch);
@@ -281,7 +325,7 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
     for (const rep of [...result.ips.values(), ...result.domains.values()]) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
 
     // Score, and file what crossed the line.
-    const judged = await judgeRows(target, rows, (row) => reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) }), summary);
+    const judged = await judgeRows(target, rows, (row) => reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) }), summary, 'sender', breathe);
     try {
       summary.judged += target.storage.applyReputationBatch(judged, deps.now());
     } catch (e) {
@@ -290,48 +334,64 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
   }
 
   // ---- Body stage: the domains each message LINKS to -----------------------
+  //
+  // Chunked and deadline-bounded where the sender stage is not, because every
+  // row here is a raw MIME body that gets HTML-parsed on this thread. One
+  // 200-row pass was therefore an unbounded stretch of synchronous parsing
+  // holding the main process, which is the freeze a CPU profile named in the
+  // inline-image pass: yielding is what lets IMAP reads, IPC replies and the
+  // renderer through while it runs.
   for (const target of deps.targets()) {
-    let rows: ReturnType<ReputationStorage['getEmailsPendingLinkReputation']>;
-    try {
-      rows = target.storage.getEmailsPendingLinkReputation(batch);
-    } catch (e) {
-      logger.warn(`[Reputation] ${target.label}: could not list rows awaiting the body stage: ${(e as Error).message}`);
-      continue;
-    }
-    if (rows.length === 0) continue;
-    const now = deps.now();
-    const linkDomainsOf = new Map<string, string[]>();
-    for (const row of rows) {
-      linkDomainsOf.set(row.id, extractLinkDomains(row.rawBody, { exclude: [registrableDomain(senderDomainOf(row.fromAddress))] }));
-    }
-    const result = empty(provider.name);
-    const ask: string[] = [];
-    for (const d of new Set([...linkDomainsOf.values()].flat())) {
-      const hit = deps.cache.get('domain', d, now);
-      if (hit) result.domains.set(d, hit); else ask.push(d);
-    }
-    if (ask.length) {
-      let fresh: ReputationResult;
+    while (nowMs() < deadline) {
+      let rows: ReturnType<ReputationStorage['getEmailsPendingLinkReputation']>;
       try {
-        fresh = await provider.lookup({ ips: [], domains: ask });
+        rows = target.storage.getEmailsPendingLinkReputation(bodyBatch);
       } catch (e) {
-        fresh = empty(provider.name);
-        notes.add(`Lookup failed: ${(e as Error).message}`);
+        logger.warn(`[Reputation] ${target.label}: could not list rows awaiting the body stage: ${(e as Error).message}`);
+        break;
       }
-      for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
-    }
-    for (const rep of result.domains.values()) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
+      if (rows.length === 0) break;
+      const now = deps.now();
+      const linkDomainsOf = new Map<string, string[]>();
+      for (const row of rows) {
+        await breathe();
+        linkDomainsOf.set(row.id, linkDomains(row.rawBody, { exclude: [registrableDomain(senderDomainOf(row.fromAddress))] }));
+      }
+      const result = empty(provider.name);
+      const ask: string[] = [];
+      for (const d of new Set([...linkDomainsOf.values()].flat())) {
+        const hit = deps.cache.get('domain', d, now);
+        if (hit) result.domains.set(d, hit); else ask.push(d);
+      }
+      if (ask.length) {
+        let fresh: ReputationResult;
+        try {
+          fresh = await provider.lookup({ ips: [], domains: ask });
+        } catch (e) {
+          fresh = empty(provider.name);
+          notes.add(`Lookup failed: ${(e as Error).message}`);
+        }
+        for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+      }
+      for (const rep of result.domains.values()) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
 
-    const judged = await judgeRows(target, rows, (row) => {
-      // The two network stages share one cap: points the sender stage already
-      // added leave that much less room for the links.
-      const already = parseSpamReasons(row.spamReasons).filter((r) => stageOfReason(r.id) === 'reputation').reduce((s, r) => s + r.points, 0);
-      return linkReputationReasons(result, linkDomainsOf.get(row.id) ?? [], already);
-    }, summary, 'link');
-    try {
-      summary.linkJudged += target.storage.applyLinkReputationBatch(judged, deps.now());
-    } catch (e) {
-      logger.warn(`[Reputation] ${target.label}: stamping the body stage failed: ${(e as Error).message}`);
+      const judged = await judgeRows(target, rows, (row) => {
+        // The two network stages share one cap: points the sender stage already
+        // added leave that much less room for the links.
+        const already = parseSpamReasons(row.spamReasons).filter((r) => stageOfReason(r.id) === 'reputation').reduce((s, r) => s + r.points, 0);
+        return linkReputationReasons(result, linkDomainsOf.get(row.id) ?? [], already);
+      }, summary, 'link', breathe);
+      let stamped = 0;
+      try {
+        stamped = target.storage.applyLinkReputationBatch(judged, deps.now());
+      } catch (e) {
+        logger.warn(`[Reputation] ${target.label}: stamping the body stage failed: ${(e as Error).message}`);
+        break; // unstamped rows are still pending: another chunk would re-read the same ones
+      }
+      summary.linkJudged += stamped;
+      // Nothing left the queue, so the next chunk would be this chunk. Stop
+      // rather than spin on it until the deadline.
+      if (stamped === 0) break;
     }
   }
 
@@ -366,10 +426,15 @@ async function judgeRows<R extends JudgeableRow>(
   reasonsFor: (row: R) => SpamReason[],
   summary: ReputationPassSummary,
   stage: 'sender' | 'link' = 'sender',
+  breathe: () => Promise<boolean> = async () => false,
 ): Promise<Array<{ id: string; spamScore: number; spamReasons: string }>> {
   let folders: FolderRecord[] | null = null;
   const updates: Array<{ id: string; spamScore: number; spamReasons: string }> = [];
   for (const row of rows) {
+    // Filing a row is a synchronous storage write; better-sqlite3 resolves its
+    // awaits as microtasks, so without this the whole batch runs as one
+    // uninterruptible block however many rows crossed the line.
+    await breathe();
     const reasons = reasonsFor(row);
     const score = row.spamScore + reasons.reduce((s, r) => s + r.points, 0);
     const allReasons = [...parseSpamReasons(row.spamReasons), ...reasons];
