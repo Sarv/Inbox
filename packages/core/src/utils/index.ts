@@ -61,6 +61,7 @@ export {
   parseSpamReasons,
   registrableDomain,
   spamVerdict,
+  stageOfReason,
   DATE_SKEW_SECONDS,
   SPAM_HEADER_NAMES,
   SPAM_THRESHOLD,
@@ -79,5 +80,6 @@ export {
 // the DNSBL operator names the shield shows, the cached brand-logo contract,
 // the avatar fetch policy — not a bare re-export.
 export * from './spam-reputation';
+export * from './link-domains';
 export * from './bimi';
 export * from './favicon';

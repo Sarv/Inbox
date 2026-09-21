@@ -3,6 +3,7 @@
 
 import { basename, dirname, join } from 'path';
 
+
 import type {
   IEmailStorage,
   EmailRecord,
@@ -46,6 +47,7 @@ import {
 } from './repositories';
 import { missingBodyClause } from './repositories/agent-eligibility';
 import { areBodyLengthsReady } from './repositories/body-metrics';
+import { rawBodyExpression } from './repositories/body-storage';
 import { attachSharedContacts, SHARED_CONTACTS_FILE } from './shared-contacts';
 import { resolveThreadId, reattachOrphans, repairThreading as repairThreadingImpl } from './thread-resolver';
 
@@ -1739,13 +1741,13 @@ export class SQLiteStorage implements IEmailStorage {
   getEmailsPendingReputation(limit: number): Array<{
     id: string; uid: number; folderId: string; folderPath: string; tags: string;
     fromAddress: string; replyTo: string | null; originIp: string | null;
-    spamScore: number; spamReasons: string | null;
+    spamScore: number; spamReasons: string | null; spamUserVerdict: 'spam' | 'ham' | null;
   }> {
     this.ensureInitialized();
     return this.db!.prepare(
       `SELECT e.id, e.uid, e.folder_id AS folderId, f.path AS folderPath, e.tags,
               e.from_address AS fromAddress, e.reply_to AS replyTo, e.origin_ip AS originIp,
-              e.spam_score AS spamScore, e.spam_reasons AS spamReasons
+              e.spam_score AS spamScore, e.spam_reasons AS spamReasons, e.spam_user_verdict AS spamUserVerdict
        FROM emails e JOIN folders f ON f.id = e.folder_id
        WHERE e.reputation_checked_at IS NULL AND e.spam_score IS NOT NULL
          AND e.uid IS NOT NULL AND e.uid > 0
@@ -1781,6 +1783,78 @@ export class SQLiteStorage implements IEmailStorage {
       return n;
     });
     return run(rows);
+  }
+
+  /**
+   * Rows the BODY stage has not judged yet: header-scored, body downloaded
+   * (raw_body_len > 0 — a NULL length is "unknown", left for the metrics
+   * backfill), no link_reputation_checked_at. Newest first, with the body,
+   * so the caller can extract link domains without a second read per row.
+   */
+  getEmailsPendingLinkReputation(limit: number): Array<{
+    id: string; uid: number; folderId: string; folderPath: string; tags: string;
+    fromAddress: string; spamScore: number; spamReasons: string | null;
+    spamUserVerdict: 'spam' | 'ham' | null; rawBody: string | null;
+  }> {
+    this.ensureInitialized();
+    return this.db!.prepare(
+      `SELECT e.id, e.uid, e.folder_id AS folderId, f.path AS folderPath, e.tags,
+              e.from_address AS fromAddress, e.spam_score AS spamScore, e.spam_reasons AS spamReasons,
+              e.spam_user_verdict AS spamUserVerdict, ${rawBodyExpression('e')} AS rawBody
+       FROM emails e JOIN folders f ON f.id = e.folder_id
+       WHERE e.link_reputation_checked_at IS NULL AND e.spam_score IS NOT NULL AND e.raw_body_len > 0
+         AND e.uid IS NOT NULL AND e.uid > 0
+       ORDER BY e.date DESC LIMIT ?`,
+    ).all(limit) as ReturnType<SQLiteStorage['getEmailsPendingLinkReputation']>;
+  }
+
+  countEmailsPendingLinkReputation(): number {
+    this.ensureInitialized();
+    const row = this.db!.prepare(
+      `SELECT COUNT(*) AS n FROM emails
+       WHERE link_reputation_checked_at IS NULL AND spam_score IS NOT NULL AND raw_body_len > 0 AND uid IS NOT NULL AND uid > 0`,
+    ).get() as { n: number };
+    return row.n;
+  }
+
+  /** Stamp a body-stage batch as judged — same contract as applyReputationBatch. */
+  applyLinkReputationBatch(rows: Array<{ id: string; spamScore: number; spamReasons: string }>, checkedAtSec: number): number {
+    this.ensureInitialized();
+    if (rows.length === 0) return 0;
+    const stmt = this.db!.prepare(
+      'UPDATE emails SET spam_score = ?, spam_reasons = ?, link_reputation_checked_at = ? WHERE id = ? AND link_reputation_checked_at IS NULL',
+    );
+    const run = this.db!.transaction((batch: typeof rows) => {
+      let n = 0;
+      for (const r of batch) n += stmt.run(r.spamScore, r.spamReasons, checkedAtSec, r.id).changes;
+      return n;
+    });
+    return run(rows);
+  }
+
+  /** The user's own verdict on a message; null clears it. Outranks every score. */
+  async setSpamUserVerdict(emailId: string, verdict: 'spam' | 'ham' | null): Promise<void> {
+    this.ensureInitialized();
+    this.db!.prepare('UPDATE emails SET spam_user_verdict = ? WHERE id = ?').run(verdict, emailId);
+  }
+
+  /**
+   * What the spam filter has had an opinion on — filed, suspicious, or
+   * overruled by the user — newest first, for the Security page's Spam tab.
+   */
+  getSpamJudgedEmails(limit: number, suspiciousFrom: number): Array<{
+    id: string; subject: string | null; fromAddress: string; fromName: string | null; date: number;
+    folderPath: string; tags: string; spamScore: number | null; spamReasons: string | null;
+    spamUserVerdict: 'spam' | 'ham' | null;
+  }> {
+    this.ensureInitialized();
+    return this.db!.prepare(
+      `SELECT e.id, e.subject, e.from_address AS fromAddress, e.from_name AS fromName, e.date, f.path AS folderPath,
+              e.tags, e.spam_score AS spamScore, e.spam_reasons AS spamReasons, e.spam_user_verdict AS spamUserVerdict
+       FROM emails e JOIN folders f ON f.id = e.folder_id
+       WHERE e.spam_score >= ? OR instr(e.tags, '|spam|') > 0 OR e.spam_user_verdict IS NOT NULL
+       ORDER BY e.date DESC LIMIT ?`,
+    ).all(suspiciousFrom, Math.max(1, limit)) as ReturnType<SQLiteStorage['getSpamJudgedEmails']>;
   }
 
   async updateEmailAuthStatus(emailId: string, authStatus: string): Promise<void> {

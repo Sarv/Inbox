@@ -26,15 +26,20 @@ import {
   addTag,
   computeFilterActionResult,
   createLogger,
+  extractLinkDomains,
   hasTag,
   isSpamScore,
+  linkReputationReasons,
   messageDomains,
   parseSpamReasons,
+  registrableDomain,
   reputationReasons,
+  stageOfReason,
   type FolderRecord,
   type ItemReputation,
   type ReputationProvider,
   type ReputationResult,
+  type SenderReport,
   type SpamReason,
 } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
@@ -55,9 +60,16 @@ export interface SpamReputationPolicy {
   mode: ReputationMode;
   /** The Sarv reputation service origin. Empty = not configured = no lookups in 'sarv' mode. */
   endpoint: string;
+  /**
+   * Send the user's own Report spam / Not spam verdicts to the Sarv service
+   * (sender domain, connecting IP, verdict — never subject, body or
+   * recipients). Opt-in: this is the one thing here that leaves the machine
+   * because the user did something, not because mail arrived.
+   */
+  reports: boolean;
 }
 
-export const DEFAULT_SPAM_REPUTATION_POLICY: SpamReputationPolicy = { mode: 'sarv', endpoint: '' };
+export const DEFAULT_SPAM_REPUTATION_POLICY: SpamReputationPolicy = { mode: 'sarv', endpoint: '', reports: false };
 const POLICY_BLOB_KEY = 'spam-reputation-policy';
 let cachedPolicy: SpamReputationPolicy | null = null;
 
@@ -70,7 +82,7 @@ export function normalizeSpamReputationPolicy(raw: unknown): SpamReputationPolic
   } catch {
     endpoint = '';
   }
-  return { mode, endpoint };
+  return { mode, endpoint, reports: r.reports === true };
 }
 
 export function getSpamReputationPolicy(): SpamReputationPolicy {
@@ -171,10 +183,17 @@ export interface ReputationStorage {
   getEmailsPendingReputation(limit: number): Array<{
     id: string; uid: number; folderId: string; folderPath: string; tags: string;
     fromAddress: string; replyTo: string | null; originIp: string | null;
-    spamScore: number; spamReasons: string | null;
+    spamScore: number; spamReasons: string | null; spamUserVerdict?: 'spam' | 'ham' | null;
   }>;
   countEmailsPendingReputation(): number;
   applyReputationBatch(rows: Array<{ id: string; spamScore: number; spamReasons: string }>, checkedAtSec: number): number;
+  getEmailsPendingLinkReputation(limit: number): Array<{
+    id: string; uid: number; folderId: string; folderPath: string; tags: string;
+    fromAddress: string; spamScore: number; spamReasons: string | null;
+    spamUserVerdict: 'spam' | 'ham' | null; rawBody: string | null;
+  }>;
+  countEmailsPendingLinkReputation(): number;
+  applyLinkReputationBatch(rows: Array<{ id: string; spamScore: number; spamReasons: string }>, checkedAtSec: number): number;
   getFolders(): Promise<FolderRecord[]>;
   updateEmail(id: string, updates: { tags?: string; folderId?: string }): Promise<void>;
 }
@@ -204,8 +223,11 @@ export interface ReputationPassSummary {
   scored: number;
   /** Rows that crossed the spam line only because of reputation, and were filed. */
   filed: number;
-  /** Rows still waiting after the pass, across accounts. */
+  /** Rows still waiting for the sender stage after the pass, across accounts. */
   pending: number;
+  /** Body-stage rows (link domains) judged this pass, and still waiting. */
+  linkJudged: number;
+  linkPending: number;
   provider: string | null;
   /** Distinct notes from unknown answers — "Spamhaus refused the query", "Not signed in to Sarv". */
   notes: string[];
@@ -216,7 +238,7 @@ const empty = (provider: string): ReputationResult => ({ provider, ips: new Map(
 /** One pass over every account's unjudged rows. */
 export async function runReputationPass(deps: ReputationPassDeps): Promise<ReputationPassSummary> {
   const provider = deps.provider();
-  const summary: ReputationPassSummary = { judged: 0, scored: 0, filed: 0, pending: 0, provider: provider?.name ?? null, notes: [] };
+  const summary: ReputationPassSummary = { judged: 0, scored: 0, filed: 0, pending: 0, linkJudged: 0, linkPending: 0, provider: provider?.name ?? null, notes: [] };
   if (!provider) return summary;
   const batch = deps.batch ?? 200;
   const notes = new Set<string>();
@@ -259,41 +281,141 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
     for (const rep of [...result.ips.values(), ...result.domains.values()]) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
 
     // Score, and file what crossed the line.
-    let folders: FolderRecord[] | null = null;
-    const updates: Array<{ id: string; spamScore: number; spamReasons: string }> = [];
-    for (const row of rows) {
-      const reasons: SpamReason[] = reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) });
-      const score = row.spamScore + reasons.reduce((s, r) => s + r.points, 0);
-      const allReasons = [...parseSpamReasons(row.spamReasons), ...reasons];
-      updates.push({ id: row.id, spamScore: score, spamReasons: JSON.stringify(allReasons) });
-      if (reasons.length) summary.scored += 1;
-      if (score < SPAM_THRESHOLD || isSpamScore(row.spamScore)) continue; // not spam, or the header stage already filed it
-      try {
-        folders ??= await target.storage.getFolders();
-        const tagged = hasTag(row.tags, 'spam') ? row.tags : addTag(row.tags, 'spam');
-        const moved = computeFilterActionResult({ tags: tagged, folderId: row.folderId }, [{ type: 'moveToSpam' }], folders);
-        await target.storage.updateEmail(row.id, { tags: moved.tags, folderId: moved.folderId });
-        if (moved.changed && target.engine) {
-          target.engine.moveToSpam(row.folderPath, row.uid).catch((err: unknown) => {
-            logger.warn(`[Reputation] server-side move failed for uid ${row.uid} in ${row.folderPath}: ${(err as Error)?.message ?? err}`);
-          });
-        }
-        summary.filed += 1;
-      } catch (e) {
-        logger.warn(`[Reputation] ${target.label}: re-file failed for ${row.id}: ${(e as Error).message}`);
-      }
-    }
+    const judged = await judgeRows(target, rows, (row) => reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) }), summary);
     try {
-      summary.judged += target.storage.applyReputationBatch(updates, deps.now());
+      summary.judged += target.storage.applyReputationBatch(judged, deps.now());
     } catch (e) {
       logger.warn(`[Reputation] ${target.label}: stamping failed: ${(e as Error).message}`);
     }
   }
+
+  // ---- Body stage: the domains each message LINKS to -----------------------
+  for (const target of deps.targets()) {
+    let rows: ReturnType<ReputationStorage['getEmailsPendingLinkReputation']>;
+    try {
+      rows = target.storage.getEmailsPendingLinkReputation(batch);
+    } catch (e) {
+      logger.warn(`[Reputation] ${target.label}: could not list rows awaiting the body stage: ${(e as Error).message}`);
+      continue;
+    }
+    if (rows.length === 0) continue;
+    const now = deps.now();
+    const linkDomainsOf = new Map<string, string[]>();
+    for (const row of rows) {
+      linkDomainsOf.set(row.id, extractLinkDomains(row.rawBody, { exclude: [registrableDomain(senderDomainOf(row.fromAddress))] }));
+    }
+    const result = empty(provider.name);
+    const ask: string[] = [];
+    for (const d of new Set([...linkDomainsOf.values()].flat())) {
+      const hit = deps.cache.get('domain', d, now);
+      if (hit) result.domains.set(d, hit); else ask.push(d);
+    }
+    if (ask.length) {
+      let fresh: ReputationResult;
+      try {
+        fresh = await provider.lookup({ ips: [], domains: ask });
+      } catch (e) {
+        fresh = empty(provider.name);
+        notes.add(`Lookup failed: ${(e as Error).message}`);
+      }
+      for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+    }
+    for (const rep of result.domains.values()) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
+
+    const judged = await judgeRows(target, rows, (row) => {
+      // The two network stages share one cap: points the sender stage already
+      // added leave that much less room for the links.
+      const already = parseSpamReasons(row.spamReasons).filter((r) => stageOfReason(r.id) === 'reputation').reduce((s, r) => s + r.points, 0);
+      return linkReputationReasons(result, linkDomainsOf.get(row.id) ?? [], already);
+    }, summary, 'link');
+    try {
+      summary.linkJudged += target.storage.applyLinkReputationBatch(judged, deps.now());
+    } catch (e) {
+      logger.warn(`[Reputation] ${target.label}: stamping the body stage failed: ${(e as Error).message}`);
+    }
+  }
+
   for (const target of deps.targets()) {
     try { summary.pending += target.storage.countEmailsPendingReputation(); } catch { /* counted as zero */ }
+    try { summary.linkPending += target.storage.countEmailsPendingLinkReputation(); } catch { /* counted as zero */ }
   }
   summary.notes = [...notes];
   return summary;
+}
+
+/** The domain of an address, lower-cased, or null. */
+function senderDomainOf(address: string | null | undefined): string | null {
+  const at = (address || '').lastIndexOf('@');
+  return at < 0 ? null : (address || '').slice(at + 1).trim().toLowerCase() || null;
+}
+
+interface JudgeableRow {
+  id: string; uid: number; folderId: string; folderPath: string; tags: string;
+  spamScore: number; spamReasons: string | null; spamUserVerdict?: 'spam' | 'ham' | null;
+}
+
+/**
+ * Add each row's new reasons to its stored score and file what crossed the
+ * line: tag, local move, queued server move. Shared by both network stages.
+ * A row the user called 'ham' is scored (for the record) but never filed;
+ * one the header stage already filed is not filed a second time.
+ */
+async function judgeRows<R extends JudgeableRow>(
+  target: ReputationTarget,
+  rows: R[],
+  reasonsFor: (row: R) => SpamReason[],
+  summary: ReputationPassSummary,
+  stage: 'sender' | 'link' = 'sender',
+): Promise<Array<{ id: string; spamScore: number; spamReasons: string }>> {
+  let folders: FolderRecord[] | null = null;
+  const updates: Array<{ id: string; spamScore: number; spamReasons: string }> = [];
+  for (const row of rows) {
+    const reasons = reasonsFor(row);
+    const score = row.spamScore + reasons.reduce((s, r) => s + r.points, 0);
+    const allReasons = [...parseSpamReasons(row.spamReasons), ...reasons];
+    updates.push({ id: row.id, spamScore: score, spamReasons: JSON.stringify(allReasons) });
+    if (reasons.length) summary.scored += 1;
+    if (score < SPAM_THRESHOLD || isSpamScore(row.spamScore) || row.spamUserVerdict === 'ham') continue;
+    try {
+      folders ??= await target.storage.getFolders();
+      const tagged = hasTag(row.tags, 'spam') ? row.tags : addTag(row.tags, 'spam');
+      const moved = computeFilterActionResult({ tags: tagged, folderId: row.folderId }, [{ type: 'moveToSpam' }], folders);
+      await target.storage.updateEmail(row.id, { tags: moved.tags, folderId: moved.folderId });
+      if (moved.changed && target.engine) {
+        target.engine.moveToSpam(row.folderPath, row.uid).catch((err: unknown) => {
+          logger.warn(`[Reputation] server-side move failed for uid ${row.uid} in ${row.folderPath}: ${(err as Error)?.message ?? err}`);
+        });
+      }
+      summary.filed += 1;
+    } catch (e) {
+      logger.warn(`[Reputation] ${target.label}: ${stage}-stage re-file failed for ${row.id}: ${(e as Error).message}`);
+    }
+  }
+  return updates;
+}
+
+// -------------------------------------------------------------- the report loop
+
+/** Does the policy allow the user's verdicts to leave the machine? */
+export function reportsAllowed(policy: SpamReputationPolicy): boolean {
+  return policy.mode === 'sarv' && !!policy.endpoint && policy.reports;
+}
+
+/**
+ * Send the user's Report spam / Not spam verdict to the Sarv service, if — and
+ * only if — the policy says so. Fire-and-forget; a failed report is nothing.
+ */
+export function reportSenderVerdict(
+  report: SenderReport,
+  deps: { policy?: SpamReputationPolicy; provider?: ReputationProvider | null } = {},
+): void {
+  const policy = deps.policy ?? getSpamReputationPolicy();
+  if (!reportsAllowed(policy)) return;
+  const provider = deps.provider === undefined ? providerForPolicy(policy) : deps.provider;
+  if (!provider?.report) return;
+  provider.report(report).then((accepted) => {
+    if (accepted) logger.info(`[Reputation] reported ${report.verdict} for ${report.domain ?? report.ip}`);
+  }).catch(() => { /* fail-open */ });
 }
 
 // --------------------------------------------------------------- real wiring
@@ -340,6 +462,9 @@ export interface SpamReputationState {
   pending: number;
   judged: number;
   filed: number;
+  /** Body stage (link domains). */
+  linkPending: number;
+  linkJudged: number;
   provider: string | null;
   notes: string[];
   running: boolean;
@@ -350,7 +475,7 @@ export interface SpamReputationState {
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 let stopped = false;
-const state: SpamReputationState = { pending: 0, judged: 0, filed: 0, provider: null, notes: [], running: false, lastRun: null };
+const state: SpamReputationState = { pending: 0, judged: 0, filed: 0, linkPending: 0, linkJudged: 0, provider: null, notes: [], running: false, lastRun: null };
 
 export function getSpamReputationState(): SpamReputationState {
   return { ...state, running: inFlight };
@@ -377,12 +502,14 @@ async function tick(): Promise<void> {
     state.pending = summary.pending;
     state.judged += summary.judged;
     state.filed += summary.filed;
+    state.linkPending = summary.linkPending;
+    state.linkJudged += summary.linkJudged;
     state.provider = summary.provider;
     state.notes = summary.notes;
     state.lastRun = Math.floor(Date.now() / 1000);
-    more = summary.provider !== null && summary.pending > 0;
-    if (summary.judged > 0) {
-      logger.info(`[Reputation] judged ${summary.judged} row(s): ${summary.scored} gained points, ${summary.filed} filed as spam; ${summary.pending} pending`
+    more = summary.provider !== null && (summary.pending > 0 || summary.linkPending > 0);
+    if (summary.judged > 0 || summary.linkJudged > 0) {
+      logger.info(`[Reputation] judged ${summary.judged} sender row(s) and ${summary.linkJudged} body row(s): ${summary.scored} gained points, ${summary.filed} filed as spam; ${summary.pending} + ${summary.linkPending} pending`
         + (summary.notes.length ? ` — ${summary.notes.join('; ')}` : ''));
     }
   } catch (e) {
