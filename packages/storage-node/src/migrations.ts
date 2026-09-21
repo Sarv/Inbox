@@ -3046,6 +3046,108 @@ export const emailReputationColumns: Migration = {
 };
 
 /**
+ * How many times the header-stage sweep may ask the server about one message
+ * before it stops asking.
+ *
+ * A uid the server no longer has — expunged, or in a folder that will not open
+ * — can never be satisfied, and the old backlog predicate had no way to say so:
+ * the sweep re-selected the same rows every 1.5 seconds, wrote nothing, logged
+ * nothing, and did it forever. Three tries distinguishes a connection blip
+ * (transient, worth retrying) from a message that is gone (permanent).
+ */
+export const HEADER_STAGE_MAX_ATTEMPTS = 3;
+
+/**
+ * The two partial indexes the backlog halves are read through.
+ *
+ * The queries name them with `INDEXED BY` rather than leaving the choice to
+ * the planner, which is not a micro-optimisation: for the COUNT halves the
+ * planner prefers the pre-existing `idx_emails_uid` — `uid > 0` is a range it
+ * can seek, while a partial index it must scan whole looks more expensive than
+ * it is — and that "seek" visits every row in the mailbox, which is the stall
+ * being removed (measured: 1.2ms vs 0.005ms on 26,700 synthetic rows, and far
+ * worse on the real 2.3GB mailbox whose rows are not 80 bytes).
+ *
+ * `INDEXED BY` also upgrades the guarantee: if the index is missing, or a
+ * clause drifts so the WHERE no longer implies the index's, SQLite raises
+ * instead of quietly planning the full scan again.
+ */
+export const AUTH_PENDING_INDEX = 'idx_emails_auth_pending';
+export const SPAM_PENDING_INDEX = 'idx_emails_spam_pending';
+
+/**
+ * The two halves of the header-stage backlog, as SQL.
+ *
+ * ONE definition, used by the partial indexes below AND by the queries in
+ * sqlite-storage, because SQLite only uses a partial index when the query's
+ * WHERE *implies* the index's. A second copy that drifted by a single term
+ * would not fail — it would silently plan a full scan of the mail table again,
+ * which is the 350ms main-process stall these indexes exist to remove.
+ *
+ * `prefix` is the table alias the caller uses ('e.'), empty in the index where
+ * there is no alias to qualify.
+ */
+export function headerStageAuthPending(prefix = ''): string {
+  return `${prefix}auth_status IS NULL AND ${prefix}uid IS NOT NULL AND ${prefix}uid > 0`
+    + ` AND ${prefix}header_stage_attempts < ${HEADER_STAGE_MAX_ATTEMPTS}`;
+}
+
+export function headerStageSpamPending(prefix = ''): string {
+  return `${prefix}spam_score IS NULL AND ${prefix}uid IS NOT NULL AND ${prefix}uid > 0`
+    + ` AND ${prefix}header_stage_attempts < ${HEADER_STAGE_MAX_ATTEMPTS}`;
+}
+
+/**
+ * v88 — make the header-stage backlog cheap to ask about, and finite.
+ *
+ * The backlog predicate was `(auth_status IS NULL OR (spam_score IS NULL AND
+ * ...))`, and not one of the 36 indexes on `emails` covered either column, so
+ * both the count and the slice full-scanned the mail table — and the slice
+ * sorted every match by date on top. Measured on a 26,700-row mailbox with a
+ * V8 profile of the main process: 8.9 seconds of synchronous SQLite in a
+ * 70-second window with the app untouched, arriving as 300-500ms blocks of a
+ * frozen UI every few seconds, every 1.5 seconds forever.
+ *
+ * An OR cannot be indexed, so the predicate is split into the two disjoint
+ * halves the callers now query separately, each with its own partial index.
+ * Partial is what makes it scale: the index holds only the rows still waiting,
+ * so a drained mailbox pays nothing and the cost tracks the backlog, never the
+ * size of the mailbox. The spam index carries `auth_status` and `folder_id` as
+ * payload so its half stays index-only despite the extra filters.
+ *
+ * `header_stage_attempts` is what makes the backlog finite — see
+ * HEADER_STAGE_MAX_ATTEMPTS. ADD COLUMN with a constant default is O(1)
+ * metadata in SQLite; existing rows read 0 and stay eligible.
+ */
+export const headerStageBacklogIndexes: Migration = {
+  version: 88,
+  name: 'header_stage_backlog_indexes',
+  up: (db) => {
+    const colNames = new Set(
+      (db.prepare('PRAGMA table_info(emails)').all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!colNames.has('header_stage_attempts')) {
+      db.exec('ALTER TABLE emails ADD COLUMN header_stage_attempts INTEGER NOT NULL DEFAULT 0;');
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS ${AUTH_PENDING_INDEX}
+        ON emails(date DESC)
+        WHERE ${headerStageAuthPending()};
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS ${SPAM_PENDING_INDEX}
+        ON emails(date DESC, auth_status, folder_id)
+        WHERE ${headerStageSpamPending()};
+    `);
+    logger.info('header-stage backlog (v88): attempts column + partial indexes ready');
+  },
+  down: (db) => {
+    db.exec(`DROP INDEX IF EXISTS ${AUTH_PENDING_INDEX};`);
+    db.exec(`DROP INDEX IF EXISTS ${SPAM_PENDING_INDEX};`);
+  },
+};
+
+/**
  * v84 — re-key the search index by rowid so maintaining it stops scanning it.
  *
  * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
@@ -3282,5 +3384,6 @@ export function createMigrationManager(
   manager.register(linkDomainRules);
   manager.register(emailSpamColumns);
   manager.register(emailReputationColumns);
+  manager.register(headerStageBacklogIndexes);
   return manager;
 }

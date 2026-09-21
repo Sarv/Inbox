@@ -24,7 +24,13 @@ import Database from 'better-sqlite3';
 import { BodyStorageBackfill } from './body-storage-backfill';
 import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
 import { InlineImageBackfill } from './inline-image-backfill';
-import { createMigrationManager } from './migrations';
+import {
+  AUTH_PENDING_INDEX,
+  createMigrationManager,
+  headerStageAuthPending,
+  headerStageSpamPending,
+  SPAM_PENDING_INDEX,
+} from './migrations';
 import { ReadModelMaintainer } from './read-model-maintainer';
 import {
   EmailRepository,
@@ -1568,41 +1574,156 @@ export class SQLiteStorage implements IEmailStorage {
     return this.aiRepo.updateImportance(emailId, score, source);
   }
 
-  // ---- auth-header backfill ------------------------------------------------
+  // ---- header backfill -----------------------------------------------------
 
-  /** Messages still without an authentication verdict AND fetchable (a uid). */
-  countEmailsMissingAuthStatus(): number {
+  /**
+   * Messages still missing a header-stage verdict AND fetchable (a uid).
+   *
+   * Two columns, two different predicates, one backlog:
+   *
+   *   * `auth_status` is missing on everything synced before the client kept
+   *     `Authentication-Results` — INCLUDING the user's own Sent and Drafts,
+   *     which have a verdict worth reading like any other message.
+   *   * `spam_score` is missing on everything synced before v86, EXCEPT own
+   *     mail, which is deliberately never scored (see `headerStage`). Own-mail
+   *     rows must therefore be excluded from the spam half of the predicate,
+   *     or they would sit in the backlog forever: the sweep would fetch them,
+   *     decline to score them, write nothing, and select them again 1.5
+   *     seconds later. Seven unfetchable rows already pinned a live mailbox's
+   *     status line at "7 to go"; this would pin it at several thousand.
+   *
+   * The caller passes the own-mail folder ids because deciding which folder is
+   * Sent or Drafts is `classifyFolder`'s job, not SQL's — the same function
+   * ingest uses, so the two cannot disagree about which mail is the user's own.
+   *
+   * The predicate is split into two DISJOINT halves rather than one `OR`,
+   * because SQLite cannot index an OR: as one clause both the count and the
+   * slice full-scanned the mail table on every tick (v88 has the measurement).
+   * Half A is every row whose auth verdict is missing; half B is every row
+   * whose auth verdict is KNOWN and whose spam score is missing. Together they
+   * are exactly the old predicate, with no row in both, so the two counts add
+   * and the two slices concatenate without a dedupe.
+   *
+   * The clauses themselves come from migrations.ts, where the matching partial
+   * indexes are declared — see the note there about why a second copy of the
+   * text would quietly cost a full scan.
+   */
+  private notOwnMailClause(ownMailFolderIds: readonly string[]): string {
+    return ownMailFolderIds.length > 0
+      ? ` AND e.folder_id NOT IN (${ownMailFolderIds.map(() => '?').join(',')})`
+      : '';
+  }
+
+  /** Half B: the spam score is missing, the auth verdict is not, and it is not own mail. */
+  private spamHalfClause(ownMailFolderIds: readonly string[]): string {
+    return `${headerStageSpamPending('e.')} AND e.auth_status IS NOT NULL${this.notOwnMailClause(ownMailFolderIds)}`;
+  }
+
+  countEmailsMissingHeaderStage(ownMailFolderIds: readonly string[] = []): number {
     this.ensureInitialized();
-    return (this.db!.prepare(
-      `SELECT COUNT(*) AS n FROM emails WHERE auth_status IS NULL AND uid IS NOT NULL AND uid > 0`,
+    const authHalf = (this.db!.prepare(
+      `SELECT COUNT(*) AS n FROM emails e INDEXED BY ${AUTH_PENDING_INDEX} WHERE ${headerStageAuthPending('e.')}`,
     ).get() as { n: number }).n;
+    const spamHalf = (this.db!.prepare(
+      `SELECT COUNT(*) AS n FROM emails e INDEXED BY ${SPAM_PENDING_INDEX} WHERE ${this.spamHalfClause(ownMailFolderIds)}`,
+    ).get(...ownMailFolderIds) as { n: number }).n;
+    return authHalf + spamHalf;
   }
 
   /**
    * The next slice of the backfill backlog, newest first, with the folder path
    * the fetch needs. Rows with no uid — NULL, or 0 for a locally-appended Sent
    * or Drafts copy the server never numbered — cannot be fetched by uid, so
-   * they are excluded rather than retried forever. Seven such rows kept a live
-   * mailbox's status line at "7 to go" after everything else had drained.
+   * they are excluded rather than retried forever, and so are rows the sweep
+   * has already asked about HEADER_STAGE_MAX_ATTEMPTS times.
+   *
+   * Each half is read newest-first through its own partial index, which is why
+   * there is no sort step and the read stops after `limit` entries. Taking the
+   * top `limit` of both halves and keeping the newest `limit` of those returns
+   * exactly the top `limit` of the union, because the halves are disjoint and
+   * each arrives ordered.
    */
-  getEmailsMissingAuthStatus(limit: number): Array<{ id: string; uid: number; folderPath: string }> {
+  getEmailsMissingHeaderStage(
+    limit: number,
+    ownMailFolderIds: readonly string[] = [],
+  ): Array<{ id: string; uid: number; folderPath: string; folderId: string }> {
     this.ensureInitialized();
-    return this.db!.prepare(
-      `SELECT e.id, e.uid, f.path AS folderPath
-       FROM emails e JOIN folders f ON f.id = e.folder_id
-       WHERE e.auth_status IS NULL AND e.uid IS NOT NULL AND e.uid > 0
-       ORDER BY e.date DESC LIMIT ?`,
-    ).all(limit) as Array<{ id: string; uid: number; folderPath: string }>;
+    type Candidate = { id: string; uid: number; date: number; folderPath: string; folderId: string };
+    const select = (index: string, where: string): string =>
+      `SELECT e.id, e.uid, e.date AS date, f.path AS folderPath, e.folder_id AS folderId
+         FROM emails e INDEXED BY ${index} JOIN folders f ON f.id = e.folder_id
+        WHERE ${where}
+        ORDER BY e.date DESC LIMIT ?`;
+    const authRows = this.db!.prepare(select(AUTH_PENDING_INDEX, headerStageAuthPending('e.')))
+      .all(limit) as Candidate[];
+    const spamRows = this.db!.prepare(select(SPAM_PENDING_INDEX, this.spamHalfClause(ownMailFolderIds)))
+      .all(...ownMailFolderIds, limit) as Candidate[];
+    return [...authRows, ...spamRows]
+      .sort((a, b) => b.date - a.date)
+      .slice(0, limit)
+      .map(({ id, uid, folderPath, folderId }) => ({ id, uid, folderPath, folderId }));
   }
 
-  /** One transaction for a whole backfill batch — 200 rows, not 200 fsyncs. */
-  updateEmailAuthStatusBatch(rows: Array<{ id: string; authStatus: string }>): number {
+  /**
+   * Count one fruitless attempt against each of these messages.
+   *
+   * Called with the uids the sweep asked for and the server did not return. A
+   * row that reaches HEADER_STAGE_MAX_ATTEMPTS leaves the backlog predicate —
+   * the columns stay NULL, which remains the truth ("never checked"), and the
+   * shield goes on reading Unverified. What ends is the asking: an expunged
+   * message or an unopenable folder used to keep the sweep selecting, fetching
+   * and writing nothing every 1.5 seconds for as long as the app ran.
+   */
+  recordHeaderStageMiss(ids: readonly string[]): number {
+    this.ensureInitialized();
+    if (ids.length === 0) return 0;
+    const stmt = this.db!.prepare(
+      'UPDATE emails SET header_stage_attempts = header_stage_attempts + 1 WHERE id = ?',
+    );
+    const run = this.db!.transaction((batch: readonly string[]) => {
+      let changed = 0;
+      for (const id of batch) changed += stmt.run(id).changes;
+      return changed;
+    });
+    return run(ids);
+  }
+
+  /**
+   * One transaction for a whole backfill batch — 200 rows, not 200 fsyncs.
+   *
+   * Every column is written through COALESCE, so a verdict already on the row
+   * is never overwritten: a backfill sweep may only FILL a gap, never restate
+   * what ingest decided. `spamScore` is null for own mail and stays null, which
+   * is why the row has to have entered the backlog through the auth half of the
+   * predicate for that to be safe.
+   *
+   * The WHERE guard keeps the returned count honest — without it SQLite reports
+   * a row as changed for a no-op UPDATE, and the progress line would claim work
+   * it did not do.
+   */
+  updateEmailHeaderStageBatch(
+    rows: Array<{
+      id: string;
+      authStatus: string | null;
+      spamScore: number | null;
+      spamReasons: string | null;
+      originIp: string | null;
+    }>,
+  ): number {
     this.ensureInitialized();
     if (rows.length === 0) return 0;
-    const stmt = this.db!.prepare('UPDATE emails SET auth_status = ? WHERE id = ? AND auth_status IS NULL');
-    const run = this.db!.transaction((batch: Array<{ id: string; authStatus: string }>) => {
+    const stmt = this.db!.prepare(
+      `UPDATE emails SET
+         auth_status  = COALESCE(auth_status, @authStatus),
+         spam_score   = COALESCE(spam_score, @spamScore),
+         spam_reasons = COALESCE(spam_reasons, @spamReasons),
+         origin_ip    = COALESCE(origin_ip, @originIp)
+       WHERE id = @id
+         AND (auth_status IS NULL OR spam_score IS NULL OR origin_ip IS NULL)`,
+    );
+    const run = this.db!.transaction((batch: typeof rows) => {
       let n = 0;
-      for (const r of batch) n += stmt.run(r.authStatus, r.id).changes;
+      for (const r of batch) n += stmt.run(r).changes;
       return n;
     });
     return run(rows);
