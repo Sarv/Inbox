@@ -17,6 +17,11 @@
       "types": "./dist/extension-sdk.d.ts",
       "import": "./dist/extension-sdk.mjs",
       "require": "./dist/extension-sdk.js"
+    },
+    "./extension-sdk-text": {
+      "types": "./dist/extension-sdk-text.d.ts",
+      "import": "./dist/extension-sdk-text.mjs",
+      "require": "./dist/extension-sdk-text.js"
     }
   },
   "scripts": {
