@@ -46,8 +46,16 @@ import { SidebarLabels } from './SidebarLabels';
 import { Tooltip } from './Tooltip';
 
 
-// Logo - optimized SVG wordmark (also serves as the favicon via index.html)
-const logoLarge = './logo.svg';
+// Wordmark only — no mark. The app rail to the left already shows the
+// SarvInbox medallion, and two copies of it side by side read as a mistake.
+// Two files because the "Sarv" glyphs are solid #000 and disappear against the
+// dark card; dark mode here is class-based (tailwind.config.js `darkMode:
+// ['class']`), so an `@media (prefers-color-scheme)` rule inside the SVG would
+// track the OS instead of the app and get it backwards half the time. An <img>
+// also seals the SVG off from the page's CSS, so `currentColor` is not an
+// option. Only the black flips — brand orange and blue are identical in both.
+const logoLarge = './wordmark.svg';
+const logoLargeDark = './wordmark-dark.svg';
 
 
 export function Sidebar() {
@@ -493,7 +501,17 @@ export function Sidebar() {
     <div className="w-64 min-w-64 flex-shrink-0 border-r border-border bg-card flex flex-col">
       {/* Header */}
       <div className="h-14 px-2 border-b border-border flex items-center justify-center">
-        <img src={logoLarge} alt="Sarv Inbox" className="h-10 w-full object-contain" />
+        <img
+          src={logoLarge}
+          alt="SarvInbox by Sarv"
+          className="h-10 w-full object-contain dark:hidden"
+        />
+        <img
+          src={logoLargeDark}
+          alt=""
+          aria-hidden="true"
+          className="hidden h-10 w-full object-contain dark:block"
+        />
       </div>
 
       {/* Account switcher (multi-account) */}

@@ -148,10 +148,12 @@ target/
 *.wmv
 
 
-# The macOS app icon lives under an otherwise-ignored build/ dir (rule above).
-# It's a committed SOURCE asset — electron-builder reads build/icon.icns for
-# release DMGs and postinstall.mjs copies it into the dev bundle — so keep it
-# tracked while still ignoring everything else under build/.
+# The app icons live under an otherwise-ignored build/ dir (rule above). They
+# are committed SOURCE assets — electron-builder reads build/icon.icns for the
+# macOS DMG and build/icon.png for the Windows/Linux executables, and
+# postinstall.mjs copies the .icns into the dev bundle — so keep both tracked
+# while still ignoring everything else under build/.
 !apps/desktop/build/
 apps/desktop/build/*
 !apps/desktop/build/icon.icns
+!apps/desktop/build/icon.png
