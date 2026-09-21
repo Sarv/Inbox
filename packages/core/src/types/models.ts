@@ -89,6 +89,9 @@ export interface EmailRecord {
   // the reputation stage (blocklists, reverse DNS). NULL when no header names
   // a public one.
   originIp?: string | null;
+  // The user's own verdict, which outranks every score: 'ham' = never file it
+  // again, 'spam' = spam whatever the score. NULL when they have not said.
+  spamUserVerdict?: 'spam' | 'ham' | null;
 
   // AI processing metadata
   aiProcessedAt?: number | null;

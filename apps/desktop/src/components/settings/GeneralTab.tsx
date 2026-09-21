@@ -399,14 +399,28 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
               <span className="text-sm whitespace-nowrap">Sarv service</span>
             </label>
             {(settings.spamReputationMode ?? 'sarv') === 'sarv' && (
-              <input
-                type="url"
-                value={settings.spamReputationEndpoint ?? ''}
-                onChange={(e) => updateSetting('spamReputationEndpoint', e.target.value)}
-                placeholder="https://reputation.sarv.com"
-                aria-label="Sarv reputation service address"
-                className="w-64 rounded-md border border-border bg-background px-2 py-1 text-sm"
-              />
+              <>
+                <input
+                  type="url"
+                  value={settings.spamReputationEndpoint ?? ''}
+                  onChange={(e) => updateSetting('spamReputationEndpoint', e.target.value)}
+                  placeholder="https://reputation.sarv.com"
+                  aria-label="Sarv reputation service address"
+                  className="w-64 rounded-md border border-border bg-background px-2 py-1 text-sm"
+                />
+                <label className="flex items-start gap-2 cursor-pointer w-64">
+                  <input
+                    type="checkbox"
+                    checked={settings.spamReputationReports === true}
+                    onChange={(e) => updateSetting('spamReputationReports', e.target.checked)}
+                    className="w-4 h-4 mt-0.5"
+                  />
+                  <span className="text-sm">
+                    Share my Report spam / Not spam verdicts so they count for other Sarv Inbox users
+                    <span className="block text-xs text-muted-foreground">Only the sender’s domain, its server address and your verdict are sent — never the message.</span>
+                  </span>
+                </label>
+              </>
             )}
           </div>
         </div>

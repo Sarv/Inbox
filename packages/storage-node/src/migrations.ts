@@ -3046,6 +3046,41 @@ export const emailReputationColumns: Migration = {
 };
 
 /**
+ * v88 — the spam filter's body stage and the user's own verdict.
+ *
+ * `link_reputation_checked_at`: when the domains a message LINKS to were last
+ * judged; NULL = not yet. The partial index holds only rows that have a body
+ * and are still waiting, so the pass selects cheaply and the index drains.
+ *
+ * `spam_user_verdict`: 'ham' or 'spam', the user's word. It outranks every
+ * score — a 'ham' row is never filed again however the reputation stages
+ * later score it — and it is what the report loop sends to the Sarv service,
+ * with the user's consent, as one more opinion on that sender.
+ */
+export const emailSpamVerdictColumns: Migration = {
+  version: 88,
+  name: 'email_spam_verdict_columns',
+  up: (db) => {
+    const colNames = new Set(
+      (db.prepare('PRAGMA table_info(emails)').all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!colNames.has('link_reputation_checked_at')) db.exec('ALTER TABLE emails ADD COLUMN link_reputation_checked_at INTEGER;');
+    if (!colNames.has('spam_user_verdict')) {
+      db.exec("ALTER TABLE emails ADD COLUMN spam_user_verdict TEXT CHECK (spam_user_verdict IN ('spam', 'ham'));");
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_emails_link_reputation_pending
+        ON emails(date DESC)
+        WHERE link_reputation_checked_at IS NULL AND spam_score IS NOT NULL AND raw_body_len > 0;
+    `);
+    logger.info('email spam verdict columns (v88): link_reputation_checked_at, spam_user_verdict ready');
+  },
+  down: (db) => {
+    db.exec('DROP INDEX IF EXISTS idx_emails_link_reputation_pending;');
+  },
+};
+
+/**
  * How many times the header-stage sweep may ask the server about one message
  * before it stops asking.
  *
@@ -3098,7 +3133,7 @@ export function headerStageSpamPending(prefix = ''): string {
 }
 
 /**
- * v88 — make the header-stage backlog cheap to ask about, and finite.
+ * v89 — make the header-stage backlog cheap to ask about, and finite.
  *
  * The backlog predicate was `(auth_status IS NULL OR (spam_score IS NULL AND
  * ...))`, and not one of the 36 indexes on `emails` covered either column, so
@@ -3120,7 +3155,7 @@ export function headerStageSpamPending(prefix = ''): string {
  * metadata in SQLite; existing rows read 0 and stay eligible.
  */
 export const headerStageBacklogIndexes: Migration = {
-  version: 88,
+  version: 89,
   name: 'header_stage_backlog_indexes',
   up: (db) => {
     const colNames = new Set(
@@ -3139,7 +3174,7 @@ export const headerStageBacklogIndexes: Migration = {
         ON emails(date DESC, auth_status, folder_id)
         WHERE ${headerStageSpamPending()};
     `);
-    logger.info('header-stage backlog (v88): attempts column + partial indexes ready');
+    logger.info('header-stage backlog (v89): attempts column + partial indexes ready');
   },
   down: (db) => {
     db.exec(`DROP INDEX IF EXISTS ${AUTH_PENDING_INDEX};`);
@@ -3384,6 +3419,7 @@ export function createMigrationManager(
   manager.register(linkDomainRules);
   manager.register(emailSpamColumns);
   manager.register(emailReputationColumns);
+  manager.register(emailSpamVerdictColumns);
   manager.register(headerStageBacklogIndexes);
   return manager;
 }

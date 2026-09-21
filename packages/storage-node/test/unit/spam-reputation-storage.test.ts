@@ -13,16 +13,23 @@ import { newMigratedDb } from '../../src/test-support/test-db';
  * make a score drift upward with every restart.
  */
 let n = 0;
-const seed = (db: ReturnType<typeof newMigratedDb>, opts: { uid?: number | null; score?: number | null; checked?: number | null; date?: number; ip?: string | null } = {}) => {
+const seed = (db: ReturnType<typeof newMigratedDb>, opts: {
+  uid?: number | null; score?: number | null; checked?: number | null; date?: number; ip?: string | null;
+  body?: string | null; bodyLen?: number | null; linkChecked?: number | null; verdict?: 'spam' | 'ham' | null; tags?: string;
+} = {}) => {
   n += 1;
   db.prepare(`INSERT INTO threads (id, subject, first_message_id, last_message_id, last_message_date) VALUES (?, 's', ?, ?, 1)`)
     .run(`t${n}`, `<m${n}@x>`, `<m${n}@x>`);
+  const body = opts.body ?? '';
   db.prepare(
     `INSERT INTO emails (id, message_id, thread_id, folder_id, uid, tags, subject, from_address, reply_to, date,
-       raw_body, clean_body, raw_body_len, clean_body_len, content_type, content_hash, spam_score, spam_reasons, origin_ip, reputation_checked_at)
-     VALUES (?, ?, ?, 'f1', ?, '|INBOX|', 's', 'a@b.com', 'r@c.com', ?, '', '', 0, 0, 'text', ?, ?, '[]', ?, ?)`,
-  ).run(`e${n}`, `<m${n}@x>`, `t${n}`, opts.uid === undefined ? n : opts.uid, opts.date ?? n, `h${n}`,
-    opts.score === undefined ? 0 : opts.score, opts.ip === undefined ? '8.8.8.8' : opts.ip, opts.checked ?? null);
+       raw_body, clean_body, raw_body_len, clean_body_len, content_type, content_hash, spam_score, spam_reasons, origin_ip,
+       reputation_checked_at, link_reputation_checked_at, spam_user_verdict)
+     VALUES (?, ?, ?, 'f1', ?, ?, 's', 'a@b.com', 'r@c.com', ?, ?, '', ?, 0, 'text', ?, ?, '[]', ?, ?, ?, ?)`,
+  ).run(`e${n}`, `<m${n}@x>`, `t${n}`, opts.uid === undefined ? n : opts.uid, opts.tags ?? '|INBOX|', opts.date ?? n, body,
+    opts.bodyLen === undefined ? body.length : opts.bodyLen, `h${n}`,
+    opts.score === undefined ? 0 : opts.score, opts.ip === undefined ? '8.8.8.8' : opts.ip, opts.checked ?? null,
+    opts.linkChecked ?? null, opts.verdict ?? null);
   return `e${n}`;
 };
 const storage = () => {
@@ -100,5 +107,73 @@ describe('applyReputationBatch', () => {
   it('is a no-op for an empty batch', () => {
     const { s } = storage();
     expect(s.applyReputationBatch([], 1)).toBe(0);
+  });
+});
+
+describe('v88 schema', () => {
+  it('adds link_reputation_checked_at, a constrained spam_user_verdict, and the body-stage index', () => {
+    const db = newMigratedDb();
+    const cols = (db.prepare('PRAGMA table_info(emails)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toEqual(expect.arrayContaining(['link_reputation_checked_at', 'spam_user_verdict']));
+    const idx = db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_emails_link_reputation_pending'`).get() as { sql: string } | undefined;
+    expect(idx?.sql).toMatch(/link_reputation_checked_at IS NULL AND spam_score IS NOT NULL AND raw_body_len > 0/);
+    // Only the two words the code writes are storable — a typo cannot become a third state.
+    const { db: seeded } = storage();
+    seed(seeded, {});
+    expect(() => seeded.prepare("UPDATE emails SET spam_user_verdict = 'maybe'").run()).toThrow(/CHECK constraint/);
+  });
+});
+
+describe('getEmailsPendingLinkReputation', () => {
+  it('lists header-scored rows that HAVE a body and no link verdict yet, with the body, newest first', () => {
+    const { s, db } = storage();
+    seed(db, { date: 100, body: '<a href="https://x.example">x</a>' });
+    seed(db, { date: 200, body: '' }); // no body yet
+    seed(db, { date: 300, body: 'https://y.example', linkChecked: 5 }); // already judged
+    seed(db, { date: 400, body: 'plain', bodyLen: null }); // length unknown: left for the metrics backfill
+    seed(db, { date: 500, body: 'https://z.example', score: null }); // never header-scored (own mail)
+    seed(db, { date: 600, body: 'https://w.example', uid: 0 }); // no server uid
+
+    const rows = s.getEmailsPendingLinkReputation(10);
+    expect(rows.map((r) => r.rawBody)).toEqual(['<a href="https://x.example">x</a>']);
+    expect(rows[0]).toMatchObject({ folderPath: 'INBOX', spamScore: 0, spamUserVerdict: null, fromAddress: 'a@b.com' });
+    expect(s.countEmailsPendingLinkReputation()).toBe(1);
+  });
+});
+
+describe('applyLinkReputationBatch', () => {
+  it('stamps once and never re-adds points', () => {
+    const { s, db } = storage();
+    const a = seed(db, { body: 'x' });
+    expect(s.applyLinkReputationBatch([{ id: a, spamScore: 5, spamReasons: '[]' }], 100)).toBe(1);
+    expect(s.applyLinkReputationBatch([{ id: a, spamScore: 9, spamReasons: '[]' }], 200)).toBe(0);
+    expect(db.prepare('SELECT spam_score, link_reputation_checked_at FROM emails WHERE id = ?').get(a)).toEqual({ spam_score: 5, link_reputation_checked_at: 100 });
+    expect(s.applyLinkReputationBatch([], 1)).toBe(0);
+    expect(s.countEmailsPendingLinkReputation()).toBe(0);
+  });
+});
+
+describe('the user’s verdict and the Spam tab listing', () => {
+  it('sets and clears the verdict, and the pending queries carry it', async () => {
+    const { s, db } = storage();
+    const a = seed(db, {});
+    await s.setSpamUserVerdict(a, 'ham');
+    expect(s.getEmailsPendingReputation(5)[0].spamUserVerdict).toBe('ham');
+    await s.setSpamUserVerdict(a, null);
+    expect(s.getEmailsPendingReputation(5)[0].spamUserVerdict).toBeNull();
+  });
+
+  // The tab shows everything the filter had an opinion on: suspicious and up,
+  // tagged, or overruled — not the clean bulk of the mailbox.
+  it('lists suspicious, tagged and overruled rows, newest first, and nothing clean', () => {
+    const { s, db } = storage();
+    seed(db, { date: 1, score: 0 }); // clean
+    const b = seed(db, { date: 2, score: 3 }); // suspicious
+    const c = seed(db, { date: 3, score: 0, tags: '|INBOX|spam|' }); // tagged by the AI
+    const d = seed(db, { date: 4, score: 1, verdict: 'ham' }); // overruled
+    const rows = s.getSpamJudgedEmails(10, 3);
+    expect(rows.map((r) => r.id)).toEqual([d, c, b]);
+    expect(rows[0]).toMatchObject({ spamUserVerdict: 'ham', folderPath: 'INBOX', fromAddress: 'a@b.com' });
+    expect(s.getSpamJudgedEmails(1, 3)).toHaveLength(1);
   });
 });

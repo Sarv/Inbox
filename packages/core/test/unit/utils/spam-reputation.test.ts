@@ -6,6 +6,7 @@ import {
   REPUTATION_MAX_POINTS,
   SarvReputationProvider,
   USER_REPORTS_MIN,
+  linkReputationReasons,
   messageDomains,
   reputationReasons,
   unknownResult,
@@ -296,5 +297,57 @@ describe('edges', () => {
   it('messageDomains tolerates missing fields', () => {
     expect(messageDomains({})).toEqual([]);
     expect(messageDomains({ fromAddress: 'a@localhost' })).toEqual([]); // no dot: nothing to look up
+  });
+});
+
+describe('linkReputationReasons', () => {
+  const result = (domains: Record<string, { category: string; list?: string }>): ReputationResult => ({
+    provider: 'test', ips: new Map(),
+    domains: new Map(Object.entries(domains).map(([d, h]) => [d, { status: 'listed' as const, hits: [{ list: h.list ?? 'Spamhaus DBL', category: h.category, detail: `${h.category} domain` }] }])),
+  });
+
+  // THE classic phish: it comes from anywhere and links to a listed site.
+  it('lets a phishing or malware link decide alone, and grades the rest', () => {
+    expect(linkReputationReasons(result({ 'evil.example': { category: 'phishing' } }), ['evil.example'])).toEqual([
+      { id: 'reputation-link-listed', points: 5, detail: expect.stringContaining('Links to evil.example, which is on Spamhaus DBL') },
+    ]);
+    expect(linkReputationReasons(result({ 's.example': { category: 'spam' } }), ['s.example'])[0].points).toBe(3);
+    expect(linkReputationReasons(result({ 'g.example': { category: 'grey', list: 'URIBL' } }), ['g.example'])[0].points).toBe(1);
+    expect(linkReputationReasons(result({ 'w.example': { category: 'weird' } }), ['w.example'])[0].points).toBe(2);
+  });
+
+  it('shares the cap with the sender stage and skips clean or unknown link domains', () => {
+    const r = result({ 'a.example': { category: 'phishing' }, 'b.example': { category: 'phishing' } });
+    const reasons = linkReputationReasons(r, ['a.example', 'A.example', 'b.example', 'clean.example'], 2);
+    expect(reasons.map((x) => x.points)).toEqual([4]); // 6 − 2 already added; the second listing has no room left
+    expect(linkReputationReasons(r, ['a.example'], REPUTATION_MAX_POINTS)).toEqual([]);
+    expect(linkReputationReasons(unknownResult('t', { ips: [], domains: ['u.example'] }), ['u.example'])).toEqual([]);
+  });
+});
+
+describe('SarvReputationProvider.report', () => {
+  const seen: Array<{ url: string; init: { headers: Record<string, string>; body: string } }> = [];
+  const provider = (status = 202, token: string | null = 'tok') => new SarvReputationProvider({
+    endpoint: 'https://r.example/', getToken: async () => token,
+    fetch: async (url, init) => { seen.push({ url, init: init as never }); return { ok: status < 400, status, json: async () => ({}) }; },
+  });
+
+  it('posts the sender domain, address and verdict with the bearer — and nothing else', async () => {
+    seen.length = 0;
+    expect(await provider().report({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' })).toBe(true);
+    expect(seen[0].url).toBe('https://r.example/v1/reputation/report');
+    expect(seen[0].init.headers.authorization).toBe('Bearer tok');
+    expect(JSON.parse(seen[0].init.body)).toEqual({ domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' });
+  });
+
+  // Fail-open: a report is a courtesy, never a blocker.
+  it('is false without a token, without anything to report, on an error status, or when unreachable', async () => {
+    expect(await provider(202, null).report({ domain: 'x.example', ip: null, verdict: 'ham' })).toBe(false);
+    expect(await provider().report({ domain: null, ip: null, verdict: 'spam' })).toBe(false);
+    expect(await provider(500).report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
+    const broken = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => 't', fetch: async () => { throw new Error('ECONNRESET'); } });
+    expect(await broken.report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
+    const noToken = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => { throw new Error('refresh failed'); }, fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+    expect(await noToken.report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
   });
 });

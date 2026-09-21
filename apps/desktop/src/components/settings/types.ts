@@ -45,6 +45,10 @@ export interface AppSettings {
   spamReputationMode: 'off' | 'local' | 'sarv';
   /** Origin of the Sarv reputation service, e.g. https://reputation.sarv.com. */
   spamReputationEndpoint: string;
+  /** Send your own Report spam / Not spam verdicts (sender domain, server address,
+   *  verdict — never subject, body or recipients) to the Sarv service so they
+   *  count for other users. Opt-in. */
+  spamReputationReports: boolean;
 
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
@@ -121,6 +125,7 @@ export const defaultSettings: AppSettings = {
   senderFavicons: true,
   spamReputationMode: 'sarv',
   spamReputationEndpoint: '',
+  spamReputationReports: false,
   categoryLabels: { enabled: true, folderMode: 'copy' },
   reputation: { enabled: false, zones: [], servers: [] },
   inboxType: 'priority_first',
