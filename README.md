@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="apps/desktop/public/icon.svg" alt="Sarv Inbox" width="128" height="128">
+</p>
+
 # Sarv Inbox
 
 [![License: Sarv Community License](https://img.shields.io/badge/license-Sarv%20Community%20License-0b7285.svg)](./LICENSE)
