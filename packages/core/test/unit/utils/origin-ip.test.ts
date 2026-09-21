@@ -4,7 +4,7 @@ import {
   normalizeIp,
   originIpFromAuthHeaders,
   originIpFromReceived,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 import { describe, expect, it } from 'vitest';
 
 

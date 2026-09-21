@@ -24,7 +24,7 @@ import {
 /**
  * BIMI and the Verified Mark Certificate behind the blue tick — as Inbox sees
  * it, now that the record grammar, the chain verification, the pinned roots
- * and the SVG Tiny PS rules are `@sarv-in/email-spam-scan/brand`.
+ * and the SVG Tiny PS rules are `@sarv-in/mailguard/brand`.
  *
  * The behaviour coverage moved with the code: the library's own
  * `brand-bimi`, `brand-vmc`, `brand-records` and `brand-svg` suites (about

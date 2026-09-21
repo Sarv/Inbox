@@ -37,7 +37,7 @@ export const DEFAULT_FORBIDDEN_RENDERER_PACKAGES: readonly string[] = [
   'imap', // legacy node-imap; removed, but guard so it can never return to the renderer
   'node-imap',
   // The freemail corpus behind the spam scorer's `reply-to-freemail` rule,
-  // reachable only from the ROOT entry of `@sarv-in/email-spam-scan`. Not
+  // reachable only from the ROOT entry of `@sarv-in/mailguard`. Not
   // Node-only, so it never produces the dynamic-require crash above — it
   // earns its place here for the second failure this guard exists to prevent.
   // It is a CommonJS array with no default export: the Vite DEV server serves

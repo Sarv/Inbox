@@ -1,4 +1,4 @@
-import { SPAMCOP, SPAMHAUS_ZEN, type DnsQuery } from '@sarv-in/email-spam-scan';
+import { SPAMCOP, SPAMHAUS_ZEN, type DnsQuery } from '@sarv-in/mailguard';
 import { describe, expect, it, vi } from 'vitest';
 
 import {

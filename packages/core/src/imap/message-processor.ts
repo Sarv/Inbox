@@ -6,7 +6,7 @@ import {
   isSpamScore,
   mergeAssessments,
   type SpamAssessment,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 import libmime from 'libmime';
 import { simpleParser, type ParsedMail } from 'mailparser';
 

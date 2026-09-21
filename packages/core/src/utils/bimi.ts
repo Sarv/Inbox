@@ -19,7 +19,7 @@
  *     would be a tick anyone could mint.
  *
  * All of that — the record grammar, the chain verification, the pinned roots,
- * the SVG Tiny PS rules — is `@sarv-in/email-spam-scan/brand` now; this module
+ * the SVG Tiny PS rules — is `@sarv-in/mailguard/brand` now; this module
  * is the seam. Everything network-shaped (DNS, HTTPS) is still injected, so
  * the whole policy stays unit-testable with a fake resolver and fetch, and the
  * main process hands in Chromium's `net.fetch`. Nothing here caches; the
@@ -44,7 +44,7 @@ export {
   lookupBimi,
   fetchBounded,
   defaultFetch,
-} from '@sarv-in/email-spam-scan/brand';
+} from '@sarv-in/mailguard/brand';
 
 export type {
   MarkVerifyingAuthorityRoot,
@@ -63,4 +63,4 @@ export type {
   FetchResponse,
   FetchedBytes,
   FetchBoundedOptions,
-} from '@sarv-in/email-spam-scan/brand';
+} from '@sarv-in/mailguard/brand';

@@ -25,7 +25,7 @@
  * us hammering a zone that will never answer. A user who wants this on
  * realistically needs their own resolver or a keyed subscription zone.
  */
-import { BLOCKLISTS, type Blocklist } from '@sarv-in/email-spam-scan';
+import { BLOCKLISTS, type Blocklist } from '@sarv-in/mailguard';
 import {
   createLogger,
   ReputationStage,

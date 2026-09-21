@@ -11,7 +11,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { EventEmitter } from 'events';
 
-import { extractAuthHeaderBlock, SPAM_HEADER_NAMES } from '@sarv-in/email-spam-scan';
+import { extractAuthHeaderBlock, SPAM_HEADER_NAMES } from '@sarv-in/mailguard';
 import type {
   ImapFlowOptions,
   FetchMessageObject,

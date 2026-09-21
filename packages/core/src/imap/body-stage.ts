@@ -36,7 +36,7 @@ import {
   parseSpamReasons,
   stageOfReason,
   type SpamAssessment,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 
 /** A parsed body in the shape this app stores it. */
 export interface BodyStageInput {

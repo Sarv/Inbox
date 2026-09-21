@@ -1,4 +1,4 @@
-import type { LinkMismatch } from '@sarv-in/email-spam-scan/links';
+import type { LinkMismatch } from '@sarv-in/mailguard/links';
 import { ShieldAlert, ShieldX, Check, Ban } from 'lucide-react';
 import { useMemo, useState } from 'react';
 

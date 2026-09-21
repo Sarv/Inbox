@@ -1,7 +1,7 @@
 // The ONE place an email's security level is decided — and, now, the one place
 // this app's WORDS for it live.
 //
-// The decision itself is `@sarv-in/email-spam-scan/security` now — the same
+// The decision itself is `@sarv-in/mailguard/security` now — the same
 // rules the sync-time filter applies, so the level a tooltip shows, the level
 // a banner escalates on and the level the Security page explains can never be
 // three different answers, and none of them can drift from the verdict that
@@ -30,9 +30,9 @@ import {
   type SecurityAssessment,
   type SecurityCheck,
   type SecurityLevel,
-} from '@sarv-in/email-spam-scan/security';
+} from '@sarv-in/mailguard/security';
 
-export { EMPTY_RULES, LEVEL_RANK, linkRuleKey, parseAuthStatus, worstLevel } from '@sarv-in/email-spam-scan/security';
+export { EMPTY_RULES, LEVEL_RANK, linkRuleKey, parseAuthStatus, worstLevel } from '@sarv-in/mailguard/security';
 
 export type {
   CheckStatus,
@@ -40,10 +40,10 @@ export type {
   SecurityAssessment,
   SecurityCheck,
   SecurityLevel,
-} from '@sarv-in/email-spam-scan/security';
+} from '@sarv-in/mailguard/security';
 
 /** Verdicts as stored in emails.auth_status (see core parseAuthenticationHeaders). */
-export type { AuthStatus } from '@sarv-in/email-spam-scan/verdict';
+export type { AuthStatus } from '@sarv-in/mailguard/verdict';
 
 /** The domain's BIMI standing as the main process cached it (see sender-identity). */
 export type BimiIdentity = BrandIdentity;

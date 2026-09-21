@@ -1,4 +1,4 @@
-import { assessSender, domainOfAddress, domainsInText, registrableDomain } from '@sarv-in/email-spam-scan';
+import { assessSender, domainOfAddress, domainsInText, registrableDomain } from '@sarv-in/mailguard';
 import { describe, expect, it } from 'vitest';
 
 

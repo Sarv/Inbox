@@ -11,7 +11,7 @@
  * Discovery order mirrors what browsers do: the icons the homepage declares
  * (`<link rel="icon">`, `apple-touch-icon`, …), best first, then
  * `/favicon.ico`. That, and the byte sniffing that keeps a 200-with-an-error-
- * page from becoming an avatar, live in `@sarv-in/email-spam-scan/brand`
+ * page from becoming an avatar, live in `@sarv-in/mailguard/brand`
  * alongside the BIMI lookup they share a fetch with; this module is the seam.
  */
 export {
@@ -22,11 +22,11 @@ export {
   sniffImageType,
   faviconHosts,
   discoverFavicon,
-} from '@sarv-in/email-spam-scan/brand';
+} from '@sarv-in/mailguard/brand';
 
 export type {
   IconCandidate,
   FaviconStatus,
   FaviconResult,
   FaviconOptions,
-} from '@sarv-in/email-spam-scan/brand';
+} from '@sarv-in/mailguard/brand';

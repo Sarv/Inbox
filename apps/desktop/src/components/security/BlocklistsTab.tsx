@@ -1,4 +1,4 @@
-import { BLOCKLISTS } from '@sarv-in/email-spam-scan/reputation';
+import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
 import { Globe, Info, Server } from 'lucide-react';
 import { useState } from 'react';
 
@@ -21,12 +21,12 @@ import { Tooltip } from '../Tooltip';
  * breaker opens, and nothing is scored. Saying so here is cheaper than letting
  * somebody discover it as a silence.
  *
- * The catalogue comes from `@sarv-in/email-spam-scan/reputation`, a subpath
+ * The catalogue comes from `@sarv-in/mailguard/reputation`, a subpath
  * entry that reaches `node:dns` only through a dynamic import. Its one cost in
  * the browser is `ipaddr.js`, which is CommonJS — so it is named in
  * `LINKED_CJS_DEPS` (apps/desktop/vite/linked-packages.ts) to keep it in Vite's
  * pre-bundle. Without that the dev server serves it unconverted and this tab
- * takes the whole window down; see docs/email-spam-scan.md.
+ * takes the whole window down; see docs/mailguard.md.
  */
 export function BlocklistsTab() {
   const [prefs, setPrefs] = useState(getReputationPrefs);

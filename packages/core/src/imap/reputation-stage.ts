@@ -7,7 +7,7 @@
  * us and costs nothing to read. This one is a DNS query per distinct sender,
  * sent to a third party, about mail a user is receiving. That difference is
  * why the whole thing is OFF unless the user has named the zones to ask:
- * `@sarv-in/email-spam-scan/reputation` takes the blocklists as a required
+ * `@sarv-in/mailguard/reputation` takes the blocklists as a required
  * argument for the same reason, and this class keeps that property rather than
  * quietly supplying a default.
  *
@@ -43,7 +43,7 @@ import {
   type Blocklist,
   type DnsQuery,
   type SpamAssessment,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 
 import { logger } from '../utils/logger';
 

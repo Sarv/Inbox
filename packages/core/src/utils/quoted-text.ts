@@ -1,5 +1,5 @@
 /**
- * Where somebody else's email begins — `@sarv-in/email-spam-scan/quote` now.
+ * Where somebody else's email begins — `@sarv-in/mailguard/quote` now.
  *
  * The markers and the cut were written here, for two callers that must not
  * drift apart: signature mining (which otherwise attributes the quoted
@@ -28,4 +28,4 @@
  * `ownWords` is the same cut with the sign-off removed, which is what a
  * scorer wants and what a contact miner must never be given.
  */
-export { QUOTE_MARKERS, stripQuotedTail } from '@sarv-in/email-spam-scan/quote';
+export { QUOTE_MARKERS, stripQuotedTail } from '@sarv-in/mailguard/quote';

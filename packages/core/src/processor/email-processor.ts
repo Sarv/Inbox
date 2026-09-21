@@ -9,8 +9,8 @@
  * - Bulk mail indicators (List-Unsubscribe, Precedence headers)
  */
 
-import { parseAuthenticationHeaders } from '@sarv-in/email-spam-scan/headers';
-import type { AuthStatus } from '@sarv-in/email-spam-scan/verdict';
+import { parseAuthenticationHeaders } from '@sarv-in/mailguard/headers';
+import type { AuthStatus } from '@sarv-in/mailguard/verdict';
 
 import type { EmailRecord } from '../types/models';
 import { bulkHeaderSignals, headerLookupFromText } from '../utils/bulk-mail';
@@ -20,7 +20,7 @@ import { hasTag } from '../utils/tags';
  * Authentication status parsed from email headers — the library's shape, so
  * the importance scorer and the spam filter read one verdict, not two.
  */
-export type { AuthStatus } from '@sarv-in/email-spam-scan/verdict';
+export type { AuthStatus } from '@sarv-in/mailguard/verdict';
 
 /**
  * Sender statistics for scoring
@@ -100,7 +100,7 @@ export const IMPORTANCE_THRESHOLDS = {
 /**
  * Parse authentication results from email headers.
  *
- * The reading is `@sarv-in/email-spam-scan/headers` — the same one the spam
+ * The reading is `@sarv-in/mailguard/headers` — the same one the spam
  * filter scores, so the importance weights and the spam points can never
  * disagree about whether a message passed DMARC. Re-exported under the name
  * this module always published: the importance scorer below is only one of its
