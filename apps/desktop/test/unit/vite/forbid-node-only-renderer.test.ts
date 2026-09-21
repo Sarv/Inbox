@@ -48,7 +48,7 @@ describe('forbiddenPackageForId — flags Node-only packages in a module id', ()
   it('flags the spam scorer\'s freemail corpus', () => {
     // Regression, 2026-09-19: core's bulk-mail.ts is aliased straight into the
     // renderer, and it was re-pointed at the ROOT entry of
-    // `@sarv-in/email-spam-scan` — which reaches the header rules, and through
+    // `@sarv-in/mailguard` — which reaches the header rules, and through
     // them `free-email-domains`, a CommonJS array with no default export. The
     // production build converted it silently; the dev server did not, and the
     // window came up blank. It is not Node-only, so nothing else in this repo
@@ -84,8 +84,8 @@ describe('forbiddenPackageForId — leaves renderer-safe ids alone', () => {
     // `/links` and `/security` entries cost. Only the root entry is off limits,
     // and it is off limits by way of the two packages it alone reaches.
     for (const id of [
-      '/repo/node_modules/@sarv-in/email-spam-scan/dist/security.js',
-      '/repo/node_modules/@sarv-in/email-spam-scan/dist/headers.js',
+      '/repo/node_modules/@sarv-in/mailguard/dist/security.js',
+      '/repo/node_modules/@sarv-in/mailguard/dist/headers.js',
       '/repo/node_modules/tldts/dist/es6/index.js',
       // The scorer's OTHER root-only dep, which the renderer imports on
       // purpose in src/utils/email-address.ts. Forbidding it alongside

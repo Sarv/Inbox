@@ -24,7 +24,7 @@ import {
   parseAuthenticationHeaders,
   type AuthStatus,
   type SpamAssessment,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 
 import type { IMAPMessage } from '../types/imap';
 

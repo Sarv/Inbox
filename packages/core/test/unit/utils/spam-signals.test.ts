@@ -4,14 +4,14 @@ import {
   assessSpamSignals,
   isFreemailAddress,
   type SpamSignalInput,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 import {
   SPAM_THRESHOLD,
   SUSPICIOUS_THRESHOLD,
   isSpamScore,
   parseSpamReasons,
   spamVerdict,
-} from '@sarv-in/email-spam-scan';
+} from '@sarv-in/mailguard';
 import { describe, expect, it } from 'vitest';
 
 import { headerLookupFromText } from '../../../src/utils/bulk-mail';

@@ -1,4 +1,4 @@
-import { assessmentOf, type SpamReason } from '@sarv-in/email-spam-scan';
+import { assessmentOf, type SpamReason } from '@sarv-in/mailguard';
 import { describe, it, expect } from 'vitest';
 
 import { bodyStage, rescoreWithBody } from '../../../src/imap/body-stage';

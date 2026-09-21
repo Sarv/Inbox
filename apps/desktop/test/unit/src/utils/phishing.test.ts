@@ -1,10 +1,10 @@
 
-import { assessSender, registrableDomain } from '@sarv-in/email-spam-scan/identity';
-import { assessPhishing } from '@sarv-in/email-spam-scan/links';
+import { assessSender, registrableDomain } from '@sarv-in/mailguard/identity';
+import { assessPhishing } from '@sarv-in/mailguard/links';
 import { describe, it, expect } from 'vitest';
 
 // `src/utils/phishing.ts` was the renderer's copy of these rules; it is now
-// `@sarv-in/email-spam-scan`, the open-source library the sync-time filter
+// `@sarv-in/mailguard`, the open-source library the sync-time filter
 // shares. The library pins each rule in its own suite — what this file keeps
 // guarding is the SWAP: that the package the shield and the banner now import
 // still answers the three questions this app asked of the module it replaced.

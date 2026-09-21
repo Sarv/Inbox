@@ -13,7 +13,7 @@ import {
 
 /**
  * Domain favicons as the fallback sender avatar — as Inbox sees them, now that
- * discovery, ranking and byte-sniffing are `@sarv-in/email-spam-scan/brand`.
+ * discovery, ranking and byte-sniffing are `@sarv-in/mailguard/brand`.
  *
  * The behaviour coverage moved with the code: the library's 372-line
  * `brand-favicon` suite pins the whole `<link>` grammar, the redirect base,
