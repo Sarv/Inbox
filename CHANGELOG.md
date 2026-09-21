@@ -40,6 +40,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machine: this stage is deterministic and offline. The connecting server's IP
   address is recorded per message for the reputation stage (blocklists, reverse
   DNS) that follows. Your own Sent and Drafts mail is never scored.
+- Mail that was already in the mailbox now gets the same treatment. A
+  background sweep re-reads the headers of older messages and fills in whatever
+  they are missing — the SPF/DKIM/DMARC verdict the receiving server recorded,
+  the spam score and its reasons, and the connecting IP — so the shield stops
+  saying "Unverified" and "Not scored" for mail that arrived before those
+  checks existed. Both verdicts come off one header fetch per message, at a
+  pace that stays out of the way of anything you are doing, and the Security
+  page shows the progress and can run it now. A verdict already recorded is
+  never overwritten, and your own Sent and Drafts mail is verified but still
+  never scored.
+- Blocklists, off by default, under **Security > Blocklists**. Sarv Inbox can
+  now ask a DNSBL operator — Spamhaus ZEN, Spamhaus DBL, SpamCop — whether the
+  server that delivered a message, or the domain it claims to be from, is a
+  known source of spam, and add what it learns to the message's spam score. A
+  listing is never the whole verdict on its own: a shared mail server appears
+  on a list for reasons that have nothing to do with the person who wrote to
+  you. This is the only spam check that leaves your machine, so it stays off
+  until you switch it on and pick a list, it is never run over old mail during
+  a backfill, and it is never run over your own Sent or Drafts. Answers are
+  cached, a batch from one sender is a single query, and a resolver that stops
+  answering is left alone until it recovers. Note that the large operators
+  refuse queries arriving through a public resolver — an ISP's DNS, or 8.8.8.8
+  — so the tab lets you name resolvers of your own, and says why that matters.
 - Attachments now open **inside** Sarv Inbox. Clicking an attachment shows it in
   an in-app viewer — PDFs, images (including SVG), text/CSV/JSON/Markdown/log
   files, audio and video — instead of writing a copy to disk and handing the file
@@ -76,6 +99,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one move the message ends up making.
 
 ### Changed
+- The mail-security rules now come from
+  [`@sarv-in/email-spam-scan`](https://github.com/Sarv/email-spam-scan), a new
+  open-source library, instead of living in this repository. SPF/DKIM/DMARC
+  header reading, display-name impersonation, origin-IP extraction, the
+  header-stage spam score and its stored verdict, deceptive-link detection and
+  the five security levels all moved there unchanged; the sync-time filter and
+  the shield beside the sender are now provably the same code rather than two
+  copies that happened to agree. Nothing about what the app decides changed —
+  every test that pinned the old modules still runs, now against the library.
+  What stayed behind is what the library has no business owning: this app's
+  wording for each level, and the thread-view rule that puts one warning banner
+  on the first message that warrants it. See
+  [docs/email-spam-scan.md](docs/email-spam-scan.md).
 - Category labels are no longer prefixed on Sarv accounts, and no longer create
   folders there. Sarv is our own product and its webmail already knows these
   labels, so a categorised message is simply flagged with the bare category name
