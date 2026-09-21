@@ -1,0 +1,51 @@
+{
+  "id": "email-summarization",
+  "name": "Thread Summary",
+  "version": "1.0.0",
+  "description": "Summarizes a long mail or a whole thread on demand, with the key points and anything that looks like it needs doing",
+  "author": "Sarv",
+  "main": "./dist/index.js",
+  "icon": "./icon.svg",
+  "engines": {
+    "sarvinbox": "^1.1.0"
+  },
+  "permissions": [
+    "email:read",
+    "ai:use",
+    "storage:local",
+    "settings:read"
+  ],
+  "contributes": {
+    "workflows": [
+      {
+        "id": "summarize-email",
+        "name": "Summarize long mail",
+        "description": "Summarizes a long message as it arrives so opening it is instant",
+        "priority": 30,
+        "requiresAI": true,
+        "requiresBody": true
+      }
+    ],
+    "settings": [
+      {
+        "key": "email-summarization.enabled",
+        "type": "boolean",
+        "default": true,
+        "description": "Enable summarization"
+      },
+      {
+        "key": "email-summarization.autoSummarize",
+        "type": "boolean",
+        "default": false,
+        "description": "Summarize long mail as it arrives, instead of only when asked. Costs an AI call per long message."
+      },
+      {
+        "key": "email-summarization.minLength",
+        "type": "number",
+        "default": 1500,
+        "description": "Shortest message worth summarizing, in characters"
+      }
+    ],
+    "events": ["email:body-ready"]
+  }
+}

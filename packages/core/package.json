@@ -12,6 +12,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./extension-sdk": {
+      "types": "./dist/extension-sdk.d.ts",
+      "import": "./dist/extension-sdk.mjs",
+      "require": "./dist/extension-sdk.js"
     }
   },
   "scripts": {

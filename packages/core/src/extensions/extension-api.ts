@@ -25,6 +25,8 @@ import type {
   ExtensionStorage,
   ExtensionAI,
   ExtensionSettings,
+  ExtensionUI,
+  ExtensionUINotification,
   ExtensionLogger,
   WorkflowExecutionContext,
   ExtensionWorkflowResult,
@@ -52,6 +54,7 @@ export interface ExtensionContextOptions {
   storageBackend: ExtensionStorageBackend;
   aiBackend?: ExtensionAIBackend;
   settingsBackend: ExtensionSettingsBackend;
+  uiBackend?: ExtensionUIBackend;
 }
 
 /**
@@ -75,6 +78,14 @@ export interface ExtensionAIBackend {
   extractActionItems(email: EmailRecord): Promise<string[]>;
   isAvailable(): boolean;
   complete(options: { systemPrompt: string; userPrompt: string; maxTokens?: number }): Promise<string>;
+}
+
+/**
+ * UI notification backend interface (implemented by host)
+ */
+export interface ExtensionUIBackend {
+  notify(extensionId: string, notification: ExtensionUINotification): void;
+  dismiss(extensionId: string, notificationId: string): void;
 }
 
 /**
@@ -112,6 +123,7 @@ export class ExtensionContextImpl implements ExtensionContext {
   readonly storage: ExtensionStorage;
   readonly ai?: ExtensionAI;
   readonly settings: ExtensionSettings;
+  readonly ui: ExtensionUI;
   readonly log: ExtensionLogger;
   subscriptions: Unsubscribe[] = [];
 
@@ -139,6 +151,9 @@ export class ExtensionContextImpl implements ExtensionContext {
 
     // Create permission-checked settings
     this.settings = this.createSettings();
+
+    // Create permission-checked UI notifications
+    this.ui = this.createUI();
 
     // Create logger
     this.log = this.createLogger();
@@ -379,6 +394,34 @@ export class ExtensionContextImpl implements ExtensionContext {
       has(key: string): boolean {
         context.requirePermission('settings:read', 'settings.has');
         return backend.has(extensionId, key);
+      },
+    };
+  }
+
+  /**
+   * Create permission-checked UI notification wrapper.
+   *
+   * Notifications are fire-and-forget by design: an extension must not be able
+   * to block the ingest path waiting on the renderer, and a window that is
+   * closed or still booting is a normal state, not an error. When no backend is
+   * wired (headless tests, a host that renders no UI) the calls are no-ops.
+   */
+  private createUI(): ExtensionUI {
+    const backend = this.options.uiBackend;
+    const extensionId = this.manifest.id;
+    const context = this;
+
+    return {
+      notify(notification: ExtensionUINotification): void {
+        context.requirePermission('ui:notify', 'ui.notify');
+        if (!backend) return;
+        backend.notify(extensionId, notification);
+      },
+
+      dismiss(notificationId: string): void {
+        context.requirePermission('ui:notify', 'ui.dismiss');
+        if (!backend) return;
+        backend.dismiss(extensionId, notificationId);
       },
     };
   }

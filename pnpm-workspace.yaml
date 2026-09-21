@@ -1,3 +1,7 @@
 packages:
   - 'packages/*'
   - 'apps/*'
+  # Builtin extensions. Each is a self-contained package that builds to a
+  # bundled CJS entry point — exactly what a third-party extension looks like,
+  # so these double as the reference implementation (see docs/EXTENSIONS.md).
+  - 'extensions/*'

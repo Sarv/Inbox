@@ -24,6 +24,9 @@ export type {
   ExtensionStorage,
   ExtensionAI,
   ExtensionSettings,
+  ExtensionUI,
+  ExtensionUIField,
+  ExtensionUINotification,
   ExtensionLogger,
   AICategorizationResult,
   AICompletionOptions,
@@ -50,8 +53,19 @@ export {
   type ExtensionStorageBackend,
   type ExtensionAIBackend,
   type ExtensionSettingsBackend,
+  type ExtensionUIBackend,
   type RegisteredWorkflow,
 } from './extension-api';
+
+// Notification card sanitisation
+export {
+  sanitizeExtensionNotification,
+  namespaceNotificationId,
+  MAX_NOTIFICATION_LIFETIME_MS,
+  MIN_NOTIFICATION_TIMEOUT_MS,
+  MAX_NOTIFICATION_TIMEOUT_MS,
+  type SanitizedExtensionNotification,
+} from './ui-notification';
 
 // Extension Loader
 export {
@@ -86,6 +100,7 @@ export {
   createExtensionHost,
   type ExtensionModule,
   type ExtensionHostOptions,
+  type WorkflowStage,
 } from './extension-host';
 
 // Extension Manager
