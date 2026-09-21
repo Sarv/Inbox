@@ -19,6 +19,8 @@ import {
   stopManualBodyDownload,
   getManualBodyDownloadState,
 } from '../services/body-prefetch-scheduler';
+import { reportSenderVerdict } from '../services/spam-reputation-service';
+import { applyUserSpamVerdict } from '../services/spam-verdict-actions';
 import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine } from '../shared';
 
 import { logUserAction } from './agent-handlers';
@@ -350,6 +352,23 @@ async function moveOrCopyOne(
   const sourceFolder = await storage.getFolder(email.folderId);
   await placeEmailInFolder(storage, syncEngine, email, sourceFolder, destFolder, mode);
   return { ok: true };
+}
+
+/**
+ * Report a bulk verdict to the reputation service once per sender domain —
+ * a thread of forty messages from one sender is one opinion, not forty.
+ * Gated inside reportSenderVerdict by the user's opt-in.
+ */
+function reportVerdictsOnce(emails: Array<{ fromAddress?: string | null; originIp?: string | null }>, verdict: 'spam' | 'ham'): void {
+  const seen = new Set<string>();
+  for (const e of emails) {
+    const at = (e.fromAddress || '').lastIndexOf('@');
+    const domain = at >= 0 ? (e.fromAddress || '').slice(at + 1).trim().toLowerCase() : '';
+    const key = domain || e.originIp || '';
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    reportSenderVerdict({ domain: domain || null, ip: e.originIp ?? null, verdict });
+  }
 }
 
 export function registerEmailHandlers(): void {
@@ -1429,81 +1448,25 @@ export function registerEmailHandlers(): void {
   });
 
   /**
-   * Move email to spam
+   * Move email to spam — the user's verdict. The local re-file, the queued
+   * server move, the spammer list, the stored verdict and the (opt-in) report
+   * all live in applyUserSpamVerdict, shared with Not spam and the Spam tab.
    */
   ipcMain.handle('emails:moveToSpam', async (_event, emailId: string, accountId?: string) => {
     try {
       const { storage, syncEngine } = await resolveAccountTarget(accountId);
-
-      const email = await storage.getEmail(emailId);
-      if (!email) {
-        return { success: false, error: 'Email not found' };
-      }
-
-      const folders = await storage.getFolders();
-      const spamFolder = findFolderByType(folders as any, 'spam') as any;
-
-      if (!spamFolder) {
-        return { success: false, error: 'Spam folder not found' };
-      }
-
-      // 1. Update local DB immediately (instant UI feedback)
-      const sourceFolder = await storage.getFolder(email.folderId);
-      let tags = email.tags || '';
-      if (sourceFolder?.path && tags.includes('|' + sourceFolder.path + '|')) {
-        tags = tags.replace('|' + sourceFolder.path + '|', '|');
-      }
-      if (!tags.includes('|' + spamFolder.path + '|')) {
-        const list = tags.split('|').filter(Boolean);
-        list.push(spamFolder.path);
-        tags = '|' + list.join('|') + '|';
-      }
-
-      await storage.updateEmail(emailId, { folderId: spamFolder.id, tags });
-
-      // Recount folder unread (thread-based)
-      // Await so the renderer's follow-up loadFolders() reads the fresh counts
-      // instead of racing this recompute (fire-and-forget could be read stale,
-      // stranding the sidebar badge). Errors are swallowed — a recount hiccup
-      // must never fail the operation itself.
-      try {
-        await storage.recalculateFolderCounts();
-      } catch (err) {
-        logger.error('[email-handlers] recalculateFolderCounts failed:', err);
-      }
+      const outcome = await applyUserSpamVerdict({
+        storage,
+        queue: (syncEngine as any)?.operationQueue ?? null,
+        report: (r) => reportSenderVerdict(r),
+      }, emailId, 'spam');
+      if (!outcome.success || !outcome.email) return { success: false, error: outcome.error ?? 'Email not found' };
 
       // Log action for agent learning
       logUserAction(emailId, 'spam', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
+        threadId: outcome.email.threadId,
+        senderAddress: outcome.email.fromAddress,
       });
-
-      // 2. Queue IMAP operation in background (fire-and-forget). Enqueue
-      // REGARDLESS of connection state — the operationQueue persists the op and
-      // replays it on reconnect (gating on isConnected() dropped offline
-      // actions). Source folder + source uid are captured above, before the
-      // updateEmail() that changed folderId.
-      if (email.uid && sourceFolder) {
-        const opQueue = (syncEngine as any)?.operationQueue;
-        opQueue?.moveToSpam(sourceFolder.path, email.uid).catch((err: any) => {
-          logger.error('[Main] IMAP spam move failed:', err);
-        });
-      }
-
-      // Register sender as spammer
-      if (email.fromAddress) {
-        try {
-          await storage.addSpammer({
-            email: email.fromAddress,
-            name: email.fromName || undefined,
-            reason: 'Marked as spam by user',
-          });
-          logger.info('[Main] Added spammer:', email.fromAddress);
-        } catch (spammerError) {
-          logger.error('[Main] Failed to add spammer:', spammerError);
-        }
-      }
-
       return { success: true };
     } catch (error) {
       logger.error('Move to spam error:', error);
@@ -1512,74 +1475,18 @@ export function registerEmailHandlers(): void {
   });
 
   /**
-   * Move email from spam back to inbox
+   * Move email from spam back to inbox — "Not spam". Same shared action; the
+   * stored 'ham' verdict keeps the filter from ever filing it again.
    */
   ipcMain.handle('emails:moveFromSpam', async (_event, emailId: string, accountId?: string) => {
     try {
       const { storage, syncEngine } = await resolveAccountTarget(accountId);
-
-      const email = await storage.getEmail(emailId);
-      if (!email) {
-        return { success: false, error: 'Email not found' };
-      }
-
-      const folders = await storage.getFolders();
-      const inboxFolder = folders.find((f: any) =>
-        f.path === 'INBOX' || f.name.toLowerCase() === 'inbox'
-      );
-
-      if (!inboxFolder) {
-        return { success: false, error: 'Inbox folder not found' };
-      }
-
-      // 1. Update local DB immediately
-      const sourceFolder = await storage.getFolder(email.folderId);
-      let tags = email.tags || '';
-      if (sourceFolder?.path && tags.includes('|' + sourceFolder.path + '|')) {
-        tags = tags.replace('|' + sourceFolder.path + '|', '|');
-      }
-      if (!tags.includes('|' + inboxFolder.path + '|')) {
-        const list = tags.split('|').filter(Boolean);
-        list.push(inboxFolder.path);
-        tags = '|' + list.join('|') + '|';
-      }
-
-      await storage.updateEmail(emailId, { folderId: inboxFolder.id, tags });
-
-      // Recount folder unread
-      // Await so the renderer's follow-up loadFolders() reads the fresh counts
-      // instead of racing this recompute (fire-and-forget could be read stale,
-      // stranding the sidebar badge). Errors are swallowed — a recount hiccup
-      // must never fail the operation itself.
-      try {
-        await storage.recalculateFolderCounts();
-      } catch (err) {
-        logger.error('[email-handlers] recalculateFolderCounts failed:', err);
-      }
-
-      // Remove sender from spammers list
-      if (email.fromAddress) {
-        try {
-          await storage.removeSpammer(email.fromAddress);
-          logger.info('[Main] Removed spammer:', email.fromAddress);
-        } catch (spammerError) {
-          logger.error('[Main] Failed to remove spammer:', spammerError);
-        }
-      }
-
-      // 2. Queue IMAP operation in background. Enqueue REGARDLESS of connection
-      // state — the operationQueue persists the op and replays it on reconnect
-      // (gating on isConnected() dropped offline actions). Source folder +
-      // source uid are captured above, before the updateEmail() that changed
-      // folderId.
-      if (email.uid && sourceFolder) {
-        const opQueue = (syncEngine as any)?.operationQueue;
-        opQueue?.move(sourceFolder.path, email.uid, inboxFolder.path).catch((err: any) => {
-          logger.error('[Main] IMAP move from spam failed:', err);
-        });
-      }
-
-      return { success: true };
+      const outcome = await applyUserSpamVerdict({
+        storage,
+        queue: (syncEngine as any)?.operationQueue ?? null,
+        report: (r) => reportSenderVerdict(r),
+      }, emailId, 'ham');
+      return outcome.success ? { success: true } : { success: false, error: outcome.error ?? 'Email not found' };
     } catch (error) {
       logger.error('Move from spam error:', error);
       return { success: false, error: (error as Error).message };
@@ -2121,6 +2028,8 @@ export function registerEmailHandlers(): void {
                   tags = '|' + list.join('|') + '|';
                 }
                 await storage.updateEmail(item.id, { folderId: spamFolder.id, tags });
+                // The user's word, stored: the filter never un-files a 'spam'.
+                storage.setSpamUserVerdict(item.id, 'spam').catch(() => { });
                 // Register sender as spammer
                 if (item.email.fromAddress) {
                   storage.addSpammer({
@@ -2130,6 +2039,7 @@ export function registerEmailHandlers(): void {
                   }).catch(() => { });
                 }
               }
+              reportVerdictsOnce(items.map((i) => i.email), 'spam');
             }
             // Enqueue REGARDLESS of connection state — the operationQueue
             // persists the op and replays it on reconnect (gating on
@@ -2162,11 +2072,14 @@ export function registerEmailHandlers(): void {
                   tags = '|' + list.join('|') + '|';
                 }
                 await storage.updateEmail(item.id, { folderId: inboxFolder.id, tags });
+                // The user's word, stored: the filter never files a 'ham' again.
+                storage.setSpamUserVerdict(item.id, 'ham').catch(() => { });
                 // Un-register the sender as a spammer (mirrors moveFromSpam).
                 if (item.email.fromAddress) {
                   storage.removeSpammer(item.email.fromAddress).catch(() => { });
                 }
               }
+              reportVerdictsOnce(items.map((i) => i.email), 'ham');
               // ONE bulk IMAP move for the whole thread (moveMessages over all
               // UIDs). Per-UID move() calls drain ~1/sec and let a mid-move Spam
               // resync re-show the not-yet-moved messages ("moves one at a time").

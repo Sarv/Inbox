@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The spam filter now judges what a message LINKS to, and you can overrule it.
+  Once a body is downloaded, every link target is reduced to its domain and
+  looked up through the same reputation provider as the sender; a link to a
+  listed phishing or malware site decides on its own. Security → Spam lists
+  every message the filter scored as suspicious or spam with its score and
+  reasons, and "Not spam" / "Spam" there — like Report spam and Not spam in the
+  message menu — record your verdict, which the filter respects from then on:
+  a message you called not-spam is never filed again. With the opt-in under
+  Settings → General, those verdicts (sender domain, server address, verdict —
+  never the message) are shared with the Sarv reputation service so they count
+  for other users.
 - Sender reputation as a spam signal. After a message arrives, its sending
   server's address and its sender and Reply-To domains are looked up — through
   Sarv's reputation service with your own Sarv sign-in (the default once its

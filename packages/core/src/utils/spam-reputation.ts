@@ -64,9 +64,23 @@ export interface ReputationResult {
   domains: Map<string, ItemReputation>;
 }
 
+export type ReportVerdict = 'spam' | 'ham';
+
+export interface SenderReport {
+  domain: string | null;
+  ip: string | null;
+  verdict: ReportVerdict;
+}
+
 export interface ReputationProvider {
   readonly name: string;
   lookup(query: ReputationQuery): Promise<ReputationResult>;
+  /**
+   * Feed the user's verdict on a sender back, when the provider can use it
+   * (the Sarv service counts them into `userReports`). Fire-and-forget and
+   * fail-open; a provider without a report channel leaves this out.
+   */
+  report?(report: SenderReport): Promise<boolean>;
 }
 
 export const UNKNOWN: ItemReputation = { status: 'unknown', hits: [] };
@@ -130,6 +144,33 @@ export function reputationReasons(result: ReputationResult, message: { originIp?
     if ((rep.userReports ?? 0) >= USER_REPORTS_MIN) {
       add('user-reported', 3, `${rep.userReports} other Sarv Inbox users reported mail from ${domain} as spam`);
     }
+  }
+  return reasons;
+}
+
+/**
+ * Points for a domain the message LINKS to. A link to a phishing or malware
+ * site is the classic phish and decides alone; a link to a mere spam domain
+ * is a strong hint; grey is a nudge. Same cap as the sender stage, shared —
+ * the two stages together never add more than REPUTATION_MAX_POINTS.
+ */
+const LINK_CATEGORY_POINTS: Record<string, number> = {
+  phishing: 5, malware: 5, botnet: 5, spam: 3, exploited: 3, abused: 2, grey: 1, policy: 1, unknown: 2,
+};
+
+/** Turn a result into the reasons the link domains of a message earn. */
+export function linkReputationReasons(result: ReputationResult, linkDomains: string[], alreadyAdded = 0): SpamReason[] {
+  const reasons: SpamReason[] = [];
+  let total = Math.max(0, alreadyAdded);
+  for (const domain of [...new Set(linkDomains.map((d) => d.toLowerCase()))]) {
+    const rep = result.domains.get(domain);
+    if (rep?.status !== 'listed') continue;
+    const best = rep.hits.reduce((a, h) => Math.max(a, LINK_CATEGORY_POINTS[h.category] ?? LINK_CATEGORY_POINTS.unknown), 0);
+    const capped = Math.min(best, REPUTATION_MAX_POINTS - total);
+    if (capped <= 0) break;
+    total += capped;
+    const lists = [...new Set(rep.hits.map((h) => h.list))].join(', ');
+    reasons.push({ id: 'link-blocklisted', points: capped, detail: `Links to ${domain}, which is on ${lists}: ${rep.hits[0].detail}` });
   }
   return reasons;
 }
@@ -390,6 +431,28 @@ export class SarvReputationProvider implements ReputationProvider {
       return unknownResult(this.name, query, `Sarv reputation service unreachable: ${(e as Error)?.message ?? e}`);
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** POST /v1/reputation/report — the user's verdict, never their mail. True when the service accepted it. */
+  async report(report: SenderReport): Promise<boolean> {
+    if (!report.domain && !report.ip) return false;
+    let token: string | null;
+    try {
+      token = await this.deps.getToken();
+    } catch {
+      token = null;
+    }
+    if (!token) return false;
+    try {
+      const res = await this.deps.fetch(`${this.deps.endpoint.replace(/\/+$/, '')}/v1/reputation/report`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ domain: report.domain, ip: report.ip, verdict: report.verdict }),
+      });
+      return res.ok;
+    } catch {
+      return false;
     }
   }
 

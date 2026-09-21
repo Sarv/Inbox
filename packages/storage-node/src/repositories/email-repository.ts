@@ -2150,6 +2150,7 @@ export class EmailRepository extends BaseRepository {
       spamScore: row.spam_score ?? null,
       spamReasons: row.spam_reasons ?? null,
       originIp: row.origin_ip ?? null,
+      spamUserVerdict: row.spam_user_verdict ?? null,
 
       // AI metadata
       aiProcessedAt: row.ai_processed_at,

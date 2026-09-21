@@ -252,8 +252,9 @@ export function senderOwnText(rawBody: string | null | undefined): string {
   return stripQuotedTail(text);
 }
 
-/** The URLs in a piece of text, parsed. Unparseable candidates are dropped. */
-function urlsIn(text: string): URL[] {
+/** The URLs in a piece of text, parsed. Unparseable candidates are dropped.
+ *  Shared with the spam filter's body stage (link-domains.ts). */
+export function urlsIn(text: string): URL[] {
   const found: URL[] = [];
   for (const candidate of text.match(URL_CANDIDATE_RE) || []) {
     try {
