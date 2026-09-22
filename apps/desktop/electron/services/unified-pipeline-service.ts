@@ -48,7 +48,7 @@ import pLimit from 'p-limit';
 import { logUserAction } from '../ipc/agent-handlers';
 import { saveDraftToIMAP } from '../ipc/draft-handlers';
 import { sendEmailFromMain, appendSentCopy } from '../ipc/smtp-handlers';
-import { getStorage, getStorageFor, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient } from '../shared';
+import { getStorage, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient, findStorageForEmail } from '../shared';
 
 import { resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
 import { loadAgentConfig } from './agent-config-store';
@@ -2503,14 +2503,6 @@ async function executeAgentAction(emailId: string, action: UserActionType, _valu
  * makes event-driven categorization work for BACKGROUND accounts, not just the
  * active one.
  */
-function findStorageForEmail(emailId: string, hintAccountId?: string): any | null {
-  const has = (s: any) => !!s?.db?.prepare?.('SELECT 1 FROM emails WHERE id = ? LIMIT 1')?.get(emailId);
-  if (hintAccountId) { const s = getStorageFor(hintAccountId); if (has(s)) return s; }
-  const active = getStorage(); if (has(active)) return active;
-  for (const [, rt] of getAllAccountRuntimes()) { if (has(rt.storage)) return rt.storage; }
-  return null;
-}
-
 /** Categorize a freshly-available email now (event-driven). Shared by the
  *  email:synced and body-ready handlers. Resolves the OWNING account, gates on
  *  body-present / not-read / not-done, then runs the pipeline. */
