@@ -1,7 +1,7 @@
 import { Mail, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import { useEmailStore } from '../store/email-store';
+import { openEmailFromNotification } from '../utils/open-email-from-notification';
 
 /**
  * In-app notification toasts — a fallback for when the OS can't show native
@@ -43,14 +43,7 @@ export function InAppNotification() {
   const open = (t: Toast) => {
     remove(t.id);
     if (!t.emailId) return;
-    document.dispatchEvent(new CustomEvent('sarvinbox:open-mail'));
-    const st = useEmailStore.getState() as any;
-    const sel = () => { try { st.selectEmail?.(t.emailId); } catch { /* ignore */ } };
-    if (t.accountId && t.accountId !== st.activeAccountId && typeof st.selectAccount === 'function') {
-      st.selectAccount(t.accountId).then(sel).catch(sel);
-    } else {
-      sel();
-    }
+    openEmailFromNotification(t.emailId, t.accountId);
   };
 
   if (toasts.length === 0) return null;

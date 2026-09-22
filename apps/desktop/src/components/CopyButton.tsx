@@ -19,6 +19,12 @@ interface CopyButtonProps {
   /** Replaces the default button classes entirely. */
   className?: string;
   disabled?: boolean;
+  /**
+   * Fired only after the text actually reached the clipboard. A failed copy
+   * must not trigger whatever the caller does next (an extension marking the
+   * mail read, say) — the user has nothing in hand to show for it.
+   */
+  onCopied?: () => void;
 }
 
 /**
@@ -35,6 +41,7 @@ export function CopyButton({
   iconOnly = false,
   className,
   disabled = false,
+  onCopied,
 }: CopyButtonProps) {
   const { status, copy } = useCopyToClipboard();
 
@@ -48,7 +55,17 @@ export function CopyButton({
         : '';
 
   const handleClick = () => {
-    void copy(typeof value === 'function' ? value() : value);
+    void copy(typeof value === 'function' ? value() : value).then((copied) => {
+      if (!copied) return;
+      // The callback belongs to the caller, and a caller that throws must not
+      // turn into an unhandled rejection inside the button: the text is already
+      // on the clipboard and the acknowledgement still has to appear.
+      try {
+        onCopied?.();
+      } catch {
+        /* the caller's problem, not the copy's */
+      }
+    });
   };
 
   const button = (
