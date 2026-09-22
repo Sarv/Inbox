@@ -188,3 +188,165 @@ export function formatDownloadSize(bytes: number): string {
   }
   return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
 }
+
+/**
+ * What an extension will actually do, and where the reader will see it.
+ *
+ * A permission list answers "what is it allowed to touch", which is the
+ * question a reviewer asks. It does not answer the question a reader asks
+ * before installing: what does this thing DO, and where does it show up? "Read
+ * Emails, Modify Labels, Show Notifications" describes a passcode reader, a
+ * spam filter and a translator equally well, so people install and then go
+ * looking for something that changed.
+ *
+ * Every line here is DERIVED from the manifest — from what the extension
+ * declared it contributes, and from permissions it cannot use without asking
+ * for. Nothing is author-written prose, so nothing can overstate: an extension
+ * that says it shows a panel really does have a panel the app will render.
+ */
+export interface ExtensionSurface {
+  icon: string;
+  title: string;
+  detail: string;
+}
+
+/**
+ * The manifest fields this reads.
+ *
+ * Deliberately the narrowest shape that works, with the rest of each object
+ * left open: a whole `ExtensionManifest`, a registry entry's trimmed summary
+ * and a hand-written test fixture all fit without any of them being converted
+ * first. Nothing outside these fields is read, so nothing outside them can
+ * change what the reader is told.
+ */
+export interface SurfaceSource {
+  permissions?: readonly string[];
+  contributes?: {
+    panels?: readonly { title?: string; surface?: string; autoOpen?: boolean; [extra: string]: unknown }[];
+    workflows?: readonly { name?: string; requiresAI?: boolean; [extra: string]: unknown }[];
+    settings?: readonly unknown[];
+    capabilities?: readonly { id?: string; description?: string; [extra: string]: unknown }[];
+  };
+}
+
+/** Capability ids the app itself asks for, said in words a reader knows. */
+const CAPABILITY_NAMES: Record<string, string> = {
+  'thread.summarize': 'summarises a conversation when you ask for it',
+  'email.summarize': 'summarises a single message when you ask for it',
+};
+
+const listOf = (names: string[], limit = 2): string => {
+  const kept = names.filter(Boolean).slice(0, limit);
+  const rest = names.filter(Boolean).length - kept.length;
+  if (kept.length === 0) return '';
+  return rest > 0 ? `${kept.join(', ')} and ${rest} more` : kept.join(', ');
+};
+
+export function describeExtensionSurfaces(source: SurfaceSource): ExtensionSurface[] {
+  const permissions = new Set(source.permissions ?? []);
+  const contributes = source.contributes ?? {};
+  const surfaces: ExtensionSurface[] = [];
+
+  // Ordered by how prominent the thing is on screen: a panel occupies real
+  // estate, a card interrupts, a background workflow is invisible until it
+  // changes something. That order is also the order someone scanning the
+  // dialog wants it in.
+  const panels = contributes.panels ?? [];
+  const sidebar = panels.filter((panel) => panel.surface === 'sidebar');
+  const elsewhere = panels.filter((panel) => panel.surface !== 'sidebar');
+
+  if (sidebar.length > 0) {
+    surfaces.push({
+      icon: '🗂️',
+      title: 'Adds a panel beside your mail',
+      detail: sidebar.some((panel) => panel.autoOpen)
+        ? `${listOf(sidebar.map((panel) => panel.title ?? 'Untitled'))} — opens on its own when you read a message`
+        : `${listOf(sidebar.map((panel) => panel.title ?? 'Untitled'))} — you open it from the message`,
+    });
+  }
+
+  if (elsewhere.length > 0) {
+    surfaces.push({
+      icon: '🪟',
+      title: 'Opens its own window',
+      detail: listOf(elsewhere.map((panel) => panel.title ?? 'Untitled')),
+    });
+  }
+
+  if (permissions.has('ui:notify')) {
+    surfaces.push({
+      icon: '🔔',
+      title: 'Shows cards in the corner of the window',
+      detail: 'Appears when it has something for you, and goes away on its own',
+    });
+  }
+
+  const capabilities = contributes.capabilities ?? [];
+  if (capabilities.length > 0) {
+    surfaces.push({
+      icon: '✨',
+      title: 'Answers on demand, when the app asks',
+      detail: listOf(
+        capabilities.map(
+          (capability) =>
+            CAPABILITY_NAMES[capability.id ?? ''] ?? capability.description ?? capability.id ?? ''
+        )
+      ),
+    });
+  }
+
+  const workflows = contributes.workflows ?? [];
+  if (workflows.length > 0) {
+    surfaces.push({
+      icon: '⚙️',
+      title: 'Runs in the background on new mail',
+      detail: listOf(workflows.map((workflow) => workflow.name ?? '')),
+    });
+  }
+
+  // What it can CHANGE, rather than what it can see: a reader who installs
+  // something that silently files their mail deserves that said plainly, and
+  // "Modify Labels" in a permission list does not say it.
+  const changes = [
+    permissions.has('email:flag') ? 'mark messages read or starred' : '',
+    permissions.has('email:label') ? 'add and remove labels' : '',
+    permissions.has('email:move') ? 'move messages between folders' : '',
+    permissions.has('email:delete') ? 'delete messages' : '',
+  ].filter(Boolean);
+  if (changes.length > 0) {
+    surfaces.push({
+      icon: '✏️',
+      title: 'Changes your mail',
+      detail: `It can ${listOf(changes, 3)}`,
+    });
+  }
+
+  if ((contributes.settings ?? []).length > 0) {
+    surfaces.push({
+      icon: '🎛️',
+      title: 'Adds its own settings',
+      detail: 'Under Settings, Extensions — you can change how it behaves',
+    });
+  }
+
+  if (permissions.has('network:fetch')) {
+    surfaces.push({
+      icon: '🌐',
+      title: 'Talks to the internet',
+      detail: 'It can send and receive data outside this app',
+    });
+  }
+
+  if (permissions.has('ai:use')) {
+    surfaces.push({
+      icon: '🤖',
+      title: 'Uses the AI model you configured',
+      detail: 'Message text is sent to whichever provider you set up',
+    });
+  }
+
+  // A line with nothing to say is dropped rather than printed headless: a
+  // manifest whose workflow list has no names would otherwise render "Runs in
+  // the background on new mail" followed by blank space.
+  return surfaces.filter((surface) => surface.detail !== '');
+}

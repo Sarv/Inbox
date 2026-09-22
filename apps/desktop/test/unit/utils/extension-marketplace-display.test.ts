@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   PERMISSION_DISPLAY,
+  describeExtensionSurfaces,
   describeInstallAction,
   describePermission,
   formatCompactCount,
@@ -130,5 +131,161 @@ describe('formatDownloadSize', () => {
   it('renders nothing for a missing or nonsense size', () => {
     expect(formatDownloadSize(0)).toBe('');
     expect(formatDownloadSize(Number.NaN)).toBe('');
+  });
+});
+
+/**
+ * What an extension DOES, as opposed to what it may touch.
+ *
+ * What this protects: the permission list above describes a passcode reader, a
+ * spam filter and a translator in exactly the same words, so people install one
+ * to find out what it is and then cannot tell what changed. These lines are the
+ * only place the app answers "what will this do, and where will I see it", and
+ * every one of them is derived from the manifest — if a line stops matching
+ * what the extension declared, the answer is confidently wrong, which is worse
+ * than absent.
+ */
+describe('describeExtensionSurfaces', () => {
+  // Nothing declared means nothing claimed: a blank section beats an invented
+  // sentence about an extension whose manifest says nothing.
+  it('says nothing about an extension that declares nothing', () => {
+    expect(describeExtensionSurfaces({})).toEqual([]);
+    expect(describeExtensionSurfaces({ permissions: [], contributes: {} })).toEqual([]);
+  });
+
+  it('leads with a sidebar panel, naming it', () => {
+    const [first] = describeExtensionSurfaces({
+      contributes: { panels: [{ id: 'codes', title: 'Passcodes', surface: 'sidebar' }] },
+    });
+
+    expect(first.title).toContain('panel');
+    expect(first.detail).toContain('Passcodes');
+  });
+
+  // autoOpen is the difference between something appearing on its own and
+  // something the reader has to go and open — the reader should know which.
+  it('distinguishes a panel that opens itself from one you open', () => {
+    const auto = describeExtensionSurfaces({
+      contributes: { panels: [{ title: 'Passcodes', surface: 'sidebar', autoOpen: true }] },
+    });
+    const manual = describeExtensionSurfaces({
+      contributes: { panels: [{ title: 'Passcodes', surface: 'sidebar' }] },
+    });
+
+    expect(auto[0].detail).toContain('opens on its own');
+    expect(manual[0].detail).toContain('you open it');
+  });
+
+  it('reports a modal panel as its own window', () => {
+    const surfaces = describeExtensionSurfaces({
+      contributes: { panels: [{ title: 'Setup', surface: 'modal' }] },
+    });
+
+    expect(surfaces.map((surface) => surface.title)).toContain('Opens its own window');
+  });
+
+  // The order is the order of prominence on screen: a panel occupies space, a
+  // card interrupts, a background workflow is invisible. Scrambling it buries
+  // the thing the reader will actually notice.
+  it('orders panels before notifications before background work', () => {
+    const titles = describeExtensionSurfaces({
+      permissions: ['ui:notify'],
+      contributes: {
+        panels: [{ title: 'Passcodes', surface: 'sidebar' }],
+        workflows: [{ name: 'Find codes' }],
+      },
+    }).map((surface) => surface.title);
+
+    expect(titles.indexOf('Adds a panel beside your mail')).toBeLessThan(
+      titles.indexOf('Shows cards in the corner of the window')
+    );
+    expect(titles.indexOf('Shows cards in the corner of the window')).toBeLessThan(
+      titles.indexOf('Runs in the background on new mail')
+    );
+  });
+
+  // A capability id is machine-facing; the reader gets the sentence instead.
+  it('says what a known capability actually does', () => {
+    const surfaces = describeExtensionSurfaces({
+      contributes: { capabilities: [{ id: 'thread.summarize', export: 'summarize' }] },
+    });
+
+    expect(surfaces[0].detail).toContain('summarises a conversation');
+  });
+
+  it('falls back to a capability description, then its id', () => {
+    const described = describeExtensionSurfaces({
+      contributes: { capabilities: [{ id: 'invoice.extract', description: 'Pulls out invoices' }] },
+    });
+    const bare = describeExtensionSurfaces({
+      contributes: { capabilities: [{ id: 'invoice.extract' }] },
+    });
+
+    expect(described[0].detail).toBe('Pulls out invoices');
+    expect(bare[0].detail).toBe('invoice.extract');
+  });
+
+  // Regression: this is the line that stops someone installing a thing that
+  // silently files their mail. "Modify Labels" in a permission table does not
+  // say that it WILL, and a reader who skims permissions reads this instead.
+  it('spells out that it can change your mail', () => {
+    const surfaces = describeExtensionSurfaces({
+      permissions: ['email:read', 'email:label', 'email:flag'],
+    });
+    const changes = surfaces.find((surface) => surface.title === 'Changes your mail');
+
+    expect(changes?.detail).toContain('add and remove labels');
+    expect(changes?.detail).toContain('mark messages read or starred');
+  });
+
+  it('says nothing about changing mail when it can only read', () => {
+    const titles = describeExtensionSurfaces({ permissions: ['email:read'] }).map(
+      (surface) => surface.title
+    );
+
+    expect(titles).not.toContain('Changes your mail');
+  });
+
+  it('names the two loudest permissions in their own words', () => {
+    const titles = describeExtensionSurfaces({
+      permissions: ['network:fetch', 'ai:use'],
+    }).map((surface) => surface.title);
+
+    expect(titles).toContain('Talks to the internet');
+    expect(titles).toContain('Uses the AI model you configured');
+  });
+
+  it('mentions its settings section only when it adds one', () => {
+    const withSettings = describeExtensionSurfaces({
+      contributes: { settings: [{ key: 'minConfidence' }] },
+    }).map((surface) => surface.title);
+    const without = describeExtensionSurfaces({ contributes: { settings: [] } }).map(
+      (surface) => surface.title
+    );
+
+    expect(withSettings).toContain('Adds its own settings');
+    expect(without).not.toContain('Adds its own settings');
+  });
+
+  // A manifest with twelve workflows must not render a paragraph in a dialog
+  // whose whole point is being readable at a glance.
+  it('summarises a long list rather than printing all of it', () => {
+    const surfaces = describeExtensionSurfaces({
+      contributes: {
+        workflows: [{ name: 'One' }, { name: 'Two' }, { name: 'Three' }, { name: 'Four' }],
+      },
+    });
+
+    expect(surfaces[0].detail).toBe('One, Two and 2 more');
+  });
+
+  // Registry data is third-party input; a missing title must not render the
+  // word "undefined" into a dialog about trust.
+  it('survives a contribution with fields missing', () => {
+    const surfaces = describeExtensionSurfaces({
+      contributes: { panels: [{ surface: 'sidebar' }], workflows: [{}] },
+    });
+
+    expect(JSON.stringify(surfaces)).not.toContain('undefined');
   });
 });
