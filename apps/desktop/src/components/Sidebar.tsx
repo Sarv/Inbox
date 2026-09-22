@@ -53,7 +53,7 @@ import { Tooltip } from './Tooltip';
 // ['class']`), so an `@media (prefers-color-scheme)` rule inside the SVG would
 // track the OS instead of the app and get it backwards half the time. An <img>
 // also seals the SVG off from the page's CSS, so `currentColor` is not an
-// option. Only the black flips — brand orange and blue are identical in both.
+// option. Only the black flips — the brand orange is identical in both.
 const logoLarge = './wordmark.svg';
 const logoLargeDark = './wordmark-dark.svg';
 
@@ -503,14 +503,14 @@ export function Sidebar() {
       <div className="h-14 px-2 border-b border-border flex items-center justify-center">
         <img
           src={logoLarge}
-          alt="SarvInbox by Sarv"
-          className="h-10 w-full object-contain dark:hidden"
+          alt="SarvInbox"
+          className="h-7 w-auto object-contain dark:hidden"
         />
         <img
           src={logoLargeDark}
           alt=""
           aria-hidden="true"
-          className="hidden h-10 w-full object-contain dark:block"
+          className="hidden h-7 w-auto object-contain dark:block"
         />
       </div>
 

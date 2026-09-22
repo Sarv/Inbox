@@ -66,13 +66,16 @@ describe('branded icon assets', () => {
     }
   });
 
-  // Breaks: the medallion shows twice in a row — once in the app rail, once
-  // inside the sidebar lockup — which reads as a rendering bug. The wordmark is
-  // text only; #2F5FAC is the mark's blue and appears in no glyph.
-  it.each(['wordmark.svg', 'wordmark-dark.svg'])('ships %s with no mark baked in', (file) => {
+  // Breaks: the sidebar header stops being the product name alone. Two ways
+  // that regresses — the medallion gets baked back into the lockup, so it shows
+  // twice in a row beside the app rail's copy, or the "by Sarv" line returns.
+  // Each has a fill nothing else uses: #2F5FAC is the mark's blue, #3069b0 was
+  // the "by Sarv" line, and no glyph in "SarvInbox" carries either.
+  it.each(['wordmark.svg', 'wordmark-dark.svg'])('ships %s as the name alone', (file) => {
     const wordmark = readFileSync(join(DESKTOP_ROOT, 'public', file), 'utf8');
 
     expect(wordmark).not.toContain('#2F5FAC');
+    expect(wordmark).not.toContain('#3069b0');
     expect(wordmark).not.toContain('<image');
   });
 
