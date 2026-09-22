@@ -219,16 +219,18 @@ export function ExtensionNotification() {
               )}
 
               {card.emailId && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    report(card, 'open');
-                    openEmailFromNotification(card.emailId!, card.accountId);
-                  }}
-                  className="mt-2 text-xs text-primary hover:underline"
-                >
-                  Open the message
-                </button>
+                <Tooltip content="Open the message this is about" delayMs={40}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      report(card, 'open');
+                      openEmailFromNotification(card.emailId!, card.accountId);
+                    }}
+                    className="mt-2 text-xs text-primary hover:underline"
+                  >
+                    Open the message
+                  </button>
+                </Tooltip>
               )}
             </div>
 

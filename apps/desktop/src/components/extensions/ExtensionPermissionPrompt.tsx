@@ -200,23 +200,27 @@ export function ExtensionPermissionPrompt({
         </div>
 
         <div className="flex items-center justify-end gap-2 p-4 border-t border-border">
-          <button
-            ref={cancelRef}
-            type="button"
-            onClick={onCancel}
-            disabled={installing}
-            className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => onConfirm(extension.permissions)}
-            disabled={installing}
-            className="px-3 py-1.5 text-sm rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50"
-          >
-            {installing ? 'Installing...' : 'Install'}
-          </button>
+          <Tooltip content="Close without installing" delayMs={40}>
+            <button
+              ref={cancelRef}
+              type="button"
+              onClick={onCancel}
+              disabled={installing}
+              className="px-3 py-1.5 text-sm rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </Tooltip>
+          <Tooltip content="Grant these permissions and install" delayMs={40}>
+            <button
+              type="button"
+              onClick={() => onConfirm(extension.permissions)}
+              disabled={installing}
+              className="px-3 py-1.5 text-sm rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50"
+            >
+              {installing ? 'Installing...' : 'Install'}
+            </button>
+          </Tooltip>
         </div>
       </div>
     </div>

@@ -131,26 +131,34 @@ function ExtensionCard({
             ) : null}
 
             {/* Enable/Disable toggle */}
-            <button
-              onClick={extension.enabled ? onDisable : onEnable}
-              disabled={isLoading}
-              className={`p-2 rounded-lg transition-colors ${
-                extension.enabled
-                  ? 'bg-green-500/10 hover:bg-green-500/20 text-green-500'
-                  : 'bg-muted hover:bg-muted/80 text-muted-foreground'
-              }`}
-              title={extension.enabled ? 'Disable extension' : 'Enable extension'}
+            <Tooltip
+              content={extension.enabled ? 'Turn this extension off' : 'Turn this extension on'}
+              delayMs={40}
             >
-              {extension.enabled ? <Power className="h-4 w-4" /> : <PowerOff className="h-4 w-4" />}
-            </button>
+              <button
+                onClick={extension.enabled ? onDisable : onEnable}
+                disabled={isLoading}
+                aria-label={extension.enabled ? 'Disable extension' : 'Enable extension'}
+                className={`p-2 rounded-lg transition-colors ${
+                  extension.enabled
+                    ? 'bg-green-500/10 hover:bg-green-500/20 text-green-500'
+                    : 'bg-muted hover:bg-muted/80 text-muted-foreground'
+                }`}
+              >
+                {extension.enabled ? <Power className="h-4 w-4" /> : <PowerOff className="h-4 w-4" />}
+              </button>
+            </Tooltip>
 
             {/* Expand/collapse */}
-            <button
-              onClick={() => setExpanded(!expanded)}
-              className="p-2 hover:bg-muted rounded-lg transition-colors"
-            >
-              {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            </button>
+            <Tooltip content={expanded ? 'Hide details' : 'Show details'} delayMs={40}>
+              <button
+                onClick={() => setExpanded(!expanded)}
+                aria-label={expanded ? 'Hide details' : 'Show details'}
+                className="p-2 hover:bg-muted rounded-lg transition-colors"
+              >
+                {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </button>
+            </Tooltip>
           </div>
         </div>
 
@@ -231,14 +239,16 @@ function ExtensionCard({
           {/* Actions */}
           {!isBuiltin && onUninstall && (
             <div className="mt-3 pt-3 border-t border-border flex justify-end">
-              <button
-                onClick={onUninstall}
-                disabled={isLoading}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-red-500 hover:bg-red-500/10 rounded transition-colors"
-              >
-                <Trash2 className="h-4 w-4" />
-                Uninstall
-              </button>
+              <Tooltip content="Remove this extension and its permissions" delayMs={40}>
+                <button
+                  onClick={onUninstall}
+                  disabled={isLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-red-500 hover:bg-red-500/10 rounded transition-colors"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Uninstall
+                </button>
+              </Tooltip>
             </div>
           )}
         </div>
@@ -377,43 +387,52 @@ export function ExtensionManager() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={loadExtensions}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-          <button
-            onClick={() => setTab('browse')}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
-          >
-            <Download className="h-4 w-4" />
-            Browse Extensions
-          </button>
+          <Tooltip content="Re-read the installed extensions" delayMs={40}>
+            <button
+              onClick={loadExtensions}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors"
+            >
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+          </Tooltip>
+          <Tooltip content="See extensions you can install" delayMs={40}>
+            <button
+              onClick={() => setTab('browse')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
+            >
+              <Download className="h-4 w-4" />
+              Browse Extensions
+            </button>
+          </Tooltip>
         </div>
       </div>
 
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b border-border mb-6">
         {([
-          ['installed', `Installed${extensions.length > 0 ? ` (${extensions.length})` : ''}`],
-          ['browse', 'Browse'],
-        ] as const).map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => setTab(value)}
-            aria-current={tab === value ? 'page' : undefined}
-            className={`px-3 py-2 text-sm -mb-px border-b-2 transition-colors ${
-              tab === value
-                ? 'border-purple-500 text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            {label}
-          </button>
+          [
+            'installed',
+            `Installed${extensions.length > 0 ? ` (${extensions.length})` : ''}`,
+            'Extensions already installed on this computer',
+          ],
+          ['browse', 'Browse', 'Extensions available to install'],
+        ] as const).map(([value, label, hint]) => (
+          <Tooltip key={value} content={hint} delayMs={40}>
+            <button
+              type="button"
+              onClick={() => setTab(value)}
+              aria-current={tab === value ? 'page' : undefined}
+              className={`px-3 py-2 text-sm -mb-px border-b-2 transition-colors ${
+                tab === value
+                  ? 'border-purple-500 text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {label}
+            </button>
+          </Tooltip>
         ))}
       </div>
 
@@ -447,13 +466,15 @@ export function ExtensionManager() {
             <p className="text-sm text-muted-foreground mb-4">
               Install extensions to add new features to Sarv Inbox
             </p>
-            <button
-              onClick={() => setTab('browse')}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
-            >
-              <Download className="h-4 w-4" />
-              Browse Extensions
-            </button>
+            <Tooltip content="See extensions you can install" delayMs={40}>
+              <button
+                onClick={() => setTab('browse')}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
+              >
+                <Download className="h-4 w-4" />
+                Browse Extensions
+              </button>
+            </Tooltip>
           </div>
         )}
 
@@ -515,13 +536,15 @@ export function ExtensionManager() {
             To try one you are writing yourself, install it from a local folder containing a{' '}
             <code className="px-1 py-0.5 bg-muted rounded">sarvinbox-extension.json</code> manifest.
           </p>
-          <button
-            onClick={handleInstall}
-            className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors border border-border"
-          >
-            <FolderOpen className="h-4 w-4" />
-            Install from folder
-          </button>
+          <Tooltip content="Load an extension you are developing from a local folder" delayMs={40}>
+            <button
+              onClick={handleInstall}
+              className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors border border-border"
+            >
+              <FolderOpen className="h-4 w-4" />
+              Install from folder
+            </button>
+          </Tooltip>
         </div>
         </>
       )}
