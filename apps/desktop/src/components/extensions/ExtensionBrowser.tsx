@@ -174,15 +174,17 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
         <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
           Available Extensions {items.length > 0 && `(${items.length})`}
         </h2>
-        <button
-          type="button"
-          onClick={() => void load(true)}
-          disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <Tooltip content="Fetch the latest list from the registry" delayMs={40}>
+          <button
+            type="button"
+            onClick={() => void load(true)}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </Tooltip>
       </div>
 
       {stale.length > 0 && (
@@ -311,18 +313,20 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
                       </span>
                     </Tooltip>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => void openPrompt(item)}
-                      disabled={preparing !== null}
-                      className="px-3 py-1.5 text-sm rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50"
-                    >
-                      {preparing === item.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading details" />
-                      ) : (
-                        action.label
-                      )}
-                    </button>
+                    <Tooltip content={`Review what ${item.name} can do, then install`} delayMs={40}>
+                      <button
+                        type="button"
+                        onClick={() => void openPrompt(item)}
+                        disabled={preparing !== null}
+                        className="px-3 py-1.5 text-sm rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50"
+                      >
+                        {preparing === item.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading details" />
+                        ) : (
+                          action.label
+                        )}
+                      </button>
+                    </Tooltip>
                   )}
                 </div>
               </div>

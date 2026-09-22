@@ -267,6 +267,26 @@ describe('ExtensionNotification', () => {
     expect(h.opened).toEqual([{ emailId: 'email-1', accountId: 'account-2' }]);
   });
 
+  it('names "Open the message" on hover', async () => {
+    // Regression: the card's only navigation loses its hover label. The button
+    // sits under whatever text the extension wrote, so "the message" is
+    // ambiguous until the tooltip says it is the one the card came from.
+    mounted = render(<ExtensionNotification />);
+    push(card({ id: 'ext:with-mail', emailId: 'email-1' }));
+
+    const button = mounted.all('button').find((el) => el.textContent === 'Open the message');
+    // The shared Tooltip opens on `mouseover` after its delay and portals the
+    // bubble to document.body.
+    await act(async () => {
+      button!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
+
+    expect(document.body.textContent).toContain('Open the message this is about');
+  });
+
   it('unsubscribes from both channels on unmount', () => {
     // Regression: every window reload leaves another pair of IPC listeners
     // behind, and one card then renders several times over.
