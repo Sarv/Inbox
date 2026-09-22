@@ -145,3 +145,28 @@ export function namespaceNotificationId(
   if (!id || !cardId) return null;
   return `${id}:${cardId}`;
 }
+
+/**
+ * Undo `namespaceNotificationId` — recover the extension and its own card id.
+ *
+ * Split on the FIRST colon, not the last: an extension id is `[a-z0-9-]+` and
+ * so can never contain one, while a card id is extension-authored and may well
+ * carry several. Splitting the other way would hand an extension's own id back
+ * truncated, and the extension would not recognise its own card.
+ *
+ * Returns null for anything that is not a namespaced id, so a renderer that
+ * reports a stale or invented id reaches no extension at all.
+ */
+export function splitNotificationId(
+  namespacedId: unknown
+): { extensionId: string; notificationId: string } | null {
+  if (typeof namespacedId !== 'string') return null;
+  const separator = namespacedId.indexOf(':');
+  if (separator <= 0 || separator === namespacedId.length - 1) return null;
+
+  const extensionId = namespacedId.slice(0, separator);
+  if (!/^[a-z0-9-]+$/.test(extensionId)) return null;
+
+  return { extensionId, notificationId: namespacedId.slice(separator + 1) };
+}
+

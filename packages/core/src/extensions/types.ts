@@ -80,6 +80,98 @@ export interface ExtensionContributions {
 
   /** Event subscriptions */
   events?: string[];
+
+  /** UI panels the extension renders inside the app */
+  panels?: PanelContribution[];
+
+  /** App features this extension can serve (see `CapabilityContribution`) */
+  capabilities?: CapabilityContribution[];
+}
+
+/**
+ * An app feature this extension offers to serve.
+ *
+ * This is what lets the app stop naming extensions. Summarising a thread used
+ * to be an IPC handler that asked for the `email-summarization` extension by
+ * id: the feature and the one extension that implemented it were the same
+ * thing, so a second implementation was unpublishable and removing the first
+ * broke the app. Now the app asks for the CAPABILITY, any extension may
+ * declare it, and none is special.
+ *
+ * The declaration lives in the manifest rather than being registered at
+ * runtime so it is visible before a line of extension code has run — reviewable
+ * in the repository, and shown to the reader alongside the permissions.
+ */
+export interface CapabilityContribution {
+  /**
+   * What this serves, e.g. `thread.summarize`. Capability ids the app itself
+   * asks for are listed in docs/EXTENSIONS.md; an extension may also invent
+   * its own for another extension to call.
+   */
+  id: string;
+
+  /** The name on `context.exports` that implements it. */
+  export: string;
+
+  /** Highest wins when more than one active extension declares the same id. */
+  priority?: number;
+
+  /** One line for the settings UI, e.g. "Summarises threads with AI". */
+  description?: string;
+}
+
+/**
+ * Where a panel is shown.
+ *
+ * 'sidebar' — a column beside the open message, for something the reader wants
+ *             alongside the mail (a tracker, an order, a ticket).
+ * 'modal'   — a dialog over the app, for a task with a beginning and an end.
+ *
+ * Deliberately not a third option that renders inside the message body. A panel
+ * drawn there is indistinguishable from the message's own content, which is
+ * exactly the confusion a phishing mail wants; keeping extension UI outside the
+ * body is what lets the reader tell the app apart from the mail.
+ */
+export type PanelSurface = 'sidebar' | 'modal';
+
+/**
+ * A panel contribution — an HTML page the extension ships, rendered by the app.
+ *
+ * The page is served from the extension's own folder over a privileged scheme
+ * and loaded into a sandboxed iframe: no Node, no app internals, no access to
+ * the renderer's DOM. Everything it can do it asks for over the panel bridge,
+ * and every one of those requests is permission-checked in main.
+ */
+export interface PanelContribution {
+  /** Panel id, scoped to the extension. Lowercase alphanumeric with hyphens. */
+  id: string;
+
+  /** Title shown in the panel header */
+  title: string;
+
+  /**
+   * The HTML file to load, relative to the extension folder.
+   * Resolved inside that folder; a path that escapes it is refused.
+   */
+  entry: string;
+
+  /** Where the panel is rendered */
+  surface: PanelSurface;
+
+  /** Icon path relative to the extension folder (SVG) */
+  icon?: string;
+
+  /** One line describing what the panel is for */
+  description?: string;
+
+  /**
+   * Open the panel automatically when a message is open, rather than waiting
+   * for the reader to ask for it. Sidebar panels only.
+   */
+  autoOpen?: boolean;
+
+  /** Preferred sidebar width in px. Clamped to what the window can give. */
+  width?: number;
 }
 
 /**
@@ -162,7 +254,8 @@ export type ExtensionPermission =
   | 'network:fetch'   // Make HTTP requests (restricted domains)
   | 'settings:read'   // Read user settings
   | 'settings:write'  // Modify user settings
-  | 'ui:notify';      // Surface a notification card in the app window
+  | 'ui:notify'       // Surface a notification card in the app window
+  | 'ui:panel';       // Render its own UI panel inside the app window
 
 /**
  * Permission metadata
@@ -253,6 +346,13 @@ export const PERMISSION_INFO: Record<ExtensionPermission, PermissionInfo> = {
     id: 'ui:notify',
     name: 'Show Notifications',
     description: 'Show a notification card in the app window',
+    dangerous: false,
+    requiresConfirmation: false,
+  },
+  'ui:panel': {
+    id: 'ui:panel',
+    name: 'Show Its Own Panels',
+    description: 'Render its own pages beside your mail and in dialogs',
     dangerous: false,
     requiresConfirmation: false,
   },
@@ -348,6 +448,14 @@ export interface ExtensionContext {
   /** Settings access */
   readonly settings: ExtensionSettings;
 
+  /**
+   * Reading and changing mail, each method gated on its own permission.
+   *
+   * The counterpart to a workflow result: a workflow acts on arrival, this acts
+   * whenever the extension decides to.
+   */
+  readonly mail: ExtensionMail;
+
   /** Notification cards shown in the app window (if ui:notify granted) */
   readonly ui: ExtensionUI;
 
@@ -360,9 +468,9 @@ export interface ExtensionContext {
   /**
    * API this extension offers to the rest of the app, set during `activate`.
    *
-   * Reached by the host through `getExtensionExports(id)` — that is how an IPC
-   * handler calls into an extension on demand (see `extension:summarizeThread`)
-   * rather than waiting for a workflow to run over a message. Declared here and
+   * Reached by the host through `getExtensionExports(id)` — that is how the app
+   * calls into an extension on demand (see `contributes.capabilities`) rather
+   * than waiting for a workflow to run over a message. Declared here and
    * not only on the implementation class because an extension is written
    * against THIS interface: without it, assigning exports needs a cast, and a
    * cast is where the export contract stops being checked.
@@ -635,6 +743,49 @@ export interface ExtensionUINotification {
 }
 
 /**
+ * Something the reader did to a card, reported back to the extension that
+ * raised it.
+ *
+ * A card is one-way without this: the extension puts a value on screen and
+ * never learns whether it was used. That gap is what stops an extension doing
+ * the obvious follow-up — a verification code that has been copied has served
+ * its purpose, and the mail carrying it can be marked read without the reader
+ * ever opening it.
+ *
+ * `notificationId` is the extension's OWN id for the card, not the namespaced
+ * one the renderer holds: an extension should never have to know the host
+ * namespaces its ids.
+ */
+export interface ExtensionUIAction {
+  /** The card's id, exactly as the extension passed it to `notify`. */
+  notificationId: string;
+
+  /**
+   * What happened.
+   *  - `copy` — a field's copy button was pressed
+   *  - `dismiss` — the reader closed the card by hand
+   *  - `expire` — the card ran out its `expiresAt`/`timeoutMs` and left
+   *  - `open` — the reader followed the card to its message
+   */
+  action: 'copy' | 'dismiss' | 'expire' | 'open';
+
+  /** For `copy`: the index into `fields` that was copied. */
+  fieldIndex?: number;
+
+  /** For `copy`: that field's label, so a handler need not re-index. */
+  fieldLabel?: string;
+
+  /** The card's `emailId`, carried through so a handler has it to hand. */
+  emailId?: string;
+
+  /** The card's `accountId`, carried through alongside `emailId`. */
+  accountId?: string;
+}
+
+/** What an extension registers with `ui.onAction`. */
+export type ExtensionUIActionHandler = (action: ExtensionUIAction) => void | Promise<void>;
+
+/**
  * Notification API exposed to extensions (requires `ui:notify`)
  */
 export interface ExtensionUI {
@@ -643,6 +794,100 @@ export interface ExtensionUI {
 
   /** Dismiss a card early by id */
   dismiss(notificationId: string): void;
+
+  /**
+   * Hear about what the reader did to this extension's cards.
+   *
+   * Only this extension's own cards are reported: card ids are namespaced by
+   * extension, so one extension cannot observe another's.
+   *
+   * Handlers are fire-and-forget. A handler that throws is logged and dropped;
+   * it cannot fail the reader's click.
+   *
+   * @returns an unsubscribe function
+   */
+  onAction(handler: ExtensionUIActionHandler): Unsubscribe;
+
+  /**
+   * Open one of this extension's own panels (requires `ui:panel`).
+   *
+   * The id is the panel's id from `contributes.panels`. An extension may only
+   * open a panel it declared itself.
+   */
+  openPanel(panelId: string): void;
+
+  /** Open a message in the reader's window (requires `email:read`). */
+  openMessage(emailId: string, accountId?: string): void;
+}
+
+// ============================================================
+// Extension Mail API
+// ============================================================
+
+/**
+ * The mail-mutation API on `ExtensionContext`.
+ *
+ * Until this existed an extension could only ASK for a change, by returning
+ * `labelsToAdd`/`labelsToRemove` from a workflow — which meant it could act
+ * only at the instant a message arrived, and never in response to anything the
+ * reader did. This is the same set of effects, available at any time.
+ *
+ * Every method is gated on the permission named beside it, checked in the main
+ * process against what the user approved at install time — the sandbox's copy
+ * of the granted set is a convenience that makes an authoring mistake fail
+ * where it was written, never the thing that decides. Every mutation is also
+ * logged with the extension's id, so what an installed extension actually did
+ * to the mailbox is answerable after the fact.
+ *
+ * Deliberately id-based rather than record-based: an extension passes the id it
+ * was given and the host reads the row itself, so nothing an extension invents
+ * about a message can reach storage.
+ */
+export interface ExtensionMail {
+  /** Read one message, or null when it is not in any open mailbox. `email:read` */
+  get(emailId: string): Promise<EmailRecord | null>;
+
+  /** The folders of the account owning `emailId`, or of the active account. `email:read` */
+  folders(accountId?: string): Promise<ExtensionMailFolder[]>;
+
+  /** Mark read. Pushed to the server like any other read receipt. `email:flag` */
+  markRead(emailId: string): Promise<void>;
+
+  /** Mark unread. `email:flag` */
+  markUnread(emailId: string): Promise<void>;
+
+  /** Star. `email:flag` */
+  star(emailId: string): Promise<void>;
+
+  /** Unstar. `email:flag` */
+  unstar(emailId: string): Promise<void>;
+
+  /** Add a label/tag. `email:label` */
+  addLabel(emailId: string, label: string): Promise<void>;
+
+  /** Remove a label/tag. `email:label` */
+  removeLabel(emailId: string, label: string): Promise<void>;
+
+  /** Move to another folder, by folder id. `email:move` */
+  move(emailId: string, folderId: string): Promise<void>;
+
+  /**
+   * Move to the account's trash folder. `email:delete`
+   *
+   * Never an expunge: an extension can put a message in the bin, and only the
+   * reader empties it. An extension that could destroy mail outright would be
+   * one bug away from an unrecoverable mailbox.
+   */
+  trash(emailId: string): Promise<void>;
+}
+
+/** A folder, in the subset an extension is shown. */
+export interface ExtensionMailFolder {
+  id: string;
+  name: string;
+  path: string;
+  type?: string;
+  accountId?: string;
 }
 
 // ============================================================
@@ -784,7 +1029,17 @@ export interface EmailSummaryResult {
 }
 
 /**
- * Email Summarization Extension exports
+ * The signatures behind the `thread.summarize` and `email.summarize`
+ * capabilities.
+ *
+ * Named for what they DO, not for which extension does it. The app once asked
+ * for the `email-summarization` extension by id, which made the feature and
+ * that one extension the same thing — a second implementation was
+ * unpublishable and removing the first broke the app. Now an extension
+ * declares the capability in `contributes.capabilities` and exports a function
+ * of this shape; the app asks for the capability and never learns who served
+ * it. Typing an implementation against this is optional but keeps the export
+ * honest.
  */
 export interface EmailSummarizationExports {
   /** Summarize a single email on demand */
@@ -810,7 +1065,9 @@ export interface EmailCategorizationResult {
 }
 
 /**
- * AI Categorization Extension exports
+ * The signature behind the `email.categorize` capability. See
+ * `EmailSummarizationExports` for why these are named by capability and not by
+ * extension.
  */
 export interface AICategorizationExports {
   /** Categorize multiple emails in a single batch */
