@@ -14,6 +14,7 @@ import {
   describeInstallAction,
   formatCompactCount,
   formatDownloadSize,
+  type SurfaceSource,
 } from '../../utils/extension-marketplace-display';
 import { Tooltip } from '../Tooltip';
 
@@ -21,6 +22,7 @@ import {
   ExtensionPermissionPrompt,
   type PermissionPromptExtension,
 } from './ExtensionPermissionPrompt';
+import { ExtensionScreenshots, ExtensionSurfaces, type ScreenshotItem } from './ExtensionSurfaces';
 
 /**
  * The Browse tab: extensions published to the GitHub registry.
@@ -45,6 +47,9 @@ interface CatalogItem {
   homepage?: string;
   iconUrl?: string;
   permissions: string[];
+  /** What it contributes, so the card can say what the extension actually does. */
+  contributes?: SurfaceSource['contributes'];
+  screenshots?: ScreenshotItem[];
   /** Bytes of the release archive, carried by the list itself. */
   size: number;
   /** Only present once the extension's detail record has been fetched. */
@@ -255,6 +260,14 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground mt-0.5">{item.description}</p>
+                    {/* The card's whole job: someone scrolling the catalogue can
+                        tell these apart without installing one to find out. */}
+                    <ExtensionSurfaces
+                      source={{ permissions: item.permissions, contributes: item.contributes }}
+                      heading={null}
+                      className="mt-2"
+                    />
+                    <ExtensionScreenshots screenshots={item.screenshots} className="mt-2" />
                     <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground flex-wrap">
                       <span>by {item.author}</span>
                       <span className="flex items-center gap-1">

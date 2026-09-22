@@ -6,8 +6,11 @@ import {
   formatDownloadSize,
   hasHighRiskPermission,
   sortPermissionsByRisk,
+  type SurfaceSource,
 } from '../../utils/extension-marketplace-display';
 import { Tooltip } from '../Tooltip';
+
+import { ExtensionScreenshots, ExtensionSurfaces, type ScreenshotItem } from './ExtensionSurfaces';
 
 /**
  * The consent step before anything from the registry is installed.
@@ -36,6 +39,9 @@ export interface PermissionPromptExtension {
   sourceUrl: string;
   homepage?: string;
   download: { url: string; sha256: string; size: number };
+  /** What it contributes, for the "what it does" section. Absent on an older registry. */
+  contributes?: SurfaceSource['contributes'];
+  screenshots?: ScreenshotItem[];
 }
 
 interface ExtensionPermissionPromptProps {
@@ -107,6 +113,17 @@ export function ExtensionPermissionPrompt({
 
         <div className="p-4 overflow-y-auto flex-1">
           <p className="text-sm text-muted-foreground">{extension.description}</p>
+
+          <ExtensionScreenshots screenshots={extension.screenshots} className="mt-3" />
+
+          {/* Before the permissions, deliberately: "what will this do and where
+              will I see it" is the question being asked, and a permission list
+              on its own has never answered it. */}
+          <ExtensionSurfaces
+            source={{ permissions: extension.permissions, contributes: extension.contributes }}
+            heading="What it does, and where you will see it"
+            className="mt-4"
+          />
 
           <h3 className="text-sm font-medium mt-4 mb-2">
             This extension will be able to:

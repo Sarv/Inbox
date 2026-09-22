@@ -15,9 +15,18 @@ import {
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
-import { describePermission, sortPermissionsByRisk } from '../utils/extension-marketplace-display';
+import {
+  describePermission,
+  sortPermissionsByRisk,
+  type SurfaceSource,
+} from '../utils/extension-marketplace-display';
 
 import { ExtensionBrowser } from './extensions/ExtensionBrowser';
+import {
+  ExtensionScreenshots,
+  ExtensionSurfaces,
+  type ScreenshotItem,
+} from './extensions/ExtensionSurfaces';
 import { Tooltip } from './Tooltip';
 
 // Extension types matching the core extension system
@@ -39,6 +48,9 @@ interface ExtensionManifest {
   description: string;
   author: string;
   permissions: string[];
+  /** The manifest arrives whole from main, so what it contributes comes with it. */
+  contributes?: SurfaceSource['contributes'];
+  screenshots?: ScreenshotItem[];
 }
 
 interface ExtensionInfo {
@@ -153,6 +165,20 @@ function ExtensionCard({
       {/* Expanded details */}
       {expanded && (
         <div className="border-t border-border px-4 py-3 bg-muted/30">
+          {/* What it does — first, because after install the question is no
+              longer "may I trust this" but "what is this one for". */}
+          {manifest && (
+            <ExtensionSurfaces
+              source={{ permissions: manifest.permissions, contributes: manifest.contributes }}
+              heading="What it does"
+              className="mb-3"
+            />
+          )}
+
+          {manifest?.screenshots && (
+            <ExtensionScreenshots screenshots={manifest.screenshots} className="mb-3" />
+          )}
+
           {/* Permissions */}
           {manifest?.permissions && manifest.permissions.length > 0 && (
             <div className="mb-3">
