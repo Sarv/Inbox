@@ -2,13 +2,14 @@
   "name": "@sarvinbox/desktop",
   "version": "1.1.1",
   "productName": "Sarv Inbox",
-  "description": "Sarv Inbox — AI-powered email client by Sarv",
+  "description": "Sarv Inbox \u2014 AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "node ../../scripts/native-abi.mjs electron && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
-    "build": "tsc && vite build && electron-builder",
+    "build": "tsc && vite build && node scripts/prefetch-default-extensions.mjs && electron-builder",
+    "prefetch:extensions": "node scripts/prefetch-default-extensions.mjs",
     "build:electron": "electron-builder",
     "preview": "vite preview",
     "type-check": "tsc --noEmit",
@@ -61,6 +62,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "sanitize-filename": "^1.6.4",
+    "tar": "^7.4.3",
     "tldts": "^7.4.10",
     "turndown": "^7.1.2",
     "uniqolor": "^1.1.1",
@@ -104,6 +106,19 @@
     "asarUnpack": [
       "**/*.node",
       "dist-electron/db-compact.worker.js"
+    ],
+    "extraResources": [
+      {
+        "from": "extensions.config.json",
+        "to": "extensions.config.json"
+      },
+      {
+        "from": "build/default-extensions",
+        "to": "default-extensions",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "mac": {
       "icon": "build/icon.icns",

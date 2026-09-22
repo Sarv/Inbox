@@ -3,6 +3,7 @@ import type { Plugin } from 'vite';
 // The scheme name comes from the same module the protocol handler and the
 // renderer use, so the policy can never allow a scheme we stopped serving (or,
 // worse, keep blocking the one we do).
+import { PANEL_SCHEME } from '../../../packages/core/src/extensions/panel-assets';
 import { ATTACHMENT_SCHEME } from '../../../packages/core/src/utils/attachment-kind';
 
 /**
@@ -35,7 +36,7 @@ import { ATTACHMENT_SCHEME } from '../../../packages/core/src/utils/attachment-k
  * content image leaks no app state — the frame is sandboxed and has no origin
  * privileges to lose.
  */
-export const APP_IMG_SRC = `'self' data: blob: https: http: ${ATTACHMENT_SCHEME}:`;
+export const APP_IMG_SRC = `'self' data: blob: https: http: ${ATTACHMENT_SCHEME}: ${PANEL_SCHEME}:`;
 
 /**
  * The attachment scheme has to appear in every directive the viewer loads
@@ -46,6 +47,13 @@ export const APP_IMG_SRC = `'self' data: blob: https: http: ${ATTACHMENT_SCHEME}
  * build only — dev injects no policy at all, so it cannot reproduce there.
  * `media-src` is spelled out rather than left to `default-src 'self'` for the
  * same reason.
+ *
+ * The panel scheme is here for the same reason and in only two places: an
+ * extension panel is an `<iframe>` this document embeds (`frame-src`) and its
+ * manifest icon is an `<img>` the app's own chrome draws (`img-src`). It needs
+ * nothing else — a panel page is a real cross-origin navigation, so it loads its
+ * subresources under the policy the protocol handler serves it with, not under
+ * this one. Miss `frame-src` and every panel is blank in a PACKAGED build only.
  */
 export const APP_CSP_DIRECTIVES: readonly string[] = [
   "default-src 'self'",
@@ -54,7 +62,7 @@ export const APP_CSP_DIRECTIVES: readonly string[] = [
   `img-src ${APP_IMG_SRC}`,
   "font-src 'self' data:",
   `connect-src 'self' https: ${ATTACHMENT_SCHEME}:`,
-  `frame-src 'self' data: blob: ${ATTACHMENT_SCHEME}:`,
+  `frame-src 'self' data: blob: ${ATTACHMENT_SCHEME}: ${PANEL_SCHEME}:`,
   `media-src 'self' data: blob: ${ATTACHMENT_SCHEME}:`,
   "worker-src 'self' blob:",
   "object-src 'none'",
