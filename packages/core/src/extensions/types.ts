@@ -64,8 +64,6 @@ export interface ExtensionManifest {
   /** Extension icon path (optional) */
   icon?: string;
 
-  /** Whether this is a builtin extension */
-  builtin?: boolean;
 }
 
 /**
@@ -936,7 +934,13 @@ export interface SerializedExtensionContext {
  * Extension installation source
  */
 export enum ExtensionSource {
-  /** Bundled with the application */
+  /**
+   * Bundled with the application.
+   *
+   * Historical: nothing ships inside the app any more. Kept only so a profile
+   * written by an older build can still be READ - the registry recognises such
+   * a record and drops it, because the folder it points at no longer exists.
+   */
   BUILTIN = 'builtin',
   /** Installed from local file */
   LOCAL = 'local',
