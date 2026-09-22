@@ -6,6 +6,9 @@ import { generateThreadSummary as generateThreadSummaryFallback, isThreadSummari
 
 import { chatMessagesFromThread, toEpochSeconds } from './email-detail/chat-message-adapter';
 
+/** The job this component needs done; any extension may declare it. */
+const CAPABILITY_THREAD_SUMMARIZE = 'thread.summarize';
+
 
 interface ThreadSummaryProps {
   threadId: string;
@@ -97,24 +100,29 @@ export function ThreadSummary({ threadId, emails }: ThreadSummaryProps) {
 
       let result: ThreadSummaryType | null = null;
 
-      // Try extension first
+      // Ask for the JOB, not for an extension. Whichever installed extension
+      // declares `thread.summarize` answers; none installed means `served:
+      // false` and the inline fallback runs, so the app never names, ships or
+      // depends on a particular summarizer.
       try {
-        const extensionAvailable = await window.electronAPI.extensions.isAvailable('email-summarization');
-        if (extensionAvailable.success && extensionAvailable.data) {
-          console.log('[ThreadSummary] Using extension for summarization');
-          const extResult = await window.electronAPI.extensions.summarizeThread(emailsForSummary);
-          if (extResult.success && extResult.data) {
-            // Map extension result to expected format
-            result = {
-              summary: extResult.data.summary || '',
-              keyPoints: extResult.data.key_points || [],
-              participants: extResult.data.participants || [],
-              confidence: extResult.data.confidence || 0.7,
-            };
-          }
+        const invoked = await window.electronAPI.extensions.invoke<{
+          summary?: string;
+          key_points?: string[];
+          participants?: string[];
+          confidence?: number;
+        }>(CAPABILITY_THREAD_SUMMARIZE, emailsForSummary);
+        if (invoked.success && invoked.data?.served) {
+          console.log(`[ThreadSummary] Summarized by extension '${invoked.data.extensionId}'`);
+          const value = invoked.data.value;
+          result = {
+            summary: value?.summary || '',
+            keyPoints: value?.key_points || [],
+            participants: value?.participants || [],
+            confidence: value?.confidence || 0.7,
+          };
         }
       } catch (extError) {
-        console.warn('[ThreadSummary] Extension call failed, using fallback:', extError);
+        console.warn('[ThreadSummary] Capability call failed, using fallback:', extError);
       }
 
       // Fallback to inline implementation if extension didn't work

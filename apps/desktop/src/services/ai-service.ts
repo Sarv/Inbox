@@ -2195,10 +2195,11 @@ export function isAISearchEnabled(): boolean {
   return feature?.enabled !== false;
 }
 
-// ========== Thread Summaries (FALLBACK - Prefer extension when available) ==========
-// NOTE: The email-summarization extension should be used when available.
-// This code is a fallback for when the extension is not loaded or fails.
-// See: packages/core/src/extensions/builtin/email-summarization/index.js
+// ========== Thread Summaries (FALLBACK - an extension is preferred) ==========
+// The app asks for the 'thread.summarize' capability first (see ThreadSummary);
+// whichever installed extension declares it answers. This implementation runs
+// when nothing serves that capability, or when the provider fails — so the
+// feature works on a fresh install with no extensions at all.
 
 export interface ThreadSummary {
   summary: string;

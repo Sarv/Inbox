@@ -210,3 +210,60 @@ describe('icon-only mode', () => {
     expect(document.body.textContent).toContain('Copy address');
   });
 });
+
+describe('onCopied', () => {
+  // Regression: the callback is how a caller learns the text actually reached
+  // the clipboard — the extension card marks its message read from it. Firing
+  // it on the click instead of on the resolved write would mark mail read that
+  // the reader never got the code from.
+  it('fires once the write resolves', async () => {
+    const onCopied = vi.fn();
+    mounted = render(<CopyButton value="481920" onCopied={onCopied} />);
+
+    fire(button(), 'click');
+    expect(onCopied).not.toHaveBeenCalled();
+
+    await settle();
+    expect(onCopied).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire when the clipboard write is rejected', async () => {
+    writeText.mockRejectedValue(new Error('not focused'));
+    const onCopied = vi.fn();
+    mounted = render(<CopyButton value="481920" onCopied={onCopied} />);
+
+    fire(button(), 'click');
+    await settle();
+
+    expect(onCopied).not.toHaveBeenCalled();
+  });
+
+  it('does not fire when there is no clipboard API at all', async () => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+    const onCopied = vi.fn();
+    mounted = render(<CopyButton value="481920" onCopied={onCopied} />);
+
+    fire(button(), 'click');
+    await settle();
+
+    expect(onCopied).not.toHaveBeenCalled();
+  });
+
+  // A callback that throws belongs to the caller, not to the button: the copy
+  // already happened and the acknowledgement still has to appear.
+  it('still acknowledges the copy when the callback throws', async () => {
+    mounted = render(
+      <CopyButton
+        value="481920"
+        onCopied={() => {
+          throw new Error('caller blew up');
+        }}
+      />
+    );
+
+    fire(button(), 'click');
+    await settle();
+
+    expect(button()!.textContent).toContain('Copied!');
+  });
+});

@@ -15,6 +15,11 @@ import {
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
+import { describePermission, sortPermissionsByRisk } from '../utils/extension-marketplace-display';
+
+import { ExtensionBrowser } from './extensions/ExtensionBrowser';
+import { Tooltip } from './Tooltip';
+
 // Extension types matching the core extension system
 interface InstalledExtension {
   id: string;
@@ -46,20 +51,6 @@ interface ExtensionInfo {
   activatedAt?: number;
   workflowIds: string[];
 }
-
-// Permission display info
-const PERMISSION_DISPLAY: Record<string, { name: string; description: string; icon: string }> = {
-  'email:read': { name: 'Read Emails', description: 'Read email content', icon: '📧' },
-  'email:label': { name: 'Modify Labels', description: 'Add/remove labels', icon: '🏷️' },
-  'email:flag': { name: 'Modify Flags', description: 'Change read/starred status', icon: '⚑' },
-  'email:move': { name: 'Move Emails', description: 'Move between folders', icon: '📁' },
-  'email:delete': { name: 'Delete Emails', description: 'Permanently delete emails', icon: '🗑️' },
-  'ai:use': { name: 'Use AI', description: 'Access AI services', icon: '🤖' },
-  'storage:local': { name: 'Local Storage', description: 'Store extension data', icon: '💾' },
-  'network:fetch': { name: 'Network Access', description: 'Make HTTP requests', icon: '🌐' },
-  'settings:read': { name: 'Read Settings', description: 'Read preferences', icon: '⚙️' },
-  'settings:write': { name: 'Write Settings', description: 'Modify preferences', icon: '✏️' },
-};
 
 interface ExtensionCardProps {
   extension: InstalledExtension;
@@ -171,17 +162,15 @@ function ExtensionCard({
                 Permissions
               </div>
               <div className="flex flex-wrap gap-2">
-                {manifest.permissions.map((perm) => {
-                  const display = PERMISSION_DISPLAY[perm];
+                {sortPermissionsByRisk(manifest.permissions).map((perm) => {
+                  const display = describePermission(perm);
                   return (
-                    <span
-                      key={perm}
-                      className="inline-flex items-center gap-1 px-2 py-1 bg-muted rounded text-xs"
-                      title={display?.description || perm}
-                    >
-                      <span>{display?.icon || '🔒'}</span>
-                      {display?.name || perm}
-                    </span>
+                    <Tooltip key={perm} content={display.description} delayMs={40}>
+                      <span className="inline-flex items-center gap-1 px-2 py-1 bg-muted rounded text-xs">
+                        <span aria-hidden="true">{display.icon}</span>
+                        {display.name}
+                      </span>
+                    </Tooltip>
                   );
                 })}
               </div>
@@ -239,6 +228,9 @@ export function ExtensionManager() {
   const [loading, setLoading] = useState(true);
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  // Installed is the default tab: the panel's first job is telling the user
+  // what is already running, not offering them something else.
+  const [tab, setTab] = useState<'installed' | 'browse'>('installed');
 
   // Load extensions
   const loadExtensions = async () => {
@@ -369,106 +361,145 @@ export function ExtensionManager() {
             Refresh
           </button>
           <button
-            onClick={handleInstall}
+            onClick={() => setTab('browse')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
           >
             <Download className="h-4 w-4" />
-            Install Extension
+            Browse Extensions
           </button>
         </div>
       </div>
 
-      {/* Error message */}
-      {error && (
-        <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-lg flex items-start gap-3">
-          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
-          <div>
-            <div className="font-medium text-red-500">Error loading extensions</div>
-            <div className="text-sm text-muted-foreground">{error}</div>
+      {/* Tabs */}
+      <div className="flex items-center gap-1 border-b border-border mb-6">
+        {([
+          ['installed', `Installed${extensions.length > 0 ? ` (${extensions.length})` : ''}`],
+          ['browse', 'Browse'],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setTab(value)}
+            aria-current={tab === value ? 'page' : undefined}
+            className={`px-3 py-2 text-sm -mb-px border-b-2 transition-colors ${
+              tab === value
+                ? 'border-purple-500 text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'browse' && <ExtensionBrowser onInstalled={loadExtensions} />}
+
+      {tab === 'installed' && (
+        <>
+        {/* Error message */}
+        {error && (
+          <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-lg flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-medium text-red-500">Error loading extensions</div>
+              <div className="text-sm text-muted-foreground">{error}</div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Loading state */}
-      {loading && extensions.length === 0 && (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-        </div>
-      )}
+        {/* Loading state */}
+        {loading && extensions.length === 0 && (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        )}
 
-      {/* Extensions list */}
-      {!loading && extensions.length === 0 && !error && (
-        <div className="text-center py-12">
-          <Puzzle className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-          <h3 className="font-medium mb-2">No extensions installed</h3>
-          <p className="text-sm text-muted-foreground mb-4">
-            Install extensions to add new features to Sarv Inbox
+        {/* Extensions list */}
+        {!loading && extensions.length === 0 && !error && (
+          <div className="text-center py-12">
+            <Puzzle className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+            <h3 className="font-medium mb-2">No extensions installed</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Install extensions to add new features to Sarv Inbox
+            </p>
+            <button
+              onClick={() => setTab('browse')}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
+            >
+              <Download className="h-4 w-4" />
+              Browse Extensions
+            </button>
+          </div>
+        )}
+
+        {/* Builtin extensions */}
+        {builtinExtensions.length > 0 && (
+          <div className="mb-8">
+            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
+              Built-in Extensions ({builtinExtensions.length})
+            </h2>
+            <div className="space-y-3">
+              {builtinExtensions.map((ext) => (
+                <ExtensionCard
+                  key={ext.id}
+                  extension={ext}
+                  info={extensionInfo.get(ext.id)}
+                  onEnable={() => handleEnable(ext.id)}
+                  onDisable={() => handleDisable(ext.id)}
+                  isLoading={loadingIds.has(ext.id)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* User extensions */}
+        {userExtensions.length > 0 && (
+          <div>
+            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
+              Installed Extensions ({userExtensions.length})
+            </h2>
+            <div className="space-y-3">
+              {userExtensions.map((ext) => (
+                <ExtensionCard
+                  key={ext.id}
+                  extension={ext}
+                  info={extensionInfo.get(ext.id)}
+                  onEnable={() => handleEnable(ext.id)}
+                  onDisable={() => handleDisable(ext.id)}
+                  onUninstall={() => handleUninstall(ext.id)}
+                  isLoading={loadingIds.has(ext.id)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Help text */}
+        <div className="mt-8 p-4 bg-muted/50 rounded-lg">
+          <h3 className="font-medium mb-2 flex items-center gap-2">
+            <FolderOpen className="h-4 w-4" />
+            Where extensions come from
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            Published extensions live in their own repository and are installed from the Browse
+            tab. Each download is checked against a published SHA-256 before anything runs, and
+            you are shown exactly what it can do first.
+          </p>
+          <p className="text-sm text-muted-foreground mt-2">
+            To try one you are writing yourself, install it from a local folder containing a{' '}
+            <code className="px-1 py-0.5 bg-muted rounded">sarvinbox-extension.json</code> manifest.
           </p>
           <button
             onClick={handleInstall}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-purple-500 text-white hover:bg-purple-600 rounded-lg transition-colors"
+            className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors border border-border"
           >
-            <Download className="h-4 w-4" />
-            Install Extension
+            <FolderOpen className="h-4 w-4" />
+            Install from folder
           </button>
         </div>
+        </>
       )}
-
-      {/* Builtin extensions */}
-      {builtinExtensions.length > 0 && (
-        <div className="mb-8">
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
-            Built-in Extensions ({builtinExtensions.length})
-          </h2>
-          <div className="space-y-3">
-            {builtinExtensions.map((ext) => (
-              <ExtensionCard
-                key={ext.id}
-                extension={ext}
-                info={extensionInfo.get(ext.id)}
-                onEnable={() => handleEnable(ext.id)}
-                onDisable={() => handleDisable(ext.id)}
-                isLoading={loadingIds.has(ext.id)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* User extensions */}
-      {userExtensions.length > 0 && (
-        <div>
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
-            Installed Extensions ({userExtensions.length})
-          </h2>
-          <div className="space-y-3">
-            {userExtensions.map((ext) => (
-              <ExtensionCard
-                key={ext.id}
-                extension={ext}
-                info={extensionInfo.get(ext.id)}
-                onEnable={() => handleEnable(ext.id)}
-                onDisable={() => handleDisable(ext.id)}
-                onUninstall={() => handleUninstall(ext.id)}
-                isLoading={loadingIds.has(ext.id)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Help text */}
-      <div className="mt-8 p-4 bg-muted/50 rounded-lg">
-        <h3 className="font-medium mb-2 flex items-center gap-2">
-          <FolderOpen className="h-4 w-4" />
-          Installing Extensions
-        </h3>
-        <p className="text-sm text-muted-foreground">
-          Extensions are installed from local directories. Each extension should contain an{' '}
-          <code className="px-1 py-0.5 bg-muted rounded">sarvinbox-extension.json</code> manifest file.
-          Extensions can register workflows to process emails, subscribe to events, and store data locally.
-        </p>
-      </div>
     </div>
   );
 }

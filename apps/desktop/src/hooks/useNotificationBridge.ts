@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 
 import { useEmailStore } from '../store/email-store';
+import { openEmailFromNotification } from '../utils/open-email-from-notification';
 
 /** Notification config the renderer owns and pushes to the main-process service.
  *  mode/sound come from settings (localStorage); accounts/view from the store. */
@@ -69,14 +70,7 @@ export function useNotificationBridge(): void {
       // A notification can be clicked from ANY app section (Contacts, Settings…).
       // Navigate to the Mail view first — otherwise selecting the email in the
       // store has no visible effect and the user stays on the current page.
-      document.dispatchEvent(new CustomEvent('sarvinbox:open-mail'));
-      const st = useEmailStore.getState() as any;
-      const open = () => { try { st.selectEmail?.(emailId); } catch { /* ignore */ } };
-      if (accountId && accountId !== st.activeAccountId && typeof st.selectAccount === 'function') {
-        st.selectAccount(accountId).then(open).catch(open);
-      } else {
-        open();
-      }
+      openEmailFromNotification(emailId, accountId);
     });
 
     return () => {

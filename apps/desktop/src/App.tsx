@@ -7,9 +7,11 @@ import { AppSidebar, AppSection } from './components/AppSidebar';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { Contacts } from './components/Contacts';
-import { EmailDetail } from './components/email-detail';
 import { EmailList } from './components/email-list';
 import { ExtensionManager } from './components/ExtensionManager';
+import { ExtensionNotification } from './components/ExtensionNotification';
+import { MailDetailWithPanels } from './components/extensions/MailDetailWithPanels';
+import { useExtensionOpenMessage } from './components/extensions/useExtensionOpenMessage';
 import { GlobalConfirmDialog } from './components/GlobalConfirmDialog';
 import { InAppNotification } from './components/InAppNotification';
 import { NoAccountEmptyState } from './components/NoAccountEmptyState';
@@ -40,6 +42,9 @@ import { migrateCredentialsToVault, canonicalizeAccountIds } from './store/helpe
 import { shouldShowOnboarding, shouldShowNoAccountEmptyState } from './utils/app-gates';
 
 function App() {
+  // An extension asking for a message to be opened can arrive in any view.
+  useExtensionOpenMessage();
+
   // Shallow slice-select so App only re-renders when one of these fields
   // changes, not on every unrelated store mutation.
   const { connected, imapConfig, hasAccounts, needsReauth, smtpConfigured, activeAccountId, connect, loadFolders, loadLabels, checkConnection, checkingConnection, compose, closeCompose, handleDisconnection, viewMode, selectedEmailId, selectedVirtualFolder, restoreDraft, clearRestoreDraft } = useEmailStore(
@@ -770,7 +775,7 @@ function App() {
             <>
               <Sidebar />
               <div className="flex-1 flex flex-col overflow-hidden">
-                {selectedEmailId ? <EmailDetail /> : <EmailList />}
+                {selectedEmailId ? <MailDetailWithPanels /> : <EmailList />}
               </div>
             </>
           );
@@ -784,7 +789,7 @@ function App() {
                   <EmailList />
                 </div>
                 <div className="h-1/2 overflow-hidden">
-                  <EmailDetail />
+                  <MailDetailWithPanels />
                 </div>
               </div>
             </>
@@ -797,7 +802,7 @@ function App() {
               <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
                 <div className="flex flex-1 min-w-0 overflow-hidden">
                   <EmailList />
-                  <EmailDetail />
+                  <MailDetailWithPanels />
                 </div>
               </div>
             </>
@@ -948,6 +953,10 @@ function App() {
       {/* In-app notification toasts — fallback when native OS toasts can't show
           (dev build / no notification daemon). */}
       <InAppNotification />
+
+      {/* Cards extensions asked to show (the `ui:notify` permission) — bottom
+          right, so they never collide with the mail toasts above. */}
+      <ExtensionNotification />
     </div>
   );
 }

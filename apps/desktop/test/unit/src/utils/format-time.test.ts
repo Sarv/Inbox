@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { formatCountdown } from '../../../../src/utils/format-time';
+import { formatCountdown, formatExpiryCountdown } from '../../../../src/utils/format-time';
 
 // snoozeUntil is stored in SECONDS (the DB column), while Date.now() is in ms —
 // pinning the clock is the only way to test the conversion, and a unit mix-up
@@ -57,5 +57,59 @@ describe('formatCountdown', () => {
 
   it('rounds DOWN rather than up (a "2d" label never over-promises)', () => {
     expect(inSec(2 * 86_400 - 1)).toBe('1d 23h');
+  });
+});
+
+/**
+ * The second-by-second countdown on an extension notification card (a
+ * verification code's expiry). Takes MILLISECONDS, unlike formatCountdown above
+ * — a unit mix-up here renders a 5-minute window as "Expired" or as "83h".
+ */
+describe('formatExpiryCountdown', () => {
+  const NOW_MS = 1_800_000_000_000;
+  const inMs = (offset: number) => formatExpiryCountdown(NOW_MS + offset, NOW_MS);
+
+  it('says "Expired" at and after the deadline', () => {
+    // Regression: a passed deadline renders a negative countdown ("-3:12").
+    expect(inMs(0)).toBe('Expired');
+    expect(inMs(-1)).toBe('Expired');
+    expect(inMs(-60 * 60_000)).toBe('Expired');
+  });
+
+  it('counts single seconds under a minute', () => {
+    // Regression: rounding to minutes shows "1m" for the last 60 seconds, which
+    // is wrong for 59 of them — the whole reason this is not formatCountdown.
+    expect(inMs(59_000)).toBe('59s');
+    expect(inMs(1_000)).toBe('1s');
+    expect(inMs(1)).toBe('1s');
+  });
+
+  it('shows m:ss between one minute and one hour', () => {
+    // Regression: the seconds lose their leading zero and "4:05" renders "4:5".
+    expect(inMs(4 * 60_000 + 32_000)).toBe('4:32');
+    expect(inMs(4 * 60_000 + 5_000)).toBe('4:05');
+    expect(inMs(60_000)).toBe('1:00');
+    expect(inMs(59 * 60_000 + 59_000)).toBe('59:59');
+  });
+
+  it('shows hours and padded minutes past an hour', () => {
+    // Regression: a long-lived card renders "65:00", which reads as 65 seconds.
+    expect(inMs(60 * 60_000)).toBe('1h 00m');
+    expect(inMs(65 * 60_000)).toBe('1h 05m');
+    expect(inMs(25 * 60 * 60_000)).toBe('25h 00m');
+  });
+
+  it('treats a non-finite deadline as expired rather than rendering NaN', () => {
+    // Regression: an extension passing a bad expiresAt shows "NaNs" on the card.
+    expect(formatExpiryCountdown(Number.NaN, NOW_MS)).toBe('Expired');
+    expect(formatExpiryCountdown(Number.POSITIVE_INFINITY, NOW_MS)).toBe('Expired');
+  });
+
+  it('defaults to the real clock when no "now" is given', () => {
+    // Regression: the default argument is dropped and every call needs a clock.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    expect(formatExpiryCountdown(NOW_MS + 30_000)).toBe('30s');
+    vi.useRealTimers();
   });
 });
