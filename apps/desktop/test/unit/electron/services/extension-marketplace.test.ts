@@ -34,6 +34,8 @@ const h = vi.hoisted(() => ({
   uninstalled: [] as string[],
   enabled: [] as string[],
   installThrows: null as string | null,
+  /** What `app.getAppPath()` reports: apps/desktop, which is vitest's own cwd. */
+  appDir: process.cwd(),
 }));
 
 vi.mock('electron', () => ({
@@ -41,6 +43,7 @@ vi.mock('electron', () => ({
     getPath: () => h.userData,
     getVersion: () => h.appVersion,
     getName: () => 'Sarv Inbox Test',
+    getAppPath: () => h.appDir,
     isPackaged: false,
   },
 }));
@@ -232,6 +235,28 @@ describe('getExtensionsConfig', () => {
     const config = getExtensionsConfig();
     expect(config.registries[0]).toBe(REGISTRY_URL);
     expect(Array.isArray(config.systemExtensions)).toBe(true);
+  });
+
+  // Regression: the file was located by counting `..` from __dirname, which is
+  // one level deeper in source than in the bundle the app actually runs, so the
+  // running app read no config at all and quietly preinstalled nothing. Asserting
+  // against the real shipped file is what makes a resolved path provable - a
+  // wrong one falls back to defaults and every other assertion still passes.
+  it('reads the file the repository actually ships, not the defaults', async () => {
+    const shipped = JSON.parse(readFileSync(join(h.appDir, 'extensions.config.json'), 'utf-8'));
+    const { getExtensionsConfig } = await loadService();
+
+    expect(getExtensionsConfig().systemExtensions).toEqual(shipped.systemExtensions);
+    expect(shipped.systemExtensions.length).toBeGreaterThan(0);
+  });
+
+  it('falls back to defaults when the config is missing', async () => {
+    h.appDir = join(h.userData, 'no-config-here');
+    const { getExtensionsConfig } = await loadService();
+
+    const config = getExtensionsConfig();
+    expect(config.registries).toEqual([REGISTRY_URL]);
+    expect(config.systemExtensions).toEqual([]);
   });
 });
 

@@ -223,6 +223,23 @@ export function flushRegistryCache(): Promise<void> {
 }
 
 /**
+ * The `apps/desktop` directory, wherever this code is running from.
+ *
+ * Regression: this used to be counted in `..` from `__dirname`, which is a
+ * different depth in the two places it runs - `electron/services/` in source,
+ * a flat `dist-electron/` after bundling - so the running app looked one level
+ * too high and read neither the build config nor the seeded extensions. It
+ * failed as defaults, silently: the Browse tab still worked, nothing was
+ * preinstalled, and only the log said why. `app.getAppPath()` is the directory
+ * of the package.json Electron was launched with, so it does not depend on how
+ * many files deep the caller happens to be.
+ */
+function desktopAppDir(): string {
+  const fromElectron = app?.getAppPath?.();
+  return fromElectron || path.join(__dirname, '..');
+}
+
+/**
  * Where `extensions.config.json` lives.
  *
  * In dev it is read from the repository so editing it does not need a rebuild;
@@ -235,7 +252,7 @@ function configPath(): string {
     const packaged = path.join(process.resourcesPath, 'extensions.config.json');
     if (fs.existsSync(packaged)) return packaged;
   }
-  return path.join(__dirname, '..', '..', 'extensions.config.json');
+  return path.join(desktopAppDir(), 'extensions.config.json');
 }
 
 /** The build's registry list and its default-installed extensions. */
@@ -694,7 +711,7 @@ export async function installFromRegistry(
 function seedDirFor(extensionId: string): string | null {
   const candidates = [
     process.resourcesPath ? path.join(process.resourcesPath, 'default-extensions', extensionId) : null,
-    path.join(__dirname, '..', '..', 'build', 'default-extensions', extensionId),
+    path.join(desktopAppDir(), 'build', 'default-extensions', extensionId),
   ].filter((dir): dir is string => dir !== null);
   return candidates.find((dir) => fs.existsSync(path.join(dir, 'sarvinbox-extension.json'))) ?? null;
 }
