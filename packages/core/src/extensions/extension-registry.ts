@@ -26,8 +26,6 @@ export interface ExtensionRegistryOptions {
   /** Directory for user extensions */
   userExtensionsDir: string;
 
-  /** Directory for builtin extensions */
-  builtinExtensionsDir?: string;
 
   /** Path to persist registry state */
   statePath: string;
@@ -65,7 +63,6 @@ export type ExtensionRegistryListener = (event: ExtensionRegistryEvent) => void;
  */
 export class ExtensionRegistry {
   private userExtensionsDir: string;
-  private builtinExtensionsDir?: string;
   private statePath: string;
 
   private extensions: Map<string, InstalledExtension> = new Map();
@@ -75,7 +72,6 @@ export class ExtensionRegistry {
 
   constructor(options: ExtensionRegistryOptions) {
     this.userExtensionsDir = options.userExtensionsDir;
-    this.builtinExtensionsDir = options.builtinExtensionsDir;
     this.statePath = options.statePath;
   }
 
@@ -121,9 +117,26 @@ export class ExtensionRegistry {
       const content = fs.readFileSync(this.statePath, 'utf-8');
       const state: RegistryState = JSON.parse(content);
 
+      let dropped = 0;
       for (const [id, ext] of Object.entries(state.extensions)) {
+        // Extensions used to ship inside the app, recorded as source 'builtin'
+        // and pointing at a folder in the app's own tree. They are published
+        // separately now, so that folder is gone and such a record can never
+        // load again: it would sit in the list forever, enabled but inert,
+        // warning on every start, un-uninstallable (uninstall refused a builtin)
+        // and blocking the reinstall of the same id from the registry. Dropping
+        // it is what lets the extension come back the ordinary way.
+        if (ext.source === ExtensionSource.BUILTIN) {
+          logger.info(`Dropping stale bundled record for '${id}'; it installs from the registry now`);
+          dropped += 1;
+          continue;
+        }
         this.extensions.set(id, ext);
       }
+
+      // Written back now rather than left to the next state change, so the file
+      // on disk stops describing extensions that cannot exist.
+      if (dropped > 0) await this.saveState();
 
       logger.debug(`Loaded registry state: ${this.extensions.size} extensions`);
     } catch (error) {
@@ -151,15 +164,7 @@ export class ExtensionRegistry {
    * Discover and load all extensions
    */
   private async discoverAndLoad(): Promise<void> {
-    // Load builtin extensions
-    if (this.builtinExtensionsDir && fs.existsSync(this.builtinExtensionsDir)) {
-      const builtins = await discoverExtensions(this.builtinExtensionsDir);
-      for (const loaded of builtins) {
-        await this.registerDiscoveredExtension(loaded, ExtensionSource.BUILTIN);
-      }
-    }
-
-    // Load user extensions
+    // Every extension is an installed one - nothing ships inside the app.
     const userExtensions = await discoverExtensions(this.userExtensionsDir);
     for (const loaded of userExtensions) {
       await this.registerDiscoveredExtension(loaded, ExtensionSource.LOCAL);
@@ -204,7 +209,7 @@ export class ExtensionRegistry {
         path: loaded.path,
         version: manifest.version,
         installedAt: Date.now(),
-        enabled: manifest.builtin ?? true, // Builtin extensions enabled by default
+        enabled: true, // Dropped into the extensions folder deliberately, so: on
         grantedPermissions: manifest.permissions, // Grant all by default (user can revoke)
         settings: {},
       };
@@ -254,10 +259,6 @@ export class ExtensionRegistry {
     const extension = this.extensions.get(extensionId);
     if (!extension) {
       throw new Error(`Extension '${extensionId}' is not installed`);
-    }
-
-    if (extension.source === ExtensionSource.BUILTIN) {
-      throw new Error('Cannot uninstall builtin extensions');
     }
 
     // Remove from disk
