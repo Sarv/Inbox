@@ -122,6 +122,25 @@ maintained as a separate open-source library,
 [docs/mailguard.md](docs/mailguard.md) for what stayed behind and
 how to switch the dependency between the local checkout and the registry.
 
+### Extensions
+
+Sarv Inbox loads extensions from a folder: a manifest, a bundled entry point,
+and a list of permissions the user sees before installing. They are published
+to their own repository,
+[Sarv/SarvInbox-extensions](https://github.com/Sarv/SarvInbox-extensions),
+and installed from **Settings → Extensions → Browse**: the app reads that
+registry over HTTPS, shows you exactly what an extension can do, and refuses
+the download unless it hashes to the SHA-256 the registry pinned. Three are
+published today — one-time passcodes, VIP scoring, and thread summarization —
+and the build decides which of them a new profile starts with in
+[`apps/desktop/extensions.config.json`](apps/desktop/extensions.config.json).
+
+Write your own against [`@sarvinbox/extension-sdk`](packages/extension-sdk).
+[docs/EXTENSIONS.md](docs/EXTENSIONS.md) covers the host side — the manifest,
+the permission model, the workflow contract, the SDK, and how an install is
+verified — and the extensions repository's README covers scaffolding,
+publishing a release, and running a registry of your own.
+
 ### Design principles
 
 1. **Privacy first** — data stays local unless you configure AI providers.
