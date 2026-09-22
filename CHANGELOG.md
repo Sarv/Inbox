@@ -8,6 +8,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Extensions do something now. The Extensions panel was empty because nothing
+  ever ran the workflows an extension registered; the app now runs them over
+  arriving mail and applies what they ask for — and only what their declared
+  permissions allow, so an extension installed to read mail cannot quietly
+  start labelling or starring it. Three ship with the app and can each be
+  turned off: **One-Time Passcodes** spots a verification code as it arrives
+  and puts it on a card with a copy button and a countdown to the moment it
+  stops working; **VIP Scoring** learns who you actually correspond with — who
+  you reply to, how fast, how often — and tags their mail so it stands out;
+  **Thread Summary** summarizes a long message or a whole thread, with the key
+  points and anything that looks like it needs doing.
+- Extensions can now put a page of their own beside the mail. An extension may
+  contribute a **panel** — shown as a column next to the open message, or as a
+  dialog — and the reader can hide or show it from a strip beside the message.
+  A panel is a page the extension ships, served from its own folder and loaded
+  in a sandbox with no network and no access to the app: everything it can do,
+  it asks for, and every request is re-checked against the permissions actually
+  granted. It cannot ask for a message by id — it is only ever shown the one
+  the reader has open — and no panel can draw inside the message body, so what
+  the sender wrote stays distinguishable from what an extension added.
+  Contributing a panel needs the new `ui:panel` permission, which is shown
+  before install like every other one.
+- Writing an extension no longer needs a build step. A folder with a manifest
+  and an `index.html` is a complete extension; the panel API is served by the
+  app itself, so there is nothing to install or vendor. Background code is
+  still supported and still optional —
+  [docs/EXTENSIONS.md](docs/EXTENSIONS.md) has both shapes.
+- Extensions can act on what you do, not just on what arrives. A card an
+  extension put on screen now tells it what you did with it — copied a field,
+  opened the message, dismissed it, or let it expire — and an extension can
+  read and change mail at that moment rather than only at the instant it
+  landed: mark read or unread, star, label, move, or put a message in the bin
+  (never a permanent delete). **One-Time Passcodes** uses it for the obvious
+  thing: copy the code and the message is marked read, which you can turn off
+  under its settings. Everything still goes through the permissions you
+  approved, checked again at the point of effect, and every change an extension
+  makes to your mailbox is written to the log with the extension's name.
+- The app no longer has any extension built into it by name. A feature that an
+  extension can provide — summarizing a thread, for one — now asks for the
+  *job* rather than for a particular extension, and whichever installed
+  extension offers it answers. Nothing changes on screen; it means an extension
+  can be published, replaced or removed without touching the app, and a build
+  with no extensions installed simply falls back to what it did before.
+
+- An extension store. Settings → Extensions now has a **Browse** tab that reads
+  a registry published on GitHub, so extensions are installed from inside the
+  app rather than by downloading a folder. Every install is checksum-verified:
+  the registry pins a SHA-256 for each release archive, the download is thrown
+  away if it does not match, and before any of that you are shown, in plain
+  language and riskiest first, exactly what the extension will be able to do —
+  and the list you agreed to is re-checked against the registry before anything
+  is installed. An unreachable registry falls back to the copy already on disk,
+  so the list still works offline. Extensions live in their own repository,
+  [SarvInbox-extensions](https://github.com/Sarv/SarvInbox-extensions),
+  rather than inside the app; which ones a new profile starts with is a build
+  setting, and those are downloaded and verified at build time so a first run
+  needs no network. Writing one now means depending on the published
+  `@sarvinbox/extension-sdk` package — [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
+  is the guide.
 - The spam filter now judges what a message LINKS to, and you can overrule it.
   Once a body is downloaded, every link target is reduced to its domain and
   looked up through the same reputation provider as the sender; a link to a
@@ -110,6 +169,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one move the message ends up making.
 
 ### Changed
+- Browsing extensions costs a lot less, on your connection and on GitHub's.
+  The catalogue is now re-fetched only when it has actually changed upstream —
+  an unchanged registry answers "not modified" with no body at all — and the
+  download counts beside each extension no longer stop refreshing once the
+  repository passes a hundred releases, which it does long before it has a
+  hundred extensions. The catalogue is also no longer written to disk on the
+  path the window is waiting on, so a large registry cannot make the app pause
+  while it saves, and it is saved atomically: a crash mid-save leaves the
+  previous copy intact rather than a half-written one that would be thrown
+  away, taking your offline catalogue with it.
+- The extension catalogue is also a third of the size it was. It used to carry
+  every field of every extension's manifest, including a block describing
+  everything an extension contributes that the app has never read — on every
+  refresh, for every user. The list now carries only what the Browse tab
+  actually draws, and the download URL and checksum for one extension are
+  fetched when you click Install on it. A registry published in the previous
+  format still works and costs no extra request.
+- Extensions now run in a separate process instead of inside the app's own. An
+  extension that crashes, hangs or loops can no longer take the app with it,
+  and permission checks stay on the app's side of that boundary rather than in
+  the extension's process.
 - The mail-security rules now come from
   [`@sarv-in/mailguard`](https://github.com/Sarv/mailguard), a new
   open-source library, instead of living in this repository. SPF/DKIM/DMARC
