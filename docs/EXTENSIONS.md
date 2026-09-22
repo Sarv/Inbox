@@ -84,6 +84,28 @@ my-extension/
 a declaration of intent — the Extensions panel renders it before the extension
 ever runs — and `activate` still has to register the workflow for real.
 
+**Say what it looks like.** The Browse tab, the install prompt and the installed
+list all show a "what it does, and where you will see it" section. It is derived
+from `contributes` and `permissions`, not written by you: declare a sidebar
+panel and the reader is told a panel appears beside their mail; ask for
+`email:label` and they are told, in those words, that it can add and remove
+labels. Nothing there can overstate what the app will actually let the extension
+do — which is the point — so the way to make an extension legible is to declare
+what it really contributes.
+
+Add pictures of it in use with the optional `screenshots` array:
+
+```json
+"screenshots": [
+  { "url": "./screenshots/sidebar.png", "caption": "A passcode in the sidebar" }
+]
+```
+
+Each `url` is a path inside your extension folder (absolute URLs are allowed but
+must be on the same hosts the registry itself is served from — an image
+elsewhere is silently not shown, because the catalogue loads it simply by being
+drawn). `caption` doubles as the image's alt text. At most six are shown.
+
 **2. The entry point.** Export `activate`, and `deactivate` if you hold
 anything that needs releasing:
 
