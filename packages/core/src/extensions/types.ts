@@ -64,6 +64,30 @@ export interface ExtensionManifest {
   /** Extension icon path (optional) */
   icon?: string;
 
+  /**
+   * Pictures of the extension doing its job, shown before install.
+   *
+   * A permission list and a one-line description do not tell a reader what an
+   * extension will look like once it is running, so people install one to find
+   * out and then go looking for whatever changed. A picture answers that in
+   * the time it takes to glance at it.
+   *
+   * Optional, and only ever decoration: nothing here is used to decide what an
+   * extension may do. URLs are re-checked against the registry host allowlist
+   * before anything is loaded, so listing one cannot turn into a request to an
+   * arbitrary server.
+   */
+  screenshots?: ExtensionScreenshot[];
+
+}
+
+/** One picture of the extension in use. */
+export interface ExtensionScreenshot {
+  /** Absolute https URL of the image. */
+  url: string;
+
+  /** One line saying what is being shown. Also the image's alt text. */
+  caption?: string;
 }
 
 /**
