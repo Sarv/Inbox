@@ -117,6 +117,14 @@ pnpm --filter @sarvinbox/core build
 echo "=== Building storage-node ==="
 pnpm --filter @sarvinbox/storage-node build
 
+# Extensions are not built here -- they live in their own repository and are
+# published as checksum-pinned release archives. This step downloads the ones
+# apps/desktop/extensions.config.json names as system extensions, verifies each
+# SHA-256, and unpacks them into build/default-extensions so electron-builder
+# can copy them into Resources. A first run then has them without a network.
+echo "=== Prefetching default extensions ==="
+pnpm --filter @sarvinbox/desktop prefetch:extensions
+
 # ── Prep native deps for electron-builder ──
 cd apps/desktop
 

@@ -142,6 +142,27 @@ export default defineConfig(({ mode }) => ({
         },
       },
       {
+        // Extension sandbox. Its own entry for the same reason as the VACUUM
+        // worker: `utilityProcess.fork` loads it by path at runtime, so it has
+        // to exist as its own file beside the main bundle. Same externals — it
+        // must resolve `@sarvinbox/core` exactly as main does, or the two ends
+        // of the extension protocol could drift apart.
+        entry: 'electron/workers/extension-sandbox.worker.ts',
+        onstart() {
+          // Deliberately no startup()/reload() — this entry rebuilding must not
+          // restart the main process or reload the window.
+        },
+        vite: {
+          define: buildDefines(mode),
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: mainExternals,
+            },
+          },
+        },
+      },
+      {
         // Preload script
         entry: 'electron/preload.ts',
         onstart(options) {

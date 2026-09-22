@@ -37,7 +37,10 @@
       "@sarvinbox/core/attachment-kind": ["../../packages/core/src/utils/attachment-kind.ts"],
       // Same: pure bulk/notification predicate, shared so the renderer and the
       // sync layer agree on what a blast is.
-      "@sarvinbox/core/bulk-mail": ["../../packages/core/src/utils/bulk-mail.ts"]
+      "@sarvinbox/core/bulk-mail": ["../../packages/core/src/utils/bulk-mail.ts"],
+      // Same: the panel bridge's wire format, shared with the main-process
+      // handler so a request one side accepts is never one the other drops.
+      "@sarvinbox/core/panel-bridge": ["../../packages/core/src/extensions/panel-bridge.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],

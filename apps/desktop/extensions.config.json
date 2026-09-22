@@ -1,0 +1,10 @@
+{
+  "_comment": "Which extensions a new profile starts with, and where the app looks for them. Read at build time by scripts/prefetch-default-extensions.mjs and at first run by the desktop app. Extensions themselves live in https://github.com/Sarv/SarvInbox-extensions, not in this repository.",
+  "registries": [
+    "https://raw.githubusercontent.com/Sarv/SarvInbox-extensions/main/registry/index.json"
+  ],
+  "systemExtensions": [
+    "otp-code",
+    "vip-scoring"
+  ]
+}

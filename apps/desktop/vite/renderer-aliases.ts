@@ -43,6 +43,14 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/attachment-kind.ts',
     ),
+    // Pure (one type-only import) — the panel bridge's wire format. The frame
+    // relay in the renderer MUST parse requests with the same module main
+    // validates them with, or a shape one accepts and the other rejects becomes
+    // a panel that hangs on a reply that never comes.
+    '@sarvinbox/core/panel-bridge': resolve(
+      desktopDir,
+      '../../packages/core/src/extensions/panel-bridge.ts',
+    ),
     // Pure (html-to-text, which is browser-safe) — the chat view decides which
     // mail to render as sent with the SAME predicate the sync layer tags with,
     // so the two can never disagree about what a blast is.

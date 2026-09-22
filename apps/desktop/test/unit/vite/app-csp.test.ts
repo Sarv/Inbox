@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { PANEL_SCHEME } from '../../../../../packages/core/src/extensions/panel-assets';
 import { ATTACHMENT_SCHEME } from '../../../../../packages/core/src/utils/attachment-kind';
 import { APP_CSP_DIRECTIVES, APP_IMG_SRC, buildAppCsp, injectCspMeta } from '../../../vite/app-csp';
 
@@ -49,6 +50,25 @@ describe('the app document policy', () => {
   it('allows the attachment scheme everywhere the viewer loads from', () => {
     for (const name of ['img-src', 'frame-src', 'media-src', 'connect-src']) {
       expect(directive(name)).toContain(`${ATTACHMENT_SCHEME}:`);
+    }
+  });
+
+  // Breaks: every extension panel is an empty frame in the PACKAGED app only.
+  // A panel is an <iframe> this document embeds, so `frame-src` has to name the
+  // scheme; its manifest icon is an <img> the app's own chrome draws, so
+  // `img-src` does too. Dev injects no policy, so neither can reproduce there.
+  it('allows the panel scheme where the app embeds a panel', () => {
+    expect(directive('frame-src')).toContain(`${PANEL_SCHEME}:`);
+    expect(directive('img-src')).toContain(`${PANEL_SCHEME}:`);
+  });
+
+  // Breaks: a panel page gets its own origin and its own policy from the
+  // protocol handler, so the app must NOT open its own connections or media to
+  // the scheme on a panel's behalf — that would be the app widening itself for
+  // code it doesn't control.
+  it('grants the panel scheme nothing beyond embedding', () => {
+    for (const name of ['connect-src', 'media-src', 'script-src', 'default-src']) {
+      expect(directive(name)).not.toContain(`${PANEL_SCHEME}:`);
     }
   });
 
