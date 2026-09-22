@@ -590,3 +590,162 @@ describe('resolveTrustedUrl', () => {
     expect(resolveTrustedUrl(value, BASE)).toBe(expected);
   });
 });
+
+/**
+ * The descriptive half of an entry: what the extension does, and pictures of it.
+ *
+ * What this protects: these fields answer "what IS this" in the catalogue and
+ * in the install prompt. Two properties matter and pull in opposite directions.
+ * They must be forgiving — a malformed panel list should cost an extension its
+ * sentence, never its listing, unlike a permission, which is rejected exactly
+ * because it decides what the extension may do. And screenshot URLs must be as
+ * unforgiving as every other URL here: a screenshot is a request the app makes
+ * while merely DRAWING the catalogue, before anyone has chosen to trust
+ * anything, so an unchecked one is a beacon to whatever host an author names.
+ */
+describe('contributes and screenshots', () => {
+  const ARCHIVE_URL =
+    'https://github.com/Sarv/SarvInbox-extensions/releases/download/otp-code-v1.0.0/otp-code-1.0.0.tgz';
+  const contributes = {
+    panels: [{ id: 'codes', title: 'Passcodes', surface: 'sidebar', autoOpen: true }],
+    workflows: [{ id: 'scan', name: 'Find codes' }],
+    settings: [{ key: 'markRead' }],
+    capabilities: [{ id: 'thread.summarize', export: 'summarize' }],
+  };
+
+  it('carries the summary through to the entry', () => {
+    const parsed = parseRegistryDocument(
+      registryDocument([entryDocument({ contributes })]),
+      SOURCE
+    );
+
+    expect(parsed.entries[0].contributes).toEqual({
+      panels: [{ title: 'Passcodes', surface: 'sidebar', autoOpen: true }],
+      workflows: [{ name: 'Find codes', requiresAI: undefined }],
+      settings: [{ key: 'markRead' }],
+      capabilities: [{ id: 'thread.summarize', description: undefined }],
+    });
+  });
+
+  // Regression: rejecting the entry over a decorative field would take a
+  // perfectly installable extension out of the catalogue.
+  it('drops a malformed summary without rejecting the extension', () => {
+    const parsed = parseRegistryDocument(
+      registryDocument([
+        entryDocument({ contributes: { panels: 'not a list', workflows: [{ name: 42 }] } }),
+      ]),
+      SOURCE
+    );
+
+    expect(parsed.rejected).toEqual([]);
+    expect(parsed.entries[0].contributes).toBeUndefined();
+  });
+
+  it('leaves the summary absent when the registry has none', () => {
+    const parsed = parseRegistryDocument(registryDocument([entryDocument()]), SOURCE);
+
+    expect(parsed.entries[0].contributes).toBeUndefined();
+  });
+
+  it('keeps screenshots served from an allowed host', () => {
+    const parsed = parseRegistryDocument(
+      registryDocument([
+        entryDocument({
+          screenshots: [
+            { url: 'extensions/otp-code/shot.png', caption: 'A code in the sidebar' },
+          ],
+        }),
+      ]),
+      SOURCE
+    );
+
+    expect(parsed.entries[0].screenshots).toEqual([
+      {
+        url: 'https://raw.githubusercontent.com/Sarv/SarvInbox-extensions/main/extensions/otp-code/shot.png',
+        caption: 'A code in the sidebar',
+      },
+    ]);
+  });
+
+  // Regression: the catalogue loads every screenshot it is given the moment it
+  // is drawn. An off-allowlist URL is a request to a stranger's server made on
+  // the reader's behalf, with their IP, for an extension they have not
+  // installed and may never install.
+  it('refuses a screenshot from anywhere else', () => {
+    const parsed = parseRegistryDocument(
+      registryDocument([
+        entryDocument({
+          screenshots: [
+            { url: 'https://tracker.example.com/pixel.png' },
+            { url: 'http://raw.githubusercontent.com/Sarv/x/main/shot.png' },
+          ],
+        }),
+      ]),
+      SOURCE
+    );
+
+    expect(parsed.rejected).toEqual([]);
+    expect(parsed.entries[0].screenshots).toBeUndefined();
+  });
+
+  // A registry is third-party data; the prompt is a fixed-size dialog.
+  it('caps how many screenshots an entry can carry', () => {
+    const many = Array.from({ length: 12 }, (_unused, index) => ({
+      url: `https://raw.githubusercontent.com/Sarv/x/main/${index}.png`,
+    }));
+    const parsed = parseRegistryDocument(
+      registryDocument([entryDocument({ screenshots: many })]),
+      SOURCE
+    );
+
+    expect(parsed.entries[0].screenshots).toHaveLength(6);
+  });
+
+  // A v2 index is deliberately thin, so the long-form record is where these
+  // may live; the merge must not drop what the index already had either.
+  it('takes them from the detail document, keeping the index values otherwise', () => {
+    const indexed = parseRegistryDocument(
+      registryDocument(
+        [
+          entryDocument({
+            download: undefined,
+            size: 7104,
+            detailUrl: 'e/otp-code.json',
+            contributes: { workflows: [{ name: 'Find codes' }] },
+          }),
+        ],
+        { schemaVersion: 2 }
+      ),
+      SOURCE
+    ).entries[0];
+
+    const withDetail = mergeRegistryDetail(
+      {
+        schemaVersion: 2,
+        id: 'otp-code',
+        version: '1.0.0',
+        download: { url: ARCHIVE_URL, sha256: DIGEST, size: 7104 },
+        contributes,
+      },
+      indexed
+    );
+
+    expect('entry' in withDetail).toBe(true);
+    if (!('entry' in withDetail)) return;
+    expect(withDetail.entry.contributes?.panels?.[0].title).toBe('Passcodes');
+
+    const noDetailFields = mergeRegistryDetail(
+      {
+        schemaVersion: 2,
+        id: 'otp-code',
+        version: '1.0.0',
+        download: { url: ARCHIVE_URL, sha256: DIGEST, size: 7104 },
+      },
+      indexed
+    );
+
+    expect('entry' in noDetailFields).toBe(true);
+    if (!('entry' in noDetailFields)) return;
+    expect(noDetailFields.entry.contributes?.workflows?.[0].name).toBe('Find codes');
+  });
+});

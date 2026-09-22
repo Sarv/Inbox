@@ -72,6 +72,29 @@ export interface RegistryEntryStats {
   ratingCount?: number;
 }
 
+/**
+ * What the extension contributes, as far as the LIST needs to know.
+ *
+ * Not the manifest's `contributes` block: only the fields the app turns into
+ * "what this does and where you will see it" survive the trip, so the index
+ * does not grow a copy of every workflow's configuration. Everything here is
+ * descriptive - nothing in it grants anything, and nothing is trusted to be
+ * accurate beyond being shown.
+ */
+export interface RegistryContributions {
+  panels?: { title: string; surface: string; autoOpen?: boolean }[];
+  workflows?: { name: string; requiresAI?: boolean }[];
+  /** Only the count is used - one entry per setting the extension adds. */
+  settings?: { key: string }[];
+  capabilities?: { id: string; description?: string }[];
+}
+
+/** One picture of the extension in use, with its URL already checked. */
+export interface RegistryScreenshot {
+  url: string;
+  caption?: string;
+}
+
 export interface RegistryEntry {
   id: string;
   name: string;
@@ -109,6 +132,17 @@ export interface RegistryEntry {
    */
   download?: RegistryDownload;
   stats: RegistryEntryStats;
+  /**
+   * What the extension does once it is running, for the "where will I see
+   * this" section of the list and the install prompt.
+   *
+   * Carried on the index entry rather than only in the detail document because
+   * the question it answers - what IS this - is the one being asked while
+   * browsing, before anything has been clicked.
+   */
+  contributes?: RegistryContributions;
+  /** Pictures of it in use. Dropped entirely if the URLs are not allowed ones. */
+  screenshots?: RegistryScreenshot[];
   /** Which configured registry this came from — shown so the user can tell them apart. */
   sourceUrl: string;
 }
@@ -211,6 +245,80 @@ function parseDownload(raw: unknown): { download: RegistryDownload } | { reason:
   };
 }
 
+/**
+ * Read the descriptive `contributes` summary off a registry record.
+ *
+ * Every field is optional and every malformed one is dropped rather than
+ * rejecting the entry: this block only decides what sentence is printed under
+ * an extension's name. An entry whose panel list is nonsense should lose the
+ * sentence, not its place in the catalogue - unlike a permission, which is
+ * rejected precisely because it decides what the extension may do.
+ */
+function parseContributions(raw: unknown): RegistryContributions | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const record = raw as Record<string, unknown>;
+  const asArray = (value: unknown): Record<string, unknown>[] =>
+    Array.isArray(value)
+      ? value.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      : [];
+
+  const panels = asArray(record.panels)
+    .map((panel) => ({
+      title: asString(panel.title) ?? '',
+      surface: asString(panel.surface) ?? 'modal',
+      autoOpen: panel.autoOpen === true ? true : undefined,
+    }))
+    .filter((panel) => panel.title !== '');
+
+  const workflows = asArray(record.workflows)
+    .map((workflow) => ({
+      name: asString(workflow.name) ?? '',
+      requiresAI: workflow.requiresAI === true ? true : undefined,
+    }))
+    .filter((workflow) => workflow.name !== '');
+
+  const settings = asArray(record.settings)
+    .map((setting) => ({ key: asString(setting.key) ?? '' }))
+    .filter((setting) => setting.key !== '');
+
+  const capabilities = asArray(record.capabilities)
+    .map((capability) => ({
+      id: asString(capability.id) ?? '',
+      description: asString(capability.description) ?? undefined,
+    }))
+    .filter((capability) => capability.id !== '');
+
+  const summary: RegistryContributions = {};
+  if (panels.length > 0) summary.panels = panels;
+  if (workflows.length > 0) summary.workflows = workflows;
+  if (settings.length > 0) summary.settings = settings;
+  if (capabilities.length > 0) summary.capabilities = capabilities;
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+/**
+ * Read the screenshot list, keeping only images from an allowed host.
+ *
+ * A screenshot is a URL the app will load, so an unchecked one is a request to
+ * whatever server an extension author named - fetched the moment the catalogue
+ * is drawn, before anyone has chosen to install anything. Running each through
+ * `resolveTrustedUrl` keeps it to the same hosts the registry and the download
+ * itself come from; a picture elsewhere is simply not shown.
+ */
+function parseScreenshots(raw: unknown, baseUrl: string): RegistryScreenshot[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const shots = raw
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .flatMap((item) => {
+      const url = resolveTrustedUrl(item.url, baseUrl);
+      return url ? [{ url, caption: asString(item.caption) ?? undefined }] : [];
+    })
+    // Enough to show what it looks like; a registry cannot turn the prompt
+    // into an unbounded gallery.
+    .slice(0, 6);
+  return shots.length > 0 ? shots : undefined;
+}
+
 function parseEntry(raw: unknown, sourceUrl: string): { entry: RegistryEntry } | { rejected: RejectedEntry } {
   if (!raw || typeof raw !== 'object') return { rejected: { id: null, reason: 'entry is not an object' } };
   const record = raw as Record<string, unknown>;
@@ -292,6 +400,8 @@ function parseEntry(raw: unknown, sourceUrl: string): { entry: RegistryEntry } |
       size,
       detailUrl: detailUrl ?? undefined,
       download,
+      contributes: parseContributions(record.contributes),
+      screenshots: parseScreenshots(record.screenshots, sourceUrl),
       stats: {
         downloads: asCount(statsRecord.downloads),
         rating,
@@ -427,6 +537,11 @@ export function mergeRegistryDetail(
       // size: it is the file the digest was taken over.
       size: download.download.size,
       download: download.download,
+      // The detail document is where a v2 registry puts the long-form record,
+      // so it may carry these when the thin index did not. It can also correct
+      // them - it is the same generator run, describing the same archive.
+      contributes: parseContributions(document.contributes) ?? entry.contributes,
+      screenshots: parseScreenshots(document.screenshots, base) ?? entry.screenshots,
     },
   };
 }
