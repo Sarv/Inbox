@@ -46,14 +46,19 @@ import { SidebarLabels } from './SidebarLabels';
 import { Tooltip } from './Tooltip';
 
 
-// Wordmark only — no mark. The app rail to the left already shows the
-// SarvInbox medallion, and two copies of it side by side read as a mistake.
-// Two files because the "Sarv" glyphs are solid #000 and disappear against the
-// dark card; dark mode here is class-based (tailwind.config.js `darkMode:
-// ['class']`), so an `@media (prefers-color-scheme)` rule inside the SVG would
-// track the OS instead of the app and get it backwards half the time. An <img>
-// also seals the SVG off from the page's CSS, so `currentColor` is not an
-// option. Only the black flips — the brand orange is identical in both.
+// Mark + wordmark lockup. The app rail to the left carries the Sarv "S" (it
+// links out to sarv.com), so the SarvInbox medallion belongs here, in front of
+// the product name.
+//
+// The wordmark is two files because the "Sarv" glyphs are solid #000 and
+// disappear against the dark card; dark mode here is class-based
+// (tailwind.config.js `darkMode: ['class']`), so an `@media
+// (prefers-color-scheme)` rule inside the SVG would track the OS instead of the
+// app and get it backwards half the time. An <img> also seals the SVG off from
+// the page's CSS, so `currentColor` is not an option. Only the black flips —
+// the brand orange is identical in both. The medallion needs no such swap: it
+// is blue and orange on transparent and reads on either card.
+const logoMark = './icon.svg';
 const logoLarge = './wordmark.svg';
 const logoLargeDark = './wordmark-dark.svg';
 
@@ -500,17 +505,24 @@ export function Sidebar() {
   return (
     <div className="w-64 min-w-64 flex-shrink-0 border-r border-border bg-card flex flex-col">
       {/* Header */}
-      <div className="h-14 px-2 border-b border-border flex items-center justify-center">
+      <div className="h-14 px-2 border-b border-border flex items-center justify-center gap-2.5">
+        {/* Decorative: the wordmark beside it already says "SarvInbox". */}
+        <img
+          src={logoMark}
+          alt=""
+          aria-hidden="true"
+          className="h-10 w-10 shrink-0 object-contain"
+        />
         <img
           src={logoLarge}
           alt="SarvInbox"
-          className="h-7 w-auto object-contain dark:hidden"
+          className="h-5 w-auto object-contain dark:hidden"
         />
         <img
           src={logoLargeDark}
           alt=""
           aria-hidden="true"
-          className="hidden h-7 w-auto object-contain dark:block"
+          className="hidden h-5 w-auto object-contain dark:block"
         />
       </div>
 

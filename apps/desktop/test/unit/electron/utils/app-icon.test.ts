@@ -41,8 +41,8 @@ describe('branded icon assets', () => {
     expect(existsSync(join(DESKTOP_ROOT, 'public', 'icon.png'))).toBe(true);
   });
 
-  // Breaks: the square mark used as the window/favicon mark, and now as the app
-  // rail's button, goes missing and the renderer requests a 404.
+  // Breaks: the square mark used as the favicon, and as the medallion in front
+  // of the sidebar wordmark, goes missing and the renderer requests a 404.
   it('ships the square mark as SVG', () => {
     expect(existsSync(join(DESKTOP_ROOT, 'public', 'icon.svg'))).toBe(true);
   });
@@ -66,11 +66,12 @@ describe('branded icon assets', () => {
     }
   });
 
-  // Breaks: the sidebar header stops being the product name alone. Two ways
-  // that regresses — the medallion gets baked back into the lockup, so it shows
-  // twice in a row beside the app rail's copy, or the "by Sarv" line returns.
-  // Each has a fill nothing else uses: #2F5FAC is the mark's blue, #3069b0 was
-  // the "by Sarv" line, and no glyph in "SarvInbox" carries either.
+  // Breaks: the wordmark stops being the product name alone. The header pairs it
+  // with icon.svg at a fixed size, so a medallion baked back INTO the wordmark
+  // renders twice over, and the retired "by Sarv" line would throw the lockup's
+  // proportions out. Each has a fill nothing else uses: #2F5FAC is the mark's
+  // blue, #3069b0 was the "by Sarv" line, and no glyph in "SarvInbox" carries
+  // either.
   it.each(['wordmark.svg', 'wordmark-dark.svg'])('ships %s as the name alone', (file) => {
     const wordmark = readFileSync(join(DESKTOP_ROOT, 'public', file), 'utf8');
 
@@ -91,6 +92,38 @@ describe('branded icon assets', () => {
     expect(read('wordmark-dark.svg').replace('fill="#F8FAFC"', 'fill="#000"')).toBe(
       read('wordmark.svg')
     );
+  });
+
+  // Breaks: the app rail's top button stops being the Sarv "S" that links out to
+  // sarv.com. The mark and the destination are one thing — showing the
+  // SarvInbox medallion there points the user at a site it does not stand for,
+  // and it duplicates the medallion the sidebar header renders one column over.
+  // The link is the bare origin on purpose: /sarvinbox does not exist yet, and a
+  // deep link that 404s is worse than the home page. Point it at the product
+  // page once that ships.
+  it('keeps the Sarv mark and the sarv.com link together in the app rail', () => {
+    const source = readFileSync(join(DESKTOP_ROOT, 'src/components/AppSidebar.tsx'), 'utf8');
+
+    expect(source).toContain("'./sarv.png'");
+    expect(source).not.toContain("'./icon.svg'");
+    expect(source).toContain("openExternal('https://sarv.com')");
+  });
+
+  // Breaks: the sidebar header loses the lockup — the medallion disappears, or
+  // it lands AFTER the name. Order is source order in a flex row, so assert
+  // icon.svg is referenced before wordmark.svg; only the wordmark carries the
+  // accessible name, so the mark must stay aria-hidden or a screen reader says
+  // "SarvInbox" twice.
+  it('renders the medallion in front of the SarvInbox wordmark', () => {
+    const source = readFileSync(join(DESKTOP_ROOT, 'src/components/Sidebar.tsx'), 'utf8');
+
+    const markAt = source.indexOf("'./icon.svg'");
+    const wordmarkAt = source.indexOf("'./wordmark.svg'");
+
+    expect(markAt).toBeGreaterThan(-1);
+    expect(markAt).toBeLessThan(wordmarkAt);
+    expect(source).toMatch(/src=\{logoMark\}[\s\S]*?aria-hidden="true"/);
+    expect(source).toMatch(/src=\{logoLarge\}\s+alt="SarvInbox"/);
   });
 
   // Breaks: a release builds with the stock Electron icon. electron-builder
