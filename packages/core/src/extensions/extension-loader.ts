@@ -9,12 +9,15 @@ import * as path from 'path';
 
 import { logger } from '../utils/logger';
 
+import { SDK_HOST } from './panel-assets';
 import type {
   ExtensionManifest,
   ExtensionPermission,
   ExtensionContributions,
   WorkflowContribution,
   SettingContribution,
+  PanelContribution,
+  CapabilityContribution,
 } from './types';
 
 /** Manifest filename */
@@ -41,7 +44,11 @@ export interface ValidationResult {
 export interface LoadedExtension {
   manifest: ExtensionManifest;
   path: string;
-  entryPoint: string;
+  /**
+   * Absolute path to the module the sandbox loads, or undefined for an
+   * extension that is only UI — a folder of HTML with no background code.
+   */
+  entryPoint?: string;
 }
 
 /**
@@ -72,8 +79,9 @@ export async function loadExtension(extensionPath: string): Promise<LoadedExtens
     logger.warn(`Extension '${manifest.id}': ${warning}`);
   }
 
-  // Resolve entry point
-  const entryPoint = resolveEntryPoint(extensionPath, manifest.main);
+  // Resolve entry point. Absent for a panel-only extension, which has no
+  // background code to run at all.
+  const entryPoint = resolveEntryPoint(extensionPath, manifest);
 
   return {
     manifest,
@@ -147,6 +155,11 @@ export function validateManifest(manifest: ExtensionManifest): ValidationResult 
     errors.push('Missing required field: id');
   } else if (!/^[a-z0-9-]+$/.test(manifest.id)) {
     errors.push('Invalid id: must be lowercase alphanumeric with hyphens only');
+  } else if (manifest.id === SDK_HOST) {
+    // The panel scheme serves the app's own SDK from this host. An extension
+    // installed under it would be addressed by the same URLs and could replace
+    // the SDK every other extension's panel loads.
+    errors.push(`Invalid id: '${SDK_HOST}' is reserved by the app`);
   }
 
   if (!manifest.name) {
@@ -167,8 +180,15 @@ export function validateManifest(manifest: ExtensionManifest): ValidationResult 
     warnings.push('Missing author');
   }
 
-  if (!manifest.main) {
-    errors.push('Missing required field: main');
+  // `main` is optional, on purpose, and the manifest alone cannot say whether
+  // that is a problem: a panel-only extension is a folder of HTML with no
+  // background code, and a no-build extension just puts its code in `index.js`
+  // and never says so. Only the loader can see which of those it is, so it
+  // makes the call once it has the folder in front of it.
+  if (!manifest.main && !manifest.contributes?.panels?.length) {
+    warnings.push(
+      'No main and no contributes.panels — the loader will look for index.js in the extension folder'
+    );
   }
 
   if (!manifest.engines) {
@@ -195,6 +215,7 @@ export function validateManifest(manifest: ExtensionManifest): ValidationResult 
       'settings:read',
       'settings:write',
       'ui:notify',
+      'ui:panel',
     ]);
 
     for (const permission of manifest.permissions) {
@@ -246,6 +267,30 @@ function validateContributions(
     }
   }
 
+  // Validate panels
+  if (contributes.panels) {
+    if (!Array.isArray(contributes.panels)) {
+      errors.push('contributes.panels must be an array');
+    } else {
+      const seen = new Set<string>();
+      for (let i = 0; i < contributes.panels.length; i++) {
+        validatePanelContribution(contributes.panels[i], i, seen, errors, warnings);
+      }
+    }
+  }
+
+  // Validate capabilities
+  if (contributes.capabilities) {
+    if (!Array.isArray(contributes.capabilities)) {
+      errors.push('contributes.capabilities must be an array');
+    } else {
+      const seen = new Set<string>();
+      for (let i = 0; i < contributes.capabilities.length; i++) {
+        validateCapabilityContribution(contributes.capabilities[i], i, seen, errors);
+      }
+    }
+  }
+
   // Validate events
   if (contributes.events) {
     if (!Array.isArray(contributes.events)) {
@@ -274,6 +319,126 @@ function validateContributions(
       }
     }
   }
+}
+
+/**
+ * Validate a panel contribution.
+ *
+ * `entry` and `icon` are paths the app will later turn into URLs, so they are
+ * checked here, at load time, rather than at request time: a manifest that
+ * points outside its own folder is rejected before the extension is ever
+ * installed, and the protocol handler's own containment check becomes the
+ * second line rather than the only one.
+ */
+/**
+ * One `contributes.capabilities` entry.
+ *
+ * A capability is how the app finds an extension without naming it, so a
+ * malformed entry is an error rather than a warning: it would leave a feature
+ * looking unprovided with nothing to say why. Two entries for the same id in
+ * ONE manifest are rejected too — across extensions a duplicate is a
+ * competition the host resolves by priority, but within a single manifest it
+ * is simply a mistake about which export serves the id.
+ */
+function validateCapabilityContribution(
+  capability: CapabilityContribution,
+  index: number,
+  seen: Set<string>,
+  errors: string[]
+): void {
+  const where = `contributes.capabilities[${index}]`;
+
+  if (!capability || typeof capability !== 'object') {
+    errors.push(`${where} must be an object`);
+    return;
+  }
+
+  if (!capability.id || typeof capability.id !== 'string') {
+    errors.push(`${where}.id is required`);
+  } else if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(capability.id)) {
+    errors.push(
+      `${where}.id must be lowercase dot-separated words, e.g. 'thread.summarize'`
+    );
+  } else if (seen.has(capability.id)) {
+    errors.push(`${where}.id '${capability.id}' is declared twice`);
+  } else {
+    seen.add(capability.id);
+  }
+
+  if (!capability.export || typeof capability.export !== 'string') {
+    errors.push(`${where}.export is required — the name on context.exports that serves it`);
+  }
+
+  if (capability.priority !== undefined && typeof capability.priority !== 'number') {
+    errors.push(`${where}.priority must be a number`);
+  }
+}
+
+function validatePanelContribution(
+  panel: PanelContribution,
+  index: number,
+  seen: Set<string>,
+  errors: string[],
+  warnings: string[]
+): void {
+  const prefix = `contributes.panels[${index}]`;
+
+  if (!panel.id) {
+    errors.push(`${prefix}: Missing required field 'id'`);
+  } else if (!/^[a-z0-9-]+$/.test(panel.id)) {
+    errors.push(`${prefix}: Invalid id '${panel.id}' - must be lowercase alphanumeric with hyphens`);
+  } else if (seen.has(panel.id)) {
+    // Two panels with one id would give the app no way to say which to open.
+    errors.push(`${prefix}: Duplicate panel id '${panel.id}'`);
+  } else {
+    seen.add(panel.id);
+  }
+
+  if (!panel.title) {
+    errors.push(`${prefix}: Missing required field 'title'`);
+  }
+
+  if (!panel.entry) {
+    errors.push(`${prefix}: Missing required field 'entry'`);
+  } else if (!isContainedRelativePath(panel.entry)) {
+    errors.push(`${prefix}: entry must be a relative path inside the extension folder`);
+  } else if (!/\.html?$/i.test(panel.entry)) {
+    errors.push(`${prefix}: entry must be an .html file`);
+  }
+
+  if (panel.icon && !isContainedRelativePath(panel.icon)) {
+    errors.push(`${prefix}: icon must be a relative path inside the extension folder`);
+  }
+
+  if (panel.surface !== 'sidebar' && panel.surface !== 'modal') {
+    errors.push(`${prefix}: surface must be 'sidebar' or 'modal'`);
+  }
+
+  if (panel.autoOpen && panel.surface === 'modal') {
+    // A dialog that opens itself every time a message is read would make the
+    // app unusable; say so rather than letting the author find out from users.
+    warnings.push(`${prefix}: autoOpen is ignored for a modal panel`);
+  }
+
+  if (panel.width !== undefined && (typeof panel.width !== 'number' || panel.width <= 0)) {
+    errors.push(`${prefix}: width must be a positive number`);
+  }
+}
+
+/**
+ * True when `candidate` stays inside the folder it is relative to.
+ *
+ * Rejects absolute paths, Windows drive letters, UNC paths, backslashes (which
+ * are a legal filename character on Linux but a separator on Windows, so a
+ * manifest using them would mean different things on different machines) and
+ * any `..` segment.
+ */
+function isContainedRelativePath(candidate: string): boolean {
+  if (typeof candidate !== 'string' || candidate.length === 0) return false;
+  if (candidate.startsWith('/') || candidate.startsWith('\\')) return false;
+  if (/^[a-zA-Z]:/.test(candidate)) return false;
+  if (candidate.includes('\\')) return false;
+  return !candidate.split('/').includes('..');
 }
 
 /**
@@ -357,33 +522,54 @@ function validateSettingContribution(
 }
 
 /**
- * Resolve extension entry point to absolute path
+ * Where an extension's code lives when the manifest does not say.
+ *
+ * In order of how an author is likely to have arranged the folder: a plain
+ * `index.js` written by hand, then the two places a bundler puts its output.
+ * Trying these is what lets a no-build extension be a folder with a manifest
+ * and a file in it, with no `main` and no build step to produce one.
  */
-function resolveEntryPoint(extensionPath: string, mainPath: string): string {
-  // Handle relative paths
-  let entryPoint = mainPath;
-  if (entryPoint.startsWith('./')) {
-    entryPoint = entryPoint.slice(2);
-  }
+const IMPLICIT_ENTRY_POINTS = ['index.js', 'dist/index.js', 'src/index.js'];
 
-  const absolutePath = path.join(extensionPath, entryPoint);
+/**
+ * Resolve extension entry point to an absolute path.
+ *
+ * Returns undefined when the extension declares panels and ships no module —
+ * a UI-only extension is a legitimate shape, not a broken one. An extension
+ * with neither still throws: silently activating nothing would leave the user
+ * with an installed extension that does nothing and says nothing.
+ */
+function resolveEntryPoint(
+  extensionPath: string,
+  manifest: ExtensionManifest
+): string | undefined {
+  const candidates = manifest.main ? [manifest.main] : IMPLICIT_ENTRY_POINTS;
 
-  // Check if file exists
-  if (!fs.existsSync(absolutePath)) {
-    // Try adding .js extension
+  for (const candidate of candidates) {
+    const relative = candidate.startsWith('./') ? candidate.slice(2) : candidate;
+    const absolutePath = path.join(extensionPath, relative);
+
+    if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile()) {
+      return absolutePath;
+    }
+    // A `main` written without its extension, the way a bundler config does.
     if (fs.existsSync(`${absolutePath}.js`)) {
       return `${absolutePath}.js`;
     }
-    // Try index.js in directory
+    // A `main` naming a directory rather than the file inside it.
     const indexPath = path.join(absolutePath, 'index.js');
     if (fs.existsSync(indexPath)) {
       return indexPath;
     }
-
-    throw new Error(`Entry point not found: ${mainPath} (resolved to ${absolutePath})`);
   }
 
-  return absolutePath;
+  if (manifest.contributes?.panels?.length) {
+    return undefined;
+  }
+
+  throw new Error(
+    `Entry point not found: ${manifest.main ?? IMPLICIT_ENTRY_POINTS.join(', ')} (in ${extensionPath})`
+  );
 }
 
 /**

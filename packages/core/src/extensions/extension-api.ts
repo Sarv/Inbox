@@ -25,7 +25,11 @@ import type {
   ExtensionStorage,
   ExtensionAI,
   ExtensionSettings,
+  ExtensionMail,
+  ExtensionMailFolder,
   ExtensionUI,
+  ExtensionUIAction,
+  ExtensionUIActionHandler,
   ExtensionUINotification,
   ExtensionLogger,
   WorkflowExecutionContext,
@@ -55,6 +59,7 @@ export interface ExtensionContextOptions {
   aiBackend?: ExtensionAIBackend;
   settingsBackend: ExtensionSettingsBackend;
   uiBackend?: ExtensionUIBackend;
+  mailBackend?: ExtensionMailBackend;
 }
 
 /**
@@ -86,6 +91,42 @@ export interface ExtensionAIBackend {
 export interface ExtensionUIBackend {
   notify(extensionId: string, notification: ExtensionUINotification): void;
   dismiss(extensionId: string, notificationId: string): void;
+
+  /** Open one of this extension's declared panels. */
+  openPanel?(extensionId: string, panelId: string): void;
+
+  /** Bring a message on screen in the reader's window. */
+  openMessage?(extensionId: string, emailId: string, accountId?: string): void;
+}
+
+/**
+ * Mail backend interface (implemented by host)
+ *
+ * The host implements the effects; the permission rules stay here, so an
+ * embedder cannot accidentally ship a backend that skips them. Each method is
+ * reached only through the matching `context.mail` wrapper, which has already
+ * checked the permission against what the user granted.
+ */
+export interface ExtensionMailBackend {
+  get(extensionId: string, emailId: string): Promise<EmailRecord | null>;
+  folders(extensionId: string, accountId?: string): Promise<ExtensionMailFolder[]>;
+
+  /**
+   * Apply label and flag changes to one message.
+   *
+   * One method rather than six because the host applies them through the same
+   * planner a workflow result goes through — the tag rules, the read/starred
+   * server push and the refusal of unsyncable flags are written once and
+   * cannot drift between the two paths.
+   */
+  applyLabels(
+    extensionId: string,
+    emailId: string,
+    changes: { add?: string[]; remove?: string[] }
+  ): Promise<void>;
+
+  move(extensionId: string, emailId: string, folderId: string): Promise<void>;
+  trash(extensionId: string, emailId: string): Promise<void>;
 }
 
 /**
@@ -95,6 +136,18 @@ export interface ExtensionSettingsBackend {
   get<T>(extensionId: string, key: string): T | undefined;
   update(extensionId: string, key: string, value: unknown): Promise<void>;
   has(extensionId: string, key: string): boolean;
+
+  /**
+   * Every key this extension currently has a value for.
+   *
+   * Optional so an embedder with a fixed settings schema need not implement it.
+   * The out-of-process runtime uses it to mirror settings into the sandbox
+   * exactly: `settings.get()` and `settings.has()` answer synchronously there,
+   * off that mirror, and without this the mirror can only carry the keys the
+   * manifest declared — so a value written under an undeclared key would read
+   * back as missing.
+   */
+  keys?(extensionId: string): string[];
 }
 
 /**
@@ -123,6 +176,7 @@ export class ExtensionContextImpl implements ExtensionContext {
   readonly storage: ExtensionStorage;
   readonly ai?: ExtensionAI;
   readonly settings: ExtensionSettings;
+  readonly mail: ExtensionMail;
   readonly ui: ExtensionUI;
   readonly log: ExtensionLogger;
   subscriptions: Unsubscribe[] = [];
@@ -132,6 +186,8 @@ export class ExtensionContextImpl implements ExtensionContext {
 
   private grantedPermissions: Set<ExtensionPermission>;
   private registeredWorkflows: Map<string, RegisteredWorkflow> = new Map();
+  /** `ui.onAction` subscribers, in registration order. */
+  private uiActionHandlers: Set<ExtensionUIActionHandler> = new Set();
 
   constructor(private options: ExtensionContextOptions) {
     this.manifest = options.manifest;
@@ -151,6 +207,9 @@ export class ExtensionContextImpl implements ExtensionContext {
 
     // Create permission-checked settings
     this.settings = this.createSettings();
+
+    // Create permission-checked mail access
+    this.mail = this.createMail();
 
     // Create permission-checked UI notifications
     this.ui = this.createUI();
@@ -262,6 +321,10 @@ export class ExtensionContextImpl implements ExtensionContext {
 
     // Clear workflows
     this.registeredWorkflows.clear();
+
+    // Drop card-action subscribers, so a card still on screen when an
+    // extension is disabled cannot call back into code that has gone away.
+    this.uiActionHandlers.clear();
   }
 
   /**
@@ -422,6 +485,137 @@ export class ExtensionContextImpl implements ExtensionContext {
         context.requirePermission('ui:notify', 'ui.dismiss');
         if (!backend) return;
         backend.dismiss(extensionId, notificationId);
+      },
+
+      onAction(handler: ExtensionUIActionHandler): Unsubscribe {
+        context.requirePermission('ui:notify', 'ui.onAction');
+        if (typeof handler !== 'function') {
+          throw new Error('ui.onAction expects a function');
+        }
+        context.uiActionHandlers.add(handler);
+        return () => {
+          context.uiActionHandlers.delete(handler);
+        };
+      },
+
+      openPanel(panelId: string): void {
+        context.requirePermission('ui:panel', 'ui.openPanel');
+        // An extension may only open a panel it declared. Without this an
+        // extension with `ui:panel` could open ANOTHER extension's panel and
+        // put a surface the reader trusts on screen at a moment of its own
+        // choosing.
+        const declared = context.manifest.contributes?.panels ?? [];
+        if (!declared.some((panel) => panel.id === panelId)) {
+          throw new Error(`Extension ${extensionId} declares no panel '${panelId}'`);
+        }
+        backend?.openPanel?.(extensionId, panelId);
+      },
+
+      openMessage(emailId: string, accountId?: string): void {
+        context.requirePermission('email:read', 'ui.openMessage');
+        backend?.openMessage?.(extensionId, emailId, accountId);
+      },
+    };
+  }
+
+  /**
+   * Deliver a card action to this extension's `ui.onAction` subscribers.
+   *
+   * Called by the host when the reader copies, dismisses or opens one of this
+   * extension's cards. Handlers are run for their effects and their results
+   * discarded: a handler that throws or rejects is logged and the rest still
+   * run, because one extension's bad handler must not swallow the notification
+   * for its own siblings.
+   */
+  dispatchUIAction(action: ExtensionUIAction): void {
+    for (const handler of this.uiActionHandlers) {
+      try {
+        const result = handler(action);
+        if (result && typeof (result as Promise<void>).catch === 'function') {
+          void (result as Promise<void>).catch((error: unknown) => {
+            logger.warn(
+              `[Extension:${this.manifest.id}] ui.onAction handler rejected:`,
+              error
+            );
+          });
+        }
+      } catch (error) {
+        logger.warn(`[Extension:${this.manifest.id}] ui.onAction handler threw:`, error);
+      }
+    }
+  }
+
+  /**
+   * Create the permission-checked mail API.
+   *
+   * Each wrapper checks ONE permission and then hands off. The read/starred
+   * flags go through `applyLabels` rather than a method of their own because
+   * the host already has a planner that knows a flag tag from a label, knows
+   * which flags can reach the server, and refuses the ones that cannot — that
+   * logic is worth exactly one implementation.
+   */
+  private createMail(): ExtensionMail {
+    const backend = this.options.mailBackend;
+    const extensionId = this.manifest.id;
+    const context = this;
+
+    /** Fail loudly rather than silently doing nothing when nothing is wired. */
+    const require_ = (operation: string): ExtensionMailBackend => {
+      if (!backend) throw new Error(`mail.${operation} is not available in this host`);
+      return backend;
+    };
+
+    // Every wrapper is `async`, so a refused permission and a missing backend
+    // come back as a REJECTION and not a synchronous throw. The signatures all
+    // promise a promise; an extension writing `mail.markRead(id).catch(...)`
+    // would otherwise take an uncaught exception on exactly the paths it wrote
+    // that `catch` for.
+    const setFlag = async (
+      operation: string,
+      emailId: string,
+      flag: 'read' | 'starred',
+      value: boolean
+    ): Promise<void> => {
+      context.requirePermission('email:flag', `mail.${operation}`);
+      return require_(operation).applyLabels(extensionId, emailId, {
+        ...(value ? { add: [flag] } : { remove: [flag] }),
+      });
+    };
+
+    return {
+      async get(emailId: string): Promise<EmailRecord | null> {
+        context.requirePermission('email:read', 'mail.get');
+        return require_('get').get(extensionId, emailId);
+      },
+
+      async folders(accountId?: string): Promise<ExtensionMailFolder[]> {
+        context.requirePermission('email:read', 'mail.folders');
+        return require_('folders').folders(extensionId, accountId);
+      },
+
+      markRead: (emailId: string) => setFlag('markRead', emailId, 'read', true),
+      markUnread: (emailId: string) => setFlag('markUnread', emailId, 'read', false),
+      star: (emailId: string) => setFlag('star', emailId, 'starred', true),
+      unstar: (emailId: string) => setFlag('unstar', emailId, 'starred', false),
+
+      async addLabel(emailId: string, label: string): Promise<void> {
+        context.requirePermission('email:label', 'mail.addLabel');
+        return require_('addLabel').applyLabels(extensionId, emailId, { add: [label] });
+      },
+
+      async removeLabel(emailId: string, label: string): Promise<void> {
+        context.requirePermission('email:label', 'mail.removeLabel');
+        return require_('removeLabel').applyLabels(extensionId, emailId, { remove: [label] });
+      },
+
+      async move(emailId: string, folderId: string): Promise<void> {
+        context.requirePermission('email:move', 'mail.move');
+        return require_('move').move(extensionId, emailId, folderId);
+      },
+
+      async trash(emailId: string): Promise<void> {
+        context.requirePermission('email:delete', 'mail.trash');
+        return require_('trash').trash(extensionId, emailId);
       },
     };
   }

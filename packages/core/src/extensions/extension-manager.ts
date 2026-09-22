@@ -18,20 +18,45 @@ import type {
   ExtensionAIBackend,
   ExtensionSettingsBackend,
   ExtensionUIBackend,
+  ExtensionMailBackend,
 } from './extension-api';
 import {
   ExtensionHost,
   createExtensionHost,
+  type ExtensionHostOptions,
+  type PanelRequestDeps,
   type WorkflowStage,
 } from './extension-host';
 import {
   ExtensionRegistry,
   createExtensionRegistry,
 } from './extension-registry';
+import { panelAssetUrl } from './panel-assets';
+import type { PanelRequest, PanelResponse } from './panel-bridge';
 import type {
   InstalledExtension,
   ExtensionInfo,
+  ExtensionUIAction,
+  PanelContribution,
 } from './types';
+import { splitNotificationId } from './ui-notification';
+
+/**
+ * A panel the app can show right now, with its assets already addressed.
+ *
+ * The URLs are built here rather than in the renderer so there is one place
+ * that knows how a panel is addressed, and the renderer never assembles a
+ * privileged URL out of parts an extension supplied.
+ */
+export interface AvailablePanel {
+  extensionId: string;
+  extensionName: string;
+  panel: PanelContribution;
+  /** The page to load into the iframe. */
+  url: string;
+  /** The panel's icon, when it ships one. */
+  iconUrl?: string;
+}
 
 
 /**
@@ -55,9 +80,19 @@ export interface ExtensionManagerOptions {
 
   /** Optional: UI notification backend (omit for a host that renders no UI) */
   uiBackend?: ExtensionUIBackend;
+  mailBackend?: ExtensionMailBackend;
 
   /** Optional: event bus (shared with pipeline) */
   eventBus?: EventBus;
+
+  /**
+   * Optional: opens the channel to the sandbox process extensions run in.
+   *
+   * The desktop app supplies one backed by an Electron `utilityProcess`. Left
+   * out, the sandbox runs in this process instead — the same engine, the same
+   * permission checks, just no process boundary.
+   */
+  createChannel?: ExtensionHostOptions['createChannel'];
 }
 
 /**
@@ -107,7 +142,9 @@ export class ExtensionManager {
       aiBackend: options.aiBackend,
       settingsBackend,
       uiBackend: options.uiBackend,
+      mailBackend: options.mailBackend,
       extensionStoragePath: this.storageDir,
+      createChannel: options.createChannel,
     });
   }
 
@@ -284,6 +321,10 @@ export class ExtensionManager {
         const extSettings = settings.get(extensionId);
         return extSettings ? key in extSettings : false;
       },
+
+      keys(extensionId: string): string[] {
+        return Object.keys(settings.get(extensionId) ?? {});
+      },
     };
   }
 
@@ -320,6 +361,51 @@ export class ExtensionManager {
    */
   getExtensionInfo(extensionId: string): ExtensionInfo | undefined {
     return this.registry.getRuntimeInfo(extensionId);
+  }
+
+  /**
+   * Every panel the app should offer right now.
+   *
+   * Enabled extensions that were granted `ui:panel`, and nothing else. Computed
+   * on each call rather than cached: disabling an extension or revoking the
+   * grant has to take the panel away immediately, not at the next restart.
+   */
+  listPanels(): AvailablePanel[] {
+    const available: AvailablePanel[] = [];
+
+    for (const installed of this.registry.getAll()) {
+      if (!installed.enabled) continue;
+      if (!installed.grantedPermissions.includes('ui:panel')) continue;
+
+      const loaded = this.registry.getLoaded(installed.id);
+      const panels = loaded?.manifest.contributes?.panels;
+      if (!loaded || !panels?.length) continue;
+
+      for (const panel of panels) {
+        available.push({
+          extensionId: installed.id,
+          extensionName: loaded.manifest.name,
+          panel,
+          url: panelAssetUrl(installed.id, panel.entry),
+          iconUrl: panel.icon ? panelAssetUrl(installed.id, panel.icon) : undefined,
+        });
+      }
+    }
+
+    return available;
+  }
+
+  /**
+   * Answer one request from an extension's panel. See
+   * `ExtensionHost.servePanelRequest` — the permission checks live there,
+   * beside the contexts they check against.
+   */
+  async servePanelRequest(
+    extensionId: string,
+    request: PanelRequest,
+    deps?: PanelRequestDeps
+  ): Promise<PanelResponse> {
+    return this.host.servePanelRequest(extensionId, request, deps);
   }
 
   /**
@@ -408,6 +494,69 @@ export class ExtensionManager {
    */
   getExtensionExports<T = Record<string, unknown>>(extensionId: string): T | undefined {
     return this.host.getExtensionExports<T>(extensionId);
+  }
+
+  /**
+   * Run whichever extension serves a capability, or report that none does.
+   *
+   * This is the call the app makes instead of naming an extension. It answers
+   * `{ served: false }` rather than throwing when nothing provides the
+   * capability, because "no extension does this" is the ordinary state of a
+   * fresh install — the app falls back to its own behaviour and shows nothing.
+   * A provider that exists and then FAILS is a different thing and does throw.
+   */
+  async invokeCapability<T = unknown>(
+    capability: string,
+    args: unknown[] = []
+  ): Promise<{ served: true; extensionId: string; value: T } | { served: false }> {
+    const provider = this.host.findCapabilityProvider(capability);
+    if (!provider) return { served: false };
+
+    const value = await this.callExtensionFunction<T>(
+      provider.extensionId,
+      provider.exportName,
+      ...args
+    );
+    return { served: true, extensionId: provider.extensionId, value };
+  }
+
+  /** Every capability an active extension currently serves. */
+  listCapabilities(): { id: string; extensionId: string; description?: string }[] {
+    const seen: { id: string; extensionId: string; description?: string }[] = [];
+    for (const installed of this.registry.getAll()) {
+      if (!this.host.isActive(installed.id)) continue;
+      const manifest = this.registry.getLoaded(installed.id)?.manifest;
+      for (const contribution of manifest?.contributes?.capabilities ?? []) {
+        if (!contribution?.id) continue;
+        seen.push({
+          id: contribution.id,
+          extensionId: installed.id,
+          description: contribution.description,
+        });
+      }
+    }
+    return seen;
+  }
+
+  /**
+   * Hand a notification-card action to the extension that raised the card.
+   *
+   * The renderer reports the namespaced id it holds; the owning extension and
+   * its own un-namespaced id are recovered here, so the renderer never has to
+   * know how ids are namespaced and an extension never sees the namespace.
+   */
+  async dispatchNotificationAction(
+    namespacedId: string,
+    action: Omit<ExtensionUIAction, 'notificationId'>
+  ): Promise<boolean> {
+    const split = splitNotificationId(namespacedId);
+    if (!split) return false;
+
+    const { extensionId, notificationId } = split;
+    if (!this.host.isActive(extensionId)) return false;
+
+    await this.host.dispatchNotificationAction(extensionId, { ...action, notificationId });
+    return true;
   }
 
   /**
