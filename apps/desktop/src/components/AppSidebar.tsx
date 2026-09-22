@@ -11,8 +11,8 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 
-// The square SarvInbox mark (also the dock/app icon, minus its tile)
-const sarvLogo = './icon.svg';
+// Logo asset path (from public folder)
+const sarvLogo = './sarv.png';
 
 type AppSection = 'mail' | 'teams' | 'chat' | 'meet' | 'webinar' | 'drive' | 'calendar' | 'contacts' | 'extensions' | 'ai-settings' | 'agent' | 'settings' | 'security';
 
@@ -46,10 +46,10 @@ export function AppSidebar({ activeSection, onSectionChange }: AppSidebarProps) 
           pinned at 12px in both states, so the extra pixel spills harmlessly
           into the row's right padding. */}
       <button
-        onClick={() => window.electronAPI.app.openExternal('https://sarv.com/sarvinbox')}
+        onClick={() => window.electronAPI.app.openExternal('https://sarv.com')}
         className="h-14 shrink-0 flex items-center justify-start px-3 border-b border-border hover:bg-accent/50 transition-colors cursor-pointer"
       >
-        <img src={sarvLogo} alt="Sarv Inbox" className="h-8 w-8 max-w-none shrink-0 object-contain" />
+        <img src={sarvLogo} alt="Sarv.com" className="h-8 w-8 max-w-none shrink-0 object-contain" />
       </button>
 
       {/* Menu Items */}
