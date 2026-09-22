@@ -1,0 +1,60 @@
+{
+  "name": "@sarvinbox/extension-sdk",
+  "version": "1.0.0",
+  "description": "Types and helpers for building Sarv Inbox extensions",
+  "license": "MIT",
+  "author": "Sarv",
+  "homepage": "https://github.com/Sarv/SarvInbox-extensions",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sarv/Inbox.git",
+    "directory": "packages/extension-sdk"
+  },
+  "keywords": [
+    "sarvinbox",
+    "email",
+    "extension",
+    "sdk"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./text": {
+      "types": "./dist/text.d.ts",
+      "import": "./dist/text.mjs",
+      "require": "./dist/text.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "eslint src --ext .ts",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@sarv-in/mailguard": "^0.1.0",
+    "html-to-text": "^10.0.0"
+  },
+  "devDependencies": {
+    "@sarvinbox/core": "workspace:*",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

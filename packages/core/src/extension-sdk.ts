@@ -16,14 +16,14 @@
  *
  * Adding to this file: only ever re-export from a module with no imports of its
  * own. A helper that needs a dependency goes behind its own entry point instead
- * — see `extension-sdk-text.ts` (`@sarvinbox/core/extension-sdk/text`), which
+ * — see `extension-sdk-text.ts` (`@sarvinbox/core/extension-sdk-text`), which
  * exists because `html-to-text` is CommonJS and therefore cannot be tree-shaken
  * out of an extension that does not use it.
  *
  * And measure, rather than trusting that rule. After adding anything here,
- * rebuild `extensions/vip-scoring` and check its size: it imports a handful of
- * these helpers and nothing heavy, so a jump means the new export dragged
- * something in.
+ * rebuild a small extension in the extensions repository and check its bundle
+ * size: one that imports a handful of these helpers and nothing heavy should not
+ * move at all, so a jump means the new export dragged something in.
  */
 
 // Tag encoding. `EmailRecord.tags` is a `|a|b|c|` string, not an array —
@@ -80,6 +80,11 @@ export type {
   ExtensionUI,
   ExtensionUIField,
   ExtensionUINotification,
+  ExtensionUIAction,
+  ExtensionUIActionHandler,
+  ExtensionMail,
+  ExtensionMailFolder,
+  CapabilityContribution,
   ExtensionAI,
   ExtensionStorage,
   ExtensionSettings,
@@ -101,8 +106,8 @@ export {
 // at the same moment — a workflow and a click, say — must pay for it once.
 export { createSingleFlight, type SingleFlight } from './utils/single-flight';
 
-// The on-demand summarization contract. An extension that sets exports of this
-// shape is reachable from the app's `extension:summarizeThread` IPC handler.
+// The on-demand summarization contract: the shape the app expects from whatever
+// extension declares the `thread.summarize` capability in its manifest.
 export type {
   EmailForSummary,
   EmailSummaryResult,

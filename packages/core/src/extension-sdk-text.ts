@@ -13,9 +13,15 @@
  * charged every extension for them whether it imported them or not: measured at
  * +107 KB on `vip-scoring`, which does no text processing at all.
  *
- * So they live behind `@sarvinbox/core/extension-sdk/text`. Importing this
+ * So they live behind `@sarvinbox/core/extension-sdk-text`. Importing this
  * module is how an extension says it wants that weight; importing the main SDK
  * entry can never hand it one by accident.
+ *
+ * The subpath is spelled flat (`-text`) rather than nested (`/text`) because
+ * Vite 5 — which is what an extension's vitest run resolves through — fails to
+ * resolve a deep export subpath under a key that is itself an export, while
+ * Node resolves it fine. The tests would have failed where the built extension
+ * worked, so the name matches the file instead.
  */
 
 export { htmlToPlainText, type HtmlToPlainTextOptions } from './utils/html-text';
