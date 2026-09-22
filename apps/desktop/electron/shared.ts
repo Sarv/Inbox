@@ -117,6 +117,32 @@ export function getAccountIdForStorage(storage: SQLiteStorage | null): string | 
   return null;
 }
 
+/** The storage that actually holds `emailId`, or null if no open account does.
+ *
+ *  An event carrying only an email id says nothing about which account it came
+ *  from, and every account has its own database — so a consumer that reached
+ *  for `getStorage()` would silently do nothing whenever the message belonged to
+ *  a background account. `hintAccountId` short-circuits the scan when the caller
+ *  already knows; otherwise the active account is tried first (overwhelmingly
+ *  the common case) before the rest. Returns null when the row is not in any db
+ *  yet, which is normal: the id can reach a listener before the insert lands.
+ */
+export function findStorageForEmail(emailId: string, hintAccountId?: string): SQLiteStorage | null {
+  const holdsIt = (candidate: SQLiteStorage | null): boolean =>
+    !!(candidate as any)?.db?.prepare?.('SELECT 1 FROM emails WHERE id = ? LIMIT 1')?.get(emailId);
+
+  if (hintAccountId) {
+    const hinted = getStorageFor(hintAccountId);
+    if (holdsIt(hinted)) return hinted;
+  }
+  const active = getStorage();
+  if (holdsIt(active)) return active;
+  for (const [, rt] of runtimes) {
+    if (holdsIt(rt.storage)) return rt.storage;
+  }
+  return null;
+}
+
 export function getSmtpClientFor(accountId: string): SMTPClient | null {
   return runtimes.get(accountId)?.smtpClient ?? null;
 }

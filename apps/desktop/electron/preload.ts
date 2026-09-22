@@ -6,7 +6,7 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict } from '@sarvinbox/core';
+import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
@@ -872,12 +872,72 @@ contextBridge.exposeInMainWorld('electronAPI', {
     uninstall: (extensionId: string) => ipcRenderer.invoke('extensions:uninstall', extensionId),
     selectAndInstall: () => ipcRenderer.invoke('extensions:selectAndInstall'),
     getWorkflows: () => ipcRenderer.invoke('extensions:getWorkflows'),
-    // Extension function calls
+    browse: (options?: { force?: boolean }) => ipcRenderer.invoke('extensions:browse', options),
+    registryDetail: (extensionId: string) =>
+      ipcRenderer.invoke('extensions:registryDetail', extensionId),
+    installFromRegistry: (extensionId: string, permissions: string[]) =>
+      ipcRenderer.invoke('extensions:installFromRegistry', extensionId, permissions),
+    getRegistries: () => ipcRenderer.invoke('extensions:getRegistries'),
+    // Panels. `listPanels` is re-read whenever extensions change: a disabled
+    // extension's panel has to disappear straight away.
+    listPanels: () => ipcRenderer.invoke('extensions:listPanels'),
+    // One request from a panel iframe, relayed verbatim. The renderer must not
+    // interpret it — main re-validates and permission-checks every field.
+    panelRequest: (
+      extensionId: string,
+      payload: unknown,
+      context?: { currentMessageId?: string },
+    ) => ipcRenderer.invoke('extensions:panelRequest', extensionId, payload, context),
+    // Cards an extension asked to show. The payload is already sanitised in the
+    // main process (capped strings, namespaced id, malformed fields dropped) —
+    // the renderer never sees what an extension literally passed.
+    onNotify: (callback: (card: ExtensionNotificationCard) => void) => {
+      const listener = (_event: unknown, card: ExtensionNotificationCard) => callback(card);
+      ipcRenderer.on('extensions:notify', listener);
+      return () => ipcRenderer.removeListener('extensions:notify', listener);
+    },
+    onDismiss: (callback: (payload: { id: string; extensionId: string }) => void) => {
+      const listener = (_event: unknown, payload: { id: string; extensionId: string }) =>
+        callback(payload);
+      ipcRenderer.on('extensions:dismiss', listener);
+      return () => ipcRenderer.removeListener('extensions:dismiss', listener);
+    },
+    // An extension asked for one of its own panels to be shown. The renderer
+    // still decides whether it can honour it right now.
+    onOpenPanel: (callback: (payload: { extensionId: string; panelId: string }) => void) => {
+      const listener = (_event: unknown, payload: { extensionId: string; panelId: string }) =>
+        callback(payload);
+      ipcRenderer.on('extensions:openPanel', listener);
+      return () => ipcRenderer.removeListener('extensions:openPanel', listener);
+    },
+    onOpenMessage: (
+      callback: (payload: { extensionId: string; emailId: string; accountId?: string }) => void,
+    ) => {
+      const listener = (
+        _event: unknown,
+        payload: { extensionId: string; emailId: string; accountId?: string },
+      ) => callback(payload);
+      ipcRenderer.on('extensions:openMessage', listener);
+      return () => ipcRenderer.removeListener('extensions:openMessage', listener);
+    },
+    // A reader acted on a card. Reporting is fire-and-await: whether an
+    // extension is listening is the main process's business, not the UI's.
+    cardAction: (
+      notificationId: string,
+      action: {
+        action: 'copy' | 'dismiss' | 'expire' | 'open';
+        fieldIndex?: number;
+        fieldLabel?: string;
+        emailId?: string;
+        accountId?: string;
+      },
+    ) => ipcRenderer.invoke('extensions:cardAction', notificationId, action),
+    // Capabilities. The app asks for a JOB by name and takes whichever
+    // extension serves it; nothing in the renderer names an extension.
+    invoke: (capability: string, ...args: unknown[]) =>
+      ipcRenderer.invoke('extensions:invoke', capability, args),
+    capabilities: () => ipcRenderer.invoke('extensions:capabilities'),
     isAvailable: (extensionId: string) => ipcRenderer.invoke('extension:isAvailable', extensionId),
-    summarizeThread: (emails: any[]) => ipcRenderer.invoke('extension:summarizeThread', emails),
-    summarizeEmail: (email: any) => ipcRenderer.invoke('extension:summarizeEmail', email),
-    categorizeEmails: (emails: any[], userEmail: string) =>
-      ipcRenderer.invoke('extension:categorizeEmails', emails, userEmail),
     // Listen for AI complete requests from main process (for extension AI backend)
     onAICompleteRequest: (callback: (request: { requestId: string; systemPrompt: string; userPrompt: string; maxTokens?: number }) => void) => {
       ipcRenderer.on('ai:complete-request', (_event, request) => callback(request));
@@ -1520,11 +1580,48 @@ export interface ElectronAPI {
     uninstall: (extensionId: string) => Promise<{ success: boolean; error?: string }>;
     selectAndInstall: () => Promise<{ success: boolean; data?: InstalledExtension; error?: string }>;
     getWorkflows: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
-    // Extension function calls
+    browse: (options?: { force?: boolean }) =>
+      Promise<{ success: boolean; data?: MarketplaceCatalog; error?: string }>;
+    registryDetail: (extensionId: string) =>
+      Promise<{ success: boolean; data?: MarketplaceExtensionDetail; error?: string }>;
+    installFromRegistry: (extensionId: string, permissions: string[]) =>
+      Promise<{ success: boolean; data?: { id: string; version: string }; error?: string }>;
+    getRegistries: () =>
+      Promise<{ success: boolean; data?: { registries: string[]; systemExtensions: string[] }; error?: string }>;
+    listPanels: () => Promise<{ success: boolean; data?: AvailablePanel[]; error?: string }>;
+    panelRequest: (
+      extensionId: string,
+      payload: unknown,
+      context?: { currentMessageId?: string },
+    ) => Promise<PanelResponse>;
+    onNotify: (callback: (card: ExtensionNotificationCard) => void) => () => void;
+    onDismiss: (callback: (payload: { id: string; extensionId: string }) => void) => () => void;
+    onOpenPanel: (callback: (payload: { extensionId: string; panelId: string }) => void) => () => void;
+    onOpenMessage: (
+      callback: (payload: { extensionId: string; emailId: string; accountId?: string }) => void,
+    ) => () => void;
+    cardAction: (
+      notificationId: string,
+      action: {
+        action: 'copy' | 'dismiss' | 'expire' | 'open';
+        fieldIndex?: number;
+        fieldLabel?: string;
+        emailId?: string;
+        accountId?: string;
+      },
+    ) => Promise<{ success: boolean; data?: boolean; error?: string }>;
+    // Extension capability calls
+    invoke: <T = unknown>(capability: string, ...args: unknown[]) => Promise<{
+      success: boolean;
+      data?: { served: true; extensionId: string; value: T } | { served: false };
+      error?: string;
+    }>;
+    capabilities: () => Promise<{
+      success: boolean;
+      data?: { id: string; extensionId: string; description?: string }[];
+      error?: string;
+    }>;
     isAvailable: (extensionId: string) => Promise<{ success: boolean; data?: boolean; error?: string }>;
-    summarizeThread: (emails: any[]) => Promise<{ success: boolean; data?: any; error?: string }>;
-    summarizeEmail: (email: any) => Promise<{ success: boolean; data?: any; error?: string }>;
-    categorizeEmails: (emails: any[], userEmail: string) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     // AI bridge for extension backend
     onAICompleteRequest: (callback: (request: { requestId: string; systemPrompt: string; userPrompt: string; maxTokens?: number }) => void) => void;
     sendAICompleteResponse: (response: { requestId: string; success: boolean; result?: string; error?: string }) => void;
@@ -1774,6 +1871,34 @@ export interface InstalledExtension {
 }
 
 /**
+ * A card an extension asked the app to show.
+ *
+ * Structurally identical to core's `SanitizedExtensionNotification`, restated
+ * here because the preload bundle is standalone and must not pull the core
+ * package into the sandboxed context. `id` is already namespaced by extension,
+ * so two extensions cannot replace or dismiss each other's cards.
+ */
+export interface ExtensionNotificationField {
+  label: string;
+  value: string;
+  copyable?: boolean;
+  emphasis?: boolean;
+}
+
+export interface ExtensionNotificationCard {
+  id: string;
+  extensionId: string;
+  title: string;
+  body?: string;
+  fields?: ExtensionNotificationField[];
+  /** UTC epoch ms after which the card is useless; rendered as a countdown. */
+  expiresAt?: number;
+  timeoutMs?: number;
+  emailId?: string;
+  accountId?: string;
+}
+
+/**
  * Extension manifest
  */
 export interface ExtensionManifest {
@@ -1789,6 +1914,75 @@ export interface ExtensionManifest {
 /**
  * Extension runtime info
  */
+/**
+ * What a registry offers, as the Browse tab sees it.
+ *
+ * Structurally identical to core's `CatalogItem` / the marketplace service's
+ * `MarketplaceCatalog`, restated here for the same reason as the types above:
+ * the preload bundle is standalone and must not pull core into the sandboxed
+ * context.
+ */
+export interface MarketplaceCatalogItem {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  license?: string;
+  keywords: string[];
+  homepage?: string;
+  iconUrl?: string;
+  readmeUrl?: string;
+  engineRange?: string;
+  permissions: string[];
+  /** Bytes of the release archive, shown on the card without a detail fetch. */
+  size: number;
+  /**
+   * How to fetch and verify the archive. Absent on a thin registry index until
+   * `registryDetail` has been read for this extension.
+   */
+  download?: { url: string; sha256: string; size: number; publishedAt?: string; releaseTag?: string };
+  stats: { downloads: number; rating?: number; ratingCount?: number };
+  sourceUrl: string;
+  state: 'available' | 'installed' | 'update-available' | 'incompatible';
+  installedVersion?: string;
+  enabled?: boolean;
+  incompatibleReason?: string;
+}
+
+/**
+ * One extension's full registry record, download block included.
+ *
+ * A thin index leaves the download URL and the digest out of the list, so the
+ * permission prompt - which shows the checksum the archive is checked against -
+ * has to ask for them for the one extension the user chose.
+ */
+export interface MarketplaceExtensionDetail {
+  id: string;
+  version: string;
+  size: number;
+  license?: string;
+  homepage?: string;
+  readmeUrl?: string;
+  download: { url: string; sha256: string; size: number; publishedAt?: string; releaseTag?: string };
+}
+
+export interface MarketplaceRegistryStatus {
+  url: string;
+  source: string | null;
+  stars: number;
+  generatedAt: string | null;
+  ok: boolean;
+  error?: string;
+  fromCache: boolean;
+}
+
+export interface MarketplaceCatalog {
+  items: MarketplaceCatalogItem[];
+  registries: MarketplaceRegistryStatus[];
+  fetchedAt: number;
+}
+
 export interface ExtensionInfo {
   manifest: ExtensionManifest | null;
   state: string;

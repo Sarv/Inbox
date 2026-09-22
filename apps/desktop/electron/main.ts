@@ -15,7 +15,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
-import { SyncEngine, ExtensionManager, createLogger, getLogLevel, setLogLevel, isConnectionError } from '@sarvinbox/core';
+import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 
@@ -57,6 +57,15 @@ import { describeDevSessionReset, resetDevSessionCaches } from './services/dev-s
 import { installEmailImageRequestHandlers } from './services/email-image-requests';
 import { describeStall, startEventLoopMonitor } from './services/event-loop-monitor';
 import { createExtensionAIBackend } from './services/extension-ai-backend';
+import { createExtensionMailBackend } from './services/extension-mail-backend';
+import { installSystemExtensions } from './services/extension-marketplace';
+import {
+  PANEL_SCHEME_PRIVILEGES,
+  registerPanelProtocol,
+} from './services/extension-panel-protocol';
+import { createSandboxChannel } from './services/extension-runtime';
+import { createExtensionUIBackend } from './services/extension-ui-backend';
+import { startExtensionWorkflowRunner, stopExtensionWorkflowRunner } from './services/extension-workflow-runner';
 import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
 import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
@@ -183,7 +192,11 @@ initSentryMain();
 // the privileges nothing else claimed and lost the three Sentry also wanted. The
 // visible result was that `<img>`/`<video>`/the PDF viewer worked while the text
 // pane's `fetch()` failed with "Failed to fetch" before the handler ever ran.
-protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES]);
+// Registered in the same call as the attachment scheme, not a second one:
+// Electron REPLACES the per-privilege scheme lists on every call rather than
+// merging them, so a separate registration here would silently strip the
+// attachment scheme's privileges (see the note above).
+protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES, PANEL_SCHEME_PRIVILEGES]);
 const logger = createLogger('main');
 
 // Read version from package.json
@@ -664,25 +677,64 @@ async function initializeExtensionManager(): Promise<void> {
   const userDataPath = app.getPath('userData');
   const extensionsBaseDir = join(userDataPath, 'extensions-data');
 
-  const builtinExtensionsDir = isDev
-    ? join(__dirname, '..', '..', '..', 'packages', 'core', 'src', 'extensions', 'builtin')
-    : join(__dirname, '..', 'builtin-extensions');
-
+  // No extensions are compiled into the app. They live in their own repository
+  // (https://github.com/Sarv/SarvInbox-extensions), are published as signed-
+  // by-checksum release archives, and are installed into `extensionsBaseDir`
+  // like any other — including the ones `extensions.config.json` names as
+  // system extensions, which are simply installed for the user on first run.
+  // That keeps one code path for a shipped extension and a user-installed one.
   const aiBackend = createExtensionAIBackend();
 
   const extensionManager = new ExtensionManager({
     extensionsBaseDir,
-    builtinExtensionsDir,
     aiBackend,
+    // The GLOBAL bus, not a private one. Without this the manager created its
+    // own, so an extension subscribing to `email:synced` heard nothing the sync
+    // pipeline ever published — the events existed, on a different bus.
+    eventBus: getEventBus(),
+    uiBackend: createExtensionUIBackend(),
+    // Reading and changing mail on the extension's own schedule, each method
+    // gated on the permission the reader approved at install time.
+    mailBackend: createExtensionMailBackend(),
+    // Extension code runs in its own process, not this one. Main keeps the
+    // database key, the credential vault and the IMAP connections; the sandbox
+    // gets a message port and has to ask for everything else.
+    createChannel: createSandboxChannel,
   });
 
   try {
     await extensionManager.initialize();
     setExtensionManager(extensionManager);
+    // Only after the manager is registered: the runner reads it through the
+    // shared accessor on every event, and starting first would drop whatever
+    // arrived in between.
+    startExtensionWorkflowRunner();
     logger.info('[Main] Extension manager initialized with AI backend');
+
+    // Deliberately not awaited: seeding a new profile can involve a registry
+    // fetch, and startup must not wait on the network. Anything already
+    // installed is left alone, so this is a no-op on every run but the first.
+    void installSystemExtensions().catch((error) => {
+      logger.warn('[Main] Could not install the default extensions:', error);
+    });
   } catch (error) {
     logger.error('[Main] Failed to initialize extension manager:', error);
   }
+}
+
+/**
+ * The folder `sarv-extension://<id>/...` is allowed to serve from, or undefined
+ * when that extension may not show panels.
+ *
+ * Re-read on every request rather than captured once, so disabling an extension
+ * or revoking `ui:panel` takes effect on the next asset it asks for instead of
+ * at the next restart.
+ */
+function resolvePanelExtensionDir(extensionId: string): string | undefined {
+  const installed = getExtensionManager()?.getRegistry().get(extensionId);
+  if (!installed || !installed.enabled) return undefined;
+  if (!installed.grantedPermissions.includes('ui:panel')) return undefined;
+  return installed.path;
 }
 
 // ========== Single-instance lock ==========
@@ -843,6 +895,13 @@ app.whenReady().then(async () => {
     // never bricks on "Storage not initialized"). Must run AFTER storage init.
     await initializeAccountRegistry();
     await initializeExtensionManager();
+    // After the manager, because the handler asks it which extensions may serve
+    // panels at all. The lookup is evaluated per request, so an extension
+    // disabled later stops serving immediately.
+    registerPanelProtocol(
+      VITE_DEV_SERVER_URL ?? `file://${join(__dirname, '../dist/index.html')}`,
+      resolvePanelExtensionDir
+    );
 
     // Start background services
     startSnoozeChecker();
@@ -1104,6 +1163,10 @@ app.on('before-quit', (event) => {
         // Ignore errors during shutdown
       }
     }
+
+    // Stop feeding the runner BEFORE shutting the manager down, so a message
+    // still draining cannot call into an extension that is being deactivated.
+    stopExtensionWorkflowRunner();
 
     const extensionManager = getExtensionManager();
     if (extensionManager) {

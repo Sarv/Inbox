@@ -338,7 +338,15 @@ async function placeEmailInFolder(
 }
 
 /** Resolve + validate an email and a destination folder, then place it (move/copy). */
-async function moveOrCopyOne(
+/**
+ * Move or copy one message, local row and server both.
+ *
+ * Exported so the extension mail backend runs the SAME move an IPC-driven move
+ * runs: the folder tag rewrite, the Gmail label semantics and the queued IMAP
+ * operation are non-obvious enough that a second implementation would be a
+ * second set of bugs.
+ */
+export async function moveOrCopyOne(
   storage: ReturnType<typeof requireStorage>,
   syncEngine: ReturnType<typeof getSyncEngine>,
   emailId: string,
