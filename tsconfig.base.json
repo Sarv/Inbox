@@ -20,7 +20,7 @@
     "paths": {
       "@sarvinbox/core": ["./packages/core/src"],
       "@sarvinbox/core/extension-sdk": ["./packages/core/src/extension-sdk"],
-      "@sarvinbox/core/extension-sdk/text": ["./packages/core/src/extension-sdk-text"],
+      "@sarvinbox/core/extension-sdk-text": ["./packages/core/src/extension-sdk-text"],
       "@sarvinbox/storage-node": ["./packages/storage-node/src"],
       "@sarvinbox/storage-mobile": ["./packages/storage-mobile/src"],
       "@sarvinbox/ui-shared": ["./packages/ui-shared/src"],
