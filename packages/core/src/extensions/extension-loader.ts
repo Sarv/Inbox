@@ -130,7 +130,6 @@ async function loadManifest(extensionPath: string): Promise<ExtensionManifest> {
           contributes: extConfig.contributes,
           keywords: extConfig.keywords || pkg.keywords,
           icon: extConfig.icon,
-          builtin: extConfig.builtin,
         };
       }
     } catch (error) {

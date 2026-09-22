@@ -66,8 +66,6 @@ export interface ExtensionManagerOptions {
   /** Base directory for extensions data */
   extensionsBaseDir: string;
 
-  /** Optional: directory containing builtin extensions */
-  builtinExtensionsDir?: string;
 
   /** Optional: custom storage backend */
   storageBackend?: ExtensionStorageBackend;
@@ -107,7 +105,6 @@ export class ExtensionManager {
 
   // Directory paths
   private userExtensionsDir: string;
-  private builtinExtensionsDir: string;
   private storageDir: string;
   private stateFile: string;
 
@@ -116,7 +113,6 @@ export class ExtensionManager {
 
     // Set up directories
     this.userExtensionsDir = path.join(this.baseDir, 'extensions');
-    this.builtinExtensionsDir = options.builtinExtensionsDir || path.join(__dirname, 'builtin');
     this.storageDir = path.join(this.baseDir, 'extension-storage');
     this.stateFile = path.join(this.baseDir, 'extensions-state.json');
 
@@ -130,7 +126,6 @@ export class ExtensionManager {
     // Create registry
     this.registry = createExtensionRegistry({
       userExtensionsDir: this.userExtensionsDir,
-      builtinExtensionsDir: this.builtinExtensionsDir,
       statePath: this.stateFile,
     });
 

@@ -39,7 +39,6 @@ interface ExtensionManifest {
   description: string;
   author: string;
   permissions: string[];
-  builtin?: boolean;
 }
 
 interface ExtensionInfo {
