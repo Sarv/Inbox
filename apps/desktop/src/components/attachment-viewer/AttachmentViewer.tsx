@@ -15,11 +15,13 @@ import {
   Minimize2,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 
+import { useGalleryNavigation } from '../../hooks/useGalleryNavigation';
 import { getFileIcon, getFileType } from '../email-detail/utils';
 import { Tooltip } from '../Tooltip';
+
 
 import { useAttachmentActions } from './useAttachmentActions';
 
@@ -75,9 +77,11 @@ export function AttachmentViewer({
   initialIndex,
   onClose,
 }: AttachmentViewerProps) {
-  const [index, setIndex] = useState(() =>
-    Math.min(Math.max(initialIndex, 0), Math.max(attachments.length - 1, 0)),
-  );
+  const { index, goTo } = useGalleryNavigation({
+    count: attachments.length,
+    initialIndex,
+    onClose,
+  });
   const { isBusy, saveCopy, openInSystemApp } = useAttachmentActions();
 
   const current = attachments[index];
@@ -94,40 +98,6 @@ export function AttachmentViewer({
   // the same fallback card an unsupported type gets.
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url]);
-
-  const goTo = useCallback(
-    (next: number) => {
-      if (attachments.length === 0) return;
-      setIndex(((next % attachments.length) + attachments.length) % attachments.length);
-    },
-    [attachments.length],
-  );
-
-  // Capture phase, and stopPropagation: the app's global shortcut handler has its
-  // own Escape branch (and single-letter shortcuts like `e`/`r`) with no
-  // modal-open suppression. Without capturing first, closing the viewer with Esc
-  // also fired whatever Escape means underneath it.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        onClose();
-        return;
-      }
-      if (attachments.length > 1 && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
-        // Leave the arrows alone while a media element has focus, so seeking a
-        // video with the keyboard doesn't skip to the next attachment instead.
-        const tag = (event.target as HTMLElement | null)?.tagName;
-        if (tag === 'VIDEO' || tag === 'AUDIO') return;
-        event.preventDefault();
-        event.stopPropagation();
-        goTo(index + (event.key === 'ArrowLeft' ? -1 : 1));
-      }
-    };
-    document.addEventListener('keydown', onKey, true);
-    return () => document.removeEventListener('keydown', onKey, true);
-  }, [onClose, goTo, index, attachments.length]);
 
   if (!current) return null;
 
