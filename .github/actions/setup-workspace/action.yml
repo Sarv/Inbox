@@ -22,8 +22,10 @@ runs:
       with:
         node-version: 22
         # Caches the pnpm STORE, so a repeat install copies from disk instead of
-        # re-downloading every tarball.
-        cache: pnpm
+        # re-downloading every tarball. Disabled when nothing is installed: the
+        # store directory never gets created, and setup-node's post step then
+        # FAILS THE JOB with "Path Validation Error" trying to save it.
+        cache: ${{ inputs.install == 'true' && 'pnpm' || '' }}
 
     # Task-level cache: turbo replays type-check/lint/test from here whenever the
     # inputs of a package are unchanged, so a PR touching one package does not

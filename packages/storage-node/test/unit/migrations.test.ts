@@ -431,7 +431,13 @@ describe('idempotency — the chain may be re-run on every app start', () => {
       db.close();
     }
     expect(throwing).toEqual([]);
-  });
+    // Deliberately generous: this replays the WHOLE chain once per migration, so
+    // its cost is quadratic in the migration count and grows with every new one.
+    // It took 7.4s on a CI runner under coverage instrumentation against the
+    // 5s default, which is a slow test, not a hang. Raise the budget rather than
+    // narrow the loop -- every migration has to be covered for this to mean
+    // anything. A real hang still trips this.
+  }, 60_000);
 
   // v64 doubles as the read-model backfill trigger. Re-running it must NOT knock
   // a finished backfill back to 'pending' — that would re-scan the whole mailbox.
