@@ -909,3 +909,135 @@ describe('installFromRegistry', () => {
     await expect(installFromRegistry('not-published', [])).rejects.toThrow(/not in any configured registry/);
   });
 });
+
+/**
+ * Registry documents fetched through the CDN mirror.
+ *
+ * `raw.githubusercontent.com` has no edge in much of the world, and the panel's
+ * visible failure is a 20s abort followed by a stale cached list. The mirror is
+ * asked first and the canonical host is the fallback, so what these protect is
+ * the property that makes that safe: the canonical URL stays the identity of
+ * the registry — its cache key, its status row — and a mirror that is down is
+ * one retry, never a lost catalogue.
+ */
+describe('the CDN mirror', () => {
+  const MIRROR_INDEX_URL =
+    'https://cdn.jsdelivr.net/gh/Sarv/SarvInbox-extensions@main/registry/index.json';
+  const MIRROR_DETAIL_URL =
+    'https://cdn.jsdelivr.net/gh/Sarv/SarvInbox-extensions@main/registry/e/otp-code.json';
+  const DETAIL_URL =
+    'https://raw.githubusercontent.com/Sarv/SarvInbox-extensions/main/registry/e/otp-code.json';
+
+  /**
+   * Only the two hosts the index itself can come from. The catalogue also
+   * refreshes GitHub's star and download counts, and counting those requests
+   * here would make these assertions about something they are not testing.
+   */
+  const indexRequests = () =>
+    h.requested.filter((url) => url === MIRROR_INDEX_URL || url === REGISTRY_URL);
+
+  it('asks the mirror before the canonical host', async () => {
+    // Breaks: the change buys nothing - every fetch still goes to the host that
+    // was timing out, and the mirror is dead weight nobody notices is unused.
+    h.responses.set(MIRROR_INDEX_URL, { body: registryFor(archiveFor()) });
+    const { fetchCatalog } = await loadService();
+
+    const catalog = await fetchCatalog();
+    expect(catalog.items.map((item) => item.id)).toEqual(['otp-code']);
+    expect(indexRequests()).toEqual([MIRROR_INDEX_URL]);
+  });
+
+  it('falls back to the canonical host when the mirror does not answer', async () => {
+    // Breaks: a CDN outage, or a network that blocks it, takes the whole
+    // catalogue down with it - the exact failure the mirror was added to avoid.
+    h.responses.set(REGISTRY_URL, { body: registryFor(archiveFor()) });
+    const { fetchCatalog } = await loadService();
+
+    const catalog = await fetchCatalog();
+    expect(catalog.items.map((item) => item.id)).toEqual(['otp-code']);
+    expect(catalog.registries[0]).toMatchObject({ ok: true, fromCache: false });
+    expect(indexRequests()).toEqual([MIRROR_INDEX_URL, REGISTRY_URL]);
+  });
+
+  it('reports the registry under its canonical URL whichever host served it', async () => {
+    // Breaks: the configured registry and the one shown as its status row stop
+    // matching, so "which registry failed" names a URL nobody configured.
+    h.responses.set(MIRROR_INDEX_URL, { body: registryFor(archiveFor()) });
+    const { fetchCatalog } = await loadService();
+
+    expect((await fetchCatalog()).registries[0].url).toBe(REGISTRY_URL);
+  });
+
+  it('caches under the canonical URL, so a mirrored fetch is not refetched', async () => {
+    // Breaks: caching under whichever host answered means the mirror and the
+    // canonical host each keep their own copy, and every failover refetches a
+    // document already on disk.
+    h.responses.set(MIRROR_INDEX_URL, { body: registryFor(archiveFor()) });
+    const { fetchCatalog } = await loadService();
+
+    await fetchCatalog();
+    expect(indexRequests()).toEqual([MIRROR_INDEX_URL]);
+    await fetchCatalog();
+    expect(indexRequests()).toEqual([MIRROR_INDEX_URL]);
+  });
+
+  it('fetches the detail document through the mirror too', async () => {
+    // Breaks: Browse is fast and Install still hangs on the slow host, which is
+    // the worse half - it stalls after the user has committed to installing.
+    const archive = archiveFor();
+    h.responses.set(MIRROR_INDEX_URL, {
+      body: JSON.stringify({
+        schemaVersion: 2,
+        generatedAt: '2026-09-01T00:00:00.000Z',
+        source: 'https://github.com/Sarv/SarvInbox-extensions',
+        extensions: [
+          {
+            id: 'otp-code',
+            name: 'OTP Code',
+            version: '1.0.0',
+            description: 'Surfaces verification codes',
+            author: 'Sarv',
+            keywords: ['otp'],
+            detailUrl: 'e/otp-code.json',
+            engines: { sarvinbox: '^1.1.0' },
+            permissions: ['email:read', 'ui:notify'],
+            size: archive.length,
+            stats: { downloads: 42 },
+          },
+        ],
+      }),
+    });
+    h.responses.set(MIRROR_DETAIL_URL, {
+      body: JSON.stringify({
+        schemaVersion: 2,
+        id: 'otp-code',
+        version: '1.0.0',
+        download: {
+          url: ASSET_URL,
+          sha256: createHash('sha256').update(archive).digest('hex'),
+          size: archive.length,
+        },
+      }),
+    });
+    const { getRegistryEntry } = await loadService();
+
+    const entry = await getRegistryEntry('otp-code');
+    expect(entry.download?.url).toBe(ASSET_URL);
+    expect(h.requested).toContain(MIRROR_DETAIL_URL);
+    expect(h.requested).not.toContain(DETAIL_URL);
+  });
+
+  it('downloads the archive from the release, which the mirror cannot serve', async () => {
+    // Breaks: release assets are not repository files, so a mirrored download
+    // URL is a 404 on every install - and the digest check would never even be
+    // reached to say why.
+    const archive = archiveFor();
+    h.responses.set(MIRROR_INDEX_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
+    expect(h.requested).toContain(ASSET_URL);
+    expect(h.requested.filter((url) => url.includes('cdn.jsdelivr.net/gh') && url.endsWith('.tgz'))).toEqual([]);
+  });
+});
