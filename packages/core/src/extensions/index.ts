@@ -219,6 +219,8 @@ export {
 // Marketplace — the GitHub-hosted registry the app browses and installs from.
 export {
   TRUSTED_REGISTRY_HOSTS,
+  REGISTRY_MIRROR_HOST,
+  registryMirrorUrl,
   REGISTRY_SCHEMA_VERSION,
   MAX_DOWNLOAD_BYTES,
   isTrustedRegistryUrl,
