@@ -9,12 +9,14 @@ import {
   describeExtensionSurfaces,
   describeInstallAction,
   describePermission,
+  findAvailableUpdates,
   formatCompactCount,
   formatDownloadSize,
   hasHighRiskPermission,
   sortPermissionsByRisk,
   truncateDescription,
 } from '../../../src/utils/extension-marketplace-display';
+import type { CatalogOffer } from '../../../src/utils/extension-marketplace-display';
 
 /**
  * How the extensions panel describes what it is about to run.
@@ -394,5 +396,88 @@ describe('categoryChipLabel', () => {
   it('names a real shelf', () => {
     expect(categoryChipLabel('security')).toBe('Security');
     expect(categoryChipLabel('ai')).toBe('AI');
+  });
+});
+
+describe('findAvailableUpdates', () => {
+  const offer = (over: Partial<CatalogOffer> = {}): CatalogOffer => ({
+    id: 'otp-code',
+    version: '1.1.0',
+    permissions: ['email:read'],
+    state: 'update-available',
+    ...over,
+  });
+
+  // Regression: the Installed tab showed nothing at all when a newer release
+  // was waiting, so a user ran an old build with no way to know.
+  it('reports an extension the registry offers a newer version of', () => {
+    expect(
+      findAvailableUpdates(
+        [{ id: 'otp-code', grantedPermissions: ['email:read'] }],
+        [offer()]
+      )
+    ).toEqual([
+      { id: 'otp-code', version: '1.1.0', permissions: ['email:read'], newPermissions: [] },
+    ]);
+  });
+
+  // Regression: an update that quietly gained a permission must not install
+  // without asking — the permission diff is the whole gate.
+  it('names the permissions the new version adds', () => {
+    expect(
+      findAvailableUpdates(
+        [{ id: 'otp-code', grantedPermissions: ['email:read'] }],
+        [offer({ permissions: ['email:read', 'network:fetch'] })]
+      )
+    ).toEqual([
+      {
+        id: 'otp-code',
+        version: '1.1.0',
+        permissions: ['email:read', 'network:fetch'],
+        newPermissions: ['network:fetch'],
+      },
+    ]);
+  });
+
+  // Regression: re-asking for permissions already granted turned Update all
+  // into a stack of dialogs, which trains people to click through consent.
+  it('asks for nothing when the new version drops a permission', () => {
+    const [update] = findAvailableUpdates(
+      [{ id: 'otp-code', grantedPermissions: ['email:read', 'email:flag'] }],
+      [offer({ permissions: ['email:read'] })]
+    );
+    expect(update.newPermissions).toEqual([]);
+    // Regression: the install is granted exactly the list it is handed, so the
+    // update has to carry the whole new set and not just the difference —
+    // handing it an empty list would strip the extension of everything.
+    expect(update.permissions).toEqual(['email:read']);
+  });
+
+  // Regression: an up-to-date or incompatible entry once drew an Update
+  // button, which either did nothing or installed something that cannot run.
+  it.each(['installed', 'available', 'incompatible'] as const)(
+    'ignores an entry in state %s',
+    (state) => {
+      expect(
+        findAvailableUpdates([{ id: 'otp-code', grantedPermissions: [] }], [offer({ state })])
+      ).toEqual([]);
+    }
+  );
+
+  it('ignores an installed extension the catalogue has never heard of', () => {
+    expect(findAvailableUpdates([{ id: 'sideloaded', grantedPermissions: [] }], [offer()])).toEqual(
+      []
+    );
+  });
+
+  it('reports every extension with an update, not just the first', () => {
+    const updates = findAvailableUpdates(
+      [
+        { id: 'otp-code', grantedPermissions: ['email:read'] },
+        { id: 'vip-scoring', grantedPermissions: ['email:read'] },
+      ],
+      [offer(), offer({ id: 'vip-scoring', version: '2.0.0' })]
+    );
+    expect(updates.map((update) => update.id)).toEqual(['otp-code', 'vip-scoring']);
   });
 });

@@ -1,5 +1,5 @@
 import { AlertTriangle, ChevronRight, Loader2, Puzzle, RefreshCw, WifiOff } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   availableCategories,
@@ -51,12 +51,20 @@ interface RegistryStatus {
 interface ExtensionBrowserProps {
   /** Called after a successful install so the Installed tab picks it up. */
   onInstalled: () => void;
+  /**
+   * Open straight onto this extension's page instead of the list.
+   *
+   * The Installed tab uses it to hand over an update that asks for a permission
+   * that was never granted: that has to be agreed to again, and this is where
+   * the dialog which does it lives.
+   */
+  initialExtensionId?: string | null;
 }
 
 /** The filter value meaning "every shelf". */
 const ALL_CATEGORIES = 'all';
 
-export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
+export function ExtensionBrowser({ onInstalled, initialExtensionId }: ExtensionBrowserProps) {
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [registries, setRegistries] = useState<RegistryStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -70,6 +78,8 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
   /** The extension whose page is open, or null while the list is showing. */
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [category, setCategory] = useState<string>(ALL_CATEGORIES);
+  /** The handed-over extension already opened, so a list refresh cannot reopen it. */
+  const openedHandoff = useRef<string | null>(null);
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
@@ -136,6 +146,25 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
     },
     [loadDetail]
   );
+
+  /**
+   * Open the page for an extension handed over from the Installed tab.
+   *
+   * It waits for the list because the page is drawn from a catalogue entry, and
+   * the ref keeps it to once: reading the detail record rewrites `items`, which
+   * would otherwise run this again on every merge.
+   */
+  useEffect(() => {
+    if (!initialExtensionId) {
+      openedHandoff.current = null;
+      return;
+    }
+    if (openedHandoff.current === initialExtensionId) return;
+    const item = items.find((entry) => entry.id === initialExtensionId);
+    if (!item) return;
+    openedHandoff.current = initialExtensionId;
+    openDetail(item);
+  }, [initialExtensionId, items, openDetail]);
 
   /**
    * Open the consent dialog.
