@@ -3,14 +3,24 @@ import type { EmailRecord } from '@sarvinbox/core';
 import { parseAttachments } from '../components/email-detail/utils';
 
 /**
- * Collapsing byte-identical copies of one message inside a conversation.
+ * Collapsing copies of ONE message — same Message-ID — inside a conversation.
  *
- * WHY THIS EXISTS. Sarv ran dual delivery for a period — mail landing in Sarv
- * was also delivered to the Gmail account — and a later migration merged the
- * Gmail side back into the Sarv mailbox. The result is real, distinct server
- * messages (each with its own Message-ID and UID, so `emails.message_id UNIQUE`
- * cannot and must not stop them) that are the SAME mail. The user opens a thread
- * and reads the same paragraph seven times.
+ * WHY THIS EXISTS. The same message can reach one conversation more than once:
+ * a unified thread draws from several account DBs, so a mail addressed to two
+ * of the reader's accounts arrives as two rows carrying the SAME Message-ID.
+ * Rendering both makes the reader scroll past the same paragraph twice.
+ *
+ * WHAT IT MUST NEVER DO — the rule that outranks everything below. A DIFFERENT
+ * Message-ID is a DIFFERENT message, even when sender, subject, body and
+ * attachments are byte-identical. Four identical OTP mails ARE four mails: the
+ * sender really did send four, each got its own Message-ID, and folding them
+ * into one row told the reader something untrue. Identity therefore STARTS at
+ * the Message-ID; the content comparison below only confirms it, and can never
+ * substitute for it.
+ *
+ * Within a single account `emails.message_id` is UNIQUE (see `schema.sql`), so
+ * the collapse cannot fire there at all — that is the intended, safe resting
+ * state, not a sign the helper is dead code.
  *
  * This is deliberately a READ-TIME, RENDER-ONLY collapse:
  *
@@ -56,18 +66,35 @@ function cheapHash(value: string): string {
 }
 
 /**
- * Everything about a message that must match for a second copy to be the same
- * mail. Deliberately EXCLUDES the date and the UID: the copies arrive days or
- * weeks apart (that is what dual delivery plus a migration looks like), so
- * keying on arrival time would never group them.
+ * The Message-ID to compare on, or null when there is none we can trust.
+ *
+ * A blank Message-ID proves nothing about identity, so a row carrying one is
+ * never a collapse candidate — it renders as its own message. Wrong in the
+ * direction that only ever shows too much, never too little.
  */
-function identityKey(email: EmailRecord, body: string): string {
+function comparableMessageId(email: EmailRecord): string | null {
+  const messageId = (email.messageId ?? '').trim();
+  return messageId ? messageId : null;
+}
+
+/**
+ * Everything about a message that must match for a second row to be the same
+ * mail. The Message-ID leads: without it two distinct mails that happen to be
+ * byte-identical (an OTP resend, a retried notification) would collapse into
+ * one and the reader would never learn the later ones arrived.
+ *
+ * Deliberately EXCLUDES the date and the UID: the two copies are the same mail
+ * seen by two accounts and land seconds or minutes apart, so keying on arrival
+ * time would never group them.
+ */
+function identityKey(email: EmailRecord, messageId: string, body: string): string {
   const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes)
     .map((a) => `${a.name}:${a.size ?? '?'}`)
     .sort()
     .join(';');
 
   return [
+    messageId,
     (email.fromAddress || '').trim().toLowerCase(),
     (email.subject || '').trim(),
     email.attachmentCount ?? 0,
@@ -98,12 +125,13 @@ export function collapseDuplicateMessages(
 
   for (const email of earliestFirst) {
     const body = comparableBody(email);
-    if (!body) {
+    const messageId = comparableMessageId(email);
+    if (!body || !messageId) {
       groups.push({ email, duplicates: [] });
       continue;
     }
 
-    const key = identityKey(email, body);
+    const key = identityKey(email, messageId, body);
     const bucket = buckets.get(key);
     // The `===` is what makes a hash collision harmless: same bucket still has
     // to mean the same bytes.

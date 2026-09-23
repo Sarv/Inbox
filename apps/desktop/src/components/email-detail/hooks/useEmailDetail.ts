@@ -90,12 +90,12 @@ export function useEmailDetail(): EmailDetailContext | null {
     [rawThreadEmails, draftFolderPaths]
   );
 
-  // Fold byte-identical copies of the same message behind one row. Dual
-  // delivery (Sarv also delivering to Gmail) plus the migration that merged the
-  // Gmail side back left real, distinct server messages that are the SAME mail
-  // sitting next to each other in a thread — up to seven of one message in the
-  // Acme integration thread. Render-only: `allThreadEmails` below still carries
-  // every copy so marking the thread read reaches the hidden ones too.
+  // Fold copies of the SAME message (same Message-ID, e.g. one mail delivered to
+  // two of the reader's accounts in a unified thread) behind one row. Messages
+  // with different Message-IDs are never folded, however identical they look —
+  // four identical OTP mails are four mails and all four must render. Render-
+  // only: `allThreadEmails` below still carries every copy so marking the thread
+  // read reaches the hidden ones too.
   const duplicateGroups = useMemo(
     () => collapseDuplicateMessages(allThreadEmails, selectedEmailId),
     [allThreadEmails, selectedEmailId]
