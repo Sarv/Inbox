@@ -158,7 +158,7 @@ describe('ReputationCache', () => {
 
 describe('runReputationPass', () => {
   type Engine = { moveToSpam: (folderPath: string, uid: number) => Promise<unknown> };
-  const mover = () => vi.fn<[string, number], Promise<unknown>>().mockResolvedValue(undefined);
+  const mover = () => vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined);
   const deps = (targets: ReturnType<typeof fakeStorage>[], provider: ReputationProvider | null, engine: Engine | null = null) => ({
     targets: () => targets.map((t, i) => ({ storage: t.storage, engine, label: `acct-${i}` })),
     provider: () => provider,
@@ -291,7 +291,7 @@ describe('runReputationPass — the body stage (link domains)', () => {
   it('extracts the link domains, looks them up, and files a message that links to a phishing domain', async () => {
     const t = fakeStorage([], true, [bodyRow({ id: 'a', uid: 9, spamScore: 0 })]);
     const p = providerOf(answering({}, { 'evil.example': phishing }));
-    const engine = { moveToSpam: vi.fn<[string, number], Promise<unknown>>().mockResolvedValue(undefined) };
+    const engine = { moveToSpam: vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined) };
     const s = await runReputationPass(deps(t, p, engine));
     expect(p.calls).toEqual([{ ips: [], domains: ['evil.example'] }]);
     expect(s).toMatchObject({ linkJudged: 1, filed: 1, scored: 1, linkPending: 0 });
@@ -326,7 +326,7 @@ describe('runReputationPass — the body stage (link domains)', () => {
       [row({ id: 'h1', spamScore: 3, spamUserVerdict: 'ham' })], true,
       [bodyRow({ id: 'h2', spamScore: 3, spamUserVerdict: 'ham' })],
     );
-    const engine = { moveToSpam: vi.fn<[string, number], Promise<unknown>>().mockResolvedValue(undefined) };
+    const engine = { moveToSpam: vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined) };
     const s = await runReputationPass(deps(t, providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') }, { 'evil.example': phishing })), engine));
     expect(s.filed).toBe(0);
     expect(t.updates).toEqual([]);
@@ -346,7 +346,7 @@ describe('the report loop', () => {
   });
 
   it('sends the verdict through the provider when allowed, and nothing otherwise', async () => {
-    const report = vi.fn<[SenderReport], Promise<boolean>>().mockResolvedValue(true);
+    const report = vi.fn<(report: SenderReport) => Promise<boolean>>().mockResolvedValue(true);
     const provider: ReputationProvider = { name: 'sarv', lookup: async () => ({ provider: 'sarv', ips: new Map(), domains: new Map() }), report };
     const verdict: SenderReport = { domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' };
     reportSenderVerdict(verdict, { policy: { mode: 'sarv', endpoint: 'https://r.example', reports: true }, provider });

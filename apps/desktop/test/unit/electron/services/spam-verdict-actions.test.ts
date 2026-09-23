@@ -43,8 +43,8 @@ function harness(e: EmailRecord | null, folders: FolderRecord[] = [INBOX, SPAM, 
     recalculateFolderCounts: vi.fn(async () => { calls.push('recount'); }),
   };
   const queue = {
-    moveToSpam: vi.fn<[string, number], Promise<unknown>>().mockResolvedValue(undefined),
-    move: vi.fn<[string, number, string], Promise<unknown>>().mockResolvedValue(undefined),
+    moveToSpam: vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined),
+    move: vi.fn<(folder: string, uid: number, target: string) => Promise<unknown>>().mockResolvedValue(undefined),
   };
   const reports: SenderReport[] = [];
   return { storage, queue, calls, reports, deps: { storage, queue, report: (r: SenderReport) => { reports.push(r); } } };
