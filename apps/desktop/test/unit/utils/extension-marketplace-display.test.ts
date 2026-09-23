@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  LIST_DESCRIPTION_LIMIT,
   PERMISSION_DISPLAY,
+  availableCategories,
+  categoryChipLabel,
+  describeCategory,
   describeExtensionSurfaces,
   describeInstallAction,
   describePermission,
@@ -9,6 +13,7 @@ import {
   formatDownloadSize,
   hasHighRiskPermission,
   sortPermissionsByRisk,
+  truncateDescription,
 } from '../../../src/utils/extension-marketplace-display';
 
 /**
@@ -287,5 +292,107 @@ describe('describeExtensionSurfaces', () => {
     });
 
     expect(JSON.stringify(surfaces)).not.toContain('undefined');
+  });
+});
+
+describe('truncateDescription', () => {
+  // The regression this exists for: one extension with a two-line description
+  // beside one with nine turns the catalogue into something nobody can scan,
+  // and a row whose height depends on its text breaks the list's rhythm.
+  it('clips a long description to the budget', () => {
+    const long = 'Spots verification codes as they arrive and shows them with a copy button and a countdown, so you never open the mail to read six digits.';
+
+    const short = truncateDescription(long);
+
+    expect(short.length).toBeLessThanOrEqual(LIST_DESCRIPTION_LIMIT + 1);
+    expect(short.endsWith('\u2026')).toBe(true);
+  });
+
+  // A description that already fits must come back untouched - an ellipsis on
+  // a complete sentence reads as missing text that is not missing.
+  it('leaves a short description alone', () => {
+    expect(truncateDescription('Tags mail from people you reply to.')).toBe(
+      'Tags mail from people you reply to.'
+    );
+  });
+
+  // Cutting mid-word looks like a rendering fault rather than a deliberate clip.
+  it('breaks at a word, not inside one', () => {
+    const clipped = truncateDescription('alpha bravo charlie delta echo foxtrot golf', 20);
+
+    expect(clipped).toBe('alpha bravo charlie\u2026');
+  });
+
+  // A single token longer than the whole budget has no space to break at; it
+  // still has to be cut, or the row it was meant to protect grows anyway.
+  it('cuts a word that is longer than the budget', () => {
+    const clipped = truncateDescription('supercalifragilisticexpialidocious', 10);
+
+    expect(clipped).toBe('supercalif\u2026');
+  });
+
+  // Manifest text is hand-written and often carries newlines; leaving them in
+  // turns one clipped line into several.
+  it('collapses whitespace so the clip is one line', () => {
+    expect(truncateDescription('two\n\nlines  here')).toBe('two lines here');
+  });
+});
+
+describe('describeCategory', () => {
+  it('names a known shelf', () => {
+    expect(describeCategory('productivity')).toBe('Productivity');
+    expect(describeCategory('ai')).toBe('AI');
+  });
+
+  // A shelf added to core's vocabulary but not to the label map must still
+  // draw something - a blank chip looks like a broken listing.
+  it('falls back to the slug capitalised for an unlabelled shelf', () => {
+    expect(describeCategory('newthing')).toBe('Newthing');
+  });
+});
+
+describe('availableCategories', () => {
+  // A filter button that can only ever return nothing is worse than no button,
+  // so the row is built from what is actually in the catalogue.
+  it('lists only shelves the catalogue actually has, busiest first', () => {
+    expect(
+      availableCategories([
+        { category: 'security' },
+        { category: 'productivity' },
+        { category: 'productivity' },
+      ])
+    ).toEqual(['productivity', 'security']);
+  });
+
+  // Two shelves of equal size must not swap places between loads, or the
+  // filter row reshuffles itself every refresh.
+  it('orders equal shelves by name so the row does not jitter', () => {
+    expect(availableCategories([{ category: 'tools' }, { category: 'office' }])).toEqual([
+      'office',
+      'tools',
+    ]);
+  });
+
+  it('ignores items with no shelf at all', () => {
+    expect(availableCategories([{}, { category: 'office' }])).toEqual(['office']);
+  });
+});
+
+describe('categoryChipLabel', () => {
+  // Regression: an uncategorised catalogue drew an identical "Other" pill on
+  // every row, which reads like information and is not.
+  it('says nothing for the fallback shelf', () => {
+    expect(categoryChipLabel('other')).toBeNull();
+  });
+
+  it('says nothing when the entry has no category at all', () => {
+    expect(categoryChipLabel(undefined)).toBeNull();
+    expect(categoryChipLabel('')).toBeNull();
+  });
+
+  // Regression: a real shelf must still be named, or the chip is dead code.
+  it('names a real shelf', () => {
+    expect(categoryChipLabel('security')).toBe('Security');
+    expect(categoryChipLabel('ai')).toBe('AI');
   });
 });

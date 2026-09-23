@@ -58,5 +58,13 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/bulk-mail.ts',
     ),
+    // Pure (zero imports) — the catalogue's shelf vocabulary. The Browse tab
+    // labels and filters by the SAME list the registry parser folds an author's
+    // manifest onto, so a shelf the parser can produce is never one the filter
+    // has no name for.
+    '@sarvinbox/core/extension-categories': resolve(
+      desktopDir,
+      '../../packages/core/src/extensions/categories.ts',
+    ),
   };
 }

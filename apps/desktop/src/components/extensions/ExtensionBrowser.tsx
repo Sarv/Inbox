@@ -1,28 +1,21 @@
-import {
-  AlertTriangle,
-  Download,
-  ExternalLink,
-  Loader2,
-  Puzzle,
-  RefreshCw,
-  Star,
-  WifiOff,
-} from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { AlertTriangle, ChevronRight, Loader2, Puzzle, RefreshCw, WifiOff } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
+  availableCategories,
+  categoryChipLabel,
+  describeCategory,
   describeInstallAction,
-  formatCompactCount,
-  formatDownloadSize,
-  type SurfaceSource,
+  truncateDescription,
 } from '../../utils/extension-marketplace-display';
 import { Tooltip } from '../Tooltip';
 
+import type { CatalogItem, PendingInstall } from './catalog-item';
+import { ExtensionDetail } from './ExtensionDetail';
 import {
   ExtensionPermissionPrompt,
   type PermissionPromptExtension,
 } from './ExtensionPermissionPrompt';
-import { ExtensionScreenshots, ExtensionSurfaces, type ScreenshotItem } from './ExtensionSurfaces';
 
 /**
  * The Browse tab: extensions published to the GitHub registry.
@@ -33,37 +26,17 @@ import { ExtensionScreenshots, ExtensionSurfaces, type ScreenshotItem } from './
  * render a decision that was already made and take the user through the
  * permission prompt.
  *
+ * Two levels, deliberately. The list says only what is needed to pick one out:
+ * icon, name, a clipped line of description, and the shelf it sits on. Opening
+ * a row gives the full record — the pictures, what it will do, where it will
+ * show up, every permission. Putting all of that on every row turned a
+ * catalogue of three extensions into a page nobody could scan, and it only gets
+ * worse as the registry grows.
+ *
  * A registry that could not be refreshed is called out rather than silently
  * showing stale results: the panel falls back to its cached copy so an offline
  * user still sees the catalogue, and the banner says that is what happened.
  */
-interface CatalogItem {
-  id: string;
-  name: string;
-  version: string;
-  description: string;
-  author: string;
-  keywords: string[];
-  homepage?: string;
-  iconUrl?: string;
-  permissions: string[];
-  /** What it contributes, so the card can say what the extension actually does. */
-  contributes?: SurfaceSource['contributes'];
-  screenshots?: ScreenshotItem[];
-  /** Bytes of the release archive, carried by the list itself. */
-  size: number;
-  /** Only present once the extension's detail record has been fetched. */
-  download?: { url: string; sha256: string; size: number };
-  stats: { downloads: number; rating?: number; ratingCount?: number };
-  sourceUrl: string;
-  state: 'available' | 'installed' | 'update-available' | 'incompatible';
-  installedVersion?: string;
-  incompatibleReason?: string;
-}
-
-/** A catalogue item whose detail record has been read, so it can be installed. */
-type PendingInstall = CatalogItem & { download: NonNullable<CatalogItem['download']> };
-
 interface RegistryStatus {
   url: string;
   source: string | null;
@@ -79,6 +52,9 @@ interface ExtensionBrowserProps {
   onInstalled: () => void;
 }
 
+/** The filter value meaning "every shelf". */
+const ALL_CATEGORIES = 'all';
+
 export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [registries, setRegistries] = useState<RegistryStatus[]>([]);
@@ -90,6 +66,9 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
   /** The extension whose detail record is being fetched, so its button can wait. */
   const [preparing, setPreparing] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  /** The extension whose page is open, or null while the list is showing. */
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [category, setCategory] = useState<string>(ALL_CATEGORIES);
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
@@ -113,20 +92,17 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
   }, [load]);
 
   /**
-   * Read the rest of an extension's record, then open the consent dialog.
+   * Read the rest of an extension's record.
    *
-   * The prompt shows the checksum the archive will be verified against, and a
-   * thin registry index does not carry it - so the dialog cannot open until this
-   * one extra request comes back. On failure nothing opens: consenting to an
-   * install whose digest we could not read is exactly what must not happen.
+   * The Browse list is drawn from a thin index that carries neither the digest
+   * nor the screenshots, so both the detail page and the consent dialog need
+   * this one extra request for the one extension the user picked. The result is
+   * merged back into the list so opening the same extension twice, or opening
+   * it and then installing it, costs one fetch rather than two.
    */
-  const openPrompt = useCallback(async (item: CatalogItem) => {
-    setInstallError(null);
-    setDetailError(null);
-    if (item.download) {
-      setPending({ ...item, download: item.download });
-      return;
-    }
+  const loadDetail = useCallback(async (item: CatalogItem): Promise<CatalogItem> => {
+    if (item.download) return item;
+
     setPreparing(item.id);
     try {
       const result = await window.electronAPI?.extensions?.registryDetail(item.id);
@@ -134,13 +110,54 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
         throw new Error(result?.error ?? 'The registry did not return a download for this extension');
       }
       const detail = result.data;
-      setPending({ ...item, ...detail, download: detail.download });
-    } catch (err) {
-      setDetailError(`${item.name}: ${(err as Error).message}`);
+      const merged = { ...item, ...detail, download: detail.download } as CatalogItem;
+      setItems((current) => current.map((entry) => (entry.id === merged.id ? merged : entry)));
+      return merged;
     } finally {
       setPreparing(null);
     }
   }, []);
+
+  /**
+   * Open an extension's page, and start reading its full record behind it.
+   *
+   * The page draws immediately from what the list already knows; a failure to
+   * fetch the rest costs the pictures and the install button, not the page.
+   */
+  const openDetail = useCallback(
+    (item: CatalogItem) => {
+      setDetailError(null);
+      setInstallError(null);
+      setSelectedId(item.id);
+      void loadDetail(item).catch((err: Error) => {
+        setDetailError(`${item.name}: ${err.message}`);
+      });
+    },
+    [loadDetail]
+  );
+
+  /**
+   * Open the consent dialog.
+   *
+   * The prompt shows the checksum the archive will be verified against, so it
+   * cannot open until the detail record is in hand. On failure nothing opens:
+   * consenting to an install whose digest we could not read is exactly what
+   * must not happen.
+   */
+  const openPrompt = useCallback(
+    async (item: CatalogItem) => {
+      setInstallError(null);
+      setDetailError(null);
+      try {
+        const detailed = await loadDetail(item);
+        if (!detailed.download) throw new Error('The registry did not return a download for this extension');
+        setPending({ ...detailed, download: detailed.download });
+      } catch (err) {
+        setDetailError(`${item.name}: ${(err as Error).message}`);
+      }
+    },
+    [loadDetail]
+  );
 
   const confirmInstall = useCallback(
     async (permissions: string[]) => {
@@ -167,26 +184,15 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
   );
 
   const stale = registries.filter((registry) => !registry.ok);
+  const selected = selectedId ? items.find((item) => item.id === selectedId) ?? null : null;
+  const categories = useMemo(() => availableCategories(items), [items]);
+  const visible = useMemo(
+    () => (category === ALL_CATEGORIES ? items : items.filter((item) => item.category === category)),
+    [category, items]
+  );
 
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
-          Available Extensions {items.length > 0 && `(${items.length})`}
-        </h2>
-        <Tooltip content="Fetch the latest list from the registry" delayMs={40}>
-          <button
-            type="button"
-            onClick={() => void load(true)}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-        </Tooltip>
-      </div>
-
+  const problems = (
+    <>
       {stale.length > 0 && (
         <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-start gap-2.5">
           <WifiOff className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
@@ -220,6 +226,79 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
           </div>
         </div>
       )}
+    </>
+  );
+
+  const prompt = pending && (
+    <ExtensionPermissionPrompt
+      extension={pending satisfies PermissionPromptExtension}
+      installing={installing}
+      error={installError}
+      onConfirm={(permissions) => void confirmInstall(permissions)}
+      onCancel={() => {
+        if (!installing) setPending(null);
+      }}
+    />
+  );
+
+  if (selected) {
+    return (
+      <div>
+        {problems}
+        <ExtensionDetail
+          item={selected}
+          loading={preparing === selected.id}
+          preparing={preparing === selected.id}
+          onBack={() => setSelectedId(null)}
+          onInstall={() => void openPrompt(selected)}
+        />
+        {prompt}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
+          Available Extensions {items.length > 0 && `(${items.length})`}
+        </h2>
+        <Tooltip content="Fetch the latest list from the registry" delayMs={40}>
+          <button
+            type="button"
+            onClick={() => void load(true)}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </Tooltip>
+      </div>
+
+      {problems}
+
+      {/* Only worth drawing once there is more than one shelf to choose
+          between — a filter with a single button filters nothing. */}
+      {categories.length > 1 && (
+        <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+          {[ALL_CATEGORIES, ...categories].map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setCategory(value)}
+              aria-pressed={category === value}
+              className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
+                category === value
+                  ? 'bg-purple-500 border-purple-500 text-white'
+                  : 'bg-transparent border-border text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              {value === ALL_CATEGORIES ? 'All' : describeCategory(value)}
+            </button>
+          ))}
+        </div>
+      )}
 
       {loading && items.length === 0 && (
         <div className="flex items-center justify-center py-12">
@@ -237,115 +316,89 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
         </div>
       )}
 
-      <div className="space-y-3">
-        {items.map((item) => {
+      {!loading && items.length > 0 && visible.length === 0 && (
+        <div className="text-center py-8 text-sm text-muted-foreground">
+          Nothing on that shelf yet.
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {visible.map((item) => {
           const action = describeInstallAction(item.state, item.incompatibleReason);
           return (
-            <div key={item.id} className="bg-card border border-border rounded-lg p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-start gap-3 min-w-0">
-                  <div className="p-2 rounded-lg bg-muted shrink-0">
-                    {item.iconUrl ? (
-                      <img src={item.iconUrl} alt="" className="h-5 w-5" />
-                    ) : (
-                      <Puzzle className="h-5 w-5 text-muted-foreground" />
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="font-medium">{item.name}</h3>
-                      <span className="text-xs text-muted-foreground">v{item.version}</span>
-                      {item.state === 'update-available' && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500">
-                          v{item.installedVersion} installed
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-muted-foreground mt-0.5">{item.description}</p>
-                    {/* The card's whole job: someone scrolling the catalogue can
-                        tell these apart without installing one to find out. */}
-                    <ExtensionSurfaces
-                      source={{ permissions: item.permissions, contributes: item.contributes }}
-                      heading={null}
-                      className="mt-2"
-                    />
-                    <ExtensionScreenshots screenshots={item.screenshots} className="mt-2" />
-                    <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground flex-wrap">
-                      <span>by {item.author}</span>
-                      <span className="flex items-center gap-1">
-                        <Download className="h-3 w-3" />
-                        {formatCompactCount(item.stats.downloads)}
-                      </span>
-                      {typeof item.stats.rating === 'number' && (
-                        <span className="flex items-center gap-1">
-                          <Star className="h-3 w-3" />
-                          {item.stats.rating.toFixed(1)}
-                          {item.stats.ratingCount ? ` (${formatCompactCount(item.stats.ratingCount)})` : ''}
-                        </span>
-                      )}
-                      <span>{formatDownloadSize(item.size)}</span>
-                      <span>
-                        {item.permissions.length} permission
-                        {item.permissions.length === 1 ? '' : 's'}
-                      </span>
-                      {item.homepage && (
-                        <Tooltip content="Open the extension page" delayMs={40}>
-                          <a
-                            href={item.homepage}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label="Open the extension page"
-                            className="inline-flex items-center gap-1 hover:text-foreground"
-                          >
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        </Tooltip>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="shrink-0">
-                  {action.disabled ? (
-                    <Tooltip content={action.reason ?? action.label} delayMs={40}>
-                      <span className="inline-block px-3 py-1.5 text-sm rounded-lg bg-muted text-muted-foreground cursor-default">
-                        {action.label}
-                      </span>
-                    </Tooltip>
+            <div
+              key={item.id}
+              className="flex items-center gap-3 bg-card border border-border rounded-lg p-3"
+            >
+              {/* The row and the install button are siblings rather than nested:
+                  a button inside a button is not something a browser or a
+                  screen reader can make sense of. */}
+              <button
+                type="button"
+                onClick={() => openDetail(item)}
+                className="flex items-center gap-3 min-w-0 flex-1 text-left group"
+              >
+                <div className="p-2 rounded-lg bg-muted shrink-0">
+                  {item.iconUrl ? (
+                    <img src={item.iconUrl} alt="" className="h-5 w-5" />
                   ) : (
-                    <Tooltip content={`Review what ${item.name} can do, then install`} delayMs={40}>
-                      <button
-                        type="button"
-                        onClick={() => void openPrompt(item)}
-                        disabled={preparing !== null}
-                        className="px-3 py-1.5 text-sm rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50"
-                      >
-                        {preparing === item.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading details" />
-                        ) : (
-                          action.label
-                        )}
-                      </button>
-                    </Tooltip>
+                    <Puzzle className="h-5 w-5 text-muted-foreground" />
                   )}
                 </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-medium group-hover:text-purple-500 transition-colors">
+                      {item.name}
+                    </h3>
+                    <span className="text-xs text-muted-foreground">v{item.version}</span>
+                    {categoryChipLabel(item.category) && (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                        {categoryChipLabel(item.category)}
+                      </span>
+                    )}
+                    {item.state === 'update-available' && (
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500">
+                        v{item.installedVersion} installed
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground mt-0.5 truncate">
+                    {truncateDescription(item.description)}
+                  </p>
+                </div>
+                <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 ml-auto" />
+              </button>
+
+              <div className="shrink-0">
+                {action.disabled ? (
+                  <Tooltip content={action.reason ?? action.label} delayMs={40}>
+                    <span className="inline-block px-3 py-1.5 text-sm rounded-lg bg-muted text-muted-foreground cursor-default">
+                      {action.label}
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <Tooltip content={`Review what ${item.name} can do, then install`} delayMs={40}>
+                    <button
+                      type="button"
+                      onClick={() => void openPrompt(item)}
+                      disabled={preparing !== null}
+                      className="px-3 py-1.5 text-sm rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50"
+                    >
+                      {preparing === item.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading details" />
+                      ) : (
+                        action.label
+                      )}
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </div>
           );
         })}
       </div>
 
-      {pending && (
-        <ExtensionPermissionPrompt
-          extension={pending satisfies PermissionPromptExtension}
-          installing={installing}
-          error={installError}
-          onConfirm={(permissions) => void confirmInstall(permissions)}
-          onCancel={() => {
-            if (!installing) setPending(null);
-          }}
-        />
-      )}
+      {prompt}
     </div>
   );
 }
