@@ -172,6 +172,9 @@ Contributions are welcome! Please read [CONTRIBUTING.md](./CONTRIBUTING.md) and
 our [Code of Conduct](./CODE_OF_CONDUCT.md). Notable changes are recorded in
 [CHANGELOG.md](./CHANGELOG.md).
 
+Maintainers: [docs/RELEASING.md](docs/RELEASING.md) covers cutting a release and
+[docs/GITHUB-SETUP.md](docs/GITHUB-SETUP.md) the repository's access rules.
+
 ## Security
 
 Found a vulnerability? **Do not open a public issue** — see
