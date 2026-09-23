@@ -96,6 +96,69 @@ and runs fine, so this failure is invisible until a user tries to sign in.
 > effectively public once you ship. Use a client dedicated to the desktop app,
 > never one shared with a web property.
 
+### 1b. Your local `.env` vs. repository secrets
+
+Your `.env` is **not** what CI builds from — it is gitignored and never leaves
+your machine. Only these of its keys have to be re-entered as repository
+secrets; the rest are deliberately not needed:
+
+| Local `.env` key | Add as a secret? | Why |
+| --- | --- | --- |
+| `SARVINBOX_GOOGLE_CLIENT_ID` | Yes | inlined into the bundle; no Gmail sign-in without it |
+| `SARVINBOX_GOOGLE_CLIENT_SECRET` | Yes | same |
+| `SARVINBOX_SENTRY_DSN` | Yes | no crash reports without it |
+| `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | Optional | only for symbolicated stack traces |
+| `SARVINBOX_SARV_CLIENT_ID` | No | `oauth-service.ts` falls back to `SARV_PRODUCTION_CLIENT_ID`, which is what a distributed build must use |
+| `SARVINBOX_SARV_*_BASE_URL` | No | dev-only overrides; production defaults are compiled in |
+| `SARV_LOG_LEVEL` | No | a local debugging knob |
+
+Set them without putting a value in your shell history — `gh` reads the value
+from stdin or prompts for it:
+
+```bash
+gh secret set SARVINBOX_GOOGLE_CLIENT_ID --repo Sarv/Inbox        # prompts
+base64 -i ~/Downloads/sarv-developerID-application.p12 \
+  | gh secret set APPLE_CERTIFICATE_P12 --repo Sarv/Inbox
+gh secret list --repo Sarv/Inbox
+```
+
+Uploading the whole `.env` is not dangerous — `release.yml` passes only the six
+secrets it names onto the build, so anything else is stored but never reaches a
+workflow. It is still worth being deliberate: every stored secret is one more
+thing a compromised workflow could print, and a dev-only value sitting in the
+list invites someone later to wire it into the build, which would point a
+released app at a development endpoint.
+
+### 1c. What the secrets are protected by
+
+- Secrets are encrypted at rest and **write-only** — nobody, including you, can
+  read one back through the UI or API. Values are masked in logs.
+- **Pull requests from forks get no secrets at all.** That is why the repo can
+  be public: a drive-by PR cannot reach the signing certificate. Never add a
+  `pull_request_target` workflow, which is precisely the hole that removes this
+  protection.
+- **Anyone with write access can read a secret** by pushing a workflow that
+  prints it. Write access IS secret access, so keep the writer list small and
+  require review on `.github/workflows/**`; see
+  [GITHUB-SETUP.md](./GITHUB-SETUP.md).
+- The release runs on a `v*` tag push, so restrict who can create those tags
+  (the tag ruleset in GITHUB-SETUP.md). For a second gate, move the Apple
+  secrets into a `release` **Environment** with required reviewers: the job then
+  waits for an approval before it can even see them.
+- Turn on **Settings → Code security**: secret scanning and push protection are
+  free on public repos and block a credential from being committed in the first
+  place.
+
+What each secret is worth if it leaks, and what to do:
+
+| Secret | Exposure | If leaked |
+| --- | --- | --- |
+| `APPLE_CERTIFICATE_P12` + password | Lets anyone sign software as you | Revoke the certificate in Apple Developer immediately |
+| `APPLE_APP_SPECIFIC_PASSWORD` | Notarization only, tied to your Apple ID | Revoke at appleid.apple.com |
+| `SENTRY_AUTH_TOKEN` | Can write releases/sourcemaps to the Sentry org | Rotate; scope it to this project only |
+| `SARVINBOX_GOOGLE_CLIENT_SECRET` | **Already public** once shipped — it is inlined into the app | Nothing to do, by design; just never reuse a web client here |
+| `SARVINBOX_SENTRY_DSN` | Public by design (client-side) | Nothing |
+
 ### 2. Allow the release to push
 
 `scripts/release.sh` pushes the version-bump commit to `main`, which branch
