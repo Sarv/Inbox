@@ -1,194 +1,173 @@
 #!/bin/bash
-# Release script: bump version → commit → push → build macOS → save to /releases
+# Cut a release: bump the version, write the changelog, commit, tag, push.
+#
+# This script does NOT build anything. Pushing the tag is what starts the
+# build: .github/workflows/release.yml then builds macOS, Linux and Windows on
+# their own runners and publishes the GitHub release with every artifact.
+#
+# That split is not a preference — it is a correctness requirement. The app has
+# two compiled native addons (better-sqlite3, lzma-native) and a native addon
+# can only be built ON the platform it runs on. The previous version of this
+# script ran `electron-builder --win` and `--linux` on macOS after rebuilding
+# the addons for macOS, so those artifacts shipped a darwin .node and would
+# have crashed on launch. Both lines ended in `|| echo`, so the failure was
+# invisible. Do not reintroduce them.
 #
 # Usage:
-#   ./scripts/release.sh          # patch bump (0.2.0 → 0.2.1)
-#   ./scripts/release.sh minor    # minor bump (0.2.0 → 0.3.0)
-#   ./scripts/release.sh major    # major bump (0.2.0 → 1.0.0)
+#   ./scripts/release.sh                 # patch bump (1.1.1 -> 1.1.2)
+#   ./scripts/release.sh minor           # 1.1.1 -> 1.2.0
+#   ./scripts/release.sh major           # 1.1.1 -> 2.0.0
+#   ./scripts/release.sh 1.5.0           # an explicit version
 #
-# Required environment — the script exits immediately with a message if any
-# of these is unset or empty (macOS only: uses `security` and `xcrun`):
-#   SARV_P12_PATH    path to your "Developer ID Application" certificate (.p12)
-#   P12_KC_SERVICE   name of the login-Keychain generic-password item that holds
-#                    the .p12 password (prompted for and saved on first run)
-#   NOTARY_PROFILE   notarytool keychain profile to notarize with; create once:
-#                      xcrun notarytool store-credentials "$NOTARY_PROFILE" \
-#                        --apple-id <apple-id> --team-id <team-id> --password <app-specific-pw>
-# Optional:
-#   APPLE_TEAM_ID    Apple Developer Team ID (default LV54AA5562 — not secret,
-#                    only echoed in the setup hint)
+#   ./scripts/release.sh minor --pr      # open a PR instead of pushing to main,
+#                                        # for when branch protection forbids a
+#                                        # direct push (see docs/RELEASING.md)
+#   NO_PUSH=1 ./scripts/release.sh minor # commit + tag locally, push by hand
+#
+# Requires: a clean working tree, gh (only for --pr).
 
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BUMP_TYPE="${1:-patch}"
+RELEASE_BRANCH="${RELEASE_BRANCH:-main}"
+GITHUB_REPO="${GITHUB_REPO:-Sarv/Inbox}"
 
-if [[ "$BUMP_TYPE" != "patch" && "$BUMP_TYPE" != "minor" && "$BUMP_TYPE" != "major" ]]; then
-  echo "Usage: $0 [patch|minor|major]"
+BUMP="patch"
+USE_PR="no"
+for arg in "$@"; do
+  case "$arg" in
+    patch | minor | major) BUMP="$arg" ;;
+    [0-9]*.[0-9]*.[0-9]*) BUMP="$arg" ;;
+    --pr) USE_PR="yes" ;;
+    *) echo "ERROR: unknown argument '$arg'" >&2; exit 1 ;;
+  esac
+done
+
+# ── Preflight ───────────────────────────────────────────────────────────
+# Each of these has a failure mode that only shows up after the tag is pushed,
+# when it is expensive to undo — so they are all checked before anything moves.
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: working tree is not clean. Commit or stash first — the release" >&2
+  echo "       commit must contain ONLY the version bump and the changelog." >&2
   exit 1
 fi
 
-# ── Signing + notarization credentials ────────────────────────────────────
-# All three come from the environment (see the header). Nothing is written to
-# disk in plaintext: electron-builder signs from the .p12 (CSC_LINK) and
-# notarization reads the Keychain profile only.
-#   • .p12 file            $SARV_P12_PATH
-#   • .p12 password        login Keychain, generic-password service $P12_KC_SERVICE
-#   • notarytool profile   $NOTARY_PROFILE
-: "${APPLE_TEAM_ID:=LV54AA5562}"      # not secret; only used in the setup hint
-
-# Fail fast with a clear message when a required env var is unset or empty.
-require_env() {
-  local name="$1" what="$2"
-  [[ -n "${!name:-}" ]] || { echo "✗ $name is not set — $what (see the header of $0)" >&2; exit 1; }
-}
-require_env SARV_P12_PATH  "path to your Developer ID Application .p12"
-require_env P12_KC_SERVICE "login-Keychain service name that holds the .p12 password"
-require_env NOTARY_PROFILE "notarytool keychain profile name"
-
-[[ -f "$SARV_P12_PATH" ]] || { echo "✗ .p12 not found at $SARV_P12_PATH (check SARV_P12_PATH)"; exit 1; }
-
-# .p12 password from the login Keychain — prompt + store once if it's missing.
-CSC_KEY_PASSWORD=$(security find-generic-password -a "$USER" -s "$P12_KC_SERVICE" -w 2>/dev/null || true)
-if [[ -z "$CSC_KEY_PASSWORD" ]]; then
-  read -rsp "Password for the .p12 ($SARV_P12_PATH): " CSC_KEY_PASSWORD; echo
-  [[ -z "$CSC_KEY_PASSWORD" ]] && { echo "✗ .p12 password required"; exit 1; }
-  security add-generic-password -a "$USER" -s "$P12_KC_SERVICE" -w "$CSC_KEY_PASSWORD" -U >/dev/null 2>&1 \
-    && echo "✓ Saved .p12 password to your login Keychain (service: $P12_KC_SERVICE)"
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$CURRENT_BRANCH" != "$RELEASE_BRANCH" ]]; then
+  echo "ERROR: on branch '$CURRENT_BRANCH', expected '$RELEASE_BRANCH'." >&2
+  echo "       Set RELEASE_BRANCH=$CURRENT_BRANCH to override." >&2
+  exit 1
 fi
 
-# electron-builder signs the .app straight from this .p12 (it creates its own
-# throwaway keychain, so no login-keychain prompts).
-export CSC_LINK="$SARV_P12_PATH"
-export CSC_KEY_PASSWORD
+git fetch --quiet origin "$RELEASE_BRANCH" --tags
+if [[ -n "$(git rev-list "HEAD..origin/$RELEASE_BRANCH" 2>/dev/null)" ]]; then
+  echo "ERROR: $RELEASE_BRANCH is behind origin. Pull first, or the release will" >&2
+  echo "       be cut from a tree that is missing commits." >&2
+  exit 1
+fi
 
-echo "✓ Signing ready — .p12: $SARV_P12_PATH · notary profile: $NOTARY_PROFILE · team: $APPLE_TEAM_ID"
-echo "  (first time only, create the notary profile once:"
-echo "     xcrun notarytool store-credentials $NOTARY_PROFILE --apple-id <apple-id> --team-id $APPLE_TEAM_ID --password <app-specific-pw>)"
-
-# ── Read current version ──
-ROOT_VERSION=$(node -p "require('./package.json').version")
-DESKTOP_VERSION=$(node -p "require('./apps/desktop/package.json').version")
-echo "Current versions: root=$ROOT_VERSION desktop=$DESKTOP_VERSION"
-
-# ── Bump version ──
-IFS='.' read -r MAJOR MINOR PATCH <<< "$DESKTOP_VERSION"
-case "$BUMP_TYPE" in
-  major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-  minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-  patch) PATCH=$((PATCH + 1)) ;;
+CURRENT_VERSION=$(node -p "require('./apps/desktop/package.json').version")
+case "$BUMP" in
+  patch | minor | major)
+    NEW_VERSION=$(node -e "
+      import('./scripts/lib/changelog.mjs').then(({ bumpVersion }) =>
+        process.stdout.write(bumpVersion('$CURRENT_VERSION', '$BUMP')))
+    ") ;;
+  *) NEW_VERSION="$BUMP" ;;
 esac
-NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-echo "Bumping to: $NEW_VERSION"
 
-# ── Update version in package.json files ──
+if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
+  echo "ERROR: tag v$NEW_VERSION already exists. Pick a different version." >&2
+  exit 1
+fi
+
+echo "Releasing $CURRENT_VERSION -> $NEW_VERSION"
+
+# ── Version bump ────────────────────────────────────────────────────────
+# Root and desktop are kept in lockstep: electron-builder reads the desktop
+# version for the artifact filenames, and vite.config.ts reads it for the
+# Sentry release name, so a mismatch makes crash reports unattributable.
 node -e "
 const fs = require('fs');
-for (const f of ['./package.json', './apps/desktop/package.json']) {
-  const pkg = JSON.parse(fs.readFileSync(f, 'utf8'));
+for (const file of ['./package.json', './apps/desktop/package.json']) {
+  const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
   pkg.version = '$NEW_VERSION';
-  fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + '\n');
-  console.log('Updated ' + f + ' → $NEW_VERSION');
+  fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+  console.log('  ' + file + ' -> $NEW_VERSION');
 }
 "
 
-# ── Commit and push ──
-echo ""
-echo "=== Committing version bump ==="
-git add package.json apps/desktop/package.json
-git commit -m "bump version to $NEW_VERSION"
-echo ""
-echo "=== Pushing to remote ==="
-git push
-
-# ── Clean and build dependencies ──
-echo ""
-echo "=== Cleaning ==="
-cd apps/desktop
-pnpm run clean
-cd ../..
-
-# Remove iCloud duplicate dirs that break builds
-find node_modules packages -maxdepth 3 -name '* 2' -type d -exec rm -rf {} + 2>/dev/null || true
-
-echo "=== Building core ==="
-pnpm --filter @sarvinbox/core build
-
-echo "=== Building storage-node ==="
-pnpm --filter @sarvinbox/storage-node build
-
-# Extensions are not built here -- they live in their own repository and are
-# published as checksum-pinned release archives. This step downloads the ones
-# apps/desktop/extensions.config.json names as system extensions, verifies each
-# SHA-256, and unpacks them into build/default-extensions so electron-builder
-# can copy them into Resources. A first run then has them without a network.
-echo "=== Prefetching default extensions ==="
-pnpm --filter @sarvinbox/desktop prefetch:extensions
-
-# ── Prep native deps for electron-builder ──
-cd apps/desktop
-
-# ── Build renderer (Vite) ──
-echo ""
-echo "=== Building renderer ==="
-npx vite build
-
-# ── Build for all platforms ──
-# Build to /tmp to avoid macOS Sequoia file-provider xattrs that break codesign
-BUILD_DIR="/tmp/sarvinbox-release-$NEW_VERSION"
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"
-
-# Rebuild native deps before each platform to prevent cross-contamination
-rebuild_native_deps() {
-  echo "  → Rebuilding native deps for $1..."
-  npx electron-rebuild -f -w better-sqlite3
-}
+# ── Changelog ───────────────────────────────────────────────────────────
+# Generated fresh from the commits since the last v* tag. Exits non-zero
+# rather than writing an empty section.
+GITHUB_REPO="$GITHUB_REPO" node scripts/changelog.mjs write "$NEW_VERSION"
 
 echo ""
-echo "=== Building + signing macOS (arm64 + x64) ==="
-rebuild_native_deps "macOS"
-# electron-builder signs from CSC_LINK/CSC_KEY_PASSWORD. It does NOT notarize
-# (mac.notarize is false in package.json) — we notarize below with the
-# $NOTARY_PROFILE Keychain profile so no Apple ID / password touches disk.
-npx electron-builder --mac --config.directories.output="$BUILD_DIR/mac" 2>&1 || echo "⚠ macOS build failed"
+echo "Review the generated entry — it is the starting point, not the final wording."
+echo "Edit CHANGELOG.md now if you want; the edit lands in the release commit."
+if [[ -t 0 ]]; then
+  read -rp "Press Enter to commit + tag v$NEW_VERSION (Ctrl-C to abort): " _
+fi
 
-# ── Notarize + staple each DMG with the Keychain profile ─────────────────
-echo ""
-echo "=== Notarizing macOS DMGs with profile '$NOTARY_PROFILE' (a few min each) ==="
-while IFS= read -r dmg; do
-  [[ -f "$dmg" ]] || continue
-  echo "  → notarizing $(basename "$dmg")"
-  if xcrun notarytool submit "$dmg" --keychain-profile "$NOTARY_PROFILE" --wait; then
-    xcrun stapler staple "$dmg" && echo "  ✓ stapled $(basename "$dmg")"
-  else
-    echo "  ⚠ notarization failed for $(basename "$dmg") — is the '$NOTARY_PROFILE' profile set up?"
-  fi
-done < <(find "$BUILD_DIR/mac" -name '*.dmg' 2>/dev/null)
+# ── Commit + tag ────────────────────────────────────────────────────────
+git add package.json apps/desktop/package.json CHANGELOG.md
+git commit -q -m "chore(release): $NEW_VERSION"
+git tag -a "v$NEW_VERSION" -m "Sarv Inbox $NEW_VERSION"
+echo "OK: release commit + tag v$NEW_VERSION created"
+
+if [[ "${NO_PUSH:-}" == "1" ]]; then
+  echo ""
+  echo "NO_PUSH=1 — nothing pushed. To publish:"
+  echo "  git push origin $RELEASE_BRANCH && git push origin v$NEW_VERSION"
+  exit 0
+fi
+
+# ── Publish ─────────────────────────────────────────────────────────────
+# The TAG is what triggers the build, and tags are not subject to branch
+# protection — so the tag push works either way. Only the branch push needs a
+# bypass, which is what --pr avoids.
+if [[ "$USE_PR" == "yes" ]]; then
+  PR_BRANCH="release/v$NEW_VERSION"
+  git branch "$PR_BRANCH"
+  git reset --hard HEAD~1              # leave the protected branch untouched
+  git push origin "$PR_BRANCH"
+  gh pr create --repo "$GITHUB_REPO" --base "$RELEASE_BRANCH" --head "$PR_BRANCH" \
+    --title "chore(release): $NEW_VERSION" \
+    --body "Version bump and changelog for $NEW_VERSION.
+
+Merge this, then push the tag to start the build:
+\`\`\`
+git checkout $RELEASE_BRANCH && git pull
+git push origin v$NEW_VERSION
+\`\`\`"
+  echo ""
+  echo "OK: opened a release PR on $PR_BRANCH. The tag v$NEW_VERSION is held"
+  echo "    LOCALLY — push it only after the PR is merged:"
+  echo "      git push origin v$NEW_VERSION"
+  exit 0
+fi
+
+echo "Pushing $RELEASE_BRANCH + tag v$NEW_VERSION"
+if ! git push origin "$RELEASE_BRANCH"; then
+  echo "" >&2
+  echo "ERROR: push to $RELEASE_BRANCH was rejected — branch protection is on and" >&2
+  echo "       you are not allowed to bypass it. The commit and tag still exist" >&2
+  echo "       locally. Either:" >&2
+  echo "         • re-run with --pr to route the bump through a pull request, after" >&2
+  echo "           'git reset --hard HEAD~1 && git tag -d v$NEW_VERSION'" >&2
+  echo "         • or grant your account bypass (see docs/RELEASING.md)" >&2
+  exit 1
+fi
+git push origin "v$NEW_VERSION"
 
 echo ""
-echo "=== Building Windows ==="
-rebuild_native_deps "Windows"
-npx electron-builder --win --config.directories.output="$BUILD_DIR/win" 2>&1 || echo "⚠ Windows build failed (may need wine or Windows)"
-
+echo "========================================"
+echo "  Tag v$NEW_VERSION pushed."
+echo "  The build is running now:"
+echo "  https://github.com/$GITHUB_REPO/actions/workflows/release.yml"
 echo ""
-echo "=== Building Linux ==="
-rebuild_native_deps "Linux"
-npx electron-builder --linux --config.directories.output="$BUILD_DIR/linux" 2>&1 || echo "⚠ Linux build failed (may need to run on Linux)"
-
-cd ../..
-
-# ── Copy artifacts to project releases dir and Desktop ──
-RELEASE_DIR="releases/$NEW_VERSION"
-mkdir -p "$RELEASE_DIR"
-find "$BUILD_DIR" \( -name '*.dmg' -o -name '*.zip' \) -exec cp {} "$RELEASE_DIR/" \; 2>/dev/null || true
-
-# ── Summary ──
-echo ""
-echo "════════════════════════════════════════"
-echo "  Release $NEW_VERSION complete!"
-echo "════════════════════════════════════════"
-echo ""
-echo "Artifacts in releases/$NEW_VERSION/:"
-ls -lh "$RELEASE_DIR"/ 2>/dev/null || echo "  (none found)"
-echo ""
+echo "  It builds macOS, Linux and Windows, then publishes the release"
+echo "  as a DRAFT. Review the artifacts and publish it when ready:"
+echo "  https://github.com/$GITHUB_REPO/releases"
+echo "========================================"

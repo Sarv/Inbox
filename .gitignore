@@ -157,3 +157,11 @@ target/
 apps/desktop/build/*
 !apps/desktop/build/icon.icns
 !apps/desktop/build/icon.png
+# The packaging inputs electron-builder names in apps/desktop/package.json
+# ("afterPack" and mac.entitlements). They MUST be tracked: a fresh clone (CI,
+# or any contributor) otherwise checks out a tree where electron-builder aborts
+# on the missing afterPack hook, and the macOS build signs with hardenedRuntime
+# and ZERO entitlements — which crashes V8 on launch. The afterPack hook was
+# already lost to this rule once and had to be reconstructed; see its header.
+!apps/desktop/build/afterPack.js
+!apps/desktop/build/entitlements.mac.plist

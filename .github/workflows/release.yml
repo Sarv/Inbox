@@ -1,0 +1,255 @@
+name: Release
+
+# Triggered by pushing a vX.Y.Z tag, which `scripts/release.sh` does for you.
+# Builds every platform on its OWN runner — the two compiled native addons
+# (better-sqlite3, lzma-native) cannot be cross-compiled, so a macOS machine
+# physically cannot produce a working Linux or Windows build.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing vX.Y.Z tag to (re)build'
+        required: true
+
+# Default to read-only; only the publish job is granted write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never kill a half-finished release build
+
+jobs:
+  # A release must not be cut from a red tree. CI runs this on every push, but
+  # a tag can point at any commit, so it is re-verified here rather than assumed.
+  verify:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The suites run in plain Node; skip the Electron ABI rebuild or every
+      # SQLite-backed test fails with ERR_DLOPEN_FAILED. See CLAUDE.md.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
+
+      - name: Build libraries
+        run: |
+          pnpm --filter @sarvinbox/core build
+          pnpm --filter @sarvinbox/storage-node build
+
+      - name: Type-check
+        run: pnpm type-check
+
+      - name: Test
+        run: pnpm test
+
+  build:
+    name: ${{ matrix.name }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90 # notarization alone can take 20+ minutes
+    env:
+      # Evaluated once at job level: a step cannot read env it sets on itself,
+      # and this gates both signing and the verification step below.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+    strategy:
+      fail-fast: false # one platform failing must not discard the others
+      matrix:
+        include:
+          - name: macOS (arm64 + x64)
+            id: mac-universal
+            os: macos-latest
+            platform: mac
+            # Both macOS arches build on one runner: Xcode ships both SDKs, so
+            # the native addons cross-compile between arm64 and x64 fine. This
+            # is the ONLY cross-arch case that works.
+            args: --mac --arm64 --x64
+          - name: Linux x64
+            id: linux-x64
+            os: ubuntu-latest
+            platform: linux
+            args: --linux --x64
+          - name: Linux arm64
+            id: linux-arm64
+            os: ubuntu-24.04-arm
+            platform: linux
+            args: --linux --arm64
+          - name: Windows x64
+            id: win-x64
+            os: windows-latest
+            platform: win
+            args: --win --x64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # fpm (which electron-builder shells out to for .deb/.rpm) needs the rpm
+      # toolchain present to emit an .rpm at all; without it the rpm target is
+      # skipped silently and the release ships without Fedora/RHEL packages.
+      - name: Install Linux packaging tools
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+
+      # NOTE: no SARVINBOX_SKIP_ELECTRON_REBUILD here, unlike the verify job.
+      # The packaged app runs inside Electron, so the addons must be built for
+      # Electron's ABI — that is exactly what postinstall does.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build libraries
+        run: |
+          pnpm --filter @sarvinbox/core build
+          pnpm --filter @sarvinbox/storage-node build
+
+      - name: Build renderer and main
+        working-directory: apps/desktop
+        run: pnpm exec tsc && pnpm exec vite build
+        env:
+          NODE_ENV: production
+          # Inlined into the bundle by vite.config.ts. Without them the shipped
+          # app has no Gmail sign-in and no crash reporting. Vite's loadEnv
+          # merges SARVINBOX_*-prefixed process.env vars, so no .env is needed.
+          SARVINBOX_GOOGLE_CLIENT_ID: ${{ secrets.SARVINBOX_GOOGLE_CLIENT_ID }}
+          SARVINBOX_GOOGLE_CLIENT_SECRET: ${{ secrets.SARVINBOX_GOOGLE_CLIENT_SECRET }}
+          SARVINBOX_SENTRY_DSN: ${{ secrets.SARVINBOX_SENTRY_DSN }}
+          # Source-map upload is skipped entirely when the token is absent.
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+
+      # Downloads the checksum-pinned system extensions into
+      # build/default-extensions so a first run works offline. Non-fatal by
+      # design: it warns and the app fetches them on first run instead.
+      - name: Prefetch default extensions
+        working-directory: apps/desktop
+        run: pnpm prefetch:extensions
+
+      - name: Package ${{ matrix.platform }}
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXTRA=()
+          if [[ "${{ matrix.platform }}" == "mac" && "${HAS_APPLE_CERT}" == "true" ]]; then
+            EXTRA+=(-c.mac.notarize=true)
+            echo "Signing and notarizing with the Developer ID certificate."
+          elif [[ "${{ matrix.platform }}" == "mac" ]]; then
+            echo "WARN: APPLE_CERTIFICATE_P12 is not set — building an UNSIGNED app."
+            echo "      Gatekeeper will block it. See docs/RELEASING.md."
+          fi
+          pnpm exec electron-builder ${{ matrix.args }} "${EXTRA[@]}" --publish never
+        env:
+          # --- macOS signing + notarization (Option A: all in CI) ---
+          # CSC_LINK takes the base64 of the .p12 directly, so no certificate
+          # file is ever written to the runner's disk.
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ github.token }}
+
+      # Fail loudly if signing silently degraded. An unsigned or
+      # entitlement-less build looks fine here and only breaks on a user's Mac,
+      # which is far too late — and shipping hardenedRuntime with no
+      # entitlements crashes V8 on launch.
+      - name: Verify macOS signature and entitlements
+        if: matrix.platform == 'mac' && env.HAS_APPLE_CERT == 'true'
+        run: |
+          set -euo pipefail
+          APP=$(find apps/desktop/release -name '*.app' -maxdepth 3 | head -1)
+          echo "Verifying $APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
+            || { echo "FAIL: signed app carries no entitlements"; exit 1; }
+          echo "OK: signature and entitlements present"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.id }}
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.rpm
+            apps/desktop/release/*.tar.gz
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest*.yml
+          if-no-files-found: error # an empty artifact set must fail, not publish
+          retention-days: 14
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the only job that can write to the repo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Derive version from the tag
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # Release notes come from CHANGELOG.md rather than being regenerated, so
+      # the release page and the changelog can never disagree. Exits non-zero
+      # if the version has no section, rather than publishing empty notes.
+      - name: Extract release notes
+        run: node scripts/changelog.mjs notes "${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      # Published as a DRAFT: a human checks the artifact list and clicks
+      # publish. Nothing reaches users without that click — electron-updater
+      # cannot see draft releases, so the draft is also the auto-update gate.
+      # The latest*.yml files in the upload glob above are what drives it.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            artifacts/* \
+            --repo "${{ github.repository }}" \
+            --title "Sarv Inbox ${{ steps.version.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md \
+            --draft \
+            --verify-tag
