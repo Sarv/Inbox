@@ -59,6 +59,26 @@ export function render(element: ReactElement): Mounted {
 }
 
 /**
+ * Type a value into an input/textarea and flush the resulting React work.
+ *
+ * Assigning `element.value` directly is NOT enough: React patches the value
+ * setter to track what it last rendered, so a direct assignment updates the
+ * tracker too and React concludes nothing changed — `onChange` never fires and
+ * the component keeps its old state. Going through the prototype's native
+ * setter leaves the tracker stale, which is exactly what makes React notice.
+ */
+export function typeInto(element: Element | null, value: string) {
+  if (!element) throw new Error('cannot type into a missing element');
+  const proto = element instanceof HTMLTextAreaElement
+    ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(element, value);
+  act(() => {
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+/**
  * Run an interaction and flush the resulting React work.
  *
  * Everything bubbles, including `error`: React attaches its listeners at the
