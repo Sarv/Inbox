@@ -16,14 +16,17 @@ import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
  */
 describe('threadHeaderLabel', () => {
   // The reported bug, end to end: the same two pure pieces the detail pane
-  // composes. Two of three messages are byte-identical, so ONE card is folded
-  // away — and the header must still say 3, the number the list row shows.
+  // composes. Two of the three rows are the SAME message (one Message-ID, synced
+  // under two accounts), so ONE card is folded away — and the header must still
+  // say 3, the number the list row shows. The shared `messageId` is what makes
+  // them one message; without it they are two mails and nothing folds.
   it('counts folded duplicate copies, so the header matches the list row', () => {
     const body = '<p>Your OTP code is 831503.</p>';
+    const sameMessage = '<one-and-the-same@acme.example>';
     const thread = [
       email({ id: 'first', date: TEN_AM, rawBody: '<p>A request was received.</p>' }),
-      email({ id: 'copy-a', date: ELEVEN_AM, uid: 2, rawBody: body }),
-      email({ id: 'copy-b', date: ELEVEN_AM + 60, uid: 3, rawBody: body }),
+      email({ id: 'copy-a', date: ELEVEN_AM, uid: 2, rawBody: body, messageId: sameMessage }),
+      email({ id: 'copy-b', date: ELEVEN_AM + 60, uid: 3, rawBody: body, messageId: sameMessage }),
     ];
 
     const visible = collapseDuplicateMessages(thread).map((group) => group.email);

@@ -7,14 +7,14 @@ import {
 } from '../../../../src/utils/duplicate-messages';
 
 /**
- * The conversation-view collapse for byte-identical copies of one message.
+ * The conversation-view collapse for repeat copies of ONE message.
  *
- * What breaks if this file fails: Sarv ran dual delivery (mail landing in Sarv
- * was also delivered to Gmail) and a later migration merged the Gmail side back
- * in, so a thread can hold seven real, distinct server messages that are the
- * SAME mail. Too loose and the collapse eats a genuine reply — mail silently
- * disappears, the worst failure a mail client has. Too tight and the user reads
- * the same paragraph seven times and stops trusting the thread.
+ * What breaks if this file fails: identity here is the Message-ID first and the
+ * content second. Too loose and mail vanishes — four identical OTP mails are
+ * four real mails the sender really sent, each with its own Message-ID, and
+ * folding them into one row tells the reader a code arrived once when it arrived
+ * four times (reported from the field). Too tight and the same message, synced
+ * under two accounts into one unified thread, renders twice.
  */
 
 /** An EmailRecord carrying only the fields the collapse looks at. */
@@ -56,10 +56,14 @@ const email = (over: Partial<EmailRecord> & Record<string, unknown> = {}): Email
     ...over,
   }) as EmailRecord;
 
-/** The real shape from the DB: one mail, seven deliveries, weeks apart. */
+/**
+ * The real shape from the DB: ONE message (one Message-ID) seen seven times —
+ * the unified-thread case, where each account DB holds its own row for the same
+ * mail. The ids and uids differ because the rows do; the Message-ID does not.
+ */
 const sevenCopies = () =>
   [1, 2, 3, 4, 5, 6, 7].map((n) =>
-    email({ id: `copy${n}`, uid: 53600 + n, messageId: `<PN2P287MB${n}@outlook.com>`, date: 1_000 * n }),
+    email({ id: `copy${n}`, uid: 53600 + n, messageId: '<PN2P287MB42@outlook.com>', date: 1_000 * n }),
   );
 
 describe('collapseDuplicateMessages', () => {
@@ -85,17 +89,6 @@ describe('collapseDuplicateMessages', () => {
     expect(groups[0].duplicates.map((d) => d.id)).toEqual(['nov']);
   });
 
-  // Distinct Message-IDs are exactly the case this exists for: each copy is a
-  // real server message, so `emails.message_id UNIQUE` never saw a conflict.
-  it('groups copies that carry DIFFERENT Message-IDs', () => {
-    const groups = collapseDuplicateMessages([
-      email({ id: 'a', messageId: '<one@test.local>' }),
-      email({ id: 'b', messageId: '<two@test.local>', date: 2_000 }),
-    ]);
-
-    expect(groups).toHaveLength(1);
-  });
-
   it('returns groups earliest-first and leaves the input untouched', () => {
     const input = [
       email({ id: 'later', date: 5_000, rawBody: '<p>reply</p>' }),
@@ -111,6 +104,45 @@ describe('collapseDuplicateMessages', () => {
 });
 
 describe('collapseDuplicateMessages — what must NEVER be collapsed', () => {
+  // THE regression, reported from the field: a service sent the same OTP mail
+  // four times. Same sender, same subject, same body, byte for byte — but four
+  // Message-IDs, so four real mails. Collapsed into one row the reader sees one
+  // code and no sign the other three ever arrived.
+  it('keeps messages with DIFFERENT Message-IDs separate, however identical', () => {
+    const groups = collapseDuplicateMessages(
+      [1, 2, 3, 4].map((n) =>
+        email({ id: `otp${n}`, uid: n, messageId: `<otp-${n}@expandtesting.com>`, date: 1_000 * n }),
+      ),
+    );
+
+    expect(groups).toHaveLength(4);
+    expect(groups.every((g) => g.duplicates.length === 0)).toBe(true);
+  });
+
+  // One differing Message-ID in a run of otherwise identical copies must break
+  // out on its own — the collapse cannot treat "nearly all match" as a match.
+  it('splits out the one copy whose Message-ID differs', () => {
+    const groups = collapseDuplicateMessages([
+      ...sevenCopies(),
+      email({ id: 'resend', uid: 999, messageId: '<a-second-send@outlook.com>', date: 8_000 }),
+    ]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.email.id)).toEqual(['copy1', 'resend']);
+    expect(groups[1].duplicates).toEqual([]);
+  });
+
+  // A blank Message-ID proves nothing, so it can never be the thing two rows
+  // agree on. Erring towards showing an extra row, never towards hiding one.
+  it('never collapses rows with a blank Message-ID', () => {
+    const groups = collapseDuplicateMessages([
+      email({ id: 'a', messageId: '' }),
+      email({ id: 'b', messageId: '   ', date: 2_000 }),
+    ]);
+
+    expect(groups).toHaveLength(2);
+  });
+
   // The failure that matters most: a real reply swallowed by the collapse is
   // mail the user never learns arrived.
   it.each([
