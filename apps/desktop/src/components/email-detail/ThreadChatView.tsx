@@ -249,45 +249,66 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
    * cursor alone — no tooltip, because a tooltip needs an element we own.
    * `AttachmentPills` renders real buttons, so both come for free.
    *
-   * Deliberately NOT the phishing warning. That belongs to the standard view
-   * (EmailCard, ThreadList), which is where a reader checks who a mail is
-   * really from; a banner under every bubble turns the chat into a wall of
-   * warnings and is how people learn to ignore the one that matters.
-   *
-   * The security SHIELD is different and does render under every bubble: it
-   * is a per-message level (green through red) with the evidence on hover,
-   * not a warning — the same icon that sits beside the sender in the
-   * standard view. It renders whether or not the bubble has attachments, so
-   * the footer no longer bails out early on an attachment-less message.
+   * Deliberately NOT the phishing warning, and no longer the shield either.
+   * The warning belongs to the standard view (EmailCard, ThreadList), which is
+   * where a reader checks who a mail is really from; a banner under every
+   * bubble turns the chat into a wall of warnings and is how people learn to
+   * ignore the one that matters. The shield moved to the header — see
+   * `renderHeaderMeta`.
    */
   const renderFooter = useCallback(
     (message: ChatMessage) => {
       const email = emailFor(message);
       if (!email) return null;
       const attachments = parseAttachments(email.attachmentNames, email.attachmentSizes);
+      if (attachments.length === 0) return null;
       return (
-        <div className="mt-1.5 space-y-1.5">
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-            <SecurityIndicator
-              fromName={email.fromName}
-              fromAddress={email.fromAddress}
-              html={email.rawBody}
-              bodyLoaded={hasLoadedBody(email)}
-              authStatus={email.authStatus}
-              spamScore={email.spamScore}
-              spamReasons={email.spamReasons}
-            />
-            <VerifiedBadge email={email.fromAddress} authStatus={email.authStatus} />
-            <span className="truncate">{email.fromAddress}</span>
-          </div>
-          {attachments.length > 0 && (
+        <div className="mt-1.5">
           <AttachmentPills
             emailId={email.id}
             accountId={(email as { accountId?: string }).accountId}
             attachments={attachments}
           />
-          )}
         </div>
+      );
+    },
+    [emailFor],
+  );
+
+  /**
+   * The per-message security marks, on the header line after the timestamp.
+   *
+   * They used to sit under the body, on a row of their own next to the
+   * sender's address. Two things were wrong with that: a mark that JUDGES the
+   * message read as part of what the sender wrote, and the address was already
+   * on the line above — the header names the sender, and hovering it gives the
+   * full From/To/Cc. So the marks moved up to the metadata line, where a reader
+   * is already looking to answer "who is this from", and the duplicate address
+   * went.
+   *
+   * The shield renders for every message, green through red, with the evidence
+   * on hover — the same icon that sits beside the sender in the standard view.
+   * A follow-up in a sender run has no header of its own and still gets it:
+   * the library gives it a meta-only row, because the sender and the time are
+   * inherited from the bubble above but a per-message verdict is not.
+   */
+  const renderHeaderMeta = useCallback(
+    (message: ChatMessage) => {
+      const email = emailFor(message);
+      if (!email) return null;
+      return (
+        <>
+          <SecurityIndicator
+            fromName={email.fromName}
+            fromAddress={email.fromAddress}
+            html={email.rawBody}
+            bodyLoaded={hasLoadedBody(email)}
+            authStatus={email.authStatus}
+            spamScore={email.spamScore}
+            spamReasons={email.spamReasons}
+          />
+          <VerifiedBadge email={email.fromAddress} authStatus={email.authStatus} />
+        </>
       );
     },
     [emailFor],
@@ -405,6 +426,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         // what draws the library's own chips, which the app replaces with its
         // own buttons (see renderFooter).
         renderActions={renderActions}
+        renderHeaderMeta={renderHeaderMeta}
         renderFooter={renderFooter}
         emptyState={
           showProcessPrompt ? (
