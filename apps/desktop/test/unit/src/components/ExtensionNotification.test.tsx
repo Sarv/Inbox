@@ -24,10 +24,16 @@ const h = vi.hoisted(() => ({
   opened: [] as Array<{ emailId: string; accountId?: string }>,
   actions: [] as Array<{ notificationId: string; action: Record<string, unknown> }>,
   cardActionFails: false,
+  activeAccountId: null as string | null,
 }));
 
 // `vi.mock` is hoisted above the imports above, so the component under test
 // picks this up even though it is declared after them.
+vi.mock('../../../../src/store/email-store', () => ({
+  useEmailStore: (select: (state: { activeAccountId: string | null }) => unknown) =>
+    select({ activeAccountId: h.activeAccountId }),
+}));
+
 vi.mock('../../../../src/utils/open-email-from-notification', () => ({
   openEmailFromNotification: (emailId: string, accountId?: string) => {
     h.opened.push({ emailId, accountId });
@@ -73,6 +79,7 @@ beforeEach(() => {
   h.opened.length = 0;
   h.actions.length = 0;
   h.cardActionFails = false;
+  h.activeAccountId = null;
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText: vi.fn(async () => {}) },
@@ -425,6 +432,37 @@ describe('reporting actions back to the extension', () => {
     await act(async () => {});
 
     expect(text(mounted)).not.toContain('Verification code');
+  });
+
+  // Regression: one message delivered to two accounts gets ONE card, so the
+  // card's own accountId cannot tell the extension which copy the reader means.
+  // Without the selected account travelling with the action, marking read lands
+  // in whichever mailbox happened to sync first.
+  it('reports the account the reader is looking at, not just the card owner', async () => {
+    h.activeAccountId = 'account-2';
+    mounted = render(<ExtensionNotification />);
+    push(card({ emailId: 'email-1', accountId: 'account-1' }));
+
+    fire(mounted.byLabel('Dismiss'), 'click');
+    await act(async () => {});
+
+    expect(h.actions[0]?.action).toMatchObject({
+      accountId: 'account-1',
+      activeAccountId: 'account-2',
+    });
+  });
+
+  // A unified view has no one account selected; sending `activeAccountId: null`
+  // would look like a real choice and beat the card's own account.
+  it('omits the active account when no single mailbox is selected', async () => {
+    h.activeAccountId = null;
+    mounted = render(<ExtensionNotification />);
+    push(card({ emailId: 'email-1', accountId: 'account-1' }));
+
+    fire(mounted.byLabel('Dismiss'), 'click');
+    await act(async () => {});
+
+    expect(h.actions[0]?.action).not.toHaveProperty('activeAccountId');
   });
 
   // An older build's preload has no `cardAction` at all; the optional chain has

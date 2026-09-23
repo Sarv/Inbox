@@ -1,6 +1,7 @@
 import { Puzzle, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { useEmailStore } from '../store/email-store';
 import { formatExpiryCountdown } from '../utils/format-time';
 import { openEmailFromNotification } from '../utils/open-email-from-notification';
 
@@ -56,6 +57,11 @@ export function ExtensionNotification() {
   // and a timer per card would keep re-rendering the whole stack anyway.
   const [now, setNow] = useState(() => Date.now());
   const timeouts = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // Which mailbox is on screen. Read through a ref so that switching accounts
+  // does not rebuild `report` and, through it, every card's callbacks.
+  const activeAccountId = useEmailStore((state) => state.activeAccountId);
+  const activeAccountRef = useRef(activeAccountId);
+  activeAccountRef.current = activeAccountId;
 
   /**
    * Tell the extension that raised a card what the reader just did with it.
@@ -74,6 +80,10 @@ export function ExtensionNotification() {
           action,
           emailId: card.emailId,
           accountId: card.accountId,
+          // The card says which account raised it; this says which one the
+          // reader is actually in. They differ whenever one message reached
+          // two accounts and the extension drew a single card for it.
+          ...(activeAccountRef.current ? { activeAccountId: activeAccountRef.current } : {}),
           ...extra,
         })
         .catch(() => {
