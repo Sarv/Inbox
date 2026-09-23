@@ -360,6 +360,12 @@ export interface EmailActionsSlice {
   /** Resolve an email's owning account (unified view routing). Internal helper. */
   _accountIdFor: (id: string) => string | undefined;
   markAsRead: (emailId: string, read: boolean) => Promise<void>;
+  /**
+   * Adopt a tag string the MAIN process already persisted — an extension acting
+   * on a card the reader clicked. Not optimistic and never reverted: the write
+   * has already happened, this only stops the list from lying about it.
+   */
+  applyPersistedTags: (emailId: string, tags: string) => void;
   markAsStarred: (emailId: string, starred: boolean) => Promise<void>;
   /** Per-message star (chat/bubble view) — stars one email, not the whole thread. */
   markMessageStarred: (emailId: string, starred: boolean) => Promise<void>;
