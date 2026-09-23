@@ -8,6 +8,8 @@
  * permission the same way.
  */
 
+import { DEFAULT_EXTENSION_CATEGORY } from '@sarvinbox/core/extension-categories';
+
 /** How much damage a permission can do if the extension turns out to be hostile. */
 export type PermissionRisk = 'high' | 'medium' | 'low';
 
@@ -349,4 +351,96 @@ export function describeExtensionSurfaces(source: SurfaceSource): ExtensionSurfa
   // manifest whose workflow list has no names would otherwise render "Runs in
   // the background on new mail" followed by blank space.
   return surfaces.filter((surface) => surface.detail !== '');
+}
+
+/**
+ * How long a description may run in the catalogue LIST.
+ *
+ * The list is for scanning: a row that is two lines for one extension and nine
+ * for the next is not a list any more, and the full text is one click away in
+ * the detail view. The cap is on characters rather than lines because a line is
+ * a rendering accident - it moves with the window width, the font and the
+ * user's zoom - and a row that reflows into a different height as the panel is
+ * resized is exactly what this is avoiding.
+ */
+export const LIST_DESCRIPTION_LIMIT = 120;
+
+/**
+ * Shorten to at most `limit` characters, breaking at a word.
+ *
+ * Cuts at the last space inside the budget so a row never ends mid-word, and
+ * appends a real ellipsis so it is visible that there is more to read. Text
+ * already inside the budget is returned untouched - no ellipsis on a
+ * description that is simply short.
+ */
+export function truncateDescription(text: string, limit: number = LIST_DESCRIPTION_LIMIT): string {
+  const collapsed = text.trim().replace(/\s+/g, ' ');
+  if (collapsed.length <= limit) return collapsed;
+
+  const clipped = collapsed.slice(0, limit);
+  const lastSpace = clipped.lastIndexOf(' ');
+  // A single word longer than the whole budget has no space to break at; cut it
+  // rather than returning the untruncated text and breaking the row.
+  const body = lastSpace > limit * 0.6 ? clipped.slice(0, lastSpace) : clipped;
+  return `${body.replace(/[\s,.;:—-]+$/, '')}…`;
+}
+
+/**
+ * What each catalogue shelf is called on screen.
+ *
+ * The stored value is a lowercase slug so it can be compared and filtered; this
+ * is the only place it becomes something to read. A shelf with no entry here
+ * falls back to its own slug capitalised, so adding one to the core vocabulary
+ * cannot produce a blank chip.
+ */
+const CATEGORY_LABELS: Record<string, string> = {
+  productivity: 'Productivity',
+  security: 'Security',
+  organisation: 'Organisation',
+  communication: 'Communication',
+  office: 'Office',
+  ai: 'AI',
+  tools: 'Tools',
+  other: 'Other',
+};
+
+/** The shelf's name, for a chip or a filter button. */
+export function describeCategory(category: string): string {
+  return CATEGORY_LABELS[category] ?? category.charAt(0).toUpperCase() + category.slice(1);
+}
+
+/**
+ * The shelves worth offering as filters, in a stable order.
+ *
+ * Derived from what is actually in the catalogue rather than from the full
+ * vocabulary: a filter button that always returns nothing is worse than no
+ * button. Ordered by how many extensions sit on each shelf, then by name, so
+ * the useful filters come first and the order does not jitter between loads.
+ */
+export function availableCategories(items: readonly { category?: string }[]): string[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const category = item.category;
+    if (!category) continue;
+    counts.set(category, (counts.get(category) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([category]) => category);
+}
+
+/**
+ * The chip text for an extension's shelf, or `null` when there is nothing worth
+ * saying.
+ *
+ * `other` is what an extension gets when its author wrote no category, or wrote
+ * one the app does not recognise — it is the absence of an answer, not an
+ * answer. Drawing it would put an identical "Other" pill on every row of an
+ * uncategorised catalogue, which is noise that reads like information.
+ * Filtering still offers it: once some extensions ARE categorised, "Other" is a
+ * useful place to find the ones that are not.
+ */
+export function categoryChipLabel(category?: string): string | null {
+  if (!category || category === DEFAULT_EXTENSION_CATEGORY) return null;
+  return describeCategory(category);
 }

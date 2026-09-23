@@ -40,7 +40,8 @@
       "@sarvinbox/core/bulk-mail": ["../../packages/core/src/utils/bulk-mail.ts"],
       // Same: the panel bridge's wire format, shared with the main-process
       // handler so a request one side accepts is never one the other drops.
-      "@sarvinbox/core/panel-bridge": ["../../packages/core/src/extensions/panel-bridge.ts"]
+      "@sarvinbox/core/panel-bridge": ["../../packages/core/src/extensions/panel-bridge.ts"],
+      "@sarvinbox/core/extension-categories": ["../../packages/core/src/extensions/categories.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],
