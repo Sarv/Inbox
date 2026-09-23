@@ -4,6 +4,7 @@ import {
   canOfferServerSearch,
   describeServerSearchResult,
   hasServerSearchableParsedQuery,
+  needsFullQuerySearch,
   shouldAutoEscalateToServer,
 } from '../../../../src/components/server-search';
 
@@ -41,6 +42,42 @@ describe('hasServerSearchableParsedQuery', () => {
     expect(hasServerSearchableParsedQuery(null)).toBe(false);
     expect(hasServerSearchableParsedQuery(undefined)).toBe(false);
     expect(hasServerSearchableParsedQuery('subject:x')).toBe(false);
+  });
+});
+
+describe('needsFullQuerySearch', () => {
+  // On All Inboxes a false here routes the query to unifiedInbox, which accepts
+  // only a ViewFilter. Anything the ViewFilter cannot carry is then not narrowed
+  // but DROPPED — the user asks for one tag and gets every mail in every inbox.
+  it('is true for anything a ViewFilter cannot express', () => {
+    for (const parsed of [
+      { textQuery: 'invoice' },
+      { from: 'a@b.com' },
+      { to: 'a@b.com' },
+      { subject: 'report' },
+      { doesntHave: 'spam' },
+      { tags: ['receipt'] },
+    ]) {
+      expect(needsFullQuerySearch(parsed)).toBe(true);
+    }
+  });
+
+  // These four ARE the ViewFilter, so unifiedInbox carries them faithfully and
+  // keeps the cheaper paginated route.
+  it('is false for a query a ViewFilter carries in full, and for junk input', () => {
+    expect(needsFullQuerySearch({ isUnread: true })).toBe(false);
+    expect(needsFullQuerySearch({ isFlagged: true, hasAttachments: true, noCategory: true })).toBe(false);
+    expect(needsFullQuerySearch({ textQuery: '   ' })).toBe(false);
+    expect(needsFullQuerySearch({ tags: [] })).toBe(false);
+    expect(needsFullQuerySearch(null)).toBe(false);
+    expect(needsFullQuerySearch('tag:receipt')).toBe(false);
+  });
+
+  // A tag filter is local-only — the server has never heard of it — so it must
+  // NOT drag the query into a server round-trip that can only come back empty.
+  it('does not make a tag-only query server-searchable', () => {
+    expect(needsFullQuerySearch({ tags: ['receipt'] })).toBe(true);
+    expect(hasServerSearchableParsedQuery({ tags: ['receipt'] })).toBe(false);
   });
 });
 

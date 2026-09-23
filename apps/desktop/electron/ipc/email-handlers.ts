@@ -147,6 +147,7 @@ function parseSearchOperators(query: string): {
   isUnread?: boolean;
   isFlagged?: boolean;
   folderIds?: string[];
+  tags?: string[];
   dateFrom?: number;
   dateTo?: number;
   sizeMin?: number;
@@ -215,6 +216,20 @@ function parseSearchOperators(query: string): {
     }
     remaining = remaining.replace(labelMatch[0], '');
   }
+
+  // Parse tag: — arbitrary tag names (`tag:vip`, `tag:receipt`). ALL occurrences
+  // are collected, not just the first, because two tags AND in the SQL layer and
+  // stopping at one would silently widen the search.
+  //
+  // Case is preserved: tag matching is a literal `instr` on the stored string,
+  // and a Gmail label carried into tags keeps its own case.
+  const tags: string[] = [];
+  remaining = remaining.replace(/tag:(?:"([^"]+)"|(\S+))/gi, (_match, quoted, bare) => {
+    const tag = (quoted || bare || '').trim();
+    if (tag) tags.push(tag);
+    return '';
+  });
+  if (tags.length > 0) result.tags = tags;
 
   // Parse after:/before: (date filters)
   const afterMatch = remaining.match(/after:(\d{4}-\d{2}-\d{2})/i);
@@ -1024,6 +1039,7 @@ export function registerEmailHandlers(): void {
         dateFrom: parsed.dateFrom,
         dateTo: parsed.dateTo,
         doesntHave: parsed.doesntHave,
+        tags: parsed.tags,
         sizeMin: parsed.sizeMin,
         sizeMax: parsed.sizeMax,
         limit: 100,

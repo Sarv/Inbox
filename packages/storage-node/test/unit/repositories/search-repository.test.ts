@@ -274,6 +274,121 @@ describe('SearchRepository', () => {
     });
   });
 
+  // ── tag: (extension / arbitrary tags) ──────────────────────────────────────
+  //
+  // Extensions write tags straight into `emails.tags` — `vip` from vip-scoring,
+  // `receipt`/`subscription` from the receipts tracker — and those never become
+  // a folder, an AI category or an IMAP flag. Before this filter existed they
+  // were written on every matching mail and reachable from nowhere: the app
+  // stored the answer and had no question that returned it.
+  describe('tags filter', () => {
+    beforeEach(() => {
+      addEmail(db, {
+        id: 't1', subject: 'Contract renewal', from: 'ceo@partner.test',
+        body: 'please sign', tags: '|INBOX|read|vip|', date: 8000,
+      });
+      addEmail(db, {
+        id: 't2', subject: 'Netflix payment', from: 'billing@netflix.test',
+        body: 'your subscription renewed', tags: '|INBOX|receipt|subscription|', date: 9000,
+      });
+      addEmail(db, {
+        id: 't3', subject: 'Coffee order', from: 'orders@tokai.test',
+        body: 'thanks for your order', tags: '|INBOX|receipt|', date: 10000,
+      });
+    });
+
+    it('returns exactly the mail carrying that tag', () => {
+      expect(ids(repo.search({ query: '', tags: ['vip'] }))).toEqual(['t1']);
+      expect(ids(repo.search({ query: '', tags: ['receipt'] }))).toEqual(['t3', 't2']);
+      expect(repo.search({ query: '', tags: ['no-such-tag'] })).toEqual([]);
+    });
+
+    // `|vip|` must match a whole segment. A substring match would make
+    // `tag:vip` return every `vip-lead`/`advisory` mail, which reads as the
+    // filter being ignored.
+    it('matches whole tag segments, never a substring of one', () => {
+      addEmail(db, { id: 't4', subject: 'Near miss', tags: '|INBOX|vip-lead|', date: 11000 });
+      addEmail(db, { id: 't5', subject: 'Other near miss', tags: '|INBOX|advip|', date: 12000 });
+      expect(ids(repo.search({ query: '', tags: ['vip'] }))).toEqual(['t1']);
+      expect(ids(repo.search({ query: '', tags: ['vip-lead'] }))).toEqual(['t4']);
+    });
+
+    // Two tags NARROW. ORing them would show a mail that carries neither the
+    // reader asked for as if it matched both.
+    it('ANDs multiple tags', () => {
+      expect(ids(repo.search({ query: '', tags: ['receipt', 'subscription'] }))).toEqual(['t2']);
+      expect(repo.search({ query: '', tags: ['receipt', 'vip'] })).toEqual([]);
+    });
+
+    // Extensions and AI categories write lowercase names, but a reader types
+    // `tag:VIP`. `instr` is case-sensitive, so without the lowered probe the
+    // capitalised spelling silently returns nothing.
+    it('finds a lowercase-stored tag however the reader capitalised it', () => {
+      expect(ids(repo.search({ query: '', tags: ['VIP'] }))).toEqual(['t1']);
+      expect(ids(repo.search({ query: '', tags: ['Receipt'] }))).toEqual(['t3', 't2']);
+    });
+
+    // ...and the other direction: a Gmail label carried into tags keeps its own
+    // case, so the as-typed probe has to stay.
+    it('finds a mixed-case stored tag when typed with its own case', () => {
+      addEmail(db, { id: 't6', subject: 'Client mail', tags: '|INBOX|Work/Clients|', date: 13000 });
+      expect(ids(repo.search({ query: '', tags: ['Work/Clients'] }))).toEqual(['t6']);
+    });
+
+    // `|` is the storage delimiter and is replaced with `_` on write, so the
+    // probe has to be sanitised the same way or it can never match the row.
+    it('sanitises the searched name the same way it was stored', () => {
+      addEmail(db, { id: 't7', subject: 'Odd label', tags: '|INBOX|a_b|', date: 14000 });
+      expect(ids(repo.search({ query: '', tags: ['a|b'] }))).toEqual(['t7']);
+    });
+
+    // An empty array (or a blank entry) means "unscoped" — reading it as "no tag
+    // matches" would blank the results for every caller that passes [].
+    it('ignores an empty list and blank entries instead of matching nothing', () => {
+      const unfiltered = ids(repo.search({ query: '' }));
+      expect(ids(repo.search({ query: '', tags: [] }))).toEqual(unfiltered);
+      expect(ids(repo.search({ query: '', tags: ['  ', ''] }))).toEqual(unfiltered);
+    });
+
+    it('ANDs with free text and with the other filters', () => {
+      expect(ids(repo.search({ query: 'netflix', tags: ['receipt'] }))).toEqual(['t2']);
+      expect(repo.search({ query: 'netflix', tags: ['vip'] })).toEqual([]);
+      expect(ids(repo.search({ query: '', tags: ['receipt'], isUnread: true }))).toEqual(['t3', 't2']);
+      expect(ids(repo.search({ query: '', tags: ['vip'], isUnread: true }))).toEqual([]);
+      expect(ids(repo.search({ query: '', tags: ['receipt'], folderPath: 'INBOX' }))).toEqual(['t3', 't2']);
+    });
+
+    // The paginator reads count(); a total that ignored the tag filter would
+    // render "1-2 of 8" over a two-row result.
+    it('count() agrees with search() for tag filters', () => {
+      for (const q of [
+        { query: '', tags: ['vip'] },
+        { query: '', tags: ['receipt'] },
+        { query: '', tags: ['receipt', 'subscription'] },
+        { query: 'netflix', tags: ['receipt'] },
+        { query: '', tags: ['VIP'] },
+        { query: '', tags: [] },
+      ] as SearchQuery[]) {
+        expect(repo.count(q)).toBe(repo.search(q).length);
+      }
+    });
+
+    // A tag search never needs FTS, but it must keep working when the index is
+    // gone — that is exactly when the reader is most likely to be hunting.
+    it('still filters when the FTS index is missing', () => {
+      breakFtsIndex(db);
+      expect(ids(repo.search({ query: '', tags: ['receipt'] }))).toEqual(['t3', 't2']);
+      expect(ids(repo.search({ query: 'netflix', tags: ['receipt'] }))).toEqual(['t2']);
+      expect(repo.count({ query: '', tags: ['vip'] })).toBe(1);
+    });
+
+    // The value reaches SQL as a bound parameter, never as text.
+    it('treats an injection payload in a tag name as a literal value', () => {
+      expect(repo.search({ query: '', tags: ["vip') OR 1=1 --"] })).toEqual([]);
+      expect(tableExists(db, 'emails')).toBe(true);
+    });
+  });
+
   describe('folder scoping', () => {
     it('folderPath scopes to that folder and STOPS excluding it when it is a special folder', () => {
       expect(ids(repo.search({ query: '', folderPath: 'INBOX' }))).toEqual(['e6', 'e3', 'e2', 'e1']);

@@ -474,6 +474,7 @@ export function registerAIHandlers(): void {
         dateTo?: number;
         textQuery?: string;
         labels?: string[];
+        tags?: string[];
         folderId?: string;
         aiCategory?: string;
         noCategory?: boolean;
@@ -512,6 +513,9 @@ export function registerAIHandlers(): void {
           dateFrom: searchQuery.dateFrom,
           dateTo: searchQuery.dateTo,
           labels: searchQuery.labels,
+          // `tag:` — the only route to a tag an extension applied; dropping it
+          // here would silently widen the search back to the whole mailbox.
+          tags: searchQuery.tags,
           doesntHave: searchQuery.doesntHave,
           sizeMin: searchQuery.sizeMin,
           sizeMax: searchQuery.sizeMax,
@@ -562,6 +566,9 @@ export function registerAIHandlers(): void {
           dateFrom: searchQuery.dateFrom,
           dateTo: searchQuery.dateTo,
           labels: searchQuery.labels,
+          // `tag:` — the only route to a tag an extension applied; dropping it
+          // here would silently widen the search back to the whole mailbox.
+          tags: searchQuery.tags,
           doesntHave: searchQuery.doesntHave,
           sizeMin: searchQuery.sizeMin,
           sizeMax: searchQuery.sizeMax,

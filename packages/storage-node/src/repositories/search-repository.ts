@@ -1,7 +1,7 @@
 // Search Repository — FTS5-powered full-text search with relevance ranking
 
 import type { EmailRecord, SearchQuery } from '@sarvinbox/core';
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, sanitizeTagName } from '@sarvinbox/core';
 
 import { applyFtsSchema, FTS_REBUILD_SQL } from '../fts-schema';
 
@@ -267,6 +267,42 @@ export class SearchRepository extends BaseRepository {
       for (const slug of slugs) {
         sql += ` AND instr(emails.tags, '|' || ? || '|') = 0`;
         params.push(slug);
+      }
+    }
+
+    // Arbitrary tag filter (`tag:vip`, `tag:receipt`) — ANDed, so two tags
+    // narrow rather than widen.
+    //
+    // This is the ONLY search surface for a tag an extension applied. Those are
+    // written straight into `emails.tags` and never become a folder, an AI
+    // category or an IMAP flag, so before this they sat in the database
+    // unreachable from anywhere in the UI.
+    //
+    // Same `instr` shape as every other tag predicate in this method (folder
+    // scoping, aiCategory, isUnread, isFlagged). `emails.tags` carries no index,
+    // so this costs exactly what those already cost and introduces no new scan.
+    //
+    // Matched as typed AND lowercased because the two producers disagree:
+    // extensions and AI categories write lowercase names ('vip', 'receipt')
+    // while a reader types `tag:VIP`, but a Gmail label carried into tags keeps
+    // its own case ('Work/Clients') and has to stay reachable exactly as typed.
+    // Both probes run on a row the query is already reading, so the OR is free.
+    if (query.tags && query.tags.length > 0) {
+      for (const rawTag of query.tags) {
+        // Sanitised the same way it was stored: a tag name containing the `|`
+        // delimiter was written with it replaced, so probing for the raw name
+        // would never match what is actually on the row.
+        const tag = sanitizeTagName(rawTag).trim();
+        if (!tag) continue;
+        const lowered = tag.toLowerCase();
+        if (lowered === tag) {
+          sql += ` AND instr(emails.tags, '|' || ? || '|') > 0`;
+          params.push(tag);
+        } else {
+          sql += ` AND (instr(emails.tags, '|' || ? || '|') > 0
+                        OR instr(emails.tags, '|' || ? || '|') > 0)`;
+          params.push(tag, lowered);
+        }
       }
     }
 

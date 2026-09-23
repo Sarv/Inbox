@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { addProvider, getDefaultProvider, loadAISettings, pruneOrphanedOAuthProviders, removeOAuthProvidersForAccount } from '../../../../src/services/ai-service';
+import { addProvider, getDefaultProvider, loadAISettings, parseSearchQuery, pruneOrphanedOAuthProviders, removeOAuthProvidersForAccount } from '../../../../src/services/ai-service';
 
 // removeOAuthProvidersForAccount is the fix for the "delete account → app
 // beachballs" bug: the Sarv account is BOTH mailbox AND LLM provider, so when the
@@ -166,5 +166,66 @@ describe('pruneOrphanedOAuthProviders (startup self-heal)', () => {
     const src = readFileSync(new URL('../../../../src/services/ai-service.ts', import.meta.url));
     expect(src.includes(0)).toBe(false);
     expect(src.toString('utf8')).toContain('\\u0000${');
+  });
+});
+
+
+// `tag:` is the only search surface for a tag an extension applied — vip-scoring's
+// `vip`, the receipts tracker's `receipt`/`subscription`. Those are written into
+// the local tags column and never become a folder, an AI category or an IMAP flag,
+// so before this operator existed the app stored the answer and had no question
+// that returned it. These tests pin the FAST path (no provider configured, so a
+// miss here doesn't silently fail over to an LLM round-trip).
+describe('parseSearchQuery: tag: operator', () => {
+  it('parses a bare tag: query without reaching for the AI', async () => {
+    const result = await parseSearchQuery('tag:receipt');
+    expect(result.query.tags).toEqual(['receipt']);
+    expect(result.confidence).toBe(1.0);
+    // Nothing else may be set — a stray textQuery would run a text search for
+    // the literal word "tag:receipt" alongside the filter and return nothing.
+    expect(result.query.textQuery).toBeUndefined();
+  });
+
+  // Two tags NARROW. Keeping only the last would quietly widen the search.
+  it('collects every tag: in a combined query', async () => {
+    const result = await parseSearchQuery('tag:receipt tag:subscription');
+    expect(result.query.tags).toEqual(['receipt', 'subscription']);
+  });
+
+  it('combines with the other simple operators', async () => {
+    const result = await parseSearchQuery('tag:vip is:unread from:boss');
+    expect(result.query).toMatchObject({ tags: ['vip'], isUnread: true, from: 'boss' });
+  });
+
+  it('keeps free text alongside the tag', async () => {
+    const result = await parseSearchQuery('tag:receipt netflix');
+    expect(result.query.tags).toEqual(['receipt']);
+    expect(result.query.textQuery).toBe('netflix');
+  });
+
+  // Tag matching is a literal comparison against the stored string, so
+  // lowercasing here would make a Gmail label (stored with its own case)
+  // unfindable. The SQL layer is what forgives a capitalised `tag:VIP`.
+  it('preserves the case the reader typed', async () => {
+    expect((await parseSearchQuery('tag:Work/Clients')).query.tags).toEqual(['Work/Clients']);
+    expect((await parseSearchQuery('tag:VIP')).query.tags).toEqual(['VIP']);
+  });
+
+  // `tag:` means a TAG, `in:`/`label:` mean a FOLDER. Conflating them would send
+  // a tag search down the folder-path predicate and return nothing.
+  it('is distinct from in:/label:, which stay folder tokens', async () => {
+    const tagged = await parseSearchQuery('tag:sent');
+    expect(tagged.query.tags).toEqual(['sent']);
+    expect(tagged.query.labels).toBeUndefined();
+
+    const located = await parseSearchQuery('in:sent');
+    expect(located.query.labels).toEqual(['sent']);
+    expect(located.query.tags).toBeUndefined();
+  });
+
+  it('ignores a bare "tag:" with no name', async () => {
+    const result = await parseSearchQuery('tag: netflix');
+    expect(result.query.tags).toBeUndefined();
+    expect(result.query.textQuery).toBe('netflix');
   });
 });

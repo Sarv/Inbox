@@ -1816,6 +1816,15 @@ export interface SearchQuery {
   dateTo?: number;    // Unix timestamp
   textQuery?: string; // Free text search
   labels?: string[];  // Folder/label filters
+  /**
+   * `tag:` operator — arbitrary tag names that must ALL be present.
+   *
+   * Distinct from `labels`, which means a FOLDER. This is how a tag an
+   * extension applied (`vip`, `receipt`, `subscription`) becomes findable:
+   * those never reach IMAP and never become a folder or an AI category, so
+   * `tag:` is their only search surface.
+   */
+  tags?: string[];
   folderId?: string;  // Restrict search to specific folder
   aiCategory?: string; // Restrict search to AI category (reminders, needs_response, waiting_reply, meeting, invoice)
   noCategory?: boolean; // Only mail with NO AI category (unlabelled)
@@ -2044,6 +2053,16 @@ function parseCombinedSimpleQuery(query: string): AISearchResult | null {
       } else {
         searchQuery.subject = subjectPart;
         interpretations.push(`subject: ${subjectPart}`);
+      }
+    } else if (lower.startsWith('tag:')) {
+      // Case is taken from the RAW part, never from `lower`: tag matching is a
+      // literal `instr` on the stored string, so lowercasing here would make
+      // `tag:Work/Clients` (a Gmail label, stored with its case) unfindable.
+      const tag = part.substring(4);
+      if (tag) {
+        searchQuery.tags = searchQuery.tags || [];
+        searchQuery.tags.push(tag);
+        interpretations.push(`tagged ${tag}`);
       }
     } else if (lower.startsWith('label:') || lower.startsWith('in:')) {
       const label = (lower.startsWith('label:') ? part.substring(6) : part.substring(3)).toLowerCase();

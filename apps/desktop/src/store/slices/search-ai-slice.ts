@@ -1,4 +1,4 @@
-import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearchableParsedQuery } from '../../components/server-search';
+import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearchableParsedQuery, needsFullQuerySearch } from '../../components/server-search';
 import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
 import { isSignatureDetectionEnabled, detectSignature, isCategorizationEnabled, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
 import { isAutoChatExtractEnabled, isConversationModeEnabled, extractConversation } from '../../services/conversation-service';
@@ -169,7 +169,9 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     if (!q) return;
     const pageSize = getEmailsPerPage();
     const offset = page * pageSize;
-    const hasFreeText = !!(q.textQuery?.trim() || q.from || q.to || q.subject || q.doesntHave);
+    // Not literally "has free text": the question is whether a ViewFilter could
+    // carry this query, because the unifiedInbox route below takes nothing else.
+    const hasFreeText = needsFullQuerySearch(q);
 
     if (get().selectedVirtualFolder === 'virtual-unified') {
       const accountIds = get().accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id);
