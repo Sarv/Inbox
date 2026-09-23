@@ -24,7 +24,7 @@
     "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"
   },
   "dependencies": {
-    "@sarv-in/email-chat-view": "^0.2.2",
+    "@sarv-in/email-chat-view": "file:../../../email-chat-view",
     "@sarv-in/mailguard": "^0.1.0",
     "@sarvinbox/core": "workspace:*",
     "@sarvinbox/storage-node": "workspace:*",
