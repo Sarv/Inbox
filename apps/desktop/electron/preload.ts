@@ -930,6 +930,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fieldLabel?: string;
         emailId?: string;
         accountId?: string;
+        activeAccountId?: string;
       },
     ) => ipcRenderer.invoke('extensions:cardAction', notificationId, action),
     // Capabilities. The app asks for a JOB by name and takes whichever
@@ -1608,6 +1609,7 @@ export interface ElectronAPI {
         fieldLabel?: string;
         emailId?: string;
         accountId?: string;
+        activeAccountId?: string;
       },
     ) => Promise<{ success: boolean; data?: boolean; error?: string }>;
     // Extension capability calls
@@ -1929,11 +1931,22 @@ export interface MarketplaceCatalogItem {
   author: string;
   license?: string;
   keywords: string[];
+  /** The catalogue shelf, already folded onto the app's known list. */
+  category: string;
   homepage?: string;
   iconUrl?: string;
   readmeUrl?: string;
   engineRange?: string;
   permissions: string[];
+  /** What it contributes, so the list can say what it does before installing. */
+  contributes?: {
+    panels?: { title?: string; surface?: string; autoOpen?: boolean }[];
+    workflows?: { name?: string; requiresAI?: boolean }[];
+    settings?: { key?: string }[];
+    capabilities?: { id?: string; description?: string }[];
+  };
+  /** Pictures of it running. URLs are already host-checked. */
+  screenshots?: { url: string; caption?: string }[];
   /** Bytes of the release archive, shown on the card without a detail fetch. */
   size: number;
   /**
