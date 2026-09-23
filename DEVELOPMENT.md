@@ -225,18 +225,30 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the commit format and PR checklist.
 
 ## Release Process
 
-Releases are cut manually by a maintainer. CI (`.github/workflows/ci.yml`) runs
-type-check, lint, the renderer-bundle guard, the test suites and a dependency
-audit on every push and pull request — it does **not** build or publish release
-artifacts.
+Releases are cut by a maintainer with one command; everything is built and
+published by GitHub Actions. Full detail lives in
+[docs/RELEASING.md](./docs/RELEASING.md).
 
-1. Move the `Unreleased` entries in `CHANGELOG.md` under the new version and date.
-2. Run `pnpm release` (or `release:patch` / `release:minor` / `release:major`).
-   `scripts/release.sh` bumps the version, commits, and builds the signed macOS
-   package; `scripts/release_github.sh` additionally notarizes it, creates the
-   release commit + tag, pushes, and publishes a GitHub release with the DMG(s).
-   Both need Apple code-signing and notarization credentials that only
-   maintainers hold — contributors never need to run them.
+```bash
+./scripts/release.sh minor      # or patch / major / an explicit 1.5.0
+```
+
+`scripts/release.sh` bumps the version in both `package.json` files, generates
+the `CHANGELOG.md` entry from the commits since the last `v*` tag, commits, tags
+and pushes. **It builds nothing.** Pushing the tag starts
+`.github/workflows/release.yml`, which builds macOS, Linux and Windows on their
+own runners, signs and notarizes the Mac app, and publishes a **draft** release
+with every artifact attached for a human to review and publish.
+
+The per-platform runners are a correctness requirement, not a convenience: the
+two compiled native addons (`better-sqlite3`, `lzma-native`) cannot be
+cross-compiled, so a Mac cannot produce a working Linux or Windows build.
+
+Only maintainers need the Apple and application secrets; they live in repository
+secrets, not on anyone's laptop. Contributors never run any of this.
+`.github/workflows/ci.yml` (type-check, lint, renderer-bundle guard, test
+suites, dependency audit) runs on every push and pull request and does **not**
+build or publish artifacts.
 
 ## Resources
 
