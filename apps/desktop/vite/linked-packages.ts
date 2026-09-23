@@ -34,14 +34,15 @@
  * silent: the dev server keeps serving the previous build of the library with
  * no error, no warning and no reload.
  *
- * Empty today, and that is the healthy state: `@sarv-in/mailguard` was
- * published to the registry in Sept 2026 and `@sarv-in/email-chat-view`
- * before it, so both now install as immutable tarballs where Vite's default
- * handling — pre-bundle once, never watch — is exactly right. Point either
- * back at `file:` to work on it in the sibling checkout and it belongs here
- * again; the test below will say so if you forget.
+ * `@sarv-in/email-chat-view` is back on `file:` while its header-meta slot is
+ * being written in the sibling checkout, so it is named here again. Move it
+ * back to a registry version and it comes straight out — a registry dep left
+ * in this list is excluded from the pre-bundle and watched for changes it will
+ * never have. `@sarv-in/mailguard` was published to the registry in Sept 2026
+ * and installs as an immutable tarball, where Vite's default handling —
+ * pre-bundle once, never watch — is exactly right.
  */
-export const LINKED_PACKAGES: readonly string[] = [];
+export const LINKED_PACKAGES: readonly string[] = ['@sarv-in/email-chat-view'];
 
 /**
  * `optimizeDeps.exclude` — keep these out of the esbuild pre-bundle.

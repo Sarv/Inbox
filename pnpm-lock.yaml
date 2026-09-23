@@ -64,8 +64,8 @@ importers:
   apps/desktop:
     dependencies:
       '@sarv-in/email-chat-view':
-        specifier: ^0.2.2
-        version: 0.2.2(react-dom@18.3.1)(react@18.3.1)
+        specifier: file:../../../email-chat-view
+        version: file:../email-chat-view(react-dom@18.3.1)(react@18.3.1)
       '@sarv-in/mailguard':
         specifier: ^0.1.0
         version: 0.1.0
@@ -2707,25 +2707,6 @@ packages:
   /@rtsao/scc@1.1.0:
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
     dev: true
-
-  /@sarv-in/email-chat-view@0.2.2(react-dom@18.3.1)(react@18.3.1):
-    resolution: {integrity: sha512-P6kNiadBN9XmW/8eUNeWdZf3Unym5ovC5ZMfcmfoM1edg+jMdXlWr52u4iz9L1zq6EnScBvxEl3qtDygcHCgiQ==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      react: ^18.2.0 || ^19.0.0
-      react-dom: ^18.2.0 || ^19.0.0
-    peerDependenciesMeta:
-      react:
-        optional: true
-      react-dom:
-        optional: true
-    dependencies:
-      chrono-node: 2.10.0
-      dompurify: 3.4.12
-      email-addresses: 5.0.0
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
-    dev: false
 
   /@sarv-in/mailguard@0.1.0:
     resolution: {integrity: sha512-4uGLyhS2Hal/CH6mzJDTKsOIr85UQjtul9pjdOda8eWXWaxZ0p1cPs4cgLsd0Ye5iEVtCp+7oNqUPNMBpDb1Gw==}
@@ -11631,4 +11612,25 @@ packages:
       '@types/react': 18.3.27
       react: 18.3.1
       use-sync-external-store: 1.6.0(react@18.3.1)
+    dev: false
+
+  file:../email-chat-view(react-dom@18.3.1)(react@18.3.1):
+    resolution: {directory: ../email-chat-view, type: directory}
+    id: file:../email-chat-view
+    name: '@sarv-in/email-chat-view'
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: ^18.2.0 || ^19.0.0
+      react-dom: ^18.2.0 || ^19.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+    dependencies:
+      chrono-node: 2.10.0
+      dompurify: 3.4.12
+      email-addresses: 5.0.0
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
     dev: false
