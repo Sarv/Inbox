@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Tooltip } from '../Tooltip';
 
 import { ExtensionPanelFrame } from './ExtensionPanelFrame';
+import { RegistryImage } from './RegistryImage';
 
 /**
  * The right-hand rail that holds extension panels beside the open message.
@@ -97,7 +98,12 @@ export function ExtensionPanelSidebar({
                   }`}
                 >
                   {available.iconUrl ? (
-                    <img src={available.iconUrl} alt="" aria-hidden="true" className="h-3.5 w-3.5" />
+                    <RegistryImage
+                      src={available.iconUrl}
+                      alt=""
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5"
+                    />
                   ) : (
                     <Puzzle className="h-3.5 w-3.5" aria-hidden="true" />
                   )}

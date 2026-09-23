@@ -5,6 +5,8 @@ import {
   type SurfaceSource,
 } from '../../utils/extension-marketplace-display';
 
+import { RegistryImage } from './RegistryImage';
+
 /**
  * "What this does, and where you will see it."
  *
@@ -80,11 +82,11 @@ export function ExtensionScreenshots({
       <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
         {usable.map((shot) => (
           <figure key={shot.url} className="shrink-0 w-56">
-            <img
+            <RegistryImage
               src={shot.url}
               alt={shot.caption ?? ''}
               loading="lazy"
-              onError={() => setBroken((current) => ({ ...current, [shot.url]: true }))}
+              onUnavailable={() => setBroken((current) => ({ ...current, [shot.url]: true }))}
               className="w-56 rounded-lg border border-border bg-muted object-cover"
             />
             {shot.caption && (

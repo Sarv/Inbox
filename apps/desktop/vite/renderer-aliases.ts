@@ -34,6 +34,13 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/single-flight.ts',
     ),
+    // Pure (zero imports) — the renderer draws registry icons and screenshots
+    // from the same CDN mirror the main process fetches registry documents
+    // through, so the rewrite rule has to be the one module, not two.
+    '@sarvinbox/core/registry-mirror': resolve(
+      desktopDir,
+      '../../packages/core/src/extensions/registry-mirror.ts',
+    ),
     // Pure (zero imports) — the attachment allow-list and viewer classification.
     // The renderer MUST see the same module the `sarv-attachment://` handler
     // uses: if the two ever disagreed about what a file is, the renderer would

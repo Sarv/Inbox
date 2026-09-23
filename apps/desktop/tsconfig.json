@@ -32,6 +32,9 @@
       // Same: pure request-coalescing helper, one implementation shared with
       // the main process instead of a renderer copy.
       "@sarvinbox/core/single-flight": ["../../packages/core/src/utils/single-flight.ts"],
+      // Same: the CDN rewrite for registry URLs, shared so an icon in the
+      // renderer and a registry document in the main process agree on the host.
+      "@sarvinbox/core/registry-mirror": ["../../packages/core/src/extensions/registry-mirror.ts"],
       // Same: pure attachment classifier + URL codec, shared with the
       // sarv-attachment:// protocol handler so the two can't disagree.
       "@sarvinbox/core/attachment-kind": ["../../packages/core/src/utils/attachment-kind.ts"],
