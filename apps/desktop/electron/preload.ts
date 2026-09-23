@@ -12,6 +12,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { DomainIdentityRow } from './services/domain-identity-store';
 import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
 import type { SpamReputationPolicy, SpamReputationState } from './services/spam-reputation-service';
+import type { UpdateState } from './services/update-policy';
 
 /**
  * A toast mirrored into the renderer when native OS notifications can't be
@@ -57,6 +58,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   app: {
     getVersion: () => ipcRenderer.invoke('app:version'),
     openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+  },
+
+  // Auto-update. The main process owns all update state and pushes it here;
+  // the renderer only renders what it is given and reports button presses back.
+  updater: {
+    getState: () => ipcRenderer.invoke('updater:state'),
+    check: () => ipcRenderer.invoke('updater:check'),
+    install: () => ipcRenderer.invoke('updater:install'),
+    skip: () => ipcRenderer.invoke('updater:skip'),
+    remindLater: () => ipcRenderer.invoke('updater:remindLater'),
+    dismiss: () => ipcRenderer.invoke('updater:dismiss'),
+    // Returns its own disposer: React effects must be able to detach this
+    // listener on unmount, or a remount stacks a second one and every state
+    // push is handled twice.
+    onState: (callback: (state: UpdateState) => void) => {
+      const handler = (_event: unknown, state: UpdateState) => callback(state);
+      ipcRenderer.on('updater:state', handler);
+      return () => ipcRenderer.removeListener('updater:state', handler);
+    },
   },
 
   // System power-state events from Electron's powerMonitor.
@@ -1013,6 +1033,18 @@ export interface ElectronAPI {
   app: {
     getVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
     openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+  };
+  updater: {
+    getState: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    /** Manual check. Always resolves with a state worth showing the user. */
+    check: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    /** Quit, install the staged update and relaunch. Fails if none is staged. */
+    install: () => Promise<{ success: boolean; error?: string }>;
+    skip: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    remindLater: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    dismiss: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    /** Subscribe to pushed state. Call the returned disposer to unsubscribe. */
+    onState: (callback: (state: UpdateState) => void) => () => void;
   };
   system: {
     onSuspend: (callback: () => void) => void;
