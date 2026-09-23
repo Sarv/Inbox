@@ -749,3 +749,73 @@ describe('contributes and screenshots', () => {
     expect(noDetailFields.entry.contributes?.workflows?.[0].name).toBe('Find codes');
   });
 });
+
+describe('registry categories', () => {
+  const INDEX = 'https://raw.githubusercontent.com/Sarv/SarvInbox-extensions/main/registry/index.json';
+
+  function categorised(category?: unknown): RegistryEntry {
+    const parsed = parseRegistryDocument(
+      registryDocument([entryDocument(category === undefined ? {} : { category })]),
+      INDEX
+    );
+    return parsed.entries[0];
+  }
+
+  // Regression: the Browse filter groups on this value, so an author's own
+  // capitalisation must not become a shelf of its own.
+  it('folds an author-written category onto a known shelf', () => {
+    expect(categorised('Productivity').category).toBe('productivity');
+    expect(categorised('tool').category).toBe('tools');
+  });
+
+  // Always set, so nothing downstream has to reason about a missing shelf -
+  // a registry written before categories existed still filters correctly.
+  it('files an entry with no category under the default shelf', () => {
+    expect(categorised().category).toBe('other');
+  });
+
+  // A category is a browsing aid; a bad one must cost the entry its shelf,
+  // never its listing.
+  it('keeps the entry when the category is nonsense', () => {
+    expect(categorised(42).category).toBe('other');
+    expect(categorised('flarblewidgets').category).toBe('other');
+  });
+
+  // The detail document is the same generator run describing the same archive,
+  // so it may carry a shelf the thin index left out - and may correct one.
+  it('takes the shelf from the detail document when it carries one', () => {
+    const listed = categorised('office');
+    const merged = mergeRegistryDetail(
+      {
+        schemaVersion: 2,
+        id: 'otp-code',
+        version: '1.0.0',
+        category: 'Security',
+        download: entryDocument().download,
+      },
+      listed
+    );
+
+    expect('entry' in merged).toBe(true);
+    if (!('entry' in merged)) return;
+    expect(merged.entry.category).toBe('security');
+  });
+
+  // Regression: a detail document that says nothing about the shelf must leave
+  // the listed one alone, not silently demote it to `other`.
+  it('keeps the listed shelf when the detail document omits it', () => {
+    const merged = mergeRegistryDetail(
+      {
+        schemaVersion: 2,
+        id: 'otp-code',
+        version: '1.0.0',
+        download: entryDocument().download,
+      },
+      categorised('security')
+    );
+
+    expect('entry' in merged).toBe(true);
+    if (!('entry' in merged)) return;
+    expect(merged.entry.category).toBe('security');
+  });
+});

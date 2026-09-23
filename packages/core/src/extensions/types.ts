@@ -61,6 +61,16 @@ export interface ExtensionManifest {
   /** Keywords for search/discovery */
   keywords?: string[];
 
+  /**
+   * The shelf this extension sits on in the catalogue, e.g. `productivity`.
+   *
+   * Free text as far as an author is concerned; it is folded onto the known
+   * list in `categories.ts` before anything is drawn, and anything
+   * unrecognised becomes `other`. Purely a browsing aid — it grants nothing
+   * and restricts nothing.
+   */
+  category?: string;
+
   /** Extension icon path (optional) */
   icon?: string;
 
@@ -802,6 +812,19 @@ export interface ExtensionUIAction {
 
   /** The card's `accountId`, carried through alongside `emailId`. */
   accountId?: string;
+
+  /**
+   * The account the reader is looking at right now, which is not necessarily
+   * the account the card was raised from.
+   *
+   * One message delivered to two accounts is one message to the reader, so an
+   * extension may well show a single card for it. When the reader then acts on
+   * that card, the copy worth touching is the one in the mailbox on screen -
+   * without this the extension can only guess, and would file the message in
+   * whichever account happened to sync first. Absent when no single account is
+   * selected (a unified view).
+   */
+  activeAccountId?: string;
 }
 
 /** What an extension registers with `ui.onAction`. */
