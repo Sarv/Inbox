@@ -4,8 +4,10 @@ import {
   describeExtensionSurfaces,
   type SurfaceSource,
 } from '../../utils/extension-marketplace-display';
+import { Tooltip } from '../Tooltip';
 
 import { RegistryImage } from './RegistryImage';
+import { ScreenshotLightbox } from './ScreenshotLightbox';
 
 /**
  * "What this does, and where you will see it."
@@ -74,21 +76,35 @@ export function ExtensionScreenshots({
   className?: string;
 }) {
   const [broken, setBroken] = useState<Record<string, true>>({});
+  // The index INTO `usable`, so dropping a broken picture cannot leave the
+  // lightbox pointing at a different screenshot than the one that was clicked.
+  const [openedAt, setOpenedAt] = useState<number | null>(null);
   const usable = (screenshots ?? []).filter((shot) => !broken[shot.url]);
   if (usable.length === 0) return null;
 
   return (
     <div className={className}>
       <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
-        {usable.map((shot) => (
+        {usable.map((shot, position) => (
           <figure key={shot.url} className="shrink-0 w-56">
-            <RegistryImage
-              src={shot.url}
-              alt={shot.caption ?? ''}
-              loading="lazy"
-              onUnavailable={() => setBroken((current) => ({ ...current, [shot.url]: true }))}
-              className="w-56 rounded-lg border border-border bg-muted object-cover"
-            />
+            <Tooltip content="View larger" delayMs={40}>
+              <button
+                type="button"
+                onClick={() => setOpenedAt(position)}
+                aria-label={
+                  shot.caption ? `View larger: ${shot.caption}` : 'View screenshot larger'
+                }
+                className="block w-56 cursor-zoom-in rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <RegistryImage
+                  src={shot.url}
+                  alt={shot.caption ?? ''}
+                  loading="lazy"
+                  onUnavailable={() => setBroken((current) => ({ ...current, [shot.url]: true }))}
+                  className="w-56 rounded-lg border border-border bg-muted object-cover transition-colors hover:border-primary"
+                />
+              </button>
+            </Tooltip>
             {shot.caption && (
               <figcaption className="text-[11px] text-muted-foreground mt-1">
                 {shot.caption}
@@ -97,6 +113,14 @@ export function ExtensionScreenshots({
           </figure>
         ))}
       </div>
+
+      {openedAt !== null && (
+        <ScreenshotLightbox
+          screenshots={usable}
+          initialIndex={openedAt}
+          onClose={() => setOpenedAt(null)}
+        />
+      )}
     </div>
   );
 }

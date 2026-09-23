@@ -5,7 +5,7 @@ import {
   ExtensionScreenshots,
   ExtensionSurfaces,
 } from '../../../../../src/components/extensions/ExtensionSurfaces';
-import { act, render } from '../../../../helpers/render';
+import { act, fire, render } from '../../../../helpers/render';
 
 /**
  * The "what is this thing" section, shown in the catalogue, the install prompt
@@ -83,6 +83,22 @@ describe('ExtensionScreenshots', () => {
     expect(image!.getAttribute('src')).toBe(MIRRORED_SHOT);
     expect(image!.getAttribute('alt')).toBe(shot.caption);
     expect(mounted.container.textContent).toContain(shot.caption);
+  });
+
+  // Regression: a thumbnail is 224px of a picture whose content is text, so the
+  // catalogue is only readable if clicking one opens it at full size - and it
+  // has to open the one that was clicked.
+  it('opens the clicked picture full size', () => {
+    const second = { url: 'https://raw.githubusercontent.com/Sarv/x/main/two.png', caption: 'Two' };
+    mounted = render(<ExtensionScreenshots screenshots={[shot, second]} />);
+
+    fire(mounted.byLabel('View larger: Two'), 'click');
+
+    const dialog = mounted.find('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog!.querySelector('img')!.getAttribute('src')).toBe(
+      'https://cdn.jsdelivr.net/gh/Sarv/x@main/two.png'
+    );
   });
 
   it('renders nothing when an extension published none', () => {
