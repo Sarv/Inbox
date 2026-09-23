@@ -1,0 +1,55 @@
+name: Set up workspace
+description: >
+  pnpm + Node + a warm turbo cache + an installed workspace. Every CI job needs
+  exactly these four steps, so they live here once rather than four times.
+
+inputs:
+  install:
+    description: Whether to install dependencies. "false" for jobs that only need the lockfile.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 8.15.0
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        # Caches the pnpm STORE, so a repeat install copies from disk instead of
+        # re-downloading every tarball.
+        cache: pnpm
+
+    # Task-level cache: turbo replays type-check/lint/test from here whenever the
+    # inputs of a package are unchanged, so a PR touching one package does not
+    # re-run the other five. Keyed per job and per commit, falling back to the
+    # most recent cache for that job on the same runner.
+    - name: Restore turbo cache
+      if: inputs.install == 'true'
+      uses: actions/cache@v4
+      with:
+        path: .turbo
+        key: turbo-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: |
+          turbo-${{ runner.os }}-${{ github.job }}-
+
+    # --prefer-offline uses the restored store before touching the network.
+    #
+    # SARVINBOX_SKIP_ELECTRON_REBUILD is set HERE rather than left to the caller
+    # because every job that uses this action runs in plain Node: rebuilding
+    # better-sqlite3 for Electron's ABI would cost minutes and then make every
+    # SQLite-backed test fail with ERR_DLOPEN_FAILED. The release workflow's
+    # packaging job does need the Electron ABI — which is exactly why it installs
+    # on its own instead of using this action. See CLAUDE.md and
+    # scripts/lib/native-abi.mjs.
+    - name: Install dependencies
+      if: inputs.install == 'true'
+      shell: bash
+      run: pnpm install --frozen-lockfile --prefer-offline
+      env:
+        SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
