@@ -41,7 +41,8 @@ my-extension/
   sarvinbox-extension.json   # the manifest — required
   dist/index.js              # the built entry point — required, unless the
                              #   extension is only a panel (see Panels)
-  icon.svg                   # optional
+  icon.svg                   # optional - your logo in the catalogue
+  screenshot-*.svg           # optional - pictures of it running
   README.md                  # optional
   src/index.ts               # your source (not shipped)
 ```
@@ -56,7 +57,8 @@ my-extension/
   "description": "What it does, in one line",
   "author": "You",
   "main": "./dist/index.js",
-  "icon": "./icon.svg",
+  "icon": "icon.svg",
+  "category": "productivity",
   "engines": { "sarvinbox": "^1.1.0" },
   "permissions": ["email:read", "email:label"],
   "contributes": {
@@ -160,6 +162,60 @@ export default defineConfig({
 app validates the manifest, copies the folder into its own extensions
 directory, and activates it. From then on the copy is what runs — reinstall
 after a rebuild while you are developing.
+
+---
+
+## How your extension looks in the catalogue
+
+Four optional manifest fields are what a reader sees *before* they agree to run
+your code. Everything else in the manifest describes the extension to the app;
+these describe it to a person.
+
+```json
+{
+  "icon": "icon.svg",
+  "category": "security",
+  "keywords": ["otp", "2fa", "verification"],
+  "screenshots": [
+    { "url": "screenshot-card.svg", "caption": "The code appears in the corner the moment the mail lands" },
+    { "url": "screenshot-copy.svg", "caption": "Copying it marks that message read" }
+  ]
+}
+```
+
+**`icon`** — a path inside your extension folder. It is drawn in an `<img>`, so
+it is rendered in isolation: a `currentColor` stroke has nothing to inherit from
+and comes out black, which disappears against a dark theme. Give the file its
+own literal colours, and check it at 32px — the browse list is the size that
+matters, not the detail page. SVG and PNG both work. This one also ships inside
+the archive, so an installed extension still has an icon with no network.
+
+**`category`** — one shelf, used to group the browse list. The app folds
+whatever you write onto its own list: `productivity`, `security`,
+`organisation`, `communication`, `office`, `ai`, `tools`, `other`. Common
+synonyms are folded too (`organization`, `tool`, `privacy`, `automation`,
+`llm`...); anything it does not recognise becomes `other`. The field grants
+nothing and restricts nothing — it is purely where you sit in the list.
+
+**`screenshots`** — pictures of it running, shown on the extension's page.
+Answer the question a reader actually has: *what will I see, and where?* A shot
+of the card, panel or tag in its real place in the window beats a diagram of how
+it works. `caption` is optional and worth writing. These are **not** shipped in
+the archive; the catalogue reads them over https, so they cost an installed
+reader nothing.
+
+Both `icon` and `screenshots` are paths relative to your extension folder. The
+registry expands them to absolute URLs on a host the app is willing to load
+from — the catalogue draws them for extensions nobody has installed yet, so an
+arbitrary host would be a request made on the reader's behalf. An absolute URL
+you write yourself is passed through and must be on that allowlist, so a path is
+almost always the right answer.
+
+One caveat worth knowing: the registry describes the **released archive**, not
+your working tree. New `category` and `screenshots` values reach the catalogue
+when you cut the release that contains them. Image *files* are read from the
+repository, so re-drawing an icon takes effect without a release — renaming one
+does not.
 
 ---
 
@@ -358,6 +414,27 @@ context.ui.onAction(async (action) => {
 `dismiss` and `expire` are deliberately distinct, and neither means the same
 thing as `copy`. A code that expired unused is worth re-offering; a message
 whose code was never taken must not be marked read, or the reader loses it.
+
+Alongside `emailId`, an action carries two account ids, and the difference
+matters as soon as anyone runs more than one mailbox. `action.accountId` is the
+account the card was raised from. `action.activeAccountId` is the account the
+reader is looking at *right now*, and is absent in a unified view where no
+single mailbox is selected.
+
+They diverge whenever one message was delivered to two accounts. That is one
+message to the reader, so you will usually draw one card for it — and when they
+act on that card, the copy worth touching is the one in the mailbox on screen.
+Keep an index from your card id to every `{ emailId, accountId }` it stands for,
+and resolve in that order: the target matching `activeAccountId`, else the one
+matching `accountId`, else the first you recorded.
+
+```ts
+const target = resolveTarget(cards, action);
+if (target) await context.mail.markRead(target.emailId);
+```
+
+`markRead` takes an email id and nothing else — ids are unique across accounts,
+so picking the right `emailId` *is* how you pick the account.
 
 `action.notificationId` is **your** id, not the namespaced one — the host strips
 the prefix on the way in, so you never see the namespacing and never have to
