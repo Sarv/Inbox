@@ -1,8 +1,9 @@
 import { parseSpamReasons, spamVerdict } from '@sarv-in/mailguard/verdict';
-import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, UserX, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { describeImageAllowEntry, type ImageAllowEntry } from '@sarvinbox/core/image-allowlist';
+import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, AtSign, Globe, Plus, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { getRemoteImageMode } from '../../store/helpers';
+import { forgetImagesAllowed, getRemoteImageMode, rememberImagesAllowed } from '../../store/helpers';
 import { LEVEL_COPY, type SecurityLevel } from '../../utils/email-security';
 import { removeLinkRule, useLinkRules, type LinkRule } from '../../utils/security-rules';
 import { useConfirm } from '../ConfirmDialog';
@@ -328,28 +329,62 @@ const MODE_COPY: Record<'block' | 'safe' | 'always', { title: string; detail: st
   always: { title: 'Always load', detail: 'Every remote image loads on open. Senders with tracking pixels learn when and where you read.' },
 };
 
+/**
+ * Remote images: the global policy (read-only here — it lives in Settings) and
+ * every standing allowance, which the reader can add by hand as well as by
+ * clicking "Load images" on a message. An allowance is one sender
+ * (`boss@x.com`) or a whole domain (`@x.com`, which also covers `news.x.com`),
+ * because a newsletter's actual envelope sender is usually some per-campaign
+ * address nobody would think to type.
+ */
 function ImagesTab() {
   const [mode, setMode] = useState<'block' | 'safe' | 'always'>('safe');
   const [allowed, setAllowed] = useState<string[]>([]);
+  const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const { confirm, confirmDialog } = useConfirm();
 
   const load = async () => {
     setMode(getRemoteImageMode());
     try {
       const res = await window.electronAPI.emails.getImageAllowedSenders();
-      if (res?.success && Array.isArray(res.data)) setAllowed([...res.data].sort());
+      // Unsorted on purpose — `entries` below is the one place that orders this
+      // list, and sorting the raw keys first would only hide what it does.
+      if (res?.success && Array.isArray(res.data)) setAllowed([...res.data]);
     } catch { /* best-effort */ }
   };
   useEffect(() => { void load(); }, []);
 
-  const revoke = async (address: string) => {
+  // Domains first, then senders — the broad rules are the ones worth reviewing.
+  const entries: ImageAllowEntry[] = useMemo(
+    () => allowed
+      .map(describeImageAllowEntry)
+      .sort((a, b) => (a.kind === b.kind ? a.label.localeCompare(b.label) : a.kind === 'domain' ? -1 : 1)),
+    [allowed],
+  );
+
+  const add = async () => {
+    const entry = rememberImagesAllowed(draft);
+    if (!entry) {
+      setError('Enter a sender address (boss@example.com) or a domain (example.com).');
+      return;
+    }
+    setDraft('');
+    setError(null);
+    await load();
+  };
+
+  const revoke = async (entry: ImageAllowEntry) => {
     const ok = await confirm({
-      title: 'Stop auto-loading images?',
-      message: `${address}\n\nImages from this sender will be blocked again until you choose “Load images” on a message.`,
+      title: entry.kind === 'domain' ? 'Stop auto-loading for this domain?' : 'Stop auto-loading images?',
+      message: `${entry.label}\n\n`
+        + (entry.kind === 'domain'
+          ? 'Images from this domain will be blocked again unless a sender on it is allowed on its own.'
+          : 'Images from this sender will be blocked again until you choose “Load images” on a message.'),
       confirmLabel: 'Stop auto-loading',
     });
     if (!ok) return;
-    await window.electronAPI.emails.disallowImagesForSender?.(address);
+    forgetImagesAllowed(entry.key);
     await load();
   };
 
@@ -371,23 +406,58 @@ function ImagesTab() {
 
       <section>
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-          Senders allowed to load images <span className="text-muted-foreground/70 font-normal">({allowed.length})</span>
+          Allowed to load images <span className="text-muted-foreground/70 font-normal">({entries.length})</span>
         </h2>
-        {allowed.length === 0 ? (
+
+        <div className="bg-muted/30 rounded-lg p-4 mb-4">
+          <h3 className="text-sm font-medium mb-1">Always load images from…</h3>
+          <p className="text-xs text-muted-foreground mb-3">
+            A sender address (<code>boss@example.com</code>) or a whole domain (<code>example.com</code>, which also
+            covers <code>news.example.com</code>). An allowance here overrides the policy above.
+          </p>
+          <div className="flex gap-3">
+            <input
+              type="text"
+              placeholder="boss@example.com or example.com"
+              value={draft}
+              aria-label="Sender address or domain to always load images from"
+              aria-invalid={error ? true : undefined}
+              onChange={(e) => { setDraft(e.target.value); if (error) setError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') void add(); }}
+              className="flex-1 px-3 py-2 border border-border rounded-md bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+            <button
+              onClick={() => void add()}
+              disabled={!draft.trim()}
+              className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              Allow
+            </button>
+          </div>
+          {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+        </div>
+
+        {entries.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-            No per-sender allowances. Clicking “Load images” on a message adds its sender here.
+            No allowances yet. Add one above, or click “Load images” on a message to add its sender.
           </div>
         ) : (
           <div className="rounded-lg border border-border divide-y divide-border">
-            {allowed.map((a) => (
-              <div key={a} className="flex items-center gap-3 px-3 py-2 text-sm">
-                <UserX className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-                <span className="flex-1 truncate">{a}</span>
+            {entries.map((entry) => (
+              <div key={entry.key} className="flex items-center gap-3 px-3 py-2 text-sm">
+                {entry.kind === 'domain'
+                  ? <Globe className="h-4 w-4 flex-shrink-0 text-primary" />
+                  : <AtSign className="h-4 w-4 flex-shrink-0 text-muted-foreground" />}
+                <span className="flex-1 truncate">{entry.label}</span>
+                <span className="text-xs text-muted-foreground flex-shrink-0">
+                  {entry.kind === 'domain' ? 'Whole domain' : 'Sender'}
+                </span>
                 <Tooltip content="Stop auto-loading" delayMs={40}>
                   <button
-                    onClick={() => revoke(a)}
+                    onClick={() => revoke(entry)}
                     className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                    aria-label={`Stop auto-loading images from ${a}`}
+                    aria-label={`Stop auto-loading images from ${entry.label}`}
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>

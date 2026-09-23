@@ -51,6 +51,14 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/extensions/panel-bridge.ts',
     ),
+    // Pure (email-addresses + tldts, both browser-safe) — the remote-image
+    // allowlist's normalisation and matching. The renderer decides block-vs-load
+    // with the SAME module the Security page adds entries with, so an allowance
+    // the reader can type is never one the body renderer fails to match.
+    '@sarvinbox/core/image-allowlist': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/image-allowlist.ts',
+    ),
     // Pure (html-to-text, which is browser-safe) — the chat view decides which
     // mail to render as sent with the SAME predicate the sync layer tags with,
     // so the two can never disagree about what a blast is.
