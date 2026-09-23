@@ -23,6 +23,7 @@ const h = vi.hoisted(() => ({
   syncEngine: null as any,
   moveCalls: [] as { emailId: string; folderId: string; operation: string }[],
   moveResult: { ok: true } as { ok: boolean; error?: string },
+  sent: [] as { channel: string; payload: any }[],
 }));
 
 // The real planner, imported from core SRC: it is pure, and it is the whole
@@ -48,6 +49,11 @@ vi.mock('../../../../electron/shared', () => ({
   getStorage: () => h.primaryStorage,
   getStorageFor: (accountId: string) => h.storageByAccount.get(accountId) ?? null,
   getSyncEngineForStorage: () => h.syncEngine,
+  getAccountIdForStorage: () => 'account-1',
+  sendToWindow: (channel: string, payload: unknown) => {
+    h.sent.push({ channel, payload });
+    return true;
+  },
 }));
 
 vi.mock('../../../../electron/ipc/email-handlers', () => ({
@@ -113,6 +119,7 @@ beforeEach(() => {
   h.syncEngine = { markAsRead: vi.fn(async () => {}), markAsStarred: vi.fn(async () => {}) };
   h.moveCalls.length = 0;
   h.moveResult = { ok: true };
+  h.sent.length = 0;
 });
 
 afterEach(() => {
@@ -135,6 +142,50 @@ describe('applyLabels', () => {
     expect(storage.updateEmail).toHaveBeenCalledWith('e1', { tags: expect.stringContaining('read') });
     expect(h.syncEngine.markAsRead).toHaveBeenCalledWith('INBOX', 42, true);
     expect(h.logs.join('\n')).toContain('otp-code changed e1');
+  });
+
+  // Regression: THE reported bug. The OTP card's copy button marked the mail
+  // read in storage and on the server, and the row the reader was looking at
+  // stayed bold until an unrelated action happened to re-query the list — a
+  // button that, from the only seat that matters, did nothing. Every other
+  // writer of a tag is the renderer itself, which flips its own row first, so
+  // main had never needed to push a tag change back.
+  it('tells the open window about a tag change it made on its own', async () => {
+    const storage = makeStorage({ 'e1': makeEmail('e1') });
+    install(storage, ['e1'], ['email:flag']);
+
+    await createExtensionMailBackend().applyLabels('otp-code', 'e1', { add: ['read'] });
+
+    expect(h.sent).toEqual([
+      {
+        channel: 'emails:tags-updated',
+        payload: { emailId: 'e1', accountId: 'account-1', tags: expect.stringContaining('|read|') },
+      },
+    ]);
+  });
+
+  // The renderer replaces the row's tags wholesale, so a payload built from
+  // the PRE-change tags would paint the old state back over the new one.
+  it('sends the tags as they were persisted, not as they were read', async () => {
+    const storage = makeStorage({ 'e1': makeEmail('e1') });
+    install(storage, ['e1'], ['email:label']);
+
+    await createExtensionMailBackend().applyLabels('tagger', 'e1', { add: ['receipts'] });
+
+    const [{ payload }] = h.sent;
+    expect(payload.tags).toBe(storage.updateEmail.mock.calls[0][1].tags);
+  });
+
+  // A broadcast for a change that did not happen would make the renderer
+  // re-run the badge and unread-bell queries once per no-op — on a first sync
+  // that is once per message.
+  it('stays silent when nothing changed', async () => {
+    const storage = makeStorage({ 'e1': makeEmail('e1', { tags: '|INBOX|read|' }) });
+    install(storage, ['e1'], ['email:flag']);
+
+    await createExtensionMailBackend().applyLabels('otp-code', 'e1', { add: ['read'] });
+
+    expect(h.sent).toEqual([]);
   });
 
   // Regression: the permission is checked again here, against the installed

@@ -330,19 +330,36 @@ function refreshMailCounts(get: any, opts: { unreadSummary?: boolean } = {}): vo
  * `markRead` for one row vs. one `bulkAction` for many). This is what makes a
  * "select all → mark read" one batched state update + one render instead of N.
  */
-function applyOptimisticRead(get: any, set: any, ids: string[], read: boolean): boolean {
-  const idSet = new Set(ids);
+function applyTagsAcrossState(
+  get: any,
+  set: any,
+  idSet: Set<string>,
+  apply: (t: string) => string,
+  extraUpdates: Record<string, unknown> = {},
+): boolean {
   const { emails, threadEmails, searchResults, sectionData } = get();
-  const apply = (t: string) => (read ? addTag(t, 'read') : removeTag(t, 'read'));
   const updates: any = {};
   const ne = mapTagAcrossList(emails, idSet, apply); if (ne !== emails) updates.emails = ne;
   const nte = mapTagAcrossList(threadEmails, idSet, apply); if (nte !== threadEmails) updates.threadEmails = nte;
   const nse = mapTagAcrossList(searchResults, idSet, apply); if (nse !== searchResults) updates.searchResults = nse;
   const nsd = bulkUpdateTagsInSectionData(sectionData, idSet, apply); if (nsd) updates.sectionData = nsd;
-  if (!read) updates.manuallyMarkedUnreadId = ids.length === 1 ? ids[0] : null;
-  if (Object.keys(updates).length === 0) return false;
-  set(updates);
+  // `extraUpdates` counts: marking an ALREADY-unread row unread changes no tag
+  // but must still record `manuallyMarkedUnreadId`, and the caller reads the
+  // return value as "there is something to persist".
+  if (Object.keys(updates).length === 0 && Object.keys(extraUpdates).length === 0) return false;
+  set({ ...updates, ...extraUpdates });
   return true;
+}
+
+function applyOptimisticRead(get: any, set: any, ids: string[], read: boolean): boolean {
+  const apply = (t: string) => (read ? addTag(t, 'read') : removeTag(t, 'read'));
+  return applyTagsAcrossState(
+    get,
+    set,
+    new Set(ids),
+    apply,
+    read ? {} : { manuallyMarkedUnreadId: ids.length === 1 ? ids[0] : null },
+  );
 }
 
 /**
@@ -470,6 +487,30 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
   },
 
   pendingDeletes: [],
+
+  /**
+   * Adopt tags MAIN already wrote — the one tag change that does not start here.
+   *
+   * An extension acting on a card (the OTP card's copy button marking the mail
+   * read) writes through `context.mail`, which persists to storage and pushes
+   * the flag to the server without the renderer ever being asked. The row then
+   * stayed exactly as it was: still bold, still counted unread, until some
+   * unrelated action re-queried the list. That reads as a button that did
+   * nothing, which is worse than a button that isn't there.
+   *
+   * The whole tag string is taken as given rather than diffed — main has
+   * already run it through the same planner a workflow result goes through, so
+   * it is the authority here, and there is nothing to revert.
+   */
+  applyPersistedTags: (emailId, tags) => {
+    if (!emailId || typeof tags !== 'string') return;
+    const changed = applyTagsAcrossState(get, set, new Set([emailId]), () => tags);
+    // Only when a row actually moved: the badge and the unread bell are backend
+    // reads, and refreshing them for a message no open list is showing is three
+    // queries for nothing.
+    if (changed) refreshMailCounts(get, { unreadSummary: true });
+  },
+
   markAsRead: async (emailId, read) => {
     const { emails, threadEmails, searchResults } = get();
     const inState = emails.some((e) => e.id === emailId)

@@ -34,15 +34,41 @@ import {
 import { moveOrCopyOne } from '../ipc/email-handlers';
 import {
   findStorageForEmail,
+  getAccountIdForStorage,
   getExtensionManager,
   getStorage,
   getStorageFor,
   getSyncEngineForStorage,
+  sendToWindow,
 } from '../shared';
 
 import { pushFlagToServer } from './flag-push';
 
 const logger = createLogger('extension-mail-backend');
+
+/**
+ * The channel that tells the open window an extension changed a message's tags.
+ *
+ * Every OTHER writer of the `read` tag is the renderer itself, which flips its
+ * own row optimistically and then persists — so main has never needed to push a
+ * tag change back. An extension inverts that: the write starts in main, lands in
+ * the database, reaches the server, and the list the reader is looking at is
+ * never told. The symptom is exact — the OTP card's copy button marked the mail
+ * read in every store that matters and the row stayed bold until the next sync
+ * happened to re-query it, which reads as a button that does nothing.
+ *
+ * The whole tag string is sent, not "read: true": the same call can add `otp`
+ * and flip `read` at once, and a per-flag payload would have to grow a field per
+ * tag the SDK ever learns to write.
+ */
+export const EMAIL_TAGS_UPDATED_CHANNEL = 'emails:tags-updated';
+
+/** What the renderer needs to find the row and replace its tags. */
+export interface EmailTagsUpdatedPayload {
+  emailId: string;
+  accountId: string | null;
+  tags: string;
+}
 
 /** What the extension was granted, straight from the installed record. */
 function permissionsFor(extensionId: string): readonly ExtensionPermission[] {
@@ -139,6 +165,18 @@ export function createExtensionMailBackend(): ExtensionMailBackend {
       }
       for (const change of plan.flagChanges) {
         await pushFlagToServer(storage, email, change);
+      }
+
+      if (plan.changed) {
+        // After the write, never before: a row the renderer paints read while
+        // storage still says unread is the optimistic-revert problem again, and
+        // main has no revert path — the click that caused it is long gone.
+        const payload: EmailTagsUpdatedPayload = {
+          emailId: email.id,
+          accountId: getAccountIdForStorage(storage),
+          tags: plan.tags,
+        };
+        sendToWindow(EMAIL_TAGS_UPDATED_CHANNEL, payload);
       }
 
       if (plan.changed || plan.flagChanges.length > 0) {

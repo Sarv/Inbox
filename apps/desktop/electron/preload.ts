@@ -236,6 +236,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('emails:setCalendarAdded', emailId, added, accountId),
     markRead: (emailId: string, read: boolean, accountId?: string) =>
       ipcRenderer.invoke('emails:markRead', emailId, read, accountId),
+    // A tag change that STARTED in main — an extension acting on a card the
+    // reader clicked. Every other tag write begins in the renderer, which
+    // already flipped its own row before persisting; this is the one direction
+    // that had no way back, so the change landed in the database and the list
+    // kept rendering the old state.
+    onTagsUpdated: (
+      callback: (update: { emailId: string; accountId: string | null; tags: string }) => void
+    ) => {
+      const handler = (
+        _event: unknown,
+        update: { emailId: string; accountId: string | null; tags: string }
+      ) => callback(update);
+      ipcRenderer.on('emails:tags-updated', handler);
+      return () => ipcRenderer.removeListener('emails:tags-updated', handler);
+    },
     markStarred: (emailId: string, starred: boolean, accountId?: string) =>
       ipcRenderer.invoke('emails:markStarred', emailId, starred, accountId),
     markImportant: (emailId: string, important: boolean) =>
@@ -1109,6 +1124,9 @@ export interface ElectronAPI {
     openCalendarInvite: (emailId: string, accountId?: string) => Promise<{ success: boolean; noHandler?: boolean; error?: string }>;
     setCalendarAdded: (emailId: string, added: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     markRead: (emailId: string, read: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    onTagsUpdated: (
+      callback: (update: { emailId: string; accountId: string | null; tags: string }) => void
+    ) => () => void;
     markStarred: (emailId: string, starred: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     markImportant: (emailId: string, important: boolean) => Promise<{ success: boolean; error?: string }>;
     syncStarred: () => Promise<{ success: boolean; data?: { synced: number; total: number }; error?: string }>;

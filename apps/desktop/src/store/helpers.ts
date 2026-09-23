@@ -1357,6 +1357,28 @@ export const loadInboxSettings = (): { inboxType: InboxType; showImportanceMarke
   return defaults;
 };
 
+/**
+ * Adopt tag changes the MAIN process made on its own.
+ *
+ * Every other tag write starts in this window, which flips its own row before
+ * persisting. An extension inverts that: `context.mail` writes to storage and
+ * pushes the flag to the server with nothing telling the open list, so the row
+ * kept its old tags until an unrelated action happened to re-query — the OTP
+ * card's copy button marking the mail read everywhere except on screen.
+ *
+ * Deliberately NOT folded into the AI-categorization listeners: those bail out
+ * early when no categorization API is present, and mail state must not depend
+ * on whether AI is wired up.
+ */
+export function setupPersistedTagListener(useEmailStore: { getState: () => any }): void {
+  if (typeof window === 'undefined' || !window.electronAPI?.emails?.onTagsUpdated) return;
+
+  window.electronAPI.emails.onTagsUpdated((update) => {
+    if (!update?.emailId) return;
+    useEmailStore.getState().applyPersistedTags(update.emailId, update.tags);
+  });
+}
+
 // Set up AI categorization IPC event listeners (called once at module load)
 export function setupAICategorizationListeners(useEmailStore: { setState: (state: any) => void; getState: () => any }): void {
   if (typeof window === 'undefined' || !window.electronAPI?.aiCategorization) return;
