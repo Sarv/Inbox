@@ -28,16 +28,25 @@ vi.mock('@sarv-in/email-chat-view', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   MailChatView: ({
     messages,
+    renderHeaderMeta,
     renderFooter,
   }: {
     messages: readonly { id: string; body: string }[];
+    renderHeaderMeta?: (message: { id: string }) => unknown;
     renderFooter?: (message: { id: string }) => unknown;
   }) => (
     <div data-testid="chat-view">
       {messages.map((message) => (
         <div key={message.id} data-testid="bubble" data-message-id={message.id}>
+          {/* The real header is sender, recipients, then the time — the mock
+              keeps only the time, because the time is what the meta slot has
+              to land after. */}
+          <div data-testid="bubble-head">
+            <time data-testid="bubble-time">10:00</time>
+            {renderHeaderMeta?.(message) as never}
+          </div>
           <div data-testid="bubble-body" dangerouslySetInnerHTML={{ __html: message.body }} />
-          {renderFooter?.(message) as never}
+          <div data-testid="bubble-footer">{renderFooter?.(message) as never}</div>
         </div>
       ))}
     </div>
@@ -222,6 +231,44 @@ describe('ThreadChatView', () => {
     expect(bubbles[0]!.querySelector('td[bgcolor="#2563eb"]')).not.toBeNull();
     expect(bubbles[0]!.querySelectorAll('th')).toHaveLength(3);
     expect(bubbles[0]!.textContent).toContain('103.255.103.3');
+    view.unmount();
+  });
+
+  /** The shield, wherever it ended up: its level attribute while it has a
+   *  verdict, its pending attribute while the body is still arriving. */
+  const shieldIn = (element: Element) =>
+    element.querySelector('[data-security-level], [data-security-pending]');
+
+  // Regression: the shield sat under the body, on a row of its own. Down there
+  // a mark that JUDGES the message reads as part of what the sender wrote —
+  // the header line is where a reader is already looking to answer "who is this
+  // from, and when", and a verdict on that answer belongs beside it.
+  it('puts the security shield on the header line, after the time', () => {
+    const view = render(<ThreadChatView ctx={context([HUMAN])} />);
+    const bubble = view.find('[data-message-id="human-1"]')!;
+    const head = bubble.querySelector('[data-testid="bubble-head"]')!;
+    const shield = shieldIn(head)!;
+
+    expect(shield).not.toBeNull();
+    expect(shield.getAttribute('aria-label')).toContain('Security:');
+    // After the time, not before it: the mark qualifies the header, it does
+    // not interrupt it.
+    expect(
+      bubble.querySelector('[data-testid="bubble-time"]')!.compareDocumentPosition(shield) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    view.unmount();
+  });
+
+  // Regression: both halves of the old footer row come back — the shield a
+  // second time, and the sender's address under a header that already names
+  // the sender (and gives the full From/To/Cc on hover).
+  it('leaves no shield and no repeated address under the body', () => {
+    const view = render(<ThreadChatView ctx={context([HUMAN])} />);
+    const footer = view.find('[data-testid="bubble-footer"]')!;
+
+    expect(shieldIn(footer)).toBeNull();
+    expect(footer.textContent).not.toContain('alice@acme.example');
     view.unmount();
   });
 
