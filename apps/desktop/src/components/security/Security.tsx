@@ -481,6 +481,12 @@ interface IdentityRow {
   bimiIssuer: string | null;
   bimiExpires: number | null;
   bimiDetail: string | null;
+  /**
+   * Which zone's BIMI record answered. Not always `domain`: the lookup falls
+   * back to the organisational domain, so a reader who goes to check their own
+   * DNS has to be told which one to look in.
+   */
+  bimiRecordDomain: string | null;
   dmarcPolicy: string | null;
   bimiCheckedAt: number | null;
   favicon: string | null;
@@ -500,6 +506,53 @@ const BIMI_PILL: Record<NonNullable<IdentityRow['bimiStatus']>, { label: string;
 };
 
 const when = (sec: number | null) => (sec ? new Date(sec * 1000).toLocaleString() : 'never');
+
+/**
+ * The BIMI answer in full, as term/value pairs for the info tooltip.
+ *
+ * This lives behind an icon rather than in the cell because the reason a
+ * domain's standing is what it is ("BIMI requires an enforcing DMARC policy;
+ * the domain's is p=none") is a SENTENCE, and a sentence in an auto-laid-out
+ * table takes every pixel the other columns needed — which is how the domain
+ * itself came to be rendered a few characters at a time.
+ */
+const bimiFacts = (row: IdentityRow): [term: string, value: string][] => {
+  const certificate = row.bimiOrganization
+    ? [
+        row.bimiOrganization,
+        row.bimiIssuer ? `issued by ${row.bimiIssuer}` : null,
+        row.bimiExpires ? `expires ${new Date(row.bimiExpires * 1000).toLocaleDateString()}` : null,
+      ].filter(Boolean).join(' — ')
+    : 'None';
+  return [
+    // The From domain and the domain whose record answered are not always the
+    // same — BIMI falls back to the organisational domain — and a reader
+    // checking their own DNS needs to know which zone to look in.
+    ['Record', row.bimiRecordDomain ?? 'None published'],
+    ['Logo', row.bimiLogo ? 'Published' : 'None'],
+    ['Certificate', certificate],
+    ['DMARC', row.dmarcPolicy ? `p=${row.dmarcPolicy}` : 'Not published'],
+    ['Checked', when(row.bimiCheckedAt)],
+  ];
+};
+
+/** The tooltip body behind the (i) in the Brand column. */
+function BimiRecordCard({ row, label }: { row: IdentityRow; label: string }) {
+  return (
+    <div className="text-left">
+      <div className="font-semibold">{label}</div>
+      {row.bimiDetail && <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{row.bimiDetail}</div>}
+      <dl className="mt-2 space-y-1 text-[11px] leading-snug">
+        {bimiFacts(row).map(([term, value]) => (
+          <div key={term} className="flex gap-2">
+            <dt className="w-[4.5rem] shrink-0 text-muted-foreground">{term}</dt>
+            <dd className="flex-1 break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
 
 /**
  * Every domain whose identity has been looked up: the logo or favicon the
@@ -560,24 +613,41 @@ function IdentityTab() {
                 const pill = r.bimiStatus ? BIMI_PILL[r.bimiStatus] : null;
                 return (
                   <tr key={r.domain} className="border-t border-border align-top">
-                    <td className="px-3 py-2">
+                    {/* `break-words`, never `break-all`: break-all makes the
+                        cell's min-content one character wide, so auto layout
+                        is free to squeeze the column to nothing and spell the
+                        domain down the page. */}
+                    <td className="px-3 py-2 min-w-[12rem]">
                       <div className="flex items-center gap-2">
                         {(r.bimiLogo || r.favicon) ? (
-                          <img src={r.bimiLogo ?? r.favicon ?? undefined} alt="" className="h-7 w-7 rounded-full bg-white object-contain p-0.5 border border-border" />
+                          <img src={r.bimiLogo ?? r.favicon ?? undefined} alt="" className="h-7 w-7 shrink-0 rounded-full bg-white object-contain p-0.5 border border-border" />
                         ) : (
-                          <span className="h-7 w-7 rounded-full bg-muted inline-block" />
+                          <span className="h-7 w-7 shrink-0 rounded-full bg-muted inline-block" />
                         )}
-                        <span className="font-medium break-all">{r.domain}</span>
+                        <span className="font-medium break-words">{r.domain}</span>
                       </div>
                     </td>
                     <td className="px-3 py-2">
-                      {pill ? <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${pill.tone}`}>{pill.label}</span> : <span className="text-muted-foreground">Not looked up</span>}
-                      {r.bimiOrganization && <div className="mt-1 text-xs">{r.bimiOrganization}{r.bimiIssuer ? ` — issued by ${r.bimiIssuer}` : ''}</div>}
-                      {r.bimiDetail && <div className="mt-0.5 text-xs text-muted-foreground break-words">{r.bimiDetail}</div>}
-                      {r.dmarcPolicy && <div className="mt-0.5 text-xs text-muted-foreground">DMARC p={r.dmarcPolicy}</div>}
+                      <div className="flex items-center gap-1.5">
+                        {pill
+                          ? <span className={`inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${pill.tone}`}>{pill.label}</span>
+                          : <span className="whitespace-nowrap text-xs text-muted-foreground">Not looked up</span>}
+                        <Tooltip content={<BimiRecordCard row={r} label={pill?.label ?? 'Not looked up'} />} delayMs={40} maxWidth={340} position="bottom">
+                          <span className="inline-flex cursor-help text-muted-foreground hover:text-foreground transition-colors" role="img" aria-label={`BIMI record for ${r.domain}`}>
+                            <Info className="h-3.5 w-3.5" />
+                          </span>
+                        </Tooltip>
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-xs text-muted-foreground">
-                      {r.faviconStatus === 'found' ? 'Found' : r.faviconStatus === 'none' ? 'None' : r.faviconStatus === 'error' ? 'Unreachable' : 'Not looked up'}
+                      {/* faviconDetail is the only account of WHY a favicon is
+                          missing, and it was being fetched and then thrown
+                          away — an "Unreachable" nobody can act on. */}
+                      <Tooltip content={r.faviconDetail ?? 'Not looked up yet'} delayMs={40} maxWidth={320} position="bottom" hidden={!r.faviconDetail}>
+                        <span className={`whitespace-nowrap${r.faviconDetail ? ' cursor-help' : ''}`}>
+                          {r.faviconStatus === 'found' ? 'Found' : r.faviconStatus === 'none' ? 'None' : r.faviconStatus === 'error' ? 'Unreachable' : 'Not looked up'}
+                        </span>
+                      </Tooltip>
                     </td>
                     <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">
                       <div>BIMI: {when(r.bimiCheckedAt)}</div>
