@@ -2,7 +2,7 @@
   "name": "@sarvinbox/desktop",
   "version": "1.1.1",
   "productName": "Sarv Inbox",
-  "description": "Sarv Inbox \u2014 AI-powered email client by Sarv",
+  "description": "Sarv Inbox — AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "main": "dist-electron/main.js",
@@ -135,6 +135,13 @@
             "arm64",
             "x64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ]
     },
@@ -160,15 +167,69 @@
     "win": {
       "icon": "build/icon.png",
       "target": [
-        "zip"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "linux": {
       "icon": "build/icon.png",
+      "category": "Office;Network;Email",
+      "synopsis": "Privacy-first email client with AI-powered features",
+      "description": "Sarv Inbox is a source-available, privacy-first IMAP email client. Mail is stored locally in SQLite and nothing leaves the device unless an AI provider is configured.",
+      "maintainer": "Sarv Webs Private Limited <support@sarv.com>",
+      "desktop": {
+        "StartupWMClass": "Sarv Inbox",
+        "MimeType": "x-scheme-handler/mailto;"
+      },
       "target": [
-        "zip"
-      ],
-      "category": "Office"
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Sarv Inbox",
+      "uninstallDisplayName": "Sarv Inbox"
     }
   }
 }
