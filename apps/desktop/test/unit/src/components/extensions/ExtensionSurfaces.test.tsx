@@ -65,12 +65,22 @@ describe('ExtensionScreenshots', () => {
     url: 'https://raw.githubusercontent.com/Sarv/x/main/one.png',
     caption: 'A code in the sidebar',
   };
+  const MIRRORED_SHOT = 'https://cdn.jsdelivr.net/gh/Sarv/x@main/one.png';
+
+  /** One failed load. Both hosts have to fail before a picture is given up on. */
+  const failToLoad = async (image: Element) => {
+    await act(async () => {
+      image.dispatchEvent(new Event('error'));
+    });
+  };
 
   it('renders each picture with its caption as the alt text', () => {
     mounted = render(<ExtensionScreenshots screenshots={[shot]} />);
     const image = mounted.find('img');
 
-    expect(image!.getAttribute('src')).toBe(shot.url);
+    // Served through the CDN mirror, like every other registry picture; the
+    // canonical URL is still what the screenshot was published under.
+    expect(image!.getAttribute('src')).toBe(MIRRORED_SHOT);
     expect(image!.getAttribute('alt')).toBe(shot.caption);
     expect(mounted.container.textContent).toContain(shot.caption);
   });
@@ -84,12 +94,16 @@ describe('ExtensionScreenshots', () => {
 
   // Regression: the image is fetched from a remote host at draw time, so a
   // moved or deleted file is ordinary, not exceptional.
-  it('removes a picture that fails to load', async () => {
+  it('removes a picture that fails to load on both hosts', async () => {
     mounted = render(<ExtensionScreenshots screenshots={[shot]} />);
 
-    await act(async () => {
-      mounted!.find('img')!.dispatchEvent(new Event('error'));
-    });
+    await failToLoad(mounted.find('img')!);
+
+    // A mirror that cannot serve one file must cost a retry against the
+    // canonical host, not a picture the extension actually published.
+    expect(mounted.find('img')!.getAttribute('src')).toBe(shot.url);
+
+    await failToLoad(mounted.find('img')!);
 
     expect(mounted.find('img')).toBeNull();
   });
@@ -98,12 +112,11 @@ describe('ExtensionScreenshots', () => {
     const second = { url: 'https://raw.githubusercontent.com/Sarv/x/main/two.png' };
     mounted = render(<ExtensionScreenshots screenshots={[shot, second]} />);
 
-    await act(async () => {
-      mounted!.find('img')!.dispatchEvent(new Event('error'));
-    });
+    await failToLoad(mounted.container.querySelectorAll('img')[0]);
+    await failToLoad(mounted.container.querySelectorAll('img')[0]);
 
     const remaining = mounted.container.querySelectorAll('img');
     expect(remaining).toHaveLength(1);
-    expect(remaining[0].getAttribute('src')).toBe(second.url);
+    expect(remaining[0].getAttribute('src')).toBe('https://cdn.jsdelivr.net/gh/Sarv/x@main/two.png');
   });
 });

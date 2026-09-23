@@ -9,6 +9,7 @@ import { Tooltip } from '../Tooltip';
 
 import { ExtensionPanelModal } from './ExtensionPanelModal';
 import { ExtensionPanelSidebar } from './ExtensionPanelSidebar';
+import { RegistryImage } from './RegistryImage';
 import { panelsForSurface, useExtensionPanels } from './useExtensionPanels';
 
 /**
@@ -127,7 +128,12 @@ export function MailDetailWithPanels() {
               className="p-2 rounded-md transition-colors hover:bg-accent text-muted-foreground"
             >
               {available.iconUrl ? (
-                <img src={available.iconUrl} alt="" aria-hidden="true" className="h-4 w-4" />
+                <RegistryImage
+                  src={available.iconUrl}
+                  alt=""
+                  aria-hidden="true"
+                  className="h-4 w-4"
+                />
               ) : (
                 <Puzzle className="h-4 w-4" />
               )}

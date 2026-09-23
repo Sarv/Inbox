@@ -16,6 +16,7 @@ import {
   ExtensionPermissionPrompt,
   type PermissionPromptExtension,
 } from './ExtensionPermissionPrompt';
+import { RegistryImage } from './RegistryImage';
 
 /**
  * The Browse tab: extensions published to the GitHub registry.
@@ -340,7 +341,7 @@ export function ExtensionBrowser({ onInstalled }: ExtensionBrowserProps) {
               >
                 <div className="p-2 rounded-lg bg-muted shrink-0">
                   {item.iconUrl ? (
-                    <img src={item.iconUrl} alt="" className="h-5 w-5" />
+                    <RegistryImage src={item.iconUrl} alt="" className="h-5 w-5" />
                   ) : (
                     <Puzzle className="h-5 w-5 text-muted-foreground" />
                   )}

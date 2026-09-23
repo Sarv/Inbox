@@ -12,6 +12,7 @@ import { Tooltip } from '../Tooltip';
 
 import type { CatalogItem } from './catalog-item';
 import { ExtensionScreenshots, ExtensionSurfaces } from './ExtensionSurfaces';
+import { RegistryImage } from './RegistryImage';
 
 /**
  * One extension, opened from the Browse list.
@@ -65,7 +66,7 @@ export function ExtensionDetail({
           <div className="flex items-start gap-3 min-w-0">
             <div className="p-2.5 rounded-lg bg-muted shrink-0">
               {item.iconUrl ? (
-                <img src={item.iconUrl} alt="" className="h-8 w-8" />
+                <RegistryImage src={item.iconUrl} alt="" className="h-8 w-8" />
               ) : (
                 <Puzzle className="h-8 w-8 text-muted-foreground" />
               )}
