@@ -13,106 +13,70 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Turbo replays unchanged tasks from here; .github/actions/setup-workspace
+  # restores and saves it. Job-level, because a composite action cannot set env
+  # for the steps that follow it.
+  TURBO_CACHE_DIR: .turbo
+  TURBO_TELEMETRY_DISABLED: '1'
+
+# Every job below is independent and starts at once — nothing here uses `needs`.
+# A red lint no longer hides a red test, and the wall-clock cost of CI is its
+# slowest job rather than the sum of all of them.
 jobs:
-  verify:
-    name: Type-check & build
+  # `pnpm type-check` is `turbo run type-check`, whose pipeline entry depends on
+  # `^build` — turbo builds @sarvinbox/core and @sarvinbox/storage-node itself,
+  # and caches them. Building them in an explicit step first only did the same
+  # work outside the cache.
+  type-check:
+    name: Type-check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-workspace
+      - run: pnpm type-check
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Type-check
-        run: pnpm type-check
-
-      - name: Build libraries
-        run: |
-          pnpm --filter @sarvinbox/core build
-          pnpm --filter @sarvinbox/storage-node build
-
-      # Lint gates the build: zero errors required. Warnings (e.g. no-explicit-any)
-      # are allowed and do not fail CI.
-      - name: Lint
-        run: pnpm lint
+  # Its own job rather than a step after type-check: lint depends on no build
+  # output, so there is no reason for it to wait for one.
+  # Zero errors required. Warnings (e.g. no-explicit-any) do not fail CI.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-workspace
+      - run: pnpm lint
 
   # Guard: fail the PR if any Node-only module (mailparser / imapflow / nodemailer
   # / better-sqlite3 / …) has leaked into the RENDERER bundle. Such a leak crashes
   # the packaged app on startup with 'Dynamic require of "stream" is not supported'
   # — a bug that has shipped to a user before. A fast renderer-only build runs the
   # exact same guard the release build carries, so the crash can never reach a
-  # user. Its own job so it runs independently of the type-check/lint gate.
+  # user.
   renderer-bundle-guard:
     name: Renderer bundle guard (no Node-only deps)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-        env:
-          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
-
-      - name: Check renderer bundle for Node-only leaks
-        run: pnpm --filter @sarvinbox/desktop check:renderer-bundle
+      - uses: ./.github/actions/setup-workspace
+      - run: pnpm --filter @sarvinbox/desktop check:renderer-bundle
 
   # The regression gate: every unit + integration suite, on every push and PR.
   # This is what stops a new feature silently breaking sync, sending or storage —
-  # type-check and lint above cannot catch behavioural regressions.
+  # type-check and lint cannot catch behavioural regressions.
   test:
     name: Unit & integration tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-workspace
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      # better-sqlite3 is a compiled addon valid for ONE ABI at a time, and the
-      # repo's postinstall builds it for Electron (what the desktop app needs).
-      # The suites run in plain Node, so skip that rebuild and keep the Node ABI —
-      # otherwise every SQLite-backed test fails with ERR_DLOPEN_FAILED.
-      # See scripts/lib/native-abi.mjs.
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-        env:
-          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
-
-      - name: Build libraries
-        run: |
-          pnpm --filter @sarvinbox/core build
-          pnpm --filter @sarvinbox/storage-node build
-
+      # turbo runs the packages' suites concurrently and builds the libraries
+      # they depend on first (`^build`), so no separate build step is needed.
       - name: Run tests with coverage
         run: pnpm test:coverage
 
@@ -130,22 +94,31 @@ jobs:
   audit:
     name: Dependency vulnerability scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      # No install: `pnpm audit` reads pnpm-lock.yaml, not node_modules.
+      - uses: ./.github/actions/setup-workspace
         with:
-          version: 8.15.0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+          install: 'false'
 
       # Fail the build on HIGH or CRITICAL advisories in the dependency tree.
       # Dependabot keeps versions current; this gate catches a known-vulnerable
       # package landing between bumps. Moderate/low are reported but non-blocking.
+      #
+      # Advisories with no available fix are listed in pnpm.auditConfig.ignoreCves
+      # in the root package.json and justified, one row each, in SECURITY.md.
       - name: pnpm audit (high+)
         run: pnpm audit --audit-level=high
+
+      # Non-blocking, and deliberately AFTER the gate: ignoreCves hides those
+      # advisories from the gate, and pnpm offers no flag to un-hide them, so
+      # this drops the ignore list on the runner's throwaway copy of
+      # package.json and re-runs. A fix landing for an ignored CVE — or a new
+      # path appearing for one — shows up here instead of staying hidden.
+      - name: Full report (including ignored advisories, non-blocking)
+        if: always()
+        run: |
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));delete p.pnpm.auditConfig;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          pnpm audit --audit-level=high || true
+          git checkout -- package.json

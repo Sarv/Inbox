@@ -21,6 +21,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false # never kill a half-finished release build
 
+# NOTE: deliberately NOT SARVINBOX_SKIP_ELECTRON_REBUILD — the `build` job below
+# packages the app, whose native addons must be built for Electron's ABI. Only
+# the `verify` job skips it, which .github/actions/setup-workspace does for it.
+env:
+  TURBO_CACHE_DIR: .turbo
+  TURBO_TELEMETRY_DISABLED: '1'
+
 jobs:
   # A release must not be cut from a red tree. CI runs this on every push, but
   # a tag can point at any commit, so it is re-verified here rather than assumed.
@@ -32,26 +39,14 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+      # The same setup CI uses: pnpm, Node, a warm turbo cache, and an install
+      # that skips the Electron ABI rebuild. The suites run in plain Node, so
+      # that rebuild would only make every SQLite-backed test fail with
+      # ERR_DLOPEN_FAILED. See CLAUDE.md.
+      - uses: ./.github/actions/setup-workspace
 
-      # The suites run in plain Node; skip the Electron ABI rebuild or every
-      # SQLite-backed test fails with ERR_DLOPEN_FAILED. See CLAUDE.md.
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-        env:
-          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
-
-      - name: Build libraries
-        run: |
-          pnpm --filter @sarvinbox/core build
-          pnpm --filter @sarvinbox/storage-node build
-
+      # No explicit library build: both turbo tasks depend on `^build`, so
+      # @sarvinbox/core and @sarvinbox/storage-node are built (and cached) here.
       - name: Type-check
         run: pnpm type-check
 
