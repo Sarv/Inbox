@@ -22,14 +22,27 @@
 
 import { normalizeExtensionCategory, type ExtensionCategory } from './categories';
 import { satisfiesVersion } from './extension-loader';
+import { REGISTRY_MIRROR_HOST } from './registry-mirror';
 import { PERMISSION_INFO, type ExtensionPermission } from './types';
 
-/** Hosts a registry document, icon or download may be served from. */
+export { REGISTRY_MIRROR_HOST, registryMirrorUrl } from './registry-mirror';
+
+/**
+ * Hosts a registry document, icon or download may be served from.
+ *
+ * The mirror host is on this list because a document fetched from it is the
+ * same document — but note what that means: this list is the set of parties
+ * trusted to tell the app what an extension is and which digest to check its
+ * archive against. The pinned SHA-256 protects against a tampered ARCHIVE, not
+ * against a tampered INDEX, so adding a host here is a trust decision and not a
+ * performance one.
+ */
 export const TRUSTED_REGISTRY_HOSTS = Object.freeze([
   'github.com',
   'raw.githubusercontent.com',
   'objects.githubusercontent.com',
   'release-assets.githubusercontent.com',
+  REGISTRY_MIRROR_HOST,
 ]);
 
 /**
