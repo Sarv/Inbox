@@ -105,6 +105,13 @@ export function useEmailDetail(): EmailDetailContext | null {
     () => new Map(duplicateGroups.filter(g => g.duplicates.length > 0).map(g => [g.email.id, g.duplicates])),
     [duplicateGroups]
   );
+  // The conversation's REAL size — every copy, not just the visible rows. The
+  // list row counts rows in the DB (THREAD_MESSAGE_COUNT_SQL) and cannot fold
+  // duplicates (list rows carry a snippet, never `rawBody`), so a header built
+  // from the collapsed `threadEmails` read as mail gone missing: the list
+  // promised (3), the opened thread said (2). The fold is render-only, so the
+  // count stays whole and the `N copies` badge explains the shorter card list.
+  const threadMessageTotal = allThreadEmails.length;
 
   const [showFullHeaders, setShowFullHeaders] = useState(false);
   const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set());
@@ -2091,6 +2098,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     selectedEmailId,
     threadEmails,
     duplicatesByEmailId,
+    threadMessageTotal,
     loadingThread,
     loadingBodies,
     failedBodies,

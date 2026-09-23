@@ -11,6 +11,10 @@ export interface EmailDetailContext {
   /** Identical copies folded behind a visible message, keyed by its id. Only
    *  messages that actually hide copies appear here. */
   duplicatesByEmailId: Map<string, { id: string; date: number }[]>;
+  /** Every real message in the conversation, INCLUDING the copies folded out of
+   *  `threadEmails`. This is the number the list row's "(N)" shows, so the
+   *  thread header must use it or the two disagree. */
+  threadMessageTotal: number;
   loadingThread: boolean;
   loadingBodies: Set<string>;
   failedBodies: Set<string>;

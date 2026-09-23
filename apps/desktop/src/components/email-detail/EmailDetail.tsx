@@ -16,6 +16,7 @@ import { EmailToolbar } from './EmailToolbar';
 import { useEmailDetail } from './hooks/useEmailDetail';
 import { ShowOriginalModal } from './ShowOriginalModal';
 import { SignatureDetectionModal } from './SignatureDetectionModal';
+import { threadHeaderLabel } from './thread-header-label';
 import { ThreadChatView } from './ThreadChatView';
 import { ThreadList } from './ThreadList';
 
@@ -88,6 +89,7 @@ export function EmailDetail() {
     displayEmail,
     isStandaloneDraft,
     threadEmails,
+    threadMessageTotal,
     loadingThread,
     chatViewEnabled,
     chatViewActive,
@@ -157,13 +159,10 @@ export function EmailDetail() {
               <div className="flex items-center gap-2">
                 <div className="h-px flex-1 bg-border" />
                 <span className="text-sm font-medium text-muted-foreground px-2">
-                  {(() => {
-                    const sorted = [...threadEmails].sort((a, b) => a.date - b.date);
-                    const first = sorted[0]?.fromName || sorted[0]?.fromAddress?.split('@')[0] || '';
-                    const last = sorted[sorted.length - 1]?.fromName || sorted[sorted.length - 1]?.fromAddress?.split('@')[0] || '';
-                    if (threadEmails.length === 1) return `${first} forwarded a conversation`;
-                    return `${first === last ? first : `${first} .. ${last}`} (${threadEmails.length})`;
-                  })()}
+                  {/* `threadMessageTotal`, NOT `threadEmails.length`: the latter
+                      is the duplicate-collapsed list, so a thread with a folded
+                      copy headed "(2)" under a list row that said "(3)". */}
+                  {threadHeaderLabel(threadEmails, threadMessageTotal)}
                 </span>
                 {/* View Mode Toggle */}
                 <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
