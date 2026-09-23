@@ -2,7 +2,7 @@
   "name": "sarvinbox",
   "version": "1.1.1",
   "private": true,
-  "description": "Sarv Inbox \u2014 AI-powered IMAP email client for the desktop",
+  "description": "Sarv Inbox — AI-powered IMAP email client for the desktop",
   "author": "Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/Sarv/Inbox#readme",
@@ -57,7 +57,7 @@
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
-    "@vitest/coverage-v8": "1.6.1",
+    "@vitest/coverage-v8": "^3.2.7",
     "eslint": "^8.56.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-import-resolver-typescript": "^3.6.1",
@@ -68,7 +68,7 @@
     "prettier": "^3.2.4",
     "turbo": "^1.11.3",
     "typescript": "^5.3.3",
-    "vitest": "^1.2.0"
+    "vitest": "^3.2.7"
   },
   "packageManager": "pnpm@8.15.0",
   "pnpm": {
@@ -76,8 +76,41 @@
       "free-email-domains"
     ],
     "overrides": {
+      "@xmldom/xmldom": "^0.8.15",
+      "axios": "^1.16.0",
+      "brace-expansion@1": "^1.1.18",
+      "brace-expansion@2": "^2.1.4",
+      "brace-expansion@5": "^5.0.9",
+      "browserslist": "^4.29.0",
+      "deepmerge-ts": "^8.0.1",
+      "fast-xml-parser": "^5.5.6",
+      "flatted": "^3.4.4",
+      "form-data": "^4.0.6",
+      "ip-address": "^10.3.1",
+      "js-yaml@3": "^3.15.2",
+      "js-yaml@4": "^4.3.2",
+      "linkify-it": "^5.0.2",
+      "lodash": "^4.18.1",
+      "minimatch@10": "^10.2.3",
+      "minimatch@3": "^3.1.4",
+      "minimatch@5": "^5.1.8",
+      "minimatch@9": "^9.0.7",
+      "nanoid@3": "^3.3.18",
       "node-abi": "^4.33.0",
-      "linkify-it": "^5.0.2"
+      "nodemailer": "^9.1.0",
+      "picomatch@2": "^2.3.2",
+      "postcss": "^8.5.18",
+      "rollup": "^4.59.0",
+      "shell-quote": "^1.10.0",
+      "tmp": "^0.2.7",
+      "ws@7": "^7.5.11"
+    },
+    "auditConfig": {
+      "ignoreCves": [
+        "CVE-2026-53571",
+        "CVE-2025-71329",
+        "CVE-2025-71330"
+      ]
     }
   }
 }

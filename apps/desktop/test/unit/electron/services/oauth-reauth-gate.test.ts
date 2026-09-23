@@ -73,7 +73,7 @@ const liveAccount = () => ({
   updatedAt: NOW_SEC - 60,
 });
 
-let fetchMock: Mock<[], Promise<Response>>;
+let fetchMock: Mock<() => Promise<Response>>;
 
 beforeEach(() => {
   vi.useFakeTimers();

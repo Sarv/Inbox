@@ -81,7 +81,7 @@ const hangingFetch = vi.fn((_url: string, init: RequestInit) =>
   }),
 );
 
-let fetchMock: Mock<[], Promise<Response>>;
+let fetchMock: Mock<() => Promise<Response>>;
 
 beforeEach(() => {
   vi.useFakeTimers();
