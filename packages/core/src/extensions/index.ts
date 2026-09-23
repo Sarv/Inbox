@@ -52,6 +52,15 @@ export type {
 
 export { PERMISSION_INFO } from './types';
 
+// Catalogue categories - the closed vocabulary an author's manifest is folded onto
+export {
+  DEFAULT_EXTENSION_CATEGORY,
+  EXTENSION_CATEGORIES,
+  isExtensionCategory,
+  normalizeExtensionCategory,
+  type ExtensionCategory,
+} from './categories';
+
 // Panel assets — the privileged scheme's address format and allow-list
 export {
   PANEL_SCHEME,

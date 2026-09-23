@@ -20,6 +20,7 @@
  * come back in `rejected` with a reason so the log says what was wrong.
  */
 
+import { normalizeExtensionCategory, type ExtensionCategory } from './categories';
 import { satisfiesVersion } from './extension-loader';
 import { PERMISSION_INFO, type ExtensionPermission } from './types';
 
@@ -103,6 +104,12 @@ export interface RegistryEntry {
   author: string;
   license?: string;
   keywords: string[];
+  /**
+   * The shelf this sits on in the catalogue, already folded onto the known
+   * list. Always set: a registry that omits it gets `other`, so the browse
+   * filter never has to reason about a missing value.
+   */
+  category: ExtensionCategory;
   homepage?: string;
   iconUrl?: string;
   readmeUrl?: string;
@@ -390,6 +397,7 @@ function parseEntry(raw: unknown, sourceUrl: string): { entry: RegistryEntry } |
       author,
       license: asString(record.license) ?? undefined,
       keywords: asStringArray(record.keywords),
+      category: normalizeExtensionCategory(record.category),
       homepage: asString(record.homepage) ?? undefined,
       // Dropped rather than rejected: a bad icon URL should cost the entry its
       // picture, not its listing.
@@ -542,6 +550,9 @@ export function mergeRegistryDetail(
       // them - it is the same generator run, describing the same archive.
       contributes: parseContributions(document.contributes) ?? entry.contributes,
       screenshots: parseScreenshots(document.screenshots, base) ?? entry.screenshots,
+      category: document.category === undefined
+        ? entry.category
+        : normalizeExtensionCategory(document.category),
     },
   };
 }
