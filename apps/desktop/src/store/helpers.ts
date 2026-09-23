@@ -1,4 +1,10 @@
 import type { SMTPConfig } from '@sarvinbox/core';
+import {
+  bareSenderAddress,
+  isImageAllowedFor,
+  parseImageAllowInput,
+  type ImageAllowEntry,
+} from '@sarvinbox/core/image-allowlist';
 
 import { clearCategoryBadgeCache, applyEmailCategories, getCachedCategorySlugs, warmCategoryDefs } from '../components/email-list/CategoryBadges';
 import type { ClassifiableFolder, StandardFolderType } from '../config/folder-mapping';
@@ -503,24 +509,19 @@ export const qualifiesForSafeAutoLoad = (tags?: string | null): boolean => {
   return slugs.some((slug) => t.includes(`|${slug}|`));
 };
 
-// ── Per-account "always load images from this sender" allowlist ────────────
+// ── Per-account "always load images from here" allowlist ───────────────────
 // When a user manually loads images on a blocked message, we remember that
 // SENDER so future mail from them auto-loads — regardless of the global mode /
-// category. Persisted PER ACCOUNT in the DB (image_allowed_senders), like the
-// blocked-senders list; the renderer keeps an in-memory Set so the block-vs-load
-// decision (inside the sandboxed-iframe render) stays SYNCHRONOUS. The set is
-// loaded lazily and cleared on account switch (see clearImageAllowedCache) —
-// mirroring the category-slug cache. Only the bare address is keyed, so
-// "Name <addr>" and "addr" match.
+// category. The Security page adds entries by hand too, and one of those may be
+// a whole DOMAIN (`@x.com`, which also covers `news.x.com`). Persisted PER
+// ACCOUNT in the DB (image_allowed_senders), like the blocked-senders list; the
+// renderer keeps an in-memory Set so the block-vs-load decision (inside the
+// sandboxed-iframe render) stays SYNCHRONOUS. The set is loaded lazily and
+// cleared on account switch (see clearImageAllowedCache) — mirroring the
+// category-slug cache. Keys are normalised by the shared `image-allowlist`
+// module, so "Name <addr>", "addr" and the sender's domain all match.
 let imageAllowedCache: Set<string> | null = null;
 let imageAllowedWarming = false;
-
-/** Bare, lowercased address from "Name <addr>" or a plain address. */
-const normalizeSenderAddress = (address?: string | null): string => {
-  const raw = (address || '').trim();
-  const m = raw.match(/<([^>]+)>/);
-  return (m ? m[1] : raw).trim().toLowerCase();
-};
 
 /** Load the active account's allowlist into the in-memory cache (once). */
 export const warmImageAllowedSenders = async (): Promise<void> => {
@@ -543,10 +544,9 @@ export const clearImageAllowedCache = (): void => { imageAllowedCache = null; };
  *  cold cache it warms in the background and stays conservative (returns false)
  *  for this render — the re-render after warming picks up the real answer. */
 export const isSenderImagesAllowed = (address?: string | null): boolean => {
-  const a = normalizeSenderAddress(address);
-  if (!a) return false;
+  if (!bareSenderAddress(address)) return false;
   if (imageAllowedCache === null) { void warmImageAllowedSenders(); return false; }
-  return imageAllowedCache.has(a);
+  return isImageAllowedFor(address, imageAllowedCache);
 };
 
 /** Does this message's remote content load without the reader asking?
@@ -572,11 +572,30 @@ export const shouldAutoLoadRemoteImages = (
 
 /** Remember this sender so their future mail auto-loads images (write-through:
  *  update the cache immediately, persist to the account DB in the background). */
-export const rememberSenderImagesAllowed = (address?: string | null): void => {
-  const a = normalizeSenderAddress(address);
-  if (!a) return;
-  (imageAllowedCache ??= new Set()).add(a);
-  void window.electronAPI.emails.allowImagesForSender(a).catch(() => { /* best-effort */ });
+export const rememberSenderImagesAllowed = (address?: string | null): ImageAllowEntry | null =>
+  rememberImagesAllowed(address);
+
+/** Remember an allowance the reader typed — a sender address OR a whole domain.
+ *  Returns the entry that was stored (so the caller can name it), or null when
+ *  the input is neither. Write-through, exactly like the per-sender path: the
+ *  cache is the thing the body renderer reads, so skipping it would leave an
+ *  allowance the Security page lists but no open message honours. */
+export const rememberImagesAllowed = (input?: string | null): ImageAllowEntry | null => {
+  const entry = parseImageAllowInput(input);
+  if (!entry) return null;
+  (imageAllowedCache ??= new Set()).add(entry.key);
+  void window.electronAPI.emails.allowImagesForSender(entry.key).catch(() => { /* best-effort */ });
+  return entry;
+};
+
+/** Drop one allowance (the Security page's revoke). Mirrors the remember path so
+ *  a revoked entry stops applying to messages already on screen, instead of
+ *  living on in the cache until the next account switch. */
+export const forgetImagesAllowed = (key?: string | null): void => {
+  const stored = (key ?? '').trim().toLowerCase();
+  if (!stored) return;
+  imageAllowedCache?.delete(stored);
+  void window.electronAPI.emails.disallowImagesForSender?.(stored).catch(() => { /* best-effort */ });
 };
 
 // Helper to get maxEmailsPerFolder from settings.

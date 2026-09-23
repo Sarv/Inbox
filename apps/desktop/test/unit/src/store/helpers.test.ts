@@ -54,6 +54,8 @@ import {
   normalizeAccount,
   pickAccountColor,
   qualifiesForSafeAutoLoad,
+  rememberImagesAllowed,
+  forgetImagesAllowed,
   rememberSenderImagesAllowed,
   removeAccount,
   resolveFolderTotal,
@@ -679,6 +681,65 @@ describe('per-sender image allowlist', () => {
     rememberSenderImagesAllowed('');
     expect(allowImagesForSender).not.toHaveBeenCalled();
     expect(() => rememberSenderImagesAllowed('a@x.com')).not.toThrow();
+  });
+
+  it('lets one DOMAIN entry cover every sender on it, subdomains included', async () => {
+    // The reason domains exist here: a newsletter's envelope sender is a
+    // per-campaign address, so a per-sender allowance never sticks.
+    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['@Example.com'] }) } });
+    await warmImageAllowedSenders();
+    expect(isSenderImagesAllowed('bounce-987@example.com')).toBe(true);
+    expect(isSenderImagesAllowed('News <news@mail.example.com>')).toBe(true);
+    expect(isSenderImagesAllowed('news@notexample.com')).toBe(false);
+    expect(isSenderImagesAllowed('news@example.com.evil.net')).toBe(false);
+  });
+
+  it('stores a typed domain as an "@domain" key and applies it immediately', () => {
+    // Write-through: the body renderer reads the CACHE, so an entry that only
+    // reached the DB would be listed in Security but honoured by nothing.
+    const allowImagesForSender = vi.fn().mockResolvedValue(undefined);
+    installElectronAPI({ emails: { allowImagesForSender } });
+    expect(rememberImagesAllowed('Example.COM')).toEqual({ kind: 'domain', key: '@example.com', label: 'example.com' });
+    expect(allowImagesForSender).toHaveBeenCalledWith('@example.com');
+    expect(isSenderImagesAllowed('anyone@example.com')).toBe(true);
+  });
+
+  it('refuses input that is neither an address nor a domain, and persists nothing', () => {
+    const allowImagesForSender = vi.fn().mockResolvedValue(undefined);
+    installElectronAPI({ emails: { allowImagesForSender } });
+    for (const junk of ['', '   ', 'com', '@co.uk', 'not a domain']) {
+      expect(rememberImagesAllowed(junk)).toBeNull();
+    }
+    expect(allowImagesForSender).not.toHaveBeenCalled();
+  });
+
+  it('revoking drops the entry from the cache, not just the DB', async () => {
+    // Otherwise a revoked allowance keeps loading images on every message
+    // already open, until the next account switch.
+    const disallowImagesForSender = vi.fn().mockResolvedValue(undefined);
+    installElectronAPI({
+      emails: {
+        disallowImagesForSender,
+        getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['@example.com'] }),
+      },
+    });
+    await warmImageAllowedSenders();
+    expect(isSenderImagesAllowed('a@example.com')).toBe(true);
+
+    forgetImagesAllowed('@example.com');
+    expect(isSenderImagesAllowed('a@example.com')).toBe(false);
+    expect(disallowImagesForSender).toHaveBeenCalledWith('@example.com');
+  });
+
+  it('ignores a blank revoke and survives a failing persist / missing channel', () => {
+    installElectronAPI({ emails: { disallowImagesForSender: vi.fn().mockRejectedValue(new Error('nope')) } });
+    forgetImagesAllowed('   ');
+    forgetImagesAllowed(undefined);
+    expect((window as any).electronAPI.emails.disallowImagesForSender).not.toHaveBeenCalled();
+    expect(() => forgetImagesAllowed('@x.com')).not.toThrow();
+
+    installElectronAPI({ emails: {} }); // older preload with no channel
+    expect(() => forgetImagesAllowed('@x.com')).not.toThrow();
   });
 
   it('clears the cache on account switch so the next read reloads', async () => {
