@@ -27,6 +27,34 @@ export function hasServerSearchableParsedQuery(parsed: unknown): boolean {
   );
 }
 
+/**
+ * Whether a parsed query carries anything a `ViewFilter` cannot express, and so
+ * must go down the full-query search route.
+ *
+ * Only relevant on "All Inboxes", which has two routes: `unifiedSearch` forwards
+ * the WHOLE query to each account's search, while `unifiedInbox` takes only a
+ * ViewFilter (unread / starred / attachment / unlabelled). Sending a query the
+ * ViewFilter can't carry down the second route doesn't narrow it — it DROPS the
+ * filter and lists every mail in every inbox as if it had matched.
+ *
+ * `tags` is here for exactly that reason: `tag:receipt` has no ViewFilter
+ * equivalent, so a tag search on All Inboxes would otherwise return the whole
+ * mailbox.
+ */
+export function needsFullQuerySearch(parsed: unknown): boolean {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const query = parsed as Record<string, unknown>;
+  const textQuery = query.textQuery;
+  return Boolean(
+    (typeof textQuery === 'string' && textQuery.trim()) ||
+      query.from ||
+      query.to ||
+      query.subject ||
+      query.doesntHave ||
+      (Array.isArray(query.tags) && query.tags.length > 0),
+  );
+}
+
 export interface AutoEscalateParams {
   /** Does the query carry a text/header/date term the server can act on? A pure
    *  flag/category filter is fully answered locally — never escalate it. */

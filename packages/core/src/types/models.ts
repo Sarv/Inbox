@@ -284,6 +284,16 @@ export interface SearchQuery {
   scope?: 'all' | 'folder';  // 'all' = exclude Trash/Spam/Sent/Drafts; 'folder' = scope to folderPath
   aiCategory?: string;       // AI category slug filter
   noCategory?: boolean;      // Only mail with NO AI category (unlabelled)
+  /**
+   * Arbitrary tag names that must ALL be present (`tag:vip tag:receipt`).
+   *
+   * The only search surface for a tag an extension applied: those are written
+   * straight into `emails.tags` and never become a folder, an AI category or an
+   * IMAP flag, so without this they exist in the database and are reachable
+   * from nowhere in the UI. Folder/category/flag tags happen to be matchable
+   * here too, but each already has its own dedicated field above.
+   */
+  tags?: string[];
   threadIds?: string[];
   from?: string;
   to?: string;

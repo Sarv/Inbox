@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
     getEmailsByIds: vi.fn(),
     bulkUpdateTags: vi.fn(),
     recalculateFolderCounts: vi.fn(),
+    searchEmails: vi.fn(),
   },
   syncEngine: {
     isConnected: vi.fn(() => true),
@@ -70,6 +71,7 @@ beforeEach(() => {
   h.storage.getEmailsByIds.mockReset().mockResolvedValue([]);
   h.storage.bulkUpdateTags.mockReset().mockResolvedValue(undefined);
   h.storage.recalculateFolderCounts.mockReset().mockResolvedValue(undefined);
+  h.storage.searchEmails.mockReset().mockResolvedValue([]);
   h.syncEngine.isConnected.mockReset().mockReturnValue(true);
   h.syncEngine.fetchBody.mockReset();
   for (const method of ['bulkMarkAsRead', 'bulkMarkAsUnread', 'bulkStar', 'bulkUnstar'] as const) {
@@ -356,5 +358,45 @@ describe('claimCidRepairAttempt', () => {
 
     expect(attempted.size).toBe(1);
     expect(attempted.has('one-more')).toBe(true);
+  });
+});
+
+
+// `emails:search` is the FALLBACK route — the renderer uses it when the AI-parsed
+// search path throws. It has its own operator parser, so a tag: query that works
+// in the main path and not here degrades into "the search that came back empty
+// the one time everything else had already failed".
+describe('emails:search — tag: operator', () => {
+  const search = () => h.handlers.get('emails:search')!;
+  const lastQuery = () => h.storage.searchEmails.mock.calls.at(-1)![0];
+
+  it('passes a tag: term through to storage and strips it from the free text', async () => {
+    await search()(null, 'tag:receipt netflix');
+    expect(lastQuery()).toMatchObject({ tags: ['receipt'], query: 'netflix' });
+  });
+
+  // Two tags AND in the SQL layer; keeping only the first would widen the search
+  // back to everything carrying the other one.
+  it('collects EVERY tag:, not just the first', async () => {
+    await search()(null, 'tag:receipt tag:subscription');
+    expect(lastQuery().tags).toEqual(['receipt', 'subscription']);
+  });
+
+  it('accepts a quoted tag name with spaces', async () => {
+    await search()(null, 'tag:"needs review"');
+    expect(lastQuery().tags).toEqual(['needs review']);
+    expect(lastQuery().query).toBe('');
+  });
+
+  // Tag matching is a literal comparison against the stored string.
+  it('preserves the case the reader typed', async () => {
+    await search()(null, 'tag:Work/Clients');
+    expect(lastQuery().tags).toEqual(['Work/Clients']);
+  });
+
+  it('leaves tags unset when no tag: is present, so the filter cannot narrow by accident', async () => {
+    await search()(null, 'is:unread invoice');
+    expect(lastQuery().tags).toBeUndefined();
+    expect(lastQuery()).toMatchObject({ isUnread: true, query: 'invoice' });
   });
 });
