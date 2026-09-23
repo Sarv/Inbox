@@ -444,3 +444,73 @@ export function categoryChipLabel(category?: string): string | null {
   if (!category || category === DEFAULT_EXTENSION_CATEGORY) return null;
   return describeCategory(category);
 }
+
+/** An installed extension, seen from the catalogue's point of view. */
+export interface UpdateCandidate {
+  id: string;
+  /** Everything this extension has already been allowed to do. */
+  grantedPermissions: readonly string[];
+}
+
+/** One catalogue entry, reduced to what deciding an update needs. */
+export interface CatalogOffer {
+  id: string;
+  version: string;
+  permissions: readonly string[];
+  state: CatalogItemState;
+}
+
+export interface AvailableUpdate {
+  id: string;
+  /** The version the registry is offering. */
+  version: string;
+  /**
+   * Everything the new version asks for, which is what the install has to be
+   * handed: an install grants exactly the list it is given, so passing only the
+   * difference would revoke every permission the extension already relies on.
+   */
+  permissions: string[];
+  /**
+   * Permissions the new version asks for that were never granted. Empty means
+   * the update can be applied without asking again.
+   */
+  newPermissions: string[];
+}
+
+/**
+ * Which installed extensions have a newer release waiting, and which of those
+ * cannot be applied without asking first.
+ *
+ * `state` is the host's answer rather than a version comparison done here: the
+ * host also knows whether the offered release will run on this build at all,
+ * and an Update button that installs something incompatible is worse than no
+ * button.
+ *
+ * The permission diff is what separates a one-click update from one that has to
+ * go back through the consent dialog. A new version is allowed to ask for more
+ * than the old one did, and the reader must see that before it runs — but
+ * re-asking for permissions they already granted would turn "Update all" into a
+ * stack of identical dialogs, which is how people learn to click through
+ * consent without reading it.
+ */
+export function findAvailableUpdates(
+  installed: readonly UpdateCandidate[],
+  catalog: readonly CatalogOffer[]
+): AvailableUpdate[] {
+  const offers = new Map(catalog.map((item) => [item.id, item]));
+
+  return installed.flatMap((extension) => {
+    const offer = offers.get(extension.id);
+    if (!offer || offer.state !== 'update-available') return [];
+
+    const granted = new Set(extension.grantedPermissions);
+    return [
+      {
+        id: extension.id,
+        version: offer.version,
+        permissions: [...offer.permissions],
+        newPermissions: offer.permissions.filter((permission) => !granted.has(permission)),
+      },
+    ];
+  });
+}

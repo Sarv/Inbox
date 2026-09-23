@@ -27,13 +27,22 @@ const h = vi.hoisted(() => ({
   requested: [] as string[],
   /** Every request with the headers it carried, so conditional GETs are visible. */
   requests: [] as { url: string; headers: Record<string, string> }[],
-  installed: [] as { id: string; version: string; enabled: boolean }[],
+  installed: [] as {
+    id: string;
+    version: string;
+    enabled: boolean;
+    settings?: Record<string, unknown>;
+  }[],
   installCalls: [] as string[],
   /** What was actually on disk when the manager was handed the folder. */
   stagedFiles: [] as string[][],
   uninstalled: [] as string[],
   enabled: [] as string[],
+  disabled: [] as string[],
+  /** Settings written back to the registry, in the order they were written. */
+  settingsWrites: [] as { id: string; settings: Record<string, unknown> }[],
   installThrows: null as string | null,
+  settingsThrows: null as string | null,
   /** What `app.getAppPath()` reports: apps/desktop, which is vitest's own cwd. */
   appDir: process.cwd(),
 }));
@@ -94,6 +103,13 @@ vi.mock('../../../../electron/shared', () => ({
     },
     uninstallExtension: async (id: string) => { h.uninstalled.push(id); },
     enableExtension: async (id: string) => { h.enabled.push(id); },
+    disableExtension: async (id: string) => { h.disabled.push(id); },
+    getRegistry: () => ({
+      updateSettings: async (id: string, settings: Record<string, unknown>) => {
+        if (h.settingsThrows) throw new Error(h.settingsThrows);
+        h.settingsWrites.push({ id, settings });
+      },
+    }),
   }),
 }));
 
@@ -217,7 +233,10 @@ beforeEach(() => {
   h.stagedFiles = [];
   h.uninstalled = [];
   h.enabled = [];
+  h.disabled = [];
+  h.settingsWrites = [];
   h.installThrows = null;
+  h.settingsThrows = null;
 });
 
 afterEach(async () => {
@@ -889,6 +908,81 @@ describe('installFromRegistry', () => {
 
     await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
     expect(h.uninstalled).toEqual(['otp-code']);
+  });
+
+  // Regression: an update is an uninstall followed by an install, and a fresh
+  // registration starts with empty settings. Without carrying them across, every
+  // update silently reset the reader's preferences - for something like "do not
+  // mark my mail read" that is the update undoing a decision they made.
+  it('carries the reader settings across an update', async () => {
+    h.installed = [
+      {
+        id: 'otp-code',
+        version: '0.9.0',
+        enabled: true,
+        settings: { 'otp-code.markReadOnCopy': false },
+      },
+    ];
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
+
+    expect(h.settingsWrites).toEqual([
+      { id: 'otp-code', settings: { 'otp-code.markReadOnCopy': false } },
+    ]);
+    expect(h.disabled).toEqual([]);
+  });
+
+  // Regression: the same fresh registration also defaults to enabled, so an
+  // update switched a deliberately disabled extension back on - the one state
+  // change a reader is guaranteed not to be watching for.
+  it('leaves an extension the reader disabled disabled after an update', async () => {
+    h.installed = [{ id: 'otp-code', version: '0.9.0', enabled: false, settings: {} }];
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
+
+    expect(h.disabled).toEqual(['otp-code']);
+    // Nothing to carry, so nothing should have been written.
+    expect(h.settingsWrites).toEqual([]);
+  });
+
+  // Regression: a first install has no previous choices to restore, and writing
+  // defaults over a brand new registration would undo what the install just set.
+  it('leaves a first install alone', async () => {
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await installFromRegistry('otp-code', ['email:read', 'ui:notify']);
+
+    expect(h.uninstalled).toEqual([]);
+    expect(h.settingsWrites).toEqual([]);
+    expect(h.disabled).toEqual([]);
+  });
+
+  // Regression: the new version is already installed and running by the time
+  // settings are restored, so a failure there must not fail the update the
+  // reader asked for and leave them unsure what actually happened.
+  it('still reports the update installed when the settings cannot be carried', async () => {
+    h.installed = [{ id: 'otp-code', version: '0.9.0', enabled: true, settings: { a: 1 } }];
+    h.settingsThrows = 'registry locked';
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+    const { installFromRegistry } = await loadService();
+
+    await expect(installFromRegistry('otp-code', ['email:read', 'ui:notify'])).resolves.toEqual({
+      id: 'otp-code',
+      version: '1.0.0',
+    });
   });
 
   it('cleans up the staging folder even when the install fails', async () => {

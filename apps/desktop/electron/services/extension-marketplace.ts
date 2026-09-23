@@ -660,6 +660,41 @@ export interface InstallResult {
 }
 
 /**
+ * Carry the reader's own choices across the uninstall/install pair that an
+ * update is made of.
+ *
+ * A fresh registration defaults to enabled with empty settings, because that is
+ * right for an extension being added for the first time. It is wrong for one
+ * being replaced: without this an update silently switches a deliberately
+ * disabled extension back on and resets every preference behind it, which for
+ * something like "do not mark my mail read" is the update undoing the decision
+ * the reader made.
+ *
+ * Order matters. Settings are written first, while the new copy is running, so
+ * the extension that reads them next has them; disabling comes last so an
+ * extension the reader had turned off does not spend the gap activated.
+ *
+ * Learned data is not handled here and does not need to be: it lives in the
+ * extension's own storage directory, which an uninstall leaves alone.
+ */
+async function restoreReaderChoices(
+  manager: NonNullable<ReturnType<typeof getExtensionManager>>,
+  previous: { id: string; enabled: boolean; settings?: Record<string, unknown> }
+): Promise<void> {
+  try {
+    const settings = previous.settings ?? {};
+    if (Object.keys(settings).length > 0) {
+      await manager.getRegistry().updateSettings(previous.id, settings);
+    }
+    if (!previous.enabled) await manager.disableExtension(previous.id);
+  } catch (error) {
+    // The new version is installed and working; losing a preference is worth
+    // recording but not worth failing the update the reader asked for.
+    logger.warn(`${previous.id}: could not carry settings across the update: ${String(error)}`);
+  }
+}
+
+/**
  * Install an extension the user has just approved.
  *
  * `confirmedPermissions` is what the renderer put in front of them. It is
@@ -720,11 +755,13 @@ export async function installFromRegistry(
 
     // Reinstalling over an existing copy is how an update lands: the registry
     // refuses a duplicate id, so the old one goes first.
-    if (manager.getInstalledExtensions().some((installed) => installed.id === entry.id)) {
+    const previous = manager.getInstalledExtensions().find((installed) => installed.id === entry.id);
+    if (previous) {
       await manager.uninstallExtension(entry.id);
     }
 
     const installed = await manager.installExtension(staging);
+    if (previous) await restoreReaderChoices(manager, previous);
     logger.info(`Installed ${installed.id} v${installed.version} from ${entry.sourceUrl}`);
     return { id: installed.id, version: installed.version };
   } finally {
