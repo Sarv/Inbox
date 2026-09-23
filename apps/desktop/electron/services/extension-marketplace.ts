@@ -43,6 +43,7 @@ import {
   mergeRegistryDetail,
   parseExtensionsConfig,
   parseRegistryDocument,
+  registryMirrorUrl,
   type CatalogItem,
   type ExtensionPermission,
   type ParsedExtensionsConfig,
@@ -279,6 +280,34 @@ async function fetchJson(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<unk
 }
 
 /**
+ * Ask the CDN mirror first, and fall back to the canonical URL when it fails.
+ *
+ * The canonical URL stays what everything else is keyed on - the cache entry,
+ * the registry status row, the host allowlist check - so the mirror is only
+ * ever where the bytes came from. A mirror that is down, blocked or rate-limited
+ * costs one extra round trip; it can never cost the catalogue, which is the
+ * whole reason the fallback is here rather than a second entry in `registries`
+ * (that list is merged, not raced, so a mirror there would double the catalogue).
+ *
+ * Both hosts serve the same file, so an ETag minted by one and offered to the
+ * other is simply not recognised and answered in full. A 304 from either is
+ * still the truth - "what you have is current" - whichever one issued the tag.
+ */
+async function fetchMirrorFirst<T>(
+  url: string,
+  fetchFrom: (target: string) => Promise<T>
+): Promise<T> {
+  const mirror = registryMirrorUrl(url);
+  if (!mirror) return fetchFrom(url);
+  try {
+    return await fetchFrom(mirror);
+  } catch (error) {
+    logger.warn(`Mirror ${mirror} failed (${(error as Error).message}); trying ${url}`);
+    return fetchFrom(url);
+  }
+}
+
+/**
  * Fetch a registry index, conditionally when we have seen it before.
  *
  * `If-None-Match` is only sent when there is a cached document to fall back on,
@@ -404,7 +433,9 @@ async function loadRegistry(
   }
 
   try {
-    const result = await fetchRegistryDocument(url, cached ? cached.etag : undefined);
+    const result = await fetchMirrorFirst(url, (target) =>
+      fetchRegistryDocument(target, cached ? cached.etag : undefined)
+    );
 
     if (result.notModified) {
       // `fetchRegistryDocument` refuses a 304 it did not ask for, so there is
@@ -518,7 +549,7 @@ async function resolveEntry(entry: RegistryEntry): Promise<InstallableEntry> {
     throw new Error(`${entry.id} has no download information in ${entry.sourceUrl}`);
   }
 
-  const document = await fetchJson(entry.detailUrl);
+  const document = await fetchMirrorFirst(entry.detailUrl, (target) => fetchJson(target));
   const merged = mergeRegistryDetail(document, entry);
   if ('reason' in merged) throw new Error(`${entry.id}: ${merged.reason}`);
   return merged.entry as InstallableEntry;
