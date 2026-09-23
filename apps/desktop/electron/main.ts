@@ -93,6 +93,7 @@ import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker
 import { startSpamReputationScheduler, stopSpamReputationScheduler } from './services/spam-reputation-service';
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
 import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
+import { checkForUpdates, startUpdateService, stopUpdateService } from './services/update-service';
 import {
   setMainWindow,
   getMainWindow,
@@ -240,6 +241,7 @@ function stopBackgroundTimers(): void {
   try { pendingPersisterFlush = stopPipelineEventPersister(); } catch {}
   try { stopUnifiedPipeline(); } catch {}
   try { stopNotificationService(); } catch {}
+  try { stopUpdateService(); } catch {}
   try { stopOAuthRefreshScheduler(); } catch {}
   try { getAICategorizationService()?.stopAutoProcess(); } catch {}
 }
@@ -248,12 +250,31 @@ logger.info('==============================================');
 logger.info('[Main] Sarv Inbox Version:', APP_VERSION);
 logger.info('==============================================');
 
-// Build macOS menu with correct app name (otherwise shows "Electron" in dev)
+// Application menu.
+//
+// Built on EVERY platform, not just macOS as it once was: the only route to
+// "Check for Updates" is a menu item, and leaving Windows and Linux on
+// Electron's stock menu meant those users had no way to reach it. macOS also
+// needs a custom menu to show the app name instead of "Electron" in dev.
+const checkForUpdatesItem: Electron.MenuItemConstructorOptions = {
+  // The ellipsis is the platform convention for "this opens something".
+  label: 'Check for Updates...',
+  click: () => {
+    // Fire-and-forget: the result reaches the renderer as a pushed state, and
+    // the dialog is what reports back. A rejection here is already logged and
+    // surfaced as the 'error' phase, so there is nothing to await.
+    void checkForUpdates('manual');
+  },
+};
+
 if (process.platform === 'darwin') {
   const appMenu: Electron.MenuItemConstructorOptions = {
     label: APP_NAME,
     submenu: [
       { role: 'about', label: `About ${APP_NAME}` },
+      // macOS convention puts this in the app menu, directly under About,
+      // rather than in Help where Windows and Linux expect it.
+      checkForUpdatesItem,
       { type: 'separator' },
       { role: 'services' },
       { type: 'separator' },
@@ -264,14 +285,32 @@ if (process.platform === 'darwin') {
       { role: 'quit', label: `Quit ${APP_NAME}` },
     ],
   };
-  const template: Electron.MenuItemConstructorOptions[] = [
-    appMenu,
-    { role: 'fileMenu' },
-    { role: 'editMenu' },
-    { role: 'viewMenu' },
-    { role: 'windowMenu' },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      appMenu,
+      { role: 'fileMenu' },
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+      { role: 'windowMenu' },
+    ]),
+  );
+} else {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: 'fileMenu' },
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+      { role: 'windowMenu' },
+      {
+        role: 'help',
+        submenu: [
+          checkForUpdatesItem,
+          { type: 'separator' },
+          { role: 'about', label: `About ${APP_NAME}` },
+        ],
+      },
+    ]),
+  );
 }
 
 // Disable security warnings in development
@@ -917,6 +956,10 @@ app.whenReady().then(async () => {
     startBodyRehealScheduler();
     startPipelineEventPersister();
     startNotificationService();
+    // Hourly check for a newer published release, plus the background
+    // download that makes "Install and Relaunch" instant. No-ops on an
+    // unpackaged build and on Linux distro packages - see update-policy.ts.
+    startUpdateService();
     // Resolve who "we" are via the single shared identity resolver (registry
     // first, legacy accounts table as fallback — NEVER an arbitrary Sent
     // from_address, which used to pick vendor/no-reply senders). On connect,

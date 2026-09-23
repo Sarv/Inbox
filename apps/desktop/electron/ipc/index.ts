@@ -29,6 +29,7 @@ import { registerSmtpHandlers } from './smtp-handlers';
 import { registerSpamHandlers } from './spam-handlers';
 import { registerStorageHandlers } from './storage-handlers';
 import { registerSyncHandlers } from './sync-handlers';
+import { registerUpdateHandlers } from './update-handlers';
 
 /**
  * Register all IPC handlers
@@ -36,6 +37,7 @@ import { registerSyncHandlers } from './sync-handlers';
  */
 export function registerAllHandlers(): void {
   registerAppHandlers();
+  registerUpdateHandlers();
   // Give the shared enrichment code the better (Node-only) signature parser.
   // core stays browser-safe by default; the renderer never installs one and
   // falls back to the local delimiter heuristics.

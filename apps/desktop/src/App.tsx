@@ -29,6 +29,7 @@ import { SmtpSetup } from './components/SmtpSetup';
 import { SyncTroubleBanner } from './components/SyncTroubleBanner';
 import { UndoDeleteToast } from './components/UndoDeleteToast';
 import { UndoSendToast } from './components/UndoSendToast';
+import { UpdateDialog } from './components/UpdateDialog';
 import { useAppVersion } from './hooks/useAppVersion';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNotificationBridge } from './hooks/useNotificationBridge';
@@ -937,6 +938,9 @@ function App() {
       {/* App-wide confirmation prompt — backs requestConfirm() so store-level
           guards (e.g. bulk delete) can prompt regardless of entry point. */}
       <GlobalConfirmDialog />
+      {/* Auto-update prompt. Self-hiding: renders nothing unless the main
+          process says there is something to show. */}
+      <UpdateDialog />
 
       {/* Set-up-sending (SMTP) modal — dismissible, opened on demand via the
           'sarvinbox:open-smtp-setup' event from the compose/reply banner. */}
