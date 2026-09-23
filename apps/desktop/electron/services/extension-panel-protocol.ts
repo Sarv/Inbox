@@ -69,12 +69,19 @@ let lookupExtension: PanelExtensionLookup = () => undefined;
  *
  * `style-src` allows inline styles because a no-build panel is one HTML file
  * with a `<style>` block in it; `script-src` deliberately does not.
+ *
+ * `script-src` also names the SDK origin. `standard: true` gives every host on
+ * this scheme its own origin, so `sarv-extension://sdk` is NOT covered by the
+ * panel's `'self'` and the documented `<script src="sarv-extension://sdk/sarv.js">`
+ * would be blocked without this. It is an app-owned host — the id `sdk` is
+ * reserved at load and the only thing served there is the SDK, from memory —
+ * so naming it grants a panel nothing an extension could supply itself.
  */
 function panelContentSecurityPolicy(): string {
   const frameAncestors = appOrigin && appOrigin !== 'null' ? `'self' ${appOrigin}` : `'self'`;
   return [
     "default-src 'none'",
-    "script-src 'self'",
+    `script-src 'self' ${PANEL_SCHEME}://${SDK_HOST}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self'",

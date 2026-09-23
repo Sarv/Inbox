@@ -84,6 +84,23 @@ describe('extension panel protocol', () => {
     expect(csp).not.toMatch(/connect-src[^;]*https?:/);
   });
 
+  // The SDK lives on its own host, so the panel's `'self'` does not cover it.
+  // Without this the documented <script src="sarv-extension://sdk/sarv.js">
+  // is blocked and every panel that uses the SDK silently does nothing.
+  it('allows the SDK origin in script-src', async () => {
+    const { handlePanelRequest } = await load();
+
+    const response = await handlePanelRequest(
+      get('sarv-extension://demo/panels/summary.html')
+    );
+    const csp = response.headers.get('Content-Security-Policy') ?? '';
+
+    expect(csp).toMatch(/script-src 'self' sarv-extension:\/\/sdk/);
+    // Nothing else was widened in the process.
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'self'");
+  });
+
   it('serves a panel script', async () => {
     const { handlePanelRequest } = await load();
 
