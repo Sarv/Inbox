@@ -46,7 +46,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@sarv-in/mailguard": "^0.3.0",
+    "@sarv-in/mailguard": "^0.4.0",
     "html-to-text": "^10.0.0"
   },
   "devDependencies": {
