@@ -883,8 +883,10 @@ describe('domain age', () => {
     expect(first.status).toBe('ok');
     expect(first.ageDays).toBeGreaterThanOrEqual(5);
     expect(second.status).toBe('not-found');
-    expect(h.fetchCalls.filter((c) => c.url.includes('iana.org'))).toHaveLength(1);
-    expect((h.fetchCalls.find((c) => c.url.includes('rdap.zdnsgtld'))?.init as { headers: { accept: string } }).headers.accept).toBe('application/rdap+json');
+    // Compared by host, not substring: the assertion is about which server was asked.
+    const host = (url: string) => new URL(url).hostname;
+    expect(h.fetchCalls.filter((c) => host(c.url) === 'data.iana.org')).toHaveLength(1);
+    expect((h.fetchCalls.find((c) => host(c.url) === 'rdap.zdnsgtld.com')?.init as { headers: { accept: string } }).headers.accept).toBe('application/rdap+json');
     expect(source.cache).toBe(ageSourceForPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true })!.cache);
   });
 
