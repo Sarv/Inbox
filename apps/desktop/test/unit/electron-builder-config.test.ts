@@ -1,5 +1,6 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -144,6 +145,44 @@ describe('electron-builder configuration', () => {
     // The hook path is relative to apps/desktop, where electron-builder runs.
     const resolved = fileURLToPath(new URL(`../../${hook as string}`, import.meta.url));
     expect(existsSync(resolved), `${hook as string} must exist on disk`).toBe(true);
+  });
+
+  // The regression: electron-builder finds the workspace root by shelling out
+  // to `pnpm --workspace-root exec pwd` -- and there is no `pwd` on Windows, so
+  // that throws and it falls back to walking UP from apps/desktop looking for a
+  // package.json with a `workspaces` field. This repo declares its workspace in
+  // pnpm-workspace.yaml, which that walk cannot see, so on Windows the root
+  // collapsed to apps/desktop: the pnpm module collector then found no
+  // dependencies and the installer shipped with NO node_modules at all -- no
+  // better_sqlite3.node, so an app whose database never opens and which
+  // therefore looks like an empty mailbox rather than an error.
+  //
+  // The `workspaces` field in the root package.json exists purely to make that
+  // fallback land in the right place; pnpm itself ignores it. This test walks
+  // the same path electron-builder does.
+  it('lets electron-builder find the workspace root by walking up from apps/desktop', () => {
+    const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
+
+    let current = fileURLToPath(new URL('../../', import.meta.url));
+    let found: string | undefined;
+    for (;;) {
+      const candidate = join(current, 'package.json');
+      if (existsSync(candidate)) {
+        const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as { workspaces?: unknown };
+        if (manifest.workspaces) {
+          found = current;
+          break;
+        }
+      }
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+
+    expect(found, 'no package.json with a `workspaces` field above apps/desktop').toBeDefined();
+    // The root that owns pnpm-workspace.yaml is the only correct answer.
+    expect(resolve(found as string)).toBe(resolve(repoRoot));
+    expect(existsSync(join(found as string, 'pnpm-workspace.yaml'))).toBe(true);
   });
 
   // Every release artifact the publish job globs must have a target that
