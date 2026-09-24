@@ -72,8 +72,11 @@ dev-server start.
 Every other stage reads the message that already arrived. The reputation stage
 asks a DNSBL operator, over DNS, about the IP that delivered the message and
 the registrable domain it claims to be from — so the operator learns, in near
-real time, who writes to this user. It is **off** until the user turns it on in
-**Security > Blocklists**, and there is no default zone list.
+real time, who writes to this user. It is **on** by default with every catalogue
+zone ticked; the user unticks lists, or the whole thing, in **Security >
+Blocklists**. A zone that refuses this network — a public resolver, an
+unregistered Barracuda querier — is retired by its own breaker in the core
+stage while the others keep answering, which is what makes default-on safe.
 
 Three pieces make it work in a mail client rather than a batch scanner, and
 they live in `packages/core/src/imap/reputation-stage.ts`:

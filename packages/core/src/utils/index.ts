@@ -12,6 +12,7 @@ export * from './deferred-fetch-error';
 export * from './event-loop';
 export * from './flush-scheduler';
 export * from './byte-budget';
+export * from './blocklist-prefs';
 export * from './db-compaction';
 export * from './folder-counts';
 export * from './folder-drift';

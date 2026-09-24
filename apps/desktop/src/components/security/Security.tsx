@@ -144,7 +144,7 @@ function HeaderBackfillStatus() {
  * answer — a Spamhaus refusal through a public resolver, no Sarv sign-in.
  */
 function ReputationStatus() {
-  const [state, setState] = useState<{ pending: number; judged: number; filed: number; provider: string | null; notes: string[]; running: boolean; lastRun: number | null } | null>(null);
+  const [state, setState] = useState<{ pending: number; judged: number; filed: number; provider: string | null; ageChecked?: number; notes: string[]; running: boolean; lastRun: number | null } | null>(null);
   useEffect(() => {
     const api = window.electronAPI.spam;
     api?.getReputationState?.().then((r) => { if (r?.success && r.data) setState(r.data); }).catch(() => { /* best-effort */ });
@@ -152,7 +152,8 @@ function ReputationStatus() {
     return () => { off?.(); };
   }, []);
   if (!state) return null;
-  const providerLabel = state.provider === 'sarv' ? 'Sarv reputation service' : state.provider === 'local-dnsbl' ? 'local DNS blocklists' : null;
+  const providerLabel = state.provider === 'sarv' ? 'Sarv reputation service' : state.provider === 'local-dnsbl' ? 'local DNS blocklists' : state.provider === 'domain-age' ? 'domain registration dates' : null;
+  const ageLine = (state.ageChecked ?? 0) > 0 ? ` ${(state.ageChecked ?? 0).toLocaleString()} domain registration date${state.ageChecked === 1 ? '' : 's'} looked up.` : '';
   return (
     <div className="rounded-lg border border-border bg-card p-3 flex items-start gap-3 text-sm">
       {state.running ? <Loader2 className="h-4 w-4 mt-0.5 animate-spin text-primary flex-shrink-0" /> : <ShieldCheck className="h-4 w-4 mt-0.5 text-green-600 dark:text-green-400 flex-shrink-0" />}
@@ -160,7 +161,7 @@ function ReputationStatus() {
         {providerLabel ? (
           <span>
             Sender reputation via <b>{providerLabel}</b>: {state.judged.toLocaleString()} message{state.judged === 1 ? '' : 's'} judged this session,
-            {' '}{state.filed.toLocaleString()} filed as spam by it, {state.pending.toLocaleString()} waiting.
+            {' '}{state.filed.toLocaleString()} filed as spam by it, {state.pending.toLocaleString()} waiting.{ageLine}
           </span>
         ) : (
           <span>Sender reputation checks are off, or the Sarv service address is not set — messages are judged from their headers alone. Change this under Settings → General.</span>

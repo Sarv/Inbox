@@ -11,8 +11,9 @@ import { Tooltip } from '../Tooltip';
  * Every other stage of the filter reads the message that already arrived. This
  * one asks an operator, over DNS, about the server that delivered it and the
  * domain it claims to be from. That is a real disclosure: the operator learns,
- * in near real time, who writes to this user. So the tab is written to be read
- * before it is switched on, and it starts off.
+ * in near real time, who writes to this user. So the tab says so plainly. It
+ * starts ON with every list ticked — a week-old campaign is on these lists
+ * long before it is anywhere else — and each list can be unticked here.
  *
  * The resolver field is not a power-user detail. Spamhaus and its peers refuse
  * queries that arrive through a public or open resolver — an ISP's DNS, or
@@ -65,8 +66,8 @@ export function BlocklistsTab() {
             <p>
               Every other spam check reads the message itself. This one sends the delivering
               server&rsquo;s address, and the sender&rsquo;s domain, to a blocklist operator over DNS
-              — so that operator learns who writes to you, as it happens. Nothing is asked until
-              you pick at least one list below.
+              — so that operator learns who writes to you, as it happens. Every list below is
+              asked unless you untick it; untick them all, or the switch, and nothing is asked.
             </p>
             <p>
               A listing adds to a message&rsquo;s spam score. It is never the whole verdict on its

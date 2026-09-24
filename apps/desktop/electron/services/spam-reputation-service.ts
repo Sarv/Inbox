@@ -16,9 +16,27 @@
  * Every answer is cached per IP / domain in the core DB so a campaign that
  * hits the inbox forty times costs one lookup, and every failure is fail-open:
  * an unknown adds no points and a row is judged once, whatever came back.
+ *
+ * DOMAIN AGE rides along (mailguard `/age`): for the same sender and link
+ * domains the pass asks the domain registry, over RDAP, how recently each was
+ * registered. It is the one fact about a campaign domain that is true before
+ * any blocklist has heard of it — the lure of 2026-09-23 linked to a domain
+ * five days old — and it runs whether or not a blocklist provider is
+ * configured, because it needs no provider: only the registry. Registration
+ * dates never change, so the answer is cached for a month rather than hours.
  */
 import { promises as dns } from 'node:dns';
 
+import {
+  assessDomainAge,
+  fetchRdapBootstrap,
+  lookupDomainAge,
+  DOMAIN_AGE_MAX_POINTS,
+  REPUTATION_MAX_POINTS,
+  type DomainAgeLookup,
+  type FetchLike,
+  type RdapBootstrap,
+} from '@sarv-in/mailguard';
 import {
   LocalDnsblProvider,
   SPAM_THRESHOLD,
@@ -69,9 +87,15 @@ export interface SpamReputationPolicy {
    * because the user did something, not because mail arrived.
    */
   reports: boolean;
+  /**
+   * Ask the domain registry (RDAP) how recently the sender's and the linked
+   * domains were registered. On by default; nothing is asked in 'off' mode,
+   * because 'off' means nothing about a message leaves the machine.
+   */
+  domainAge: boolean;
 }
 
-export const DEFAULT_SPAM_REPUTATION_POLICY: SpamReputationPolicy = { mode: 'sarv', endpoint: '', reports: false };
+export const DEFAULT_SPAM_REPUTATION_POLICY: SpamReputationPolicy = { mode: 'sarv', endpoint: '', reports: false, domainAge: true };
 const POLICY_BLOB_KEY = 'spam-reputation-policy';
 let cachedPolicy: SpamReputationPolicy | null = null;
 
@@ -84,7 +108,7 @@ export function normalizeSpamReputationPolicy(raw: unknown): SpamReputationPolic
   } catch {
     endpoint = '';
   }
-  return { mode, endpoint, reports: r.reports === true };
+  return { mode, endpoint, reports: r.reports === true, domainAge: r.domainAge !== false };
 }
 
 export function getSpamReputationPolicy(): SpamReputationPolicy {
@@ -178,6 +202,121 @@ export function getReputationCache(): ReputationCache {
   return cacheSingleton;
 }
 
+// ------------------------------------------------------------ domain age cache
+
+/** Seconds a registry's answer is kept. A registration date does not change. */
+export const DOMAIN_AGE_CACHE_TTL_S = 30 * 24 * 60 * 60;
+/** Seconds before a failed lookup (registry down, rate-limited) is tried again. */
+export const DOMAIN_AGE_CACHE_ERROR_TTL_S = 60 * 60;
+
+export function ensureDomainAgeCacheSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS domain_age_cache (
+      domain      TEXT PRIMARY KEY,
+      status      TEXT NOT NULL,
+      registered  INTEGER,
+      registrar   TEXT,
+      server      TEXT,
+      detail      TEXT,
+      checked_at  INTEGER NOT NULL
+    );
+  `);
+}
+
+/**
+ * What the registry said about each domain, kept for a month. The age is
+ * recomputed from the stored registration date on every read, so a domain
+ * cached at five days old is read as thirty-five days old a month later —
+ * the cache holds the fact, not the arithmetic.
+ */
+export class DomainAgeCache {
+  constructor(private readonly db: Database.Database) {
+    ensureDomainAgeCacheSchema(db);
+  }
+
+  get(domain: string, nowSec: number): DomainAgeLookup | null {
+    const r = this.db.prepare('SELECT status, registered, registrar, server, detail, checked_at FROM domain_age_cache WHERE domain = ?')
+      .get(domain) as { status: DomainAgeLookup['status']; registered: number | null; registrar: string | null; server: string | null; detail: string | null; checked_at: number } | undefined;
+    if (!r) return null;
+    const ttl = r.status === 'error' ? DOMAIN_AGE_CACHE_ERROR_TTL_S : DOMAIN_AGE_CACHE_TTL_S;
+    if (nowSec - r.checked_at > ttl) return null;
+    return {
+      domain,
+      status: r.status,
+      registered: r.registered,
+      ageDays: r.registered === null ? null : Math.max(0, Math.floor((nowSec - r.registered) / 86_400)),
+      registrar: r.registrar,
+      server: r.server,
+      detail: r.detail,
+    };
+  }
+
+  set(domain: string, lookup: DomainAgeLookup, nowSec: number): void {
+    this.db.prepare(`
+      INSERT INTO domain_age_cache (domain, status, registered, registrar, server, detail, checked_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(domain) DO UPDATE SET status = excluded.status, registered = excluded.registered, registrar = excluded.registrar,
+        server = excluded.server, detail = excluded.detail, checked_at = excluded.checked_at
+    `).run(domain, lookup.status, lookup.registered, lookup.registrar, lookup.server, lookup.detail, nowSec);
+  }
+
+  count(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM domain_age_cache').get() as { n: number }).n;
+  }
+}
+
+let ageCacheSingleton: DomainAgeCache | null = null;
+export function getDomainAgeCache(): DomainAgeCache {
+  if (!ageCacheSingleton) ageCacheSingleton = new DomainAgeCache(getCoreDb());
+  return ageCacheSingleton;
+}
+
+/** The registry lookups one pass may make: the cache and this cap together bound what a pass costs. */
+export const AGE_LOOKUPS_PER_PASS = 40;
+
+/** Where the pass gets a domain's age from: a lookup and the cache in front of it. */
+export interface AgeSource {
+  lookup(domain: string): Promise<DomainAgeLookup>;
+  cache: DomainAgeCache;
+  /** Fresh registry lookups per pass. Default AGE_LOOKUPS_PER_PASS. */
+  maxLookups?: number;
+}
+
+/** The age reasons, which keep their own budget apart from the blocklist cap. */
+const AGE_REASON_IDS = new Set<string>(['reputation-domain-new', 'reputation-link-new']);
+
+/** Blocklist points a row already carries, from any stage — the cap they all share. */
+function blocklistPointsOn(reasons: SpamReason[]): number {
+  return reasons.filter((r) => stageOfReason(r.id) === 'reputation' && !AGE_REASON_IDS.has(r.id)).reduce((s, r) => s + r.points, 0);
+}
+
+/**
+ * The sender-stage blocklist reasons a row has not been charged yet, within
+ * what is left of the shared cap.
+ *
+ * TWO CHECKS ASK THE SAME LISTS. The ingest-time lookup (Security >
+ * Blocklists, on by default) scores a message's sending IP and domain as it
+ * arrives; this pass asks its provider — local DNSBL or the Sarv service —
+ * about the same IP and domain later. Both write `reputation-ip-listed` and
+ * `reputation-domain-listed`, so without this a message on one list would be
+ * charged twice for one listing, and a single PBL entry would file a message
+ * that neither check alone considered spam. A reason id already on the row is
+ * that same fact, and is skipped.
+ */
+function unchargedBlocklistReasons(stored: SpamReason[], fresh: SpamReason[]): SpamReason[] {
+  const present = new Set(stored.map((r) => r.id));
+  let left = REPUTATION_MAX_POINTS - blocklistPointsOn(stored);
+  const out: SpamReason[] = [];
+  for (const reason of fresh) {
+    if (present.has(reason.id)) continue;
+    const points = Math.min(reason.points, left);
+    if (points <= 0) break;
+    left -= points;
+    out.push(points === reason.points ? reason : { ...reason, points });
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------- the pass
 
 /** The storage surface one pass needs — structural, so tests can fake it. */
@@ -209,9 +348,11 @@ export interface ReputationTarget {
 
 export interface ReputationPassDeps {
   targets: () => ReputationTarget[];
-  /** null = the stage is off. */
+  /** null = no blocklist provider. */
   provider: () => ReputationProvider | null;
   cache: ReputationCache;
+  /** null / absent = domain age is off. With no provider AND no age source the pass does nothing. */
+  age?: () => AgeSource | null;
   /** Unix seconds. */
   now: () => number;
   /** Rows judged per account per pass. */
@@ -264,6 +405,8 @@ export interface ReputationPassSummary {
   linkJudged: number;
   linkPending: number;
   provider: string | null;
+  /** Fresh registry lookups made for domain age this pass. */
+  ageLookups: number;
   /** Distinct notes from unknown answers — "Spamhaus refused the query", "Not signed in to Sarv". */
   notes: string[];
 }
@@ -273,8 +416,13 @@ const empty = (provider: string): ReputationResult => ({ provider, ips: new Map(
 /** One pass over every account's unjudged rows. */
 export async function runReputationPass(deps: ReputationPassDeps): Promise<ReputationPassSummary> {
   const provider = deps.provider();
-  const summary: ReputationPassSummary = { judged: 0, scored: 0, filed: 0, pending: 0, linkJudged: 0, linkPending: 0, provider: provider?.name ?? null, notes: [] };
-  if (!provider) return summary;
+  const age = deps.age?.() ?? null;
+  const summary: ReputationPassSummary = {
+    judged: 0, scored: 0, filed: 0, pending: 0, linkJudged: 0, linkPending: 0,
+    provider: provider?.name ?? (age ? 'domain-age' : null), ageLookups: 0, notes: [],
+  };
+  if (!provider && !age) return summary;
+  const providerName = provider?.name ?? 'none';
   const batch = deps.batch ?? 200;
   const bodyBatch = deps.bodyBatch ?? BODY_BATCH_SIZE;
   const nowMs = deps.nowMs ?? Date.now;
@@ -285,6 +433,50 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
   // and hands the thread back to libuv the moment the budget is spent.
   const breathe = createLoopYielder({ now: nowMs, yieldFn });
   const notes = new Set<string>();
+
+  // ---- Domain age, shared by both stages -----------------------------------
+  //
+  // One answer per domain per pass, from the month-long cache first and the
+  // registry after, with a cap on fresh lookups so a pass over a large backlog
+  // is bounded in registry traffic as well as in time. A lookup that fails is
+  // cached for an hour (the cache's own rule) and adds nothing.
+  const ages = new Map<string, DomainAgeLookup>();
+  let ageBudget = age?.maxLookups ?? AGE_LOOKUPS_PER_PASS;
+  const learnAges = async (domains: Iterable<string>): Promise<void> => {
+    if (!age) return;
+    const now = deps.now();
+    for (const raw of new Set(domains)) {
+      const domain = raw.toLowerCase();
+      if (ages.has(domain)) continue;
+      const cached = age.cache.get(domain, now);
+      if (cached) { ages.set(domain, cached); continue; }
+      if (ageBudget <= 0) continue;
+      ageBudget -= 1;
+      let lookup: DomainAgeLookup;
+      try {
+        lookup = await age.lookup(domain);
+      } catch (e) {
+        lookup = { domain, status: 'error', registered: null, ageDays: null, registrar: null, server: null, detail: (e as Error).message };
+      }
+      summary.ageLookups += 1;
+      age.cache.set(domain, lookup, now);
+      ages.set(domain, lookup);
+      if (lookup.status === 'error' && lookup.detail) notes.add(`Domain age: ${lookup.detail}`);
+    }
+  };
+  /** The youngest dated answer among some domains, or null. */
+  const youngestOf = (domains: string[]): DomainAgeLookup | null => {
+    let best: DomainAgeLookup | null = null;
+    for (const d of domains) {
+      const lookup = ages.get(d.toLowerCase());
+      if (lookup?.status !== 'ok' || lookup.ageDays === null) continue;
+      if (best === null || (best.ageDays ?? Infinity) > lookup.ageDays) best = lookup;
+    }
+    return best;
+  };
+  /** Age points a row already carries — the age budget is shared by both stages. */
+  const agePointsOn = (row: { spamReasons: string | null }): number =>
+    parseSpamReasons(row.spamReasons).filter((r) => AGE_REASON_IDS.has(r.id)).reduce((s, r) => s + r.points, 0);
 
   for (const target of deps.targets()) {
     if (nowMs() >= deadline) break;
@@ -299,33 +491,43 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
 
     // What to ask about, minus what the cache already knows.
     const now = deps.now();
-    const result = empty(provider.name);
-    const askIps: string[] = [];
-    const askDomains: string[] = [];
-    for (const ip of new Set(rows.map((r) => r.originIp).filter((x): x is string => !!x))) {
-      const hit = deps.cache.get('ip', ip, now);
-      if (hit) result.ips.set(ip, hit); else askIps.push(ip);
-    }
-    for (const d of new Set(rows.flatMap((r) => messageDomains(r)))) {
-      const hit = deps.cache.get('domain', d, now);
-      if (hit) result.domains.set(d, hit); else askDomains.push(d);
-    }
-    if (askIps.length || askDomains.length) {
-      let fresh: ReputationResult;
-      try {
-        fresh = await provider.lookup({ ips: askIps, domains: askDomains });
-      } catch (e) {
-        // A provider that throws instead of answering "unknown" is still fail-open.
-        fresh = empty(provider.name);
-        notes.add(`Lookup failed: ${(e as Error).message}`);
+    const result = empty(providerName);
+    if (provider) {
+      const askIps: string[] = [];
+      const askDomains: string[] = [];
+      for (const ip of new Set(rows.map((r) => r.originIp).filter((x): x is string => !!x))) {
+        const hit = deps.cache.get('ip', ip, now);
+        if (hit) result.ips.set(ip, hit); else askIps.push(ip);
       }
-      for (const [ip, rep] of fresh.ips) { result.ips.set(ip, rep); deps.cache.set('ip', ip, rep, provider.name, now); }
-      for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+      for (const d of new Set(rows.flatMap((r) => messageDomains(r)))) {
+        const hit = deps.cache.get('domain', d, now);
+        if (hit) result.domains.set(d, hit); else askDomains.push(d);
+      }
+      if (askIps.length || askDomains.length) {
+        let fresh: ReputationResult;
+        try {
+          fresh = await provider.lookup({ ips: askIps, domains: askDomains });
+        } catch (e) {
+          // A provider that throws instead of answering "unknown" is still fail-open.
+          fresh = empty(provider.name);
+          notes.add(`Lookup failed: ${(e as Error).message}`);
+        }
+        for (const [ip, rep] of fresh.ips) { result.ips.set(ip, rep); deps.cache.set('ip', ip, rep, provider.name, now); }
+        for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+      }
+      for (const rep of [...result.ips.values(), ...result.domains.values()]) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
     }
-    for (const rep of [...result.ips.values(), ...result.domains.values()]) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
+    await learnAges(rows.flatMap((r) => messageDomains(r)));
 
-    // Score, and file what crossed the line.
-    const judged = await judgeRows(target, rows, (row) => reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) }), summary, 'sender', breathe);
+    // Score, and file what crossed the line. The blocklist reasons and the age
+    // reasons keep separate budgets: a listing and a fresh registration are
+    // two facts about the sender, not one.
+    const judged = await judgeRows(target, rows, (row) => [
+      ...(provider
+        ? unchargedBlocklistReasons(parseSpamReasons(row.spamReasons), reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) }))
+        : []),
+      ...assessDomainAge({ sender: youngestOf(messageDomains(row)) }, { maxPoints: DOMAIN_AGE_MAX_POINTS - agePointsOn(row) }).reasons,
+    ], summary, 'sender', breathe);
     try {
       summary.judged += target.storage.applyReputationBatch(judged, deps.now());
     } catch (e) {
@@ -357,29 +559,38 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
         await breathe();
         linkDomainsOf.set(row.id, linkDomains(row.rawBody, { exclude: [registrableDomain(senderDomainOf(row.fromAddress))] }));
       }
-      const result = empty(provider.name);
-      const ask: string[] = [];
-      for (const d of new Set([...linkDomainsOf.values()].flat())) {
-        const hit = deps.cache.get('domain', d, now);
-        if (hit) result.domains.set(d, hit); else ask.push(d);
-      }
-      if (ask.length) {
-        let fresh: ReputationResult;
-        try {
-          fresh = await provider.lookup({ ips: [], domains: ask });
-        } catch (e) {
-          fresh = empty(provider.name);
-          notes.add(`Lookup failed: ${(e as Error).message}`);
+      const result = empty(providerName);
+      if (provider) {
+        const ask: string[] = [];
+        for (const d of new Set([...linkDomainsOf.values()].flat())) {
+          const hit = deps.cache.get('domain', d, now);
+          if (hit) result.domains.set(d, hit); else ask.push(d);
         }
-        for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+        if (ask.length) {
+          let fresh: ReputationResult;
+          try {
+            fresh = await provider.lookup({ ips: [], domains: ask });
+          } catch (e) {
+            fresh = empty(provider.name);
+            notes.add(`Lookup failed: ${(e as Error).message}`);
+          }
+          for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+        }
+        for (const rep of result.domains.values()) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
       }
-      for (const rep of result.domains.values()) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
+      await learnAges([...linkDomainsOf.values()].flat());
 
       const judged = await judgeRows(target, rows, (row) => {
-        // The two network stages share one cap: points the sender stage already
-        // added leave that much less room for the links.
-        const already = parseSpamReasons(row.spamReasons).filter((r) => stageOfReason(r.id) === 'reputation').reduce((s, r) => s + r.points, 0);
-        return linkReputationReasons(result, linkDomainsOf.get(row.id) ?? [], already);
+        const links = linkDomainsOf.get(row.id) ?? [];
+        // The two blocklist stages share one cap: points the sender stage
+        // already added leave that much less room for the links. Age points
+        // are not in that sum — they have a budget of their own.
+        const already = blocklistPointsOn(parseSpamReasons(row.spamReasons));
+        const linkAges = links.map((d) => ages.get(d.toLowerCase())).filter((l): l is DomainAgeLookup => l !== undefined);
+        return [
+          ...(provider ? linkReputationReasons(result, links, already) : []),
+          ...assessDomainAge({ links: linkAges }, { maxPoints: DOMAIN_AGE_MAX_POINTS - agePointsOn(row) }).reasons,
+        ];
       }, summary, 'link', breathe);
       let stamped = 0;
       try {
@@ -506,6 +717,47 @@ export function providerForPolicy(policy: SpamReputationPolicy): ReputationProvi
   return null;
 }
 
+/** RDAP over Chromium's network stack: the OS trust store and the user's proxy, like every other outbound call. */
+const rdapFetch: FetchLike = (url) =>
+  chromiumFetch(url, { headers: { accept: 'application/rdap+json' } }) as unknown as ReturnType<FetchLike>;
+
+/** How long IANA's bootstrap file is believed before it is fetched again. It changes rarely. */
+export const RDAP_BOOTSTRAP_TTL_MS = 24 * 60 * 60_000;
+/** How soon a failed bootstrap fetch is retried — long enough not to hammer IANA during an outage. */
+export const RDAP_BOOTSTRAP_RETRY_MS = 10 * 60_000;
+let bootstrapPromise: Promise<RdapBootstrap | null> | null = null;
+let bootstrapFetchedAt = 0;
+let bootstrapTtl = RDAP_BOOTSTRAP_TTL_MS;
+
+/** IANA's TLD → RDAP server table, fetched once a day and shared by every lookup. */
+function rdapBootstrap(): Promise<RdapBootstrap | null> {
+  const now = Date.now();
+  if (bootstrapPromise && now - bootstrapFetchedAt < bootstrapTtl) return bootstrapPromise;
+  bootstrapFetchedAt = now;
+  bootstrapTtl = RDAP_BOOTSTRAP_TTL_MS;
+  bootstrapPromise = fetchRdapBootstrap(rdapFetch).then((bootstrap) => {
+    if (!bootstrap) bootstrapTtl = RDAP_BOOTSTRAP_RETRY_MS;
+    return bootstrap;
+  });
+  return bootstrapPromise;
+}
+
+/** Test seam. */
+export function resetRdapBootstrapCache(): void {
+  bootstrapPromise = null;
+  bootstrapFetchedAt = 0;
+  bootstrapTtl = RDAP_BOOTSTRAP_TTL_MS;
+}
+
+/** The age source the policy allows, or null: nothing leaves the machine in 'off' mode or with the toggle off. */
+export function ageSourceForPolicy(policy: SpamReputationPolicy): AgeSource | null {
+  if (policy.mode === 'off' || !policy.domainAge) return null;
+  return {
+    cache: getDomainAgeCache(),
+    lookup: async (domain) => lookupDomainAge(domain, { fetch: rdapFetch, bootstrap: await rdapBootstrap() }),
+  };
+}
+
 function liveTargets(): ReputationTarget[] {
   const out: ReputationTarget[] = [];
   for (const [accountId, rt] of getAllAccountRuntimes()) {
@@ -531,6 +783,8 @@ export interface SpamReputationState {
   linkPending: number;
   linkJudged: number;
   provider: string | null;
+  /** Registry lookups made for domain age this session. */
+  ageChecked: number;
   notes: string[];
   running: boolean;
   /** Unix seconds of the last completed pass, null before the first. */
@@ -540,7 +794,7 @@ export interface SpamReputationState {
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 let stopped = false;
-const state: SpamReputationState = { pending: 0, judged: 0, filed: 0, linkPending: 0, linkJudged: 0, provider: null, notes: [], running: false, lastRun: null };
+const state: SpamReputationState = { pending: 0, judged: 0, filed: 0, linkPending: 0, linkJudged: 0, provider: null, ageChecked: 0, notes: [], running: false, lastRun: null };
 
 export function getSpamReputationState(): SpamReputationState {
   return { ...state, running: inFlight };
@@ -561,6 +815,7 @@ async function tick(): Promise<void> {
     const summary = await runReputationPass({
       targets: liveTargets,
       provider: () => providerForPolicy(policy),
+      age: () => ageSourceForPolicy(policy),
       cache: getReputationCache(),
       now: () => Math.floor(Date.now() / 1000),
     });
@@ -570,6 +825,7 @@ async function tick(): Promise<void> {
     state.linkPending = summary.linkPending;
     state.linkJudged += summary.linkJudged;
     state.provider = summary.provider;
+    state.ageChecked += summary.ageLookups;
     state.notes = summary.notes;
     state.lastRun = Math.floor(Date.now() / 1000);
     more = summary.provider !== null && (summary.pending > 0 || summary.linkPending > 0);

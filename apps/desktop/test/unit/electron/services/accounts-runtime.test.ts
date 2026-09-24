@@ -43,7 +43,10 @@ vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
 }));
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real reader of the blocklist settings: pure, and what decides whether
+  // the stage below is built at all.
+  readBlocklistPrefs: (await import('../../../../../../packages/core/src/utils/blocklist-prefs')).readBlocklistPrefs,
   createLogger: () => ({
     info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
@@ -56,8 +59,8 @@ vi.mock('@sarvinbox/core', () => ({
     constructor(storage: unknown) { this.storage = storage; h.engines.push(this as never); }
     setReputationLookup(fn: unknown): void { this.reputationLookup = fn; }
   },
-  // The blocklist stage itself. Constructed only when the user has switched
-  // blocklists on, which no test here does; present so the import resolves.
+  // The blocklist stage itself. Blocklists are on by default (2026-09-23), so
+  // every test here builds one; it answers "no opinion" and asks nobody.
   ReputationStage: class {
     constructor(public config: unknown) {}
     async assess(): Promise<null> { return null; }

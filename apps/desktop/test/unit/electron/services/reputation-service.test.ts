@@ -23,8 +23,10 @@ vi.mock(
   async () => await import('../../../../electron/services/__testing__/fake-core-db'),
 );
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
   createLogger: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {} }),
+  // The real reader: which lists are queried is exactly what this suite guards.
+  readBlocklistPrefs: (await import('../../../../../../packages/core/src/utils/blocklist-prefs')).readBlocklistPrefs,
   // A stand-in that records the configuration it was handed and answers a
   // fixed assessment, so a test can see BOTH which zones were configured and
   // whether the lookup reached a stage at all.
@@ -83,23 +85,45 @@ describe('readReputationSettings', () => {
     ).toEqual({ enabled: true, zones: ['spamhaus-zen'], servers: ['10.0.0.1', '10.0.0.2'] });
   });
 
-  // THE regression this parser exists for. The value crosses from the
-  // renderer's localStorage into a DNS query about the user's correspondents,
-  // so every shape that is not an explicit, well-formed opt-in has to read as
-  // "ask nobody" — not as a partial opt-in and not as a throw at boot.
-  it('reads every malformed or absent setting as off', async () => {
+  // Behaviour changed 2026-09-23: blocklists are on by default, every zone.
+  // An absent or unreadable section reads as those defaults, never as a
+  // throw at boot. An EXPLICIT section is still read literally — "truthy" is
+  // not "true", and a zone list that is not a list is no zones — so a user
+  // who turned lists off stays off whatever else the blob has suffered.
+  it('reads an absent or unreadable section as the defaults, and an explicit one literally', async () => {
     const { service } = await setup();
-    const off = { enabled: false, zones: [], servers: [] };
+    const defaults = { enabled: true, zones: [...service.DEFAULT_ZONES], servers: [] };
+    expect(defaults.zones).toEqual(['spamhaus-zen', 'spamhaus-dbl', 'spamcop', 'barracuda', 'surbl', 'uribl']);
 
-    expect(service.readReputationSettings({})).toEqual(off);
-    expect(service.readReputationSettings({ [SETTINGS_KEY]: 'not json' })).toEqual(off);
-    expect(service.readReputationSettings({ [SETTINGS_KEY]: '{}' })).toEqual(off);
-    expect(service.readReputationSettings({ [SETTINGS_KEY]: '{"reputation":null}' })).toEqual(off);
-    expect(service.readReputationSettings({ [SETTINGS_KEY]: '{"reputation":"yes"}' })).toEqual(off);
-    // "truthy" is not "true": only the boolean counts as consent.
+    expect(service.readReputationSettings({})).toEqual(defaults);
+    expect(service.readReputationSettings({ [SETTINGS_KEY]: 'not json' })).toEqual(defaults);
+    expect(service.readReputationSettings({ [SETTINGS_KEY]: '{}' })).toEqual(defaults);
+    expect(service.readReputationSettings({ [SETTINGS_KEY]: '{"reputation":null}' })).toEqual(defaults);
+    expect(service.readReputationSettings({ [SETTINGS_KEY]: '{"reputation":"yes"}' })).toEqual(defaults);
     expect(
       service.readReputationSettings({ [SETTINGS_KEY]: '{"reputation":{"enabled":1,"zones":"all"}}' }),
-    ).toEqual(off);
+    ).toEqual({ enabled: false, zones: [], servers: [] });
+    expect(
+      service.readReputationSettings({ [SETTINGS_KEY]: '{"reputation":{"enabled":false,"zones":["spamcop"],"servers":[]}}' }),
+    ).toEqual({ enabled: false, zones: ['spamcop'], servers: [] });
+  });
+
+  // THE migration, end to end on the main side: every install that ever saved
+  // Settings has the old default stored as an explicit "off". It must read as
+  // the new default — and a section the Blocklists tab marked must not.
+  it('reads the old saved "off" as the new default, but honours an off the user chose', async () => {
+    const { service } = await setup();
+    const blob = (reputation: unknown) => ({ [SETTINGS_KEY]: JSON.stringify({ signatures: [], reputation }) });
+
+    expect(service.readReputationSettings(blob({ enabled: false, zones: [], servers: [] }))).toEqual(
+      service.DEFAULT_REPUTATION_SETTINGS,
+    );
+    expect(service.readReputationSettings(blob({ enabled: false, zones: [], servers: [], chosen: true }))).toEqual({
+      enabled: false,
+      zones: [],
+      servers: [],
+      chosen: true,
+    });
   });
 
   // Regression: a zone name this build does not know must be dropped, never
@@ -119,15 +143,30 @@ describe('readReputationSettings', () => {
 });
 
 describe('attachReputation', () => {
-  // The default, and the one that matters most: a user who has never opened
-  // the Blocklists tab must not have a single DNS query sent on their behalf.
-  it('wires a lookup that asks nobody until the user opts in', async () => {
+  // The default, and the one that matters most: a fresh install asks every
+  // catalogue zone from its first message, through the system resolver, with
+  // no setting touched. (Behaviour changed 2026-09-23; it used to ask nobody.)
+  it('wires a lookup that asks every catalogue zone out of the box', async () => {
     const { service } = await setup();
     const engine = fakeEngine();
 
     service.attachReputation(engine);
 
     expect(engine.lookup).toBeTypeOf('function');
+    await expect(engine.lookup!({ ip: '185.199.108.1' })).resolves.toMatchObject({ score: 4 });
+    expect(h.built).toHaveLength(1);
+    expect(h.built[0]!.config.blocklists.map((list) => list.name)).toEqual([...service.DEFAULT_ZONES]);
+    expect(h.built[0]!.config.servers).toEqual([]);
+  });
+
+  // `chosen` is what the Blocklists tab writes: without it this exact shape
+  // is the old saved default, which the migration reads as ON.
+  it('asks nobody once the user has turned the lists off', async () => {
+    const { service } = await setup({ enabled: false, zones: [], servers: [], chosen: true });
+    const engine = fakeEngine();
+
+    service.attachReputation(engine);
+
     await expect(engine.lookup!({ ip: '185.199.108.1' })).resolves.toBeNull();
     expect(h.built).toHaveLength(0);
   });
@@ -184,7 +223,7 @@ describe('noteAppSettingChanged', () => {
   // not after the next restart. The engine is never re-wired, so this only
   // works if the lookup reads the CURRENT stage rather than capturing one.
   it('reaches an already-wired engine when the settings change', async () => {
-    const { service, db } = await setup({ enabled: false, zones: [], servers: [] });
+    const { service, db } = await setup({ enabled: false, zones: [], servers: [], chosen: true });
     const engine = fakeEngine();
     service.attachReputation(engine);
     await expect(engine.lookup!({ ip: '185.199.108.1' })).resolves.toBeNull();

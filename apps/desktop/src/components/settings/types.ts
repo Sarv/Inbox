@@ -1,3 +1,6 @@
+import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
+import { defaultBlocklistPrefs, type BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
+
 import type { InboxType, InboxSection } from '../../config/inbox-types';
 
 export type SettingsTab = 'general' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'advanced' | 'keyboard-shortcuts';
@@ -49,6 +52,10 @@ export interface AppSettings {
    *  verdict — never subject, body or recipients) to the Sarv service so they
    *  count for other users. Opt-in. */
   spamReputationReports: boolean;
+  /** Ask the domain registry (RDAP) how recently the sender's and the linked
+   *  domains were registered — a five-day-old domain is the tell no blocklist
+   *  has yet. On by default; nothing is asked when the stage is off. */
+  spamReputationDomainAge: boolean;
 
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
@@ -64,7 +71,7 @@ export interface AppSettings {
    *  the resolvers to ask, which matters because the large operators refuse
    *  queries arriving through a public or open resolver — the default on most
    *  home connections. Absent means never configured, which reads as off. */
-  reputation?: { enabled: boolean; zones: string[]; servers: string[] };
+  reputation?: BlocklistPrefs;
 
   // Inbox settings
   inboxType: InboxType;
@@ -126,8 +133,9 @@ export const defaultSettings: AppSettings = {
   spamReputationMode: 'sarv',
   spamReputationEndpoint: '',
   spamReputationReports: false,
+  spamReputationDomainAge: true,
   categoryLabels: { enabled: true, folderMode: 'copy' },
-  reputation: { enabled: false, zones: [], servers: [] },
+  reputation: defaultBlocklistPrefs(BLOCKLISTS.map((list) => list.name)),
   inboxType: 'priority_first',
   showImportanceMarkers: true,
   inboxSections: [],

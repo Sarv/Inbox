@@ -1,4 +1,6 @@
+import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
 import type { SMTPConfig } from '@sarvinbox/core';
+import { readBlocklistPrefs, type BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
 import {
   bareSenderAddress,
   isImageAllowedFor,
@@ -648,33 +650,23 @@ export const getMaxAIProcessingEmails = (): number => {
  * them, so the Security tab and the main process never disagree about the
  * shape stored in the settings blob.
  *
- * Reading defaults to OFF for every malformed or missing case — this setting
- * decides whether the app tells a third party who is writing to the user, and
- * the safe reading of "I could not tell" is "do not ask".
+ * Read with core's `readBlocklistPrefs` — the same function main reads them
+ * with — so the ticks in the Blocklists tab are the lists that are queried:
+ * on with every list by default, the old saved "off" migrated once, anything
+ * else literal. See packages/core/src/utils/blocklist-prefs.ts.
  */
-export interface ReputationPrefs {
-  enabled: boolean;
-  /** Zone names from the scanner's catalogue. */
-  zones: string[];
-  /** Resolvers to query. Empty means the system's. */
-  servers: string[];
-}
+export type ReputationPrefs = BlocklistPrefs;
 
 export const getReputationPrefs = (): ReputationPrefs => {
+  let section: unknown;
   try {
     const stored = localStorage.getItem('sarvinbox-settings');
-    const value = stored ? JSON.parse(stored)?.reputation : null;
-    if (value && typeof value === 'object') {
-      return {
-        enabled: value.enabled === true,
-        zones: Array.isArray(value.zones) ? value.zones.filter((z: unknown) => typeof z === 'string') : [],
-        servers: Array.isArray(value.servers) ? value.servers.filter((v: unknown) => typeof v === 'string') : [],
-      };
-    }
+    section = stored ? JSON.parse(stored)?.reputation : undefined;
   } catch {
-    // A malformed blob reads as off, never as on.
+    // A malformed blob reads as no section: the defaults.
+    section = undefined;
   }
-  return { enabled: false, zones: [], servers: [] };
+  return readBlocklistPrefs(section, BLOCKLISTS.map((list) => list.name));
 };
 
 /** Read-modify-write, so saving this one section never drops the signatures,
@@ -685,7 +677,9 @@ export const setReputationPrefs = (prefs: ReputationPrefs): void => {
   try {
     const stored = localStorage.getItem('sarvinbox-settings');
     const settings = stored ? JSON.parse(stored) : {};
-    localStorage.setItem('sarvinbox-settings', JSON.stringify({ ...settings, reputation: prefs }));
+    // `chosen` marks this as the user's own decision, so the one-time
+    // migration of the old saved default can never touch it.
+    localStorage.setItem('sarvinbox-settings', JSON.stringify({ ...settings, reputation: { ...prefs, chosen: true } }));
   } catch {
     // Ignore errors
   }

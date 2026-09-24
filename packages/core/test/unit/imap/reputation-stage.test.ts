@@ -244,3 +244,100 @@ describe('ReputationStage', () => {
     expect(assessment?.score).toBe(3);
   });
 });
+
+/**
+ * Per-zone breakers. With every catalogue zone on by default, most machines
+ * will have at least one operator that never answers them — URIBL refuses
+ * public resolvers, Barracuda refuses unregistered ones — and a stage that
+ * treated any zone's refusal as the lookup failing would score nothing on
+ * exactly those machines while the zones that DO answer went unheard.
+ */
+describe('ReputationStage — one zone refusing does not silence the rest', () => {
+  const SPAMCOP_NAME = '34.216.184.93.bl.spamcop.net';
+  const ipAt = (i: number) => `93.184.216.${i + 10}`;
+  const zenOf = (i: number) => `${i + 10}.216.184.93.zen.spamhaus.org`;
+  const spamcopOf = (i: number) => `${i + 10}.216.184.93.bl.spamcop.net`;
+
+  // Regression: a listing one operator reported is true whatever happened to
+  // the operator beside it. Discarding it because SpamCop was down turned a
+  // real listing into "no opinion".
+  it('scores the zones that answered even when another one failed', async () => {
+    const dns = fakeDns({ [LISTED_NAME]: ['127.0.0.2'], [SPAMCOP_NAME]: new Error('queryA ETIMEOUT') });
+    const stage = stageWith({ blocklists: [SPAMHAUS_ZEN, SPAMCOP] }, dns.query);
+
+    const assessment = await stage.assess({ ip: SENDER_IP });
+
+    expect(assessment?.reasons[0]?.id).toBe('reputation-ip-listed');
+    expect(assessment?.reasons[0]?.detail).toContain('spamhaus-zen');
+    expect(dns.asked.sort()).toEqual([SPAMCOP_NAME, LISTED_NAME].sort());
+  });
+
+  // Regression: THE default-on case. One zone that will never answer this
+  // network is retired after its own run of failures, on its own; the other
+  // keeps being asked about every sender, and the retired one is tried again
+  // after its cooldown.
+  it('retires a zone after its own run of failures while the others keep answering', async () => {
+    const clock = { now: 1_000_000 };
+    const answers: Record<string, string[] | Error> = {};
+    for (let i = 0; i < 20; i += 1) {
+      answers[zenOf(i)] = [];
+      answers[spamcopOf(i)] = ['127.0.0.1']; // SpamCop's "you are refused" answer, read by the library as an error
+    }
+    const dns = fakeDns(answers);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stage = stageWith({ blocklists: [SPAMHAUS_ZEN, SPAMCOP], breakerCooldownMs: 600_000 }, dns.query, clock);
+
+    for (let i = 0; i < DEFAULT_FAILURE_THRESHOLD; i += 1) {
+      expect(await stage.assess({ ip: ipAt(i) })).not.toBeNull(); // ZEN answered every time
+    }
+    expect(stage.activeZones().map((zone) => zone.name)).toEqual(['spamhaus-zen']);
+
+    // The next sender is asked of ZEN only.
+    await stage.assess({ ip: ipAt(7) });
+    expect(dns.asked).toContain(zenOf(7));
+    expect(dns.asked).not.toContain(spamcopOf(7));
+
+    // Whole stage still live: the global breaker only counts lookups in which nobody answered.
+    clock.now += 600_001;
+    await stage.assess({ ip: ipAt(8) });
+    expect(dns.asked).toContain(spamcopOf(8));
+
+    warn.mockRestore();
+  });
+
+  // Regression: a zone that answers again is forgiven — its count must reset,
+  // or three refusals a week apart would retire an operator that is working.
+  it('forgives a zone that answers, and counts only its consecutive failures', async () => {
+    const answers: Record<string, string[] | Error> = {};
+    for (let i = 0; i < 20; i += 1) {
+      answers[zenOf(i)] = [];
+      answers[spamcopOf(i)] = i % 2 === 0 ? new Error('queryA ETIMEOUT') : [];
+    }
+    const dns = fakeDns(answers);
+    const stage = stageWith({ blocklists: [SPAMHAUS_ZEN, SPAMCOP], failureThreshold: 3 }, dns.query);
+
+    for (let i = 0; i < 12; i += 1) await stage.assess({ ip: ipAt(i) });
+    expect(stage.activeZones()).toHaveLength(2);
+  });
+
+  it('asks nothing, and counts no failure, while every zone is sitting out its cooldown', async () => {
+    const clock = { now: 1_000_000 };
+    const answers: Record<string, string[] | Error> = {};
+    for (let i = 0; i < 20; i += 1) answers[zenOf(i)] = ['127.255.255.254'];
+    const dns = fakeDns(answers);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stage = stageWith({ breakerCooldownMs: 600_000, failureThreshold: 2 }, dns.query, clock);
+
+    await stage.assess({ ip: ipAt(0) });
+    await stage.assess({ ip: ipAt(1) });
+    expect(stage.activeZones()).toEqual([]);
+    const asked = dns.asked.length;
+    expect(await stage.assess({ ip: ipAt(2) })).toBeNull();
+    expect(dns.asked).toHaveLength(asked);
+
+    // Reset clears the zone breakers too — a settings change starts everyone fresh.
+    stage.reset();
+    expect(stage.activeZones()).toHaveLength(1);
+    warn.mockRestore();
+  });
+});
