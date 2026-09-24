@@ -25,11 +25,11 @@ import {
 } from '../../../../scripts/lib/native-abi.mjs';
 
 let workDir;
-let lockDir;
+let lockPath;
 
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), 'native-abi-'));
-  lockDir = join(workDir, 'lock');
+  lockPath = join(workDir, 'lock');
 });
 
 afterEach(() => {
@@ -42,10 +42,11 @@ const deadPid = () => {
   return child.pid;
 };
 
-const seedLock = (pid) => {
-  mkdirSync(lockDir);
-  writeFileSync(join(lockDir, 'pid'), String(pid));
-};
+/** A lock already held by `pid`, as acquireBuildLock would have written it. */
+const seedLock = (pid) => writeFileSync(lockPath, String(pid));
+
+/** Longer than OWNERLESS_GRACE_MS, for the tests that must outlive it. */
+const PAST_THE_GRACE_PERIOD = 60_000;
 
 describe('isRunning', () => {
   // Breaks: our own pid read as dead makes the lock self-defeating — a rebuild
@@ -77,8 +78,8 @@ describe('acquireBuildLock', () => {
   // Breaks: the lock never forms, both rebuilds proceed, and node-gyp's
   // `rm -rf build` in one deletes the directories the other is compiling into.
   it('takes a free lock and records the owning pid', () => {
-    expect(acquireBuildLock({ lockDir })).toBe(true);
-    expect(readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(String(process.pid));
+    expect(acquireBuildLock({ lockPath })).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid));
   });
 
   // Breaks: THE concurrency bug. A second rebuild starting on top of a live one
@@ -87,10 +88,32 @@ describe('acquireBuildLock', () => {
     const warnings = [];
     seedLock(process.pid);
 
-    expect(acquireBuildLock({ lockDir, warn: (msg) => warnings.push(msg) })).toBe(false);
+    expect(acquireBuildLock({ lockPath, warn: (msg) => warnings.push(msg) })).toBe(false);
     expect(warnings.join('\n')).toContain(String(process.pid));
     // The live owner's record must survive — stealing it would defeat the lock.
-    expect(readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(String(process.pid));
+    expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid));
+  });
+
+  // Breaks: `pnpm test`, roughly one run in three, and this is the regression
+  // the file-plus-grace-period lock was written for.
+  //
+  // The lock used to be a DIRECTORY with a `pid` file written into it as a
+  // second step. Turbo starts the storage-node and desktop suites at the same
+  // instant; both ask for the Node ABI; A created the directory, and B — losing
+  // the mkdir by microseconds — read the pid file A had not written yet, saw no
+  // owner, concluded the lock was abandoned, deleted it and took it. Two
+  // node-gyp runs then shredded each other's build tree, and the symptom was a
+  // rebuild that failed BOTH attempts yet succeeded when re-run by hand.
+  //
+  // A lock that exists but names no owner must therefore be left alone while it
+  // could still be someone mid-claim.
+  it('leaves an ownerless lock alone while it could still be mid-claim', () => {
+    // Exactly the state A is in between creating the lock and writing its pid.
+    writeFileSync(lockPath, '');
+
+    expect(acquireBuildLock({ lockPath })).toBe(false);
+    // Not stolen, not emptied — A's claim survives to be completed.
+    expect(existsSync(lockPath)).toBe(true);
   });
 
   // Breaks: `pnpm test`. Turbo runs the package suites in PARALLEL and each one
@@ -105,18 +128,36 @@ describe('acquireBuildLock', () => {
     const sleep = (ms: number) => {
       clock += ms;
       sleeps += 1;
-      if (sleeps === 3) rmSync(lockDir, { recursive: true, force: true });
+      if (sleeps === 3) rmSync(lockPath, { recursive: true, force: true });
     };
 
     const took = acquireBuildLock({
-      lockDir, waitMs: 60_000, sleep, now: () => clock, log: (msg: string) => logs.push(msg),
+      lockPath, waitMs: 60_000, sleep, now: () => clock, log: (msg: string) => logs.push(msg),
     });
 
     expect(took).toBe(true);
     expect(sleeps).toBe(3);
-    expect(readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(String(process.pid));
+    expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid));
     // Said so once, not once per poll — a 60s wait must not print 240 lines.
     expect(logs.filter((msg) => msg.includes('waiting'))).toHaveLength(1);
+  });
+
+  // Breaks: the grace period turning a crash between the two syscalls into a
+  // permanent block. An ownerless lock is waited on, not stolen — but only
+  // until it is old enough that nobody can still be mid-claim.
+  it('waits out an ownerless lock and then takes it', () => {
+    writeFileSync(lockPath, '');
+    let clock = 0;
+
+    const took = acquireBuildLock({
+      lockPath,
+      waitMs: PAST_THE_GRACE_PERIOD,
+      sleep: (ms: number) => { clock += ms; },
+      now: () => clock,
+    });
+
+    expect(took).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid));
   });
 
   // Breaks: a genuinely wedged rebuild hangs the command forever instead of
@@ -127,7 +168,7 @@ describe('acquireBuildLock', () => {
     let clock = 0;
 
     const took = acquireBuildLock({
-      lockDir,
+      lockPath,
       waitMs: 1_000,
       sleep: (ms: number) => { clock += ms; },
       now: () => clock,
@@ -137,7 +178,7 @@ describe('acquireBuildLock', () => {
     expect(took).toBe(false);
     expect(warnings.join('\n')).toContain(String(process.pid));
     // The live owner's lock must survive being waited on and given up on.
-    expect(existsSync(lockDir)).toBe(true);
+    expect(existsSync(lockPath)).toBe(true);
   });
 
   // Breaks: postinstall (waitMs defaults to 0) blocking a `pnpm install` behind
@@ -146,52 +187,74 @@ describe('acquireBuildLock', () => {
     seedLock(process.pid);
     let sleeps = 0;
 
-    expect(acquireBuildLock({ lockDir, sleep: () => { sleeps += 1; } })).toBe(false);
+    expect(acquireBuildLock({ lockPath, sleep: () => { sleeps += 1; } })).toBe(false);
     expect(sleeps).toBe(0);
   });
 
   // Breaks: an interrupted flip (Ctrl-C, a killed shell) leaves the lock behind
-  // and no rebuild can ever run again until someone deletes it by hand.
+  // and no rebuild can ever run again until someone deletes it by hand. A named
+  // owner that is gone is unambiguous, so this needs no grace period.
   it('takes over a lock whose owner has died', () => {
     seedLock(deadPid());
 
-    expect(acquireBuildLock({ lockDir })).toBe(true);
-    expect(readFileSync(join(lockDir, 'pid'), 'utf8')).toBe(String(process.pid));
+    expect(acquireBuildLock({ lockPath })).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid));
   });
 
-  // Breaks: a run killed between the mkdir and the pid write leaves an ownerless
-  // lock; reading it must not throw, and must not block the next rebuild.
+  // Breaks: a lock whose contents are not a pid at all (a truncated write, a
+  // stray file) blocking every rebuild forever. It is ownerless, so it is
+  // cleared on the same terms as an empty one -- once it is too old to be a
+  // claim in progress.
   it.each([
-    ['an empty pid file', ''],
     ['a garbage pid file', 'not-a-pid'],
-  ])('takes over a lock with %s', (_case, contents) => {
-    mkdirSync(lockDir);
-    writeFileSync(join(lockDir, 'pid'), contents);
+    ['a zero pid, which must never be signalled', '0'],
+  ])('takes over %s once it is past the grace period', (_case, contents) => {
+    writeFileSync(lockPath, contents);
+    let clock = 0;
 
-    expect(acquireBuildLock({ lockDir })).toBe(true);
+    const took = acquireBuildLock({
+      lockPath,
+      waitMs: PAST_THE_GRACE_PERIOD,
+      sleep: (ms: number) => { clock += ms; },
+      now: () => clock,
+    });
+
+    expect(took).toBe(true);
   });
 
-  // Breaks: same half-written lock, with no pid file at all.
-  it('takes over a lock directory that has no pid file', () => {
-    mkdirSync(lockDir);
+  // Breaks: a checkout that ran the older code left the lock as a DIRECTORY, so
+  // the first rebuild after the update cannot create the file and — if it could
+  // not remove a directory — would never run again.
+  it('clears a lock left behind as a directory by an older checkout', () => {
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, 'pid'), String(deadPid()));
+    let clock = 0;
 
-    expect(acquireBuildLock({ lockDir })).toBe(true);
+    const took = acquireBuildLock({
+      lockPath,
+      waitMs: PAST_THE_GRACE_PERIOD,
+      sleep: (ms: number) => { clock += ms; },
+      now: () => clock,
+    });
+
+    expect(took).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid));
   });
 
   // Breaks: the lock outlives the rebuild that held it, so the next flip — the
   // `pnpm test:node-abi` → `electron` round trip — is refused.
   it('releases the lock so the next rebuild can take it', () => {
-    acquireBuildLock({ lockDir });
-    releaseBuildLock({ lockDir });
+    acquireBuildLock({ lockPath });
+    releaseBuildLock({ lockPath });
 
-    expect(existsSync(lockDir)).toBe(false);
-    expect(acquireBuildLock({ lockDir })).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(acquireBuildLock({ lockPath })).toBe(true);
   });
 
   // Breaks: releasing a lock nobody holds (a failed acquire, a double release)
   // throws and takes the rebuild down with it.
   it('tolerates releasing a lock that is not there', () => {
-    expect(() => releaseBuildLock({ lockDir })).not.toThrow();
+    expect(() => releaseBuildLock({ lockPath })).not.toThrow();
   });
 });
 

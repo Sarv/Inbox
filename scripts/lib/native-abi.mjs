@@ -19,7 +19,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
@@ -28,7 +28,14 @@ const NODE_MODULES = join(ROOT, 'node_modules');
 const BSQ_DIR = join(NODE_MODULES, 'better-sqlite3');
 const BUILD_DIR = join(BSQ_DIR, 'build');
 const ADDON = join(BUILD_DIR, 'Release', 'better_sqlite3.node');
-export const LOCK_DIR = join(BSQ_DIR, '.native-abi.lock');
+/**
+ * The build lock.
+ *
+ * A FILE, not a directory, and that distinction is the whole fix: see
+ * acquireBuildLock. The path is unchanged, so a lock directory left behind by
+ * an older checkout is still recognised and cleaned up.
+ */
+export const LOCK_FILE = join(BSQ_DIR, '.native-abi.lock');
 
 /** How node-gyp is resolved when it is not hoisted to the root node_modules. */
 const defaultResolve = (specifier) => createRequire(import.meta.url).resolve(specifier);
@@ -142,6 +149,24 @@ const LOCK_POLL_MS = 250;
 /** Give up on a takeover war rather than spinning forever. */
 const MAX_STALE_TAKEOVERS = 2;
 
+/**
+ * How long an OWNERLESS lock is given before it counts as abandoned.
+ *
+ * The lock records its owner's pid, and a lock with no readable pid used to be
+ * treated as abandoned immediately. That is what made `pnpm test` fail at
+ * random: see acquireBuildLock. Creating the lock and writing the pid into it
+ * are two syscalls, so there is always an instant where the file exists and is
+ * still empty, and a rival arriving in that instant read "no owner".
+ *
+ * It is measured from when THIS process first saw the lock ownerless, not from
+ * the file's timestamp: the two would be different clocks, and only the elapsed
+ * observation matters. Any value comfortably longer than an open/write pair and
+ * comfortably shorter than a compile closes the window. A lock genuinely
+ * orphaned between the two syscalls (a kill -9 landing in the gap) is still
+ * cleared, just this much later.
+ */
+const OWNERLESS_GRACE_MS = 5_000;
+
 /** Block this (synchronous) script for `ms` without burning a core. */
 function sleepSync(ms) {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -156,9 +181,25 @@ function sleepSync(ms) {
  * `build/Release/.deps/…/sqlite3.o.d.raw` or `build/node_gyp_bins`. Those two
  * errors look like a broken toolchain but mean "something else is building".
  *
- * mkdir is atomic, so it doubles as the lock. A lock whose owner is gone is
- * stale (an interrupted run, a killed shell) and gets taken over — otherwise it
- * would block every rebuild forever.
+ * The lock is one file created with `wx` (O_CREAT|O_EXCL): the create either
+ * wins or fails, with no separate "now claim it" step to lose. It replaced a
+ * lock DIRECTORY plus a `pid` file written into it afterwards, and that pair is
+ * what made `pnpm test` fail perhaps one run in three:
+ *
+ *   turbo starts the storage-node and desktop suites at the same instant
+ *   both run this script, both reach the lock within microseconds
+ *   A creates the directory
+ *   B fails with EEXIST, reads the pid file — which A has not written yet
+ *   B reads no owner, calls the lock abandoned, deletes it and takes it
+ *   both run node-gyp in the same tree and shred each other
+ *
+ * The give-away was a rebuild that failed BOTH attempts and then succeeded when
+ * re-run on its own. Writing the pid inside the exclusive create closes the gap
+ * for the writer; OWNERLESS_GRACE_MS covers the remainder, because a reader can
+ * still catch the file after the create and before the write.
+ *
+ * A lock whose owner is gone is stale (an interrupted run, a killed shell) and
+ * gets taken over — otherwise it would block every rebuild forever.
  *
  * `waitMs > 0` makes a live owner something to wait for rather than a failure.
  * That is the normal case now that the flip is automatic: `pnpm test` runs the
@@ -171,46 +212,69 @@ function sleepSync(ms) {
 export function acquireBuildLock({
   warn = () => {},
   log = () => {},
-  lockDir = LOCK_DIR,
+  lockPath = LOCK_FILE,
   waitMs = 0,
+  graceMs = OWNERLESS_GRACE_MS,
   sleep = sleepSync,
   now = Date.now,
 } = {}) {
   const deadline = now() + waitMs;
   let staleTakeovers = 0;
   let announced = false;
+  /** When this process first saw the lock held by nobody. */
+  let ownerlessSince = null;
 
   for (;;) {
     try {
-      mkdirSync(lockDir);
-      writeFileSync(join(lockDir, 'pid'), String(process.pid));
+      // O_EXCL: the create IS the claim, and the pid goes in before anyone can
+      // act on the file's existence.
+      const handle = openSync(lockPath, 'wx');
+      try {
+        writeSync(handle, String(process.pid));
+      } finally {
+        closeSync(handle);
+      }
       return true;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      const owner = readOwnerPid(lockDir);
+      const owner = readOwnerPid(lockPath);
 
-      if (!isRunning(owner)) {
+      // Unowned means one of two very different things: a lock created
+      // microseconds ago whose pid is still in flight, or one orphaned by a
+      // process that died in that same gap. Only elapsed time tells them apart,
+      // and guessing "abandoned" is the bug this grace period exists to fix.
+      let abandoned;
+      if (owner == null) {
+        ownerlessSince ??= now();
+        abandoned = now() - ownerlessSince >= graceMs;
+      } else {
+        ownerlessSince = null;
+        abandoned = !isRunning(owner);
+      }
+
+      if (abandoned) {
         // The owner died mid-build; its half-written tree is exactly what breaks
         // the next run, so clear the lock and let the clean rebuild below fix it.
         if (staleTakeovers >= MAX_STALE_TAKEOVERS) {
-          warn(`could not take the better-sqlite3 build lock at ${lockDir} — it keeps being re-taken.`);
+          warn(`could not take the better-sqlite3 build lock at ${lockPath} — it keeps being re-taken.`);
           return false;
         }
         staleTakeovers += 1;
-        rmSync(lockDir, { recursive: true, force: true });
+        // recursive: a lock left as a DIRECTORY by an older checkout.
+        rmSync(lockPath, { recursive: true, force: true });
         continue;
       }
 
       const remaining = deadline - now();
       if (remaining <= 0) {
         warn(
-          `another better-sqlite3 rebuild is already running (pid ${owner}) — refusing to build `
-          + 'on top of it. Wait for it to finish, or kill it and re-run.',
+          `another better-sqlite3 rebuild is already running (${owner == null ? 'owner unknown' : `pid ${owner}`}) — `
+          + 'refusing to build on top of it. Wait for it to finish, or kill it and re-run.',
         );
         return false;
       }
       if (!announced) {
-        log(`another better-sqlite3 rebuild is running (pid ${owner}) — waiting for it…`);
+        log(`another better-sqlite3 rebuild is running (${owner == null ? 'owner unknown' : `pid ${owner}`}) — waiting for it…`);
         announced = true;
       }
       sleep(Math.min(LOCK_POLL_MS, remaining));
@@ -218,21 +282,22 @@ export function acquireBuildLock({
   }
 }
 
-export function releaseBuildLock({ lockDir = LOCK_DIR } = {}) {
-  rmSync(lockDir, { recursive: true, force: true });
+export function releaseBuildLock({ lockPath = LOCK_FILE } = {}) {
+  // recursive so a lock left as a directory by an older checkout also goes.
+  rmSync(lockPath, { recursive: true, force: true });
 }
 
 /**
- * The pid recorded in a lock directory, or null when it can't be read.
+ * The pid recorded in a lock, or null when it can't be read.
  *
- * A lock whose pid file is missing, empty or garbage was written by a run that
- * died between the mkdir and the write. Treating that as "no owner" is what
- * lets the next rebuild take it over instead of being blocked forever.
+ * Null is "owner unknown", NOT "no owner": a lock created microseconds ago is
+ * still empty, and so is one left as a bare directory by an older checkout.
+ * acquireBuildLock decides what to do about it by age, never by this alone.
  */
-function readOwnerPid(lockDir) {
+function readOwnerPid(lockPath) {
   try {
-    const pid = Number(readFileSync(join(lockDir, 'pid'), 'utf8').trim());
-    return Number.isInteger(pid) ? pid : null;
+    const pid = Number(readFileSync(lockPath, 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {
     return null;
   }
