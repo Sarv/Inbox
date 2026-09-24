@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { finished } from 'node:stream/promises';
 
+import { createPackageWithOptions } from '@electron/asar';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -45,10 +47,30 @@ const touch = (...segments: string[]): string => {
   return file;
 };
 
+/** better-sqlite3's addon, relative to the root of the app being packed. */
+const ADDON = ['node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node'];
+
+/**
+ * Pack a real `resources/app.asar` from an app holding better-sqlite3, using the
+ * library electron-builder packs with and unpacking `.node` files as the app's
+ * `asarUnpack` does. The addon lands in app.asar.unpacked, and the archive's
+ * header still lists it.
+ */
+const packApp = async (): Promise<void> => {
+  touch('app', 'package.json');
+  touch('app', ...ADDON);
+  mkdirSync(join(root, 'resources'));
+  const archive = join(root, 'resources', 'app.asar');
+  // createPackageWithOptions resolves once its stream is ended, not once it is flushed.
+  await finished(await createPackageWithOptions(join(root, 'app'), archive, { unpack: '*.node' }));
+  rmSync(join(root, 'app'), { recursive: true });
+};
+
 describe('findNativeAddons', () => {
   // The addon lives several levels down inside app.asar.unpacked, so a
   // non-recursive search would report every app as broken -- or, worse, a
   // shallow one that found nothing would be indistinguishable from the real bug.
+  // Inside Electron, fs gave up on this placeholder app.asar and never listed app.asar.unpacked.
   it('finds addons nested anywhere under the tree', () => {
     touch('resources', 'app.asar.unpacked', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
     touch('resources', 'app.asar');
@@ -62,6 +84,39 @@ describe('findNativeAddons', () => {
   it('returns nothing for a tree with no addons', () => {
     touch('resources', 'app.asar');
     expect(findNativeAddons(root)).toEqual([]);
+  });
+
+  // Inside Electron, fs reads a real app.asar as a directory: the walk stepped
+  // into it and reported the addon twice, once at a path that is no file at all.
+  it('reports an addon beside a real app.asar once, at its real path', async () => {
+    await packApp();
+    expect(findNativeAddons(root).map((addon) => relative(root, addon))).toEqual([
+      join('resources', 'app.asar.unpacked', ...ADDON),
+    ]);
+  });
+
+  // The false pass that walk made possible: the header still lists an addon whose
+  // unpacked copy never reached the disk, and counting it passed an app with no
+  // database -- the v1.2.0 failure, back through the archive.
+  it('does not count an addon that only the app.asar header lists', async () => {
+    await packApp();
+    rmSync(join(root, 'resources', 'app.asar.unpacked'), { recursive: true });
+    expect(findNativeAddons(root)).toEqual([]);
+  });
+
+  // Asar support is switched off process-wide for the walk. Left off -- say by a
+  // walk that threw -- an Electron process could no longer read its own app.asar.
+  it('puts asar support back as it found it, even when the walk throws', () => {
+    const asarWas = process.noAsar;
+    try {
+      process.noAsar = false;
+      findNativeAddons(root);
+      expect(process.noAsar).toBe(false);
+      expect(() => findNativeAddons(join(root, 'missing'))).toThrow(/ENOENT/);
+      expect(process.noAsar).toBe(false);
+    } finally {
+      process.noAsar = asarWas;
+    }
   });
 });
 
