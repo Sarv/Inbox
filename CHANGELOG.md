@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Blocklist settings that cannot be read ask nobody**, instead of reading as
   the every-list default for a user who had switched blocklists off. A resolver
   address that cannot be used no longer fails the message being synced.
+- **Recent mail could stop arriving on a large mailbox.** When an account's sync
+  watermark fell a long way behind, the app tried to download the whole gap —
+  tens of thousands of messages — in one pass. It could never finish inside the
+  sync timeout, so it was cancelled and restarted from the same point every
+  cycle: the oldest mail kept downloading while the newest weeks never appeared.
+  Each pass now fetches the newest mail first and is bounded, so today's mail
+  lands on the first sync; the older gap continues filling in the background.
 
 ## [1.2.1] - 2026-09-24
 
