@@ -37,7 +37,8 @@ export const REQUIRED_ADDONS = ['better_sqlite3.node'];
 const MAX_APP_DEPTH = 5;
 
 /**
- * Collect every `.node` addon under a directory tree.
+ * Collect every `.node` addon under a directory tree: the files on disk, never
+ * the entries an archive's header lists (see {@link readTreeOnDisk}).
  *
  * @param {string} root
  * @returns {string[]} Absolute-or-as-given paths, sorted for stable output.
@@ -45,12 +46,43 @@ const MAX_APP_DEPTH = 5;
 export function findNativeAddons(root) {
   /** @type {string[]} */
   const found = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true, recursive: true })) {
+  for (const entry of readTreeOnDisk(root)) {
     if (entry.isFile() && entry.name.endsWith('.node')) {
       found.push(path.join(entry.parentPath ?? entry.path, entry.name));
     }
   }
   return found.sort();
+}
+
+/**
+ * Every entry under `root` as it is on disk -- never the inside of an archive.
+ *
+ * Inside Electron (the desktop suite runs there while the dev app holds the
+ * Electron ABI) `node:fs` reads every `.asar` file as a directory, and the
+ * recursive readdir goes wrong both ways. A real app.asar is descended into and
+ * the addons its header LISTS are reported whether or not they are on disk, so
+ * an app whose app.asar.unpacked never landed passes. An app.asar that cannot
+ * be opened cuts the listing of its directory short, so the app.asar.unpacked
+ * beside it -- where the addon really is -- may never be looked at.
+ *
+ * `process.noAsar` is Electron's switch for exactly this, and means nothing to
+ * plain Node. `original-fs` is not enough: Node's recursive readdir asks the
+ * native binding whether each entry is a directory, Electron patches that
+ * binding for everyone, and so it still steps into a real app.asar and throws
+ * ENOTDIR there.
+ *
+ * @param {string} root
+ * @returns {fs.Dirent[]}
+ */
+function readTreeOnDisk(root) {
+  const asarWas = process.noAsar;
+  process.noAsar = true;
+  try {
+    return fs.readdirSync(root, { withFileTypes: true, recursive: true });
+  } finally {
+    // Process-wide: if it stayed set, an Electron process could no longer read its own app.asar.
+    process.noAsar = asarWas;
+  }
 }
 
 /**
