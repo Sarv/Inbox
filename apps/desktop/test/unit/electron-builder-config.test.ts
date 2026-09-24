@@ -101,6 +101,21 @@ describe('electron-builder configuration', () => {
     }
   });
 
+  // Every Windows target must list BOTH arches. That is what makes NSIS emit
+  // ONE installer carrying both payloads rather than two separate downloads:
+  // buildInstaller() is handed the whole arch map and only splits per arch when
+  // the effective artifactName contains ${arch}, so the second assertion is
+  // part of the same guarantee, not a separate nicety. Dropping arm64 here
+  // silently puts Windows-on-ARM users back on x64 emulation.
+  it('builds both Windows arches into a single installer', () => {
+    const win = buildConfig['win'] as { target?: Array<{ target: string; arch?: string[] }>; artifactName?: string };
+    for (const entry of win.target ?? []) {
+      expect(entry.arch, `win target ${entry.target}`).toEqual(['x64', 'arm64']);
+    }
+    const effectivePattern = win.artifactName ?? (buildConfig['artifactName'] as string | undefined) ?? '';
+    expect(effectivePattern).not.toContain('${arch}');
+  });
+
   // Every release artifact the publish job globs must have a target that
   // actually produces it. A target quietly dropped here means a platform
   // silently vanishes from the release page.

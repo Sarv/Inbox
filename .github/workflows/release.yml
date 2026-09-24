@@ -1,9 +1,11 @@
 name: Release
 
 # Triggered by pushing a vX.Y.Z tag, which `scripts/release.sh` does for you.
-# Builds every platform on its OWN runner — the two compiled native addons
-# (better-sqlite3, lzma-native) cannot be cross-compiled, so a macOS machine
-# physically cannot produce a working Linux or Windows build.
+# Builds every platform on its OWN runner: better-sqlite3 is a compiled addon
+# and cannot be cross-compiled ACROSS operating systems, so a macOS machine
+# physically cannot produce a working Linux or Windows build. Cross-compiling
+# between arches of the SAME OS does work, which is why macOS and Windows each
+# build both of theirs on one runner.
 on:
   push:
     tags: ['v*.*.*']
@@ -84,11 +86,19 @@ jobs:
             os: ubuntu-24.04-arm
             platform: linux
             args: --linux --arm64
-          - name: Windows x64
-            id: win-x64
+          - name: Windows (x64 + arm64)
+            id: win-x64-arm64
             os: windows-latest
             platform: win
-            args: --win --x64
+            # Both arches in ONE invocation on purpose: NSIS then emits a
+            # SINGLE installer carrying both payloads, which is what we want
+            # users to download. Splitting them across runners would produce
+            # two installers. The arm64 native addon is cross-compiled here --
+            # windows-latest ships the MSVC ARM64 toolset
+            # (Microsoft.VisualStudio.Component.VC.Tools.ARM64) -- and the
+            # "Verify Windows native addon architecture" step below proves the
+            # cross-compile actually happened.
+            args: --win --x64 --arm64
 
     steps:
       - uses: actions/checkout@v7
@@ -183,6 +193,18 @@ jobs:
           codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
             || { echo "FAIL: signed app carries no entitlements"; exit 1; }
           echo "OK: signature and entitlements present"
+
+      # A cross-compiled addon that silently fell back to the host CPU still
+      # builds, packs and installs -- it only fails on a real arm64 machine,
+      # and not as a crash: every DB read is try/catch'd, so it looks like an
+      # account with no mail. Cheaper to check the PE header than to ship it.
+      - name: Verify Windows native addon architecture
+        if: matrix.platform == 'win'
+        shell: bash
+        run: |
+          node scripts/verify-win-arch.mjs \
+            apps/desktop/release/win-unpacked=x64 \
+            apps/desktop/release/win-arm64-unpacked=arm64
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
