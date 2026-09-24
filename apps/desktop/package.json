@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@sarv-in/email-chat-view": "^0.2.3",
-    "@sarv-in/mailguard": "^0.3.0",
+    "@sarv-in/mailguard": "^0.4.0",
     "@sarvinbox/core": "workspace:*",
     "@sarvinbox/storage-node": "workspace:*",
     "@sentry/electron": "^7.15.0",

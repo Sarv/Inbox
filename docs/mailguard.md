@@ -144,7 +144,7 @@ run `pnpm build` inside the library checkout after changing its source — the
 **Releasing** (the current state): point at the registry and empty the list.
 
 ```json
-"@sarv-in/mailguard": "^0.3.0"
+"@sarv-in/mailguard": "^0.4.0"
 ```
 
 ```ts

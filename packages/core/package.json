@@ -37,7 +37,7 @@
     "test:integration": "vitest run test/integration"
   },
   "dependencies": {
-    "@sarv-in/mailguard": "^0.3.0",
+    "@sarv-in/mailguard": "^0.4.0",
     "@zone-eu/mailsplit": "^5.4.8",
     "chardet": "^2.2.0",
     "date-fns": "^3.2.0",

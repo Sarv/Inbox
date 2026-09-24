@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   download that was already there — the NSIS installer carries x64 and arm64 in
   one file, and the AppImage covers the no-package-manager case.
 
+### Fixed
+- **A brand name on a free mailbox address is flagged again.** "Microsoft
+  account team" writing from an outlook.com address passed the brand check;
+  fixed in mailguard 0.4.0.
+
 ## [1.2.0] - 2026-09-24
 
 ### Added
