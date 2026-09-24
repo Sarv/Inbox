@@ -1159,7 +1159,39 @@ describe('processBatch — reputation stage', () => {
     ], db.folder(INBOX), db.asStorage());
 
     // `mail.evil.example` is not what a domain blocklist lists; `evil.example` is.
-    expect(lookup).toHaveBeenCalledWith({ ip: '185.199.108.1', domain: 'evil.example' });
+    expect(lookup).toHaveBeenCalledWith({ ip: '185.199.108.1', domains: ['evil.example'] });
+  });
+
+  // Regression: a clean From with a notorious Reply-To is where the answers
+  // go. Only the retired background pass used to ask about the Reply-To; the
+  // ingest check is now the only sender check, so it must ask about both —
+  // registrable, and once each.
+  it('asks about the Reply-To domain too, once', async () => {
+    const { db, mp } = setup();
+    const lookup = vi.fn().mockResolvedValue(null);
+    mp.setReputationLookup(lookup);
+
+    await mp.processBatch([
+      msg({
+        uid: 1,
+        rawHeaders: cleanHeaders,
+        envelope: {
+          from: [{ address: 'billing@brand.example', name: '' }],
+          replyTo: [{ address: 'desk@replies.notorious.example', name: '' }],
+        } as never,
+      }),
+      msg({
+        uid: 2,
+        rawHeaders: cleanHeaders,
+        envelope: {
+          from: [{ address: 'a@brand.example', name: '' }],
+          replyTo: [{ address: 'b@mail.brand.example', name: '' }],
+        } as never,
+      }),
+    ], db.folder(INBOX), db.asStorage());
+
+    expect(lookup).toHaveBeenNthCalledWith(1, { ip: '185.199.108.1', domains: ['brand.example', 'notorious.example'] });
+    expect(lookup).toHaveBeenNthCalledWith(2, { ip: '185.199.108.1', domains: ['brand.example'] });
   });
 
   // Regression: a lookup that found nothing, failed, or was switched off must

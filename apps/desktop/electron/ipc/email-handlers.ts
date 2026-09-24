@@ -19,7 +19,7 @@ import {
   getManualBodyDownloadState,
 } from '../services/body-prefetch-scheduler';
 import { getHeaderBackfillState, kickHeaderBackfill } from '../services/header-backfill';
-import { reportSenderVerdict } from '../services/spam-reputation-service';
+import { reportSenderVerdict } from '../services/reputation-service';
 import { applyUserSpamVerdict } from '../services/spam-verdict-actions';
 import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine } from '../shared';
 

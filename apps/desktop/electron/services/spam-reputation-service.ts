@@ -1,46 +1,45 @@
 /**
- * The spam filter's reputation stage — the part that asks the network.
+ * The spam filter's background reputation pass — what can only be judged once
+ * a message is stored.
  *
- * The header stage scores every message at insert. This stage runs a little
- * later, in the background, over rows it has not judged yet: it looks up the
- * connecting IP and the sender / Reply-To domains through ONE provider, adds
- * whatever points the answer earns to the stored score, and — when a message
- * crosses the line only now — tags it, files it locally and queues the
- * server-side move, exactly as the header stage would have at insert.
+ * The header stage scores every message at insert, and the blocklist check
+ * (`reputation-service.ts`) asks about the SENDER before that score is stored,
+ * so a listed sender is filed before the user ever sees the message. This pass
+ * runs a little later, in the background, over rows it has not judged yet, for
+ * the two questions insert cannot ask:
  *
- * Providers (core spam-reputation.ts): the Sarv-hosted service, reached with
- * the user's own Sarv OAuth token (the default once its endpoint is
- * configured), or plain DNSBL queries from this machine for self-hosters. Off
- * is off: rows stay unjudged and nothing leaves the machine.
+ *  - LINK DOMAINS. Once a body is downloaded, what the blocklists say about
+ *    the domains it links to — asked through the SAME stage the ingest check
+ *    uses, so one cache and one provider serve both, and only when the user
+ *    opted into link lookups in Security > Blocklists.
+ *  - DOMAIN AGE (mailguard `/age`): how recently the sender's domain, and the
+ *    domains the body links to, were registered, asked of the domain registry
+ *    over RDAP. It is the one fact about a campaign domain that is true before
+ *    any blocklist has heard of it — the lure of 2026-09-23 linked to a domain
+ *    five days old — and it needs no blocklist, only the registry. Registration
+ *    dates never change, so the answer is cached for a month rather than hours.
  *
- * Every answer is cached per IP / domain in the core DB so a campaign that
- * hits the inbox forty times costs one lookup, and every failure is fail-open:
- * an unknown adds no points and a row is judged once, whatever came back.
+ * It never asks about the sender's blocklist standing. Until 2026-09-24 it did —
+ * a second copy of the ingest check with its own setting and its own cache,
+ * asking the same lists about the same sender again and needing a guard so one
+ * listing was not charged twice. The sender is asked once now, as mail arrives.
  *
- * DOMAIN AGE rides along (mailguard `/age`): for the same sender and link
- * domains the pass asks the domain registry, over RDAP, how recently each was
- * registered. It is the one fact about a campaign domain that is true before
- * any blocklist has heard of it — the lure of 2026-09-23 linked to a domain
- * five days old — and it runs whether or not a blocklist provider is
- * configured, because it needs no provider: only the registry. Registration
- * dates never change, so the answer is cached for a month rather than hours.
+ * Whatever the pass adds, a message that crosses the line only now is tagged,
+ * filed locally and its server-side move queued, exactly as the header stage
+ * would have at insert. Every failure is fail-open: an unknown adds no points
+ * and a row is judged once, whatever came back.
  */
-import { promises as dns } from 'node:dns';
-
 import {
   assessDomainAge,
   fetchRdapBootstrap,
   lookupDomainAge,
   DOMAIN_AGE_MAX_POINTS,
-  REPUTATION_MAX_POINTS,
   type DomainAgeLookup,
   type FetchLike,
   type RdapBootstrap,
 } from '@sarv-in/mailguard';
 import {
-  LocalDnsblProvider,
   SPAM_THRESHOLD,
-  SarvReputationProvider,
   addTag,
   computeFilterActionResult,
   createLogger,
@@ -52,155 +51,29 @@ import {
   messageDomains,
   parseSpamReasons,
   registrableDomain,
-  reputationReasons,
   stageOfReason,
   yieldToEventLoop,
   type FolderRecord,
-  type ItemReputation,
-  type ReputationProvider,
+  type ReputationQuery,
   type ReputationResult,
-  type SenderReport,
   type SpamReason,
 } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 import { getAllAccountRuntimes, getMainWindow } from '../shared';
 
-import { getBlob, getCoreDb, setBlob } from './core-db';
+import { getCoreDb } from './core-db';
 import { chromiumFetch } from './net-fetch';
-import { getValidAccessToken, listSignedInAccounts } from './oauth-service';
+import {
+  blocklistProviderName,
+  getReputationCache,
+  getReputationSettings,
+  linkReputationStage,
+  onReputationSettingsChanged,
+  type ReputationSettings,
+} from './reputation-service';
 
 const logger = createLogger('spam-reputation');
-
-// --------------------------------------------------------------------- policy
-
-export type ReputationMode = 'off' | 'local' | 'sarv';
-
-export interface SpamReputationPolicy {
-  mode: ReputationMode;
-  /** The Sarv reputation service origin. Empty = not configured = no lookups in 'sarv' mode. */
-  endpoint: string;
-  /**
-   * Send the user's own Report spam / Not spam verdicts to the Sarv service
-   * (sender domain, connecting IP, verdict — never subject, body or
-   * recipients). Opt-in: this is the one thing here that leaves the machine
-   * because the user did something, not because mail arrived.
-   */
-  reports: boolean;
-  /**
-   * Ask the domain registry (RDAP) how recently the sender's and the linked
-   * domains were registered. On by default; nothing is asked in 'off' mode,
-   * because 'off' means nothing about a message leaves the machine.
-   */
-  domainAge: boolean;
-}
-
-export const DEFAULT_SPAM_REPUTATION_POLICY: SpamReputationPolicy = { mode: 'sarv', endpoint: '', reports: false, domainAge: true };
-const POLICY_BLOB_KEY = 'spam-reputation-policy';
-let cachedPolicy: SpamReputationPolicy | null = null;
-
-export function normalizeSpamReputationPolicy(raw: unknown): SpamReputationPolicy {
-  const r = (raw ?? {}) as Record<string, unknown>;
-  const mode = r.mode === 'off' || r.mode === 'local' || r.mode === 'sarv' ? r.mode : DEFAULT_SPAM_REPUTATION_POLICY.mode;
-  let endpoint = typeof r.endpoint === 'string' ? r.endpoint.trim() : '';
-  try {
-    endpoint = endpoint && new URL(endpoint).protocol === 'https:' ? endpoint.replace(/\/+$/, '') : '';
-  } catch {
-    endpoint = '';
-  }
-  return { mode, endpoint, reports: r.reports === true, domainAge: r.domainAge !== false };
-}
-
-export function getSpamReputationPolicy(): SpamReputationPolicy {
-  if (cachedPolicy) return cachedPolicy;
-  try {
-    const blob = getBlob(POLICY_BLOB_KEY);
-    cachedPolicy = normalizeSpamReputationPolicy(blob ? JSON.parse(blob.toString('utf8')) : null);
-  } catch {
-    cachedPolicy = { ...DEFAULT_SPAM_REPUTATION_POLICY };
-  }
-  return cachedPolicy;
-}
-
-export function setSpamReputationPolicy(raw: unknown): SpamReputationPolicy {
-  cachedPolicy = normalizeSpamReputationPolicy(raw);
-  try {
-    setBlob(POLICY_BLOB_KEY, Buffer.from(JSON.stringify(cachedPolicy), 'utf8'));
-  } catch (e) {
-    logger.warn(`[Reputation] policy not persisted: ${(e as Error).message}`);
-  }
-  return cachedPolicy;
-}
-
-/** Test seam. */
-export function resetSpamReputationPolicyCache(): void {
-  cachedPolicy = null;
-}
-
-// ---------------------------------------------------------------------- cache
-
-/** Seconds a listed / clean answer is reused. */
-export const REPUTATION_CACHE_TTL_S = 6 * 60 * 60;
-/** Seconds before an unknown (refused, unreachable) is asked again. */
-export const REPUTATION_CACHE_UNKNOWN_TTL_S = 30 * 60;
-
-export function ensureReputationCacheSchema(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS reputation_cache (
-      kind         TEXT NOT NULL,
-      item         TEXT NOT NULL,
-      status       TEXT NOT NULL,
-      hits         TEXT NOT NULL,
-      user_reports INTEGER,
-      note         TEXT,
-      provider     TEXT NOT NULL,
-      checked_at   INTEGER NOT NULL,
-      PRIMARY KEY (kind, item)
-    );
-  `);
-}
-
-export class ReputationCache {
-  constructor(private readonly db: Database.Database) {
-    ensureReputationCacheSchema(db);
-  }
-
-  /** A still-fresh answer, or null. */
-  get(kind: 'ip' | 'domain', item: string, nowSec: number): ItemReputation | null {
-    const r = this.db.prepare('SELECT status, hits, user_reports, note, checked_at FROM reputation_cache WHERE kind = ? AND item = ?')
-      .get(kind, item) as { status: ItemReputation['status']; hits: string; user_reports: number | null; note: string | null; checked_at: number } | undefined;
-    if (!r) return null;
-    const ttl = r.status === 'unknown' ? REPUTATION_CACHE_UNKNOWN_TTL_S : REPUTATION_CACHE_TTL_S;
-    if (nowSec - r.checked_at > ttl) return null;
-    let hits: ItemReputation['hits'] = [];
-    try { hits = JSON.parse(r.hits); } catch { hits = []; }
-    return {
-      status: r.status, hits,
-      ...(r.user_reports != null ? { userReports: r.user_reports } : {}),
-      ...(r.note ? { note: r.note } : {}),
-    };
-  }
-
-  set(kind: 'ip' | 'domain', item: string, rep: ItemReputation, provider: string, nowSec: number): void {
-    this.db.prepare(`
-      INSERT INTO reputation_cache (kind, item, status, hits, user_reports, note, provider, checked_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(kind, item) DO UPDATE SET status = excluded.status, hits = excluded.hits, user_reports = excluded.user_reports,
-        note = excluded.note, provider = excluded.provider, checked_at = excluded.checked_at
-    `).run(kind, item, rep.status, JSON.stringify(rep.hits), rep.userReports ?? null, rep.note ?? null, provider, nowSec);
-  }
-
-  /** Cached rows, newest first — for the Security page. */
-  count(): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM reputation_cache').get() as { n: number }).n;
-  }
-}
-
-let cacheSingleton: ReputationCache | null = null;
-export function getReputationCache(): ReputationCache {
-  if (!cacheSingleton) cacheSingleton = new ReputationCache(getCoreDb());
-  return cacheSingleton;
-}
 
 // ------------------------------------------------------------ domain age cache
 
@@ -285,36 +158,12 @@ export interface AgeSource {
 /** The age reasons, which keep their own budget apart from the blocklist cap. */
 const AGE_REASON_IDS = new Set<string>(['reputation-domain-new', 'reputation-link-new']);
 
-/** Blocklist points a row already carries, from any stage — the cap they all share. */
+/**
+ * Blocklist points a row already carries — the sender listings the ingest check
+ * charged, and any link listing — which is the cap the link stage shares.
+ */
 function blocklistPointsOn(reasons: SpamReason[]): number {
   return reasons.filter((r) => stageOfReason(r.id) === 'reputation' && !AGE_REASON_IDS.has(r.id)).reduce((s, r) => s + r.points, 0);
-}
-
-/**
- * The sender-stage blocklist reasons a row has not been charged yet, within
- * what is left of the shared cap.
- *
- * TWO CHECKS ASK THE SAME LISTS. The ingest-time lookup (Security >
- * Blocklists, on by default) scores a message's sending IP and domain as it
- * arrives; this pass asks its provider — local DNSBL or the Sarv service —
- * about the same IP and domain later. Both write `reputation-ip-listed` and
- * `reputation-domain-listed`, so without this a message on one list would be
- * charged twice for one listing, and a single PBL entry would file a message
- * that neither check alone considered spam. A reason id already on the row is
- * that same fact, and is skipped.
- */
-function unchargedBlocklistReasons(stored: SpamReason[], fresh: SpamReason[]): SpamReason[] {
-  const present = new Set(stored.map((r) => r.id));
-  let left = REPUTATION_MAX_POINTS - blocklistPointsOn(stored);
-  const out: SpamReason[] = [];
-  for (const reason of fresh) {
-    if (present.has(reason.id)) continue;
-    const points = Math.min(reason.points, left);
-    if (points <= 0) break;
-    left -= points;
-    out.push(points === reason.points ? reason : { ...reason, points });
-  }
-  return out;
 }
 
 // ------------------------------------------------------------------- the pass
@@ -346,12 +195,20 @@ export interface ReputationTarget {
   label: string;
 }
 
+/**
+ * Where link domains are looked up: the one blocklist stage the ingest check
+ * uses (`linkReputationStage()`), cached and fail-open.
+ */
+export interface LinkLookup {
+  readonly providerName: string;
+  lookup(query: ReputationQuery): Promise<ReputationResult>;
+}
+
 export interface ReputationPassDeps {
   targets: () => ReputationTarget[];
-  /** null = no blocklist provider. */
-  provider: () => ReputationProvider | null;
-  cache: ReputationCache;
-  /** null / absent = domain age is off. With no provider AND no age source the pass does nothing. */
+  /** null = link lookups are off, or nobody is asked. */
+  links: () => LinkLookup | null;
+  /** null / absent = domain age is off. With no link lookups AND no age source the pass does nothing. */
   age?: () => AgeSource | null;
   /** Unix seconds. */
   now: () => number;
@@ -393,36 +250,36 @@ export const TICK_BUDGET_MS = 2_000;
 export const BODY_BATCH_SIZE = 25;
 
 export interface ReputationPassSummary {
-  /** Rows stamped this pass. */
+  /** Sender-stage rows stamped this pass. */
   judged: number;
-  /** Rows that gained reputation points. */
+  /** Rows that gained points. */
   scored: number;
-  /** Rows that crossed the spam line only because of reputation, and were filed. */
+  /** Rows that crossed the spam line only now, and were filed. */
   filed: number;
   /** Rows still waiting for the sender stage after the pass, across accounts. */
   pending: number;
   /** Body-stage rows (link domains) judged this pass, and still waiting. */
   linkJudged: number;
   linkPending: number;
-  provider: string | null;
+  /** Who link domains were looked up through, or null when that is off. */
+  linkProvider: string | null;
+  /** Whether registration dates were looked up. */
+  domainAge: boolean;
   /** Fresh registry lookups made for domain age this pass. */
   ageLookups: number;
   /** Distinct notes from unknown answers — "Spamhaus refused the query", "Not signed in to Sarv". */
   notes: string[];
 }
 
-const empty = (provider: string): ReputationResult => ({ provider, ips: new Map(), domains: new Map() });
-
 /** One pass over every account's unjudged rows. */
 export async function runReputationPass(deps: ReputationPassDeps): Promise<ReputationPassSummary> {
-  const provider = deps.provider();
+  const links = deps.links();
   const age = deps.age?.() ?? null;
   const summary: ReputationPassSummary = {
     judged: 0, scored: 0, filed: 0, pending: 0, linkJudged: 0, linkPending: 0,
-    provider: provider?.name ?? (age ? 'domain-age' : null), ageLookups: 0, notes: [],
+    linkProvider: links?.providerName ?? null, domainAge: age !== null, ageLookups: 0, notes: [],
   };
-  if (!provider && !age) return summary;
-  const providerName = provider?.name ?? 'none';
+  if (!links && !age) return summary;
   const batch = deps.batch ?? 200;
   const bodyBatch = deps.bodyBatch ?? BODY_BATCH_SIZE;
   const nowMs = deps.nowMs ?? Date.now;
@@ -478,7 +335,14 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
   const agePointsOn = (row: { spamReasons: string | null }): number =>
     parseSpamReasons(row.spamReasons).filter((r) => AGE_REASON_IDS.has(r.id)).reduce((s, r) => s + r.points, 0);
 
-  for (const target of deps.targets()) {
+  // ---- Sender stage: how old the sender's domains are ----------------------
+  //
+  // Registration dates only. The sender's blocklist standing was asked as the
+  // message arrived; asking again here is the duplicate this pass used to be.
+  // With domain age off there is nothing to judge a sender row by, so its rows
+  // are left waiting rather than stamped — switching age on later still reaches
+  // them.
+  for (const target of age ? deps.targets() : []) {
     if (nowMs() >= deadline) break;
     let rows: ReturnType<ReputationStorage['getEmailsPendingReputation']>;
     try {
@@ -489,45 +353,15 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
     }
     if (rows.length === 0) continue;
 
-    // What to ask about, minus what the cache already knows.
-    const now = deps.now();
-    const result = empty(providerName);
-    if (provider) {
-      const askIps: string[] = [];
-      const askDomains: string[] = [];
-      for (const ip of new Set(rows.map((r) => r.originIp).filter((x): x is string => !!x))) {
-        const hit = deps.cache.get('ip', ip, now);
-        if (hit) result.ips.set(ip, hit); else askIps.push(ip);
-      }
-      for (const d of new Set(rows.flatMap((r) => messageDomains(r)))) {
-        const hit = deps.cache.get('domain', d, now);
-        if (hit) result.domains.set(d, hit); else askDomains.push(d);
-      }
-      if (askIps.length || askDomains.length) {
-        let fresh: ReputationResult;
-        try {
-          fresh = await provider.lookup({ ips: askIps, domains: askDomains });
-        } catch (e) {
-          // A provider that throws instead of answering "unknown" is still fail-open.
-          fresh = empty(provider.name);
-          notes.add(`Lookup failed: ${(e as Error).message}`);
-        }
-        for (const [ip, rep] of fresh.ips) { result.ips.set(ip, rep); deps.cache.set('ip', ip, rep, provider.name, now); }
-        for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
-      }
-      for (const rep of [...result.ips.values(), ...result.domains.values()]) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
-    }
     await learnAges(rows.flatMap((r) => messageDomains(r)));
-
-    // Score, and file what crossed the line. The blocklist reasons and the age
-    // reasons keep separate budgets: a listing and a fresh registration are
-    // two facts about the sender, not one.
-    const judged = await judgeRows(target, rows, (row) => [
-      ...(provider
-        ? unchargedBlocklistReasons(parseSpamReasons(row.spamReasons), reputationReasons(result, { originIp: row.originIp, domains: messageDomains(row) }))
-        : []),
-      ...assessDomainAge({ sender: youngestOf(messageDomains(row)) }, { maxPoints: DOMAIN_AGE_MAX_POINTS - agePointsOn(row) }).reasons,
-    ], summary, 'sender', breathe);
+    const judged = await judgeRows(
+      target,
+      rows,
+      (row) => assessDomainAge({ sender: youngestOf(messageDomains(row)) }, { maxPoints: DOMAIN_AGE_MAX_POINTS - agePointsOn(row) }).reasons,
+      summary,
+      'sender',
+      breathe,
+    );
     try {
       summary.judged += target.storage.applyReputationBatch(judged, deps.now());
     } catch (e) {
@@ -553,42 +387,33 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
         break;
       }
       if (rows.length === 0) break;
-      const now = deps.now();
       const linkDomainsOf = new Map<string, string[]>();
       for (const row of rows) {
         await breathe();
         linkDomainsOf.set(row.id, linkDomains(row.rawBody, { exclude: [registrableDomain(senderDomainOf(row.fromAddress))] }));
       }
-      const result = empty(providerName);
-      if (provider) {
-        const ask: string[] = [];
-        for (const d of new Set([...linkDomainsOf.values()].flat())) {
-          const hit = deps.cache.get('domain', d, now);
-          if (hit) result.domains.set(d, hit); else ask.push(d);
-        }
-        if (ask.length) {
-          let fresh: ReputationResult;
-          try {
-            fresh = await provider.lookup({ ips: [], domains: ask });
-          } catch (e) {
-            fresh = empty(provider.name);
-            notes.add(`Lookup failed: ${(e as Error).message}`);
-          }
-          for (const [d, rep] of fresh.domains) { result.domains.set(d, rep); deps.cache.set('domain', d, rep, provider.name, now); }
+      const asked = [...new Set([...linkDomainsOf.values()].flat())];
+      let result: ReputationResult = { provider: links?.providerName ?? 'none', ips: new Map(), domains: new Map() };
+      if (links && asked.length > 0) {
+        try {
+          result = await links.lookup({ ips: [], domains: asked });
+        } catch (e) {
+          // The stage never throws; a lookup that does is still fail-open.
+          notes.add(`Lookup failed: ${(e as Error).message}`);
         }
         for (const rep of result.domains.values()) if (rep.status === 'unknown' && rep.note) notes.add(rep.note);
       }
-      await learnAges([...linkDomainsOf.values()].flat());
+      await learnAges(asked);
 
       const judged = await judgeRows(target, rows, (row) => {
-        const links = linkDomainsOf.get(row.id) ?? [];
-        // The two blocklist stages share one cap: points the sender stage
-        // already added leave that much less room for the links. Age points
-        // are not in that sum — they have a budget of their own.
+        const found = linkDomainsOf.get(row.id) ?? [];
+        // One cap for every blocklist point a message can carry: the listings
+        // the ingest check charged leave that much less room for the links.
+        // Age points are not in that sum — they have a budget of their own.
         const already = blocklistPointsOn(parseSpamReasons(row.spamReasons));
-        const linkAges = links.map((d) => ages.get(d.toLowerCase())).filter((l): l is DomainAgeLookup => l !== undefined);
+        const linkAges = found.map((d) => ages.get(d.toLowerCase())).filter((l): l is DomainAgeLookup => l !== undefined);
         return [
-          ...(provider ? linkReputationReasons(result, links, already) : []),
+          ...(links ? linkReputationReasons(result, found, already) : []),
           ...assessDomainAge({ links: linkAges }, { maxPoints: DOMAIN_AGE_MAX_POINTS - agePointsOn(row) }).reasons,
         ];
       }, summary, 'link', breathe);
@@ -607,7 +432,9 @@ export async function runReputationPass(deps: ReputationPassDeps): Promise<Reput
   }
 
   for (const target of deps.targets()) {
-    try { summary.pending += target.storage.countEmailsPendingReputation(); } catch { /* counted as zero */ }
+    if (age) {
+      try { summary.pending += target.storage.countEmailsPendingReputation(); } catch { /* counted as zero */ }
+    }
     try { summary.linkPending += target.storage.countEmailsPendingLinkReputation(); } catch { /* counted as zero */ }
   }
   summary.notes = [...notes];
@@ -627,7 +454,7 @@ interface JudgeableRow {
 
 /**
  * Add each row's new reasons to its stored score and file what crossed the
- * line: tag, local move, queued server move. Shared by both network stages.
+ * line: tag, local move, queued server move. Shared by both stages.
  * A row the user called 'ham' is scored (for the record) but never filed;
  * one the header stage already filed is not filed a second time.
  */
@@ -670,52 +497,7 @@ async function judgeRows<R extends JudgeableRow>(
   return updates;
 }
 
-// -------------------------------------------------------------- the report loop
-
-/** Does the policy allow the user's verdicts to leave the machine? */
-export function reportsAllowed(policy: SpamReputationPolicy): boolean {
-  return policy.mode === 'sarv' && !!policy.endpoint && policy.reports;
-}
-
-/**
- * Send the user's Report spam / Not spam verdict to the Sarv service, if — and
- * only if — the policy says so. Fire-and-forget; a failed report is nothing.
- */
-export function reportSenderVerdict(
-  report: SenderReport,
-  deps: { policy?: SpamReputationPolicy; provider?: ReputationProvider | null } = {},
-): void {
-  const policy = deps.policy ?? getSpamReputationPolicy();
-  if (!reportsAllowed(policy)) return;
-  const provider = deps.provider === undefined ? providerForPolicy(policy) : deps.provider;
-  if (!provider?.report) return;
-  provider.report(report).then((accepted) => {
-    if (accepted) logger.info(`[Reputation] reported ${report.verdict} for ${report.domain ?? report.ip}`);
-  }).catch(() => { /* fail-open */ });
-}
-
 // --------------------------------------------------------------- real wiring
-
-/** The first signed-in Sarv account's bearer, or null — the service is per user. */
-async function sarvToken(): Promise<string | null> {
-  const accounts = await listSignedInAccounts();
-  const sarv = accounts.find((a) => a.provider === 'sarv');
-  if (!sarv) return null;
-  return getValidAccessToken('sarv', sarv.email);
-}
-
-/** Build the provider the policy names, or null when the stage is off / not configured. */
-export function providerForPolicy(policy: SpamReputationPolicy): ReputationProvider | null {
-  if (policy.mode === 'local') return new LocalDnsblProvider({ resolve4: (name) => dns.resolve4(name) });
-  if (policy.mode === 'sarv' && policy.endpoint) {
-    return new SarvReputationProvider({
-      endpoint: policy.endpoint,
-      getToken: sarvToken,
-      fetch: (url, init) => chromiumFetch(url, init as RequestInit),
-    });
-  }
-  return null;
-}
 
 /** RDAP over Chromium's network stack: the OS trust store and the user's proxy, like every other outbound call. */
 const rdapFetch: FetchLike = (url) =>
@@ -749,9 +531,9 @@ export function resetRdapBootstrapCache(): void {
   bootstrapTtl = RDAP_BOOTSTRAP_TTL_MS;
 }
 
-/** The age source the policy allows, or null: nothing leaves the machine in 'off' mode or with the toggle off. */
-export function ageSourceForPolicy(policy: SpamReputationPolicy): AgeSource | null {
-  if (policy.mode === 'off' || !policy.domainAge) return null;
+/** The age source the settings allow, or null: with the toggle off, the registry is asked nothing. */
+export function ageSourceForSettings(settings: ReputationSettings): AgeSource | null {
+  if (!settings.domainAge) return null;
   return {
     cache: getDomainAgeCache(),
     lookup: async (domain) => lookupDomainAge(domain, { fetch: rdapFetch, bootstrap: await rdapBootstrap() }),
@@ -782,7 +564,12 @@ export interface SpamReputationState {
   /** Body stage (link domains). */
   linkPending: number;
   linkJudged: number;
-  provider: string | null;
+  /** Who the blocklists are asked through as mail arrives, or null when nobody is. */
+  blocklists: string | null;
+  /** Who link domains were last looked up through, or null when link lookups are off. */
+  linkProvider: string | null;
+  /** Whether registration dates were looked up on the last pass. */
+  domainAge: boolean;
   /** Registry lookups made for domain age this session. */
   ageChecked: number;
   notes: string[];
@@ -794,10 +581,14 @@ export interface SpamReputationState {
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 let stopped = false;
-const state: SpamReputationState = { pending: 0, judged: 0, filed: 0, linkPending: 0, linkJudged: 0, provider: null, ageChecked: 0, notes: [], running: false, lastRun: null };
+let unsubscribe: (() => void) | null = null;
+const state: SpamReputationState = {
+  pending: 0, judged: 0, filed: 0, linkPending: 0, linkJudged: 0, blocklists: null, linkProvider: null,
+  domainAge: false, ageChecked: 0, notes: [], running: false, lastRun: null,
+};
 
 export function getSpamReputationState(): SpamReputationState {
-  return { ...state, running: inFlight };
+  return { ...state, blocklists: blocklistProviderName(), running: inFlight };
 }
 
 function emitProgress(): void {
@@ -811,12 +602,15 @@ async function tick(): Promise<void> {
   inFlight = true;
   let more = false;
   try {
-    const policy = getSpamReputationPolicy();
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Keep the one blocklist cache to answers that can still be served.
+    try { getReputationCache().prune(nowSec); } catch { /* the next pass tries again */ }
+    // Unreadable settings: nothing is looked up at all (see reputation-service).
+    const settings = getReputationSettings();
     const summary = await runReputationPass({
       targets: liveTargets,
-      provider: () => providerForPolicy(policy),
-      age: () => ageSourceForPolicy(policy),
-      cache: getReputationCache(),
+      links: () => linkReputationStage(),
+      age: () => (settings ? ageSourceForSettings(settings) : null),
       now: () => Math.floor(Date.now() / 1000),
     });
     state.pending = summary.pending;
@@ -824,11 +618,12 @@ async function tick(): Promise<void> {
     state.filed += summary.filed;
     state.linkPending = summary.linkPending;
     state.linkJudged += summary.linkJudged;
-    state.provider = summary.provider;
+    state.linkProvider = summary.linkProvider;
+    state.domainAge = summary.domainAge;
     state.ageChecked += summary.ageLookups;
     state.notes = summary.notes;
     state.lastRun = Math.floor(Date.now() / 1000);
-    more = summary.provider !== null && (summary.pending > 0 || summary.linkPending > 0);
+    more = (summary.domainAge || summary.linkProvider !== null) && (summary.pending > 0 || summary.linkPending > 0);
     if (summary.judged > 0 || summary.linkJudged > 0) {
       logger.info(`[Reputation] judged ${summary.judged} sender row(s) and ${summary.linkJudged} body row(s): ${summary.scored} gained points, ${summary.filed} filed as spam; ${summary.pending} + ${summary.linkPending} pending`
         + (summary.notes.length ? ` — ${summary.notes.join('; ')}` : ''));
@@ -846,15 +641,19 @@ export function startSpamReputationScheduler(): void {
   if (timer) return;
   stopped = false;
   timer = setTimeout(tick, REPUTATION_FIRST_TICK_MS);
+  // A newly enabled lookup should not wait out the idle cadence.
+  unsubscribe ??= onReputationSettingsChanged(kickSpamReputation);
   logger.info(`[Reputation] scheduled: first pass in ${REPUTATION_FIRST_TICK_MS / 1000}s`);
 }
 
 export function stopSpamReputationScheduler(): void {
   stopped = true;
   if (timer) { clearTimeout(timer); timer = null; }
+  unsubscribe?.();
+  unsubscribe = null;
 }
 
-/** Pull the next pass forward — the Security page's "Run now". No-op mid-pass. */
+/** Pull the next pass forward — the Security page's "Run now", or a settings change. No-op mid-pass. */
 export function kickSpamReputation(): void {
   if (!timer || inFlight) return;
   clearTimeout(timer);

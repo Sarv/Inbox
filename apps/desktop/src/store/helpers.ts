@@ -646,27 +646,29 @@ export const getMaxAIProcessingEmails = (): number => {
 };
 
 /**
- * Blocklist (DNSBL) settings. The one pair of helpers that read and write
- * them, so the Security tab and the main process never disagree about the
- * shape stored in the settings blob.
+ * The reputation settings — blocklists, who answers, link lookups,
+ * registration dates. The one pair of helpers that read and write them, so the
+ * Security tab and the main process never disagree about the shape stored in
+ * the settings blob.
  *
  * Read with core's `readBlocklistPrefs` — the same function main reads them
- * with — so the ticks in the Blocklists tab are the lists that are queried:
- * on with every list by default, the old saved "off" migrated once, anything
- * else literal. See packages/core/src/utils/blocklist-prefs.ts.
+ * with — over the WHOLE blob, because the fields the retired Settings > General
+ * control left beside the section are part of what it means: on with every
+ * list by default, the old saved "off" migrated once, an explicit "Off" kept,
+ * anything else literal. See packages/core/src/utils/blocklist-prefs.ts.
  */
 export type ReputationPrefs = BlocklistPrefs;
 
 export const getReputationPrefs = (): ReputationPrefs => {
-  let section: unknown;
+  let blob: unknown;
   try {
     const stored = localStorage.getItem('sarvinbox-settings');
-    section = stored ? JSON.parse(stored)?.reputation : undefined;
+    blob = stored ? JSON.parse(stored) : undefined;
   } catch {
-    // A malformed blob reads as no section: the defaults.
-    section = undefined;
+    // A malformed blob reads as no settings: the defaults.
+    blob = undefined;
   }
-  return readBlocklistPrefs(section, BLOCKLISTS.map((list) => list.name));
+  return readBlocklistPrefs(blob, BLOCKLISTS.map((list) => list.name));
 };
 
 /** Read-modify-write, so saving this one section never drops the signatures,
@@ -677,8 +679,9 @@ export const setReputationPrefs = (prefs: ReputationPrefs): void => {
   try {
     const stored = localStorage.getItem('sarvinbox-settings');
     const settings = stored ? JSON.parse(stored) : {};
-    // `chosen` marks this as the user's own decision, so the one-time
-    // migration of the old saved default can never touch it.
+    // `chosen` marks this as the user's own decision, so the migration of the
+    // old saved default can never touch it; the complete shape (with
+    // `provider`) is what makes the reader stop consulting the retired fields.
     localStorage.setItem('sarvinbox-settings', JSON.stringify({ ...settings, reputation: { ...prefs, chosen: true } }));
   } catch {
     // Ignore errors

@@ -104,7 +104,7 @@ function initAppSettingsSync(): void {
   localStorage.setItem = function patchedSetItem(key: string, value: string): void {
     nativeSet(key, value);
     if (MANAGED.has(key)) { try { void api.set(key, value); } catch { /* ignore */ } }
-    if (key === 'sarvinbox-settings') { pushBacklogCap(value); pushSenderIdentityPolicy(value); pushSpamReputationPolicy(value); }
+    if (key === 'sarvinbox-settings') { pushBacklogCap(value); pushSenderIdentityPolicy(value); }
   };
   localStorage.removeItem = function patchedRemoveItem(key: string): void {
     nativeRemove(key);
@@ -153,25 +153,9 @@ function pushSenderIdentityPolicy(rawSettings: string | null): void {
   } catch { /* a malformed settings blob must not break boot */ }
 }
 
-/**
- * Mirror the spam filter's reputation setting (off / local DNSBL / Sarv service
- * + endpoint) into main, which owns the lookups. Main normalises the value.
- */
-function pushSpamReputationPolicy(rawSettings: string | null): void {
-  try {
-    const parsed = rawSettings ? JSON.parse(rawSettings) : null;
-    if (!parsed || typeof parsed !== 'object') return;
-    const api = (window as any)?.electronAPI?.spam;
-    if (!api?.setReputationPolicy) return;
-    void Promise.resolve(api.setReputationPolicy({ mode: parsed.spamReputationMode ?? 'sarv', endpoint: parsed.spamReputationEndpoint ?? '', reports: parsed.spamReputationReports === true, domainAge: parsed.spamReputationDomainAge !== false }))
-      .catch(() => { /* best-effort */ });
-  } catch { /* a malformed settings blob must not break boot */ }
-}
-
 initAppSettingsSync();
 // Boot push: main persists the cap, but a profile restored from the DB (or a
 // value changed while main was down) would otherwise not reach it until the
 // next time the user opened Settings.
 try { pushBacklogCap(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
 try { pushSenderIdentityPolicy(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
-try { pushSpamReputationPolicy(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }

@@ -15,6 +15,13 @@ This document is the contract the client already implements
 (`SarvReputationProvider` in `packages/core/src/utils/spam-reputation.ts`).
 The service lives in its own repository.
 
+On the client it is one of the two providers behind the ONE blocklist setting
+(Security > Blocklists: "Sarv reputation service", with its address and the
+report opt-in); the other is this computer's own DNSBL queries. Whichever is
+chosen is asked about each new sender AS MAIL ARRIVES — before the message is
+filed — and, when the user opted into link lookups, about the domains a body
+links to once it is downloaded.
+
 ## Authentication
 
 Every request carries `Authorization: Bearer <access token>` where the token
@@ -37,9 +44,11 @@ Request (`application/json`):
 - `ips` — connecting-client addresses as the receiving server recorded them
   (`emails.origin_ip`). Public unicast only; the client never sends private
   ranges.
-- `domains` — the From domain and the Reply-To domain of each message, lower
-  case. Up to a few hundred of each per request; the client batches per sync
-  batch and deduplicates.
+- `domains` — the registrable From and Reply-To domains of a message, or the
+  domains a body links to, lower case. A sender lookup is one IP and a domain
+  or two, asked as the message arrives; a link lookup is up to a few hundred
+  domains per downloaded batch of bodies. The client deduplicates, and asks
+  only for what its cache does not already hold.
 
 Response (`200`, `application/json`):
 
@@ -73,9 +82,12 @@ Response (`200`, `application/json`):
 
 Items missing from the response are treated as `unknown`.
 
-Errors: any non-2xx, a timeout (the client allows 10 s), or a body that is not
-JSON of this shape → the client records nothing for that batch and retries
-each item on its own cache expiry.
+Errors: any non-2xx, a timeout (the client allows 5 s — the answer is awaited
+on the ingest path), or a body that is not JSON of this shape → the client
+records nothing for those items and asks again the next time they appear.
+After five failures in a row it stops asking for thirty minutes, so a service
+that is down is not waited on by every message behind it; not being signed in
+costs no request and does not count.
 
 ## `POST /v1/reputation/report` (later)
 
@@ -90,6 +102,8 @@ not send subjects, bodies or recipients — ever.
 ## Caching
 
 The client caches per item in its core DB (`reputation_cache`): six hours for
-a `listed` or `clean` answer, thirty minutes for `unknown`. The service should
+a `listed` or `clean` answer. An `unknown` is never cached — it is asked about
+again next time. The cache is shared with the local DNSBL provider's answers
+and is emptied whenever the user changes who is asked. The service should
 set `Cache-Control: max-age` if it wants to shorten that; the client honours
 a smaller value, never a larger one.

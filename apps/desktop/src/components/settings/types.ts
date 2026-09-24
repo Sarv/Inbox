@@ -1,5 +1,4 @@
-import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
-import { defaultBlocklistPrefs, type BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
+import type { BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
 
 import type { InboxType, InboxSection } from '../../config/inbox-types';
 
@@ -40,23 +39,6 @@ export interface AppSettings {
   /** When a sender has no photo or logo, use the domain's favicon. One fetch
    *  per domain, which tells that domain a client here looked, once. */
   senderFavicons: boolean;
-  /** The spam filter's reputation stage: who is asked about sender IPs and
-   *  domains after a message arrives. 'sarv' = the Sarv-hosted service (needs
-   *  its endpoint; nothing happens until it is set), 'local' = DNS blocklists
-   *  queried from this machine (Spamhaus and URIBL refuse public resolvers),
-   *  'off' = judge from headers only. */
-  spamReputationMode: 'off' | 'local' | 'sarv';
-  /** Origin of the Sarv reputation service, e.g. https://reputation.sarv.com. */
-  spamReputationEndpoint: string;
-  /** Send your own Report spam / Not spam verdicts (sender domain, server address,
-   *  verdict — never subject, body or recipients) to the Sarv service so they
-   *  count for other users. Opt-in. */
-  spamReputationReports: boolean;
-  /** Ask the domain registry (RDAP) how recently the sender's and the linked
-   *  domains were registered — a five-day-old domain is the tell no blocklist
-   *  has yet. On by default; nothing is asked when the stage is off. */
-  spamReputationDomainAge: boolean;
-
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
    *  have no labels/keywords (Outlook, Yahoo, …): copy = keep in Inbox + a
@@ -64,13 +46,15 @@ export interface AppSettings {
    *  Gmail (labels) and sarv (keywords) keep mail in the Inbox with no dupe. */
   categoryLabels: { enabled: boolean; folderMode: 'copy' | 'move' };
 
-  /** Blocklist (DNSBL) lookups during the spam scan. OFF by default and
-   *  deliberately: it is the only check that leaves the machine, telling a
-   *  third-party operator in real time which addresses are writing to this
-   *  user. `zones` names entries from the scanner's catalogue; `servers` are
-   *  the resolvers to ask, which matters because the large operators refuse
-   *  queries arriving through a public or open resolver — the default on most
-   *  home connections. Absent means never configured, which reads as off. */
+  /** Who is asked about incoming mail — blocklists through this computer's DNS
+   *  or the Sarv service, link lookups, registration dates — the ONE setting
+   *  for the reputation checks, the only ones that leave the machine. Written
+   *  only by Security > Blocklists (with `chosen`) and read only through
+   *  core's `readBlocklistPrefs`, which also migrates the retired
+   *  `spamReputationMode` / `spamReputationEndpoint` / `spamReputationReports`
+   *  / `spamReputationDomainAge` fields older builds left beside it. Absent
+   *  from the defaults on purpose: a default section written by the Settings
+   *  screen's save would look like a choice and hide those older fields. */
   reputation?: BlocklistPrefs;
 
   // Inbox settings
@@ -130,12 +114,7 @@ export const defaultSettings: AppSettings = {
   remoteImageMode: 'safe',
   senderLogos: true,
   senderFavicons: true,
-  spamReputationMode: 'sarv',
-  spamReputationEndpoint: '',
-  spamReputationReports: false,
-  spamReputationDomainAge: true,
   categoryLabels: { enabled: true, folderMode: 'copy' },
-  reputation: defaultBlocklistPrefs(BLOCKLISTS.map((list) => list.name)),
   inboxType: 'priority_first',
   showImportanceMarkers: true,
   inboxSections: [],

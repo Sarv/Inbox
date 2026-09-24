@@ -286,9 +286,10 @@ export class MessageProcessor {
   // which is the guard reconcile and syncFlags honour.
   private serverActions: Partial<IngestServerActions> = {};
 
-  // Blocklist lookups for the sender, when the user has configured zones to
-  // ask. Injected rather than constructed here because it makes DNS calls and
-  // owns a cache: one per app, shared across accounts, and absent by default.
+  // Blocklist lookups for the sender, answering null whenever the user's
+  // settings name nobody to ask. Injected rather than constructed here because
+  // it goes to the network and owns a cache: one per app, shared across
+  // accounts, and absent in a host (or test) that never wires one.
   private reputationLookup?: ReputationLookup;
 
   /** Wire the pending-op source (see SyncEngine). */
@@ -914,9 +915,12 @@ export class MessageProcessor {
 
     // What the blocklists say about the sender, added to the header stage's
     // own signals. This is the only part of the score that costs a network
-    // round trip, which is why it is the only part that is injected, off by
-    // default, and awaited HERE rather than in `headerStage`: that function
-    // stays pure and synchronous so the backfill can keep sharing it.
+    // round trip, which is why it is the only part that is injected, governed
+    // by the user's Security > Blocklists setting, and awaited HERE rather than
+    // in `headerStage`: that function stays pure and synchronous so the
+    // backfill can keep sharing it. It is also the ONLY place a sender is asked
+    // about — the background reputation pass asks about link domains and
+    // registration dates, never about the sender again.
     //
     // It runs before the spam tag and before the caller's re-file decision,
     // because a listing that arrived after either would show the user a
@@ -927,9 +931,16 @@ export class MessageProcessor {
       spam && opts?.reputation
         ? await opts.reputation({
             ip: originIp,
-            // The REGISTRABLE domain, which is what a domain blocklist lists:
-            // `mail.sarv.com` is not an entry, `sarv.com` is.
-            domain: domainOfAddress(envelopeFields.fromAddress ?? ''),
+            // The REGISTRABLE domains, which is what a domain blocklist lists:
+            // `mail.sarv.com` is not an entry, `sarv.com` is. Reply-To too — a
+            // clean From with a notorious Reply-To is where the answers go.
+            domains: [
+              ...new Set(
+                [envelopeFields.fromAddress, envelopeFields.replyTo]
+                  .map((address) => domainOfAddress(address))
+                  .filter((domain): domain is string => !!domain),
+              ),
+            ],
           })
         : null;
     // The body stage — what the message SAYS and what it carries — but only

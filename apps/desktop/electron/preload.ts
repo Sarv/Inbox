@@ -11,7 +11,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
 import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
-import type { SpamReputationPolicy, SpamReputationState } from './services/spam-reputation-service';
+import type { SpamReputationState } from './services/spam-reputation-service';
 import type { UpdateState } from './services/update-policy';
 
 /**
@@ -335,10 +335,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
-  // Spam filter, reputation stage: which provider judges senders, and its progress.
+  // Spam filter, reputation stage: the background pass's progress, the Spam
+  // tab, and the user's verdicts. What is asked lives in the settings blob.
   spam: {
-    getReputationPolicy: () => ipcRenderer.invoke('spam:getReputationPolicy'),
-    setReputationPolicy: (policy: SpamReputationPolicy) => ipcRenderer.invoke('spam:setReputationPolicy', policy),
     getReputationState: () => ipcRenderer.invoke('spam:getReputationState'),
     kickReputation: () => ipcRenderer.invoke('spam:kickReputation'),
     listJudged: (limit?: number, accountId?: string) => ipcRenderer.invoke('spam:listJudged', limit, accountId),
@@ -1197,8 +1196,6 @@ export interface ElectronAPI {
     onUpdated: (cb: (event: { domain: string }) => void) => () => void;
   };
   spam: {
-    getReputationPolicy: () => Promise<{ success: boolean; data?: SpamReputationPolicy; error?: string }>;
-    setReputationPolicy: (policy: SpamReputationPolicy) => Promise<{ success: boolean; data?: SpamReputationPolicy; error?: string }>;
     getReputationState: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
     kickReputation: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
     listJudged: (limit?: number, accountId?: string) => Promise<{ success: boolean; data?: SpamJudgedRow[]; error?: string }>;
