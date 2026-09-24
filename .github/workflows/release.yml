@@ -120,6 +120,35 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # The Electron binary is the single biggest cost in this workflow: a
+      # ~100MB zip per target arch, downloaded twice on the macOS and Windows
+      # runners (once by electron's own postinstall for the host, then once per
+      # arch by electron-builder). Nothing can download it ONCE for all six
+      # jobs -- every runner needs a different platform-arch build, and routing
+      # the same bytes through the artifact store would only move the transfer,
+      # not remove it. Caching per runner does remove it: after the first run
+      # on a given lockfile, every later run restores the zips instead.
+      #
+      # setup-node's `cache: pnpm` covers the pnpm store only; these two
+      # directories live outside it. Paths that do not exist on a given OS are
+      # skipped, so one step serves all three.
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          # The lockfile pins the Electron version, so a bump invalidates this
+          # on its own; runner.arch keeps the x64 and arm64 Linux runners from
+          # restoring each other's binaries.
+          key: ${{ runner.os }}-${{ runner.arch }}-electron-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-electron-
+
       # fpm (which electron-builder shells out to for .deb/.rpm) needs the rpm
       # toolchain present to emit an .rpm at all; without it the rpm target is
       # skipped silently and the release ships without Fedora/RHEL packages.
