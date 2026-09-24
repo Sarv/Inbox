@@ -315,6 +315,8 @@ describe('fetchCatalog', () => {
     h.responses.set(REGISTRY_URL, { body: registryFor(archiveFor()) });
     const first = await loadService();
     await first.fetchCatalog();
+    // Flakes without it: the queued cache write can land after the second instance reads.
+    await first.flushRegistryCache();
 
     h.responses.set(REGISTRY_URL, { fail: true });
     const second = await loadService();
