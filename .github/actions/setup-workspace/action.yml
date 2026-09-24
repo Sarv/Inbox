@@ -13,12 +13,12 @@ runs:
   using: composite
   steps:
     - name: Install pnpm
-      uses: pnpm/action-setup@v4
+      uses: pnpm/action-setup@v6
       with:
         version: 8.15.0
 
     - name: Setup Node
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: 22
         # Caches the pnpm STORE, so a repeat install copies from disk instead of
@@ -33,7 +33,7 @@ runs:
     # most recent cache for that job on the same runner.
     - name: Restore turbo cache
       if: inputs.install == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: .turbo
         key: turbo-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
