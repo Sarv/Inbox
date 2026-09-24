@@ -8,6 +8,7 @@ import {
   isOrphanedFromLauncher,
   MAIN_PROCESS_TITLE,
   mainProcessTitle,
+  shouldTagMainProcess,
   selectReclaimablePids,
   shouldKillLauncherOnQuit,
 } from '../../../../electron/services/single-instance';
@@ -168,6 +169,32 @@ describe('mainProcessTitle', () => {
     expect(mainProcessTitle(true)).toBe(DEV_MAIN_PROCESS_TITLE);
     expect(mainProcessTitle(false)).toBe(MAIN_PROCESS_TITLE);
     expect(DEV_MAIN_PROCESS_TITLE).not.toBe(MAIN_PROCESS_TITLE);
+  });
+});
+
+/**
+ * The regression: the shipped macOS app showed "sarvinbox-main" as its menu-bar
+ * name, beside a window correctly titled "Sarv Inbox". On macOS process.title is
+ * also handed to LaunchServices as the display name, and AppKit draws the first
+ * menu from that, overriding the label main.ts asks for. So the packaged mac
+ * build must not be tagged -- and every other build still must be, because that
+ * is how a wedged instance is found and reclaimed.
+ */
+describe('shouldTagMainProcess', () => {
+  it('skips only the packaged macOS build', () => {
+    expect(shouldTagMainProcess({ platform: 'darwin', isDev: false })).toBe(false);
+
+    // Dev on macOS keeps it: dev runs a shared Electron binary whose helpers
+    // carry the same product name, so the title is the only marker that finds
+    // the main process without sweeping the helpers in too.
+    expect(shouldTagMainProcess({ platform: 'darwin', isDev: true })).toBe(true);
+
+    // Linux finds the process by title (process.title rewrites argv), and
+    // Windows keeps it harmlessly -- there it never reaches any visible name.
+    for (const platform of ['linux', 'win32']) {
+      expect(shouldTagMainProcess({ platform, isDev: false }), platform).toBe(true);
+      expect(shouldTagMainProcess({ platform, isDev: true }), platform).toBe(true);
+    }
   });
 });
 

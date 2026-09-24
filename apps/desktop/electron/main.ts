@@ -88,7 +88,13 @@ import {
   startHeartbeat,
   tagMainProcess,
 } from './services/single-child';
-import { decideSecondInstanceAction, isOrphanedFromLauncher, mainProcessTitle, shouldKillLauncherOnQuit } from './services/single-instance';
+import {
+  decideSecondInstanceAction,
+  isOrphanedFromLauncher,
+  mainProcessTitle,
+  shouldKillLauncherOnQuit,
+  shouldTagMainProcess,
+} from './services/single-instance';
 import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
 import { startSpamReputationScheduler, stopSpamReputationScheduler } from './services/spam-reputation-service';
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
@@ -140,7 +146,12 @@ const isDev = !!process.env['VITE_DEV_SERVER_URL'] || !app.isPackaged;
 // reclaim so a prior run is already tagged when we look. Both builds: dev sweeps by
 // title for orphans; prod reclaims a wedged holder found via its heartbeat, and the
 // title is how prod verifies that pid is really ours before killing it.
-tagMainProcess(mainProcessTitle(isDev));
+//
+// Skipped for a packaged macOS build, where process.title doubles as the name
+// AppKit draws in the menu bar -- see shouldTagMainProcess().
+if (shouldTagMainProcess({ platform: process.platform, isDev })) {
+  tagMainProcess(mainProcessTitle(isDev));
+}
 
 // The vite/pnpm launcher that spawned this dev process. Captured at module load,
 // before Ctrl+C can re-parent us to launchd (pid 1). The ppid watchdog (installed
