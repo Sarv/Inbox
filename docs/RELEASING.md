@@ -35,9 +35,9 @@ arm64 and x64 SDKs, so one macOS runner legitimately produces both Mac arches.
 | Runner | Artifacts |
 | --- | --- |
 | `macos-latest` | `.dmg` and `.zip`, arm64 + x64, signed and notarized |
-| `ubuntu-latest` | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` — x64 |
-| `ubuntu-24.04-arm` | the same four — arm64 |
-| `windows-latest` | NSIS installer `.exe` and a portable `.exe` — x64 |
+| `ubuntu-latest` | `.deb`, `.rpm`, `.AppImage` — x64 |
+| `ubuntu-24.04-arm` | the same three — arm64 |
+| `windows-latest` | one NSIS installer `.exe` carrying x64 + arm64 |
 
 `.deb` covers Debian, Ubuntu, Mint and Pop!\_OS; `.rpm` covers Fedora, RHEL and
 openSUSE; the AppImage runs on anything else without installing.
@@ -251,7 +251,7 @@ Three things make that work, and each is a way to break it:
 | macOS `.dmg` / `.zip` | Yes — the `.zip` is the update payload; the `.dmg` is only for first install |
 | Windows NSIS `.exe` | Yes |
 | Linux `.AppImage` | Yes |
-| Linux `.deb` / `.rpm` / `.tar.gz` | **No** — owned by the package manager |
+| Linux `.deb` / `.rpm` | **No** — owned by the package manager |
 
 The app detects the last case and disables checking entirely rather than trying
 an in-place swap on a root-owned install. Unpackaged dev builds are disabled the

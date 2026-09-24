@@ -188,13 +188,6 @@
             "x64",
             "arm64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
         }
       ]
     },
@@ -220,9 +213,6 @@
         },
         {
           "target": "rpm"
-        },
-        {
-          "target": "tar.gz"
         }
       ]
     },

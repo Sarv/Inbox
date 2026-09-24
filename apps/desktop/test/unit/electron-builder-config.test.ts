@@ -38,6 +38,11 @@ const buildConfig = packageJson['build'] as Record<string, unknown>;
 const hookPath = fileURLToPath(new URL('../../build/beforeBuild.js', import.meta.url));
 
 describe('electron-builder configuration', () => {
+  const targetsOf = (platform: string): string[] => {
+    const config = buildConfig[platform] as { target?: Array<{ target: string }> };
+    return (config.target ?? []).map((entry) => entry.target);
+  };
+
   // If this fails, every platform in .github/workflows/release.yml fails.
   it('validates against the installed electron-builder schema', () => {
     expect(() => validateSchema(schema, buildConfig, { name: 'electron-builder' })).not.toThrow();
@@ -218,13 +223,37 @@ describe('electron-builder configuration', () => {
   // Every release artifact the publish job globs must have a target that
   // actually produces it. A target quietly dropped here means a platform
   // silently vanishes from the release page.
+  //
+  // The list is exact, not a subset, because the release page is a product
+  // surface: a target added by accident puts a download in front of users that
+  // nobody decided to support, and one removed by accident takes a platform
+  // away. Both are deliberate decisions, so both must edit this test.
   it('still targets every platform the release workflow publishes', () => {
-    const targetsOf = (platform: string): string[] => {
-      const config = buildConfig[platform] as { target?: Array<{ target: string }> };
-      return (config.target ?? []).map((entry) => entry.target);
-    };
-    expect(targetsOf('mac')).toEqual(expect.arrayContaining(['dmg', 'zip']));
-    expect(targetsOf('win')).toEqual(expect.arrayContaining(['nsis']));
-    expect(targetsOf('linux')).toEqual(expect.arrayContaining(['AppImage', 'deb', 'rpm']));
+    expect(targetsOf('mac')).toEqual(['dmg', 'zip']);
+    expect(targetsOf('win')).toEqual(['nsis']);
+    expect(targetsOf('linux')).toEqual(['AppImage', 'deb', 'rpm']);
+  });
+
+  // macOS auto-update runs off the .zip, NOT the .dmg -- electron-updater's
+  // MacUpdater has no dmg code path at all. Dropping the zip to tidy the
+  // release page therefore does not remove a duplicate download, it silently
+  // ends updates for every existing Mac user: they are never offered a new
+  // version again and have to find one by hand. Nothing else in the build
+  // fails if it goes, which is exactly why it needs a test saying so.
+  it('keeps the macOS zip that electron-updater installs from', () => {
+    expect(targetsOf('mac')).toContain('zip');
+  });
+
+  // Deliberately NOT shipped, so a future "let's offer more formats" does not
+  // quietly undo the decision:
+  //   - win `portable`: a second ~259 MB exe carrying the same payload as the
+  //     NSIS installer, which already handles both arches.
+  //   - linux `tar.gz`: a generic archive that overlaps AppImage, which serves
+  //     the no-package-manager case better.
+  // Neither was removed for being broken -- both worked. They were removed
+  // because every extra row on the release page is a choice a user has to make.
+  it('leaves out the formats that only duplicate another download', () => {
+    expect(targetsOf('win')).not.toContain('portable');
+    expect(targetsOf('linux')).not.toContain('tar.gz');
   });
 });
