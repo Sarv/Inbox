@@ -162,6 +162,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # electron-builder finds the pnpm workspace root by running
+      # `pnpm --workspace-root exec pwd` and using its stdout verbatim. On the
+      # Windows runners Git's coreutils pwd.exe is on PATH, so that probe
+      # answers an MSYS path (/d/a/Inbox/Inbox) instead of throwing -- no
+      # package.json exists there, the workspace root collapses to apps/desktop,
+      # and the installer ships with NO node_modules and no better_sqlite3.node.
+      # See scripts/lib/win-pwd-shim.mjs. The step fails loudly if the probe is
+      # still unusable, rather than 20 minutes later with an empty installer.
+      - name: Make the workspace-root probe answer a Windows path
+        if: runner.os == 'Windows'
+        run: node scripts/win-pwd-shim.mjs
+
       - name: Build libraries
         run: |
           pnpm --filter @sarvinbox/core build
