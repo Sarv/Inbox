@@ -17,8 +17,15 @@
 // like an account with no mail (see CLAUDE.md). Doing the rebuild here, once
 // per arch, is the only way it is deterministic on all three platforms.
 //
-// Returning false is electron-builder's documented "handled externally" signal
-// and skips its own rebuild (Packager.installAppDependencies).
+// This hook MUST return true. `false` is electron-builder's "node_modules are
+// handled externally" signal, and in v26 that does far more than skip the
+// rebuild: Packager.installAppDependencies sets _nodeModulesHandledExternally,
+// and platformPackager then skips computeNodeModuleFileSets outright -- the app
+// ships with NO node_modules at all, on every platform. The v1.2.0 tag built
+// four green artifacts whose app.asar contained only dist/, dist-electron/ and
+// package.json. Returning true costs a second pass of electron-builder's own
+// @electron/rebuild over an addon this hook has already built for the same
+// arch; that is idempotent, and on Windows it is the no-op it always was.
 
 const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -45,5 +52,7 @@ exports.default = async ({ electronVersion, arch }) => {
         'produce an app whose database never opens, which reads as an empty mailbox.'
     )
   }
-  return false
+  // MUST be true -- see the header. false makes electron-builder drop every
+  // node_module from the package, better_sqlite3.node included.
+  return true
 }
