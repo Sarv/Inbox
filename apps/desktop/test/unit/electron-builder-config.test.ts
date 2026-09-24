@@ -1,0 +1,63 @@
+import { createRequire } from 'module';
+
+import { describe, expect, it } from 'vitest';
+
+/**
+ * Guards the SHIPPED electron-builder config against the schema of the
+ * electron-builder actually installed.
+ *
+ * The regression: electron-builder validates its whole configuration up front,
+ * before it touches any platform. So one stale key fails EVERY platform at once
+ * -- and it fails inside the release workflow, minutes after the test suite has
+ * already gone green, on four runners in parallel. That is exactly what
+ * happened on the v1.2.0 tag: electron-builder 26 moved the Linux desktop-entry
+ * keys under `desktop.entry`, and the flat `desktop` map from v24 took down the
+ * macOS, Windows and both Linux builds with "configuration.linux.desktop should
+ * be one of these: null".
+ *
+ * Validating here means a builder upgrade that renames or removes an option is
+ * caught by `pnpm test`, where it costs seconds, instead of by a tag push.
+ */
+
+const require = createRequire(import.meta.url);
+
+// The same two inputs electron-builder itself uses: its bundled JSON schema and
+// its own ajv wrapper. Resolved from the installed copy on purpose -- pinning a
+// snapshot of the schema here would defeat the point, since the whole risk is
+// the installed version moving out from under the config.
+const schema = require('app-builder-lib/scheme.json');
+const { validateSchema } = require('app-builder-lib/out/util/config/schemaValidator.js') as {
+  validateSchema: (schema: unknown, data: unknown, config?: { name?: string }) => void;
+};
+const buildConfig = require('../../package.json').build as Record<string, unknown>;
+
+describe('electron-builder configuration', () => {
+  // If this fails, every platform in .github/workflows/release.yml fails.
+  it('validates against the installed electron-builder schema', () => {
+    expect(() => validateSchema(schema, buildConfig, { name: 'electron-builder' })).not.toThrow();
+  });
+
+  // The keys that carry the mailto: handler registration on Linux. Losing them
+  // is silent: the app still packages, it just stops being offerable as the
+  // system mail client, which nobody notices until a user reports it.
+  it('keeps the Linux desktop entry under the v26 `entry` key', () => {
+    const linux = buildConfig['linux'] as { desktop?: { entry?: Record<string, string> } };
+    expect(linux.desktop?.entry).toMatchObject({
+      StartupWMClass: 'Sarv Inbox',
+      MimeType: 'x-scheme-handler/mailto;',
+    });
+  });
+
+  // Every release artifact the publish job globs must have a target that
+  // actually produces it. A target quietly dropped here means a platform
+  // silently vanishes from the release page.
+  it('still targets every platform the release workflow publishes', () => {
+    const targetsOf = (platform: string): string[] => {
+      const config = buildConfig[platform] as { target?: Array<{ target: string }> };
+      return (config.target ?? []).map((entry) => entry.target);
+    };
+    expect(targetsOf('mac')).toEqual(expect.arrayContaining(['dmg', 'zip']));
+    expect(targetsOf('win')).toEqual(expect.arrayContaining(['nsis']));
+    expect(targetsOf('linux')).toEqual(expect.arrayContaining(['AppImage', 'deb', 'rpm']));
+  });
+});
