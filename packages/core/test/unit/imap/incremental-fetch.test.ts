@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { fetchNewMessagesWindowed, NEW_MESSAGE_WINDOW } from '../../../src/imap/incremental-fetch';
+import { fetchNewestMessagesWindowed, fetchNewMessagesWindowed, NEW_MESSAGE_WINDOW } from '../../../src/imap/incremental-fetch';
 import type { FetchOptions, IIMAPClient, IMAPMessage } from '../../../src/types/imap';
 
 // These pin the ONE thing that made new mail stop arriving on a LARGE/slow
@@ -107,5 +107,85 @@ describe('fetchNewMessagesWindowed', () => {
     const out = await fetchNewMessagesWindowed(client, 100, 103);
     expect(getNewMessages).toHaveBeenCalledWith(100, undefined);
     expect(out.map((m) => m.uid)).toEqual([101, 102]); // boundary echo still filtered
+  });
+});
+
+// These pin the fix for the bug where an account whose watermark had fallen far
+// behind (INBOX at UID 3226 while the server was at uidNext 27709) never showed
+// recent mail: the ascending walk could not cross the 24,482-UID gap inside the
+// 120s sync timeout, so it was torn down every cycle and restarted from the same
+// UID. Newest-first + a cap makes today's mail arrive on the FIRST pass, and
+// `scannedDownToUid` is what stops the caller marking the skipped range as done.
+describe('fetchNewestMessagesWindowed', () => {
+  // The whole point: the newest UIDs must come back from the very first window,
+  // not after traversing the entire gap. If this regresses, recent mail is again
+  // thousands of messages behind and the user sees a month-old inbox.
+  it('walks windows downward so the newest UIDs arrive first', async () => {
+    const uids = Array.from({ length: 1200 }, (_, i) => i + 1); // UIDs 1..1200
+    const { client, calls } = rangeClient(uids);
+
+    const out = await fetchNewestMessagesWindowed(client, 0, 1201, undefined, { windowSize: 500 });
+
+    expect(calls[0]).toEqual([701, 1200]);          // newest window FIRST
+    expect(calls).toEqual([[701, 1200], [201, 700], [1, 200]]);
+    expect(out.messages.map((m) => m.uid)).toEqual(uids); // uncapped: still everything
+    expect(out.scannedDownToUid).toBe(1);                 // reached the floor
+    expect((client as any).getNewMessages).not.toHaveBeenCalled();
+  });
+
+  // The cap is what keeps a pass inside the sync timeout on a far-behind folder.
+  // It must stop early AND report how far down it got, so the caller knows a hole
+  // is left below.
+  it('stops at maxMessages and reports the hole it left below', async () => {
+    const uids = Array.from({ length: 1200 }, (_, i) => i + 1);
+    const { client, calls } = rangeClient(uids);
+
+    const out = await fetchNewestMessagesWindowed(client, 0, 1201, undefined, {
+      windowSize: 500,
+      maxMessages: 500,
+    });
+
+    expect(calls).toEqual([[701, 1200]]);                  // one window, then stop
+    expect(out.messages).toHaveLength(500);
+    expect(out.messages.at(-1)!.uid).toBe(1200);           // the NEWEST mail
+    expect(out.scannedDownToUid).toBe(701);                // > sinceUid+1 => hole below
+  });
+
+  // Covering the whole range must be distinguishable from stopping early —
+  // it is the only signal that lets the caller safely advance lastSyncUid.
+  it('reports sinceUid + 1 when it reached the watermark', async () => {
+    const { client } = rangeClient([101, 102, 103]);
+    const out = await fetchNewestMessagesWindowed(client, 100, 104, undefined, { windowSize: 500 });
+    expect(out.scannedDownToUid).toBe(101); // sinceUid + 1 => no hole
+    expect(out.messages.map((m) => m.uid)).toEqual([101, 102, 103]);
+  });
+
+  // Same no-regress guarantee as the ascending version: a server echoing the
+  // boundary message must not push lastSyncUid backwards.
+  it('drops any UID <= sinceUid (boundary echo)', async () => {
+    const client = {
+      async fetchMessagesByUidRange() { return [msg(100), msg(101), msg(102)]; },
+    } as unknown as IIMAPClient;
+    const out = await fetchNewestMessagesWindowed(client, 100, 103, undefined, { windowSize: 500 });
+    expect(out.messages.map((m) => m.uid)).toEqual([101, 102]);
+  });
+
+  // Nothing newer than the watermark must cost a round-trip at all.
+  it('does no fetch when the server has nothing newer', async () => {
+    const { client, calls } = rangeClient([1, 2, 3]);
+    const out = await fetchNewestMessagesWindowed(client, 3, 4);
+    expect(calls).toEqual([]);
+    expect(out.messages).toEqual([]);
+    expect(out.scannedDownToUid).toBe(4); // sinceUid + 1 => nothing left behind
+  });
+
+  // Minimal fakes without bounded ranges still work; the unbounded fetch covers
+  // the whole range, so it must report no hole.
+  it('falls back to getNewMessages and reports no hole', async () => {
+    const getNewMessages = vi.fn(async () => [msg(100), msg(101), msg(102)]);
+    const client = { getNewMessages } as unknown as IIMAPClient;
+    const out = await fetchNewestMessagesWindowed(client, 100, 103);
+    expect(out.messages.map((m) => m.uid)).toEqual([101, 102]);
+    expect(out.scannedDownToUid).toBe(101);
   });
 });

@@ -8,7 +8,7 @@ import { generateFolderId } from '../utils/id';
 import { logger } from '../utils/logger';
 import { isWatermarkImpossible } from '../utils/sync-watermark';
 
-import { fetchNewMessagesWindowed } from './incremental-fetch';
+import { fetchNewestMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
 import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
@@ -36,6 +36,10 @@ const DEFAULT_OPTIONS: FolderSyncOptions = {
 // range fetch of 1000 messages-with-bodies timed out on imap.sarv.com). Small
 // enough to be safe, large enough to keep round-trips reasonable on fast ones.
 const FULL_SYNC_BATCH = 200;
+/** Cap on messages one incremental sync pass may fetch. Bounds the pass so it
+ *  always completes inside the sync timeout even when the watermark has fallen
+ *  tens of thousands of UIDs behind; the rest is closed by the background drain. */
+const INCREMENTAL_MAX_NEW_MESSAGES = 500;
 
 /**
  * Folder sync result
@@ -603,18 +607,27 @@ export class FolderSyncer {
       };
     }
 
-    // Fetch new messages in BOUNDED UID windows — never an unbounded
-    // `lastUID+1:*`, which on a LARGE/slow mailbox blows the 60s op timeout and
-    // the incremental sync can never complete (see incremental-fetch.ts). The
-    // helper also drops any UID <= lastUID (some servers echo the boundary
-    // message for an out-of-range low bound) so lastSyncUid can never regress
-    // into a permanent redundant refetch loop.
-    const messages = await withFolderSelected(client, folder.path, () =>
-      fetchNewMessagesWindowed(client, lastUID, boxStatus.uidNext, {
+    // Fetch new messages NEWEST-FIRST, in BOUNDED UID windows, and stop after
+    // INCREMENTAL_MAX_NEW_MESSAGES. Never an unbounded `lastUID+1:*`, which on a
+    // LARGE/slow mailbox blows the op timeout (see incremental-fetch.ts), and
+    // never an uncapped ascending walk of the whole gap either: a watermark that
+    // has fallen far behind (observed: INBOX at UID 3226 against uidNext 27709)
+    // cannot be traversed inside the 120s sync timeout, so the sync was torn
+    // down mid-flight, lastSyncUid never advanced, and every later cycle
+    // restarted from the same UID — the newest month of mail never arrived while
+    // the oldest end drained steadily. The helper also drops any UID <= lastUID
+    // (some servers echo the boundary message for an out-of-range low bound) so
+    // lastSyncUid can never regress into a permanent redundant refetch loop.
+    const { messages, scannedDownToUid } = await withFolderSelected(client, folder.path, () =>
+      fetchNewestMessagesWindowed(client, lastUID, boxStatus.uidNext, {
         fetchHeaders: true,
         fetchBody: !options.headersOnly,
         fetchBodyStructure: true,
-      }));
+      }, { maxMessages: INCREMENTAL_MAX_NEW_MESSAGES }));
+
+    // True when the cap stopped the pass before it reached the watermark, so
+    // unfetched UIDs remain BELOW the newest message we just took.
+    const gapRemainsBelow = scannedDownToUid > lastUID + 1;
 
     if (messages.length === 0) {
       // Handle sent folder edge case
@@ -642,10 +655,20 @@ export class FolderSyncer {
     );
     if (processResult.relinkedFromFolders?.length) this.onReconcileFolders?.(processResult.relinkedFromFolders);
 
-    // Update last sync UID — never write a value below the stored one
-    if (processResult.maxUid > lastUID) {
+    // Update last sync UID — never write a value below the stored one, and never
+    // ACROSS a hole. lastSyncUid means "everything at or below this is synced";
+    // jumping it to the newest UID after a capped pass would mark the skipped
+    // range as done and permanently hide that mail from incremental sync. When a
+    // gap remains we leave the watermark where it is and let
+    // SyncEngine.drainFolderChunk close it — the drain derives its work from
+    // `serverUids - localUids`, so it is unaffected by the watermark, and once
+    // the gap is closed a later pass reaches the watermark and advances it.
+    const nextSyncUid = !gapRemainsBelow && processResult.maxUid > lastUID
+      ? processResult.maxUid
+      : lastUID;
+    if (nextSyncUid > lastUID) {
       await storage.updateFolder(folder.id, {
-        lastSyncUid: processResult.maxUid,
+        lastSyncUid: nextSyncUid,
       });
     }
 
@@ -662,7 +685,7 @@ export class FolderSyncer {
       messagesUpdated: processResult.updated,
       flagsUpdated: flagsResult.updated,
       deletedCount: flagsResult.deleted,
-      lastSyncUid: processResult.maxUid > lastUID ? processResult.maxUid : lastUID,
+      lastSyncUid: nextSyncUid,
     };
   }
 

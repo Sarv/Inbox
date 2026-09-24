@@ -327,3 +327,55 @@ describe('reconcileDeletionsFull (background deferred deletion)', () => {
     );
   });
 });
+
+describe('incremental sync on a far-behind folder', () => {
+  // The bug: INBOX sat at lastSyncUid 3226 while the server was at uidNext 27709.
+  // The ascending walk had to cross 24,482 UIDs before the caller saw anything,
+  // could not finish inside the 120s sync timeout, and was torn down every cycle —
+  // so the watermark never moved and the newest month of mail never arrived, even
+  // though the oldest end drained steadily. The pass MUST bring back the newest
+  // mail first and MUST stay bounded.
+  it('fetches the NEWEST mail first instead of walking up from the watermark', async () => {
+    const { server, db, fs } = setup();
+    server.addMessages(INBOX, 700);                              // UIDs 1..700
+    // totalCount keeps this off the low-local-count recovery path, so the
+    // INCREMENTAL branch is the one under test.
+    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 1, totalCount: 50 }); // 699 UIDs behind
+
+    const res = await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
+
+    expect(res.success).toBe(true);
+    // The newest UID on the server is in this pass — that is the mail the user
+    // is looking for. Before the fix it was ~700 messages away.
+    expect(res.messagesInserted).toBe(500);       // capped, not all 699
+    expect(db.allRows().some((e) => e.uid === 700)).toBe(true);
+  });
+
+  // lastSyncUid means "everything at or below this is synced". Advancing it over
+  // the range the cap skipped would mark that mail as done and hide it from
+  // incremental sync forever — the exact trap realtime-manager already documents.
+  it('does NOT advance lastSyncUid across the hole the cap left below', async () => {
+    const { server, db, fs } = setup();
+    server.addMessages(INBOX, 700);
+    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 1, totalCount: 50 });
+
+    await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
+
+    // Scanned down to 201 only, so UIDs 2..200 are still missing: the watermark
+    // stays put and the background drain closes the gap.
+    expect(db.folder(INBOX).lastSyncUid).toBe(1);
+  });
+
+  // Once the gap is small enough to cover in one pass the watermark MUST advance,
+  // otherwise a healthy folder re-fetches its newest window forever.
+  it('advances lastSyncUid once the pass reaches the watermark', async () => {
+    const { server, db, fs } = setup();
+    server.addMessages(INBOX, 10);
+    await db.updateFolder(db.folderId(INBOX), { lastSyncUid: 4, totalCount: 50 });
+
+    const res = await fs.syncFolder(server, imapFolder(INBOX), db.asStorage());
+
+    expect(res.messagesInserted).toBe(6);            // UIDs 5..10
+    expect(db.folder(INBOX).lastSyncUid).toBe(10);   // no hole => advance
+  });
+});

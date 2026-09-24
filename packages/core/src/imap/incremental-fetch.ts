@@ -77,3 +77,73 @@ export async function fetchNewMessagesWindowed(
   collected.sort((a, b) => a.uid - b.uid);
   return collected;
 }
+
+/** What a newest-first pass fetched, plus how far down it actually looked. */
+export interface NewestFirstFetch {
+  /** Messages with UID > sinceUid, ascending by UID (callers reverse themselves). */
+  messages: IMAPMessage[];
+  /**
+   * Lowest UID this pass scanned. `<= sinceUid + 1` means the whole range was
+   * covered, so the caller may advance its contiguous watermark. Anything higher
+   * means the pass stopped on `maxMessages` and a HOLE remains below — advancing
+   * the watermark past it would skip that mail from incremental sync forever.
+   */
+  scannedDownToUid: number;
+}
+
+/**
+ * Like `fetchNewMessagesWindowed`, but walks the windows DOWNWARD from the
+ * newest UID so the most recent mail arrives on the FIRST call.
+ *
+ * Why this exists: the ascending version has to traverse the entire gap before
+ * the caller sees today's mail. On an account whose watermark has fallen far
+ * behind (observed: INBOX pinned at UID 3226 while the server was at uidNext
+ * 27709 -- a 24,482-UID gap) that traversal cannot finish inside the 120s sync
+ * timeout, so the sync was torn down, the watermark never advanced, and the next
+ * cycle restarted from the same place. The mailbox drained steadily from the
+ * OLDEST end while the newest month of mail never appeared at all.
+ *
+ * Fetching newest-first fixes the symptom the user actually sees; the hole left
+ * underneath is filled by SyncEngine.drainFolderChunk, which computes its work as
+ * `serverUids - localUids` and so is unaffected by the watermark. That is why
+ * this reports `scannedDownToUid`: the caller must NOT advance `lastSyncUid` over
+ * a hole just because it holds a newer message.
+ */
+export async function fetchNewestMessagesWindowed(
+  client: IIMAPClient,
+  sinceUid: number,
+  uidNext: number,
+  options?: FetchOptions,
+  windowOptions?: WindowedFetchOptions,
+): Promise<NewestFirstFetch> {
+  const hiEnd = uidNext - 1; // highest UID that can currently exist
+  if (hiEnd <= sinceUid) return { messages: [], scannedDownToUid: sinceUid + 1 };
+
+  // No bounded-range support: same correctness floor as the ascending version.
+  // The unbounded fetch covers the whole range, so nothing is left behind.
+  if (typeof client.fetchMessagesByUidRange !== 'function') {
+    const msgs = await client.getNewMessages(sinceUid, options);
+    return {
+      messages: msgs.filter((m) => m.uid > sinceUid).sort((a, b) => a.uid - b.uid),
+      scannedDownToUid: sinceUid + 1,
+    };
+  }
+
+  const windowSize = Math.max(1, windowOptions?.windowSize ?? NEW_MESSAGE_WINDOW);
+  const maxMessages = windowOptions?.maxMessages;
+  const collected: IMAPMessage[] = [];
+  let scannedDownToUid = hiEnd + 1;
+
+  for (let hi = hiEnd; hi > sinceUid; hi -= windowSize) {
+    const lo = Math.max(sinceUid + 1, hi - windowSize + 1);
+    const window = await client.fetchMessagesByUidRange(lo, hi, options);
+    for (const m of window) {
+      if (m.uid > sinceUid) collected.push(m);
+    }
+    scannedDownToUid = lo;
+    if (maxMessages !== undefined && collected.length >= maxMessages) break;
+  }
+
+  collected.sort((a, b) => a.uid - b.uid);
+  return { messages: collected, scannedDownToUid };
+}
