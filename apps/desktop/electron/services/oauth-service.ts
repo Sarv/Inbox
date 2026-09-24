@@ -545,139 +545,234 @@ export function attachOAuthBearer<
 // ---------- Internal helpers ----------
 
 /**
- * Preferred loopback ports for the OAuth callback. We try them in order
- * until one is free. They must all be registered as allowed redirect_uris
- * on the provider (Sarv does strict exact-match; Google accepts any).
+ * Preferred loopback ports for the OAuth callback. Tried in order until one
+ * binds. They must all be registered as allowed redirect_uris on the provider
+ * (Sarv does strict exact-match; Google accepts any).
  *   http://127.0.0.1:51823/cb
  *   http://127.0.0.1:51824/cb
  *   http://127.0.0.1:51825/cb
- * If all three are in use (extremely rare), we fall back to ephemeral
- * port 0 and the flow will fail with redirect_uri_mismatch on strict
- * servers — the user then needs to free one of the preferred ports.
+ * If all three are held by another process we fall back to ephemeral port 0;
+ * a strict server then answers redirect_uri_mismatch and the user has to free
+ * one of the preferred ports.
  */
 const PREFERRED_PORTS = [51823, 51824, 51825];
 
-// Only one interactive loopback flow runs at a time (it's driven by a single
-// "Sign in with X" modal). Track it so we can ABORT a pending flow — closing its
-// loopback server releases the registered redirect port and lets the user retry.
-// Without this, hitting Back left the flow (and its server) alive: the button
-// stayed a disabled spinner and, after a few retries, all preferred ports were
-// held → the flow fell back to an unregistered ephemeral port → redirect_uri
-// mismatch.
-let activeLoopbackFlow: { cancel: () => void } | null = null;
-
-/** Abort the in-flight interactive OAuth loopback flow, if any. Safe to call
- *  when nothing is running (no-op). Rejects the pending flow with FLOW_CANCELLED
- *  and frees the loopback port. */
-export function cancelOAuthFlow(): void {
-  activeLoopbackFlow?.cancel();
+/**
+ * A sign-in waiting for its redirect, keyed by the `state` we issued for it.
+ *
+ * Keying by state is also the CSRF check: a callback carrying a state we never
+ * issued matches nothing and can complete nothing.
+ */
+interface PendingFlow {
+  /** The redirect_uri sent to the provider — echoed back to the token exchange. */
+  redirectUri: string;
+  done: (code: string) => void;
+  fail: (err: unknown) => void;
 }
 
-function runLoopbackFlow(
+const pendingFlows = new Map<string, PendingFlow>();
+
+/**
+ * Only one interactive flow runs at a time (it is driven by a single "Sign in
+ * with X" modal), so remember which state is the live one — that is the flow
+ * `cancelOAuthFlow()` aborts.
+ */
+let activeFlowState: string | null = null;
+
+/**
+ * The loopback listener, bound ONCE and kept for the life of the process.
+ *
+ * It deliberately outlives the flow that started it. A server owned by a single
+ * flow is closed by every cancel — Back in the modal, a superseding click, the
+ * five-minute timeout — and the next flow then races the OS to rebind: it gets
+ * EADDRINUSE on the just-closed socket, moves to the next preferred port, and
+ * the consent page still in the user's browser redirects to the port it was
+ * issued, where nothing is listening. That is ERR_CONNECTION_REFUSED on
+ * 127.0.0.1:51823 after a successful sign-in. One long-lived listener removes
+ * the whole class: the port never moves, and a redirect that arrives late gets
+ * an explanatory page instead of a refused connection.
+ */
+let callbackServer: { server: http.Server; port: number } | null = null;
+let callbackServerPending: Promise<{ server: http.Server; port: number }> | null = null;
+
+/** Listen on one port, resolving on success and rejecting on the bind error. */
+const listenOnce = (server: http.Server, port: number): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const onError = (err: Error) => {
+      server.removeListener('listening', onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.removeListener('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, '127.0.0.1');
+  });
+
+/** Bind the first free preferred port, falling back to an ephemeral one. */
+const bindCallbackServer = async (server: http.Server): Promise<number> => {
+  for (const port of PREFERRED_PORTS) {
+    try {
+      await listenOnce(server, port);
+      return (server.address() as AddressInfo).port;
+    } catch (err) {
+      // Anything but "taken" is a real failure (no loopback, sandboxed, …).
+      if ((err as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw err;
+    }
+  }
+  logger.warn(
+    '[OAuth] All preferred loopback ports are in use — falling back to an ephemeral port. ' +
+      'A strict provider (Sarv) will answer redirect_uri_mismatch; free 51823-51825 and retry.',
+  );
+  await listenOnce(server, 0);
+  return (server.address() as AddressInfo).port;
+};
+
+/**
+ * Handle one redirect. Every branch writes a response: a browser left on a
+ * blank tab reads as "the app hung", which is exactly what the user sees when
+ * the callback finds nothing to complete.
+ */
+const handleCallbackRequest = (req: http.IncomingMessage, res: http.ServerResponse): void => {
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  if (url.pathname !== '/cb') {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+
+  const state = url.searchParams.get('state') ?? '';
+  const pending = pendingFlows.get(state);
+  if (!pending) {
+    // The flow was cancelled, timed out, or already completed — or this state
+    // was never ours. Nothing to complete, so say so instead of leaving the
+    // browser to guess.
+    logger.warn('[OAuth] Loopback callback for an unknown or finished sign-in — ignored');
+    respondHtml(res, 'expired');
+    return;
+  }
+
+  const providerError = url.searchParams.get('error');
+  if (providerError) {
+    respondHtml(res, 'error', providerError);
+    pending.fail(
+      new OAuthError(`Provider returned error: ${providerError}`, 'PROVIDER_ERROR', providerError),
+    );
+    return;
+  }
+
+  const code = url.searchParams.get('code');
+  if (!code) {
+    respondHtml(res, 'error', 'missing_code');
+    pending.fail(new OAuthError('Missing code in callback', 'BAD_CALLBACK'));
+    return;
+  }
+
+  respondHtml(res, 'ok');
+  logger.info('[OAuth] Loopback callback received — exchanging the authorization code');
+  pending.done(code);
+};
+
+/** The loopback listener, started on first use and reused after that. */
+const ensureCallbackServer = (): Promise<{ server: http.Server; port: number }> => {
+  if (callbackServer) return Promise.resolve(callbackServer);
+  if (!callbackServerPending) {
+    const server = http.createServer();
+    server.on('request', (req, res) => {
+      try {
+        handleCallbackRequest(req, res);
+      } catch (err) {
+        logger.warn('[OAuth] Loopback callback failed:', err);
+        if (!res.headersSent) respondHtml(res, 'error', 'callback_failed');
+      }
+    });
+    // A closed socket must not be handed to the next flow as if it were live.
+    server.on('close', () => {
+      callbackServer = null;
+    });
+    callbackServerPending = bindCallbackServer(server)
+      .then((port) => {
+        // Never hold the app (or a test run) open on an idle listener.
+        server.unref();
+        callbackServer = { server, port };
+        logger.info(`[OAuth] Loopback callback server listening on http://127.0.0.1:${port}/cb`);
+        return callbackServer;
+      })
+      .finally(() => {
+        callbackServerPending = null;
+      });
+  }
+  return callbackServerPending;
+};
+
+/**
+ * Stop the loopback listener and reject anything still waiting on it. Only
+ * needed to release the port deterministically (tests, shutdown) — normal
+ * cancellation leaves the listener up on purpose.
+ */
+export function closeOAuthCallbackServer(): void {
+  cancelOAuthFlow();
+  const current = callbackServer;
+  callbackServer = null;
+  try {
+    current?.server.close();
+  } catch {
+    /* already closing */
+  }
+}
+
+/** Abort the in-flight interactive OAuth flow, if any. No-op when idle.
+ *  Rejects the pending sign-in with FLOW_CANCELLED; the loopback port stays
+ *  bound, so the next attempt reuses the same registered redirect_uri. */
+export function cancelOAuthFlow(): void {
+  const state = activeFlowState;
+  if (!state) return;
+  pendingFlows.get(state)?.fail(new OAuthError('OAuth sign-in cancelled', 'FLOW_CANCELLED'));
+}
+
+async function runLoopbackFlow(
   provider: OAuthProviderConfig,
   codeChallenge: string,
   expectedState: string,
 ): Promise<{ code: string; redirectUri: string }> {
-  // A previous flow still pending (e.g. user hit Back then clicked again) — kill
-  // it first so its server releases the registered redirect port before we bind.
-  activeLoopbackFlow?.cancel();
+  // A previous flow still pending (e.g. the user hit Back then clicked again)
+  // is superseded, not left to answer over the top of this one.
+  cancelOAuthFlow();
+
+  const { port } = await ensureCallbackServer();
+  const redirectUri = `http://127.0.0.1:${port}/cb`;
 
   return new Promise((resolve, reject) => {
-    const server = http.createServer();
     let settled = false;
 
-    // Single exit point: clear the timeout, close the server, deregister this
-    // flow, and resolve/reject exactly once (guards against a late redirect
-    // racing the timeout/cancel).
+    // Single exit point: clear the timeout, deregister the flow, and
+    // resolve/reject exactly once (a late redirect racing a cancel or the
+    // timeout finds nothing registered and gets the "expired" page).
     const settle = (run: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      try { server.close(); } catch { /* already closing */ }
-      if (activeLoopbackFlow === handle) activeLoopbackFlow = null;
+      pendingFlows.delete(expectedState);
+      if (activeFlowState === expectedState) activeFlowState = null;
       run();
     };
-    const done = (value: { code: string; redirectUri: string }) => settle(() => resolve(value));
+    const done = (code: string) => settle(() => resolve({ code, redirectUri }));
     const fail = (err: unknown) => settle(() => reject(err));
 
     const timeout = setTimeout(
       () => fail(new OAuthError('OAuth flow timed out (5 minutes)', 'FLOW_TIMEOUT')),
       5 * 60 * 1000,
     );
+    // The timer must not keep the app alive for five minutes after a quit.
+    timeout.unref?.();
 
-    const handle = {
-      cancel: () => fail(new OAuthError('OAuth sign-in cancelled', 'FLOW_CANCELLED')),
-    };
-    activeLoopbackFlow = handle;
+    pendingFlows.set(expectedState, { redirectUri, done, fail });
+    activeFlowState = expectedState;
 
-    server.on('request', (req, res) => {
-      try {
-        const url = new URL(req.url || '/', `http://127.0.0.1`);
-        if (url.pathname !== '/cb') {
-          res.writeHead(404); res.end(); return;
-        }
-        const err = url.searchParams.get('error');
-        if (err) {
-          respondHtml(res, 'error', err);
-          fail(new OAuthError(`Provider returned error: ${err}`, 'PROVIDER_ERROR', err));
-          return;
-        }
-        const code = url.searchParams.get('code');
-        const state = url.searchParams.get('state');
-        if (!code || !state) {
-          respondHtml(res, 'error', 'missing_code');
-          fail(new OAuthError('Missing code or state in callback', 'BAD_CALLBACK'));
-          return;
-        }
-        if (state !== expectedState) {
-          respondHtml(res, 'error', 'state_mismatch');
-          fail(new OAuthError('OAuth state mismatch — possible CSRF', 'STATE_MISMATCH'));
-          return;
-        }
-        respondHtml(res, 'ok');
-        const addr = server.address() as AddressInfo;
-        const redirectUri = `http://127.0.0.1:${addr.port}/cb`;
-        done({ code, redirectUri });
-      } catch (e) {
-        fail(e);
-      }
-    });
-
-    // Try preferred fixed ports, then fall back to an ephemeral port.
-    const onListening = () => {
-      const addr = server.address() as AddressInfo;
-      const redirectUri = `http://127.0.0.1:${addr.port}/cb`;
-      const authUrl = buildAuthUrl(provider, redirectUri, codeChallenge, expectedState);
-      shell.openExternal(authUrl).catch((e) => fail(e));
-    };
-    // Register exactly ONCE, outside the retry loop. Passing the callback
-    // to every listen() attempt left one once-listener per failed port, so
-    // the eventual success fired them all → multiple consent tabs.
-    server.once('listening', onListening);
-
-    const tryPorts = (ports: number[]) => {
-      const [next, ...rest] = ports;
-      server.removeAllListeners('error');
-      server.once('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE' && rest.length > 0) {
-          tryPorts(rest);
-          return;
-        }
-        // Last-resort: ephemeral port. This will fail on strict servers
-        // (Sarv) with redirect_uri_mismatch; user must free a preferred port.
-        if (err.code === 'EADDRINUSE') {
-          logger.warn('[OAuth] All preferred loopback ports in use — falling back to ephemeral');
-          server.removeAllListeners('error');
-          server.once('error', (e) => fail(e));
-          server.listen(0, '127.0.0.1');
-          return;
-        }
-        fail(err);
-      });
-      server.listen(next, '127.0.0.1');
-    };
-
-    tryPorts([...PREFERRED_PORTS]);
+    const authUrl = buildAuthUrl(provider, redirectUri, codeChallenge, expectedState);
+    shell.openExternal(authUrl).catch((err) => fail(err));
   });
 }
 
@@ -717,11 +812,25 @@ async function fetchUserInfo(
   return { email: body.email, name: body.name, picture: body.picture };
 }
 
-function respondHtml(res: http.ServerResponse, kind: 'ok' | 'error', detail = ''): void {
-  const title = kind === 'ok' ? 'Signed in' : 'Sign-in failed';
-  const body = kind === 'ok'
-    ? 'You can close this tab and return to Sarv Inbox.'
-    : `Sign-in failed: ${escapeHtml(detail)}. Close this tab and try again.`;
+/**
+ * Answer the browser. `expired` is the page for a redirect that no longer has a
+ * sign-in to complete (cancelled, timed out, already done, or a state we never
+ * issued) — the case that used to show ERR_CONNECTION_REFUSED because the
+ * listener had been torn down with its flow.
+ */
+function respondHtml(
+  res: http.ServerResponse,
+  kind: 'ok' | 'error' | 'expired',
+  detail = '',
+): void {
+  const title =
+    kind === 'ok' ? 'Signed in' : kind === 'expired' ? 'This sign-in has expired' : 'Sign-in failed';
+  const body =
+    kind === 'ok'
+      ? 'You can close this tab and return to Sarv Inbox.'
+      : kind === 'expired'
+        ? 'This sign-in was cancelled or took too long. Close this tab, return to Sarv Inbox and start the sign-in again.'
+        : `Sign-in failed: ${escapeHtml(detail)}. Close this tab and try again.`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:480px;margin:80px auto;padding:24px;text-align:center;color:#1f2937}
 h1{font-size:22px;margin:0 0 12px}p{color:#4b5563}</style></head>
