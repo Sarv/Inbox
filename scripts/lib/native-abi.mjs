@@ -20,6 +20,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..', '..');
@@ -28,6 +29,41 @@ const BSQ_DIR = join(NODE_MODULES, 'better-sqlite3');
 const BUILD_DIR = join(BSQ_DIR, 'build');
 const ADDON = join(BUILD_DIR, 'Release', 'better_sqlite3.node');
 export const LOCK_DIR = join(BSQ_DIR, '.native-abi.lock');
+
+/** How node-gyp is resolved when it is not hoisted to the root node_modules. */
+const defaultResolve = (specifier) => createRequire(import.meta.url).resolve(specifier);
+
+/**
+ * node-gyp's CLI, as an argv pair ready for execFile.
+ *
+ * Deliberately NOT `node_modules/.bin/node-gyp`. On Windows pnpm writes three
+ * shims under that name -- `node-gyp` (a POSIX sh script), `node-gyp.cmd` and
+ * `node-gyp.ps1` -- and an existsSync check finds the extensionless sh one,
+ * which Windows cannot start: execFile fails instantly.
+ *
+ * That is not hypothetical. On the v1.2.0 Windows release job both rebuild
+ * attempts "failed" 1.6ms apart, where a real compile takes about a minute, and
+ * since each attempt clears build/ first the runner was left with no
+ * better_sqlite3.node at all -- an installer with no database addon, which does
+ * not crash, it just looks like an app with no mail in it.
+ *
+ * Running the .js entry with THIS node binary involves no shim and behaves the
+ * same on all three platforms.
+ *
+ * @returns {{command: string, args: string[]} | null} null when node-gyp cannot
+ *   be found at all.
+ */
+export function nodeGypCommand({ nodeModules = NODE_MODULES, resolve = defaultResolve } = {}) {
+  const hoisted = join(nodeModules, 'node-gyp', 'bin', 'node-gyp.js');
+  if (existsSync(hoisted)) return { command: process.execPath, args: [hoisted] };
+  try {
+    // pnpm need not have hoisted node-gyp to the root; resolve it the way an
+    // import would rather than giving up on the rebuild.
+    return { command: process.execPath, args: [resolve('node-gyp/bin/node-gyp.js')] };
+  } catch {
+    return null;
+  }
+}
 
 /** Electron version this repo builds against, or null when not installed. */
 export function readElectronVersion() {
@@ -91,7 +127,10 @@ function expectedAbi({ runtime, target }) {
  * whose ABI cannot be resolved (node-abi absent), both report false, so the
  * caller rebuilds rather than trusting a binary it could not verify.
  */
-export function isAbiCurrent({ runtime, target }) {
+export function isAbiCurrent({ runtime, target, arch = process.arch }) {
+  // An addon compiled for another CPU cannot be dlopen'd by this process, so
+  // there is nothing to probe — a cross-arch request always means "rebuild".
+  if (arch !== process.arch) return false;
   const wanted = expectedAbi({ runtime, target });
   if (!wanted) return false;
   return readBuiltAbi() === wanted;
@@ -211,11 +250,13 @@ export function isRunning(pid) {
 }
 
 /** The manual command to run when the automated rebuild can't. */
-export function manualRebuildCommand({ runtime, target }) {
+export function manualRebuildCommand({ runtime, target, arch = process.arch }) {
   const electronFlags = runtime === 'electron'
     ? ` --runtime=electron --target=${target} --dist-url=https://electronjs.org/headers`
     : '';
-  return `(cd node_modules/better-sqlite3 && node-gyp rebuild --release${electronFlags} --arch=${process.arch})`;
+  // --arch names the arch that was BEING built, not the host: a cross-compile
+  // that failed is only reproducible with the same --arch.
+  return `(cd node_modules/better-sqlite3 && node-gyp rebuild --release${electronFlags} --arch=${arch})`;
 }
 
 /**
@@ -233,6 +274,7 @@ export function manualRebuildCommand({ runtime, target }) {
 export function rebuildBetterSqlite3({
   runtime,
   target,
+  arch = process.arch,
   log = () => {},
   warn = () => {},
   waitMs = 0,
@@ -242,9 +284,9 @@ export function rebuildBetterSqlite3({
     warn('better-sqlite3 not found — skipping rebuild');
     return false;
   }
-  const manual = manualRebuildCommand({ runtime, target });
-  const nodeGyp = join(NODE_MODULES, '.bin', 'node-gyp');
-  if (!existsSync(nodeGyp)) {
+  const manual = manualRebuildCommand({ runtime, target, arch });
+  const nodeGyp = nodeGypCommand();
+  if (nodeGyp == null) {
     warn(`node-gyp not found — cannot rebuild better-sqlite3. Run manually:\n  ${manual}`);
     return false;
   }
@@ -255,19 +297,29 @@ export function rebuildBetterSqlite3({
     // were very likely building the same ABI we want (parallel `pnpm test`
     // tasks all ask for Node's), and compiling it a second time would cost
     // another minute to produce a byte-identical binary.
-    if (!force && isAbiCurrent({ runtime, target })) {
+    if (!force && isAbiCurrent({ runtime, target, arch })) {
       log(`better-sqlite3 is already built for ${runtime} — nothing to do`);
       return true;
     }
-    return rebuildUnderLock({ runtime, target, nodeGyp, manual, log, warn });
+    return rebuildUnderLock({ runtime, target, arch, nodeGyp, manual, log, warn });
   } finally {
     releaseBuildLock();
   }
 }
 
-function rebuildUnderLock({ runtime, target, nodeGyp, manual, log, warn }) {
-  const wanted = expectedAbi({ runtime, target });
+function rebuildUnderLock({ runtime, target, arch, nodeGyp, manual, log, warn }) {
+  // A binary for another CPU cannot be loaded here, so the ABI probe below is
+  // unavailable and existence is all we can assert. The release workflow reads
+  // the machine type straight out of the file instead — see
+  // scripts/verify-win-arch.mjs, which is the check that caught this whole bug.
+  const crossCompiling = arch !== process.arch;
+  const wanted = crossCompiling ? null : expectedAbi({ runtime, target });
   const verify = (how) => {
+    if (crossCompiling) {
+      if (existsSync(ADDON)) return true;
+      warn(`${how} produced no better-sqlite3 binary for ${arch}.`);
+      return false;
+    }
     const built = readBuiltAbi();
     if (!built) {
       warn(`${how} produced no loadable better-sqlite3 binary.`);
@@ -288,9 +340,9 @@ function rebuildUnderLock({ runtime, target, nodeGyp, manual, log, warn }) {
   // Electron majors usually don't ship one, so this normally falls through.
   const prebuildCli = join(NODE_MODULES, 'prebuild-install', 'bin.js');
   if (runtime === 'electron' && existsSync(prebuildCli)) {
-    log(`Fetching better-sqlite3 prebuild for Electron ${target} (${process.platform}-${process.arch})`);
+    log(`Fetching better-sqlite3 prebuild for Electron ${target} (${process.platform}-${arch})`);
     try {
-      execFileSync(process.execPath, [prebuildCli, '--runtime=electron', `--target=${target}`], {
+      execFileSync(process.execPath, [prebuildCli, '--runtime=electron', `--target=${target}`, `--arch=${arch}`], {
         cwd: BSQ_DIR,
         stdio: 'inherit',
       });
@@ -303,7 +355,7 @@ function rebuildUnderLock({ runtime, target, nodeGyp, manual, log, warn }) {
     }
   }
 
-  const args = ['rebuild', '--release', `--arch=${process.arch}`];
+  const args = ['rebuild', '--release', `--arch=${arch}`];
   if (runtime === 'electron') {
     args.push('--runtime=electron', `--target=${target}`, '--dist-url=https://electronjs.org/headers');
   }
@@ -316,13 +368,15 @@ function rebuildUnderLock({ runtime, target, nodeGyp, manual, log, warn }) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     rmSync(BUILD_DIR, { recursive: true, force: true });
     try {
-      execFileSync(nodeGyp, args, { cwd: BSQ_DIR, stdio: 'inherit' });
+      execFileSync(nodeGyp.command, [...nodeGyp.args, ...args], { cwd: BSQ_DIR, stdio: 'inherit' });
       if (verify('The rebuild')) {
-        log(`better-sqlite3 compiled from source for ${runtime === 'electron' ? 'Electron' : 'Node'}`);
+        log(`better-sqlite3 compiled from source for ${runtime === 'electron' ? 'Electron' : 'Node'} (${arch})`);
         return true;
       }
-    } catch {
-      warn(`better-sqlite3 rebuild attempt ${attempt} failed.`);
+    } catch (error) {
+      // Naming the reason matters: a spawn that never started (the Windows .bin
+      // shim) and a compile that failed look identical without it.
+      warn(`better-sqlite3 rebuild attempt ${attempt} failed: ${error.message}`);
     }
     if (attempt === 1) log('retrying once from a clean build directory…');
   }
