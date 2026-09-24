@@ -111,6 +111,43 @@ describe('electron-builder configuration', () => {
     }
   });
 
+  // Both macOS targets must say "universal", not "arm64"/"x64". That single
+  // word is what turns two dmgs and two zips into one of each: electron-builder
+  // packs both arches and merges them with lipo into one fat binary that macOS
+  // picks a slice from at launch. Listing the arches separately instead builds
+  // fine and produces four downloads, putting a "which Mac do I have?" question
+  // back in front of every user.
+  //
+  // The filename spells both arches out because "universal" means nothing to
+  // someone deciding whether a download will run on their Mac. That makes the
+  // name a CLAIM, and the two assertions here have to stay together: a name
+  // promising arm64 and amd64 on top of a build that quietly went back to a
+  // single arch would send half of all Mac users to a file that cannot run.
+  it('merges both macOS arches into one universal download and says so in the filename', () => {
+    const mac = buildConfig['mac'] as { target?: Array<{ target: string; arch?: string[] }>; artifactName?: string };
+    for (const entry of mac.target ?? []) {
+      expect(entry.arch, `mac target ${entry.target}`).toEqual(['universal']);
+    }
+    expect(mac.artifactName).toContain('arm64');
+    expect(mac.artifactName).toContain('amd64');
+  });
+
+  // The regression: @electron/universal refuses to merge two packs whose files
+  // disagree, and node-gyp's intermediates (obj/, obj.target/, .deps/) are
+  // arch-specific build droppings. Worse, build/afterPack.js deletes them from
+  // app.asar.unpacked AFTER the asar header has already listed them, so the
+  // merge walked the header and died on a file that was no longer on disk:
+  //   ENOENT ... app.asar.unpacked/.../build/Release/obj/gen/sqlite3/sqlite3.c
+  // Excluding them at the files level means they never enter the package, so
+  // there is nothing inconsistent left to reconcile. A normal single-arch build
+  // never notices any of this, so nothing but this test guards it.
+  it('keeps the node-gyp intermediates out of the package entirely', () => {
+    const files = buildConfig['files'] as string[];
+    for (const intermediate of ['obj', 'obj.target', '.deps']) {
+      expect(files, `node-gyp ${intermediate}`).toContain(`!**/build/Release/${intermediate}/**`);
+    }
+  });
+
   // Every Windows target must list BOTH arches. That is what makes NSIS emit
   // ONE installer carrying both payloads rather than two separate downloads:
   // buildInstaller() is handed the whole arch map and only splits per arch when

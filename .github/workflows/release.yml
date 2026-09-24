@@ -68,14 +68,23 @@ jobs:
       fail-fast: false # one platform failing must not discard the others
       matrix:
         include:
-          - name: macOS (arm64 + x64)
+          - name: macOS (universal)
             id: mac-universal
             os: macos-latest
             platform: mac
             # Both macOS arches build on one runner: Xcode ships both SDKs, so
             # the native addons cross-compile between arm64 and x64 fine. This
             # is the ONLY cross-arch case that works.
-            args: --mac --arm64 --x64
+            #
+            # --universal packs each arch separately and then merges them with
+            # lipo into ONE fat binary, so the job emits a single dmg and a
+            # single zip instead of one of each per arch. Users stop having to
+            # know which Mac they own; the cost is that each download carries
+            # both slices. The merge is strict -- it refuses to reconcile files
+            # that differ between the two packs -- which is why build.files
+            # excludes the node-gyp intermediates (obj/, .deps/) whose contents
+            # are arch-specific.
+            args: --mac --universal
           # Each Linux arch gets its OWN runner: unlike Xcode and MSVC, the
           # stock gcc on a GitHub runner has no cross toolchain, so the arm64
           # machine cannot compile x64 (`cc: unrecognized command-line option
@@ -253,6 +262,16 @@ jobs:
           node scripts/verify-win-arch.mjs \
             apps/desktop/release/win-unpacked=x64 \
             apps/desktop/release/win-arm64-unpacked=arm64
+
+      # The universal merge is the step that can silently halve the app: if
+      # lipo ever keeps one slice, the dmg still builds, signs, notarizes and
+      # installs, and fails only for users on the missing CPU -- as an app with
+      # no mail, not as a crash, because every DB read is try/catch'd. Reading
+      # the Mach-O fat header costs milliseconds.
+      - name: Verify the macOS build is really universal
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: node scripts/verify-mac-arch.mjs apps/desktop/release/mac-universal=x64,arm64
 
       # The v1.2.0 tag built four green artifacts that were all EMPTY: a false
       # from build/beforeBuild.js told electron-builder 26 that node_modules

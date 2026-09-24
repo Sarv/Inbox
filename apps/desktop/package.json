@@ -116,7 +116,11 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "!**/build/Release/obj/**",
+      "!**/build/Release/obj.target/**",
+      "!**/build/Release/.deps/**",
+      "!**/build/deps/**"
     ],
     "asarUnpack": [
       "**/*.node",
@@ -136,6 +140,7 @@
       }
     ],
     "mac": {
+      "artifactName": "sarv-inbox-${version}-mac-arm64-amd64.${ext}",
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
@@ -147,15 +152,13 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64",
-            "x64"
+            "universal"
           ]
         },
         {
           "target": "zip",
           "arch": [
-            "arm64",
-            "x64"
+            "universal"
           ]
         }
       ]
