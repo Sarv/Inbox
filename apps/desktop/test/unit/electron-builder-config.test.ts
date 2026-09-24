@@ -63,11 +63,25 @@ describe('electron-builder configuration', () => {
   // one from the package name -- and `@sarvinbox/desktop` sanitizes to
   // `@sarvinboxdesktop`, which v26 rejects outright ("contains characters that
   // cannot be safely used in file paths"). That killed both Linux jobs on the
-  // v1.2.0 tag while macOS and Windows, which never use it, built fine.
-  it('sets an executableName that is safe in a file path', () => {
-    const executableName = buildConfig['executableName'];
+  // v1.2.0 tag.
+  //
+  // It must stay scoped to linux. A second regression came from fixing the first
+  // at the TOP level: appInfo.js derives productFilename from executableName when
+  // one is set, and macPackager names the bundle `${productFilename}.app`, so the
+  // shipped app installed as "sarv-inbox.app" and Launchpad, the Dock and Finder
+  // all called it "sarv-inbox". It also made the Windows exe "sarv-inbox.exe",
+  // which quietly broke the product-name half of the prod identity check in
+  // single-child.ts. Only Linux -- where the binary lands in /usr/bin and the
+  // .desktop Exec line points at it -- needs a filesystem-safe name.
+  it('sets a file-path-safe executableName, and only for Linux', () => {
+    expect(buildConfig['executableName']).toBeUndefined();
+
+    const executableName = (buildConfig['linux'] as { executableName?: unknown }).executableName;
     expect(executableName).toBeTypeOf('string');
-    expect(executableName).toMatch(/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/);
+    expect(executableName).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+
+    // What macOS and Windows fall back to instead, and what the bundle is named.
+    expect(buildConfig['productName']).toBe('Sarv Inbox');
   });
 
   // The regression: fpm -- which electron-builder shells out to for .deb and
