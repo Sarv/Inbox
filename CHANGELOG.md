@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-24
+
 ### Added
 - Extensions do something now. The Extensions panel was empty because nothing
   ever ran the workflows an extension registered; the app now runs them over
@@ -816,4 +818,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Sarv/Inbox/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Sarv/Inbox/releases/tag/v1.1.0
