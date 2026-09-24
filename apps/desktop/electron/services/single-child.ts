@@ -229,9 +229,15 @@ export function defaultDevReclaimDeps(logger: { info: (m: string) => void; warn:
 
 /**
  * Real PROD contention deps. Identity is confirmed against our unique main-process
- * title AND the packaged product name — the title covers macOS/Linux (process.title
- * rewrites argv), the product name covers Windows (the exe is "Sarv Inbox.exe", so
- * the image name matches even though the title doesn't).
+ * title AND the packaged product name — either alone is enough, which is what lets
+ * a platform skip one of them:
+ * - Linux: the title (process.title rewrites argv there).
+ * - Windows: the product name; process.title does not change the tasklist image
+ *   name, but the exe is "Sarv Inbox.exe", so the image name matches.
+ * - macOS: the product name. The title is deliberately NOT set on a packaged mac
+ *   build (it would rename the app in the menu bar — see shouldTagMainProcess),
+ *   and the main process runs as ".../Sarv Inbox.app/Contents/MacOS/Sarv Inbox",
+ *   so the product name is already in its command line.
  */
 export function defaultHeartbeatDeps(userDataDir: string, productName: string): HeartbeatDeps {
   const file = join(userDataDir, HEARTBEAT_FILE);

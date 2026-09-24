@@ -100,6 +100,37 @@ export function mainProcessTitle(isDev: boolean): string {
 }
 
 /**
+ * Should this process be tagged with {@link mainProcessTitle} at all?
+ *
+ * Everywhere except a PACKAGED macOS build, yes. On macOS `process.title` is not
+ * the private bookkeeping it is elsewhere: libuv's darwin implementation also
+ * hands the string to LaunchServices as the app's display name, and AppKit draws
+ * the first menu from that -- ignoring the label the menu template asks for. So
+ * tagging the packaged app renamed it to "sarvinbox-main" in the menu bar, next
+ * to a window titled "Sarv Inbox".
+ *
+ * Nothing is lost by skipping it there. The packaged macOS main process runs as
+ * `.../Sarv Inbox.app/Contents/MacOS/Sarv Inbox`, and defaultHeartbeatDeps
+ * already accepts the product name as proof of identity alongside the title --
+ * which is why build.executableName is scoped to linux, so that path really does
+ * carry the product name rather than "sarv-inbox".
+ *
+ * DEV on macOS keeps the title: it runs a shared Electron binary whose helper
+ * processes carry the same product name, so the title is the ONLY marker that
+ * picks out the main process without sweeping helpers in with it. A dev build
+ * showing a technical name in its menu bar is a fair price for that.
+ */
+export function shouldTagMainProcess({
+  platform,
+  isDev,
+}: {
+  platform: string;
+  isDev: boolean;
+}): boolean {
+  return isDev || platform !== 'darwin';
+}
+
+/**
  * DEV-ONLY reclaim selection: given every pid currently carrying our main-process
  * title, which ones should this freshly-launched instance FORCE-KILL before it
  * starts?
