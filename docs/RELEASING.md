@@ -29,12 +29,20 @@ to publish. Do not reintroduce that pattern.
 
 macOS is the single exception to the per-platform rule: Xcode ships both the
 arm64 and x64 SDKs, so one macOS runner legitimately produces both Mac arches.
+It then merges them: `--mac --universal` packs each arch and `lipo`s the two
+into one *universal* binary — a single file carrying both instruction sets, from
+which macOS picks the matching slice at launch. That is why the Mac rows below
+say "universal" rather than listing two downloads. The merge is strict and
+refuses to reconcile files that differ between the arches, which is why
+`build.files` excludes node-gyp's `obj/` and `.deps/` intermediates; the release
+workflow then reads the Mach-O fat header of every packaged `.node` to prove
+both slices actually survived.
 
 ## What a release produces
 
 | Runner | Artifacts |
 | --- | --- |
-| `macos-latest` | `.dmg` and `.zip`, arm64 + x64, signed and notarized |
+| `macos-latest` | one universal `.dmg` and one universal `.zip` (arm64 + x64 in each), signed and notarized |
 | `ubuntu-latest` | `.deb`, `.rpm`, `.AppImage` — x64 |
 | `ubuntu-24.04-arm` | the same three — arm64 |
 | `windows-latest` | one NSIS installer `.exe` carrying x64 + arm64 |
@@ -277,9 +285,11 @@ timeout), re-run it against the existing tag instead of burning a version:
 For a signed DMG from the current tree without touching versions or git:
 
 ```bash
-./scripts/build-dmg.sh --arch both --notarize
+./scripts/build-dmg.sh --notarize
 ```
 
+It builds the same universal DMG the release does — there is no `--arch`, since
+the arch is pinned in the config and a CLI flag could not have overridden it.
 That is for testing and hand-distribution only. It cannot produce Linux or
 Windows artifacts, for the reason at the top of this page.
 
