@@ -23,8 +23,10 @@ import type { EmailRecord } from '../types/models';
 import { logger } from '../utils/logger';
 
 import {
+  applySecurityGate,
   buildCategorizationPrompt,
   buildEmailText,
+  buildSecurityContext,
   validateCategorizationResponse,
   type EnrichedEmail,
   type CategoryDef,
@@ -368,6 +370,9 @@ export class UnifiedPipeline {
       contactType: this.deps.getContactType(fromAddr),
       importanceScore: email.importanceScore || this.deps.getImportanceScore(email.id),
       authStatus,
+      // The filter's verdict and where the links really go — the evidence
+      // the model was missing when it marked an authenticated phish important.
+      security: buildSecurityContext(email),
       existingNotes: this.deps.getNotesForPrompt?.(fromAddr) || undefined,
     };
   }
@@ -441,6 +446,13 @@ export class UnifiedPipeline {
         r.autoDraftReason = undefined;
       }
     }
+
+    // Security gate: the filter's verdict outranks the model. A message the
+    // filter scored spam is spam; one it found suspicious on a deception —
+    // a borrowed brand name, a lying link — keeps its descriptive categories
+    // but never `important`, `needs_response` or `reminders`, and never a
+    // draft. Last, so it sees what the other two gates left.
+    applySecurityGate(results, emails);
 
     if (results.length > 0) {
       const processedAt = Math.floor(Date.now() / 1000);

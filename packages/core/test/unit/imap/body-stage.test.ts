@@ -1,7 +1,7 @@
 import { assessmentOf, type SpamReason } from '@sarv-in/mailguard';
 import { describe, it, expect } from 'vitest';
 
-import { bodyStage, rescoreWithBody } from '../../../src/imap/body-stage';
+import { bodyStage, recipientDomainsOf, rescoreWithBody } from '../../../src/imap/body-stage';
 
 /**
  * The body stage is the half of the spam score that cannot run at sync,
@@ -154,5 +154,41 @@ describe('rescoreWithBody', () => {
   it('re-scores a clean row, which legitimately has no reasons', () => {
     const result = rescoreWithBody({ spamScore: 0, spamReasons: '[]' }, assessmentOf([reason('link-bare-ip', 2)]));
     expect(result!.score).toBe(2);
+  });
+});
+
+describe('recipientDomainsOf', () => {
+  // Regression: `to_address` is a stored, comma-separated list with display
+  // names — a naive split shreds `"Doe, John"`. It must go through the shared
+  // address parser, and yield each registrable domain once.
+  it('collects the registrable domains of every address in the stored lists, once', () => {
+    expect(
+      recipientDomainsOf(
+        'Ramesh <rc@sarv.com>, "Doe, John" <john@mail.acme.example>',
+        'x@sarv.com, not-an-address',
+        null,
+        undefined,
+        '',
+      ),
+    ).toEqual(['sarv.com', 'acme.example']);
+    expect(recipientDomainsOf()).toEqual([]);
+  });
+});
+
+describe('bodyStage — a link dressed as the reader’s own domain', () => {
+  // Regression: the Adobe Sign lure. Text "Sarv.com Engagement Letter", href
+  // kuaiyudh.top — dressed as the reader's own organisation, which the library
+  // weighs at 4. But only if this app hands the recipient domains over: the
+  // same call without them is an anonymous 2-point mismatch.
+  it('weighs it at 4 with the recipient domains, and at 2 without them', () => {
+    const input = {
+      subject: 'Signature requested',
+      contentType: 'html',
+      rawBody: '<a href="https://kuaiyudh.top/v/#rc">Sarv.com Engagement Letter - for signature</a>',
+      cleanBody: 'Sarv.com Engagement Letter - for signature',
+    };
+    const own = bodyStage({ ...input, recipientDomains: recipientDomainsOf('rc@sarv.com') });
+    expect(own.reasons.map((r) => [r.id, r.points])).toEqual([['link-display-mismatch', 4]]);
+    expect(bodyStage(input).score).toBe(2);
   });
 });

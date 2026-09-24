@@ -34,7 +34,7 @@ import { selectStaleFlagCandidates } from '../utils/stale-flags';
 import { buildTags, parseTags, hasTag, addTag, imapFlagsToTags, FLAG_TAG_NAMES } from '../utils/tags';
 import { normalizeSubject } from '../utils/validators';
 
-import { bodyStage, rescoreWithBody } from './body-stage';
+import { bodyStage, recipientDomainsOf, rescoreWithBody } from './body-stage';
 import {
   countReplacementChars,
   hasReplacementChar,
@@ -946,6 +946,9 @@ export class MessageProcessor {
             rawBody,
             contentType,
             attachments: parsedBody.attachmentSpam,
+            // Whose name a deceptive link may borrow to look like the reader's
+            // own site: everyone this message was addressed to.
+            recipientDomains: recipientDomainsOf(envelopeFields.toAddress, envelopeFields.ccAddress),
           })
         : null;
     // One total, from every stage that ran. Added, never overridden: they are
@@ -1469,6 +1472,7 @@ export class MessageProcessor {
           rawBody: parsed.rawBody,
           contentType: parsed.contentType,
           attachments: parsed.attachmentSpam,
+          recipientDomains: recipientDomainsOf(target.toAddress, target.ccAddress),
         }),
       );
       if (scored) {

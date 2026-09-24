@@ -7,8 +7,8 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger } from '@sarvinbox/core';
-import type { EmailRecord , AIErrorInfo } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT } from '@sarvinbox/core';
+import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
 
@@ -95,6 +95,8 @@ interface EmailForCategorization {
   sameSubjectCount?: number; // emails from this sender with identical subject
   volumePercent?: number;    // sender's share of total inbox as percentage
   threadDepth?: number;      // total messages in this email's thread
+  /** The filter's verdict and where the links go — see core's buildSecurityContext. */
+  security?: EmailSecurityContext;
 }
 
 interface CategorizationResult {
@@ -145,26 +147,12 @@ const AUTO_BACKOFF_MAX_MS = 30 * 60_000;
 const BULK_RESTART_BASE_MS = 15_000;
 const BULK_RESTART_MAX_MS = 5 * 60_000;
 
-// ========== Spam Prompt (hardcoded — special behavior) ==========
-
-const SPAM_PROMPT = `is_spam:
-   - TRUE if the email is clearly spam, phishing, or unwanted promotional content
-   - SPAM indicators (mark TRUE):
-     * Unsolicited promotional/marketing emails from unknown senders
-     * Phishing attempts (suspicious links, requests for passwords/personal info)
-     * Nigerian prince / lottery / inheritance scams
-     * Fake shipping notifications, fake invoices from unknown sources
-     * "You've won!" / "Congratulations!" / "Claim your prize" messages
-     * Suspicious subject lines with urgency (URGENT, ACT NOW, LIMITED TIME)
-     * Random gibberish or garbled text
-     * Crypto/forex/investment spam
-     * Adult content spam
-     * Unknown sender with suspicious attachment mentions
-   - NOT SPAM indicators (mark FALSE):
-     * Legitimate newsletters user may have subscribed to
-     * Transactional emails (order confirmations, shipping updates from known stores)
-     * Emails from known contacts or same domain
-     * Normal business correspondence`;
+// The spam and phishing guidance is shared with the pipeline in core
+// (`SPAM_PROMPT`, `PHISHING_PROMPT` in categorization-utils) so both prompts
+// teach the model the same rules — the Adobe Sign lure of 2026-09-23 was
+// marked important by a prompt that had never been told authentication is
+// not identity, and a second copy of the text here is how one prompt learns
+// a lesson the other does not.
 
 // ========== Service Class ==========
 
@@ -211,6 +199,8 @@ ${categorySection}
 
 SPAM:
 ${SPAM_PROMPT}
+
+${PHISHING_PROMPT}
 
 ═══════════════════════════════════════════
 KEY RULE: Think from ${userName}'s perspective.
@@ -842,6 +832,7 @@ Return JSON array:
         sameSubjectCount,
         volumePercent,
         threadDepth: email.threadId ? (threadDepthMap[email.threadId] || 1) : 1,
+        security: buildSecurityContext(email),
         senderContext: ctx ? {
           tier: ctx.tier,
           receivedCount: ctx.receivedCount,
@@ -915,7 +906,7 @@ Date: ${new Date(email.date * 1000).toISOString()}
 Origin: ${email.origin || 'unknown'}
 ${senderLine}
 User-Role: ${recipientRole}
-Read: ${email.isRead ? 'yes' : 'no'}${threadDepthLine}
+Read: ${email.isRead ? 'yes' : 'no'}${threadDepthLine}${formatSecurityLines(email.security)}
 Body:
 ${email.body}`;
     }).join('\n\n');
@@ -937,7 +928,9 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
 ]`;
 
     const responseText = await this.callAPIWithRetry(prompt, userMessage);
-    return this.validateResponse(responseText);
+    // The filter's verdict outranks the model: spam stays spam, and a
+    // deception never comes out important / needs_response / reminders.
+    return applySecurityGate(this.validateResponse(responseText), emails);
   }
 
   private async callAPIWithRetry(systemPrompt: string, userMessage: string, retryCount = 0): Promise<string> {
