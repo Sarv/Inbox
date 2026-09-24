@@ -73,11 +73,21 @@ import {
   startOAuthFlow,
 } from '../../../../electron/services/oauth-service';
 
-/** GET a URL over real HTTP, returning status + body (never throws on 4xx/5xx). */
+/**
+ * GET a URL over real HTTP, returning status + body (never throws on 4xx/5xx).
+ *
+ * `agent: false` is load-bearing, not tidiness. Node's global agent keeps
+ * connections alive by default (>=19), so a socket pooled against the listener
+ * one test used outlives the `closeOAuthCallbackServer()` in `afterEach`. The
+ * next test rebinds a NEW server on the SAME port, the agent hands the pooled
+ * socket to the next request, and it fails with "socket hang up" — a flake
+ * that lands on whichever test happens to reuse first. A fresh connection per
+ * request cannot reach a closed server.
+ */
 const get = (url: string): Promise<{ status: number; body: string }> =>
   new Promise((resolve, reject) => {
     http
-      .get(url, (res) => {
+      .get(url, { agent: false }, (res) => {
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (chunk) => {
