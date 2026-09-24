@@ -75,6 +75,32 @@ describe('electron-builder configuration', () => {
     expect(linux.maintainer).toMatch(/^.+ <[^@\s]+@[^@\s]+\.[^@\s]+>$/);
   });
 
+  // The regression: the fpm and archive targets default their filename to
+  // `${name}-${version}...`, and `${name}` expands to the RAW package name --
+  // `@sarvinbox/desktop`, slash included. That wrote the .deb, .rpm and
+  // .tar.gz into `release/@sarvinbox/`, where release.yml's `release/*.deb`
+  // glob could never find them: the release would have shipped with the Linux
+  // packages silently missing while still reporting success.
+  it('names Linux artifacts without the scoped package name', () => {
+    const linux = buildConfig['linux'] as { artifactName?: string };
+    expect(linux.artifactName).toBeTypeOf('string');
+    // ${name} is the broken macro -- it is the scope slash that breaks the glob.
+    expect(linux.artifactName).not.toContain('${name}');
+    expect(linux.artifactName).not.toContain('/');
+  });
+
+  // The regression: for an @scoped package, electron-builder falls back to the
+  // sanitized PRODUCT name for the package identifier -- and sanitize-filename
+  // keeps spaces, so rpm got `Name: Sarv Inbox` and rpmbuild refused to build
+  // it. deb and rpm therefore need an explicit, policy-legal package name.
+  it('gives deb and rpm a package name those formats accept', () => {
+    for (const format of ['deb', 'rpm'] as const) {
+      const options = buildConfig[format] as { packageName?: string } | undefined;
+      // Lowercase, no spaces: what both dpkg and rpm require of a package name.
+      expect(options?.packageName, format).toMatch(/^[a-z][a-z0-9+._-]*$/);
+    }
+  });
+
   // Every release artifact the publish job globs must have a target that
   // actually produces it. A target quietly dropped here means a platform
   // silently vanishes from the release page.

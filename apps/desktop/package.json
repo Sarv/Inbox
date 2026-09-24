@@ -201,6 +201,7 @@
       "synopsis": "Privacy-first email client with AI-powered features",
       "description": "Sarv Inbox is a source-available, privacy-first IMAP email client. Mail is stored locally in SQLite and nothing leaves the device unless an AI provider is configured.",
       "maintainer": "Sarv Webs Private Limited <support@sarv.com>",
+      "artifactName": "sarv-inbox-${version}-${arch}.${ext}",
       "desktop": {
         "entry": {
           "StartupWMClass": "Sarv Inbox",
@@ -237,6 +238,12 @@
           ]
         }
       ]
+    },
+    "deb": {
+      "packageName": "sarv-inbox"
+    },
+    "rpm": {
+      "packageName": "sarv-inbox"
     },
     "nsis": {
       "oneClick": false,
