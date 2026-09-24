@@ -1,4 +1,6 @@
-import { createRequire } from 'module';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
@@ -114,6 +116,34 @@ describe('electron-builder configuration', () => {
     }
     const effectivePattern = win.artifactName ?? (buildConfig['artifactName'] as string | undefined) ?? '';
     expect(effectivePattern).not.toContain('${arch}');
+  });
+
+  // The regression: electron-builder's computeArchToTargetNamesMap takes the
+  // arch list from the CONFIG when a target names one, and ignores the --x64 /
+  // --arm64 the CLI was given. Pinning both arches here therefore made EVERY
+  // Linux runner try to build BOTH: the arm64 runner shelled out to an aarch64
+  // gcc with `-m64` and died ("unrecognized command-line option"). Unlike
+  // macOS and Windows, each Linux arch has its own runner, so the arch must
+  // come from the command line.
+  it('lets the command line choose the Linux arch', () => {
+    const linux = buildConfig['linux'] as { target?: Array<{ target: string; arch?: string[] }> };
+    for (const entry of linux.target ?? []) {
+      expect(entry.arch, `linux target ${entry.target}`).toBeUndefined();
+    }
+  });
+
+  // The regression: @electron/rebuild cannot find this pnpm workspace's root on
+  // Windows, so it rebuilds nothing and each packaged arch keeps whatever
+  // binary was already on disk. The beforeBuild hook does the per-arch rebuild
+  // itself and returns false to take electron-builder's own attempt out of the
+  // picture. It must also be TRACKED: .gitignore excludes apps/desktop/build/*,
+  // and the afterPack hook was already lost to that rule once.
+  it('keeps the per-arch native rebuild hook wired up and committed', () => {
+    const hook = buildConfig['beforeBuild'];
+    expect(hook).toBeTypeOf('string');
+    // The hook path is relative to apps/desktop, where electron-builder runs.
+    const resolved = fileURLToPath(new URL(`../../${hook as string}`, import.meta.url));
+    expect(existsSync(resolved), `${hook as string} must exist on disk`).toBe(true);
   });
 
   // Every release artifact the publish job globs must have a target that

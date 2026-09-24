@@ -109,6 +109,7 @@
         "repo": "Inbox"
       }
     ],
+    "beforeBuild": "./build/beforeBuild.js",
     "afterPack": "./build/afterPack.js",
     "directories": {
       "output": "release"
@@ -212,32 +213,16 @@
       },
       "target": [
         {
-          "target": "AppImage",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "AppImage"
         },
         {
-          "target": "deb",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "deb"
         },
         {
-          "target": "rpm",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "rpm"
         },
         {
-          "target": "tar.gz",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "tar.gz"
         }
       ]
     },

@@ -76,6 +76,13 @@ jobs:
             # the native addons cross-compile between arm64 and x64 fine. This
             # is the ONLY cross-arch case that works.
             args: --mac --arm64 --x64
+          # Each Linux arch gets its OWN runner: unlike Xcode and MSVC, the
+          # stock gcc on a GitHub runner has no cross toolchain, so the arm64
+          # machine cannot compile x64 (`cc: unrecognized command-line option
+          # '-m64'`) and vice versa. The --x64/--arm64 flag below is therefore
+          # load-bearing, which is why build.linux.target pins no arch of its
+          # own -- electron-builder prefers a config arch over the CLI one and
+          # would make every runner try to build both.
           - name: Linux x64
             id: linux-x64
             os: ubuntu-latest
