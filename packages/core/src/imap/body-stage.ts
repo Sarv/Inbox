@@ -32,11 +32,14 @@
 import {
   assessContentSignals,
   assessmentOf,
+  domainOfAddress,
   mergeAssessments,
   parseSpamReasons,
   stageOfReason,
   type SpamAssessment,
 } from '@sarv-in/mailguard';
+
+import { parseAddresses } from '../utils/email-address';
 
 /** A parsed body in the shape this app stores it. */
 export interface BodyStageInput {
@@ -58,6 +61,32 @@ export interface BodyStageInput {
    * attachment.
    */
   attachments?: SpamAssessment | null;
+  /**
+   * The registrable domains the message was addressed to — see
+   * {@link recipientDomainsOf}. A deceptive link whose text names one of them
+   * is dressed as the reader's own organisation, which the library weighs at
+   * twice an anonymous mismatch. Omitted, every mismatch scores the same.
+   */
+  recipientDomains?: readonly (string | null | undefined)[];
+}
+
+/**
+ * The registrable domains in one or more stored address lists — `emails.to_address`
+ * and `emails.cc_address` are comma-separated — de-duplicated, in order.
+ *
+ * The mailbox owner's own address is in one of those lists for any message they
+ * were sent, so this is also the reader's domain without the processor having to
+ * know whose account it is syncing.
+ */
+export function recipientDomainsOf(...lists: ReadonlyArray<string | null | undefined>): string[] {
+  const domains = new Set<string>();
+  for (const list of lists) {
+    for (const address of parseAddresses(list)) {
+      const domain = domainOfAddress(address);
+      if (domain) domains.add(domain);
+    }
+  }
+  return [...domains];
 }
 
 /**
@@ -69,7 +98,12 @@ export function bodyStage(input: BodyStageInput): SpamAssessment {
   // Both parts are offered: the library prefers the HTML's own words and falls
   // back to the text, which is what rescues an HTML body that extracts to
   // nothing (a single tracking pixel, a mail that is one image).
-  const content = assessContentSignals({ subject: input.subject, text: input.cleanBody, html });
+  const content = assessContentSignals({
+    subject: input.subject,
+    text: input.cleanBody,
+    html,
+    recipientDomains: input.recipientDomains,
+  });
   return mergeAssessments(content, input.attachments);
 }
 

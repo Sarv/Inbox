@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The AI now sees what the spam filter found.** It reads the verdict, the
+  reasons and where each link really goes, and mail the filter found deceptive
+  can no longer be marked important, needs-response or a reminder.
+
 ### Removed
 - Windows portable `.exe` and the Linux `.tar.gz` builds. Both duplicated a
   download that was already there — the NSIS installer carries x64 and arm64 in

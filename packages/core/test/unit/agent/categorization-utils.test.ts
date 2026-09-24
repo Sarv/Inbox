@@ -2,15 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_CATEGORIZATION_TEMPLATE,
+  JUDGEMENT_CATEGORIES,
   MAX_API_RETRIES,
+  PHISHING_PROMPT,
   SarvApiError,
+  applySecurityGate,
   buildCategorizationPrompt,
   buildEmailText,
+  buildSecurityContext,
   callAIProvider,
   callAIWithRetry,
+  formatSecurityLines,
   validateCategorizationResponse,
   type AIProviderConfig,
+  type CategorizationResult,
   type CategoryDef,
+  type EmailSecurityContext,
   type EnrichedEmail,
 } from '../../../src/agent/categorization-utils';
 
@@ -755,5 +762,228 @@ describe('SarvApiError', () => {
     expect(err.code).toBe('insufficient_balance');
     expect(err.retryAfterSec).toBe(5);
     expect(err.detail).toEqual({ x: 1 });
+  });
+});
+
+// ========== Security context and the gate behind the model ==========
+
+/**
+ * The regression, verbatim: on 2026-09-23 "Adobe Acrobat Sign"
+ * <Adobesign@powersublinks.com> — SPF, DKIM and DMARC all passing for the
+ * attacker's own domain, every link going to kuaiyudh.top under text that said
+ * sarv.com — was categorised important + reminders + needs_response at 0.95:
+ * "a legal document that requires an immediate action (signature)". The model
+ * never saw where the links went, and nothing stood behind it to say no. These
+ * tests pin both halves: the evidence reaches the prompt, and the filter's
+ * verdict outranks the model's.
+ */
+const LURE_HTML =
+  '<p>Please review and sign</p>' +
+  '<a href="https://kuaiyudh.top/v/#rc@sarv.com">Sarv.com Engagement Letter - for signature</a>' +
+  '<a href="https://kuaiyudh.top/v/#rc@sarv.com">Review and sign</a>';
+
+const lureRow = (over: Partial<Parameters<typeof buildSecurityContext>[0]> = {}) => ({
+  fromAddress: 'Adobesign@powersublinks.com',
+  spamScore: 9,
+  spamReasons: JSON.stringify([
+    { id: 'brand-impersonation', points: 3, detail: 'The sender name "Adobe Acrobat Sign" borrows the Adobe name' },
+    { id: 'in-reply-to-self', points: 2, detail: 'Claims to be a reply to itself' },
+    { id: 'link-display-mismatch', points: 4, detail: 'A link dressed as your own domain sarv.com actually points to kuaiyudh.top' },
+  ]),
+  rawBody: LURE_HTML,
+  contentType: 'html',
+  ...over,
+});
+
+const securityOf = (over: Partial<EmailSecurityContext> = {}): EmailSecurityContext => ({
+  verdict: 'suspicious',
+  score: 3,
+  reasons: ['The sender name borrows the Adobe name'],
+  deceptive: true,
+  deceptiveLinks: [],
+  linkDomains: [],
+  ...over,
+});
+
+describe('buildSecurityContext', () => {
+  it('reads the verdict, the reasons, the deceptive links and where the links go', () => {
+    const ctx = buildSecurityContext(lureRow())!;
+    expect(ctx.verdict).toBe('spam');
+    expect(ctx.score).toBe(9);
+    expect(ctx.reasons).toHaveLength(3);
+    expect(ctx.deceptive).toBe(true);
+    expect(ctx.deceptiveLinks).toEqual([{ shown: 'sarv.com', actual: 'kuaiyudh.top' }]);
+    expect(ctx.linkDomains).toEqual(['kuaiyudh.top']);
+  });
+
+  // Regression: "never scored" must not reach the model as "clean". An empty
+  // context is no lines at all.
+  it('is undefined when the filter knows nothing, so the prompt says nothing', () => {
+    expect(
+      buildSecurityContext({ fromAddress: 'a@b.example', spamScore: null, spamReasons: null, rawBody: '', contentType: 'text' }),
+    ).toBeUndefined();
+    expect(buildSecurityContext({})).toBeUndefined();
+  });
+
+  it('distinguishes a deception from a nuisance, and reads links out of a plain-text body', () => {
+    const nuisance = buildSecurityContext({
+      fromAddress: 'cron@ops.example',
+      spamScore: 3,
+      spamReasons: JSON.stringify([
+        { id: 'missing-message-id', points: 2, detail: 'No Message-ID' },
+        { id: 'no-recipient', points: 1, detail: 'No recipient' },
+      ]),
+      rawBody: 'See https://status.ops.example/x and https://vendor.example/y',
+      contentType: 'text',
+    })!;
+    expect(nuisance.verdict).toBe('suspicious');
+    expect(nuisance.deceptive).toBe(false);
+    expect(nuisance.deceptiveLinks).toEqual([]);
+    // The sender's own domain is left out: the sender stage already judged it.
+    expect(nuisance.linkDomains).toEqual(['vendor.example']);
+  });
+
+  it('treats a lying link as deception even when the stored reasons carry none', () => {
+    const ctx = buildSecurityContext(lureRow({ spamScore: 0, spamReasons: '[]' }))!;
+    expect(ctx.verdict).toBe('clean');
+    expect(ctx.deceptive).toBe(true);
+    expect(ctx.reasons).toEqual([]);
+  });
+
+  it('tolerates corrupt stored reasons and a body with no links', () => {
+    const ctx = buildSecurityContext({
+      fromAddress: 'a@b.example',
+      spamScore: 2,
+      spamReasons: 'not json',
+      rawBody: '<p>hello</p>',
+      contentType: 'html',
+    });
+    expect(ctx).toEqual({ verdict: 'clean', score: 2, reasons: [], deceptive: false, deceptiveLinks: [], linkDomains: [] });
+  });
+});
+
+describe('formatSecurityLines', () => {
+  it('names the verdict with its reasons, each deceptive link, and the link destinations', () => {
+    const text = formatSecurityLines(buildSecurityContext(lureRow()));
+    expect(text).toContain('\nSecurity: SPAM (filter score 9) — The sender name');
+    expect(text).toContain('\nDeceptive-Link: text says sarv.com, actually goes to kuaiyudh.top');
+    expect(text).toContain('\nLinks-Go-To: kuaiyudh.top');
+  });
+
+  it('says clean in lower case, upper-cases the warnings, and omits what is absent', () => {
+    const empty = { reasons: [], deceptive: false, deceptiveLinks: [], linkDomains: [] };
+    expect(formatSecurityLines({ ...empty, verdict: 'clean', score: 0 })).toBe('\nSecurity: clean (filter score 0)');
+    expect(formatSecurityLines(securityOf({ reasons: ['x'] }))).toBe('\nSecurity: SUSPICIOUS (filter score 3) — x');
+    expect(formatSecurityLines({ ...empty, verdict: null, score: null, linkDomains: ['a.example'] })).toBe('\nLinks-Go-To: a.example');
+    expect(formatSecurityLines(undefined)).toBe('');
+    expect(formatSecurityLines({ ...empty, verdict: null, score: null })).toBe('');
+  });
+
+  // Regression: the whole point. The per-email text the model reads must carry
+  // the evidence, or the prompt's phishing rules have nothing to act on.
+  it('reaches the model through buildEmailText', () => {
+    const email: EnrichedEmail = {
+      id: 'e1',
+      subject: 'Signature requested',
+      fromAddress: 'adobesign@powersublinks.com',
+      toAddress: 'rc@sarv.com',
+      body: 'Please review and sign',
+      date: 1_790_000_000,
+      isRead: false,
+      security: buildSecurityContext(lureRow()),
+    };
+    const text = buildEmailText([email], 'rc@sarv.com', ['important']);
+    expect(text).toContain('Security: SPAM');
+    expect(text).toContain('Deceptive-Link: text says sarv.com, actually goes to kuaiyudh.top');
+  });
+});
+
+describe('PHISHING_PROMPT', () => {
+  // Regression: the two facts the model got wrong, stated in so many words, and
+  // rendered into the system prompt every path uses.
+  it('teaches that authentication is not identity and that the Security lines come first', () => {
+    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toContain('{{phishingPrompt}}');
+    expect(buildCategorizationPrompt(CATEGORIES, 'rc@sarv.com')).toContain(PHISHING_PROMPT);
+    expect(PHISHING_PROMPT).toMatch(/Passing SPF, DKIM and DMARC does NOT mean/);
+    expect(PHISHING_PROMPT).toMatch(/NEVER important, needs_response or reminders/);
+    expect(PHISHING_PROMPT).toContain('Deceptive-Link');
+    expect(PHISHING_PROMPT).toContain('Links-Go-To');
+  });
+});
+
+describe('applySecurityGate', () => {
+  const result = (over: Partial<CategorizationResult> = {}): CategorizationResult => ({
+    emailId: 'e1',
+    categories: ['important', 'reminders', 'needs_response', 'invoice'],
+    isSpam: false,
+    confidence: 0.95,
+    reasoning: 'Legal document needing a signature',
+    shouldAutoDraft: true,
+    autoDraftReason: 'direct request',
+    ...over,
+  });
+  const withSecurity = (security: EmailSecurityContext | undefined) => [{ id: 'e1', security }];
+
+  // The regression itself: the filter said spam, the model said important.
+  it('forces spam and clears everything when the filter scored the message spam', () => {
+    const [r] = applySecurityGate([result()], withSecurity(buildSecurityContext(lureRow())));
+    expect(r!.isSpam).toBe(true);
+    expect(r!.categories).toEqual([]);
+    expect(r!.shouldAutoDraft).toBe(false);
+    expect(r!.reasoning).toMatch(/^Security filter scored it spam: The sender name/);
+    expect(r!.reasoning).toContain('Legal document needing a signature');
+  });
+
+  it('strips the judgement categories and the draft on a suspicious deception, keeping the descriptive ones', () => {
+    const [r] = applySecurityGate([result()], withSecurity(securityOf()));
+    expect(r!.categories).toEqual(['invoice']);
+    expect(r!.isSpam).toBe(false);
+    expect(r!.shouldAutoDraft).toBe(false);
+    expect(r!.autoDraftReason).toContain('deception');
+    expect(r!.reasoning).toContain(
+      '[Security gate: dropped important, reminders, needs_response — The sender name borrows the Adobe name]',
+    );
+    for (const slug of JUDGEMENT_CATEGORIES) expect(r!.categories).not.toContain(slug);
+  });
+
+  it('explains itself from the deceptive links when the stored reasons are empty', () => {
+    const [r] = applySecurityGate(
+      [result({ categories: ['important'] })],
+      withSecurity(securityOf({ reasons: [], deceptiveLinks: [{ shown: 'sarv.com', actual: 'kuaiyudh.top' }] })),
+    );
+    expect(r!.reasoning).toContain('text says sarv.com, goes to kuaiyudh.top');
+  });
+
+  it('still cancels a draft that arrived without a judgement category', () => {
+    const [r] = applySecurityGate([result({ categories: ['invoice'] })], withSecurity(securityOf()));
+    expect(r!.shouldAutoDraft).toBe(false);
+    expect(r!.reasoning).toContain('no draft');
+  });
+
+  // Regression: the gate must not become a second spam filter. A suspicious
+  // score made of nuisances, a clean verdict, an unscored message, no context
+  // at all, or a result with nothing to strip pass through untouched.
+  it('leaves everything else exactly as the model returned it', () => {
+    const untouched: ReadonlyArray<ReadonlyArray<{ id: string; security?: EmailSecurityContext }>> = [
+      withSecurity(securityOf({ deceptive: false })),
+      withSecurity(securityOf({ verdict: 'clean', score: 2 })),
+      withSecurity(securityOf({ verdict: null, score: null })),
+      withSecurity(undefined),
+      [{ id: 'someone-else' }],
+    ];
+    for (const emails of untouched) {
+      expect(applySecurityGate([result()], emails)[0]).toEqual(result());
+    }
+    const nothingToStrip = result({ categories: ['invoice'], shouldAutoDraft: false });
+    expect(applySecurityGate([nothingToStrip], withSecurity(securityOf()))[0]).toEqual(
+      result({ categories: ['invoice'], shouldAutoDraft: false }),
+    );
+  });
+
+  it('gates each result against its own email in a batch', () => {
+    const results = [result({ emailId: 'a' }), result({ emailId: 'b' })];
+    applySecurityGate(results, [{ id: 'a', security: securityOf() }, { id: 'b' }]);
+    expect(results[0]!.categories).toEqual(['invoice']);
+    expect(results[1]!.categories).toEqual(['important', 'reminders', 'needs_response', 'invoice']);
   });
 });

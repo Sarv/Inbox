@@ -5,6 +5,14 @@
  * Contains: prompt building, response validation, email enrichment types.
  */
 
+import { domainOfAddress } from '@sarv-in/mailguard/identity';
+import { linkDomains, linkMismatches, type LinkMismatch } from '@sarv-in/mailguard/links';
+import {
+  parseSpamReasons,
+  spamVerdict,
+  type SpamReasonId,
+  type SpamVerdict,
+} from '@sarv-in/mailguard/verdict';
 import pRetry, { AbortError } from 'p-retry';
 
 import { logger } from '../utils/logger';
@@ -99,6 +107,11 @@ export interface EnrichedEmail {
   };
   // Existing notes about this sender (for LLM context)
   existingNotes?: string; // Pre-formatted text from getNotesForPrompt()
+  /**
+   * What the spam filter already knows about this message — its verdict and
+   * reasons, and where the links really go. See {@link buildSecurityContext}.
+   */
+  security?: EmailSecurityContext;
 }
 
 export interface SenderSignals {
@@ -167,7 +180,7 @@ export interface CategorizationResult {
 export const MAX_BODY_LENGTH = 1000;
 export const MAX_API_RETRIES = 3;
 
-const SPAM_PROMPT = `is_spam:
+export const SPAM_PROMPT = `is_spam:
    - TRUE if the email is clearly spam, phishing, or unwanted promotional content
    - SPAM indicators (mark TRUE):
      * Unsolicited promotional/marketing emails from unknown senders
@@ -185,6 +198,232 @@ const SPAM_PROMPT = `is_spam:
      * Transactional emails (order confirmations, shipping updates from known stores)
      * Emails from known contacts or same domain
      * Normal business correspondence`;
+
+/**
+ * Phishing guidance, and why it is its own block.
+ *
+ * On 2026-09-23 a real lure — "Adobe Acrobat Sign" <Adobesign@powersublinks.com>,
+ * subject `Signature requested on "Sarv.com Engagement Letter"`, every link
+ * going to kuaiyudh.top — was categorised important + reminders +
+ * needs_response with 0.95 confidence: "a legal document that requires an
+ * immediate action (signature)". The model saw the body text and three green
+ * authentication results, and nothing else. It could not see where the links
+ * went, and it read SPF/DKIM/DMARC passing as proof of who the sender was,
+ * when the attacker had simply authenticated a domain they owned.
+ *
+ * So the prompt now states the two facts the model got wrong, and the
+ * per-email text carries the evidence (`formatSecurityLines`). The rules here
+ * are deliberately about the SHAPE of a phish, not a word list: the filter
+ * already scores words, and a model reasoning about shape generalises to the
+ * next campaign where a list does not.
+ */
+export const PHISHING_PROMPT = `PHISHING — the "Security:", "Deceptive-Link:" and "Links-Go-To:" lines are evidence
+the mail filter already gathered about the message. READ THEM BEFORE deciding
+"important" or "needs_response":
+   - Security SUSPICIOUS or SPAM with an impersonation or deceptive-link reason = PHISHING.
+     is_spam TRUE. NEVER important, needs_response or reminders — whatever the body asks for.
+   - Passing SPF, DKIM and DMARC does NOT mean the sender is who the name says. An attacker
+     authenticates THEIR OWN throwaway domain. Authentication says which domain sent it, nothing more.
+   - Brand in the name, stranger in the address: "Adobe Acrobat Sign", "DocuSign", "Microsoft 365",
+     "PayPal", a bank — from a domain that is not that brand's = PHISHING.
+   - "Deceptive-Link: text says X, actually goes to Y" = PHISHING, above all when X is the user's own
+     domain or a known brand.
+   - "Links-Go-To" naming a domain unrelated to both the sender and the brand the message claims to
+     be = treat the message as suspect.
+   - An unexpected e-signature, shared-document, invoice, payment, password or account-verification
+     request from a first-time sender that pushes the user to click = PHISHING, not "important".
+     Urgency and legal-sounding subjects are the lure, not a reason to prioritise. A genuine
+     signature request comes from the provider's own domain and names a document the user expects.`;
+
+// ========== Security context — what the filter already knows ==========
+
+/**
+ * The security evidence the spam filter recorded for a message, in the shape
+ * the categorizer needs: for the prompt (see {@link formatSecurityLines}) and
+ * for the deterministic gate that runs after the model has answered (see
+ * {@link applySecurityGate}).
+ */
+export interface EmailSecurityContext {
+  /** The filter's verdict on the stored score; null when the message was never scored. */
+  verdict: SpamVerdict | null;
+  score: number | null;
+  /** One sentence per reason the filter charged, as stored. */
+  reasons: string[];
+  /**
+   * True when the verdict rests on a DECEPTION — impersonation, a lying link,
+   * forged headers, a listed sender — rather than on a nuisance signal like a
+   * missing Message-ID or shouting. See {@link DECEPTION_REASON_IDS}.
+   */
+  deceptive: boolean;
+  /** Links whose visible text names one domain while the href goes to another. */
+  deceptiveLinks: LinkMismatch[];
+  /** Registrable domains the sender's own links go to, the sender's own excluded. */
+  linkDomains: string[];
+}
+
+/**
+ * Reason ids that describe a deception rather than a nuisance.
+ *
+ * The gate strips the judgement categories on these and only these. A message
+ * with no Message-ID from a cron job, or a newsletter shouting in capitals, is
+ * odd but may still genuinely need the user; a message that borrowed a brand's
+ * name or lies about where its links go never does. Typed against the
+ * library's union so a renamed id fails to compile here rather than silently
+ * dropping out of the gate.
+ */
+export const DECEPTION_REASON_IDS: ReadonlySet<SpamReasonId> = new Set<SpamReasonId>([
+  'upstream-spam',
+  'known-spammer',
+  'auth-failed',
+  'display-name-spoof',
+  'brand-impersonation',
+  'in-reply-to-self',
+  'link-display-mismatch',
+  'link-userinfo',
+  'link-bare-ip',
+  'link-punycode',
+  'attachment-executable',
+  'attachment-double-extension',
+  'attachment-name-spoof',
+  'attachment-type-mismatch',
+  'attachment-macro',
+  'attachment-archive-executable',
+  'reputation-ip-listed',
+  'reputation-domain-listed',
+  'reputation-link-listed',
+]);
+
+/**
+ * The categories that say "act on this". A message the filter flagged as a
+ * deception is never allowed to carry one, whatever the model returned — the
+ * lure's whole design is to read as urgent and personal.
+ */
+export const JUDGEMENT_CATEGORIES: readonly string[] = ['important', 'needs_response', 'reminders'];
+
+/** How many link destinations the prompt names. The first few are the ones a reader would meet. */
+const LINK_DOMAINS_SHOWN = 8;
+
+/** The columns {@link buildSecurityContext} reads — a subset of `EmailRecord`. */
+export interface SecuritySourceRow {
+  fromAddress?: string | null;
+  spamScore?: number | null;
+  spamReasons?: string | null;
+  rawBody?: string | null;
+  contentType?: string | null;
+}
+
+/**
+ * What the filter knows about one stored message, or undefined when it knows
+ * nothing at all — never scored, no reasons, no links — so the prompt says
+ * nothing rather than "clean".
+ *
+ * Pure and synchronous: the verdict and reasons come from the row, the link
+ * facts from the stored body through the same library the filter used, so the
+ * model is shown exactly what the shield shows.
+ */
+export function buildSecurityContext(email: SecuritySourceRow): EmailSecurityContext | undefined {
+  const verdict = spamVerdict(email.spamScore);
+  const reasons = parseSpamReasons(email.spamReasons);
+  const html = email.contentType === 'html' ? (email.rawBody ?? null) : null;
+  const deceptiveLinks = linkMismatches(html);
+  const domains = linkDomains(email.rawBody ?? null, {
+    exclude: [domainOfAddress(email.fromAddress)],
+    max: LINK_DOMAINS_SHOWN,
+  });
+  if (verdict === null && reasons.length === 0 && deceptiveLinks.length === 0 && domains.length === 0) {
+    return undefined;
+  }
+  return {
+    verdict,
+    score: typeof email.spamScore === 'number' ? email.spamScore : null,
+    reasons: reasons.map((reason) => reason.detail),
+    deceptive: reasons.some((reason) => DECEPTION_REASON_IDS.has(reason.id)) || deceptiveLinks.length > 0,
+    deceptiveLinks,
+    linkDomains: domains,
+  };
+}
+
+/**
+ * The security evidence as prompt lines, each starting on a new line — or an
+ * empty string when there is nothing to say. Shared by both prompt builders
+ * (the bulk service's and the pipeline's) so the model reads the same facts
+ * in the same words whichever path categorised the message.
+ */
+export function formatSecurityLines(security: EmailSecurityContext | undefined): string {
+  if (!security) return '';
+  const lines: string[] = [];
+  if (security.verdict) {
+    const label = security.verdict === 'clean' ? 'clean' : security.verdict.toUpperCase();
+    const why = security.reasons.length > 0 ? ` — ${security.reasons.join('; ')}` : '';
+    lines.push(`Security: ${label} (filter score ${security.score})${why}`);
+  }
+  for (const { shown, actual } of security.deceptiveLinks) {
+    lines.push(`Deceptive-Link: text says ${shown}, actually goes to ${actual}`);
+  }
+  if (security.linkDomains.length > 0) {
+    lines.push(`Links-Go-To: ${security.linkDomains.join(', ')}`);
+  }
+  return lines.length > 0 ? `\n${lines.join('\n')}` : '';
+}
+
+/** The fields the gate reads and writes — both pipelines' result shapes satisfy it. */
+export interface GateableResult {
+  emailId: string;
+  categories: string[];
+  isSpam: boolean;
+  reasoning: string;
+  shouldAutoDraft?: boolean;
+  autoDraftReason?: string;
+}
+
+/**
+ * The deterministic gate behind the model: the filter's verdict outranks the
+ * model's enthusiasm.
+ *
+ * - A message the filter scored SPAM is spam, full stop: `isSpam` is forced,
+ *   categories cleared, no draft. (Such rows are normally excluded from the
+ *   AI before it runs — this is the belt to that suspender.)
+ * - A message the filter found SUSPICIOUS on a DECEPTION loses every
+ *   judgement category and its draft, and the reasoning says why. Its
+ *   descriptive categories stay — a phish is still, descriptively, a phish —
+ *   and `isSpam` is left to the model, which now has the evidence in front
+ *   of it.
+ * - Anything else — clean, suspicious on a nuisance, never scored — passes
+ *   untouched.
+ *
+ * Mutates and returns the same array, like the addressing and automated-sender
+ * gates beside it in the pipeline.
+ */
+export function applySecurityGate<T extends GateableResult>(
+  results: T[],
+  emails: ReadonlyArray<{ id: string; security?: EmailSecurityContext }>,
+): T[] {
+  const securityById = new Map(emails.map((email) => [email.id, email.security]));
+  for (const result of results) {
+    const security = securityById.get(result.emailId);
+    if (!security || !security.verdict) continue;
+    const evidence = security.reasons.length > 0
+      ? security.reasons.join('; ')
+      : security.deceptiveLinks.map((link) => `text says ${link.shown}, goes to ${link.actual}`).join('; ');
+    if (security.verdict === 'spam') {
+      result.isSpam = true;
+      result.categories = [];
+      result.shouldAutoDraft = false;
+      result.autoDraftReason = 'Filed as spam by the security filter';
+      result.reasoning = `Security filter scored it spam: ${evidence}. ${result.reasoning}`.trim();
+      continue;
+    }
+    if (security.verdict !== 'suspicious' || !security.deceptive) continue;
+    const dropped = result.categories.filter((slug) => JUDGEMENT_CATEGORIES.includes(slug));
+    if (dropped.length === 0 && !result.shouldAutoDraft) continue;
+    result.categories = result.categories.filter((slug) => !JUDGEMENT_CATEGORIES.includes(slug));
+    result.shouldAutoDraft = false;
+    result.autoDraftReason = 'The security filter found deception in this message';
+    const removed = dropped.length > 0 ? `dropped ${dropped.join(', ')}` : 'no draft';
+    result.reasoning = `${result.reasoning} [Security gate: ${removed} — ${evidence}]`.trim();
+  }
+  return results;
+}
 
 // ========== Prompt Builder ==========
 
@@ -220,6 +459,8 @@ as calling a CC'd team thread "important".
 
 SPAM:
 {{spamPrompt}}
+
+{{phishingPrompt}}
 
 ═══════════════════════════════════════════════════
 CORE PRINCIPLE: Think from the USER's perspective.
@@ -458,6 +699,7 @@ export function buildCategorizationPrompt(
     userDomain,
     categorySection,
     spamPrompt: SPAM_PROMPT,
+    phishingPrompt: PHISHING_PROMPT,
   });
 }
 
@@ -536,6 +778,12 @@ export function buildEmailText(emails: EnrichedEmail[], userEmail: string, categ
       }
     }
 
+    // What the filter already knows: verdict, reasons, and where the links
+    // really go. The model cannot see an href in the body text it is shown,
+    // and it read three green auth rows as proof of identity — see
+    // PHISHING_PROMPT for the lure that taught us that.
+    const securityBlock = formatSecurityLines(email.security);
+
     // Existing notes about this sender (so LLM doesn't repeat them)
     const notesBlock = email.existingNotes
       ? `\nExisting-Notes:\n${email.existingNotes}` : '';
@@ -549,7 +797,7 @@ To: ${email.toAddress}${email.ccAddress ? `\nCC: ${email.ccAddress}` : ''}
 Role: ${role}
 Subject: ${email.subject}
 Date: ${new Date(email.date * 1000).toISOString()}
-${behaviorBlock}${memoryBlock}${typeLine}${threadLine}${authLine}${notesBlock}
+${behaviorBlock}${memoryBlock}${typeLine}${threadLine}${authLine}${securityBlock}${notesBlock}
 
 ${email.body}`;
   }).join('\n\n');
