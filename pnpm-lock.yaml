@@ -93,8 +93,8 @@ importers:
         specifier: ^0.2.3
         version: 0.2.3(react-dom@18.3.1)(react@18.3.1)
       '@sarv-in/mailguard':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.3.0
+        version: 0.3.0
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -289,8 +289,8 @@ importers:
   packages/core:
     dependencies:
       '@sarv-in/mailguard':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.3.0
+        version: 0.3.0
       '@zone-eu/mailsplit':
         specifier: ^5.4.8
         version: 5.4.12
@@ -389,8 +389,8 @@ importers:
   packages/extension-sdk:
     dependencies:
       '@sarv-in/mailguard':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.3.0
+        version: 0.3.0
       html-to-text:
         specifier: ^10.0.0
         version: 10.0.0
@@ -2745,8 +2745,8 @@ packages:
       react-dom: 18.3.1(react@18.3.1)
     dev: false
 
-  /@sarv-in/mailguard@0.1.0:
-    resolution: {integrity: sha512-4uGLyhS2Hal/CH6mzJDTKsOIr85UQjtul9pjdOda8eWXWaxZ0p1cPs4cgLsd0Ye5iEVtCp+7oNqUPNMBpDb1Gw==}
+  /@sarv-in/mailguard@0.3.0:
+    resolution: {integrity: sha512-4m2IoQHSCBduWK6qbJDj6a7msAcP0PjgtYC3bU1VY9iL1oaRzUNdXUTCw4F7/6qxIpLlfQeZZtSmEz+STc+99w==}
     engines: {node: '>=20'}
     peerDependencies:
       '@peculiar/x509': ^2.1.0
