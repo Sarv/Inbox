@@ -24,5 +24,10 @@ export default defineConfig({
     // Keep electron tests to dependency-free logic — the node env has no `electron`.
     include: ['test/**/*.{test,spec}.{ts,tsx}'],
     environment: 'node',
+    // Child processes, never worker threads — the root vitest.config.ts explains
+    // why. Several electron/** suites open real SQLite, and as threads inside
+    // Electron this suite ran 4x slower (21 s vs 5 s). Guarded by
+    // test/unit/test-pool-guard.test.ts.
+    pool: 'forks',
   },
 });
