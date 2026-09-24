@@ -14,13 +14,18 @@
 # the whole build signs unattended.
 #
 # Usage:
-#   ./scripts/build-dmg.sh                  # arm64, signed, not notarized
-#   ./scripts/build-dmg.sh --arch x64       # Intel
-#   ./scripts/build-dmg.sh --arch both      # arm64 + x64
+#   ./scripts/build-dmg.sh                  # universal, signed, not notarized
 #   ./scripts/build-dmg.sh --notarize       # also submit to Apple + staple
 #   ./scripts/build-dmg.sh --out ~/Downloads  # where the finished DMG lands
 #
-# The finished DMG is named "Sarv Inbox-<version>-<arch>-<UTC timestamp>.dmg".
+# There is no --arch any more. build.mac in apps/desktop/package.json pins
+# arch: ["universal"], and electron-builder prefers a config arch over a CLI
+# flag -- so --arch x64 would have gone on printing "x64" while building a
+# universal DMG anyway. One DMG carrying both arm64 and amd64 is what the
+# release ships, so this builds the same thing.
+#
+# The finished DMG is named
+# "sarv-inbox-<version>-mac-arm64-amd64-<UTC timestamp>.dmg".
 # The stamp is UTC (per the repo's store-UTC rule) in compact ISO-8601 basic
 # form -- 20260907T110000Z -- because ":" is a path separator in Finder and
 # would render the name wrong.
@@ -34,23 +39,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 
-ARCH="arm64"
 NOTARIZE="no"
 OUT_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --arch) ARCH="${2:-}"; shift 2 ;;
+    # Rejected rather than ignored: the config pins the arch, so honouring this
+    # was never possible and pretending to would hand back a mislabelled DMG.
+    --arch) echo "x --arch is gone: the DMG is always universal (arm64 + amd64)"; exit 1 ;;
     --notarize) NOTARIZE="yes"; shift ;;
     --out) OUT_DIR="${2:-}"; shift 2 ;;
-    *) echo "✗ unknown option: $1"; exit 1 ;;
+    *) echo "x unknown option: $1"; exit 1 ;;
   esac
 done
-case "$ARCH" in
-  arm64) BUILDER_ARCH=(--arm64) ;;
-  x64)   BUILDER_ARCH=(--x64) ;;
-  both)  BUILDER_ARCH=(--arm64 --x64) ;;
-  *) echo "✗ --arch must be arm64, x64, or both"; exit 1 ;;
-esac
 
 VERSION=$(node -p "require('./apps/desktop/package.json').version")
 
@@ -126,16 +126,21 @@ BUILD_DIR="/tmp/sarvinbox-dmg-$VERSION"
 rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"
 
 echo ""
-echo "=== Packaging + signing DMG ($ARCH) ==="
-npx electron-builder --mac dmg "${BUILDER_ARCH[@]}" --config.directories.output="$BUILD_DIR"
+echo "=== Packaging + signing DMG (universal: arm64 + amd64) ==="
+npx electron-builder --mac dmg --universal --config.directories.output="$BUILD_DIR"
 
 # ── Verify + collect ─────────────────────────────────────────────────────
-APP="$BUILD_DIR/mac-arm64/Sarv Inbox.app"
-[[ -d "$APP" ]] || APP=$(find "$BUILD_DIR" -maxdepth 2 -name "Sarv Inbox.app" -print -quit)
-if [[ -n "$APP" && -d "$APP" ]]; then
-  codesign --verify --deep --strict --verbose=2 "$APP"
-  echo "OK: $(codesign -dv "$APP" 2>&1 | grep '^Authority' | head -1)"
-fi
+# Matched by extension, not by name: build.executableName makes the bundle
+# "sarv-inbox.app", not "Sarv Inbox.app", so the old hardcoded name found
+# nothing and the signature check below quietly never ran.
+APP=$(find "$BUILD_DIR" -maxdepth 2 -name "*.app" -print -quit)
+[[ -n "$APP" && -d "$APP" ]] || { echo "x electron-builder produced no .app to verify"; exit 1; }
+codesign --verify --deep --strict --verbose=2 "$APP"
+echo "OK: $(codesign -dv "$APP" 2>&1 | grep '^Authority' | head -1)"
+
+# The merge is the step that can silently halve the app, and a half-universal
+# DMG signs and notarizes exactly like a whole one.
+node "$REPO_ROOT/scripts/verify-mac-arch.mjs" "$(dirname "$APP")=x64,arm64"
 
 DIST_DIR="${OUT_DIR:-$REPO_ROOT/release}"
 # Expand a leading ~ so `--out ~/Downloads` works when quoted by the caller.
@@ -147,7 +152,8 @@ BUILD_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
 SHIPPED=()
 while IFS= read -r dmg; do
-  # "Sarv Inbox-1.1.1-arm64.dmg" -> "Sarv Inbox-1.1.1-arm64-20260907T110000Z.dmg"
+  # "sarv-inbox-1.2.0-mac-arm64-amd64.dmg"
+  #   -> "sarv-inbox-1.2.0-mac-arm64-amd64-20260907T110000Z.dmg"
   stamped="$(basename "$dmg" .dmg)-$BUILD_STAMP.dmg"
   cp -f "$dmg" "$DIST_DIR/$stamped"
   SHIPPED+=("$DIST_DIR/$stamped")
