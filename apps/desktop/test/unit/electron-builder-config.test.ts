@@ -48,6 +48,17 @@ describe('electron-builder configuration', () => {
     });
   });
 
+  // The regression: with no explicit executableName, electron-builder derives
+  // one from the package name -- and `@sarvinbox/desktop` sanitizes to
+  // `@sarvinboxdesktop`, which v26 rejects outright ("contains characters that
+  // cannot be safely used in file paths"). That killed both Linux jobs on the
+  // v1.2.0 tag while macOS and Windows, which never use it, built fine.
+  it('sets an executableName that is safe in a file path', () => {
+    const executableName = buildConfig['executableName'];
+    expect(executableName).toBeTypeOf('string');
+    expect(executableName).toMatch(/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/);
+  });
+
   // Every release artifact the publish job globs must have a target that
   // actually produces it. A target quietly dropped here means a platform
   // silently vanishes from the release page.
