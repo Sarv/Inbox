@@ -29,7 +29,8 @@ const schema = require('app-builder-lib/scheme.json');
 const { validateSchema } = require('app-builder-lib/out/util/config/schemaValidator.js') as {
   validateSchema: (schema: unknown, data: unknown, config?: { name?: string }) => void;
 };
-const buildConfig = require('../../package.json').build as Record<string, unknown>;
+const packageJson = require('../../package.json') as Record<string, unknown>;
+const buildConfig = packageJson['build'] as Record<string, unknown>;
 
 describe('electron-builder configuration', () => {
   // If this fails, every platform in .github/workflows/release.yml fails.
@@ -57,6 +58,21 @@ describe('electron-builder configuration', () => {
     const executableName = buildConfig['executableName'];
     expect(executableName).toBeTypeOf('string');
     expect(executableName).toMatch(/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/);
+  });
+
+  // The regression: fpm -- which electron-builder shells out to for .deb and
+  // .rpm -- refuses to run without a homepage and a maintainer, because both
+  // are mandatory fields in those package formats. electron-builder looks for
+  // the homepage in THIS package.json, not the workspace root, so the root
+  // having one is no help; see FpmTarget.computeFpmMetaInfoOptions. Missing
+  // either one fails the two Linux jobs only, which is how it survived a
+  // release attempt where macOS and Windows both went green.
+  it('carries the package metadata fpm requires for .deb and .rpm', () => {
+    expect(packageJson['homepage']).toMatch(/^https?:\/\//);
+    const linux = buildConfig['linux'] as { maintainer?: string };
+    // fpm wants "Name <email>" -- electron-builder falls back to author.email
+    // when linux.maintainer is absent, and a bare "Sarv" string has no email.
+    expect(linux.maintainer).toMatch(/^.+ <[^@\s]+@[^@\s]+\.[^@\s]+>$/);
   });
 
   // Every release artifact the publish job globs must have a target that

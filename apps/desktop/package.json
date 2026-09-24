@@ -5,6 +5,11 @@
   "description": "Sarv Inbox \u2014 AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
+  "homepage": "https://github.com/Sarv/Inbox",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sarv/Inbox.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "node ../../scripts/native-abi.mjs electron && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
