@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **One place for blocklists.** Security → Blocklists is now the only control:
+  whether to ask, who answers (this computer's DNS or the Sarv service), whether
+  the domains a message links to are asked about too, and registration dates
+  (domain age), which used to be switched off under Settings → General.
+  Settings → General's "Sender reputation checks" is gone and its choices carry
+  over — "Off" stays off. A sender is asked about once, as the message arrives,
+  so a listed sender is filed before you see it whoever answers; the Reply-To
+  domain is asked too, and every answer lands in one cache that survives a
+  restart.
+
+### Fixed
+- **Blocklist settings that cannot be read ask nobody**, instead of reading as
+  the every-list default for a user who had switched blocklists off. A resolver
+  address that cannot be used no longer fails the message being synced.
+
 ## [1.2.1] - 2026-09-24
 
 ### Added

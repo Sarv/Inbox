@@ -8,7 +8,7 @@ import {
   USER_REPORTS_MIN,
   linkReputationReasons,
   messageDomains,
-  reputationReasons,
+  reputationAssessment,
   unknownResult,
   type ReputationResult,
 } from '../../../src/utils/spam-reputation';
@@ -159,11 +159,26 @@ describe('LocalDnsblProvider — reading the lists', () => {
   });
 });
 
-describe('reputationReasons', () => {
+/** The reasons alone, as most of these assertions want them. */
+const reputationReasons = (...args: Parameters<typeof reputationAssessment>) => reputationAssessment(...args).reasons;
+
+// THE one place a sender's listings become points — at ingest, whichever
+// provider answered. A second reading of the same answers is how one listing
+// used to be charged twice.
+describe('reputationAssessment', () => {
   const result = (over: Partial<{ ips: ReputationResult['ips']; domains: ReputationResult['domains'] }>): ReputationResult => ({
     provider: 'test', ips: over.ips ?? new Map(), domains: over.domains ?? new Map(),
   });
   const hit = (list: string, category: string) => ({ list, category, detail: `${list} says ${category}` });
+
+  // The assessment ingest merges into the header score: a spam-source
+  // listing alone is spam, a policy listing alone only suspicious.
+  it('adds up to an assessment ingest can merge, spam from a spam source alone', () => {
+    const listed = (category: string) => result({ ips: new Map([['1.2.3.4', { status: 'listed', hits: [hit('Spamhaus ZEN', category)] }]]) });
+    expect(reputationAssessment(listed('spam'), { originIp: '1.2.3.4', domains: [] })).toMatchObject({ score: 5, isSpam: true, suspicious: true });
+    expect(reputationAssessment(listed('policy'), { originIp: '1.2.3.4', domains: [] })).toMatchObject({ score: 3, isSpam: false, suspicious: true });
+    expect(reputationAssessment(result({}), { originIp: '1.2.3.4', domains: [] })).toMatchObject({ score: 0, reasons: [] });
+  });
 
   it('scores a spam-source IP listing at the threshold, a policy listing below it', () => {
     const spam = reputationReasons(result({ ips: new Map([['1.2.3.4', { status: 'listed', hits: [hit('Spamhaus ZEN', 'spam')] }]]) }), { originIp: '1.2.3.4', domains: [] });
@@ -349,5 +364,117 @@ describe('SarvReputationProvider.report', () => {
     expect(await broken.report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
     const noToken = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => { throw new Error('refresh failed'); }, fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
     expect(await noToken.report({ domain: 'x.example', ip: null, verdict: 'spam' })).toBe(false);
+  });
+});
+
+/**
+ * The breakers, at the provider — where they live, because only a provider
+ * knows what one of its failures looks like. What this protects: every
+ * question here is asked on the ingest path, so a zone or a service that will
+ * never answer is paid for by every message behind it unless something stops
+ * asking. (The same breakers seen through the stage, as ingest sees them, are
+ * pinned in reputation-stage.test.ts.)
+ */
+describe('LocalDnsblProvider — per-zone breakers', () => {
+  const zen = DEFAULT_DNSBL_LISTS.find((list) => list.name === 'spamhaus-zen')!;
+  const dbl = DEFAULT_DNSBL_LISTS.find((list) => list.name === 'spamhaus-dbl')!;
+  const warn = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+  // Regression: a batch of link domains gives an IP zone nothing to ask. It
+  // must not count as that zone answering — which would keep forgiving a zone
+  // that refuses every address — nor as it failing.
+  it('neither forgives nor fails a zone the call gave nothing to ask', async () => {
+    const spy = warn();
+    const answers: Answers = {};
+    for (let i = 1; i <= 9; i += 1) answers[`${i}.3.2.1.zen.spamhaus.org`] = ['127.255.255.254'];
+    const p = new LocalDnsblProvider({ resolve4: resolver(answers), lists: [zen, dbl], breaker: { failureThreshold: 3 } });
+
+    await p.lookup({ ips: ['1.2.3.1'], domains: [] });
+    await p.lookup({ ips: [], domains: ['a.example'] });
+    await p.lookup({ ips: ['1.2.3.2'], domains: [] });
+    await p.lookup({ ips: [], domains: ['b.example'] });
+    expect(p.activeLists().map((list) => list.name)).toEqual(['spamhaus-zen', 'spamhaus-dbl']);
+    await p.lookup({ ips: ['1.2.3.3'], domains: [] });
+    expect(p.activeLists().map((list) => list.name)).toEqual(['spamhaus-dbl']);
+    spy.mockRestore();
+  });
+
+  // A zone that answered ANY item in a batch is answering this network.
+  it('forgives a zone that answered part of a batch', async () => {
+    const answers: Answers = { '1.3.2.1.zen.spamhaus.org': 'timeout', '2.3.2.1.zen.spamhaus.org': 'timeout' };
+    const p = new LocalDnsblProvider({ resolve4: resolver(answers), lists: [zen], breaker: { failureThreshold: 2 } });
+
+    for (let i = 0; i < 3; i += 1) await p.lookup({ ips: ['1.2.3.1', '1.2.3.2', '1.2.3.9'], domains: [] });
+    expect(p.activeLists()).toHaveLength(1);
+  });
+
+  // THE gate: no zone configured means no query — and no note either, because
+  // nothing went wrong.
+  it('asks nothing, and answers unknown, with no zone configured', async () => {
+    const calls: string[] = [];
+    const r = await new LocalDnsblProvider({ resolve4: resolver({}, calls), lists: [] }).lookup({ ips: ['1.2.3.4'], domains: ['x.example'] });
+    expect(calls).toEqual([]);
+    expect(r.ips.get('1.2.3.4')).toEqual({ status: 'unknown', hits: [] });
+    expect(r.domains.get('x.example')).toEqual({ status: 'unknown', hits: [] });
+  });
+
+  it('says why it asked nobody when every zone is resting', async () => {
+    const spy = warn();
+    const calls: string[] = [];
+    const p = new LocalDnsblProvider({ resolve4: resolver({ '4.3.2.1.zen.spamhaus.org': 'timeout' }, calls), lists: [zen], breaker: { failureThreshold: 1 } });
+    await p.lookup({ ips: ['1.2.3.4'], domains: [] });
+    const r = await p.lookup({ ips: ['1.2.3.4'], domains: [] });
+    expect(calls).toHaveLength(1);
+    expect(r.ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', note: expect.stringContaining('resting') });
+    spy.mockRestore();
+  });
+});
+
+describe('SarvReputationProvider — the breaker', () => {
+  const query = { ips: ['1.2.3.4'], domains: [] };
+
+  // Regression: the service is asked as mail arrives. One that is down must
+  // be paused after a run of failures, or every new sender's message waits
+  // out the full request timeout before it can be filed.
+  it('pauses after consecutive failures, and asks again after the cooldown', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const clock = { now: 1_000 };
+    const fetch = vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+    const p = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => 't', fetch, breaker: { failureThreshold: 2, cooldownMs: 60_000, now: () => clock.now } });
+
+    await p.lookup(query);
+    await p.lookup(query);
+    const paused = await p.lookup(query);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(paused.ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', note: expect.stringContaining('paused') });
+
+    clock.now += 60_001;
+    await p.lookup(query);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    spy.mockRestore();
+  });
+
+  // Not being signed in costs no request, so it is not a failure — and an
+  // answer in between failures forgives them.
+  it('counts neither a missing sign-in nor failures an answer came between', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let token: string | null = null;
+    let ok = false;
+    const fetch = vi.fn(async () => ({ ok, status: ok ? 200 : 500, json: async () => ({ ips: [] }) }));
+    const p = new SarvReputationProvider({ endpoint: 'https://r.example', getToken: async () => token, fetch, breaker: { failureThreshold: 2 } });
+
+    for (let i = 0; i < 5; i += 1) await p.lookup(query);
+    expect(fetch).not.toHaveBeenCalled();
+
+    token = 't';
+    await p.lookup(query); // fails
+    ok = true;
+    await p.lookup(query); // answers
+    ok = false;
+    await p.lookup(query); // fails — one in a row, not two
+    await p.lookup(query); // fails — two: now paused
+    await p.lookup(query);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    spy.mockRestore();
   });
 });

@@ -1,17 +1,17 @@
 import type { DomainAgeLookup } from '@sarv-in/mailguard';
-import type { FolderRecord, ItemReputation, ReputationProvider, ReputationResult, SenderReport } from '@sarvinbox/core';
+import { ReputationStage, type FolderRecord, type ItemReputation, type ReputationProvider, type ReputationResult } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
-  blobs: new Map<string, Buffer>(),
+  settings: new Map<string, string>(),
+  settingsUnreadable: false,
   runtimes: [] as unknown[],
   sent: [] as Array<{ c: string; p: unknown }>,
   coreDb: null as unknown,
   accounts: [] as Array<{ provider: string; email: string }>,
   fetchCalls: [] as Array<{ url: string; init: unknown }>,
   dnsQueries: [] as string[],
-  setBlobThrows: false,
   /** When set, the fake Sarv fetch waits on this before answering. */
   fetchGate: null as Promise<void> | null,
   /** RDAP answers by URL for the domain-age wiring. IANA's bootstrap defaults to an empty registry: every TLD unsupported, nothing scored. */
@@ -23,8 +23,10 @@ vi.mock('../../../../electron/shared', () => ({
 }));
 vi.mock('../../../../electron/services/core-db', () => ({
   getCoreDb: () => { if (!h.coreDb) throw new Error('the core DB is not opened in tests'); return h.coreDb; },
-  getBlob: (k: string) => h.blobs.get(k) ?? null,
-  setBlob: (k: string, v: Buffer) => { if (h.setBlobThrows) throw new Error('disk full'); h.blobs.set(k, v); },
+  readAppSetting: (key: string) => {
+    if (h.settingsUnreadable) throw new Error('file is not a database');
+    return h.settings.get(key) ?? null;
+  },
 }));
 vi.mock('../../../../electron/services/net-fetch', () => ({
   chromiumFetch: async (url: string, init: unknown) => {
@@ -47,54 +49,67 @@ vi.mock('../../../../electron/services/oauth-service', () => ({
   listSignedInAccounts: async () => h.accounts,
   getValidAccessToken: async (_p: string, email: string) => `tok-${email}`,
 }));
-// The local provider must never hit real DNS from a test: every name is "not listed".
+// The blocklist stage the scheduler builds must never hit real DNS from a test: every name is "not listed".
 vi.mock('node:dns', () => ({
-  promises: { resolve4: async (name: string) => { h.dnsQueries.push(name); throw Object.assign(new Error('queryA ENOTFOUND'), { code: 'ENOTFOUND' }); } },
+  promises: {
+    Resolver: class {
+      setServers(): void {}
+      async resolve4(name: string): Promise<string[]> {
+        h.dnsQueries.push(name);
+        throw Object.assign(new Error('queryA ENOTFOUND'), { code: 'ENOTFOUND' });
+      }
+    },
+  },
 }));
 
 import {
+  DEFAULT_REPUTATION_SETTINGS,
+  ReputationCache,
+  SETTINGS_KEY,
+  noteAppSettingChanged,
+  resetReputationForTests,
+  type ReputationSettings,
+} from '../../../../electron/services/reputation-service';
+import {
   REPUTATION_ACTIVE_INTERVAL_MS,
   BODY_BATCH_SIZE,
-  REPUTATION_CACHE_TTL_S,
-  REPUTATION_CACHE_UNKNOWN_TTL_S,
   REPUTATION_FIRST_TICK_MS,
   REPUTATION_IDLE_INTERVAL_MS,
-  ReputationCache,
   DomainAgeCache,
   DOMAIN_AGE_CACHE_ERROR_TTL_S,
   DOMAIN_AGE_CACHE_TTL_S,
-  ageSourceForPolicy,
-  getReputationCache,
+  ageSourceForSettings,
   resetRdapBootstrapCache,
   type AgeSource,
-  getSpamReputationPolicy,
   getSpamReputationState,
   kickSpamReputation,
-  normalizeSpamReputationPolicy,
-  providerForPolicy,
-  reportSenderVerdict,
-  reportsAllowed,
-  resetSpamReputationPolicyCache,
   runReputationPass,
-  setSpamReputationPolicy,
   startSpamReputationScheduler,
   stopSpamReputationScheduler,
+  type LinkLookup,
   type ReputationStorage,
 } from '../../../../electron/services/spam-reputation-service';
 
 /**
- * The reputation stage's pass: what it asks, what it caches, what it files.
+ * The background reputation pass: what it asks, what it caches, what it files.
  *
- * What this protects: this stage changes stored scores after the fact and can
+ * What this protects: this pass changes stored scores after the fact and can
  * move mail on the server. A pass that added points twice on a retried batch,
- * looked up the same campaign IP forty times, filed a message the header
+ * looked up the same campaign domain forty times, filed a message the header
  * stage had already filed (a second server move for a uid that no longer
- * exists), or treated "the provider is down" as a verdict would each be
- * silent — nothing crashes, the mailbox just drifts. Pinned with fakes.
+ * exists), treated "the provider is down" as a verdict — or asked the
+ * blocklists about a SENDER again, a second time after the ingest check did,
+ * and charged the same listing twice — would each be silent: nothing crashes,
+ * the mailbox just drifts. Pinned with fakes.
+ *
+ * The pass asks about two things now: the domains a body links to (through
+ * the one blocklist stage, when the user opted in) and how recently domains
+ * were registered. The sender is asked about once, as mail arrives — see
+ * reputation-service.test.ts.
  */
 const T0 = 1_760_000_000;
-const listedSpam = (list: string): ItemReputation => ({ status: 'listed', hits: [{ list, category: 'spam', detail: `${list} says spam` }] });
 const clean: ItemReputation = { status: 'clean', hits: [] };
+const phishing: ItemReputation = { status: 'listed', hits: [{ list: 'Spamhaus DBL', category: 'phishing', detail: 'phishing domain' }] };
 
 type Row = ReturnType<ReputationStorage['getEmailsPendingReputation']>[number];
 type BodyRow = ReturnType<ReputationStorage['getEmailsPendingLinkReputation']>[number];
@@ -140,98 +155,110 @@ const answering = (ips: Record<string, ItemReputation>, domains: Record<string, 
     ips: new Map(q.ips.map((ip) => [ip, ips[ip] ?? clean])),
     domains: new Map(q.domains.map((d) => [d, domains[d] ?? clean])),
   });
+/** The one blocklist stage over a fake provider and a real (in-memory) cache — what the pass is handed in the app. */
+const stageOf = (provider: ReputationProvider, cache = new ReputationCache(new Database(':memory:'))): LinkLookup =>
+  new ReputationStage(provider, cache, { now: () => T0 * 1000 });
 
-beforeEach(() => { h.blobs.clear(); h.runtimes = []; h.sent = []; h.accounts = []; h.fetchCalls = []; h.dnsQueries = []; h.setBlobThrows = false; h.fetchGate = null; h.rdap = {}; h.coreDb = new Database(':memory:'); resetSpamReputationPolicyCache(); resetRdapBootstrapCache(); });
+// ---- Domain age fakes
+const dated = (domain: string, ageDays: number, over: Partial<DomainAgeLookup> = {}): DomainAgeLookup => ({
+  domain, status: 'ok', registered: T0 - ageDays * 86_400, ageDays, registrar: null, server: 'https://rdap.example/', detail: null, ...over,
+});
+const unsupported = (domain: string): DomainAgeLookup => ({ domain, status: 'unsupported', registered: null, ageDays: null, registrar: null, server: null, detail: 'No RDAP service is published for .example' });
+const sourceOf = (table: Record<string, DomainAgeLookup | Error>, over: Partial<AgeSource> = {}) => {
+  const calls: string[] = [];
+  const cache = over.cache ?? new DomainAgeCache(new Database(':memory:'));
+  const source: AgeSource = {
+    cache,
+    lookup: async (domain) => { calls.push(domain); const answer = table[domain]; if (answer instanceof Error) throw answer; return answer ?? unsupported(domain); },
+    ...over,
+  };
+  return { calls, cache, source };
+};
+/** A sender domain registered today: the most domain age can add, which is what makes it a filing trigger here. */
+const brandNew = (domain = 'sender.example') => sourceOf({ [domain]: dated(domain, 0) });
+
+const store = (settings: Partial<ReputationSettings>): void => {
+  h.settings.set(SETTINGS_KEY, JSON.stringify({ reputation: { ...DEFAULT_REPUTATION_SETTINGS, ...settings, chosen: true } }));
+};
+
+beforeEach(() => {
+  resetReputationForTests();
+  h.settings.clear(); h.settingsUnreadable = false; h.runtimes = []; h.sent = []; h.accounts = []; h.fetchCalls = []; h.dnsQueries = [];
+  h.fetchGate = null; h.rdap = {}; h.coreDb = new Database(':memory:');
+  resetRdapBootstrapCache();
+});
 afterEach(() => { vi.restoreAllMocks(); });
 
-describe('policy', () => {
-  it('normalises modes and endpoints, persists, and defaults to the Sarv service with no endpoint', () => {
-    expect(normalizeSpamReputationPolicy(null)).toEqual({ mode: 'sarv', endpoint: '', reports: false, domainAge: true });
-    expect(normalizeSpamReputationPolicy({ mode: 'local', endpoint: 'ignored' })).toEqual({ mode: 'local', endpoint: '', reports: false, domainAge: true });
-    expect(normalizeSpamReputationPolicy({ mode: 'sarv', endpoint: 'https://rep.sarv.example/', reports: true, domainAge: true })).toEqual({ mode: 'sarv', endpoint: 'https://rep.sarv.example', reports: true, domainAge: true });
-    expect(normalizeSpamReputationPolicy({ mode: 'sarv', endpoint: 'http://insecure.example' }).endpoint).toBe(''); // https only
-    expect(normalizeSpamReputationPolicy({ mode: 'weird' }).mode).toBe('sarv');
-    setSpamReputationPolicy({ mode: 'off' });
-    resetSpamReputationPolicyCache();
-    expect(getSpamReputationPolicy()).toEqual({ mode: 'off', endpoint: '', reports: false, domainAge: true });
-  });
-
-  // Off is off; Sarv without an address is off too; local and Sarv-with-address build a provider.
-  it('builds a provider only for a usable policy', () => {
-    expect(providerForPolicy({ mode: 'off', endpoint: '', reports: false, domainAge: true })).toBeNull();
-    expect(providerForPolicy({ mode: 'sarv', endpoint: '', reports: false, domainAge: true })).toBeNull();
-    expect(providerForPolicy({ mode: 'sarv', endpoint: 'https://rep.sarv.example', reports: false, domainAge: true })?.name).toBe('sarv');
-    expect(providerForPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true })?.name).toBe('local-dnsbl');
-  });
-});
-
-describe('ReputationCache', () => {
-  it('serves a fresh answer, forgets it after its TTL, and gives unknowns a short life', () => {
-    const cache = new ReputationCache(new Database(':memory:'));
-    cache.set('ip', '5.6.7.8', listedSpam('Spamhaus ZEN'), 'test', T0);
-    cache.set('domain', 'x.example', { status: 'unknown', hits: [], note: 'refused' }, 'test', T0);
-    expect(cache.get('ip', '5.6.7.8', T0 + REPUTATION_CACHE_TTL_S - 1)).toMatchObject({ status: 'listed' });
-    expect(cache.get('ip', '5.6.7.8', T0 + REPUTATION_CACHE_TTL_S + 1)).toBeNull();
-    expect(cache.get('domain', 'x.example', T0 + REPUTATION_CACHE_UNKNOWN_TTL_S - 1)).toMatchObject({ status: 'unknown', note: 'refused' });
-    expect(cache.get('domain', 'x.example', T0 + REPUTATION_CACHE_UNKNOWN_TTL_S + 1)).toBeNull();
-    expect(cache.get('ip', '9.9.9.9', T0)).toBeNull();
-    expect(cache.count()).toBe(2);
-  });
-});
-
-describe('runReputationPass', () => {
+describe('runReputationPass — the sender stage', () => {
   type Engine = { moveToSpam: (folderPath: string, uid: number) => Promise<unknown> };
   const mover = () => vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined);
-  const deps = (targets: ReturnType<typeof fakeStorage>[], provider: ReputationProvider | null, engine: Engine | null = null) => ({
+  const deps = (targets: ReturnType<typeof fakeStorage>[], age: AgeSource | null, engine: Engine | null = null, links: LinkLookup | null = null) => ({
     targets: () => targets.map((t, i) => ({ storage: t.storage, engine, label: `acct-${i}` })),
-    provider: () => provider,
-    cache: new ReputationCache(new Database(':memory:')),
+    links: () => links,
+    age: () => age,
     now: () => T0,
   });
 
-  it('does nothing — and touches no row — when the stage is off', async () => {
-    const t = fakeStorage([row({ id: 'a' })]);
+  it('does nothing — and touches no row — when neither link lookups nor domain age are on', async () => {
+    const t = fakeStorage([row({ id: 'a' })], true, [bodyRow({ id: 'b' })]);
     const s = await runReputationPass(deps([t], null));
-    expect(s).toMatchObject({ judged: 0, linkJudged: 0, provider: null, pending: 0 });
+    expect(s).toMatchObject({ judged: 0, linkJudged: 0, linkProvider: null, domainAge: false, pending: 0 });
     expect(t.stamped).toEqual([]);
+    expect(t.linkStamped).toEqual([]);
   });
 
-  it('asks about each distinct IP and domain once, adds the points, and stamps every row', async () => {
+  // THE regression this pass was rebuilt for. The ingest check asks the
+  // blocklists about the sender as the message arrives; asking again here
+  // was a second copy with its own cache, and it charged the same listing
+  // twice until a guard stopped it. The sender stage asks the registry about
+  // each distinct domain once, and never the blocklists.
+  it('never asks the blocklists about the sender, and asks the registry once per distinct sender domain', async () => {
     const t = fakeStorage([
       row({ id: 'a', originIp: '5.6.7.8', fromAddress: 'x@camp.example' }),
       row({ id: 'b', originIp: '5.6.7.8', fromAddress: 'y@camp.example', replyTo: 'z@Reply.Example' }),
       row({ id: 'c', originIp: null, fromAddress: 'ok@fine.example', spamScore: 1 }),
     ]);
-    const p = providerOf(answering({ '5.6.7.8': { status: 'listed', hits: [{ list: 'Spamhaus ZEN', category: 'policy', detail: 'PBL' }] } }));
-    const s = await runReputationPass(deps([t], p));
-    expect(p.calls).toEqual([{ ips: ['5.6.7.8'], domains: ['camp.example', 'reply.example', 'fine.example'] }]);
-    expect(s).toMatchObject({ judged: 3, scored: 2, filed: 0, pending: 0, provider: 'test' });
-    const a = t.stamped.find((x) => x.id === 'a')!;
-    expect(a.spamScore).toBe(3); // PBL = 3 points, under the line
-    expect(JSON.parse(a.spamReasons)).toEqual([{ id: 'reputation-ip-listed', points: 3, detail: expect.stringContaining('5.6.7.8') }]);
+    const p = providerOf(answering({ '5.6.7.8': phishing }));
+    const { calls, source } = sourceOf({ 'camp.example': dated('camp.example', 2) });
+    const s = await runReputationPass(deps([t], source, null, stageOf(p)));
+    expect(p.calls).toEqual([]);
+    expect(calls.sort()).toEqual(['camp.example', 'fine.example', 'reply.example']);
+    expect(s).toMatchObject({ judged: 3, scored: 2, filed: 0, pending: 0, linkProvider: 'test', domainAge: true });
+    expect(JSON.parse(t.stamped.find((x) => x.id === 'a')!.spamReasons).map((r: { id: string }) => r.id)).toEqual(['reputation-domain-new']);
     expect(t.stamped.find((x) => x.id === 'c')).toMatchObject({ spamScore: 1, spamReasons: '[]' });
-    expect(t.updates).toEqual([]); // nothing crossed the line
   });
 
-  // THE point of the stage: header score 3 + reputation 5 crosses the line →
-  // tagged, filed locally, moved on the server. The header stage's reasons
-  // are kept, the new one appended.
-  it('files a message that crosses the line only because of reputation, locally and on the server', async () => {
+  // A row the ingest check already charged keeps that one charge: the pass
+  // adds nothing about the same listing, whatever the provider now says.
+  it('leaves a listing the ingest check charged exactly as it was', async () => {
+    const stored = JSON.stringify([{ id: 'reputation-ip-listed', points: 3, detail: 'The sending address 5.6.7.8 is listed by Spamhaus ZEN (PBL).' }]);
+    const t = fakeStorage([row({ id: 'a', originIp: '5.6.7.8', fromAddress: 'x@listed.example', spamScore: 3, spamReasons: stored })]);
+    const p = providerOf(answering({ '5.6.7.8': { status: 'listed', hits: [{ list: 'Spamhaus ZEN', category: 'policy', detail: 'PBL' }] } }));
+    await runReputationPass(deps([t], sourceOf({}).source, null, stageOf(p)));
+    expect(p.calls).toEqual([]);
+    expect(t.stamped[0]).toMatchObject({ spamScore: 3, spamReasons: stored });
+    expect(t.updates).toEqual([]);
+  });
+
+  // THE point of filing here: header score 3 + a sender domain registered
+  // today (3) crosses the line → tagged, filed locally, moved on the server.
+  // The header stage's reasons are kept, the new one appended.
+  it('files a message that crosses the line only now, locally and on the server', async () => {
     const t = fakeStorage([row({ id: 'a', uid: 42, spamScore: 3, spamReasons: '[{"id":"auth-failed","points":3,"detail":"DMARC failed"}]' })]);
     const engine = { moveToSpam: mover() };
-    const s = await runReputationPass(deps([t], providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') })), engine));
+    const s = await runReputationPass(deps([t], brandNew().source, engine));
     expect(s).toMatchObject({ judged: 1, scored: 1, filed: 1 });
     expect(t.updates).toEqual([{ id: 'a', tags: '|spam|Spam|', folderId: 'f-spam' }]);
     expect(engine.moveToSpam).toHaveBeenCalledWith('INBOX', 42);
     const stamped = t.stamped[0];
-    expect(stamped.spamScore).toBe(8);
-    expect(JSON.parse(stamped.spamReasons).map((r: { id: string }) => r.id)).toEqual(['auth-failed', 'reputation-ip-listed']);
+    expect(stamped.spamScore).toBe(6);
+    expect(JSON.parse(stamped.spamReasons).map((r: { id: string }) => r.id)).toEqual(['auth-failed', 'reputation-domain-new']);
   });
 
   it('tags but cannot move when the account has no spam folder, and queues no server move', async () => {
     const t = fakeStorage([row({ id: 'a', spamScore: 3 })], false);
     const engine = { moveToSpam: mover() };
-    await runReputationPass(deps([t], providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') })), engine));
+    await runReputationPass(deps([t], brandNew().source, engine));
     expect(t.updates).toEqual([{ id: 'a', tags: '|INBOX|spam|', folderId: 'f-inbox' }]);
     expect(engine.moveToSpam).not.toHaveBeenCalled();
   });
@@ -241,45 +268,27 @@ describe('runReputationPass', () => {
   it('does not file again a message the header stage already filed', async () => {
     const t = fakeStorage([row({ id: 'a', spamScore: 5, tags: '|spam|Spam|', folderId: 'f-spam', folderPath: 'Spam' })]);
     const engine = { moveToSpam: mover() };
-    const s = await runReputationPass(deps([t], providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') })), engine));
+    const s = await runReputationPass(deps([t], brandNew().source, engine));
     expect(s.filed).toBe(0);
     expect(t.updates).toEqual([]);
     expect(engine.moveToSpam).not.toHaveBeenCalled();
-    expect(t.stamped[0].spamScore).toBe(10);
+    expect(t.stamped[0].spamScore).toBe(8);
   });
 
-  it('serves repeated IPs and domains from the cache instead of asking again', async () => {
-    const d = deps([], null);
-    const p = providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') }));
-    const t1 = fakeStorage([row({ id: 'a' })]);
-    await runReputationPass({ ...d, targets: () => [{ storage: t1.storage, engine: null, label: 'x' }], provider: () => p });
-    const t2 = fakeStorage([row({ id: 'b' })]);
-    await runReputationPass({ ...d, targets: () => [{ storage: t2.storage, engine: null, label: 'x' }], provider: () => p });
-    expect(p.calls).toHaveLength(1);
-    expect(t2.stamped[0].spamScore).toBe(5); // the cached listing still counted
-  });
-
-  // Fail-open, in every form: a provider that says unknown, one that throws,
-  // and one that is missing the item. The row is judged once, with no points,
-  // and the reason surfaces as a note the Security page can show.
-  it('adds no points for unknown answers or a throwing provider, but still judges the rows once', async () => {
-    const refused = providerOf((q) => ({ provider: 'test', ips: new Map(q.ips.map((ip) => [ip, { status: 'unknown', hits: [], note: 'Spamhaus refused the query (public resolver or quota)' }])), domains: new Map() }));
-    const t = fakeStorage([row({ id: 'a', spamScore: 4 })]);
-    const s = await runReputationPass(deps([t], refused));
-    expect(s).toMatchObject({ judged: 1, scored: 0, filed: 0, notes: ['Spamhaus refused the query (public resolver or quota)'] });
-    expect(t.stamped[0].spamScore).toBe(4);
-
-    const thrower: ReputationProvider = { name: 'broken', lookup: async () => { throw new Error('ECONNRESET'); } };
-    const t2 = fakeStorage([row({ id: 'b', spamScore: 4 })]);
-    const s2 = await runReputationPass(deps([t2], thrower));
-    expect(s2).toMatchObject({ judged: 1, scored: 0, notes: ['Lookup failed: ECONNRESET'] });
-    expect(t2.stamped[0].spamScore).toBe(4);
+  // With registration dates off there is nothing to judge a sender row by:
+  // it is left waiting rather than stamped, so switching them on later still
+  // reaches it — and it is not counted as waiting on a check that is off.
+  it('leaves sender rows alone when domain age is off, even with link lookups on', async () => {
+    const t = fakeStorage([row({ id: 'a' })]);
+    const s = await runReputationPass(deps([t], null, null, stageOf(providerOf(answering({})))));
+    expect(t.stamped).toEqual([]);
+    expect(s).toMatchObject({ judged: 0, pending: 0, linkProvider: 'test', domainAge: false });
   });
 
   it('works through every account and reports what is still waiting', async () => {
     const t1 = fakeStorage([row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })]);
     const t2 = fakeStorage([row({ id: 'd' })]);
-    const s = await runReputationPass({ ...deps([t1, t2], providerOf(answering({}))), batch: 2 });
+    const s = await runReputationPass({ ...deps([t1, t2], sourceOf({}).source), batch: 2 });
     expect(s.judged).toBe(3); // 2 from the first account (batch), 1 from the second
     expect(s.pending).toBe(1); // the third row of the first account waits for the next pass
   });
@@ -295,27 +304,25 @@ describe('runReputationPass', () => {
     const good = fakeStorage([row({ id: 'a' })]);
     const s = await runReputationPass({
       targets: () => [{ storage: bad, engine: null, label: 'bad' }, { storage: good.storage, engine: null, label: 'good' }],
-      provider: () => providerOf(answering({})), cache: new ReputationCache(new Database(':memory:')), now: () => T0,
+      links: () => null, age: () => sourceOf({}).source, now: () => T0,
     });
     expect(s.judged).toBe(1);
   });
 });
 
 describe('runReputationPass — the body stage (link domains)', () => {
-  const deps = (t: ReturnType<typeof fakeStorage>, provider: ReputationProvider, engine: { moveToSpam: (f: string, u: number) => Promise<unknown> } | null = null) => ({
+  const deps = (t: ReturnType<typeof fakeStorage>, links: LinkLookup | null, engine: { moveToSpam: (f: string, u: number) => Promise<unknown> } | null = null) => ({
     targets: () => [{ storage: t.storage, engine, label: 'acct' }],
-    provider: () => provider,
-    cache: new ReputationCache(new Database(':memory:')),
+    links: () => links,
     now: () => T0,
   });
-  const phishing: ItemReputation = { status: 'listed', hits: [{ list: 'Spamhaus DBL', category: 'phishing', detail: 'phishing domain' }] };
 
   // THE classic phish: clean headers, one link to a listed site.
   it('extracts the link domains, looks them up, and files a message that links to a phishing domain', async () => {
     const t = fakeStorage([], true, [bodyRow({ id: 'a', uid: 9, spamScore: 0 })]);
     const p = providerOf(answering({}, { 'evil.example': phishing }));
     const engine = { moveToSpam: vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined) };
-    const s = await runReputationPass(deps(t, p, engine));
+    const s = await runReputationPass(deps(t, stageOf(p), engine));
     expect(p.calls).toEqual([{ ips: [], domains: ['evil.example'] }]);
     expect(s).toMatchObject({ linkJudged: 1, filed: 1, scored: 1, linkPending: 0 });
     expect(t.linkStamped[0].spamScore).toBe(5);
@@ -330,17 +337,42 @@ describe('runReputationPass — the body stage (link domains)', () => {
       bodyRow({ id: 'b', rawBody: '<p>no links</p>' }),
     ]);
     const p = providerOf(answering({}));
-    const s = await runReputationPass(deps(t, p));
+    const s = await runReputationPass(deps(t, stageOf(p)));
     expect(p.calls).toEqual([]);
     expect(s.linkJudged).toBe(2);
   });
 
-  // The two network stages share ONE cap: sender-stage points already on the
-  // row leave that much less room for the links.
-  it('shares the reputation cap with points the sender stage already added', async () => {
-    const t = fakeStorage([], true, [bodyRow({ id: 'a', spamScore: 3, spamReasons: JSON.stringify([{ id: 'ip-blocklisted', points: 3, detail: 'PBL' }]) })]);
-    await runReputationPass(deps(t, providerOf(answering({}, { 'evil.example': phishing }))));
+  // ONE cap for every blocklist point a message carries: the listings the
+  // ingest check charged leave that much less room for the links.
+  it('shares the reputation cap with the listings the ingest check charged', async () => {
+    const t = fakeStorage([], true, [bodyRow({ id: 'a', spamScore: 3, spamReasons: JSON.stringify([{ id: 'reputation-ip-listed', points: 3, detail: 'PBL' }]) })]);
+    await runReputationPass(deps(t, stageOf(providerOf(answering({}, { 'evil.example': phishing })))));
     expect(t.linkStamped[0].spamScore).toBe(6); // 3 + min(5, 6 − 3)
+  });
+
+  // ...and a legacy-named listing from before the reason ids were renamed
+  // counts against that cap just the same.
+  it('counts a stored listing under its old reason id against the cap too', async () => {
+    const t = fakeStorage([], true, [bodyRow({ id: 'a', spamScore: 5, spamReasons: JSON.stringify([{ id: 'ip-blocklisted', points: 5, detail: 'SBL' }]) })]);
+    await runReputationPass(deps(t, stageOf(providerOf(answering({}, { 'evil.example': phishing })))));
+    expect(t.linkStamped[0].spamScore).toBe(6);
+  });
+
+  it('adds nothing once the cap is spent', async () => {
+    const t = fakeStorage([], true, [bodyRow({ id: 'a', spamScore: 6, spamReasons: JSON.stringify([{ id: 'reputation-ip-listed', points: 6, detail: 'listed' }]) })]);
+    await runReputationPass(deps(t, stageOf(providerOf(answering({}, { 'evil.example': phishing })))));
+    expect(JSON.parse(t.linkStamped[0].spamReasons)).toHaveLength(1);
+  });
+
+  // Link lookups are opt-in: with them off, the links are not sent anywhere —
+  // the body stage runs for registration dates alone.
+  it('sends no link domain anywhere when link lookups are off', async () => {
+    const t = fakeStorage([], true, [bodyRow({ id: 'a' })]);
+    const { calls, source } = sourceOf({});
+    const s = await runReputationPass({ ...deps(t, null), age: () => source });
+    expect(s).toMatchObject({ linkJudged: 1, linkProvider: null, domainAge: true });
+    expect(calls).toEqual(['evil.example']); // the registry, not a blocklist
+    expect(t.linkStamped[0].spamScore).toBe(0);
   });
 
   // The user's word outranks the score: points are recorded, nothing is filed.
@@ -350,67 +382,12 @@ describe('runReputationPass — the body stage (link domains)', () => {
       [bodyRow({ id: 'h2', spamScore: 3, spamUserVerdict: 'ham' })],
     );
     const engine = { moveToSpam: vi.fn<(folder: string, uid: number) => Promise<unknown>>().mockResolvedValue(undefined) };
-    const s = await runReputationPass(deps(t, providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') }, { 'evil.example': phishing })), engine));
+    const s = await runReputationPass({ ...deps(t, stageOf(providerOf(answering({}, { 'evil.example': phishing }))), engine), age: () => brandNew().source });
     expect(s.filed).toBe(0);
     expect(t.updates).toEqual([]);
     expect(engine.moveToSpam).not.toHaveBeenCalled();
-    expect(t.stamped[0].spamScore).toBe(8);
+    expect(t.stamped[0].spamScore).toBe(6);
     expect(t.linkStamped[0].spamScore).toBe(8);
-  });
-});
-
-describe('the report loop', () => {
-  it('is allowed only in Sarv mode with an endpoint and the opt-in', () => {
-    expect(reportsAllowed({ mode: 'sarv', endpoint: 'https://r.example', reports: true, domainAge: true })).toBe(true);
-    expect(reportsAllowed({ mode: 'sarv', endpoint: 'https://r.example', reports: false, domainAge: true })).toBe(false);
-    expect(reportsAllowed({ mode: 'sarv', endpoint: '', reports: true, domainAge: true })).toBe(false);
-    expect(reportsAllowed({ mode: 'local', endpoint: 'https://r.example', reports: true, domainAge: true })).toBe(false);
-    expect(normalizeSpamReputationPolicy({ mode: 'sarv', endpoint: 'https://r.example', reports: 'yes' }).reports).toBe(false);
-  });
-
-  it('sends the verdict through the provider when allowed, and nothing otherwise', async () => {
-    const report = vi.fn<(report: SenderReport) => Promise<boolean>>().mockResolvedValue(true);
-    const provider: ReputationProvider = { name: 'sarv', lookup: async () => ({ provider: 'sarv', ips: new Map(), domains: new Map() }), report };
-    const verdict: SenderReport = { domain: 'spam.example', ip: '1.2.3.4', verdict: 'spam' };
-    reportSenderVerdict(verdict, { policy: { mode: 'sarv', endpoint: 'https://r.example', reports: true, domainAge: true }, provider });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(report).toHaveBeenCalledWith(verdict);
-    reportSenderVerdict(verdict, { policy: { mode: 'sarv', endpoint: 'https://r.example', reports: false, domainAge: true }, provider });
-    reportSenderVerdict(verdict, { policy: { mode: 'local', endpoint: '', reports: true, domainAge: true }, provider });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(report).toHaveBeenCalledTimes(1);
-    // A provider without a report channel, or one that rejects, is fine.
-    reportSenderVerdict(verdict, { policy: { mode: 'sarv', endpoint: 'https://r.example', reports: true, domainAge: true }, provider: { name: 'x', lookup: provider.lookup } });
-    reportSenderVerdict(verdict, { policy: { mode: 'sarv', endpoint: 'https://r.example', reports: true, domainAge: true }, provider: { ...provider, report: async () => { throw new Error('down'); } } });
-    await new Promise((r) => setTimeout(r, 0));
-  });
-});
-
-describe('the real wiring', () => {
-  it('the Sarv provider fetches with the first signed-in Sarv account’s bearer, and is unknown with none', async () => {
-    const p = providerForPolicy({ mode: 'sarv', endpoint: 'https://rep.sarv.example', reports: false, domainAge: true })!;
-    let r = await p.lookup({ ips: ['1.2.3.4'], domains: [] });
-    expect(r.ips.get('1.2.3.4')).toMatchObject({ status: 'unknown', note: expect.stringContaining('signed in') });
-    expect(h.fetchCalls).toEqual([]);
-
-    h.accounts = [{ provider: 'gmail', email: 'g@gmail.com' }, { provider: 'sarv', email: 'rc@sarv.example' }];
-    r = await p.lookup({ ips: ['1.2.3.4'], domains: [] });
-    expect(h.fetchCalls[0].url).toBe('https://rep.sarv.example/v1/reputation/lookup');
-    expect((h.fetchCalls[0].init as { headers: Record<string, string> }).headers.authorization).toBe('Bearer tok-rc@sarv.example');
-    expect(r.ips.get('1.2.3.4')?.status).toBe('unknown'); // the fake service answered for nothing
-  });
-
-  it('the local provider queries DNS through node:dns', async () => {
-    const p = providerForPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true })!;
-    const r = await p.lookup({ ips: ['1.2.3.4'], domains: [] });
-    expect(h.dnsQueries).toContain('4.3.2.1.zen.spamhaus.org');
-    expect(r.ips.get('1.2.3.4')?.status).toBe('clean');
-  });
-
-  it('the shared cache lives on the core DB', () => {
-    const cache = getReputationCache();
-    cache.set('ip', '9.9.9.9', clean, 'test', T0);
-    expect(getReputationCache().get('ip', '9.9.9.9', T0)).toMatchObject({ status: 'clean' });
   });
 });
 
@@ -419,7 +396,6 @@ describe('the scheduler', () => {
 
   it('runs its first pass after the delay over every account, reports progress, and re-arms on the active cadence while rows wait', async () => {
     vi.useFakeTimers();
-    setSpamReputationPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true });
     const t = fakeStorage([row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })]);
     h.runtimes = [['acct-1', { storage: t.storage, syncEngine: { isConnected: () => true, moveToSpam: async () => undefined } }]];
 
@@ -429,15 +405,17 @@ describe('the scheduler', () => {
     await vi.advanceTimersByTimeAsync(REPUTATION_FIRST_TICK_MS + 10);
 
     const state = getSpamReputationState();
-    expect(state).toMatchObject({ judged: 3, provider: 'local-dnsbl', pending: 0, running: false });
+    // The defaults: every list asked through this computer's DNS as mail
+    // arrives, link lookups off, registration dates on.
+    expect(state).toMatchObject({ judged: 3, blocklists: 'local-dnsbl', linkProvider: null, domainAge: true, pending: 0, running: false });
     expect(state.lastRun).not.toBeNull();
     expect(h.sent.some((m) => m.c === 'spam:reputation-progress')).toBe(true);
     expect(t.stamped).toHaveLength(3);
+    expect(h.dnsQueries).toEqual([]); // the pass never asks a list about a sender
   });
 
   it('sleeps on the idle cadence when nothing is waiting, and "Run now" pulls the next pass forward', async () => {
     vi.useFakeTimers();
-    setSpamReputationPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true });
     const t = fakeStorage([]);
     h.runtimes = [['acct-1', { storage: t.storage, syncEngine: null }]];
     startSpamReputationScheduler();
@@ -454,48 +432,56 @@ describe('the scheduler', () => {
     expect(h.sent.length).toBe(sentAfterFirst + 2);
   });
 
+  // Regression: this used to be the `spam:setReputationPolicy` IPC's job. A
+  // lookup the user just switched on must not wait out the idle cadence.
+  it('pulls the next pass forward when the settings change', async () => {
+    vi.useFakeTimers();
+    h.runtimes = [['acct-1', { storage: fakeStorage([]).storage, syncEngine: null }]];
+    startSpamReputationScheduler();
+    await vi.advanceTimersByTimeAsync(REPUTATION_FIRST_TICK_MS + 10);
+    const sentAfterFirst = h.sent.length;
+
+    store({ links: true });
+    noteAppSettingChanged(SETTINGS_KEY);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(h.sent.length).toBe(sentAfterFirst + 1);
+    expect(getSpamReputationState().linkProvider).toBe('local-dnsbl');
+  });
+
+  // Fail closed: settings that cannot be read ask nobody — not the registry,
+  // not a blocklist — and the rows wait rather than being stamped unjudged.
+  it('looks nothing up while the settings cannot be read', async () => {
+    vi.useFakeTimers();
+    h.settingsUnreadable = true;
+    const t = fakeStorage([row({ id: 'a' })], true, [bodyRow({ id: 'b' })]);
+    h.runtimes = [['acct-1', { storage: t.storage, syncEngine: null }]];
+    startSpamReputationScheduler();
+    await vi.advanceTimersByTimeAsync(REPUTATION_FIRST_TICK_MS + 10);
+    expect(t.stamped).toEqual([]);
+    expect(t.linkStamped).toEqual([]);
+    expect(h.fetchCalls).toEqual([]);
+    expect(getSpamReputationState()).toMatchObject({ blocklists: null, domainAge: false, linkProvider: null });
+  });
+
   it('stops: no further pass fires after stop, and a kick after stop is a no-op', async () => {
     vi.useFakeTimers();
-    setSpamReputationPolicy({ mode: 'off', endpoint: '', reports: false, domainAge: true });
+    store({ enabled: false, domainAge: false });
     startSpamReputationScheduler();
     stopSpamReputationScheduler();
     kickSpamReputation();
+    store({ links: true });
+    noteAppSettingChanged(SETTINGS_KEY);
     await vi.advanceTimersByTimeAsync(REPUTATION_FIRST_TICK_MS * 2);
     expect(h.sent).toEqual([]);
   });
 });
 
 describe('edges', () => {
-  it('policy: a non-string or unparseable endpoint is dropped, a corrupt blob means defaults, a failed persist still answers', () => {
-    expect(normalizeSpamReputationPolicy({ mode: 'sarv', endpoint: 5 }).endpoint).toBe('');
-    expect(normalizeSpamReputationPolicy({ mode: 'sarv', endpoint: 'not a url' }).endpoint).toBe('');
-    h.blobs.set('spam-reputation-policy', Buffer.from('{not json'));
-    expect(getSpamReputationPolicy()).toEqual({ mode: 'sarv', endpoint: '', reports: false, domainAge: true });
-    h.setBlobThrows = true;
-    expect(setSpamReputationPolicy({ mode: 'local' })).toEqual({ mode: 'local', endpoint: '', reports: false, domainAge: true });
-  });
-
-  it('cache: a corrupt hits column reads as no hits', () => {
-    const db = new Database(':memory:');
-    const cache = new ReputationCache(db);
-    cache.set('ip', '1.1.1.1', clean, 'test', T0);
-    db.prepare("UPDATE reputation_cache SET hits = '{bad' WHERE item = '1.1.1.1'").run();
-    expect(cache.get('ip', '1.1.1.1', T0)).toMatchObject({ status: 'clean', hits: [] });
-  });
-
-  it('the report loop builds the provider from the policy when none is given, and reaches the service', async () => {
-    h.accounts = [{ provider: 'sarv', email: 'rc@sarv.example' }];
-    reportSenderVerdict({ domain: 'spam.example', ip: null, verdict: 'spam' }, { policy: { mode: 'sarv', endpoint: 'https://rep.sarv.example', reports: true, domainAge: true } });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(h.fetchCalls.map((c) => c.url)).toEqual(['https://rep.sarv.example/v1/reputation/report']);
-  });
-
   it('a stamping failure is isolated to its account', async () => {
     const t = fakeStorage([row({ id: 'a' })]);
     t.storage.applyReputationBatch = () => { throw new Error('db locked'); };
     const s = await runReputationPass({
-      targets: () => [{ storage: t.storage, engine: null, label: 'x' }], provider: () => providerOf(answering({})),
-      cache: new ReputationCache(new Database(':memory:')), now: () => T0,
+      targets: () => [{ storage: t.storage, engine: null, label: 'x' }], links: () => null, age: () => sourceOf({}).source, now: () => T0,
     });
     expect(s.judged).toBe(0);
   });
@@ -503,7 +489,6 @@ describe('edges', () => {
   it('the scheduler treats a disconnected engine as no engine, and survives a window that is gone', async () => {
     vi.useFakeTimers();
     try {
-      setSpamReputationPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true });
       const t = fakeStorage([row({ id: 'a', spamScore: 4 })]);
       h.runtimes = [['acct-1', { storage: t.storage, syncEngine: { isConnected: () => false, moveToSpam: vi.fn() } }]];
       startSpamReputationScheduler();
@@ -517,76 +502,60 @@ describe('edges', () => {
 });
 
 describe('more edges', () => {
-  const deps = (t: ReturnType<typeof fakeStorage>, provider: ReputationProvider, cache = new ReputationCache(new Database(':memory:'))) => ({
-    targets: () => [{ storage: t.storage, engine: null, label: 'acct' }], provider: () => provider, cache, now: () => T0,
-  });
-  const phishing: ItemReputation = { status: 'listed', hits: [{ list: 'Spamhaus DBL', category: 'phishing', detail: 'phishing domain' }] };
-
-  it('the policy defaults when nothing was ever stored', () => {
-    expect(getSpamReputationPolicy()).toEqual({ mode: 'sarv', endpoint: '', reports: false, domainAge: true });
+  const deps = (t: ReturnType<typeof fakeStorage>, links: LinkLookup | null, age: AgeSource | null = null) => ({
+    targets: () => [{ storage: t.storage, engine: null, label: 'acct' }], links: () => links, age: () => age, now: () => T0,
   });
 
-  it('the cache keeps user report counts', () => {
-    const cache = new ReputationCache(new Database(':memory:'));
-    cache.set('domain', 'x.example', { status: 'clean', hits: [], userReports: 7 }, 'sarv', T0);
-    expect(cache.get('domain', 'x.example', T0)).toMatchObject({ userReports: 7 });
-  });
-
-  it('the body stage serves a link domain from the cache, surfaces an unknown’s note, and survives a throwing provider or stamp', async () => {
-    const cache = new ReputationCache(new Database(':memory:'));
+  // Fail-open for link lookups, in every form: a cached answer is reused, an
+  // unknown adds no points but says why, and a lookup that throws — or a stamp
+  // that fails — costs the row nothing but a note.
+  it('the body stage serves a link domain from the cache, surfaces an unknown’s note, and survives a throwing lookup or stamp', async () => {
     const p = providerOf(answering({}, { 'evil.example': phishing }));
-    await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'a' })]), p, cache));
-    await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'b' })]), p, cache));
-    expect(p.calls).toHaveLength(1); // the second pass hit the cache
+    const links = stageOf(p);
+    await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'a' })]), links));
+    await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'b' })]), links));
+    expect(p.calls).toHaveLength(1); // the second pass hit the one cache
 
     const unknownNote = providerOf((q) => ({ provider: 'test', ips: new Map(), domains: new Map(q.domains.map((d) => [d, { status: 'unknown' as const, hits: [], note: 'URIBL refused the query' }])) }));
-    const s1 = await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'c' })]), unknownNote));
-    expect(s1.notes).toEqual(['URIBL refused the query']);
+    const s1 = await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'c', spamScore: 4 })]), stageOf(unknownNote)));
+    expect(s1).toMatchObject({ linkJudged: 1, scored: 0, notes: ['URIBL refused the query'] });
 
-    const thrower: ReputationProvider = { name: 'broken', lookup: async () => { throw new Error('ECONNRESET'); } };
-    const t = fakeStorage([], true, [bodyRow({ id: 'd' })]);
-    const s2 = await runReputationPass(deps(t, thrower));
-    expect(s2).toMatchObject({ linkJudged: 1, notes: ['Lookup failed: ECONNRESET'] });
+    const throwingProvider: ReputationProvider = { name: 'broken', lookup: async () => { throw new Error('ECONNRESET'); } };
+    const t = fakeStorage([], true, [bodyRow({ id: 'd', spamScore: 4 })]);
+    const s2 = await runReputationPass(deps(t, stageOf(throwingProvider)));
+    expect(s2).toMatchObject({ linkJudged: 1, scored: 0, notes: ['Lookup failed: ECONNRESET'] });
+    expect(t.linkStamped[0].spamScore).toBe(4);
 
-    const t2 = fakeStorage([], true, [bodyRow({ id: 'e' })]);
+    const throwingLookup: LinkLookup = { providerName: 'odd', lookup: async () => { throw new Error('boom'); } };
+    const s3 = await runReputationPass(deps(fakeStorage([], true, [bodyRow({ id: 'e' })]), throwingLookup));
+    expect(s3).toMatchObject({ linkJudged: 1, notes: ['Lookup failed: boom'] });
+
+    const t2 = fakeStorage([], true, [bodyRow({ id: 'f' })]);
     t2.storage.applyLinkReputationBatch = () => { throw new Error('db locked'); };
-    expect((await runReputationPass(deps(t2, providerOf(answering({}))))).linkJudged).toBe(0);
+    expect((await runReputationPass(deps(t2, stageOf(providerOf(answering({})))))).linkJudged).toBe(0);
   });
 
   // A row the AI categoriser tagged `spam` but the filter never filed: the tag is kept, the row is filed once it crosses.
   it('keeps an existing spam tag when filing, and isolates a failing local update', async () => {
     const t = fakeStorage([row({ id: 'a', spamScore: 3, tags: '|INBOX|spam|' })]);
-    await runReputationPass(deps(t, providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') }))));
+    await runReputationPass(deps(t, null, brandNew().source));
     expect(t.updates).toEqual([{ id: 'a', tags: '|spam|Spam|', folderId: 'f-spam' }]);
 
     const failing = fakeStorage([row({ id: 'b', spamScore: 3 })]);
     failing.storage.updateEmail = async () => { throw new Error('db locked'); };
-    const s = await runReputationPass(deps(failing, providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') }))));
+    const s = await runReputationPass(deps(failing, null, brandNew().source));
     expect(s.filed).toBe(0);
     expect(failing.stamped).toHaveLength(1); // scored and stamped all the same
-  });
-
-  it('the report loop reads the stored policy when none is given, and stays quiet when the service declines', async () => {
-    setSpamReputationPolicy({ mode: 'sarv', endpoint: 'https://rep.sarv.example', reports: true, domainAge: true });
-    const declined: ReputationProvider = { name: 'sarv', lookup: async () => ({ provider: 'sarv', ips: new Map(), domains: new Map() }), report: async () => false };
-    reportSenderVerdict({ domain: 'x.example', ip: null, verdict: 'ham' }, { provider: declined });
-    await new Promise((r) => setTimeout(r, 0));
-    setSpamReputationPolicy({ mode: 'off', endpoint: '', reports: false, domainAge: true });
-    const spy: ReputationProvider = { ...declined, report: vi.fn(async () => true) };
-    reportSenderVerdict({ domain: 'x.example', ip: null, verdict: 'ham' }, { provider: spy });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(spy.report).not.toHaveBeenCalled();
   });
 
   it('the scheduler skips a runtime whose storage predates the stage, logs notes, and does not re-arm after a stop mid-pass', async () => {
     vi.useFakeTimers();
     try {
-      setSpamReputationPolicy({ mode: 'sarv', endpoint: 'https://rep.sarv.example', reports: false, domainAge: true });
+      store({ provider: 'sarv', endpoint: 'https://rep.sarv.example', links: true, domainAge: false });
       h.accounts = [{ provider: 'sarv', email: 'rc@sarv.example' }];
       let release!: () => void;
       h.fetchGate = new Promise<void>((r) => { release = r; });
-      // The shared cache outlives tests: an IP and domain no other test used, or the pass never reaches the service.
-      const t = fakeStorage([row({ id: 'a', originIp: '198.18.7.7', fromAddress: 'x@never-before.example' })]);
+      const t = fakeStorage([], true, [bodyRow({ id: 'a', rawBody: '<a href="https://never-before.example/x">x</a>' })]);
       h.runtimes = [
         ['old', { storage: {}, syncEngine: null }],
         ['acct-1', { storage: t.storage, syncEngine: null }],
@@ -599,8 +568,9 @@ describe('more edges', () => {
       await vi.advanceTimersByTimeAsync(10);
       const st = getSpamReputationState();
       expect(st.running).toBe(false);
-      expect(st.judged).toBeGreaterThanOrEqual(1);
+      expect(st.linkJudged).toBeGreaterThanOrEqual(1);
       expect(st.notes).toContain('No answer for this item');
+      expect(st).toMatchObject({ blocklists: 'sarv', linkProvider: 'sarv' });
       const sent = h.sent.length;
       await vi.advanceTimersByTimeAsync(REPUTATION_IDLE_INTERVAL_MS * 2);
       expect(h.sent.length).toBe(sent); // stopped: no further pass
@@ -624,12 +594,11 @@ describe('more edges', () => {
 describe('runReputationPass — holding the main thread', () => {
   const pacing = (
     t: ReturnType<typeof fakeStorage>,
-    provider: ReputationProvider,
-    over: Partial<{ nowMs: () => number; budgetMs: number; yieldFn: () => Promise<void> }> = {},
+    links: LinkLookup,
+    over: Partial<{ nowMs: () => number; budgetMs: number; yieldFn: () => Promise<void>; age: () => AgeSource | null }> = {},
   ) => ({
     targets: () => [{ storage: t.storage, engine: null, label: 'acct' }],
-    provider: () => provider,
-    cache: new ReputationCache(new Database(':memory:')),
+    links: () => links,
     now: () => T0,
     ...over,
   });
@@ -647,7 +616,7 @@ describe('runReputationPass — holding the main thread', () => {
   it('reads bodies in bounded chunks, and still drains the backlog', async () => {
     const t = fakeStorage([], true, bodies(60));
     const limits = countingReads(t);
-    const s = await runReputationPass(pacing(t, providerOf(answering({}))));
+    const s = await runReputationPass(pacing(t, stageOf(providerOf(answering({})))));
     expect(Math.max(...limits)).toBe(BODY_BATCH_SIZE);
     expect(s).toMatchObject({ linkJudged: 60, linkPending: 0 });
   });
@@ -658,7 +627,7 @@ describe('runReputationPass — holding the main thread', () => {
   it('stops starting chunks once the time budget is spent, leaving the rest pending', async () => {
     const t = fakeStorage([], true, bodies(60));
     let ms = 0;
-    const s = await runReputationPass(pacing(t, providerOf(answering({})), {
+    const s = await runReputationPass(pacing(t, stageOf(providerOf(answering({}))), {
       nowMs: () => (ms += 40), // a clock that runs out mid-chunk
       budgetMs: 1_000,
       yieldFn: async () => {},
@@ -674,12 +643,14 @@ describe('runReputationPass — holding the main thread', () => {
     const t = fakeStorage([row({ id: 'a', spamScore: 3 })], true, bodies(3));
     let ms = 0;
     let yields = 0;
-    await runReputationPass(pacing(t, providerOf(answering({ '5.6.7.8': listedSpam('SpamCop') })), {
+    await runReputationPass(pacing(t, stageOf(providerOf(answering({}))), {
       nowMs: () => (ms += 10), // each row costs more than the yielder's budget
       yieldFn: async () => { yields += 1; },
+      age: () => brandNew().source,
     }));
     expect(yields).toBeGreaterThanOrEqual(4); // at least once per row parsed or filed
     expect(t.linkStamped).toHaveLength(3);
+    expect(t.updates).toEqual([{ id: 'a', tags: '|spam|Spam|', folderId: 'f-spam' }]);
   });
 
   // Nothing left the queue, so the next chunk is this chunk. Re-reading it
@@ -689,13 +660,13 @@ describe('runReputationPass — holding the main thread', () => {
     const stalled = fakeStorage([], true, bodies(3));
     stalled.storage.applyLinkReputationBatch = () => 0;
     const stalledReads = countingReads(stalled);
-    expect((await runReputationPass(pacing(stalled, providerOf(answering({}))))).linkJudged).toBe(0);
+    expect((await runReputationPass(pacing(stalled, stageOf(providerOf(answering({})))))).linkJudged).toBe(0);
     expect(stalledReads).toHaveLength(1);
 
     const broken = fakeStorage([], true, bodies(3));
     broken.storage.applyLinkReputationBatch = () => { throw new Error('db locked'); };
     const brokenReads = countingReads(broken);
-    expect((await runReputationPass(pacing(broken, providerOf(answering({}))))).linkJudged).toBe(0);
+    expect((await runReputationPass(pacing(broken, stageOf(providerOf(answering({})))))).linkJudged).toBe(0);
     expect(brokenReads).toHaveLength(1);
   });
 
@@ -704,10 +675,11 @@ describe('runReputationPass — holding the main thread', () => {
   // tab would show zero waiting rows for as long as the app stayed busy.
   it('starts no account when the budget is already spent, and still reports what is waiting', async () => {
     const t = fakeStorage([row({ id: 'a' })], true, bodies(2));
-    const s = await runReputationPass(pacing(t, providerOf(answering({})), {
+    const s = await runReputationPass(pacing(t, stageOf(providerOf(answering({}))), {
       nowMs: () => 0,
       budgetMs: 0,
       yieldFn: async () => {},
+      age: () => sourceOf({}).source,
     }));
     expect(s).toMatchObject({ judged: 0, linkJudged: 0, pending: 1, linkPending: 2 });
   });
@@ -720,54 +692,31 @@ describe('runReputationPass — holding the main thread', () => {
  * that no blocklist had heard of. Age is the one fact about a campaign domain
  * that is true before anyone reports it — and it is equally true of a start-up's
  * first week, so the cap that keeps age from filing a message on its own is
- * pinned here as hard as the detection is. Everything runs with no blocklist
- * provider at all, because that is the default install: no Sarv endpoint yet,
- * and the registry needs no provider.
+ * pinned here as hard as the detection is. Most of these run with no link
+ * lookups at all, because that is the default install: link lookups are opt-in,
+ * and the registry needs no blocklist.
  */
 describe('domain age', () => {
-  const dated = (domain: string, ageDays: number, over: Partial<DomainAgeLookup> = {}): DomainAgeLookup => ({
-    domain, status: 'ok', registered: T0 - ageDays * 86_400, ageDays, registrar: null, server: 'https://rdap.example/', detail: null, ...over,
-  });
-  const unsupported = (domain: string): DomainAgeLookup => ({ domain, status: 'unsupported', registered: null, ageDays: null, registrar: null, server: null, detail: 'No RDAP service is published for .example' });
-  const sourceOf = (table: Record<string, DomainAgeLookup | Error>, over: Partial<AgeSource> = {}) => {
-    const calls: string[] = [];
-    const cache = over.cache ?? new DomainAgeCache(new Database(':memory:'));
-    const source: AgeSource = {
-      cache,
-      lookup: async (domain) => { calls.push(domain); const answer = table[domain]; if (answer instanceof Error) throw answer; return answer ?? unsupported(domain); },
-      ...over,
-    };
-    return { calls, cache, source };
-  };
-  const ageDeps = (targets: ReturnType<typeof fakeStorage>[], source: AgeSource | null, provider: ReputationProvider | null = null) => ({
+  const ageDeps = (targets: ReturnType<typeof fakeStorage>[], source: AgeSource | null, links: LinkLookup | null = null) => ({
     targets: () => targets.map((t, i) => ({ storage: t.storage, engine: null, label: `acct-${i}` })),
-    provider: () => provider,
+    links: () => links,
     age: () => source,
-    cache: new ReputationCache(new Database(':memory:')),
     now: () => T0,
   });
 
-  it('policy: on unless explicitly turned off, and persisted like the rest', () => {
-    expect(normalizeSpamReputationPolicy({}).domainAge).toBe(true);
-    expect(normalizeSpamReputationPolicy({ domainAge: false }).domainAge).toBe(false);
-    expect(normalizeSpamReputationPolicy({ domainAge: 'no' }).domainAge).toBe(true);
-    setSpamReputationPolicy({ mode: 'sarv', domainAge: false });
-    resetSpamReputationPolicyCache();
-    expect(getSpamReputationPolicy().domainAge).toBe(false);
+  // Not a blocklist, so the blocklist switch does not govern it — its own
+  // toggle does, and with that off the registry is asked nothing.
+  it('wires a source only when its toggle is on, whether or not the blocklists are', () => {
+    expect(ageSourceForSettings({ ...DEFAULT_REPUTATION_SETTINGS, domainAge: false })).toBeNull();
+    expect(ageSourceForSettings({ ...DEFAULT_REPUTATION_SETTINGS })).not.toBeNull();
+    expect(ageSourceForSettings({ ...DEFAULT_REPUTATION_SETTINGS, enabled: false })).not.toBeNull();
+    expect(ageSourceForSettings({ ...DEFAULT_REPUTATION_SETTINGS, provider: 'sarv', endpoint: '' })).not.toBeNull();
   });
 
-  // Off means nothing about a message leaves the machine — the registry included.
-  it('wires a source only when the stage is on and the toggle is on', () => {
-    expect(ageSourceForPolicy({ mode: 'off', endpoint: '', reports: false, domainAge: true })).toBeNull();
-    expect(ageSourceForPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: false })).toBeNull();
-    expect(ageSourceForPolicy({ mode: 'sarv', endpoint: '', reports: false, domainAge: true })).not.toBeNull();
-    expect(ageSourceForPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true })).not.toBeNull();
-  });
-
-  // THE case: no blocklist provider configured (the default install), a
-  // 78-day-old sender in the sender stage and a five-day-old link in the body
-  // stage. 2 + 1 stays in the inbox; 2 + 3 crosses the line and is filed.
-  it('runs with no blocklist provider at all, scoring the sender domain and the youngest linked domain', async () => {
+  // THE case: no link lookups (the default install), a 78-day-old sender in
+  // the sender stage and a five-day-old link in the body stage. 2 + 1 stays in
+  // the inbox; 2 + 3 crosses the line and is filed.
+  it('runs with no link lookups at all, scoring the sender domain and the youngest linked domain', async () => {
     const t = fakeStorage(
       [row({ id: 'a', fromAddress: 'Adobesign@powersublinks.com', originIp: null, spamScore: 2 })],
       true,
@@ -776,7 +725,7 @@ describe('domain age', () => {
     const { calls, source } = sourceOf({ 'powersublinks.com': dated('powersublinks.com', 78), 'kuaiyudh.top': dated('kuaiyudh.top', 5), 'cdn.example': dated('cdn.example', 4000) });
     const s = await runReputationPass(ageDeps([t], source));
 
-    expect(s).toMatchObject({ provider: 'domain-age', judged: 1, linkJudged: 1, scored: 2, filed: 1, ageLookups: 3, notes: [] });
+    expect(s).toMatchObject({ linkProvider: null, domainAge: true, judged: 1, linkJudged: 1, scored: 2, filed: 1, ageLookups: 3, notes: [] });
     expect(calls.sort()).toEqual(['cdn.example', 'kuaiyudh.top', 'powersublinks.com']);
     const a = t.stamped.find((x) => x.id === 'a')!;
     expect(a.spamScore).toBe(3);
@@ -803,13 +752,13 @@ describe('domain age', () => {
   });
 
   // Blocklist points and age points are separate facts with separate budgets:
-  // a listed sender on a domain registered today is both.
-  it('adds age on top of a blocklist listing, each within its own cap', async () => {
-    const t = fakeStorage([row({ id: 'a', fromAddress: 'x@fresh.example', originIp: '5.6.7.8' })]);
-    const p = providerOf(answering({ '5.6.7.8': { status: 'listed', hits: [{ list: 'Spamhaus ZEN', category: 'policy', detail: 'PBL' }] } }));
+  // a sender the ingest check found listed, on a domain registered today, is
+  // both.
+  it('adds age on top of the listing the ingest check charged, each within its own cap', async () => {
+    const listed = JSON.stringify([{ id: 'reputation-ip-listed', points: 3, detail: 'The sending address 5.6.7.8 is listed by Spamhaus ZEN (PBL).' }]);
+    const t = fakeStorage([row({ id: 'a', fromAddress: 'x@fresh.example', originIp: '5.6.7.8', spamScore: 3, spamReasons: listed })]);
     const { source } = sourceOf({ 'fresh.example': dated('fresh.example', 0) });
-    const s = await runReputationPass(ageDeps([t], source, p));
-    expect(s.provider).toBe('test');
+    const s = await runReputationPass(ageDeps([t], source));
     const a = t.stamped[0]!;
     expect(JSON.parse(a.spamReasons).map((r: { id: string; points: number }) => [r.id, r.points])).toEqual([['reputation-ip-listed', 3], ['reputation-domain-new', 3]]);
     expect(a.spamScore).toBe(6);
@@ -876,7 +825,7 @@ describe('domain age', () => {
     h.rdap['https://data.iana.org/rdap/dns.json'] = { status: 200, body: JSON.stringify({ services: [[['top'], ['https://rdap.zdnsgtld.com/top/']]] }) };
     h.rdap['https://rdap.zdnsgtld.com/top/domain/kuaiyudh.top'] = { status: 200, body: JSON.stringify({ events: [{ eventAction: 'registration', eventDate: '2026-09-17T23:11:55Z' }] }) };
     h.rdap['https://rdap.zdnsgtld.com/top/domain/other.top'] = { status: 404, body: '' };
-    const source = ageSourceForPolicy({ mode: 'sarv', endpoint: '', reports: false, domainAge: true })!;
+    const source = ageSourceForSettings(DEFAULT_REPUTATION_SETTINGS)!;
 
     const first = await source.lookup('kuaiyudh.top');
     const second = await source.lookup('other.top');
@@ -887,59 +836,16 @@ describe('domain age', () => {
     const host = (url: string) => new URL(url).hostname;
     expect(h.fetchCalls.filter((c) => host(c.url) === 'data.iana.org')).toHaveLength(1);
     expect((h.fetchCalls.find((c) => host(c.url) === 'rdap.zdnsgtld.com')?.init as { headers: { accept: string } }).headers.accept).toBe('application/rdap+json');
-    expect(source.cache).toBe(ageSourceForPolicy({ mode: 'local', endpoint: '', reports: false, domainAge: true })!.cache);
+    expect(source.cache).toBe(ageSourceForSettings({ ...DEFAULT_REPUTATION_SETTINGS, provider: 'sarv' })!.cache);
   });
 
   it('retries a failed bootstrap fetch on the next lookup rather than believing the failure for a day', async () => {
     h.rdap['https://data.iana.org/rdap/dns.json'] = { status: 503, body: '' };
-    const source = ageSourceForPolicy({ mode: 'sarv', endpoint: '', reports: false, domainAge: true })!;
+    const source = ageSourceForSettings(DEFAULT_REPUTATION_SETTINGS)!;
     expect((await source.lookup('kuaiyudh.top')).status).toBe('error');
     resetRdapBootstrapCache();
     h.rdap['https://data.iana.org/rdap/dns.json'] = { status: 200, body: JSON.stringify({ services: [[['top'], ['https://rdap.zdnsgtld.com/top/']]] }) };
     h.rdap['https://rdap.zdnsgtld.com/top/domain/kuaiyudh.top'] = { status: 200, body: JSON.stringify({ events: [{ eventAction: 'registration', eventDate: '2026-09-17T23:11:55Z' }] }) };
     expect((await source.lookup('kuaiyudh.top')).status).toBe('ok');
-  });
-});
-
-/**
- * The ingest-time blocklist check (Security > Blocklists, on by default) and
- * this pass ask the same lists about the same sender. What this protects: one
- * listing charged twice — a single PBL entry, worth 3, filing a message at 6
- * that neither check alone thought was spam.
- */
-describe('the blocklist cap shared with the ingest-time check', () => {
-  const pbl: ItemReputation = { status: 'listed', hits: [{ list: 'Spamhaus ZEN', category: 'policy', detail: 'PBL' }] };
-  const run = (stored: string, spamScore: number, provider: ReputationProvider) => {
-    const t = fakeStorage([row({ id: 'a', originIp: '5.6.7.8', fromAddress: 'x@listed.example', spamScore, spamReasons: stored })]);
-    return runReputationPass({
-      targets: () => [{ storage: t.storage, engine: null, label: 'acct' }],
-      provider: () => provider,
-      cache: new ReputationCache(new Database(':memory:')),
-      now: () => T0,
-    }).then(() => t);
-  };
-
-  it('does not charge a listing the ingest-time check already charged', async () => {
-    const stored = JSON.stringify([{ id: 'reputation-ip-listed', points: 3, detail: 'The sending address 5.6.7.8 is listed by spamhaus-zen (PBL).' }]);
-    const t = await run(stored, 3, providerOf(answering({ '5.6.7.8': pbl })));
-    expect(t.stamped[0]).toMatchObject({ spamScore: 3 });
-    expect(JSON.parse(t.stamped[0]!.spamReasons)).toHaveLength(1);
-    expect(t.updates).toEqual([]);
-  });
-
-  it('still adds a fact the ingest check did not have, within what is left of the shared cap', async () => {
-    const stored = JSON.stringify([{ id: 'reputation-ip-listed', points: 5, detail: 'listed' }]);
-    const domainSpam: ItemReputation = { status: 'listed', hits: [{ list: 'Spamhaus DBL', category: 'spam', detail: 'spam domain' }] };
-    const t = await run(stored, 5, providerOf(answering({ '5.6.7.8': pbl }, { 'listed.example': domainSpam })));
-    const reasons = JSON.parse(t.stamped[0]!.spamReasons) as Array<{ id: string; points: number }>;
-    expect(reasons.map((r) => [r.id, r.points])).toEqual([['reputation-ip-listed', 5], ['reputation-domain-listed', 1]]);
-    expect(t.stamped[0]!.spamScore).toBe(6);
-  });
-
-  it('adds nothing once the cap is spent', async () => {
-    const stored = JSON.stringify([{ id: 'reputation-ip-listed', points: 6, detail: 'listed' }]);
-    const domainSpam: ItemReputation = { status: 'listed', hits: [{ list: 'Spamhaus DBL', category: 'spam', detail: 'spam domain' }] };
-    const t = await run(stored, 6, providerOf(answering({}, { 'listed.example': domainSpam })));
-    expect(JSON.parse(t.stamped[0]!.spamReasons)).toHaveLength(1);
   });
 });

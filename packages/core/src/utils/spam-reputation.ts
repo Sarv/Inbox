@@ -29,7 +29,14 @@
  *
  * Both fail OPEN: a provider that is down, slow, unauthorised or rate-limited
  * yields "unknown" — never "clean" (which would be cached as a fact) and never
- * a point. Nothing here caches; the main-process service does.
+ * a point. Nothing here caches; the reputation stage in front of them does
+ * (packages/core/src/imap/reputation-stage.ts).
+ *
+ * Both also carry a CIRCUIT BREAKER, because both are asked on the ingest path
+ * and a failure there is paid for by every message that follows it: the local
+ * provider retires one zone at a time (the big operators refuse queries from
+ * public resolvers, and one refusing zone must not silence the others), and the
+ * Sarv provider pauses as a whole (one service, one failure mode).
  */
 import {
   BLOCKLISTS,
@@ -45,7 +52,10 @@ import {
   type ReputationResult as BlocklistReport,
   type ReputationTarget,
 } from '@sarv-in/mailguard/reputation';
-import type { SpamReason } from '@sarv-in/mailguard/verdict';
+import type { SpamAssessment, SpamReason } from '@sarv-in/mailguard/verdict';
+
+import { CircuitBreakers, type CircuitBreakerOptions } from './circuit-breaker';
+import { logger } from './logger';
 
 /** The zones the local provider asks by default, and how to read their answers. */
 export { BLOCKLISTS as DEFAULT_DNSBL_LISTS };
@@ -179,8 +189,9 @@ function blocklistHit(hit: ListHit, kind: BlocklistKind, target: string): Blockl
 }
 
 /**
- * Turn a result into the reasons to add to a message, given the message's own
- * IP and domains.
+ * Turn a result into the assessment a message earns, given the message's own
+ * IP and domains — THE one place a sender's listings become points, whichever
+ * provider answered and whenever it was asked.
  *
  * The scoring is the library's {@link assessReputation}: the highest hit per
  * side rather than the sum (the public lists mirror each other, so three zones
@@ -189,7 +200,7 @@ function blocklistHit(hit: ListHit, kind: BlocklistKind, target: string): Blockl
  * report for the whole message — rather than scoring each item — is what keeps
  * that budget shared.
  */
-export function reputationReasons(result: ReputationResult, message: { originIp?: string | null; domains: string[] }): SpamReason[] {
+export function reputationAssessment(result: ReputationResult, message: { originIp?: string | null; domains: string[] }): SpamAssessment {
   const originIp = message.originIp ?? null;
   const hits: BlocklistHit[] = [];
   const consulted: ItemReputation[] = [];
@@ -224,8 +235,9 @@ export function reputationReasons(result: ReputationResult, message: { originIp?
     errors: [],
     completed: consulted.length > 0 && consulted.every((item) => item.status !== 'unknown'),
   };
-  return assessReputation(report, { userReports }).reasons;
+  return assessReputation(report, { userReports });
 }
+
 
 /**
  * Points for a domain the message LINKS to. A link to a phishing or malware
@@ -259,9 +271,12 @@ export function linkReputationReasons(result: ReputationResult, linkDomains: str
 export interface DnsblDeps {
   /** `dns.promises.resolve4` shape. ENOTFOUND / ENODATA / NXDOMAIN = not listed; anything else = unknown. */
   resolve4: (name: string) => Promise<string[]>;
+  /** The zones to ask. EMPTY MEANS NOBODY IS ASKED. Default: the whole catalogue. */
   lists?: readonly Blocklist[];
   /** Queries in flight at once. */
   concurrency?: number;
+  /** Each zone's breaker: consecutive failed lookups that retire it, and for how long. */
+  breaker?: CircuitBreakerOptions;
 }
 
 const NOT_LISTED_CODES = new Set(['ENOTFOUND', 'ENODATA', 'NXDOMAIN']);
@@ -316,11 +331,25 @@ function itemFrom(report: BlocklistReport): ItemReputation {
  * DNSBL from this machine. One query per (item, zone), pooled by the library;
  * a zone's answer is read through its own code table, so a refusal is unknown,
  * not a listing.
+ *
+ * A BREAKER PER ZONE, which matters more on a desktop client than anywhere
+ * else. Spamhaus and several other operators refuse queries that arrive
+ * through a public resolver — `127.255.255.254`, "you are querying through an
+ * open resolver" — and a laptop on an ISP's DNS or on 8.8.8.8 is exactly that;
+ * Barracuda refuses any resolver nobody registered; URIBL answers `127.0.0.1`
+ * to the same. The library reports each as an error rather than a listing,
+ * which is right, but without a breaker the app would then send one doomed
+ * query per sender to that operator for the rest of the session. So a zone
+ * that fails consecutively is retired for a cooldown WHILE THE OTHERS KEEP
+ * ANSWERING — with every zone on by default, one operator that will never
+ * answer this network must not silence the five that do. With every zone
+ * retired, nothing is asked at all.
  */
 export class LocalDnsblProvider implements ReputationProvider {
   readonly name = 'local-dnsbl';
   private readonly lists: readonly Blocklist[];
   private readonly concurrency: number;
+  private readonly breakers: CircuitBreakers;
   /**
    * The injected resolver in the library's terms: a name that does not exist
    * is an empty answer, and only a genuine failure throws. `includeText` is
@@ -331,6 +360,7 @@ export class LocalDnsblProvider implements ReputationProvider {
   constructor(deps: DnsblDeps) {
     this.lists = deps.lists ?? BLOCKLISTS;
     this.concurrency = Math.max(1, deps.concurrency ?? 8);
+    this.breakers = new CircuitBreakers(deps.breaker);
     this.query = async (name) => {
       try {
         return await deps.resolve4(name);
@@ -342,18 +372,34 @@ export class LocalDnsblProvider implements ReputationProvider {
     };
   }
 
+  /** The configured zones whose own breaker is not open right now. */
+  activeLists(): Blocklist[] {
+    return this.lists.filter((list) => this.breakers.isClosed(list.name));
+  }
+
   async lookup(query: ReputationQuery): Promise<ReputationResult> {
     const ips = [...new Set(query.ips)];
     const domains = [...new Set(query.domains.map((d) => d.trim().toLowerCase()).filter(Boolean))];
+    const lists = this.activeLists();
+    // Nothing configured, or every zone sitting out a cooldown: nothing to ask,
+    // and not a failure either — the failures that retired them were counted.
+    if (lists.length === 0) {
+      return unknownResult(
+        this.name,
+        { ips, domains },
+        this.lists.length > 0 ? 'Every blocklist is resting after refusing or failing repeatedly' : undefined,
+      );
+    }
     const targets: ReputationTarget[] = [
       ...ips.map((ip) => ({ ip })),
       ...domains.map((domain) => ({ domain })),
     ];
 
-    const reports = await checkReputationBatch(targets, this.lists, {
+    const reports = await checkReputationBatch(targets, lists, {
       query: this.query,
       concurrency: this.concurrency,
     });
+    this.scoreZones(lists, reports);
 
     const result: ReputationResult = { provider: this.name, ips: new Map(), domains: new Map() };
     reports.forEach((report, i) => {
@@ -368,6 +414,29 @@ export class LocalDnsblProvider implements ReputationProvider {
       if (!result.domains.has(key)) result.domains.set(key, UNKNOWN);
     }
     return result;
+  }
+
+  /**
+   * Each zone keeps its own score: one that answered anything is forgiven its
+   * past, one that failed everything it was asked moves toward its own
+   * cooldown. A zone this call gave nothing to ask — an IP zone for a batch of
+   * link domains — is neither. The library names a zone by its DNS zone in
+   * `checked` and by its catalogue id in `errors`.
+   */
+  private scoreZones(lists: readonly Blocklist[], reports: readonly BlocklistReport[]): void {
+    const answered = new Set(reports.flatMap((report) => report.checked));
+    const lastError = new Map(reports.flatMap((report) => report.errors.map((error) => [error.name, error.error] as const)));
+    for (const list of lists) {
+      if (answered.has(list.zone)) {
+        this.breakers.succeeded(list.name);
+        continue;
+      }
+      const reason = lastError.get(list.name);
+      if (reason === undefined || !this.breakers.failed(list.name)) continue;
+      logger.warn(
+        `[Reputation] ${list.name}: ${this.breakers.failureThreshold} consecutive failed lookups — not asking it for ${Math.round(this.breakers.cooldownMs / 60_000)} min. Last error: ${reason}`,
+      );
+    }
   }
 }
 
@@ -386,21 +455,33 @@ export interface SarvReputationDeps {
   getToken: () => Promise<string | null>;
   fetch: (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
   timeoutMs?: number;
+  /** The service's breaker: consecutive failed lookups that pause it, and for how long. */
+  breaker?: CircuitBreakerOptions;
 }
 
+const SARV_SERVICE = 'sarv';
+
 /**
- * The Sarv-hosted lookup. Batched (one request per sync batch), authenticated
- * with the user's own Sarv token, and fail-open: no token, a 4xx/5xx, a
- * timeout or malformed JSON all come back as unknown — mail is never held
- * hostage to a service.
+ * The Sarv-hosted lookup. Authenticated with the user's own Sarv token, and
+ * fail-open: no token, a 4xx/5xx, a timeout or malformed JSON all come back as
+ * unknown — mail is never held hostage to a service. It is asked as mail
+ * arrives, so a service that keeps failing is PAUSED rather than waited on by
+ * every message behind it; not being signed in costs no request and is not a
+ * failure.
  */
 export class SarvReputationProvider implements ReputationProvider {
   readonly name = 'sarv';
+  private readonly breakers: CircuitBreakers;
 
-  constructor(private readonly deps: SarvReputationDeps) {}
+  constructor(private readonly deps: SarvReputationDeps) {
+    this.breakers = new CircuitBreakers(deps.breaker);
+  }
 
   async lookup(query: ReputationQuery): Promise<ReputationResult> {
     if (query.ips.length === 0 && query.domains.length === 0) return { provider: this.name, ips: new Map(), domains: new Map() };
+    if (!this.breakers.isClosed(SARV_SERVICE)) {
+      return unknownResult(this.name, query, 'Sarv reputation service paused after repeated failures');
+    }
     let token: string | null;
     try {
       token = await this.deps.getToken();
@@ -418,14 +499,25 @@ export class SarvReputationProvider implements ReputationProvider {
         body: JSON.stringify({ ips: query.ips, domains: query.domains }),
         signal: controller?.signal,
       });
-      if (!res.ok) return unknownResult(this.name, query, `Sarv reputation service answered ${res.status}`);
+      if (!res.ok) return this.failed(query, `Sarv reputation service answered ${res.status}`);
       const body = (await res.json()) as SarvReputationResponse;
+      this.breakers.succeeded(SARV_SERVICE);
       return this.parse(body, query);
     } catch (e) {
-      return unknownResult(this.name, query, `Sarv reputation service unreachable: ${(e as Error)?.message ?? e}`);
+      return this.failed(query, `Sarv reputation service unreachable: ${(e as Error)?.message ?? e}`);
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  /** A lookup that learned nothing: unknown for everything asked, and one step toward the pause. */
+  private failed(query: ReputationQuery, note: string): ReputationResult {
+    if (this.breakers.failed(SARV_SERVICE)) {
+      logger.warn(
+        `[Reputation] Sarv service: ${this.breakers.failureThreshold} consecutive failed lookups — not asking it for ${Math.round(this.breakers.cooldownMs / 60_000)} min. Last error: ${note}`,
+      );
+    }
+    return unknownResult(this.name, query, note);
   }
 
   /** POST /v1/reputation/report — the user's verdict, never their mail. True when the service accepted it. */

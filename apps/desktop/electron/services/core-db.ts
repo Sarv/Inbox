@@ -159,6 +159,20 @@ export function getAllAppSettings(): Record<string, string> {
   }
 }
 
+/**
+ * One setting's stored value — null when it was never written — and a THROW
+ * when the store cannot be read. `getAllAppSettings` answers `{}` for both,
+ * which is right for the boot restore and wrong for a caller whose default is
+ * "ask a third party": an unreadable store and an empty one are the same value
+ * and opposite facts, so a reader deciding what may leave the machine uses this.
+ */
+export function readAppSetting(key: string): string | null {
+  const row = getCoreDb().prepare('SELECT value FROM app_settings WHERE key = ?').get(key) as
+    | { value: string | null }
+    | undefined;
+  return row?.value ?? null;
+}
+
 export function setAppSetting(key: string, value: string): void {
   if (!key) return;
   try {

@@ -1,37 +1,24 @@
 /**
- * IPC for the spam filter's reputation stage: its policy (off / local DNSBL /
- * Sarv service) and its progress, for Settings and the Security page.
+ * IPC for the spam filter's reputation stage: the background pass's progress
+ * for the Security page, the Spam tab's list, and the user's own verdicts.
+ *
+ * There is no policy channel. What is asked, and of whom, is the `reputation`
+ * section of the settings blob (Security > Blocklists), which main reads from
+ * the core DB mirror and hears about through `appSettings:set` — see
+ * reputation-service.ts.
  */
 import { SUSPICIOUS_THRESHOLD, createLogger, type SpamUserVerdict } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { resolveAccountTarget } from '../services/account-target';
-import {
-  getSpamReputationPolicy,
-  getSpamReputationState,
-  kickSpamReputation,
-  reportSenderVerdict,
-  setSpamReputationPolicy,
-} from '../services/spam-reputation-service';
+import { reportSenderVerdict } from '../services/reputation-service';
+import { getSpamReputationState, kickSpamReputation } from '../services/spam-reputation-service';
 import { applyUserSpamVerdict } from '../services/spam-verdict-actions';
 
 const logger = createLogger('spam-handlers');
 const fail = (error: unknown) => ({ success: false as const, error: (error as Error)?.message ?? String(error) });
 
 export function registerSpamHandlers(): void {
-  ipcMain.handle('spam:getReputationPolicy', async () => {
-    try { return { success: true, data: getSpamReputationPolicy() }; } catch (error) { return fail(error); }
-  });
-  ipcMain.handle('spam:setReputationPolicy', async (_event, policy: unknown) => {
-    try {
-      const saved = setSpamReputationPolicy(policy);
-      kickSpamReputation(); // a newly enabled provider should not wait ten minutes
-      return { success: true, data: saved };
-    } catch (error) {
-      logger.error('spam:setReputationPolicy failed:', error);
-      return fail(error);
-    }
-  });
   ipcMain.handle('spam:getReputationState', async () => {
     try { return { success: true, data: getSpamReputationState() }; } catch (error) { return fail(error); }
   });

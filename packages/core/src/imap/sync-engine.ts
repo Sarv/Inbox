@@ -279,9 +279,9 @@ export class SyncEngine {
     this.realtimeManager.setServerActions(ingestActions);
 
     // The blocklist lookup is NOT wired here. It is a network call to a third
-    // party about the user's correspondents, so it arrives from outside (see
-    // setReputationLookup) only once the user has switched it on, and the
-    // engine runs perfectly without one.
+    // party about the user's correspondents, governed by the user's settings,
+    // so it arrives from outside (see setReputationLookup) and the engine runs
+    // perfectly without one.
 
     // Hook folder-sync inserts into the same event stream realtime
     // uses, so manual / periodic syncs that insert new emails get
@@ -450,7 +450,7 @@ export class SyncEngine {
    *
    * Injected rather than constructed because the decision to ask a blocklist
    * operator about the user's mail is the user's, made in Security settings,
-   * and because the cache and circuit breaker behind it are shared across
+   * and because the cache and circuit breakers behind it are shared across
    * every account's engine — one process, one set of queries.
    */
   setReputationLookup(fn: ReputationLookup): void {

@@ -30,7 +30,7 @@ export interface RegistryRow {
   updated_at: number;
 }
 
-type FailPoint = 'select' | 'insert' | 'delete' | 'transaction';
+type FailPoint = 'select' | 'insert' | 'delete' | 'transaction' | 'settings';
 
 interface FakeState {
   rows: Map<string, RegistryRow>;
@@ -178,6 +178,12 @@ export function markMigrationDone(flag: string): void {
 
 export function getAllAppSettings(): Record<string, string> {
   return Object.fromEntries(state.settings);
+}
+
+/** The strict read: throws when the 'settings' fail point is set, like an unreadable DB. */
+export function readAppSetting(key: string): string | null {
+  if (state.fail.has('settings')) boom('settings');
+  return state.settings.get(key) ?? null;
 }
 
 export function setAppSetting(key: string, value: string): void {

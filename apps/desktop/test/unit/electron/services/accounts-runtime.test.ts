@@ -60,11 +60,24 @@ vi.mock('@sarvinbox/core', async () => ({
     setReputationLookup(fn: unknown): void { this.reputationLookup = fn; }
   },
   // The blocklist stage itself. Blocklists are on by default (2026-09-23), so
-  // every test here builds one; it answers "no opinion" and asks nobody.
+  // every test here builds one over this computer's DNS; it answers "no
+  // opinion" and asks nobody.
   ReputationStage: class {
-    constructor(public config: unknown) {}
+    constructor(public provider: unknown, public cache: unknown) {}
     async assess(): Promise<null> { return null; }
   },
+  LocalDnsblProvider: class { constructor(public deps: unknown) {} },
+  SarvReputationProvider: class { constructor(public deps: unknown) {} },
+}));
+
+// The Sarv provider's token and transport, which the blocklist service imports:
+// never reached here, and not worth loading for real.
+vi.mock('../../../../electron/services/oauth-service', () => ({
+  listSignedInAccounts: async () => [],
+  getValidAccessToken: async () => null,
+}));
+vi.mock('../../../../electron/services/net-fetch', () => ({
+  chromiumFetch: async () => { throw new Error('no network in tests'); },
 }));
 
 // Async factory on purpose: the sweep needs the REAL shared-directory

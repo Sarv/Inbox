@@ -70,49 +70,68 @@ dev-server start.
 ## Blocklists: the one check that leaves the machine
 
 Every other stage reads the message that already arrived. The reputation stage
-asks a DNSBL operator, over DNS, about the IP that delivered the message and
-the registrable domain it claims to be from — so the operator learns, in near
-real time, who writes to this user. It is **on** by default with every catalogue
-zone ticked; the user unticks lists, or the whole thing, in **Security >
-Blocklists**. A zone that refuses this network — a public resolver, an
-unregistered Barracuda querier — is retired by its own breaker in the core
-stage while the others keep answering, which is what makes default-on safe.
+asks somebody else — a DNSBL operator over DNS, or the Sarv reputation service
+— about the IP that delivered the message and the registrable domains it
+claims to be from (From and Reply-To), so that somebody learns, in near real
+time, who writes to this user. It is **on** by default with every catalogue
+zone ticked, asked through this computer's DNS; the user unticks lists, picks
+the Sarv service, or turns it off in **Security > Blocklists** — the one place
+it is set. A zone that refuses this network — a public resolver, an
+unregistered Barracuda querier — is retired by its own breaker while the
+others keep answering, which is what makes default-on safe.
 
-Three pieces make it work in a mail client rather than a batch scanner, and
-they live in `packages/core/src/imap/reputation-stage.ts`:
+There is ONE path. Until 2026-09-24 a background pass (Settings > General,
+off / local / Sarv) asked the same lists about the same sender again, with its
+own setting, its own cache and its own reading of the answers; it now asks
+blocklists only about the domains a body LINKS to (opt-in, "Also ask about the
+domains a message links to"), through the same stage. Its old settings are
+read into the one section by `readBlocklistPrefs`
+(`packages/core/src/utils/blocklist-prefs.ts`), which the tab and main share.
 
-- **A cache.** A mailing list delivers from the same handful of IPs all day.
+What makes it work in a mail client rather than a batch scanner:
+
+- **One cache**, per address and per domain, in the core DB
+  (`reputation_cache`): a mailing list delivers from the same handful of IPs
+  all day, and the answers survive a restart. An answer nobody could give is
+  never cached.
 - **In-flight de-duplication.** A batch of twenty messages from one sender is
   one query, not twenty.
-- **A circuit breaker.** This is the desktop-specific one. Spamhaus and its
-  peers _refuse_ queries that arrive through a public or open resolver — which
-  is what an ISP's DNS, or 8.8.8.8, is, and therefore what most consumer
-  machines have. The refusal is an answer (`127.255.255.254`), not a listing;
-  the library reads it as a refusal, and the breaker stops us hammering a zone
-  that will never answer. This is why the settings tab asks for resolvers, and
-  says why.
+- **A circuit breaker per zone**, and one for the Sarv service. This is the
+  desktop-specific part. Spamhaus and its peers _refuse_ queries that arrive
+  through a public or open resolver — which is what an ISP's DNS, or 8.8.8.8,
+  is, and therefore what most consumer machines have. The refusal is an answer
+  (`127.255.255.254`), not a listing; the library reads it as a refusal, and
+  the breaker stops us hammering a zone that will never answer. This is why the
+  settings tab asks for resolvers, and says why.
 
 Where each part sits:
 
-| Piece                                                | File                                                     |
-| ---------------------------------------------------- | -------------------------------------------------------- |
-| Cache, de-duplication, breaker                       | `packages/core/src/imap/reputation-stage.ts`             |
-| The `await` that must happen before the re-file      | `message-processor.ts`, in `convertMessage`              |
-| One stage for the whole process, built from settings | `apps/desktop/electron/services/reputation-service.ts`   |
-| The settings tab                                     | `apps/desktop/src/components/security/BlocklistsTab.tsx` |
+| Piece                                                  | File                                                        |
+| ------------------------------------------------------ | ----------------------------------------------------------- |
+| Cache in front of a provider, de-duplication           | `packages/core/src/imap/reputation-stage.ts`                |
+| The providers and their breakers, the one scoring      | `packages/core/src/utils/spam-reputation.ts`                |
+| The one setting, and the migration of the old ones     | `packages/core/src/utils/blocklist-prefs.ts`                |
+| The `await` that must happen before the re-file        | `message-processor.ts`, in `convertMessage`                 |
+| One stage and one cache for the process, from settings | `apps/desktop/electron/services/reputation-service.ts`      |
+| Link domains and registration dates, in the background | `apps/desktop/electron/services/spam-reputation-service.ts` |
+| The settings tab                                       | `apps/desktop/src/components/security/BlocklistsTab.tsx`    |
 
-Two constraints on the ingest side are load-bearing:
+Three constraints are load-bearing:
 
-- The lookup is awaited **inside `convertMessage`, before the spam tag and
-  before the re-file**. Scoring it afterwards would show the user a message
-  land in the inbox and then leave it.
+- The sender lookup is awaited **inside `convertMessage`, before the spam tag
+  and before the re-file**. Scoring it afterwards would show the user a message
+  land in the inbox and then leave it. It is the only place a sender is asked
+  about.
 - It is withheld in `quiet` mode, alongside the known-spammer lookup and the AI
   pipeline. A historical backfill of a large mailbox must never become tens of
   thousands of DNS queries sent to an operator on the user's behalf.
+- Main reads the setting **strictly** (`readAppSetting`). The default is "ask
+  everybody", so a core DB that cannot be read must not read as the default for
+  a user who switched it off: until a read succeeds, nobody is asked.
 
 `headerStage` stays pure and synchronous. The header backfill shares it, so
-both paths reach the same verdict from the same evidence; the DNS happens one
-level up, where only ingest runs.
+both paths reach the same verdict from the same evidence; the network happens
+one level up, where only ingest runs.
 
 ## Local development vs. release
 

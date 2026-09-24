@@ -107,18 +107,14 @@ export type { HeaderStageOptions, HeaderStageResult } from './header-stage';
 export { bodyStage, rescoreWithBody } from './body-stage';
 export type { BodyStageInput } from './body-stage';
 
-// The reputation stage — blocklist lookups for the sender, cached and
-// circuit-broken. Off until zones are configured; see the module header.
-export {
-  ReputationStage,
-  DEFAULT_BREAKER_COOLDOWN_MS,
-  DEFAULT_CACHE_MAX,
-  DEFAULT_CACHE_TTL_MS,
-  DEFAULT_FAILURE_THRESHOLD,
-} from './reputation-stage';
+// The reputation stage — blocklist lookups for the sender as mail arrives and
+// for a body's link domains after, through one provider and one cache. It
+// exists only while the user's settings name somebody to ask.
+export { ReputationStage } from './reputation-stage';
 export type {
+  ReputationCacheStore,
+  ReputationItemKind,
   ReputationLookup,
-  ReputationStageConfig,
   ReputationStageDeps,
   ReputationSubject,
 } from './reputation-stage';
