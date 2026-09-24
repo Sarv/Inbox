@@ -254,6 +254,17 @@ jobs:
             apps/desktop/release/win-unpacked=x64 \
             apps/desktop/release/win-arm64-unpacked=arm64
 
+      # The v1.2.0 tag built four green artifacts that were all EMPTY: a false
+      # from build/beforeBuild.js told electron-builder 26 that node_modules
+      # were handled externally, so it packed none, on every platform. Only the
+      # Windows job noticed, because only the Windows job looked inside the
+      # artifact. This makes macOS and Linux look too. Windows is excluded
+      # because the step above already checks every addon, and its CPU.
+      - name: Verify the packed app carries its native addons
+        if: matrix.platform != 'win'
+        shell: bash
+        run: node scripts/verify-packaged-addons.mjs apps/desktop/release
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
