@@ -23,29 +23,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { findNativeAddons } from './lib/native-addons.mjs';
+import { findNativeAddons, readFileHeader } from './lib/native-addons.mjs';
 import { readPeMachine } from './lib/pe-machine.mjs';
-
-/** Enough bytes to cover the DOS stub and the COFF header of any PE file. */
-const HEADER_BYTES = 1024;
-
-/**
- * Read only the header of a file, rather than pulling a multi-megabyte addon
- * into memory just to look at 64 bytes of it.
- *
- * @param {string} file
- * @returns {Buffer}
- */
-function readHeader(file) {
-  const handle = fs.openSync(file, 'r');
-  try {
-    const buffer = Buffer.alloc(HEADER_BYTES);
-    const read = fs.readSync(handle, buffer, 0, HEADER_BYTES, 0);
-    return buffer.subarray(0, read);
-  } finally {
-    fs.closeSync(handle);
-  }
-}
 
 /**
  * @param {string[]} args `<dir>=<arch>` pairs.
@@ -85,7 +64,7 @@ function main(args) {
       const relative = path.relative(directory, addon);
       let actual;
       try {
-        actual = readPeMachine(readHeader(addon));
+        actual = readPeMachine(readFileHeader(addon));
       } catch (error) {
         problems.push(`FAIL: ${directory} -> ${relative}: ${error.message}`);
         continue;

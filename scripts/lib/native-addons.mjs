@@ -103,3 +103,23 @@ export function missingRequiredAddons(addonPaths, required = REQUIRED_ADDONS) {
   const present = new Set(addonPaths.map((addon) => path.basename(addon)));
   return required.filter((name) => !present.has(name));
 }
+
+/**
+ * Read only the start of a file, rather than pulling a multi-megabyte addon
+ * into memory to look at a few dozen bytes of its header.
+ *
+ * @param {string} file
+ * @param {number} [bytes] How much to read. The default covers a PE DOS stub
+ *   and a Mach-O fat header with room to spare.
+ * @returns {Buffer} What was actually read, which may be shorter than `bytes`.
+ */
+export function readFileHeader(file, bytes = 1024) {
+  const handle = fs.openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(bytes);
+    const read = fs.readSync(handle, buffer, 0, bytes, 0);
+    return buffer.subarray(0, read);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
