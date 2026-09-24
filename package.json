@@ -2,6 +2,10 @@
   "name": "sarvinbox",
   "version": "1.2.0",
   "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "description": "Sarv Inbox — AI-powered IMAP email client for the desktop",
   "author": "Sarv",
   "license": "SEE LICENSE IN LICENSE",
