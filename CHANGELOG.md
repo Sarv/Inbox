@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can no longer be marked important, needs-response or a reminder.
 
 ### Changed
+- **One Mac download instead of four.** The `.dmg` and `.zip` are now universal
+  builds carrying both Apple Silicon and Intel, so there is no longer a choice
+  to get wrong; the file is larger because it holds both.
 - **Blocklists are on by default**, every list ticked, existing installs
   included. A list that refuses this network now steps aside on its own while
   the others keep answering.
