@@ -2,7 +2,7 @@
   "name": "@sarvinbox/desktop",
   "version": "1.2.1",
   "productName": "Sarv Inbox",
-  "description": "Sarv Inbox — AI-powered email client by Sarv",
+  "description": "Sarv Inbox \u2014 AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "homepage": "https://github.com/Sarv/Inbox",
@@ -101,7 +101,6 @@
   "build": {
     "appId": "com.sarv.sarvinbox",
     "productName": "Sarv Inbox",
-    "executableName": "sarv-inbox",
     "electronVersion": "43.2.0",
     "publish": [
       {
@@ -196,6 +195,7 @@
       ]
     },
     "linux": {
+      "executableName": "sarv-inbox",
       "icon": "build/icon.png",
       "category": "Office;Network;Email",
       "synopsis": "Privacy-first email client with AI-powered features",
