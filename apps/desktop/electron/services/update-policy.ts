@@ -238,6 +238,11 @@ export const getUpdateSupport = ({
  *    so the primary button installs instantly instead of appearing and then
  *    making the user wait on a progress bar they did not ask for. And only then
  *    if the user has not skipped this version or asked to be reminded later.
+ *
+ * `dismissed` wins over both, and exists because this function is re-run on
+ * EVERY state change: without it, "Close" on a manual check computed `true`
+ * again a moment later ("manual, and the phase isn't idle") and the dialog
+ * reopened itself — a Close button that could never close.
  */
 export const shouldShowDialog = ({
   phase,
@@ -245,13 +250,17 @@ export const shouldShowDialog = ({
   version,
   prefs,
   now,
+  dismissed = false,
 }: {
   phase: UpdatePhase;
   trigger: UpdateTrigger;
   version: string | null;
   prefs: UpdatePrefs;
   now: number;
+  /** The user closed the dialog for the current check; keep it closed. */
+  dismissed?: boolean;
 }): boolean => {
+  if (dismissed) return false;
   if (trigger === 'manual') return phase !== 'idle';
   if (phase !== 'downloaded' || version === null) return false;
   return shouldPromptForUpdate({ version, prefs, now, trigger });

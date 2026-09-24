@@ -172,6 +172,26 @@ describe('shouldShowDialog', () => {
     ).toBe(true);
   });
 
+  // `prompt` is recomputed on every state change, so "the user closed it" has
+  // to be an INPUT to the decision. Without this, Close on a manual check
+  // recomputed to true a moment later and the dialog reopened itself.
+  it('stays closed once dismissed, whatever the trigger or phase', () => {
+    for (const phase of everyPhase) {
+      for (const trigger of ['manual', 'scheduled'] as const) {
+        expect(
+          shouldShowDialog({
+            phase,
+            trigger,
+            version: '1.2.0',
+            prefs: prefs(),
+            now: NOW,
+            dismissed: true,
+          }),
+        ).toBe(false);
+      }
+    }
+  });
+
   // If a background error raised the dialog, an offline laptop would produce a
   // popup every single hour.
   it('never surfaces a background check failure', () => {

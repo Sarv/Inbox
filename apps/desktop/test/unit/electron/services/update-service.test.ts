@@ -253,6 +253,67 @@ describe('remindAboutUpdateLater', () => {
   });
 });
 
+describe('dismissUpdateDialog', () => {
+  // THE regression: `prompt` is recomputed on every state change, so a dialog
+  // closed during a MANUAL check ("you're up to date" — always promptable)
+  // reopened itself the instant anything else touched the state. Close did
+  // nothing, however many times it was pressed.
+  it('closes the dialog on a manual check and keeps it closed', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('manual');
+    h.updater.emit('update-not-available', { version: '1.2.1' });
+    expect(service.getUpdateState().prompt).toBe(true);
+
+    expect(service.dismissUpdateDialog().prompt).toBe(false);
+
+    // Any later state change in the same cycle must not resurrect it.
+    h.updater.emit('download-progress', { percent: 12 });
+    expect(service.getUpdateState().prompt).toBe(false);
+    expect(h.sent.at(-1)?.payload).toMatchObject({ prompt: false });
+    service.stopUpdateService();
+  });
+
+  // A dismissal answers the check it was shown for, not every future one:
+  // pressing "Check for Updates" again must show an answer.
+  it('does not silence the next check', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('manual');
+    h.updater.emit('update-not-available', { version: '1.2.1' });
+    service.dismissUpdateDialog();
+
+    await service.checkForUpdates('manual');
+    h.updater.emit('update-not-available', { version: '1.2.1' });
+
+    expect(service.getUpdateState()).toMatchObject({ phase: 'up-to-date', prompt: true });
+    service.stopUpdateService();
+  });
+
+  // Same recomputation bug, reached through the other two buttons: on a manual
+  // check both were as unclosable as Close.
+  it('keeps the dialog closed after Remind me later and Skip on a manual check', async () => {
+    const later = await load();
+    later.startUpdateService();
+    await later.checkForUpdates('manual');
+    h.updater.emit('update-downloaded', { version: '1.2.0' });
+
+    expect(later.remindAboutUpdateLater().prompt).toBe(false);
+    h.updater.emit('download-progress', { percent: 100 });
+    expect(later.getUpdateState().prompt).toBe(false);
+    later.stopUpdateService();
+
+    const skipped = await load();
+    skipped.startUpdateService();
+    await skipped.checkForUpdates('manual');
+    h.updater.emit('update-downloaded', { version: '1.2.0' });
+
+    expect(skipped.skipCurrentVersion().prompt).toBe(false);
+    expect(skipped.getUpdateState().prompt).toBe(false);
+    skipped.stopUpdateService();
+  });
+});
+
 describe('installUpdateAndRestart', () => {
   // Calling quitAndInstall with nothing staged kills the app without replacing
   // anything - the user loses their session and gains no update.

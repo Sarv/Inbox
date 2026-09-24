@@ -63,6 +63,17 @@ let firstCheckTimer: NodeJS.Timeout | null = null;
 let wired = false;
 /** Guards against overlapping checks (a manual press during an hourly check). */
 let checkInFlight = false;
+/**
+ * The user closed the dialog for the CURRENT check cycle.
+ *
+ * `setState` recomputes `prompt` on every state change, so a patch of
+ * `{ prompt: false }` was overwritten by the recomputation an instant later and
+ * the dialog reopened itself — "Close" and "Remind me later" did nothing on a
+ * manual check, which always wants to show something. The answer has to
+ * survive the recomputation, so it is an input to it. Reset when a new check
+ * begins: a dismissal answers this check, not every future one.
+ */
+let dialogDismissed = false;
 
 const loadPrefs = (): UpdatePrefs => {
   try {
@@ -114,6 +125,7 @@ const setState = (patch: Partial<UpdateState>): void => {
     version: merged.version,
     prefs,
     now: Date.now(),
+    dismissed: dialogDismissed,
   });
   merged.trigger = currentTrigger;
   state = merged;
@@ -195,6 +207,8 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
   });
 
   currentTrigger = trigger;
+  // A new check is a new question, so an earlier "Close" no longer applies.
+  dialogDismissed = false;
 
   if (!support.supported) {
     setState({ phase: 'unsupported', error: support.message, version: null });
@@ -255,7 +269,8 @@ export const skipCurrentVersion = (): UpdateState => {
     // would make "Skip this version" a button that does nothing.
     autoUpdater.autoInstallOnAppQuit = false;
   }
-  setState({ prompt: false });
+  dialogDismissed = true;
+  setState({});
   return state;
 };
 
@@ -266,13 +281,15 @@ export const remindAboutUpdateLater = (): UpdateState => {
   // get the new version, which is the whole point of automatic updates.
   savePrefs(remindLater(prefs, Date.now()));
   logger.info('[Update] Reminder snoozed until', new Date(prefs.remindAfter ?? 0).toISOString());
-  setState({ prompt: false });
+  dialogDismissed = true;
+  setState({});
   return state;
 };
 
 /** Dismiss the dialog without recording anything (Escape / backdrop click). */
 export const dismissUpdateDialog = (): UpdateState => {
-  setState({ prompt: false });
+  dialogDismissed = true;
+  setState({});
   return state;
 };
 
