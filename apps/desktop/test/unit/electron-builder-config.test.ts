@@ -34,6 +34,8 @@ const { validateSchema } = require('app-builder-lib/out/util/config/schemaValida
 };
 const packageJson = require('../../package.json') as Record<string, unknown>;
 const buildConfig = packageJson['build'] as Record<string, unknown>;
+// Resolved from apps/desktop, which is where electron-builder runs the hook.
+const hookPath = fileURLToPath(new URL('../../build/beforeBuild.js', import.meta.url));
 
 describe('electron-builder configuration', () => {
   // If this fails, every platform in .github/workflows/release.yml fails.
@@ -136,15 +138,43 @@ describe('electron-builder configuration', () => {
   // The regression: @electron/rebuild cannot find this pnpm workspace's root on
   // Windows, so it rebuilds nothing and each packaged arch keeps whatever
   // binary was already on disk. The beforeBuild hook does the per-arch rebuild
-  // itself and returns false to take electron-builder's own attempt out of the
-  // picture. It must also be TRACKED: .gitignore excludes apps/desktop/build/*,
+  // itself. It must also be TRACKED: .gitignore excludes apps/desktop/build/*,
   // and the afterPack hook was already lost to that rule once.
   it('keeps the per-arch native rebuild hook wired up and committed', () => {
     const hook = buildConfig['beforeBuild'];
     expect(hook).toBeTypeOf('string');
     // The hook path is relative to apps/desktop, where electron-builder runs.
-    const resolved = fileURLToPath(new URL(`../../${hook as string}`, import.meta.url));
-    expect(existsSync(resolved), `${hook as string} must exist on disk`).toBe(true);
+    expect(hook).toBe('./build/beforeBuild.js');
+    expect(existsSync(hookPath), `${hook as string} must exist on disk`).toBe(true);
+  });
+
+  // The regression that shipped four EMPTY artifacts on the v1.2.0 tag. In
+  // electron-builder 26 a falsy beforeBuild result does far more than skip the
+  // rebuild: Packager.installAppDependencies reads it as "node_modules are
+  // handled externally" and PlatformPackager then skips computeNodeModuleFileSets
+  // altogether, so the app is packed with NO node_modules on ANY platform. Every
+  // job stays green -- the installers are produced and uploaded -- and the
+  // app.asar holds only dist/, dist-electron/ and package.json. With no
+  // better_sqlite3.node the database never opens, and because every core-DB read
+  // is wrapped in a try/catch returning an empty result (see CLAUDE.md) the user
+  // sees an app with no accounts and no mail rather than an error.
+  it('returns true from beforeBuild so node_modules are still packaged', () => {
+    const hook = readFileSync(hookPath, 'utf8');
+    // `return false` IS the bug. It must never come back to this hook.
+    expect(hook).not.toMatch(/^\s*return false\b/m);
+    expect(hook).toMatch(/^\s*return true\b/m);
+  });
+
+  // The tripwire for the test above. `return true` is only required because of
+  // the coupling below; if an electron-builder upgrade renames or removes it,
+  // the reasoning has to be re-derived from the new source rather than assumed
+  // to still hold. Failing here means "go re-read installAppDependencies", not
+  // "the hook is wrong".
+  it('still couples the beforeBuild result to whether node_modules are packed', () => {
+    const packager = readFileSync(require.resolve('app-builder-lib/out/packager.js'), 'utf8');
+    const platformPackager = readFileSync(require.resolve('app-builder-lib/out/platformPackager.js'), 'utf8');
+    expect(packager).toContain('_nodeModulesHandledExternally');
+    expect(platformPackager).toContain('areNodeModulesHandledExternally');
   });
 
   // The regression: electron-builder finds the workspace root by shelling out
