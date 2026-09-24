@@ -22,20 +22,26 @@
  *   - **In-flight de-duplication.** A batch arrives all at once, and a dozen
  *     messages from one sender must produce ONE query, not a dozen racing
  *     queries that each miss the cache the others are about to fill.
- *   - **A circuit breaker**, which matters more on a desktop client than
- *     anywhere else. Spamhaus and several other operators refuse queries that
- *     arrive through a public resolver — `127.255.255.254`, "you are querying
- *     through an open resolver" — and a laptop on an ISP's DNS or on 8.8.8.8
- *     is exactly that. The library reports it as an error rather than a
- *     listing, which is right, but without a breaker the app would then send
- *     one doomed query per sender for the rest of the session. So: consecutive
- *     failures open the breaker, and it stays open for a cooldown.
+ *   - **A circuit breaker PER ZONE**, which matters more on a desktop client
+ *     than anywhere else. Spamhaus and several other operators refuse queries
+ *     that arrive through a public resolver — `127.255.255.254`, "you are
+ *     querying through an open resolver" — and a laptop on an ISP's DNS or on
+ *     8.8.8.8 is exactly that; Barracuda refuses any resolver nobody
+ *     registered; URIBL answers `127.0.0.1` to the same. The library reports
+ *     each as an error rather than a listing, which is right, but without a
+ *     breaker the app would then send one doomed query per sender to that
+ *     operator for the rest of the session. So: a zone that fails
+ *     consecutively is retired for a cooldown WHILE THE OTHERS KEEP ANSWERING
+ *     — with every zone on by default, one operator that will never answer
+ *     this network must not silence the five that do. Only when no zone at
+ *     all answers does the whole stage pause.
  *
  * The verdict this produces is a `SpamAssessment` like any other stage's, and
- * it is merged into the header stage's score by the caller. A lookup that
- * failed, was cached as failed, or never ran contributes NOTHING — never a
- * penalty and never a discount. `checkReputation` does not throw, and neither
- * does this.
+ * it is merged into the header stage's score by the caller. It is built from
+ * the zones that ANSWERED: a listing one operator reported is true whatever
+ * happened to the operator next to it. A lookup in which nobody answered, or
+ * that never ran, contributes NOTHING — never a penalty and never a discount.
+ * `checkReputation` does not throw, and neither does this.
  */
 import {
   assessReputation,
@@ -60,10 +66,11 @@ export const DEFAULT_TIMEOUT_MS = 3_000;
 
 export interface ReputationStageConfig {
   /**
-   * The zones to query. EMPTY MEANS OFF, and that is the default everywhere:
-   * every list has terms, several answer "over quota" rather than "listed"
-   * once you pass a threshold, and every query tells its operator about a
-   * sender this user receives mail from. None of that is ours to opt into.
+   * The zones to query. EMPTY MEANS OFF. Which zones a deployment asks by
+   * default is the caller's decision, not this class's: every list has terms,
+   * several answer "over quota" rather than "listed" once you pass a
+   * threshold, and every query tells its operator about a sender this user
+   * receives mail from.
    */
   blocklists: readonly Blocklist[];
   /**
@@ -124,6 +131,8 @@ export class ReputationStage {
 
   private consecutiveFailures = 0;
   private breakerOpenUntil = 0;
+  /** Per-zone failure counts and cooldowns, by the zone's catalogue name. */
+  private readonly zones = new Map<string, { failures: number; openUntil: number }>();
 
   constructor(config: ReputationStageConfig, deps: ReputationStageDeps = {}) {
     this.config = config;
@@ -164,32 +173,71 @@ export class ReputationStage {
   /** Forget every cached verdict — for a settings change that alters the zones. */
   reset(): void {
     this.cache.clear();
+    this.zones.clear();
     this.consecutiveFailures = 0;
     this.breakerOpenUntil = 0;
+  }
+
+  /** The configured zones whose own breaker is not open right now. */
+  activeZones(): Blocklist[] {
+    const now = this.now();
+    return this.config.blocklists.filter((list) => (this.zones.get(list.name)?.openUntil ?? 0) <= now);
   }
 
   private async lookup(
     subject: ReputationSubject,
     key: string,
   ): Promise<SpamAssessment | null> {
-    const result = await checkReputation(subject, this.config.blocklists, {
+    const zones = this.activeZones();
+    // Every zone is sitting out a cooldown: nothing to ask, and not a failure
+    // either — the failures that retired them were already counted.
+    if (zones.length === 0) return null;
+
+    const result = await checkReputation(subject, zones, {
       timeoutMs: this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       servers: this.config.servers,
       query: this.query,
     });
 
-    // An incomplete lookup is not a verdict, and caching one would turn a
-    // momentary outage into hours of "no opinion" about a sender we could
-    // have asked about a minute later.
-    if (!result.completed) {
+    // Each zone keeps its own score: one that answered is forgiven its past,
+    // one that did not moves toward its own cooldown. The library names a zone
+    // by its catalogue id in one list and by its DNS zone in another; both
+    // resolve to the id here so the two lists cannot disagree about a zone.
+    const idOf = new Map(zones.flatMap((list) => [[list.name, list.name], [list.zone, list.name]]));
+    for (const answered of result.checked) this.zones.delete(idOf.get(answered) ?? answered);
+    for (const error of result.errors) this.recordZoneFailure(idOf.get(error.name) ?? idOf.get(error.zone) ?? error.name, error.error);
+
+    // Nobody answered: not a verdict, and caching one would turn a momentary
+    // outage into hours of "no opinion" about a sender we could have asked
+    // about a minute later.
+    if (result.checked.length === 0) {
       this.recordFailure(result.errors[0]?.error);
       return null;
     }
 
+    // At least one operator answered, and what it said is true whatever
+    // happened to the operators beside it. The zones that failed are on
+    // their way out through their own breaker; their answer, if they ever
+    // give one, is a later sender's to collect.
     this.consecutiveFailures = 0;
     const assessment = assessReputation(result);
     this.remember(key, assessment);
     return assessment;
+  }
+
+  private recordZoneFailure(name: string, reason: string): void {
+    const entry = this.zones.get(name) ?? { failures: 0, openUntil: 0 };
+    entry.failures += 1;
+    const threshold = this.config.failureThreshold ?? DEFAULT_FAILURE_THRESHOLD;
+    if (entry.failures >= threshold) {
+      const cooldown = this.config.breakerCooldownMs ?? DEFAULT_BREAKER_COOLDOWN_MS;
+      entry.openUntil = this.now() + cooldown;
+      entry.failures = 0;
+      logger.warn(
+        `[Reputation] ${name}: ${threshold} consecutive failed lookups — not asking it for ${Math.round(cooldown / 60_000)} min. Last error: ${reason}`,
+      );
+    }
+    this.zones.set(name, entry);
   }
 
   private recordFailure(reason: string | undefined): void {

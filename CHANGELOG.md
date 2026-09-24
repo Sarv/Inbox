@@ -8,9 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Domain age.** The sender's domain and the domains a message links to are
+  looked up in the domain registry; one registered days or weeks ago adds to
+  the spam score, never enough to file mail alone. Settings → General turns it
+  off.
 - **The AI now sees what the spam filter found.** It reads the verdict, the
   reasons and where each link really goes, and mail the filter found deceptive
   can no longer be marked important, needs-response or a reminder.
+
+### Changed
+- **Blocklists are on by default**, every list ticked, existing installs
+  included. A list that refuses this network now steps aside on its own while
+  the others keep answering.
 
 ### Removed
 - Windows portable `.exe` and the Linux `.tar.gz` builds. Both duplicated a

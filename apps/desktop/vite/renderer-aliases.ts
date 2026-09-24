@@ -81,5 +81,12 @@ export function rendererAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/extensions/categories.ts',
     ),
+    // Pure (zero imports) — the blocklist preferences, read by the Blocklists
+    // tab with the SAME function main reads them with, so the ticks a user
+    // sees are the lists that are actually queried.
+    '@sarvinbox/core/blocklist-prefs': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/blocklist-prefs.ts',
+    ),
   };
 }

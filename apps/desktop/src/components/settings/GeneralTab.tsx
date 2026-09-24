@@ -398,6 +398,20 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
               <input type="radio" checked={(settings.spamReputationMode ?? 'sarv') === 'sarv'} onChange={() => updateSetting('spamReputationMode', 'sarv')} className="w-4 h-4" />
               <span className="text-sm whitespace-nowrap">Sarv service</span>
             </label>
+            {(settings.spamReputationMode ?? 'sarv') !== 'off' && (
+              <label className="flex items-start gap-2 cursor-pointer w-64">
+                <input
+                  type="checkbox"
+                  checked={settings.spamReputationDomainAge !== false}
+                  onChange={(e) => updateSetting('spamReputationDomainAge', e.target.checked)}
+                  className="w-4 h-4 mt-0.5"
+                />
+                <span className="text-sm">
+                  Check how recently sender and link domains were registered
+                  <span className="block text-xs text-muted-foreground">Asks the domain registry (RDAP). A domain registered days ago is the tell no blocklist has yet; it adds points, never the whole verdict.</span>
+                </span>
+              </label>
+            )}
             {(settings.spamReputationMode ?? 'sarv') === 'sarv' && (
               <>
                 <input
