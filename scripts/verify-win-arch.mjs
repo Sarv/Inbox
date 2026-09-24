@@ -23,27 +23,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { findNativeAddons } from './lib/native-addons.mjs';
 import { readPeMachine } from './lib/pe-machine.mjs';
 
 /** Enough bytes to cover the DOS stub and the COFF header of any PE file. */
 const HEADER_BYTES = 1024;
-
-/**
- * Collect every `.node` addon under a directory tree.
- *
- * @param {string} root
- * @returns {string[]} Absolute paths, sorted for stable output.
- */
-function findNativeAddons(root) {
-  /** @type {string[]} */
-  const found = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true, recursive: true })) {
-    if (entry.isFile() && entry.name.endsWith('.node')) {
-      found.push(path.join(entry.parentPath ?? entry.path, entry.name));
-    }
-  }
-  return found.sort();
-}
 
 /**
  * Read only the header of a file, rather than pulling a multi-megabyte addon
