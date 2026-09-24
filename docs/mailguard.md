@@ -113,8 +113,9 @@ level up, where only ingest runs.
 
 ## Local development vs. release
 
-The dependency is declared in two places — `packages/core/package.json` and
-`apps/desktop/package.json` — and both must say the same thing.
+The dependency is declared in three places — `packages/core/package.json`,
+`packages/extension-sdk/package.json` and `apps/desktop/package.json` — and all
+three must say the same thing.
 
 **Working on the library**: point at the sibling checkout.
 
@@ -143,7 +144,7 @@ run `pnpm build` inside the library checkout after changing its source — the
 **Releasing** (the current state): point at the registry and empty the list.
 
 ```json
-"@sarv-in/mailguard": "^0.1.0"
+"@sarv-in/mailguard": "^0.3.0"
 ```
 
 ```ts
