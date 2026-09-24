@@ -5,6 +5,7 @@ import {
   bumpVersion,
   extractVersionSection,
   insertVersionSection,
+  readUnreleasedBody,
   isDocsOnlyChange,
   parseCommit,
 } from '../../../../../scripts/lib/changelog.mjs';
@@ -143,9 +144,44 @@ describe('insertVersionSection', () => {
     expect(next.indexOf('## [1.2.0]')).toBeLessThan(next.indexOf('## [1.1.0]'));
   });
 
-  // If this fails, pending [Unreleased] notes are swallowed by the release.
-  it('leaves the [Unreleased] content in place', () => {
-    expect(insert(CHANGELOG)).toContain('- Something still pending.');
+  // REPLACES an older test that asserted the opposite -- that [Unreleased]
+  // content stayed put. That behaviour shipped v1.2.1 with a three-line entry
+  // generated from commit subjects while the hand-written notes for exactly
+  // those changes sat above it, still marked unreleased. Nothing failed; the
+  // release notes were simply wrong, and for a user the changelog is the only
+  // account of what changed. Hand-written notes ARE the release.
+  it('moves the hand-written [Unreleased] notes into the new version', () => {
+    const next = insert(CHANGELOG);
+    const versionAt = next.indexOf('## [1.2.0] - 2026-09-23');
+    const previousAt = next.indexOf('## [1.1.0]');
+    const noteAt = next.indexOf('- Something still pending.');
+
+    expect(noteAt).toBeGreaterThan(versionAt);
+    expect(noteAt).toBeLessThan(previousAt);
+    // And [Unreleased] is left empty, so the next release does not ship them again.
+    expect(next.slice(next.indexOf('## [Unreleased]'), versionAt).trim()).toBe('## [Unreleased]');
+  });
+
+  // The generated section is the fallback, not the default: with nothing
+  // pending it is all there is, and dropping it would publish an empty release.
+  it('falls back to the generated section when nothing is pending', () => {
+    const next = insert(CHANGELOG.replace('\n### Added\n- Something still pending.\n', ''));
+    expect(next).toContain('- A new thing.');
+  });
+
+  // Hand-written notes win outright rather than being merged: a note and the
+  // commit subject it was written from say the same thing in different words,
+  // so merging prints the change twice.
+  it('does not also append the generated section when notes were written', () => {
+    expect(insert(CHANGELOG)).not.toContain('- A new thing.');
+  });
+
+  // The promotion rewrites everything after [Unreleased]. If it takes the link
+  // reference block with it, that block lands INSIDE the version section and
+  // every [1.1.0] link in the file stops resolving.
+  it('keeps the link reference block below the version sections', () => {
+    const next = insert(CHANGELOG);
+    expect(next.indexOf('[1.1.0]: https://')).toBeGreaterThan(next.indexOf('## [1.1.0] - 2026-09-01'));
   });
 
   // If this fails, re-running a release duplicates the section — and the old
@@ -174,6 +210,23 @@ describe('insertVersionSection', () => {
     });
     expect(next).toContain('## [1.0.0] - 2026-09-23');
     expect(next).toContain('[1.0.0]: https://github.com/Sarv/Inbox/releases/tag/v1.0.0');
+  });
+});
+
+describe('readUnreleasedBody', () => {
+  // Drives the promotion above, so its "is anything pending?" answer decides
+  // whether a release ships hand-written notes or generated ones.
+  it('returns the pending notes, and empty when there are none', () => {
+    expect(readUnreleasedBody(CHANGELOG)).toBe('### Added\n- Something still pending.');
+    expect(readUnreleasedBody(CHANGELOG.replace('\n### Added\n- Something still pending.\n', ''))).toBe('');
+    expect(readUnreleasedBody('# Changelog\n\nNo sections at all.\n')).toBe('');
+  });
+
+  // A changelog whose only section is [Unreleased] -- the first release ever.
+  // Reading to the end of the file would swallow the link reference block.
+  it('stops at the link reference block when no version section follows', () => {
+    const first = '# Changelog\n\n## [Unreleased]\n\n### Added\n- First ever.\n\n[Unreleased]: https://x/compare\n';
+    expect(readUnreleasedBody(first)).toBe('### Added\n- First ever.');
   });
 });
 

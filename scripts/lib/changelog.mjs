@@ -89,9 +89,50 @@ export const buildSection = (commits) => {
     .trimEnd();
 };
 
+/** Heading of the `## [Unreleased]` section. */
+const UNRELEASED_HEADING = '## [Unreleased]';
+
+/**
+ * Read whatever has been written by hand under `## [Unreleased]`.
+ *
+ * Returns the body with surrounding blank lines trimmed, or `''` when the
+ * section is absent or holds nothing but whitespace.
+ */
+const unreleasedBodyRange = (markdown) => {
+  const heading = markdown.indexOf(UNRELEASED_HEADING);
+  if (heading === -1) return null;
+
+  const start = heading + UNRELEASED_HEADING.length;
+  // The body ends at the next `## [` heading or at the link-reference block,
+  // whichever comes first. Missing the link refs would move them INTO the new
+  // version section, which breaks every `[1.2.0]` link in the file.
+  const nextSection = markdown.indexOf('\n## [', start);
+  const linkRefs = markdown.search(/^\[[^\]]+\]:/m);
+
+  const ends = [nextSection, linkRefs].filter((index) => index > start);
+  return { start, end: ends.length > 0 ? Math.min(...ends) : markdown.length };
+};
+
+export const readUnreleasedBody = (markdown) => {
+  const range = unreleasedBodyRange(markdown);
+  return range === null ? '' : markdown.slice(range.start, range.end).trim();
+};
+
 /**
  * Insert a new `## [version] - date` section into CHANGELOG.md, directly below
  * `## [Unreleased]`, and refresh the link reference definitions at the bottom.
+ *
+ * Anything written by hand under `## [Unreleased]` IS the release: it is moved
+ * down into the new version section and `[Unreleased]` is left empty. The
+ * `section` generated from commit subjects is only used when nobody wrote
+ * anything, because a hand-written note and the commit subject it came from say
+ * the same thing in different words -- merging them would print both.
+ *
+ * The regression that made this necessary: v1.2.1 was cut with a full set of
+ * hand-written notes under [Unreleased] and they stayed there, so the release
+ * shipped with a three-line generated entry while the feature that release was
+ * FOR sat above it still marked unreleased. Nothing failed; the notes were just
+ * wrong, and the changelog is the only place a user finds out what changed.
  *
  * Returns the new markdown. Idempotent: a changelog that already documents
  * `version` is returned untouched, so a re-run of a release never duplicates a
@@ -100,21 +141,18 @@ export const buildSection = (commits) => {
 export const insertVersionSection = (markdown, { version, date, section, repo }) => {
   if (new RegExp(`^## \\[${escapeForRegExp(version)}\\]`, 'm').test(markdown)) return markdown;
 
-  const entry = `## [${version}] - ${date}\n\n${section}\n\n`;
-  const unreleasedAt = markdown.indexOf('## [Unreleased]');
+  const pending = readUnreleasedBody(markdown);
+  const body = pending === '' ? section : pending;
+  const entry = `## [${version}] - ${date}\n\n${body}\n\n`;
+  const range = unreleasedBodyRange(markdown);
 
-  let next;
-  if (unreleasedAt === -1) {
-    next = `${markdown.trimEnd()}\n\n${entry}`;
-  } else {
-    // Land the entry immediately before the previous newest version so
-    // [Unreleased] keeps whatever is still pending above it.
-    const followingSection = markdown.indexOf('\n## [', unreleasedAt + 1);
-    next =
-      followingSection === -1
-        ? `${markdown.trimEnd()}\n\n${entry}`
-        : `${markdown.slice(0, followingSection + 1)}${entry}${markdown.slice(followingSection + 1)}`;
-  }
+  // Rewrite from [Unreleased] onwards: the heading stays, its body moves into
+  // the new entry, and everything after it -- older versions and the link
+  // references -- follows unchanged.
+  const next =
+    range === null
+      ? `${markdown.trimEnd()}\n\n${entry}`
+      : `${markdown.slice(0, range.start)}\n\n${entry}${markdown.slice(range.end).replace(/^\n+/, '')}`;
 
   return updateLinkReferences(next, { version, repo });
 };

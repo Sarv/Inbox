@@ -18,7 +18,12 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { buildSection, extractVersionSection, insertVersionSection } from './lib/changelog.mjs';
+import {
+  buildSection,
+  extractVersionSection,
+  insertVersionSection,
+  readUnreleasedBody,
+} from './lib/changelog.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CHANGELOG_PATH = join(ROOT, 'CHANGELOG.md');
@@ -100,6 +105,7 @@ const commandWrite = (version) => {
   const repo = process.env.GITHUB_REPO ?? 'Sarv/Inbox';
 
   const markdown = readFileSync(CHANGELOG_PATH, 'utf8');
+  const pending = readUnreleasedBody(markdown);
   const next = insertVersionSection(markdown, { version, date, section, repo });
 
   if (next === markdown) {
@@ -109,7 +115,18 @@ const commandWrite = (version) => {
 
   writeFileSync(CHANGELOG_PATH, next);
   console.log(`OK: CHANGELOG.md updated with [${version}] - ${date}`);
-  console.log(`\n${section}\n`);
+
+  // Say which of the two sources was used. Silence here is how v1.2.1 nearly
+  // shipped notes that described none of what was in it: the hand-written
+  // [Unreleased] entries were left behind and only the generated ones showed.
+  if (pending === '') {
+    console.log(`\n${section}\n`);
+  } else {
+    console.log('\nPromoted the hand-written [Unreleased] notes into the release:\n');
+    console.log(`${pending}\n`);
+    console.log('For cross-checking, the commits since the last tag say:\n');
+    console.log(`${section}\n`);
+  }
 };
 
 const commandNotes = (version) => {
