@@ -104,7 +104,8 @@ for (const file of ['./package.json', './apps/desktop/package.json']) {
 GITHUB_REPO="$GITHUB_REPO" node scripts/changelog.mjs write "$NEW_VERSION"
 
 echo ""
-echo "Review the generated entry — it is the starting point, not the final wording."
+echo "Review the entry above — it is the starting point, not the final wording."
+echo "Anything you had written under [Unreleased] has been moved into it."
 echo "Edit CHANGELOG.md now if you want; the edit lands in the release commit."
 if [[ -t 0 ]]; then
   read -rp "Press Enter to commit + tag v$NEW_VERSION (Ctrl-C to abort): " _

@@ -19,7 +19,10 @@ export interface InsertOptions {
   version: string;
   /** ISO-8601 date (UTC), e.g. "2026-09-23". */
   date: string;
-  /** Markdown body produced by buildSection. */
+  /**
+   * Markdown body produced by buildSection. Used only as a FALLBACK: anything
+   * written by hand under `## [Unreleased]` is promoted instead.
+   */
   section: string;
   /** GitHub "owner/repo", used to build the link reference definitions. */
   repo: string;
@@ -28,6 +31,7 @@ export interface InsertOptions {
 export function isDocsOnlyChange(files: string[]): boolean;
 export function parseCommit(commit: CommitInput): ChangelogEntry | null;
 export function buildSection(commits: CommitInput[]): string;
+export function readUnreleasedBody(markdown: string): string;
 export function insertVersionSection(markdown: string, options: InsertOptions): string;
 export function extractVersionSection(markdown: string, version: string): string | null;
 export function bumpVersion(current: string, release: 'major' | 'minor' | 'patch'): string;
