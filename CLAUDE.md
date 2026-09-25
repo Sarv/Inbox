@@ -92,6 +92,36 @@ not the swallowing `listRegistryAccounts`) and must do nothing when it does.
 
 See [docs/TESTING.md](docs/TESTING.md) for the rebuild lock and the ABI probe.
 
+## Releases: push a tag — GitHub builds and publishes, never you
+
+A release IS a pushed git tag. Nothing is built, signed, uploaded or published
+from a local machine, ever.
+
+- **Cut one with `pnpm release:patch`** (or `minor` / `major`, or an explicit
+  version). `scripts/release.sh` bumps `package.json` and
+  `apps/desktop/package.json` in lockstep, moves whatever stands under
+  `## [Unreleased]` in CHANGELOG.md into the new version section, commits
+  `chore(release): X`, tags `vX`, and pushes the branch and the tag.
+- **The tag is the trigger.** `.github/workflows/release.yml` fires on `v*` and
+  builds macOS, Linux and Windows each on their own runner, then publishes a
+  DRAFT GitHub release carrying every artifact. Review the draft on the
+  releases page and publish it when it looks right.
+- **Never run electron-builder, or upload/publish a release, by hand.** The app
+  has two compiled native addons (better-sqlite3, lzma-native) and a native
+  addon can only be built ON the platform it runs on, so a local cross-build
+  ships a darwin `.node` inside the Windows and Linux artifacts and they crash
+  on launch. That is not hypothetical: this script used to run
+  `electron-builder --win` and `--linux` on macOS, both lines ending in
+  `|| echo`, so the broken artifacts shipped and the failure was invisible.
+- **Write the user-facing notes under `## [Unreleased]` BEFORE cutting.** A
+  non-empty `[Unreleased]` becomes the release body verbatim and the
+  commit-derived bullets are discarded — they are only printed for
+  cross-checking. Anything missing there is missing from the release, and the
+  changelog is the only place a user finds out what changed.
+- `NO_PUSH=1` commits and tags locally without pushing; `--pr` routes the bump
+  through a pull request when branch protection forbids a direct push. See
+  [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Debugging: there IS a log file — read it, don't ask
 
 When the user reports a problem ("X is not working", "why is it doing Y",
