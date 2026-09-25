@@ -39,6 +39,36 @@ describe('getConnectionBarStatus', () => {
     expect(bar.label).toBe('2/5 folders (40%)');
   });
 
+  // THE REGRESSION: a bar that reads "5/6 folders (22%)" unchanged for minutes
+  // while a big mailbox streams in, so the user concludes the download stalled.
+  // The stored-message count is the one number that always climbs.
+  it('counts the mail stored so far while a sync runs', () => {
+    const bar = getConnectionBarStatus('connected', true, false, {
+      foldersCompleted: 5, foldersTotal: 6, percentComplete: 22, messagesProcessed: 4921,
+    }, false);
+    // Grouped by the reader's locale, so build the expectation the same way
+    // rather than hardcoding en-US separators into a CI-portable test.
+    expect(bar.label).toBe(`5/6 folders \u00b7 ${(4921).toLocaleString()} emails`);
+  });
+
+  // Breaks: the opening tick of a sync (nothing stored yet) rendering a bare
+  // "0 emails", which reads worse than saying nothing about mail at all.
+  it('omits the mail count until something has actually been stored', () => {
+    const bar = getConnectionBarStatus('connected', true, false, {
+      foldersCompleted: 0, foldersTotal: 6, percentComplete: 0, messagesProcessed: 0,
+    }, false);
+    expect(bar.label).toBe('0/6 folders');
+  });
+
+  // Breaks: an older main process (or a status shaped before messagesProcessed
+  // existed) losing the progress read-out entirely instead of falling back.
+  it('falls back to the percentage when the status carries no message count', () => {
+    const bar = getConnectionBarStatus('connected', true, false, {
+      foldersCompleted: 2, foldersTotal: 5, percentComplete: 40,
+    }, false);
+    expect(bar.label).toBe('2/5 folders (40%)');
+  });
+
   // Priority: an explicit socket drop (reconnecting/disconnected) outranks the
   // softer "sync issue" — those have their own, more urgent surfaces.
   it('reconnecting outranks syncTrouble', () => {

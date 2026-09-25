@@ -327,6 +327,10 @@ const flatInboxState = (overrides: Record<string, unknown> = {}) => {
     inboxType: 'default',
     inboxSections: [],
     mergeNewEmails,
+    // The real store always has this; a progress tick past the throttle re-reads
+    // the folder list for its counts, so leaving it out would have every test in
+    // here exercising the failure path instead of the one it is about.
+    loadFolders: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
   return { state, mergeNewEmails };
@@ -473,6 +477,247 @@ describe('handleSyncProgress (progressive fill during a sync)', () => {
 
     expect(() => slice.handleSyncProgress({} as never)).not.toThrow();
     expect(mergeNewEmails).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleSyncProgress — showing the FOLDER LIST mid-sync.
+//
+// The field report this guards: connect a fresh account and the sidebar says
+// "No folders yet. Click sync below to fetch emails." while the footer counts
+// "5/6 folders (22%)" and the list says "Select a folder to view emails". The
+// renderer lists folders once, in doConnect, BEFORE the sync starts — and the
+// main process writes the folder list at the top of the sync. On a first-run
+// account the pre-sync read finds an empty table, so nothing is on screen for
+// the whole first sync no matter how much mail lands in the DB.
+// ---------------------------------------------------------------------------
+describe('handleSyncProgress (showing folders mid-sync)', () => {
+  /** A renderer that has NOT got a folder list yet — the first-run shape. */
+  const emptySidebarState = (overrides: Record<string, unknown> = {}) => {
+    const loadFolders = vi.fn().mockResolvedValue(undefined);
+    const state: Record<string, any> = {
+      folders: [],
+      selectedFolderId: null,
+      inboxType: 'default',
+      inboxSections: [],
+      mergeNewEmails: vi.fn().mockResolvedValue(undefined),
+      loadFolders,
+      ...overrides,
+    };
+    return { state, loadFolders };
+  };
+
+  /**
+   * The adoption is fire-and-forget, so let its `await get().loadFolders()`
+   * settle and its in-flight guard clear. Microtasks only — the suite runs on
+   * fake timers, and nothing here is on a timer.
+   */
+  const settleAdoption = () => Promise.resolve().then(() => {}).then(() => {});
+
+  // THE REGRESSION: an empty sidebar for the whole first sync. The tick that
+  // first reports a folder count is the moment the list can be shown.
+  it('loads the folder list on the first tick that reports one', async () => {
+    const { state, loadFolders } = emptySidebarState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 0 } as never);
+
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: the adoption must NOT ride the progressive-fill gate. The tick that
+  // first carries a folder count has stored no messages yet, so the gate
+  // rejects it — and gating the folder load on it would put the sidebar back to
+  // waiting for the first committed batch.
+  it('shows folders on a tick that has stored no mail yet', async () => {
+    const { state, loadFolders } = emptySidebarState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    // messagesProcessed 0 == the engine's opening tick; no refresh is due.
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 0 } as never);
+
+    expect(loadFolders).toHaveBeenCalled();
+    expect(state.mergeNewEmails).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a tick fires every ~10 messages, so an ungated adoption runs a
+  // folders:list (a withFiledCounts pass over the DB) hundreds of times per
+  // sync on the main thread — the exact stall this app profiles for. Once the
+  // list is adopted the ONLY thing allowed to re-read it is the throttled count
+  // refresh below, so a burst of ticks inside one window costs at most one more.
+  it('does not re-list folders on every later tick', async () => {
+    // Mirror the real loadFolders: it populates the store's folder list.
+    const loadFolders = vi.fn(async () => { state.folders = [{ id: 'f-inbox', path: 'INBOX' }]; });
+    const { state } = emptySidebarState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 0 } as never);
+    await settleAdoption();
+    for (let processed = 10; processed <= 200; processed += 10) {
+      slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: processed } as never);
+      await settleAdoption();
+    }
+
+    // 1 adoption + 1 count refresh, for 20 ticks — not 21.
+    expect(loadFolders).toHaveBeenCalledTimes(2);
+  });
+
+  // Breaks: a slow folders:list has several adoptions in flight at once, each
+  // auto-selecting INBOX under the others — a folder the user picked mid-sync
+  // gets yanked back, repeatedly.
+  it('does not stack a second load while the first is still in flight', async () => {
+    // Never resolves: the first adoption stays in flight for the whole test.
+    const loadFolders = vi.fn(() => new Promise<void>(() => {}));
+    const { state } = emptySidebarState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 0 } as never);
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 10 } as never);
+    await settleAdoption();
+
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: an account that already has its folders (every sync after the
+  // first, and every reconnect) gets its INBOX re-selected out from under the
+  // reader. A populated sidebar is the count-refresh's job below, NOT the
+  // adoption's — only the adoption auto-selects a folder, so it must stay off.
+  it('does not adopt when the sidebar is already populated', async () => {
+    const { state } = flatInboxState({ loadFolders: vi.fn().mockResolvedValue(undefined) });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    // A tick BELOW the progressive-fill gate: nothing stored yet, so the count
+    // refresh is not due either and only the adoption could fire here.
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 0 } as never);
+
+    expect((state as any).loadFolders).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a folders:list that rejects (storage not initialised yet during the
+  // main-process restart dev does on every save) leaves the in-flight guard
+  // stuck true, and the sidebar never recovers for the life of the renderer.
+  it('retries on a later tick after a failed load', async () => {
+    const loadFolders = vi.fn()
+      .mockRejectedValueOnce(new Error('Storage not initialized'))
+      .mockResolvedValue(undefined);
+    const { state } = emptySidebarState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 0 } as never);
+    await settleAdoption();
+    slice.handleSyncProgress({ foldersTotal: 6, messagesProcessed: 10 } as never);
+
+    expect(loadFolders).toHaveBeenCalledTimes(2);
+  });
+
+  // Breaks: a malformed status (an older main process, a null between syncs)
+  // throws inside the IPC listener and kills the whole progressive fill with it.
+  it('survives a status carrying no folder count', async () => {
+    const { state, loadFolders } = emptySidebarState();
+    const { slice } = await loadSliceWithSet(() => state);
+
+    expect(() => slice.handleSyncProgress({ messagesProcessed: 10 } as never)).not.toThrow();
+    expect(loadFolders).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * THE REGRESSION: the sidebar badge that never moves during a sync.
+ *
+ * The badge renders `folders.unread_count`, a STORED column. The engine now
+ * re-states it per folder while that folder syncs, but the renderer only SEES a
+ * new value by re-listing folders — and it listed once per connect plus once
+ * when the whole sync resolved. So the badge sat on its opening number for the
+ * entire download while the section totals beside it, which are live queries,
+ * climbed by thousands. Reported as "counters are increasing drastically ...
+ * just [the] counter is stuck".
+ */
+describe('handleSyncProgress (folder counts during a sync)', () => {
+  beforeEach(() => {
+    // The refresh rides the progressive-fill gate, which compares Date.now().
+    vi.setSystemTime(new Date('2026-09-09T12:00:00Z'));
+  });
+
+  /** Fire-and-forget, so let `await get().loadFolders()` settle and the
+   *  in-flight guard clear. Microtasks only — nothing here is on a timer. */
+  const settle = () => Promise.resolve().then(() => {}).then(() => {});
+
+  // Breaks: the badge stays frozen for the whole sync. This is the fix.
+  it('re-reads the folder list when the fill gate opens', async () => {
+    const loadFolders = vi.fn().mockResolvedValue(undefined);
+    const { state } = flatInboxState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: a folders:list (a withFiledCounts pass over the DB) on every one of
+  // the ~2,500 progress ticks a 25k-message sync fires. It must share the list
+  // refresh's throttle, not run per batch.
+  it('does not re-read on a tick inside the throttle window', async () => {
+    const loadFolders = vi.fn().mockResolvedValue(undefined);
+    const { state } = flatInboxState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+    await settle();
+    vi.advanceTimersByTime(200); // well inside SYNC_PROGRESS_REFRESH_MS
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 60 } as never);
+
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: a slow folders:list piles up one call per tick behind the first,
+  // each one landing a stale folder array on top of a newer one.
+  it('does not stack a second read while one is still in flight', async () => {
+    const loadFolders = vi.fn(() => new Promise<void>(() => {})); // never resolves
+    const { state } = flatInboxState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+    vi.advanceTimersByTime(5_000);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 100 } as never);
+    await settle();
+
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: a rejected folders:list (storage not initialised yet — dev restarts
+  // the main process on every save) leaves the guard stuck true and the badge
+  // frozen for the life of the renderer, which is the bug this fixes.
+  it('recovers on a later tick after a failed read', async () => {
+    const loadFolders = vi.fn()
+      .mockRejectedValueOnce(new Error('Storage not initialized'))
+      .mockResolvedValue(undefined);
+    const { state } = flatInboxState({ loadFolders });
+    const { slice } = await loadSliceWithSet(() => state);
+
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+    await settle();
+    vi.advanceTimersByTime(5_000);
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 100 } as never);
+
+    expect(loadFolders).toHaveBeenCalledTimes(2);
+  });
+
+  // Breaks: the first-run account. An empty sidebar belongs to the ADOPTION
+  // (which also selects INBOX); refreshing counts there would race it with a
+  // second folders:list that has no selection to make.
+  it('leaves an empty sidebar to the adoption', async () => {
+    const loadFolders = vi.fn().mockResolvedValue(undefined);
+    const state: Record<string, any> = {
+      folders: [], selectedFolderId: null, inboxType: 'default', inboxSections: [],
+      mergeNewEmails: vi.fn().mockResolvedValue(undefined), loadFolders,
+    };
+    const { slice } = await loadSliceWithSet(() => state);
+
+    // No folder count on this tick, so the adoption cannot fire either: the
+    // count refresh is the only candidate, and it must decline.
+    slice.handleSyncProgress({ currentFolder: 'INBOX', messagesProcessed: 50 } as never);
+
+    expect(loadFolders).not.toHaveBeenCalled();
   });
 });
 

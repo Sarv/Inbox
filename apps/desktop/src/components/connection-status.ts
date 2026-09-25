@@ -5,6 +5,33 @@
 
 export type ConnectionBarStatus = { dotClass: string; label: string; pulse: boolean };
 
+/** The sync half of the bar's status snapshot. */
+export type SyncBarStatus = {
+  foldersCompleted: number;
+  foldersTotal: number;
+  percentComplete: number;
+  messagesProcessed?: number;
+};
+
+/**
+ * What the bar says while a sync runs.
+ *
+ * Leads with the folder pair, then the count of messages stored SO FAR. That
+ * count is the point: the percentage beside it is folder-set relative and can
+ * sit on one number for minutes while a single big mailbox streams in (and it
+ * is already drawn, as the progress fill along the bottom edge of the bar), so
+ * on a first sync the bar could read "5/6 folders (22%)" unchanged for long
+ * enough that the user concludes the download has stalled. The message count
+ * only ever climbs, which is the proof that mail is still arriving.
+ */
+const syncingLabel = (status: SyncBarStatus): string => {
+  const folders = `${status.foldersCompleted}/${status.foldersTotal} folders`;
+  const messages = status.messagesProcessed ?? 0;
+  if (messages > 0) return `${folders} · ${messages.toLocaleString()} emails`;
+  // Nothing stored yet (so percentComplete is 0 too): the folder pair alone.
+  return status.percentComplete > 0 ? `${folders} (${status.percentComplete}%)` : folders;
+};
+
 /**
  * The sidebar connection dot. Five cases, in PRIORITY order:
  *   syncing → reconnecting → disconnected → sync-trouble → connected.
@@ -18,15 +45,11 @@ export const getConnectionBarStatus = (
   connectionStatus: string,
   isSyncing: boolean,
   idleActive: boolean,
-  syncStatus: { foldersCompleted: number; foldersTotal: number; percentComplete: number } | null,
+  syncStatus: SyncBarStatus | null,
   syncTrouble: boolean,
 ): ConnectionBarStatus => {
   if (isSyncing) {
-    const label = syncStatus
-      ? `${syncStatus.foldersCompleted}/${syncStatus.foldersTotal} folders${
-          syncStatus.percentComplete > 0 ? ` (${syncStatus.percentComplete}%)` : ''
-        }`
-      : 'Syncing…';
+    const label = syncStatus ? syncingLabel(syncStatus) : 'Syncing…';
     return { dotClass: 'bg-orange-500', label, pulse: true };
   }
   if (connectionStatus === 'reconnecting') {

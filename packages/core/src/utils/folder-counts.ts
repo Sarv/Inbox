@@ -44,6 +44,69 @@ export async function refreshCountsForFolders(
   }
 }
 
+/**
+ * How long a folder waits between mid-sync recounts. Long enough that a big
+ * mailbox pays a handful of scoped recounts instead of one per committed batch
+ * (the message processor commits every 10 messages, so the ticks arrive far
+ * faster than a human reads); short enough that a watching user sees the badge
+ * move while mail is landing. Each recount is two `instr(tags, ...)` aggregate
+ * scans for the ONE folder being synced -- the same cost the realtime drain
+ * already pays per drain, not the full-table recount.
+ */
+export const MID_SYNC_RECOUNT_MS = 2_000;
+
+/** What a folder's mid-sync recount gate remembers between progress ticks. */
+export interface MidSyncRecountGate {
+  /** The folder's `processed` count at the last recount we let through. */
+  lastProcessed: number;
+  /** Epoch ms of that recount. */
+  lastRecountAt: number;
+}
+
+export interface MidSyncRecountDecision {
+  recount: boolean;
+  gate: MidSyncRecountGate;
+}
+
+/**
+ * Whether a folder still being synced should re-state its stored counts NOW.
+ *
+ * The regression this exists to end: `folders.total_count` / `unread_count` are
+ * STORED columns, and the sync engine re-states them exactly once, AFTER the
+ * whole folder loop (`recalculateFolderCounts` at the end of
+ * syncAllSequential/syncAllParallel). On a first sync of a big mailbox that is
+ * minutes away, so the sidebar badge sits frozen on its opening value while
+ * thousands of messages land in the DB and the list totals underneath it -- which
+ * come from LIVE queries -- climb past it. The user reads a still number next to
+ * a growing list as "the download has stalled".
+ *
+ * So recount the one folder being synced, on a time gate. Two guards keep it off
+ * the hot path:
+ *  - `processed` must have MOVED since the last recount -- a batch that stored
+ *    nothing cannot have changed a count, so the scan would find it unchanged;
+ *  - `inFlight` blocks stacking a second scan behind one that is still running,
+ *    which is how a slow DB turns a 2s gate into an unbounded queue of scans.
+ */
+export const decideMidSyncRecount = (
+  state: { processed?: number | null; inFlight: boolean },
+  gate: MidSyncRecountGate,
+  now: number,
+): MidSyncRecountDecision => {
+  const { processed } = state;
+  if (typeof processed !== 'number' || !Number.isFinite(processed)) return { recount: false, gate };
+  // Still scanning for the previous tick: drop this one WITHOUT consuming the
+  // gate, so the first tick after it lands is still eligible.
+  if (state.inFlight) return { recount: false, gate };
+  // Same count, or a folder that restarted lower: nothing new to count. Move
+  // `lastProcessed` down with it so the restart's first real batch counts as
+  // progress rather than having to climb back past the old high-water mark.
+  if (processed <= gate.lastProcessed) return { recount: false, gate: { ...gate, lastProcessed: processed } };
+  // Real progress, but too soon -- leave `lastProcessed` alone so the next tick
+  // past the window still reads as progress rather than being swallowed here.
+  if (now - gate.lastRecountAt < MID_SYNC_RECOUNT_MS) return { recount: false, gate };
+  return { recount: true, gate: { lastProcessed: processed, lastRecountAt: now } };
+};
+
 /** Just the slice of storage the filed-count measurement needs. */
 export type FiledCountReader = Pick<IEmailStorage, 'countEmailsFiledIn'>;
 

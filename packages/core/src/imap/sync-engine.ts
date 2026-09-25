@@ -9,7 +9,12 @@ import type { IMAPConfig, IIMAPClient, IMAPFolder, IMAPMessage, SearchCriteria }
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
-import { withFiledCounts } from '../utils/folder-counts';
+import {
+  decideMidSyncRecount,
+  refreshCountsForFolders,
+  withFiledCounts,
+  type MidSyncRecountGate,
+} from '../utils/folder-counts';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import type { EmailProvider } from '../utils/provider';
@@ -1106,6 +1111,13 @@ export class SyncEngine {
     this.syncState.startFolder(folder.path);
     this.emitProgress();
 
+    // Keep this folder's STORED counts moving while it syncs instead of only
+    // once the whole loop finishes. See decideMidSyncRecount for why a frozen
+    // badge over a growing list reads as a stalled download. Per-folder state,
+    // not per-engine: `processed` restarts at 0 for every folder.
+    let recountGate: MidSyncRecountGate = { lastProcessed: 0, lastRecountAt: Date.now() };
+    let recountInFlight = false;
+
     try {
       const result = await this.folderSyncer.syncFolder(
         client,
@@ -1119,6 +1131,17 @@ export class SyncEngine {
         },
         (processed, total) => {
           this.syncState.updateFolderProgress(folder.path, processed, total);
+          const decision = decideMidSyncRecount({ processed, inFlight: recountInFlight }, recountGate, Date.now());
+          recountGate = decision.gate;
+          if (decision.recount) {
+            // Fire-and-forget: the badge is cosmetic and refreshCountsForFolders
+            // never throws, so a slow or failing recount must not hold up the
+            // batch that triggered it. The renderer re-reads the folder list on
+            // its own progress gate and picks up whatever this wrote.
+            recountInFlight = true;
+            void refreshCountsForFolders(this.storage, [folder.path], `mid-sync ${folder.path}`)
+              .finally(() => { recountInFlight = false; });
+          }
           this.emitProgress();
         }
       );

@@ -551,7 +551,18 @@ export function Sidebar() {
           </div>
         ) : folders.length === 0 ? (
           <div className="p-4 text-sm text-muted-foreground text-center">
-            No folders yet. Click sync below to fetch emails.
+            {/* A sync IS running — telling the user to click sync is both wrong
+                and the reason a first run looks broken. The list appears on its
+                own as soon as the sync reports its folders (see
+                shouldAdoptSyncFolders); until then, say what is happening. */}
+            {isSyncing ? (
+              <span className="flex items-center justify-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Fetching your folders...
+              </span>
+            ) : (
+              'No folders yet. Click sync below to fetch emails.'
+            )}
           </div>
         ) : (
           <div className="px-2">

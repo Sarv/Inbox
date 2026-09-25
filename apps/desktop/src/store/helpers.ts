@@ -243,6 +243,36 @@ export const decideSyncProgressRefresh = (
   return { refresh: true, gate: { lastProcessed: processed, lastRefreshAt: now } };
 };
 
+/**
+ * Whether a sync-progress tick should make the renderer re-read the folder list.
+ *
+ * The renderer lists folders ONCE per connect — before the sync starts — and
+ * again only when the whole sync resolves. The main process, though, writes the
+ * folder list at the very top of a sync (`syncFolderList`, before a single
+ * message is fetched). On a FIRST-RUN account those two facts collide: the
+ * pre-sync read finds an empty table, so the sidebar says "No folders yet",
+ * nothing is selected, and the list says "Select a folder to view emails" for
+ * the entire first sync — while the progress bar counts folders and mail piles
+ * up in the DB the user cannot see.
+ *
+ * So: as soon as a tick says the engine has folders (`foldersTotal > 0`) and we
+ * still have none, adopt the list. `loadFolders` auto-selects INBOX, which is
+ * what gives the progressive fill (`decideSyncProgressRefresh`) a view to fill.
+ *
+ * Only ever true while our list is EMPTY — a tick fires every ~10 messages, and
+ * re-listing folders on each one would run a `withFiledCounts` pass over the DB
+ * hundreds of times per sync, on the main thread. Folder COUNT updates during a
+ * sync are not this rule's job; they ride the existing end-of-sync reload.
+ */
+export const shouldAdoptSyncFolders = (
+  status: { foldersTotal?: number | null } | null | undefined,
+  state: { folderCount: number; adoptInFlight: boolean },
+): boolean => {
+  if (state.adoptInFlight || state.folderCount > 0) return false;
+  const total = status?.foldersTotal;
+  return typeof total === 'number' && Number.isFinite(total) && total > 0;
+};
+
 // ── One page size per view class ───────────────────────────────────────────
 // Every list in the app pages through getPageSizeForView, so the initial load,
 // the header paginator, the footer paginator, prev/next and any background

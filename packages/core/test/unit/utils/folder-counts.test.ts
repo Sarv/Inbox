@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   applyReadFlagCountDelta,
+  decideMidSyncRecount,
+  MID_SYNC_RECOUNT_MS,
   refreshCountsForFolders,
   setEmailReadFlag,
   withFiledCounts,
@@ -300,5 +302,78 @@ describe('applyReadFlagCountDelta', () => {
 
     await expect(applyReadFlagCountDelta(storage, [{ emailId: 'e1', nowRead: true }], 'test'))
       .resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The gate that keeps a folder's stored counts moving while it is still syncing.
+ *
+ * What breaks if this file fails: either the sidebar badge freezes for the whole
+ * of a long first sync (the reported "counter is stuck" while the list totals
+ * climb past it), or the fix overcorrects into a recount per committed batch —
+ * a synchronous scan every ~10 messages, which is the main-thread stall the
+ * end-of-sync gate was introduced to remove.
+ */
+describe('decideMidSyncRecount', () => {
+  const gate = (lastProcessed: number, lastRecountAt: number) => ({ lastProcessed, lastRecountAt });
+  const ready = { inFlight: false };
+
+  // Breaks: the badge never moves mid-sync. This is the whole feature — a folder
+  // that has stored new mail and has not been recounted for a full window.
+  it('recounts once new mail has landed and the window has passed', () => {
+    const decision = decideMidSyncRecount({ ...ready, processed: 10 }, gate(0, 1_000), 1_000 + MID_SYNC_RECOUNT_MS);
+    expect(decision.recount).toBe(true);
+    expect(decision.gate).toEqual({ lastProcessed: 10, lastRecountAt: 1_000 + MID_SYNC_RECOUNT_MS });
+  });
+
+  // Breaks: the throttle. The message processor calls back every 10 messages, so
+  // an ungated recount fires thousands of scans on one large folder.
+  it('refuses a second recount inside the window and keeps the gate intact', () => {
+    const before = gate(10, 1_000);
+    const decision = decideMidSyncRecount({ ...ready, processed: 20 }, before, 1_000 + MID_SYNC_RECOUNT_MS - 1);
+    expect(decision.recount).toBe(false);
+    // `lastProcessed` must NOT advance: the next tick past the window still has
+    // to read as progress rather than being swallowed by this one.
+    expect(decision.gate).toBe(before);
+  });
+
+  // Breaks: a wasted full scan. A batch that stored nothing cannot have moved a
+  // count, so re-running the aggregates would write back the same numbers.
+  it('does not recount when the processed count has not moved', () => {
+    const decision = decideMidSyncRecount({ ...ready, processed: 10 }, gate(10, 0), 10_000_000);
+    expect(decision.recount).toBe(false);
+  });
+
+  // Breaks: the next folder (or a retried one) never recounts. `processed` is
+  // per-folder and restarts at 0, so the gate has to follow it back down instead
+  // of waiting for it to climb past the previous folder's high-water mark.
+  it('follows a restarted folder back down instead of stranding the gate', () => {
+    const decision = decideMidSyncRecount({ ...ready, processed: 2 }, gate(400, 0), 10_000_000);
+    expect(decision.recount).toBe(false);
+    expect(decision.gate.lastProcessed).toBe(2);
+  });
+
+  // Breaks: a slow DB turns the 2s gate into an unbounded queue of scans stacked
+  // behind each other, each one holding the thread when it finally runs.
+  it('never stacks a recount behind one still running', () => {
+    const before = gate(0, 0);
+    const decision = decideMidSyncRecount({ processed: 500, inFlight: true }, before, 10_000_000);
+    expect(decision.recount).toBe(false);
+    // Untouched, so the first tick AFTER the in-flight scan lands is eligible.
+    expect(decision.gate).toBe(before);
+  });
+
+  // Breaks: a malformed progress tick (a folder syncer that reports nothing)
+  // being read as `NaN > lastProcessed` and recounting on every single callback.
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ])('ignores a %s processed count', (_label, processed) => {
+    const before = gate(0, 0);
+    const decision = decideMidSyncRecount({ ...ready, processed }, before, 10_000_000);
+    expect(decision.recount).toBe(false);
+    expect(decision.gate).toBe(before);
   });
 });
