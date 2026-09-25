@@ -92,14 +92,27 @@ jobs:
           # load-bearing, which is why build.linux.target pins no arch of its
           # own -- electron-builder prefers a config arch over the CLI one and
           # would make every runner try to build both.
+          #
+          # The runner image is ALSO load-bearing, and must stay PINNED to the
+          # oldest distro we support -- never `ubuntu-latest`. glibc is
+          # backward compatible and never forward: a native addon linked on a
+          # newer glibc binds the newest versioned symbols it can see, and then
+          # refuses to load anywhere older. `ubuntu-latest` floats forward on
+          # its own schedule, so it silently raised that floor to Ubuntu 24.04
+          # (glibc 2.39) and 1.2.2 shipped a Linux build that died on launch
+          # for every user on Ubuntu 22.04 LTS, Debian 12 or RHEL 9:
+          #   libm.so.6: version `GLIBC_2.38' not found (required by
+          #   .../better_sqlite3.node)
+          # 22.04 (glibc 2.35) resolves on every newer distro too, so building
+          # there covers 22.04 through 25.x from one artifact.
           - name: Linux x64
             id: linux-x64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             platform: linux
             args: --linux --x64
           - name: Linux arm64
             id: linux-arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             platform: linux
             args: --linux --arm64
           - name: Windows (x64 + arm64)
