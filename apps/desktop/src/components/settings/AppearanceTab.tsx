@@ -139,6 +139,37 @@ export function AppearanceTab() {
               Your OS is currently asking for <span className="font-medium text-foreground">{resolved}</span>.
             </div>
           )}
+
+          <Row
+            title="Dark email bodies"
+            description={
+              resolved === 'dark'
+                ? 'Re-colour the message itself for dark mode. Off, messages show on the white page their sender wrote them for.'
+                : 'Re-colour the message itself for dark mode. Takes effect when the theme is dark.'
+            }
+          >
+            <button
+              type="button"
+              role="switch"
+              aria-checked={appearance.darkenEmails}
+              aria-label="Dark email bodies"
+              onClick={() => setAppearance({ darkenEmails: !appearance.darkenEmails })}
+              className={`relative w-11 h-6 rounded-full transition-colors ${appearance.darkenEmails ? 'bg-primary' : 'bg-muted'}`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                  appearance.darkenEmails ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </Row>
+          {appearance.darkenEmails && (
+            <div className="text-sm text-muted-foreground">
+              Senders style their mail for a white page, so this is a best effort on their
+              markup: a message that already has a dark design is left alone, and images keep
+              their own colours.
+            </div>
+          )}
         </Section>
 
         <Section title="Accent Colour">

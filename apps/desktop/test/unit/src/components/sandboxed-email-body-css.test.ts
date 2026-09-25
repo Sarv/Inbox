@@ -12,11 +12,19 @@ import { buildIframeCss } from '../../../../src/components/SandboxedEmailBody';
 //   normalize=true                            — a chat bubble whose typography
 //     and tables are restructured.
 //
+// A fifth flag, darkCanvas, splits the FIRST of those in two: the Standard pane
+// on white (everyone, today) and the Standard pane on a dark canvas (the reader
+// who turned "Dark email bodies" on). It changes the colours, never which pane
+// this is — so the pane's own fixes have to survive it.
+//
 // Which rules reach which page is the part that has actually been got wrong,
 // and it cannot be reached through the component — jsdom neither lays out nor
 // renders `srcdoc`.
 
 const standard = (isDark = false) => buildIframeCss(isDark, false, false, false);
+// The Standard pane again, but with the reader's opt-in dark bodies on: the
+// same page, no longer on a white canvas.
+const darkStandard = () => buildIframeCss(true, false, false, false, true);
 const tintedBubble = (isDark = false) => buildIframeCss(isDark, false, false, true);
 const normalizedBubble = (isDark = false) => buildIframeCss(isDark, false, true, false);
 
@@ -92,5 +100,48 @@ describe('the table-sheet rule', () => {
     const sheetRule = /\.sec-table-sheet tr[^{]*\{[^}]*\}/.exec(tintedBubble())?.[0] ?? '';
     expect(sheetRule).not.toBe('');
     expect(sheetRule).not.toContain('!important');
+  });
+});
+
+describe('the dark-bodies canvas', () => {
+  // Regression: the default. Calling with four arguments — which every caller
+  // outside the dark-bodies path still does — must produce exactly the
+  // stylesheet it produced before the flag existed.
+  it('defaults to off, leaving the four-argument call unchanged', () => {
+    expect(buildIframeCss(true, false, false, false, false)).toBe(standard(true));
+    expect(buildIframeCss(true, true, true, true, false)).toBe(buildIframeCss(true, true, true, true));
+  });
+
+  // Regression: THE point of the flag. Force white here and the re-coloured
+  // message is painted onto a white page — dark text on dark, unreadable.
+  it('stops forcing the white page', () => {
+    expect(standard()).toContain('background-color: #ffffff;');
+    expect(darkStandard()).not.toContain('background-color: #ffffff;');
+  });
+
+  // Regression: the frame's own foreground is what an email that declares NO
+  // colour of its own gets. Leave it at the light value and a plain-text mail
+  // renders near-black on the new dark canvas.
+  it('uses the dark foreground and link colours', () => {
+    expect(darkStandard()).toContain('color: hsl(210, 40%, 98%);');
+    expect(darkStandard()).toContain('a { color: hsl(217.2, 91.2%, 59.8%); }');
+    expect(standard(true)).toContain('color: hsl(222.2, 84%, 4.9%);');
+  });
+
+  // Regression: this is still the Standard reading pane, so its own fixes —
+  // the attachment-chip un-clip, which exists because our system font is wider
+  // than the sender's — must not fall off the moment the canvas goes dark.
+  it('keeps the Standard pane fixes that have nothing to do with the canvas', () => {
+    expect(darkStandard()).toContain('attachment-chip');
+    expect(tintedBubble()).not.toContain('attachment-chip');
+  });
+
+  // Regression: the paper/table-sheet rules are for a canvas carrying the
+  // sender's TINT, where a stray white slab reads as a second background.
+  // A dark canvas is still a canvas of our own, and blanking the sender's
+  // backgrounds there would strip the message we just re-coloured.
+  it('does not turn on the transparent-canvas surface rules', () => {
+    expect(darkStandard()).not.toContain('sec-paper');
+    expect(darkStandard()).not.toContain('sec-table-sheet');
   });
 });

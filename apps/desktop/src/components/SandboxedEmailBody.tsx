@@ -8,7 +8,9 @@ import {
 import { ImageOff } from 'lucide-react';
 import { useRef, useEffect, useMemo, useState } from 'react';
 
+import { useAppearance, useResolvedTheme } from '../appearance';
 import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
+import { applyEmailDarkMode } from '../utils/email-dark-mode';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
 // Shared with Chat View rather than kept in a second copy here: the two
 // renderers had the same two-step fit written twice, and the measurement is the
@@ -99,7 +101,7 @@ interface SandboxedEmailBodyProps {
  * that has actually been got wrong, and it is not reachable through the
  * component: jsdom neither lays out nor renders `srcdoc`.
  */
-export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boolean, transparentCanvas: boolean): string {
+export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boolean, transparentCanvas: boolean, darkCanvas = false): string {
   // !important forces normalized typography across mismatched senders —
   // only applied when caller opts in (Chat View). Standard email view
   // keeps everything low-specificity so the email's own inline styles
@@ -114,7 +116,16 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
   // Transparent canvas (chat bubbles) when EITHER the aggressive normalize is on
   // OR the caller explicitly asked to keep the email's own styles but still let
   // the bubble tint show through (transparentCanvas).
-  const lightCanvas = !normalize && !transparentCanvas;
+  //
+  // `darkCanvas` is the third way out of the white page, and the only one that
+  // reaches the Standard view: the reader opted into dark message bodies and
+  // `applyEmailDarkMode` has re-coloured the sender's own declarations for a
+  // dark surface, so the white page is no longer the page this mail is written
+  // for. The rules below therefore split on TWO questions, not one — "is this
+  // the Standard reading pane" (which still wants its attachment-chip and
+  // wide-table fixes) and "is the canvas white" (which decides the colours.)
+  const standardView = !normalize && !transparentCanvas;
+  const lightCanvas = standardView && !darkCanvas;
   const emailDark = isDark && !lightCanvas;
   const fg = emailDark ? 'hsl(210, 40%, 98%)' : 'hsl(222.2, 84%, 4.9%)';
   const link = emailDark ? 'hsl(217.2, 91.2%, 59.8%)' : 'hsl(221.2, 83.2%, 53.3%)';
@@ -239,7 +250,7 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
     }
     a { color: ${link}; }
     img { max-width: 100%; height: auto; }
-    ${lightCanvas ? `
+    ${standardView ? `
     /* Un-clip attachment-name chips that cap themselves with a fixed
        max-width + ellipsis (+ a fixed-height overflow:hidden wrapper) tuned for
        the sender's OWN narrower webfont; with our system-font fallback the name
@@ -302,7 +313,7 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
       color: ${fg} !important;
     }
     ` : ''}
-    ${lightCanvas ? '' : `
+    ${standardView ? '' : `
     /* Told apart by measurement in \`fitDocumentSurfaces\` (called from the
        measurement pass below), because no selector can tell white from teal:
          - a wrapper whose white is the EDITOR's — Word and Outlook stamp
@@ -312,8 +323,11 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
          - a ruled data table IS drawn as paper with lines on it, so once the
            page behind is tinted it gets its sheet back and its plain rows read
            white again.
-       Only when the canvas is transparent: on the forced white canvas the
-       message is already on the page it was written for. */
+       Chat View only. The Standard pane is excluded on BOTH its canvases: on
+       the white one the message is already on the page it was written for, and
+       on the dark one \`applyEmailDarkMode\` has re-coloured that editor white
+       into a dark surface, so there is no slab left to blank and no measured
+       pass (\`fitDocumentSurfaces\`) marking one. */
     ${documentSurfaceCss(tableSheet)}
     `}
     ${normalize ? '' : `
@@ -750,6 +764,23 @@ function estimateInitialHeight(html: string): number {
  */
 export function SandboxedEmailBody({ html, className = '', styledTables = false, normalize = false, transparentCanvas = false, heightPadding = 0, blockRemoteImages = true, safeAutoLoad = false, senderAddress }: SandboxedEmailBodyProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  // Dark message bodies are opt-in (Appearance -> "Dark email bodies"). They
+  // only apply to the Standard reading pane: a chat bubble already renders on a
+  // themed surface, and re-colouring the sender's HTML underneath one would
+  // fight the tint rather than help it. `useAppearance` re-renders on the
+  // change, so flipping the setting re-renders whatever message is open.
+  const { darkenEmails } = useAppearance();
+  const resolvedTheme = useResolvedTheme();
+  const standardView = !normalize && !transparentCanvas;
+  // Memoised because it parses the whole message: this must run once per
+  // message, not once per render of the pane around it.
+  const dark = useMemo(
+    () => applyEmailDarkMode(html, {
+      enabled: darkenEmails && standardView,
+      isDark: resolvedTheme === 'dark',
+    }),
+    [html, darkenEmails, standardView, resolvedTheme],
+  );
   // Text-length-derived estimate stands in until the iframe document
   // reports a real height — kills the 80px → measured "pop" that used
   // to happen on every thread open.
@@ -792,11 +823,12 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
     const iframe = iframeRef.current;
     if (!iframe) return;
 
-    const isDark = document.documentElement.classList.contains('dark');
-    const themeCss = buildIframeCss(isDark, styledTables, normalize, transparentCanvas);
+    const themeCss = buildIframeCss(resolvedTheme === 'dark', styledTables, normalize, transparentCanvas, dark.darkCanvas);
     // Lazy-load images BEFORE srcdoc so the iframe's load event isn't
-    // gated on every image network request finishing.
-    const lazied = makeImagesNonBlocking(html);
+    // gated on every image network request finishing. `dark.html` is the
+    // message with its own colours already moved for a dark page (or the
+    // untouched original on every other path).
+    const lazied = makeImagesNonBlocking(dark.html);
     // Anchors get their href repaired first, THEN forced external — the order
     // matters: fixBareLinks mints hrefs that must also be made to open out.
     const fixed = forceLinksExternal(fixBareLinks(lazied));
@@ -806,7 +838,7 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
 
     // Setting srcdoc resets the iframe and re-fires onload.
     iframe.srcdoc = doc;
-  }, [html, styledTables, normalize, imagesLoaded, effectiveBlock]);
+  }, [dark, resolvedTheme, styledTables, normalize, transparentCanvas, imagesLoaded, effectiveBlock]);
 
   // Measure body height + intercept link clicks. Don't wait for the
   // iframe `load` event — it fires only after every subresource (images,
@@ -949,8 +981,10 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
     };
     // `transparentCanvas` too: with `normalize` it decides whether the page
     // under the message is the sender's tint, which is the whole question
-    // `fitDocumentSurfaces` is asked inside the measurement below.
-  }, [html, styledTables, normalize, transparentCanvas]);
+    // `fitDocumentSurfaces` is asked inside the measurement below. `dark`
+    // because a re-coloured message is a NEW srcdoc, and the observers below
+    // are attached to the document the old one left behind.
+  }, [dark, styledTables, normalize, transparentCanvas]);
 
   // Theme change: re-render so our injected <style> picks up new colors.
   useEffect(() => {
@@ -962,7 +996,7 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
       const isDark = document.documentElement.classList.contains('dark');
       const themeStyle = idoc.querySelector('style[data-sarv-theme]');
       if (themeStyle) {
-        themeStyle.textContent = buildIframeCss(isDark, styledTables, normalize, transparentCanvas);
+        themeStyle.textContent = buildIframeCss(isDark, styledTables, normalize, transparentCanvas, dark.darkCanvas);
       }
     });
 
@@ -972,7 +1006,7 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
     });
 
     return () => observer.disconnect();
-  }, [styledTables, normalize]);
+  }, [dark, styledTables, normalize, transparentCanvas]);
 
   return (
     <>
@@ -1017,7 +1051,12 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
         // Transparent — the email's body styling provides any
         // background. The app shell's bg shows through if absent.
         backgroundColor: 'transparent',
-        colorScheme: 'normal',
+        // The frame's colour scheme is what `prefers-color-scheme` resolves to
+        // INSIDE it, and what its scrollbars and form controls are drawn with.
+        // 'normal' everywhere else keeps a mail written for a light page off the
+        // OS's dark preference; on the dark canvas the message has been
+        // re-coloured for dark and the frame should say so.
+        colorScheme: dark.darkCanvas ? 'dark' : 'normal',
         // Fade in once the first real measurement has landed so the
         // estimate→measured height snap happens while invisible.
         opacity: revealed ? 1 : 0,
