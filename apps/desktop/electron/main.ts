@@ -13,9 +13,10 @@
 // block so `import/order` can sort it and the real startup order is the one
 // visible below.
 import { existsSync, readFileSync } from 'fs';
+import netModule from 'net';
 import { join } from 'path';
 
-import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError } from '@sarvinbox/core';
+import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
 import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 
@@ -213,6 +214,19 @@ initSentryMain();
 protocol.registerSchemesAsPrivileged([ATTACHMENT_SCHEME_PRIVILEGES, PANEL_SCHEME_PRIVILEGES]);
 const logger = createLogger('main');
 
+// Give every outbound connection from the main process a fair chance at its
+// FIRST address before Node races the next one. Node's 250ms default turns an
+// ordinary 300ms handshake into `ETIMEDOUT` on any dual-stack host when the
+// machine has no working IPv6 — which is how a Gmail account stops refreshing
+// its OAuth token on a link where `curl` to the same URL works fine. Process-
+// wide, so IMAP/SMTP and every fetch get it too. See connect-timeout.ts.
+// Raised HERE, before anything can connect; reported further down, once the
+// app.log sink exists (a line logged this early reaches the terminal only).
+const connectWindow = raiseAutoSelectFamilyAttemptTimeout({
+  get: () => netModule.getDefaultAutoSelectFamilyAttemptTimeout(),
+  set: (ms) => netModule.setDefaultAutoSelectFamilyAttemptTimeout(ms),
+});
+
 // Read version from package.json
 const packageJson = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 const APP_VERSION = packageJson.version;
@@ -379,6 +393,9 @@ ipcMain.on('log:forward', (_e, rec: { level?: string; name?: string; text?: stri
 // Announce the active log level up front so it's obvious in app.log what will
 // (and won't) be captured — e.g. the IMAP command trace only shows at 'debug'.
 logger.info(`Log level: ${getLogLevel()} (override with SARV_LOG_LEVEL=trace|debug|info|warn|error)`);
+if (connectWindow.changed) {
+  logger.info(`[Net] per-address connect window ${connectWindow.from}ms -> ${connectWindow.to}ms (Node's default abandons a slow first address and fails as ETIMEDOUT)`);
+}
 
 // Suppress connection errors (normal network issues)
 process.on('uncaughtException', (error: any) => {
