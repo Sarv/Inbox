@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-09-25
+
 ### Added
 - **Appearance settings.** A new Settings tab for making the app look the way
   you want it: light, dark or follow-the-system theme; seven accent colours,
@@ -194,7 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/Sarv/Inbox/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Sarv/Inbox/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Sarv/Inbox/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Sarv/Inbox/releases/tag/v1.1.0
