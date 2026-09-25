@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Dark email bodies (Settings > Appearance).** In dark mode the message
+  itself still arrives on a white page, because that is the page senders write
+  their mail for. Turn this on and Sarv Inbox re-colours the message for dark
+  mode instead: white paper becomes a dark surface, black text becomes light,
+  and the parts the sender actually designed — a brand-coloured button, a
+  coloured header bar, a message that already has a dark design — are left
+  exactly as they drew them, along with every image. It is off by default and
+  has no effect in the light theme, so nothing changes unless you ask for it.
+
 ### Fixed
 - **The Linux app refused to start on Ubuntu 22.04, Debian 12 and other
   long-term releases.** 1.2.2's Linux builds were compiled against a newer
