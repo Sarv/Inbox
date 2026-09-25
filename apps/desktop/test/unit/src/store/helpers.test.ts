@@ -38,6 +38,7 @@ import {
   isFolderInView,
   findFolderPathById,
   decideSyncProgressRefresh,
+  shouldAdoptSyncFolders,
   SYNC_PROGRESS_REFRESH_MS,
   isPromoOrSpam,
   isSenderImagesAllowed,
@@ -2157,5 +2158,50 @@ describe('decideSyncProgressRefresh', () => {
   ])('refuses to refresh on %s, and leaves the gate alone', (_case, status) => {
     const held = gate(50, 1_000);
     expect(decideSyncProgressRefresh(status as never, held, 10_000)).toEqual({ refresh: false, gate: held });
+  });
+});
+
+describe('shouldAdoptSyncFolders', () => {
+  const idle = { folderCount: 0, adoptInFlight: false };
+
+  // THE REGRESSION this rule exists for: on a first-run account the renderer
+  // listed folders BEFORE the sync wrote them, so the sidebar said "No folders
+  // yet", nothing was selected, and the mail list said "Select a folder to view
+  // emails" for the WHOLE first sync — under a progress bar counting folders.
+  it('adopts the folder list on the first tick that reports one', () => {
+    expect(shouldAdoptSyncFolders({ foldersTotal: 6 }, idle)).toBe(true);
+  });
+
+  // Breaks: a tick fires every ~10 messages, so re-listing on each one runs a
+  // withFiledCounts pass over the DB hundreds of times per sync, on the main
+  // thread, during the busiest moment of the app's life.
+  it('does not re-adopt once the sidebar already has folders', () => {
+    expect(shouldAdoptSyncFolders({ foldersTotal: 6 }, { ...idle, folderCount: 6 })).toBe(false);
+  });
+
+  // Breaks: several adoptions in flight at once, each auto-selecting INBOX
+  // under the others — a folder switch the user did mid-sync gets yanked back.
+  it('does not stack a second adoption while one is still loading', () => {
+    expect(shouldAdoptSyncFolders({ foldersTotal: 6 }, { ...idle, adoptInFlight: true })).toBe(false);
+  });
+
+  // Breaks: the engine's earliest ticks (connecting, a sync that resolved to no
+  // selectable folder) carry no folder count, and adopting there spends a
+  // folders:list on a table we already know is empty.
+  it('waits for a tick that actually has folders', () => {
+    expect(shouldAdoptSyncFolders({ foldersTotal: 0 }, idle)).toBe(false);
+  });
+
+  // Breaks: a malformed status (an older main process, a null between syncs)
+  // throws inside the IPC listener and kills every later tick — including the
+  // progressive fill that shares it.
+  it.each([
+    ['a null status', null],
+    ['an undefined status', undefined],
+    ['a status with no total', {}],
+    ['a non-numeric total', { foldersTotal: 'six' }],
+    ['NaN', { foldersTotal: Number.NaN }],
+  ])('refuses to adopt on %s', (_case, status) => {
+    expect(shouldAdoptSyncFolders(status as never, idle)).toBe(false);
   });
 });

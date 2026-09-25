@@ -10,6 +10,7 @@ import {
   isFolderInView,
   findFolderPathById,
   decideSyncProgressRefresh,
+  shouldAdoptSyncFolders,
   getPageSizeForState,
   mergePageWindow,
 } from '../helpers';
@@ -175,6 +176,75 @@ async function refreshVisibleViewForFolder(
 // resets its cumulative count to 0 at the start of every sync, so a first tick
 // reporting 0 has stored nothing and must not spend a reload.
 let syncProgressGate = { lastProcessed: 0, lastRefreshAt: 0 };
+
+/**
+ * True while the mid-sync folder adoption below is awaiting `loadFolders`.
+ * Same class of transient plumbing as the gate above — a progress tick fires
+ * every ~10 messages, so without it a slow `folders:list` would have several
+ * adoptions in flight at once, each one re-selecting INBOX under the others.
+ */
+let adoptingSyncFolders = false;
+
+/**
+ * Show the folder list the moment the sync has one, instead of waiting for the
+ * whole sync to resolve. See `shouldAdoptSyncFolders` for why a first-run
+ * account otherwise sits on "No folders yet" for the entire first sync.
+ *
+ * `loadFolders` auto-selects INBOX when nothing is selected, so this both fills
+ * the sidebar and gives the progressive fill a view to render into.
+ */
+async function adoptSyncFolders(get: () => any, status: any): Promise<void> {
+  if (!shouldAdoptSyncFolders(status, {
+    folderCount: get().folders.length,
+    adoptInFlight: adoptingSyncFolders,
+  })) return;
+
+  adoptingSyncFolders = true;
+  try {
+    console.log(`[Store] syncProgress: adopting the ${status.foldersTotal} folder(s) this sync listed — showing the sidebar mid-sync`);
+    await get().loadFolders();
+  } catch (error) {
+    console.warn('[Store] syncProgress: mid-sync folder adoption failed:', error);
+  } finally {
+    adoptingSyncFolders = false;
+  }
+}
+
+/**
+ * True while the mid-sync count refresh below is awaiting `loadFolders`.
+ * Separate from `adoptingSyncFolders`: the two never run at the same time (one
+ * fires only with an empty sidebar, the other only with a populated one), but
+ * they must not share a flag or either could mask the other.
+ */
+let refreshingSyncFolderCounts = false;
+
+/**
+ * Re-read the folder list mid-sync so the sidebar badges track the download.
+ *
+ * The badge is a STORED column (`folders.unread_count`), which the sync engine
+ * now re-states per folder while it syncs (`decideMidSyncRecount`) -- but the
+ * renderer only ever SEES a new number by re-listing folders, and it did that
+ * once per connect plus once when the whole sync resolved. So the badge sat
+ * still for the entire sync while the section totals beside it, which come from
+ * live queries, climbed by thousands. That mismatch is what reads as "the
+ * counter is stuck".
+ *
+ * Rides the SAME throttle as the progressive list fill (one call per
+ * SYNC_PROGRESS_REFRESH_MS at most), and skips an empty sidebar because that
+ * case belongs to `adoptSyncFolders`.
+ */
+async function refreshSyncFolderCounts(get: () => any): Promise<void> {
+  if (refreshingSyncFolderCounts || get().folders.length === 0) return;
+
+  refreshingSyncFolderCounts = true;
+  try {
+    await get().loadFolders();
+  } catch (error) {
+    console.warn('[Store] syncProgress: mid-sync folder count refresh failed:', error);
+  } finally {
+    refreshingSyncFolderCounts = false;
+  }
+}
 
 // ---- Realtime (IDLE) event coalescer -----------------------------------------
 // Transient plumbing, not UI state — nothing renders off it, and a `set()` per
@@ -423,6 +493,13 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
   handleSyncProgress: (status) => {
     set({ syncStatus: status });
 
+    // Folders first, and OUTSIDE the refresh gate below: the tick that first
+    // reports a folder count has stored no messages yet, so the gate rejects
+    // it — but that is exactly the tick at which the sidebar can stop saying
+    // "No folders yet". Fire-and-forget; the progressive fill does not wait on
+    // it, and the next tick past the gate refreshes whatever it selected.
+    void adoptSyncFolders(get, status);
+
     const decision = decideSyncProgressRefresh(status, syncProgressGate, Date.now());
     syncProgressGate = decision.gate;
     if (!decision.refresh) return;
@@ -441,6 +518,10 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
     // through to its virtual branches, which is exactly right.
     const state = get();
     void refreshVisibleViewForFolder(get, findFolderPathById(state.folders, state.selectedFolderId) ?? '');
+
+    // ...and the sidebar counts alongside it, so the badge climbs with the list
+    // instead of staying on the number it had when the sync started.
+    void refreshSyncFolderCounts(get);
   },
 
   // Sync-health signal. A single failure can be a transient blip (a 60s timeout

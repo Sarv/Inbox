@@ -19,6 +19,7 @@ import { BulkActionBar } from './BulkActionBar';
 import { getCachedCategorySlugs } from './CategoryBadges';
 import { CategoryFilterBar } from './CategoryFilterBar';
 import { CompactThreadRow } from './CompactThreadRow';
+import { EMPTY_LIST_MESSAGES, emptyListReason } from './empty-list-view';
 import { useEmailListSearch } from './hooks/useEmailListSearch';
 import { useSectionAssignment } from './hooks/useSectionAssignment';
 import { listHeaderTitle } from './list-header-view';
@@ -1008,10 +1009,20 @@ export function EmailList() {
           // `emails` (the reported empty-then-populated flicker).
           <div className="p-8 text-center text-muted-foreground text-sm">
             {(() => {
-              const currentFolder = folders.find(f => f.id === selectedFolderId);
-              const neverSynced = currentFolder && !currentFolder.lastSyncTime;
-              const isFolderSyncing = currentFolder && syncingFolders.has(currentFolder.path);
-              if (isFolderSyncing && neverSynced) {
+              // `isViewSyncing` (global sync OR this folder's own sync), not a
+              // second `syncingFolders.has(...)` lookup: the FIRST sync of an
+              // account runs through `syncEmails`, which never touches
+              // `syncingFolders` — so a never-synced INBOX read "No emails in
+              // this folder" for the whole of it, exactly when the mail was on
+              // its way. Same folder record the rest of the view resolves from.
+              const reason = emptyListReason({
+                syncing: isViewSyncing,
+                neverSynced: !!selectedFolder && !selectedFolder.lastSyncTime,
+                searching: !!searchQuery,
+                snoozed: viewingSnoozed,
+                aiCategory: viewingAICategory,
+              });
+              if (reason === 'syncing') {
                 return (
                   <div className="flex items-center justify-center gap-2">
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -1019,7 +1030,7 @@ export function EmailList() {
                   </div>
                 );
               }
-              return searchQuery ? 'No results found' : viewingSnoozed ? 'No snoozed emails' : viewingAICategory ? 'No emails in this category' : 'No emails in this folder';
+              return EMPTY_LIST_MESSAGES[reason];
             })()}
           </div>
         ) : (
