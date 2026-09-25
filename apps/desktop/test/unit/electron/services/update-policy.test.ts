@@ -6,6 +6,8 @@ import {
   getUpdateSupport,
   parseUpdatePrefs,
   remindLater,
+  setAutoUpdate,
+  shouldAutoDownload,
   shouldAutoInstallOnQuit,
   shouldPromptForUpdate,
   shouldShowDialog,
@@ -40,6 +42,7 @@ describe('parseUpdatePrefs', () => {
     expect(parseUpdatePrefs({ skippedVersion: '1.2.0', remindAfter: NOW })).toEqual({
       skippedVersion: '1.2.0',
       remindAfter: NOW,
+      autoUpdate: true,
     });
     expect(parseUpdatePrefs({ skippedVersion: '', remindAfter: 0 })).toEqual(DEFAULT_UPDATE_PREFS);
     expect(parseUpdatePrefs({ skippedVersion: 7, remindAfter: 'soon' })).toEqual(DEFAULT_UPDATE_PREFS);
@@ -57,6 +60,7 @@ describe('skipVersion', () => {
     expect(skipVersion(prefs({ remindAfter: NOW + 1000 }), '1.2.0')).toEqual({
       skippedVersion: '1.2.0',
       remindAfter: null,
+      autoUpdate: true,
     });
   });
 });
@@ -68,6 +72,7 @@ describe('remindLater', () => {
     expect(remindLater(prefs(), NOW)).toEqual({
       skippedVersion: null,
       remindAfter: NOW + REMIND_LATER_MS,
+      autoUpdate: true,
     });
     expect(REMIND_LATER_MS).toBe(6 * 60 * 60 * 1000);
   });
@@ -152,24 +157,50 @@ describe('shouldShowDialog', () => {
     ).toBe(false);
   });
 
-  // If a scheduled check popped up at 'available' or 'downloading', the primary
-  // button would be dead on arrival and the user would be interrupted to watch
-  // a progress bar they never asked for.
-  it('only interrupts a scheduled check once the download is finished', () => {
-    for (const phase of everyPhase.filter((p) => p !== 'downloaded')) {
+  // BEHAVIOUR CHANGE (was: prompt at 'downloaded'). With automatic updates on
+  // there is no decision left for the user to make - the download and the
+  // install both happen without them - so a background cycle must never
+  // interrupt. Someone mid-reply being asked to restart a mail client is the
+  // exact interruption the toggle's ON position promises not to cause.
+  it('never interrupts a background cycle while automatic updates are on', () => {
+    for (const phase of everyPhase) {
       expect(
         shouldShowDialog({ phase, trigger: 'scheduled', version: '1.2.0', prefs: prefs(), now: NOW }),
       ).toBe(false);
     }
+  });
+
+  // The other half: with automatic updates OFF the app cannot proceed without
+  // an answer, so it must ask - at 'available' (before spending bandwidth) and
+  // again at 'downloaded' (before taking the app away). If this regressed,
+  // turning the toggle off would mean never hearing about an update again.
+  it('asks a background cycle at available and downloaded when automatic updates are off', () => {
+    const manual = prefs({ autoUpdate: false });
+    const ask = (phase: UpdatePhase) =>
+      shouldShowDialog({ phase, trigger: 'scheduled', version: '1.2.0', prefs: manual, now: NOW });
+
+    expect(ask('available')).toBe(true);
+    expect(ask('downloaded')).toBe(true);
+    for (const phase of ['checking', 'downloading', 'up-to-date', 'unsupported', 'error'] as UpdatePhase[]) {
+      expect(ask(phase)).toBe(false);
+    }
+  });
+
+  // A download the user pressed the button for owes them the "ready to install"
+  // prompt, even though the cycle that found it was a background one and even
+  // though they may have hidden the progress bar. Without this the request
+  // finished in silence and the update just sat there.
+  it('reports back on a download the user asked for', () => {
+    const asked = { trigger: 'scheduled' as const, version: '1.2.0', now: NOW, downloadRequested: true };
+    expect(shouldShowDialog({ ...asked, phase: 'downloading', prefs: prefs() })).toBe(true);
+    expect(shouldShowDialog({ ...asked, phase: 'downloaded', prefs: prefs() })).toBe(true);
+    // Including the failure: a download that dies after the user asked for it
+    // must say so rather than leaving a dialog that never resolves.
+    expect(shouldShowDialog({ ...asked, phase: 'error', prefs: prefs() })).toBe(true);
+    // ...and it does not resurrect a dialog the user explicitly closed.
     expect(
-      shouldShowDialog({
-        phase: 'downloaded',
-        trigger: 'scheduled',
-        version: '1.2.0',
-        prefs: prefs(),
-        now: NOW,
-      }),
-    ).toBe(true);
+      shouldShowDialog({ ...asked, phase: 'downloaded', prefs: prefs(), dismissed: true }),
+    ).toBe(false);
   });
 
   // `prompt` is recomputed on every state change, so "the user closed it" has
@@ -270,5 +301,44 @@ describe('shouldAutoInstallOnQuit', () => {
   // automatic updates is that ignoring the dialog still gets you updated.
   it('still auto-installs while a snooze is active', () => {
     expect(shouldAutoInstallOnQuit(prefs({ remindAfter: NOW + REMIND_LATER_MS }), '1.2.0')).toBe(true);
+  });
+});
+
+describe('setAutoUpdate / shouldAutoDownload', () => {
+  // The toggle is the ONLY thing standing between a metered connection and a
+  // hundred-megabyte download nobody asked for. If shouldAutoDownload ignored
+  // it, turning it off would change nothing at all.
+  it('gates background downloading on the preference', () => {
+    expect(shouldAutoDownload(prefs())).toBe(true);
+    expect(shouldAutoDownload(prefs({ autoUpdate: false }))).toBe(false);
+    expect(shouldAutoDownload(setAutoUpdate(prefs(), false))).toBe(false);
+    expect(shouldAutoDownload(setAutoUpdate(prefs({ autoUpdate: false }), true))).toBe(true);
+  });
+
+  // If the toggle cleared these, flipping it would quietly undo a skip the user
+  // recorded - and re-offer a version they had declined.
+  it('leaves the skip and snooze answers untouched', () => {
+    const answered = prefs({ skippedVersion: '1.2.0', remindAfter: NOW + 1000 });
+    expect(setAutoUpdate(answered, false)).toEqual({ ...answered, autoUpdate: false });
+  });
+});
+
+describe('automatic updates default', () => {
+  // THE upgrade-path regression. A prefs file written by any build before the
+  // toggle existed has no `autoUpdate` key. Reading that absence as "off" would
+  // silently strand every existing install on the version it happened to have -
+  // a mail client that stops receiving security fixes and never says so.
+  it('is ON for a prefs file that predates the toggle', () => {
+    expect(parseUpdatePrefs({ skippedVersion: null, remindAfter: null }).autoUpdate).toBe(true);
+    expect(DEFAULT_UPDATE_PREFS.autoUpdate).toBe(true);
+  });
+
+  // A hand-edited or corrupted value must not be read as a confident "off"
+  // either - same stranding, harder to notice.
+  it('is ON for a junk value, and only a real false turns it off', () => {
+    expect(parseUpdatePrefs({ autoUpdate: 'no' }).autoUpdate).toBe(true);
+    expect(parseUpdatePrefs({ autoUpdate: 0 }).autoUpdate).toBe(true);
+    expect(parseUpdatePrefs({ autoUpdate: null }).autoUpdate).toBe(true);
+    expect(parseUpdatePrefs({ autoUpdate: false }).autoUpdate).toBe(false);
   });
 });

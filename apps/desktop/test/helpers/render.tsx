@@ -79,6 +79,22 @@ export function typeInto(element: Element | null, value: string) {
 }
 
 /**
+ * Toggle a checkbox the way a user does, and flush the resulting React work.
+ *
+ * Assigning `element.checked` directly does NOT work, for the same reason
+ * `typeInto` exists: React patches the `checked` setter to track what it last
+ * rendered, so a direct assignment updates the tracker too and React concludes
+ * nothing changed — `onChange` never fires. Dispatching a click lets the DOM
+ * perform the activation behaviour itself, which is what React listens for.
+ */
+export function toggle(element: Element | null) {
+  if (!element) throw new Error('cannot toggle a missing element');
+  act(() => {
+    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+}
+
+/**
  * Run an interaction and flush the resulting React work.
  *
  * Everything bubbles, including `error`: React attaches its listeners at the

@@ -5,6 +5,7 @@ import { useConfirm } from '../ConfirmDialog';
 import { formatBytes } from '../quota-format';
 
 import { summariseCompaction } from './compaction-summary';
+import { UpdatesSection } from './UpdatesSection';
 
 interface AccountStorageUsage {
   accountId: string;
@@ -141,6 +142,8 @@ export function AdvancedTab() {
   return (
     <div className="space-y-6">
       {confirmDialog}
+
+      <UpdatesSection />
 
       <div className="border-b border-border pb-6">
         <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wider">

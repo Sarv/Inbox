@@ -11,9 +11,11 @@ import { ipcMain } from 'electron';
 import {
   checkForUpdates,
   dismissUpdateDialog,
+  downloadUpdate,
   getUpdateState,
   installUpdateAndRestart,
   remindAboutUpdateLater,
+  setAutoUpdateEnabled,
   skipCurrentVersion,
 } from '../services/update-service';
 
@@ -32,8 +34,26 @@ export function registerUpdateHandlers(): void {
   }));
 
   /**
-   * "Install and Relaunch". Resolves only if the install could not start;
-   * on success the app is already on its way down.
+   * "Download and install" — the user asking for the bytes, which only happens
+   * with automatic updates off. Fails when nothing is waiting, so the renderer
+   * can say so rather than spinning on a download that was never started.
+   */
+  ipcMain.handle('updater:download', () => {
+    const started = downloadUpdate();
+    return started
+      ? { success: true, data: getUpdateState() }
+      : { success: false, error: 'No update is waiting to be downloaded.' };
+  });
+
+  /** The "Install updates automatically" toggle in Settings -> Advanced. */
+  ipcMain.handle('updater:setAutoUpdate', (_event, enabled: boolean) => ({
+    success: true,
+    data: setAutoUpdateEnabled(enabled === true),
+  }));
+
+  /**
+   * "Restart now". Resolves only if the install could not start; on success the
+   * app is already on its way down.
    */
   ipcMain.handle('updater:install', () => {
     const started = installUpdateAndRestart();
