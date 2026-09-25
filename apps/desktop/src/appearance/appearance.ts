@@ -30,6 +30,15 @@ export interface Appearance {
   density: DensityId;
   /** UI scale in PERCENT (100 = native). Applied as an Electron zoom factor. */
   zoom: number;
+  /**
+   * Re-colour the MESSAGE BODY for dark mode instead of showing it on the white
+   * page it was written for. Off by default, and deliberately so: email HTML is
+   * only ever partially styled, so this can only ever be a best effort on
+   * someone else's markup — everyone gets the faithful white canvas until they
+   * ask for something else. Has no effect while the theme resolves to light.
+   * The re-colouring itself lives in utils/email-dark-mode.ts.
+   */
+  darkenEmails: boolean;
 }
 
 /** One accent's tokens for a single resolved theme. */
@@ -210,6 +219,7 @@ export const defaultAppearance: Appearance = {
   font: 'system',
   density: 'cozy',
   zoom: ZOOM_DEFAULT,
+  darkenEmails: false,
 };
 
 const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
@@ -271,6 +281,7 @@ export const normalizeAppearance = (raw: unknown): Appearance => {
     font: isOneOf(FONT_IDS, stored.font) ? stored.font : defaultAppearance.font,
     density: isOneOf(DENSITY_IDS, stored.density) ? stored.density : defaultAppearance.density,
     zoom: clampZoom(stored.zoom),
+    darkenEmails: typeof stored.darkenEmails === 'boolean' ? stored.darkenEmails : defaultAppearance.darkenEmails,
   };
 };
 

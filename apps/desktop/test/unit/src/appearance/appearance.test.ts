@@ -110,6 +110,7 @@ describe('normalizeAppearance', () => {
       font: 'comic',
       density: 'tiny',
       gradientAccents: 'yes',
+      darkenEmails: 'sure',
       zoom: 'big',
     });
     expect(normalized).toEqual(defaultAppearance);
@@ -123,6 +124,7 @@ describe('normalizeAppearance', () => {
       font: 'serif',
       density: 'compact',
       zoom: 125,
+      darkenEmails: true,
     };
     expect(normalizeAppearance(stored)).toEqual(stored);
   });
