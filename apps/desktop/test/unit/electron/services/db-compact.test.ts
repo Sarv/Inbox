@@ -1,5 +1,6 @@
 import { sep } from 'node:path';
 
+import { resolveUnpacked } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -124,7 +125,6 @@ import {
   compactionInProgress,
   compactWorkerPath,
   estimateCompaction,
-  resolveUnpacked,
 } from '../../../../electron/services/db-compact';
 
 /** The worker's reply for a rebuild that reclaimed the whole freelist. */

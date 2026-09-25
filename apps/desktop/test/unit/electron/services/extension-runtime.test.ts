@@ -50,7 +50,10 @@ vi.mock('electron', () => ({
   },
 }));
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async (importOriginal) => ({
+  // Only the logger is stubbed. `resolveUnpacked` is the real thing — the asar
+  // rewrite asserted below is exactly what must not be mocked away.
+  ...(await importOriginal<Record<string, unknown>>()),
   createLogger: () => ({
     info: (...args: unknown[]) => h.logs.push(args.join(' ')),
     warn: (...args: unknown[]) => h.logs.push(args.join(' ')),
@@ -74,7 +77,8 @@ describe('extension sandbox transport', () => {
   // A path inside app.asar cannot be spawned. Getting this wrong breaks
   // extensions only in a packaged build, where nobody is watching a terminal.
   it('resolves the entry outside the asar archive', async () => {
-    const { resolveUnpacked, sandboxEntryPath } = await loadService();
+    const { resolveUnpacked } = await import('@sarvinbox/core');
+    const { sandboxEntryPath } = await loadService();
 
     expect(resolveUnpacked(`${sep}Apps${sep}app.asar${sep}dist-electron${sep}x.js`)).toBe(
       `${sep}Apps${sep}app.asar.unpacked${sep}dist-electron${sep}x.js`

@@ -23,7 +23,7 @@
  *      stopped existing until they restart.
  */
 import { statfs } from 'node:fs/promises';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 import {
@@ -31,6 +31,7 @@ import {
   formatBytes,
   hasCompactionHeadroom,
   isCompactionWorthwhile,
+  resolveUnpacked,
   createLogger,
   type CompactionEstimate,
 } from '@sarvinbox/core';
@@ -134,20 +135,6 @@ async function freeDiskBytes(): Promise<number> {
     logger.warn('[Compact] could not read free disk space', error);
     return 0;
   }
-}
-
-/**
- * Redirect a path inside `app.asar` to its unpacked twin, leaving any other
- * path untouched.
- *
- * `new Worker()` is not a plain fs read and cannot be relied on to see through
- * the archive the way `readFileSync` does, so anything spawned as a thread has
- * to be listed in `asarUnpack` and addressed here. Matching on the separator
- * (rather than the bare string) keeps a directory merely NAMED `app.asarX` from
- * being rewritten, and uses the platform separator so it works on Windows too.
- */
-export function resolveUnpacked(path: string): string {
-  return path.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`);
 }
 
 /**
