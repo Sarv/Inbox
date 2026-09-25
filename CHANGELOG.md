@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start rather than open with an empty mailbox — and Linux builds are now
   compiled against the oldest supported distribution, which every newer one
   accepts.
+- **macOS: updates failed with "Cannot update while running on a read-only
+  volume".** An app kept in Downloads, or opened straight from the disk image,
+  is run by macOS from a temporary read-only copy and cannot replace itself, so
+  every update check ended in an error that read like a connection problem.
+  Sarv Inbox now offers to move itself into your Applications folder the first
+  time it starts from the wrong place; your accounts, mail and settings are
+  stored separately and are not touched by the move.
 - **No more screens of blank space in the chat view.** A table pasted from
   Google Sheets shrank to one pixel wide and pushed the rest of the message a
   page or more down; it now shows as the table it is. Column widths, merged
