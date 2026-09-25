@@ -85,6 +85,9 @@ jobs:
             # excludes the node-gyp intermediates (obj/, .deps/) whose contents
             # are arch-specific.
             args: --mac --universal
+            # The binary inside the .app bundle, launched directly: `open`
+            # returns before the app has done anything.
+            smoke: apps/desktop/release/mac-universal/Sarv Inbox.app/Contents/MacOS/Sarv Inbox
           # Each Linux arch gets its OWN runner: unlike Xcode and MSVC, the
           # stock gcc on a GitHub runner has no cross toolchain, so the arm64
           # machine cannot compile x64 (`cc: unrecognized command-line option
@@ -110,11 +113,13 @@ jobs:
             os: ubuntu-22.04
             platform: linux
             args: --linux --x64
+            unpacked: apps/desktop/release/linux-unpacked
           - name: Linux arm64
             id: linux-arm64
             os: ubuntu-22.04-arm
             platform: linux
             args: --linux --arm64
+            unpacked: apps/desktop/release/linux-arm64-unpacked
           - name: Windows (x64 + arm64)
             id: win-x64-arm64
             os: windows-latest
@@ -128,6 +133,9 @@ jobs:
             # "Verify Windows native addon architecture" step below proves the
             # cross-compile actually happened.
             args: --win --x64 --arm64
+            # x64 only: an x64 runner cannot execute the arm64 build, whose
+            # addon CPU is verified from its PE header instead.
+            smoke: apps/desktop/release/win-unpacked/Sarv Inbox.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -296,6 +304,48 @@ jobs:
         if: matrix.platform != 'win'
         shell: bash
         run: node scripts/verify-packaged-addons.mjs apps/desktop/release
+
+      # glibc is backward compatible and never forward, so a binary linked on a
+      # newer distribution than the user's refuses to load there -- and the
+      # build machine can never notice, because its own glibc is always new
+      # enough. v1.2.2 shipped exactly that: built on `ubuntu-latest` after
+      # GitHub moved the label to 24.04, it died on launch for everyone on
+      # Ubuntu 22.04 LTS with `version GLIBC_2.38 not found`, having passed
+      # every check above. This reads the artifacts instead of trusting the pin.
+      - name: Verify the Linux build runs on an older glibc
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: node scripts/verify-glibc-floor.mjs "${{ matrix.unpacked }}" --max=2.35
+
+      # Installing through apt is the point, not a convenience: it resolves the
+      # .deb's declared dependencies exactly as a user's machine would, so a
+      # missing one fails here rather than on their desktop. Electron needs a
+      # display to reach app.whenReady at all, hence xvfb.
+      - name: Install the Linux package the way a user would
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEB=$(ls apps/desktop/release/*.deb | head -1)
+          echo "Installing $DEB"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb "$DEB"
+
+      # Every check above reads the artifact, and reading a binary cannot tell
+      # you it runs: v1.2.2 was signed, verified, uploaded and dead on launch.
+      # This starts the packaged app for real -- SARV_SMOKE_TEST makes it boot,
+      # prove better-sqlite3 loads, print a marker and exit 0 without touching a
+      # database. Windows arm64 is not covered: an x64 runner cannot execute it,
+      # which is what "Verify Windows native addon architecture" is for.
+      - name: Smoke-launch the packaged app
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            xvfb-run -a node scripts/smoke-launch.mjs "/opt/Sarv Inbox/sarv-inbox"
+          else
+            node scripts/smoke-launch.mjs "${{ matrix.smoke }}"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
