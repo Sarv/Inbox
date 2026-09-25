@@ -7,6 +7,7 @@ import {
   adjustTotalForFilteredOut,
   assignThreadsToSections,
   buildThreads,
+  sectionIsVisible,
   hasImportanceFlag,
   hasStarredFlag,
   isDraft,
@@ -496,6 +497,37 @@ describe('sortThreadsForDisplay', () => {
     installLocalStorage({ 'sarvinbox-agent-config': JSON.stringify({ enabled: true, autoPrioritize: true }) });
     const sorted = sortThreadsForDisplay([thread('older', 100, 0), thread('newer', 900, 0)]);
     expect(sorted.map((t) => t.threadId)).toEqual(['newer', 'older']);
+  });
+});
+
+/**
+ * THE REGRESSION: a section that appears on one render and is gone on the next.
+ *
+ * Reported from the field with two screenshots of the same mailbox taken
+ * seconds apart: "Important and unread 0" in the first, absent in the second.
+ * The DB-backed pipeline kept a hide-when-empty section on screen while its
+ * rows were still loading, so it rendered a 0 and then vanished when the load
+ * came back empty. Both section pipelines now answer this ONE way.
+ */
+describe('sectionIsVisible', () => {
+  // Breaks: the flicker comes back. Empty is empty — loading is not a reason to
+  // show a section that has nothing in it.
+  it('hides an empty hide-when-empty section', () => {
+    expect(sectionIsVisible({ hideWhenEmpty: true, threadCount: 0 })).toBe(false);
+  });
+
+  // Breaks: a section the user asked to keep (the default for "Important and
+  // unread") disappears the moment it empties, which is not what the option says.
+  it('keeps an empty section that was never marked hide-when-empty', () => {
+    expect(sectionIsVisible({ hideWhenEmpty: false, threadCount: 0 })).toBe(true);
+  });
+
+  // Breaks: the reverse flicker — a populated section blinking out mid-refresh.
+  // Every loading transition preserves the rows, so a section with threads must
+  // stay visible no matter what else is going on.
+  it('shows a section that has threads, hide-when-empty or not', () => {
+    expect(sectionIsVisible({ hideWhenEmpty: true, threadCount: 3 })).toBe(true);
+    expect(sectionIsVisible({ hideWhenEmpty: false, threadCount: 3 })).toBe(true);
   });
 });
 

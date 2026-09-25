@@ -438,6 +438,27 @@ export interface SectionData {
   page?: number;
 }
 
+/**
+ * Whether a section renders at all.
+ *
+ * ONE rule for both section pipelines (the in-memory `assignThreadsToSections`
+ * and EmailList's DB-backed one), because a section that appears in one pass and
+ * not the other is exactly the flicker this fixes: a "hide when empty" section
+ * used to be kept on screen while its rows were still loading, so it rendered
+ * with a count of 0 and then VANISHED the moment the load resolved empty. The
+ * reader sees a section appear and disappear between two renders of the same
+ * mailbox and reads the whole list as unreliable.
+ *
+ * Hiding it while it is still loading is safe in the other direction: every
+ * loading transition PRESERVES the rows the section already had
+ * (loadMoreSectionEmails / goToSectionPage both spread the current data), so a
+ * populated section never momentarily counts as empty. Only a section that has
+ * nothing to show is hidden, and when it gains content it simply appears.
+ */
+export function sectionIsVisible(view: { hideWhenEmpty: boolean; threadCount: number }): boolean {
+  return !view.hideWhenEmpty || view.threadCount > 0;
+}
+
 export function assignThreadsToSections(
   threads: EmailThread[],
   sections: InboxSection[],
@@ -465,7 +486,7 @@ export function assignThreadsToSections(
       sectionThreads = sectionThreads.slice(0, section.maxItems);
     }
 
-    if (section.hideWhenEmpty && sectionThreads.length === 0) continue;
+    if (!sectionIsVisible({ hideWhenEmpty: section.hideWhenEmpty, threadCount: sectionThreads.length })) continue;
 
     sectionThreads.forEach(t => usedThreadIds.add(t.threadId));
     result.push({
