@@ -3,7 +3,9 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   evaluateLockContention,
   reclaimPids,
+  readDevInstancePid,
   reclaimSingleDevInstance,
+  startDevInstanceRecord,
   startHeartbeat,
   tagMainProcess,
   type DevReclaimDeps,
@@ -48,22 +50,29 @@ function makeDevDeps(overrides: Partial<DevReclaimDeps> = {}): { deps: DevReclai
   const deps: DevReclaimDeps = {
     ...base,
     ourPid: 1000,
-    listPidsByTitle: () => [1000],
+    // Default: nothing recorded (a clean first launch). Each test opts in.
+    readRecordedPid: () => null,
+    isOurApp: () => true,
     ...overrides,
   };
   return { deps, killed };
 }
 
 /**
- * The dev reclaim guarantees a single dev child: on launch it kills any previous
- * instance (a Ctrl+C orphan still holding Gmail connections) BEFORE this run opens
- * the DB or a socket.
+ * The dev reclaim guarantees a single dev child: on launch it reads the pid the
+ * previous dev main recorded under userData and kills it (a Ctrl+C orphan still
+ * holding Gmail connections) BEFORE this run opens the DB or a socket.
+ *
+ * CHANGED: this used to sweep the process table for the dev process title. It
+ * targets the recorded pid instead — exact, works on Windows, and it frees macOS
+ * from carrying a title AppKit would draw in the menu bar.
  */
 describe('reclaimSingleDevInstance', () => {
-  // Regression: a clean first launch (only our own pid carries the title) must NOT
-  // signal anything — a stray kill here would make the app suicide on startup.
-  it('does nothing when we are the only instance', async () => {
-    const { deps, killed } = makeDevDeps({ listPidsByTitle: () => [1000] });
+  // Regression: a clean first launch (or one after a clean quit, which removes the
+  // record) must NOT signal anything — a stray kill here would make the app
+  // suicide on startup.
+  it('does nothing when no previous instance recorded a pid', async () => {
+    const { deps, killed } = makeDevDeps({ readRecordedPid: () => null });
     await reclaimSingleDevInstance(deps);
     expect(killed).toEqual([]);
   });
@@ -71,10 +80,12 @@ describe('reclaimSingleDevInstance', () => {
   // The core case: a leftover orphan exits promptly on SIGTERM, so we never
   // escalate to SIGKILL. If SIGTERM weren't sent the orphan keeps its Gmail
   // connections and the new run stacks on top of it.
-  it('SIGTERMs a previous instance that exits gracefully (no SIGKILL)', async () => {
+  it('SIGTERMs the recorded previous instance when it exits gracefully', async () => {
+    let probes = 0;
     const { deps, killed } = makeDevDeps({
-      listPidsByTitle: () => [999, 1000],
-      isAlive: () => false, // already gone by the first poll after SIGTERM
+      readRecordedPid: () => 999,
+      // Alive for the pre-kill liveness probe, gone by the first poll after SIGTERM.
+      isAlive: () => probes++ === 0,
     });
     await reclaimSingleDevInstance(deps);
     expect(killed).toEqual([[999, 'SIGTERM']]);
@@ -83,9 +94,9 @@ describe('reclaimSingleDevInstance', () => {
   // Regression for the WEDGED orphan — a beachballed main thread never processes
   // SIGTERM, so we MUST escalate to SIGKILL after the grace window. This is the
   // whole reason kill-old-on-startup beats a self-quit watchdog.
-  it('escalates to SIGKILL when a previous instance stays alive (wedged)', async () => {
+  it('escalates to SIGKILL when the recorded instance stays alive (wedged)', async () => {
     const { deps, killed } = makeDevDeps({
-      listPidsByTitle: () => [999, 1000],
+      readRecordedPid: () => 999,
       isAlive: () => true, // never dies on its own
     });
     await reclaimSingleDevInstance(deps);
@@ -93,31 +104,60 @@ describe('reclaimSingleDevInstance', () => {
     expect(killed).toContainEqual([999, 'SIGKILL']);
   });
 
-  // Multiple orphans can accumulate across crashed runs; reclaim must clear ALL of
-  // them or connections keep stacking against Gmail's cap.
-  it('reclaims every previous instance, skipping our own pid', async () => {
+  // Regression: a record left by a process that already exited is the ordinary
+  // case after a crash. Nothing to signal — and the pid may since have been
+  // recycled, so signalling it anyway would be actively dangerous.
+  it('does not signal a recorded pid that is no longer alive', async () => {
+    const isOurApp = vi.fn(() => true);
     const { deps, killed } = makeDevDeps({
-      ourPid: 1000,
-      listPidsByTitle: () => [111, 222, 1000],
+      readRecordedPid: () => 999,
       isAlive: () => false,
+      isOurApp,
     });
     await reclaimSingleDevInstance(deps);
-    expect(killed).toEqual([[111, 'SIGTERM'], [222, 'SIGTERM']]);
+    expect(killed).toEqual([]);
+    // Dead pid → we never pay for the `ps`/`tasklist` identity probe.
+    expect(isOurApp).not.toHaveBeenCalled();
   });
 
-  // A pid that vanished between the listing and the signal (ESRCH) makes kill()
+  // THE pid-reuse regression, and the reason this path verifies identity at all:
+  // the recorded number is alive but belongs to an unrelated process. Killing it
+  // would destroy someone else's work.
+  it('never kills a live recorded pid that is not our app', async () => {
+    const { deps, killed } = makeDevDeps({
+      readRecordedPid: () => 999,
+      isAlive: () => true,
+      isOurApp: () => false,
+    });
+    await reclaimSingleDevInstance(deps);
+    expect(killed).toEqual([]);
+  });
+
+  // Self-suicide guard: a record holding our OWN pid (a crash mid-launch, or a
+  // recycled number that landed on us) must never make the app signal itself.
+  it('never signals our own pid', async () => {
+    const { deps, killed } = makeDevDeps({
+      ourPid: 1000,
+      readRecordedPid: () => 1000,
+      isAlive: () => true,
+    });
+    await reclaimSingleDevInstance(deps);
+    expect(killed).toEqual([]);
+  });
+
+  // A pid that vanished between the probe and the signal (ESRCH) makes kill()
   // throw; that must be swallowed and must NOT escalate to SIGKILL on a dead pid.
   it('tolerates a previous instance that dies before we signal it', async () => {
-    const isAlive = vi.fn(() => false);
+    const isAlive = vi.fn(() => true);
     const { deps, killed } = makeDevDeps({
-      listPidsByTitle: () => [999, 1000],
+      readRecordedPid: () => 999,
       isAlive,
       kill: (_pid, _signal) => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); },
     });
     await reclaimSingleDevInstance(deps);
     expect(killed).toEqual([]); // kill threw → nothing recorded, no escalation
-    // We returned immediately on the throw rather than polling liveness.
-    expect(isAlive).not.toHaveBeenCalled();
+    // Only the single pre-kill liveness probe ran; the grace loop never polled.
+    expect(isAlive).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -276,6 +316,71 @@ describe('startHeartbeat', () => {
       expect(typeof parsed.ts).toBe('number');
       stop();
       expect(fs.existsSync(file)).toBe(false);
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+});
+
+/**
+ * The dev pid record is the whole basis of the dev reclaim: written on startup,
+ * read by the NEXT launch, removed on a clean quit. If the round trip breaks, dev
+ * silently loses its single-child guarantee — two mains, two IMAP connection sets.
+ */
+describe('startDevInstanceRecord / readDevInstancePid', () => {
+  // Regression: the record must be readable by pid the moment it is written (the
+  // next launch can come seconds later), and stop() must remove it so a cleanly
+  // quit run leaves no pid for the next launch to probe and possibly mis-kill.
+  it('records our pid immediately and removes it on stop', () => {
+    const os = require('node:os');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sarv-dev-'));
+    try {
+      const stop = startDevInstanceRecord(dir);
+      expect(readDevInstancePid(dir)).toBe(process.pid);
+      // A separate file from the prod heartbeat: dev and prod userData dirs differ,
+      // but the two records must never be able to alias each other.
+      expect(fs.existsSync(path.join(dir, 'instance-heartbeat.json'))).toBe(false);
+      stop();
+      expect(readDevInstancePid(dir)).toBeNull();
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  // Regression for the vite hot-restart handover: the replacement dev main writes
+  // its record while THIS one is still tearing down. Removing a record that no
+  // longer names us would leave the launch after that with nothing to reclaim.
+  it('leaves a record rewritten by a replacement process alone', () => {
+    const os = require('node:os');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sarv-dev-'));
+    try {
+      const stop = startDevInstanceRecord(dir);
+      // Stand in for the incoming process claiming the record.
+      fs.writeFileSync(path.join(dir, 'dev-instance.json'), JSON.stringify({ pid: process.pid + 1, ts: Date.now() }));
+      stop();
+      expect(readDevInstancePid(dir)).toBe(process.pid + 1);
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  // Defensive: a truncated or hand-edited record must read as "no record" (defer to
+  // the ppid watchdog), never as a pid to signal.
+  it('reads a missing or corrupt record as no pid', () => {
+    const os = require('node:os');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sarv-dev-'));
+    try {
+      expect(readDevInstancePid(dir)).toBeNull();
+      fs.writeFileSync(path.join(dir, 'dev-instance.json'), '{ "pid": ');
+      expect(readDevInstancePid(dir)).toBeNull();
+      fs.writeFileSync(path.join(dir, 'dev-instance.json'), '{"pid":"nope","ts":1}');
+      expect(readDevInstancePid(dir)).toBeNull();
     } finally {
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     }

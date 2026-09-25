@@ -1,11 +1,13 @@
 /**
- * Single-instance enforcement IO for BOTH builds. One name-based mechanism, two
- * policies layered on top:
+ * Single-instance enforcement IO for BOTH builds. One mechanism — each running main
+ * process records its pid in a file under userData — with two policies layered on
+ * top:
  *
  * - DEV: there is no OS lock (it would fight vite's hot-restart), and the failure
  *   mode is an ORPHAN — a Ctrl+C'd launcher leaves the Electron child re-parented
- *   to launchd. So dev ALWAYS wins on startup: find every process carrying our dev
- *   main-process title and kill it before we open the DB or a socket.
+ *   to launchd. So dev ALWAYS wins on startup: read the pid the previous run
+ *   recorded, verify it is still our app, and kill it before we open the DB or a
+ *   socket.
  *
  * - PROD: the OS single-instance lock (`requestSingleInstanceLock`) is the fast
  *   path and a HEALTHY primary must be PRESERVED, not killed. The only failure the
@@ -22,7 +24,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import {
   decideLockContention,
@@ -30,6 +32,7 @@ import {
   isHeartbeatStale,
   MAIN_PROCESS_TITLE,
   selectReclaimablePids,
+  shouldReclaimRecordedDevPid,
   type InstanceHeartbeat,
   type LockContentionAction,
 } from './single-instance';
@@ -48,6 +51,14 @@ export const HEARTBEAT_STALE_MS = 30_000;
 /** File under userData holding the current primary's {@link InstanceHeartbeat}. */
 const HEARTBEAT_FILE = 'instance-heartbeat.json';
 
+/**
+ * File under the DEV userData dir holding the running dev main's pid, so the NEXT
+ * dev launch can reclaim exactly it. Same {pid, ts} record as the prod heartbeat —
+ * dev simply ignores the timestamp, because a dev orphan is reclaimed whether it is
+ * wedged or perfectly healthy (there is only ever meant to be one dev child).
+ */
+const DEV_INSTANCE_FILE = 'dev-instance.json';
+
 /** Signalling + timing primitives shared by every reclaim path. */
 export interface KillDeps {
   isAlive: (pid: number) => boolean;
@@ -58,10 +69,15 @@ export interface KillDeps {
   logWarn: (message: string) => void;
 }
 
-/** DEV reclaim deps: find orphans by title, then kill via {@link KillDeps}. */
+/**
+ * DEV reclaim deps: read the pid the previous dev main recorded, prove it is still
+ * our app, then kill it via {@link KillDeps} (whose `isAlive` doubles as the
+ * liveness probe).
+ */
 export interface DevReclaimDeps extends KillDeps {
   ourPid: number;
-  listPidsByTitle: () => number[];
+  readRecordedPid: () => number | null;
+  isOurApp: (pid: number) => boolean;
 }
 
 /** PROD contention deps: read the heartbeat + probe the recorded holder. */
@@ -128,12 +144,25 @@ export async function reclaimPids(targetPids: number[], ourPid: number, deps: Ki
 }
 
 /**
- * DEV single-child guarantee: kill every previous dev main process (found by
- * title), skipping our own. Runs before the DB or any IMAP connection opens so a
- * Ctrl+C orphan can't stack Gmail connections against the new run.
+ * DEV single-child guarantee: kill the previous dev main process, identified by the
+ * pid it recorded under userData. Runs before the DB or any IMAP connection opens so
+ * a Ctrl+C orphan can't stack Gmail connections against the new run.
+ *
+ * The probes are ordered cheapest-first and short-circuit: a dead pid (the ordinary
+ * case after a clean quit) never pays for the `ps`/`tasklist` identity check.
  */
 export async function reclaimSingleDevInstance(deps: DevReclaimDeps): Promise<void> {
-  await reclaimPids(deps.listPidsByTitle(), deps.ourPid, deps);
+  const recordedPid = deps.readRecordedPid();
+  if (recordedPid === null) return;
+  const pidAlive = deps.isAlive(recordedPid);
+  const reclaimable = shouldReclaimRecordedDevPid({
+    recordedPid,
+    ourPid: deps.ourPid,
+    pidAlive,
+    pidIsOurApp: pidAlive && deps.isOurApp(recordedPid),
+  });
+  if (!reclaimable) return;
+  await reclaimPids([recordedPid], deps.ourPid, deps);
 }
 
 /**
@@ -203,28 +232,43 @@ export function defaultKillDeps(logger: { info: (m: string) => void; warn: (m: s
   };
 }
 
-/** Real DEV reclaim deps (title sweep via pgrep on posix; skipped on Windows). */
-export function defaultDevReclaimDeps(logger: { info: (m: string) => void; warn: (m: string) => void }): DevReclaimDeps {
+/**
+ * Real DEV reclaim deps. Works on all three platforms — the pid comes from our own
+ * file, not from the process table — which is what the previous `pgrep -f <title>`
+ * sweep could not do (Windows never sees `process.title`, so dev there had no
+ * reclaim at all and relied solely on the ppid watchdog).
+ *
+ * Identity is confirmed against any of three markers, so no platform is left
+ * without one:
+ * - the Electron binary this run was started from (`process.execPath`), which in
+ *   dev is the repo's own `node_modules/electron/...` — the macOS marker, since the
+ *   dev main is no longer titled there,
+ * - its bare file name, for Windows, where `tasklist` reports an image name
+ *   (`electron.exe`) rather than a full path,
+ * - the dev title, for Linux, where `process.title` rewrites argv so the command
+ *   line reads `sarvinbox-dev-main` and the exec path may no longer appear.
+ * Failing to match any of them means we leave the pid alone (see
+ * {@link shouldReclaimRecordedDevPid}) — a recycled pid is never signalled.
+ */
+export function defaultDevReclaimDeps(
+  logger: { info: (m: string) => void; warn: (m: string) => void },
+  userDataDir: string,
+): DevReclaimDeps {
   return {
     ...defaultKillDeps(logger),
     ourPid: process.pid,
-    listPidsByTitle: () => {
-      try {
-        if (process.platform === 'win32') {
-          // process.title doesn't change the tasklist image name on Windows, so a
-          // title sweep can't work there — rely on the ppid watchdog instead.
-          return [];
-        }
-        const out = spawnSync('pgrep', ['-f', DEV_MAIN_PROCESS_TITLE], { encoding: 'utf8' });
-        return (out.stdout ?? '')
-          .split('\n')
-          .map((line) => Number.parseInt(line.trim(), 10))
-          .filter((pid) => Number.isInteger(pid) && pid > 0);
-      } catch {
-        return [];
-      }
-    },
+    readRecordedPid: () => readDevInstancePid(userDataDir),
+    isOurApp: (pid) => processMatchesAny(pid, [
+      process.execPath,
+      basename(process.execPath),
+      DEV_MAIN_PROCESS_TITLE,
+    ]),
   };
+}
+
+/** The pid recorded by the running/previous dev main, or null if there is none. */
+export function readDevInstancePid(userDataDir: string): number | null {
+  return readPidRecord(join(userDataDir, DEV_INSTANCE_FILE))?.pid ?? null;
 }
 
 /**
@@ -234,15 +278,15 @@ export function defaultDevReclaimDeps(logger: { info: (m: string) => void; warn:
  * - Linux: the title (process.title rewrites argv there).
  * - Windows: the product name; process.title does not change the tasklist image
  *   name, but the exe is "Sarv Inbox.exe", so the image name matches.
- * - macOS: the product name. The title is deliberately NOT set on a packaged mac
- *   build (it would rename the app in the menu bar — see shouldTagMainProcess),
+ * - macOS: the product name. The title is deliberately NOT set on mac at all
+ *   (it would rename the app in its own menu bar — see shouldTagMainProcess),
  *   and the main process runs as ".../Sarv Inbox.app/Contents/MacOS/Sarv Inbox",
  *   so the product name is already in its command line.
  */
 export function defaultHeartbeatDeps(userDataDir: string, productName: string): HeartbeatDeps {
   const file = join(userDataDir, HEARTBEAT_FILE);
   return {
-    readHeartbeat: () => readHeartbeatFile(file),
+    readHeartbeat: () => readPidRecord(file),
     isAlive: processIsAlive,
     isOurApp: (pid) => processMatchesAny(pid, [MAIN_PROCESS_TITLE, productName]),
     now: () => Date.now(),
@@ -250,10 +294,11 @@ export function defaultHeartbeatDeps(userDataDir: string, productName: string): 
 }
 
 // ---------------------------------------------------------------------------
-// PROD heartbeat file lifecycle (only the lock-holding primary writes it).
+// Pid-record file lifecycle. One implementation, two callers: the PROD heartbeat
+// (written only by the lock-holding primary) and the DEV instance record.
 // ---------------------------------------------------------------------------
 
-function readHeartbeatFile(file: string): InstanceHeartbeat | null {
+function readPidRecord(file: string): InstanceHeartbeat | null {
   try {
     if (!existsSync(file)) return null;
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<InstanceHeartbeat>;
@@ -270,26 +315,64 @@ function readHeartbeatFile(file: string): InstanceHeartbeat | null {
  * Start writing our liveness heartbeat every {@link HEARTBEAT_INTERVAL_MS} while we
  * hold the lock. Returns a stop function that clears the timer AND removes the file
  * (a clean exit leaves nothing behind; a crash/wedge leaves a stale file the next
- * launch judges). `.unref()` so the timer never keeps the process alive.
+ * launch judges).
  */
 export function startHeartbeat(userDataDir: string): () => void {
-  const file = join(userDataDir, HEARTBEAT_FILE);
+  return startPidRecord(join(userDataDir, HEARTBEAT_FILE), HEARTBEAT_INTERVAL_MS);
+}
+
+/**
+ * DEV counterpart: record THIS dev main's pid so the next dev launch can reclaim it.
+ * Must be called AFTER {@link reclaimSingleDevInstance} has read the previous run's
+ * record, or we would overwrite the very pid we are about to look for.
+ *
+ * Written ONCE, with no re-stamp timer: dev ignores the timestamp (an orphan is
+ * reclaimed whether wedged or healthy), and a repeating write would be a liability
+ * during a vite hot-restart — the outgoing process could re-stamp its own dying pid
+ * over the record the incoming one just wrote, costing the launch after that its
+ * reclaim.
+ */
+export function startDevInstanceRecord(userDataDir: string): () => void {
+  return startPidRecord(join(userDataDir, DEV_INSTANCE_FILE), null);
+}
+
+/**
+ * Write a {pid, ts} record to `file`, optionally re-stamping every `repeatEveryMs`.
+ * Returns a stop function that clears the timer and removes the record.
+ */
+function startPidRecord(file: string, repeatEveryMs: number | null): () => void {
   const write = () => {
     try {
       writeFileSync(file, JSON.stringify({ pid: process.pid, ts: Date.now() }));
     } catch {
-      // Non-fatal: a missing heartbeat just makes the next launch defer to the lock.
+      // Non-fatal: a missing record just costs the next launch its reclaim —
+      // prod defers to the lock, dev falls back to the ppid watchdog.
     }
   };
-  write(); // stamp immediately so a fast relaunch sees a fresh beat
-  const timer = setInterval(write, HEARTBEAT_INTERVAL_MS);
-  timer.unref?.();
+  write(); // stamp immediately so a fast relaunch sees the record, not an empty dir
+  // `.unref()` so the timer never keeps the process alive.
+  const timer = repeatEveryMs === null ? null : setInterval(write, repeatEveryMs);
+  timer?.unref?.();
   return () => {
-    clearInterval(timer);
-    try {
-      if (existsSync(file)) rmSync(file);
-    } catch {
-      // Best-effort.
-    }
+    if (timer) clearInterval(timer);
+    removeOwnPidRecord(file);
   };
+}
+
+/**
+ * Remove a pid record on the way out — but ONLY while it still names us.
+ *
+ * A clean exit must leave nothing behind (a stale record is what tells the next
+ * launch the previous run died badly). The guard covers the handover window: a vite
+ * hot-restart spawns the replacement process while this one is still tearing down,
+ * so by the time we get here the file may already hold the NEW pid. Deleting that
+ * would silently cost the launch after it its reclaim.
+ */
+function removeOwnPidRecord(file: string): void {
+  try {
+    if (readPidRecord(file)?.pid !== process.pid) return;
+    rmSync(file);
+  } catch {
+    // Best-effort.
+  }
 }
