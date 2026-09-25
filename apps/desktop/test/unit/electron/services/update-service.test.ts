@@ -19,7 +19,8 @@ import { UPDATE_CHECK_TIMEOUT_MS } from '../../../../electron/services/update-po
 
 const h = vi.hoisted(() => ({
   userData: '',
-  isPackaged: true,
+  /** Stands in for process.resourcesPath - where app-update.yml lives. */
+  resources: '',
   platform: 'darwin' as NodeJS.Platform,
   /** Stand-in for electron-updater's singleton. */
   updater: {
@@ -54,9 +55,9 @@ vi.mock('electron', () => ({
   app: {
     getPath: () => h.userData,
     getVersion: () => h.getVersion(),
-    get isPackaged() {
-      return h.isPackaged;
-    },
+    // Deliberately NO isPackaged: the service must not consult it. Electron
+    // derives it from the executable's file name, which scripts/postinstall.mjs
+    // renames in dev, so it is true inside `pnpm dev:desktop`.
   },
 }));
 
@@ -102,10 +103,25 @@ const writePrefs = (prefs: Record<string, unknown>) =>
 const manualMode = () => writePrefs({ skippedVersion: null, remindAfter: null, autoUpdate: false });
 
 let originalPlatform: PropertyDescriptor | undefined;
+let originalDefaultApp: PropertyDescriptor | undefined;
+let originalResourcesPath: PropertyDescriptor | undefined;
+
+/** Both signals the support gate reads, set to "this is a shipped build". */
+const defineProcess = (key: string, value: unknown) =>
+  Object.defineProperty(process, key, { value, configurable: true, writable: true });
+
+/** Model a `pnpm dev:desktop` run: Electron was handed a script to execute. */
+const devRun = () => defineProcess('defaultApp', true);
+
+/** Model a packaged build published without electron-builder's update config. */
+const withoutUpdateConfig = () => rmSync(join(h.resources, 'app-update.yml'), { force: true });
 
 beforeEach(() => {
   h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-update-'));
-  h.isPackaged = true;
+  h.resources = mkdtempSync(join(tmpdir(), 'sarvinbox-resources-'));
+  // The file electron-updater opens on every check. Present by default, so the
+  // default harness build is one that can genuinely update itself.
+  writeFileSync(join(h.resources, 'app-update.yml'), 'provider: github\n');
   h.sent = [];
   h.updater.handlers.clear();
   h.updater.autoDownload = false;
@@ -119,13 +135,22 @@ beforeEach(() => {
     h.sent.push({ channel, payload });
   };
   originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  originalDefaultApp = Object.getOwnPropertyDescriptor(process, 'defaultApp');
+  originalResourcesPath = Object.getOwnPropertyDescriptor(process, 'resourcesPath');
   Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  defineProcess('defaultApp', false);
+  defineProcess('resourcesPath', h.resources);
   delete process.env['APPIMAGE'];
 });
 
 afterEach(() => {
   if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+  if (originalDefaultApp) Object.defineProperty(process, 'defaultApp', originalDefaultApp);
+  else delete (process as unknown as Record<string, unknown>)['defaultApp'];
+  if (originalResourcesPath) Object.defineProperty(process, 'resourcesPath', originalResourcesPath);
+  else delete (process as unknown as Record<string, unknown>)['resourcesPath'];
   rmSync(h.userData, { recursive: true, force: true });
+  rmSync(h.resources, { recursive: true, force: true });
   vi.useRealTimers();
 });
 
@@ -160,12 +185,55 @@ describe('startUpdateService', () => {
 
   // If this armed a timer, every `pnpm dev` session would throw on the missing
   // app-update.yml 30 seconds in.
-  it('does nothing at all for an unpackaged build', async () => {
-    h.isPackaged = false;
+  it('does nothing at all for a development run', async () => {
+    devRun();
+    withoutUpdateConfig();
     const service = await load();
     service.startUpdateService();
 
     expect(h.updater.autoDownload).toBe(false);
+    expect(h.updater.handlers.size).toBe(0);
+    expect(service.getUpdateState()).toMatchObject({ phase: 'unsupported', prompt: false });
+  });
+
+  /**
+   * THE bug this gate was rewritten for. scripts/postinstall.mjs renames the dev
+   * Electron binary to brand the Dock tile, and Electron derives app.isPackaged
+   * from that file NAME - so it was true under `pnpm dev:desktop`, the gate
+   * passed, the hourly timer armed, and every dev session logged
+   * "ENOENT: ... Electron.app/Contents/Resources/app-update.yml" twice.
+   * A dev run must arm nothing no matter how packaged the binary looks.
+   */
+  it('arms nothing in dev even when the binary has been renamed to look packaged', async () => {
+    devRun();
+    withoutUpdateConfig();
+    const service = await load();
+    service.startUpdateService();
+
+    expect(h.updater.handlers.size).toBe(0);
+    expect(h.updater.checkForUpdates).not.toHaveBeenCalled();
+    expect(service.getUpdateState().phase).toBe('unsupported');
+  });
+
+  // process.resourcesPath is undefined outside a packaged Electron app, which
+  // makes the path join throw. Startup must survive that and refuse to update,
+  // not take the main process down before the window opens.
+  it('refuses, rather than throwing, when there is no resources directory', async () => {
+    defineProcess('resourcesPath', undefined);
+    const service = await load();
+
+    expect(() => service.startUpdateService()).not.toThrow();
+    expect(h.updater.handlers.size).toBe(0);
+    expect(service.getUpdateState().phase).toBe('unsupported');
+  });
+
+  // A packaged build whose publish config never made it into the bundle would
+  // otherwise throw the same ENOENT at a real user every hour.
+  it('does nothing for a packaged build with no app-update.yml', async () => {
+    withoutUpdateConfig();
+    const service = await load();
+    service.startUpdateService();
+
     expect(h.updater.handlers.size).toBe(0);
     expect(service.getUpdateState()).toMatchObject({ phase: 'unsupported', prompt: false });
   });
@@ -732,7 +800,8 @@ describe('resilience', () => {
   // update rather than calling into electron-updater, which throws on the
   // missing app-update.yml.
   it('answers a manual check on an unsupported build without checking', async () => {
-    h.isPackaged = false;
+    devRun();
+    withoutUpdateConfig();
     const service = await load();
 
     const state = await service.checkForUpdates('manual');

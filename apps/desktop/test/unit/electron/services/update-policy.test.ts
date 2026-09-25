@@ -241,14 +241,43 @@ describe('shouldShowDialog', () => {
 });
 
 describe('getUpdateSupport', () => {
+  /** A packaged, updatable build: every signal pointing the supported way. */
+  const shipped = {
+    platform: 'darwin' as NodeJS.Platform,
+    isDefaultApp: false,
+    hasUpdateConfig: true,
+    isAppImage: false,
+  };
+
   // If dev builds tried to self-update, every `pnpm dev` run would throw on the
   // missing app-update.yml 30 seconds after launch.
-  it('refuses to update an unpackaged build on every platform', () => {
+  it('refuses to update a development run on every platform', () => {
     for (const platform of ['darwin', 'win32', 'linux'] as NodeJS.Platform[]) {
-      const support = getUpdateSupport({ platform, isPackaged: false, isAppImage: false });
+      const support = getUpdateSupport({ ...shipped, platform, isDefaultApp: true });
       expect(support).toMatchObject({ supported: false, reason: 'development' });
       expect(support.message).toBeTruthy();
     }
+  });
+
+  // THE regression this input replaced app.isPackaged for. scripts/postinstall.mjs
+  // renames the dev Electron binary to brand the Dock tile, and Electron derives
+  // app.isPackaged from that file NAME - so it reports true inside
+  // `pnpm dev:desktop`, the support gate passed, and every dev run logged
+  // "ENOENT: ... Electron.app/Contents/Resources/app-update.yml" twice.
+  // process.defaultApp is unaffected by the rename, so it must decide this.
+  it('still refuses when a renamed dev binary looks packaged', () => {
+    expect(
+      getUpdateSupport({ ...shipped, isDefaultApp: true, hasUpdateConfig: false }),
+    ).toMatchObject({ supported: false, reason: 'development' });
+  });
+
+  // The file electron-updater actually opens. Without this, a build that is
+  // packaged but published without update settings throws the same ENOENT at
+  // the user instead of saying it cannot update itself.
+  it('refuses a packaged build with no app-update.yml', () => {
+    const support = getUpdateSupport({ ...shipped, hasUpdateConfig: false });
+    expect(support).toMatchObject({ supported: false, reason: 'unconfigured' });
+    expect(support.message).toBeTruthy();
   });
 
   // THE one that protects users' machines: a .deb/.rpm install is owned by the
@@ -256,11 +285,11 @@ describe('getUpdateSupport', () => {
   // either fails confusingly or corrupts a system-managed install.
   it('refuses on a Linux distro package but allows an AppImage', () => {
     expect(
-      getUpdateSupport({ platform: 'linux', isPackaged: true, isAppImage: false }),
+      getUpdateSupport({ ...shipped, platform: 'linux', isAppImage: false }),
     ).toMatchObject({ supported: false, reason: 'linux-package' });
 
     expect(
-      getUpdateSupport({ platform: 'linux', isPackaged: true, isAppImage: true }),
+      getUpdateSupport({ ...shipped, platform: 'linux', isAppImage: true }),
     ).toMatchObject({ supported: true, reason: null });
   });
 
@@ -268,7 +297,7 @@ describe('getUpdateSupport', () => {
   // would silently lose it.
   it('allows a packaged macOS or Windows build', () => {
     for (const platform of ['darwin', 'win32'] as NodeJS.Platform[]) {
-      expect(getUpdateSupport({ platform, isPackaged: true, isAppImage: false })).toMatchObject({
+      expect(getUpdateSupport({ ...shipped, platform })).toMatchObject({
         supported: true,
         reason: null,
         message: '',

@@ -247,7 +247,7 @@ export const shouldPromptForUpdate = ({
 };
 
 /** Why this build cannot self-update, or null when it can. */
-export type UnsupportedReason = 'development' | 'linux-package';
+export type UnsupportedReason = 'development' | 'linux-package' | 'unconfigured';
 
 export interface UpdateSupport {
   supported: boolean;
@@ -264,8 +264,16 @@ const SUPPORTED: UpdateSupport = Object.freeze({ supported: true, reason: null, 
  * Three cases where it cannot, and all three must be detected rather than
  * discovered through a failed download:
  *
- *  - **Not packaged** (`pnpm dev`). There is no `app-update.yml` beside the
- *    binary, so electron-updater throws on the first check.
+ *  - **A development run** (`pnpm dev:desktop`). Detected through
+ *    `process.defaultApp`, which Electron sets when the binary was handed a
+ *    script to run, and deliberately NOT through `app.isPackaged`: Electron
+ *    derives that from the executable's FILE NAME, and `scripts/postinstall.mjs`
+ *    renames the dev binary to brand the Dock tile, so `app.isPackaged` is true
+ *    inside `pnpm dev:desktop` on this repo.
+ *  - **No update configuration.** electron-updater opens `app-update.yml` in
+ *    the resources directory on every check and throws ENOENT when it is
+ *    absent. That file is the decisive fact about whether a build can update
+ *    itself, so it is checked rather than inferred.
  *  - **A Linux distro package** (.deb / .rpm / .tar.gz). The files are owned by
  *    dpkg/rpm and root; electron-updater cannot and must not overwrite them.
  *    Only the AppImage is self-contained enough to swap itself out, and it
@@ -276,18 +284,32 @@ const SUPPORTED: UpdateSupport = Object.freeze({ supported: true, reason: null, 
  */
 export const getUpdateSupport = ({
   platform,
-  isPackaged,
+  isDefaultApp,
+  hasUpdateConfig,
   isAppImage,
 }: {
   platform: NodeJS.Platform;
-  isPackaged: boolean;
+  /** `process.defaultApp` - Electron running a script rather than an app. */
+  isDefaultApp: boolean;
+  /** Does `app-update.yml` exist in the build's resources directory? */
+  hasUpdateConfig: boolean;
   isAppImage: boolean;
 }): UpdateSupport => {
-  if (!isPackaged) {
+  if (isDefaultApp) {
     return {
       supported: false,
       reason: 'development',
       message: 'Automatic updates are disabled in a development build.',
+    };
+  }
+
+  if (!hasUpdateConfig) {
+    return {
+      supported: false,
+      reason: 'unconfigured',
+      message:
+        'This copy was built without update settings, so it cannot update ' +
+        'itself. Download the latest version from the website instead.',
     };
   }
 

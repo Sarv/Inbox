@@ -19,7 +19,7 @@
  * oversight — see docs/RELEASING.md.
  */
 
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 import { createLogger, isTimeoutError, withTimeout } from '@sarvinbox/core';
@@ -242,15 +242,40 @@ const wireEvents = (): void => {
 };
 
 /**
+ * The file electron-updater opens on every check.
+ *
+ * electron-builder writes `app-update.yml` into the packaged app's resources
+ * directory; electron-updater reads it from `process.resourcesPath` to learn
+ * where the feed is. Nothing else tells us as honestly whether this build can
+ * update itself, so the check asks the filesystem rather than trusting a flag.
+ */
+const hasUpdateConfig = (): boolean => {
+  try {
+    return existsSync(join(process.resourcesPath, 'app-update.yml'));
+  } catch {
+    // An unreadable resources directory is not an updatable build either.
+    return false;
+  }
+};
+
+/** Everything the pure support rules need, read from this process. */
+const currentUpdateSupport = () =>
+  getUpdateSupport({
+    platform: process.platform,
+    // NOT app.isPackaged: Electron derives that from the executable's file
+    // name, and scripts/postinstall.mjs renames the dev binary, so it reports
+    // true under `pnpm dev:desktop`. process.defaultApp survives the rename.
+    isDefaultApp: Boolean(process.defaultApp),
+    hasUpdateConfig: hasUpdateConfig(),
+    isAppImage: Boolean(process.env['APPIMAGE']),
+  });
+
+/**
  * Run one check. Safe to call at any time: it no-ops on an unsupported build
  * and coalesces with a check that is already running.
  */
 export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateState> => {
-  const support = getUpdateSupport({
-    platform: process.platform,
-    isPackaged: app.isPackaged,
-    isAppImage: Boolean(process.env['APPIMAGE']),
-  });
+  const support = currentUpdateSupport();
 
   currentTrigger = trigger;
   // A new check is a new question, so an earlier "Close" no longer applies.
@@ -427,11 +452,7 @@ export const dismissUpdateDialog = (): UpdateState => {
 export const startUpdateService = (): void => {
   prefs = loadPrefs();
 
-  const support = getUpdateSupport({
-    platform: process.platform,
-    isPackaged: app.isPackaged,
-    isAppImage: Boolean(process.env['APPIMAGE']),
-  });
+  const support = currentUpdateSupport();
 
   if (!support.supported) {
     logger.info('[Update] Background checks disabled:', support.message);
