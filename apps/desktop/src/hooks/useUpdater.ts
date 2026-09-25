@@ -46,6 +46,25 @@ export const useUpdater = () => {
     return result?.success ?? false;
   }, []);
 
+  const download = useCallback(async () => {
+    const result = await window.electronAPI?.updater?.download();
+    if (result?.success && result.data) setState(result.data);
+    return result?.success ?? false;
+  }, []);
+
+  /** The Settings toggle. Returns the state so the switch renders the truth. */
+  const setAutoUpdate = useCallback(async (enabled: boolean) => {
+    const result = await window.electronAPI?.updater?.setAutoUpdate(enabled);
+    if (result?.success && result.data) setState(result.data);
+    return result?.success ?? false;
+  }, []);
+
+  const check = useCallback(async () => {
+    const result = await window.electronAPI?.updater?.check();
+    if (result?.success && result.data) setState(result.data);
+    return result?.success ?? false;
+  }, []);
+
   const skip = useCallback(async () => {
     await window.electronAPI?.updater?.skip();
   }, []);
@@ -58,5 +77,5 @@ export const useUpdater = () => {
     await window.electronAPI?.updater?.dismiss();
   }, []);
 
-  return { state, install, skip, remindLater, dismiss };
+  return { state, check, install, download, setAutoUpdate, skip, remindLater, dismiss };
 };

@@ -7,9 +7,25 @@
  *
  * The split matters because the interesting bugs in an updater are all
  * *decisions*, not downloads: prompting for a version the user skipped,
- * re-prompting a minute after "remind me later", or nagging someone whose
+ * re-prompting a minute after "remind me later", downloading a hundred
+ * megabytes over someone's tether without asking, or nagging someone whose
  * package manager owns the app and for whom the button cannot work at all.
  * Those are cheap to test here and expensive to test through a real download.
+ *
+ * ## The two modes
+ *
+ * `prefs.autoUpdate` picks between the two shapes mature desktop apps use:
+ *
+ *  - **On** (the default, the Chrome/VS Code shape): check quietly, download
+ *    quietly, install during a quit the user was performing anyway. The user is
+ *    never interrupted; they simply end up on the new version.
+ *  - **Off** (the Signal/Slack "ask me" shape): check quietly, then ASK before
+ *    spending bandwidth. Nothing downloads until the user presses the button,
+ *    and nothing restarts until they press the other one.
+ *
+ * In both modes a finished download installs on the next ordinary quit, so
+ * "Later" is never a decision to stay out of date — only a decision about when
+ * to be interrupted.
  */
 
 /** How long "Remind me later" silences the prompt. */
@@ -25,6 +41,26 @@ export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
  */
 export const FIRST_CHECK_DELAY_MS = 30 * 1000;
 
+/**
+ * How long a single check may take before it is called a failure.
+ *
+ * There has to be a number here, and it has to be ours. electron-updater's
+ * transport (builder-util-runtime) defaults to a 60-SECOND socket timeout and
+ * retries server errors three times with a growing backoff, so an unbounded
+ * check can legitimately sit there for minutes — which is exactly what it did:
+ * "Checking for updates..." with no end and no log line.
+ *
+ * 20s is chosen against a measured worst case, not a guess. The GitHub feed is
+ * two requests: the releases atom feed, and `latest-mac.yml` from
+ * `release-assets.githubusercontent.com`. On a network that slow-paths that
+ * asset host the TCP connect alone was reproducibly ~14.8s (15.5s wall, three
+ * runs). So the budget must clear ~16s to avoid failing a check that would
+ * have succeeded, and must stay far enough under a minute that the dialog
+ * always answers. Below this, an honest "couldn't reach the server, the next
+ * check is in an hour" beats a spinner that never resolves.
+ */
+export const UPDATE_CHECK_TIMEOUT_MS = 20 * 1000;
+
 /** Who asked. A manual check always reports back, even to say "you're current". */
 export type UpdateTrigger = 'manual' | 'scheduled';
 
@@ -33,11 +69,11 @@ export type UpdatePhase =
   | 'idle'
   /** Asking the update feed whether a newer release exists. */
   | 'checking'
-  /** A newer release exists; the download has not finished. */
+  /** A newer release exists and nothing is being downloaded — waiting on the user. */
   | 'available'
-  /** Downloading the update in the background. `percent` is meaningful. */
+  /** Downloading the update. `percent` is meaningful. */
   | 'downloading'
-  /** Staged on disk. "Install and Relaunch" is instant from here. */
+  /** Staged on disk. "Restart now" is instant from here. */
   | 'downloaded'
   /** The check succeeded and this build is the newest. */
   | 'up-to-date'
@@ -55,6 +91,8 @@ export interface UpdateState {
   phase: UpdatePhase;
   /** The version being offered, when one is. */
   version: string | null;
+  /** The version running right now, so "you're up to date" can name it. */
+  currentVersion: string | null;
   /** Download progress 0-100. Only meaningful while `phase` is 'downloading'. */
   percent: number;
   /** Human-readable failure, set only when `phase` is 'error' or 'unsupported'. */
@@ -69,16 +107,23 @@ export interface UpdateState {
   prompt: boolean;
   /** What started the current cycle, so the UI can stay quiet for a scheduled one. */
   trigger: UpdateTrigger | null;
+  /**
+   * Mirror of `prefs.autoUpdate`, so the settings toggle renders from the same
+   * pushed state as the dialog instead of keeping a second copy that can drift.
+   */
+  autoUpdate: boolean;
 }
 
 export const INITIAL_UPDATE_STATE: UpdateState = {
   phase: 'idle',
   version: null,
+  currentVersion: null,
   percent: 0,
   error: null,
   checkedAt: null,
   prompt: false,
   trigger: null,
+  autoUpdate: true,
 };
 
 /** What the user has told us to stop doing, persisted across restarts. */
@@ -87,11 +132,22 @@ export interface UpdatePrefs {
   skippedVersion: string | null;
   /** Epoch ms before which no prompt may appear, or null. */
   remindAfter: number | null;
+  /**
+   * Download new versions in the background without asking.
+   *
+   * Defaults to ON: an out-of-date mail client is a security problem, and the
+   * overwhelming majority of users never open a settings pane to turn updates
+   * on. The toggle exists for the people who need to control when a hundred
+   * megabytes moves — metered connections, locked-down machines — and for them
+   * OFF must mean genuinely nothing is fetched until they press the button.
+   */
+  autoUpdate: boolean;
 }
 
 export const DEFAULT_UPDATE_PREFS: UpdatePrefs = Object.freeze({
   skippedVersion: null,
   remindAfter: null,
+  autoUpdate: true,
 });
 
 /**
@@ -99,6 +155,11 @@ export const DEFAULT_UPDATE_PREFS: UpdatePrefs = Object.freeze({
  * truncated or hand-edited file degrades to "no preferences" rather than
  * throwing, because a parse error here must never be able to stop the app from
  * updating — or, worse, from starting.
+ *
+ * Note which way `autoUpdate` falls when the field is missing or the wrong
+ * type: ON. A prefs file written by an older build has no such key, and those
+ * users were already on automatic updates — reading the absence as "off" would
+ * silently strand every existing install on the version it happens to have.
  */
 export const parseUpdatePrefs = (raw: unknown): UpdatePrefs => {
   if (typeof raw !== 'object' || raw === null) return { ...DEFAULT_UPDATE_PREFS };
@@ -115,7 +176,10 @@ export const parseUpdatePrefs = (raw: unknown): UpdatePrefs => {
       ? remindAfterValue
       : null;
 
-  return { skippedVersion, remindAfter };
+  const autoUpdate =
+    typeof record['autoUpdate'] === 'boolean' ? record['autoUpdate'] : DEFAULT_UPDATE_PREFS.autoUpdate;
+
+  return { skippedVersion, remindAfter, autoUpdate };
 };
 
 /**
@@ -137,6 +201,21 @@ export const remindLater = (
   now: number,
   delayMs: number = REMIND_LATER_MS,
 ): UpdatePrefs => ({ ...prefs, remindAfter: now + delayMs });
+
+/** Record the automatic-updates toggle. */
+export const setAutoUpdate = (prefs: UpdatePrefs, enabled: boolean): UpdatePrefs => ({
+  ...prefs,
+  autoUpdate: enabled,
+});
+
+/**
+ * May electron-updater start fetching the moment it finds a release?
+ *
+ * This is the whole of what the toggle buys: with it off the check still runs
+ * (knowing a version exists costs one small request) but not a byte of the
+ * package moves until the user asks.
+ */
+export const shouldAutoDownload = (prefs: UpdatePrefs): boolean => prefs.autoUpdate;
 
 /**
  * Should the dialog appear for `version`?
@@ -228,21 +307,26 @@ export const getUpdateSupport = ({
 /**
  * Should the renderer show the update dialog right now?
  *
- * The two triggers deserve different answers, which is the whole reason this is
- * a function rather than `phase === 'downloaded'`:
+ * Four rules, in the order they are applied, because each exists to stop a
+ * specific way of annoying someone:
  *
- *  - **Manual** ("Check for Updates"): always show something. The user pressed a
- *    button, so "Downloading 42%", "You're up to date" and "Check failed" are
- *    all useful answers, and silence would read as a broken menu item.
- *  - **Scheduled** (hourly): only interrupt once the update is fully downloaded,
- *    so the primary button installs instantly instead of appearing and then
- *    making the user wait on a progress bar they did not ask for. And only then
- *    if the user has not skipped this version or asked to be reminded later.
- *
- * `dismissed` wins over both, and exists because this function is re-run on
- * EVERY state change: without it, "Close" on a manual check computed `true`
- * again a moment later ("manual, and the phase isn't idle") and the dialog
- * reopened itself — a Close button that could never close.
+ *  1. **`dismissed` wins over everything.** This function is re-run on EVERY
+ *     state change: without it, "Close" on a manual check computed `true` again
+ *     a moment later ("manual, and the phase isn't idle") and the dialog
+ *     reopened itself — a Close button that could never close.
+ *  2. **Manual: always show something.** The user pressed a button, so
+ *     "Downloading 42%", "You're on the latest version" and "Check failed" are
+ *     all useful answers, and silence would read as a broken menu item.
+ *  3. **A download the user asked for reports back.** Once they press
+ *     "Download and install" they are owed the "ready to install" prompt, even
+ *     though the cycle that found the update was a background one, and even
+ *     though they may have hidden the progress in the meantime.
+ *  4. **Otherwise, a background cycle interrupts only when there is a decision
+ *     to make.** With automatic updates ON there is none — the download and the
+ *     install both happen without the user, so the dialog never opens. With
+ *     them OFF the app cannot proceed without an answer, so it asks once the
+ *     update is found (and again when a requested download is staged), subject
+ *     to the user's earlier "skip" and "later".
  */
 export const shouldShowDialog = ({
   phase,
@@ -251,6 +335,7 @@ export const shouldShowDialog = ({
   prefs,
   now,
   dismissed = false,
+  downloadRequested = false,
 }: {
   phase: UpdatePhase;
   trigger: UpdateTrigger;
@@ -259,10 +344,17 @@ export const shouldShowDialog = ({
   now: number;
   /** The user closed the dialog for the current check; keep it closed. */
   dismissed?: boolean;
+  /** The user pressed "Download and install" during this cycle. */
+  downloadRequested?: boolean;
 }): boolean => {
   if (dismissed) return false;
   if (trigger === 'manual') return phase !== 'idle';
-  if (phase !== 'downloaded' || version === null) return false;
+  if (downloadRequested && (phase === 'downloading' || phase === 'downloaded' || phase === 'error')) {
+    return true;
+  }
+  if (prefs.autoUpdate) return false;
+  if (phase !== 'available' && phase !== 'downloaded') return false;
+  if (version === null) return false;
   return shouldPromptForUpdate({ version, prefs, now, trigger });
 };
 
@@ -270,10 +362,12 @@ export const shouldShowDialog = ({
  * May a downloaded update install ITSELF the next time the app quits, with no
  * button pressed and nothing for the user to do?
  *
- * This is what makes updates automatic in the Chrome sense: the download
- * happens in the background, and the swap happens during a quit the user was
- * performing anyway, so the next launch is simply the new version. The dialog's
- * "Install and Relaunch" only exists to do that sooner.
+ * This is what makes "Later" safe to press. The bytes are already on disk, so
+ * the swap costs nothing and happens during a quit the user was performing
+ * anyway — the next launch is simply the new version. It applies in BOTH modes:
+ * turning automatic updates off means "ask before downloading", not "make me
+ * sit through an installer", and a user who has already agreed to the download
+ * has agreed to the update.
  *
  * The single exception is an explicit "Skip this version". Silently installing
  * a version the user just declined would make that button a lie, so a skip

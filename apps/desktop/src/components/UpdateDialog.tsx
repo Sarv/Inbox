@@ -2,27 +2,42 @@ import { useEffect, useState } from 'react';
 
 import { useUpdater } from '../hooks/useUpdater';
 
+import { describeUpdateDialog, type UpdateDialogAction } from './update-dialog-view';
+
+/** How long a check may run before the dialog admits it is slow. */
+const SLOW_CHECK_MS = 6000;
+
 /**
  * The auto-update dialog.
  *
- * Shown in two situations, both decided by the MAIN process (see
+ * Shown in three situations, all decided by the MAIN process (see
  * `update-policy.ts`), never here:
  *
- *  - the hourly background check found a release and finished downloading it,
- *    and the user has not skipped that version or asked to be reminded later;
  *  - the user chose "Check for Updates..." from the menu, in which case every
- *    outcome is reported — including "you're up to date" and a failed check.
+ *    outcome is reported — including "you're on the latest version" and a
+ *    failed check;
+ *  - automatic updates are OFF and a background check found a release, in which
+ *    case the dialog asks before a byte is downloaded;
+ *  - a download the user started has finished, in which case it offers the
+ *    restart.
  *
- * Updates install automatically on the next quit regardless of what is pressed
- * here (unless "Skip this version" is), so the copy is careful to frame the
- * primary button as *sooner*, not as *the only way*.
+ * With automatic updates ON (the default) a background cycle never opens this
+ * at all: the download and the install both happen without the user, and the
+ * new version is simply what launches next time.
+ *
+ * What this file must NOT do is decide any of that. The renderer can be
+ * reloaded, remounted or reopened at any moment, and every one of those has to
+ * show the same answer — which is only true while the main process is the sole
+ * owner of the state.
  */
 export function UpdateDialog() {
-  const { state, install, skip, remindLater, dismiss } = useUpdater();
+  const { state, install, download, setAutoUpdate, skip, remindLater, dismiss } = useUpdater();
   const [installing, setInstalling] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [slowCheck, setSlowCheck] = useState(false);
 
   const open = state?.prompt === true;
+  const phase = state?.phase;
 
   // Escape dismisses without recording an answer, matching ConfirmDialog. The
   // listener is only attached while the dialog is open so it cannot swallow
@@ -39,56 +54,75 @@ export function UpdateDialog() {
     return () => document.removeEventListener('keydown', onKey, true);
   }, [open, dismiss]);
 
+  // A check that runs long is the thing that made updates feel broken: the
+  // dialog sat on "Contacting the update server" with nothing to say. It is
+  // bounded in the main process now, and after a few seconds it says so.
+  useEffect(() => {
+    if (phase !== 'checking') {
+      setSlowCheck(false);
+      return;
+    }
+    const timer = setTimeout(() => setSlowCheck(true), SLOW_CHECK_MS);
+    return () => clearTimeout(timer);
+  }, [phase]);
+
   if (!state || !open) return null;
 
-  const version = state.version ? `Sarv Inbox ${state.version}` : 'A new version';
+  const view = describeUpdateDialog(state, { slowCheck });
 
-  const onInstall = async () => {
-    setInstalling(true);
-    setInstallError(null);
-    const started = await install();
-    if (!started) {
-      // The only way here is a race: the staged update went away between the
-      // button rendering and the press. Re-enable rather than hanging on a
-      // spinner that will never resolve.
-      setInstalling(false);
-      setInstallError('That update is no longer ready. Try checking again.');
+  const run = async (action: UpdateDialogAction) => {
+    setActionError(null);
+    switch (action) {
+      case 'install': {
+        setInstalling(true);
+        const started = await install();
+        if (!started) {
+          // The only way here is a race: the staged update went away between
+          // the button rendering and the press. Re-enable rather than hanging
+          // on a spinner that will never resolve.
+          setInstalling(false);
+          setActionError('That update is no longer ready. Try checking again.');
+        }
+        return;
+      }
+      case 'download': {
+        const started = await download();
+        if (!started) setActionError('That update is no longer available. Try checking again.');
+        return;
+      }
+      case 'skip':
+        await skip();
+        return;
+      case 'later':
+        await remindLater();
+        return;
+      default:
+        await dismiss();
     }
   };
 
-  /** Title, body and which buttons make sense, per phase. */
-  const content = (() => {
-    switch (state.phase) {
-      case 'checking':
-        return { title: 'Checking for updates...', body: 'Contacting the update server.' };
-      case 'downloading':
-        return {
-          title: `${version} is available`,
-          body: 'Downloading it now. It will install automatically the next time you quit.',
-        };
-      case 'downloaded':
-        return {
-          title: `${version} is ready`,
-          body: 'It will install automatically the next time you quit, or you can install it now.',
-        };
-      case 'up-to-date':
-        return { title: "You're up to date", body: 'You already have the newest version.' };
-      case 'unsupported':
-        return { title: 'Updates are managed elsewhere', body: state.error ?? '' };
-      case 'error':
-        return {
-          title: "Couldn't check for updates",
-          body: `${state.error ?? 'The update server could not be reached.'}\n\nThis usually means no connection. The next automatic check is in an hour.`,
-        };
-      default:
-        return { title: 'Updates', body: '' };
-    }
-  })();
+  /**
+   * The automatic-updates checkbox.
+   *
+   * Kept out of `run` because it is not one of the dialog's ANSWERS: it changes
+   * a standing preference and never closes the dialog. At phase 'available'
+   * ticking it also starts this download — the main process does that, and the
+   * pushed state moves the dialog to 'downloading' on its own.
+   */
+  const toggleAutoUpdate = async (enabled: boolean) => {
+    setActionError(null);
+    const saved = await setAutoUpdate(enabled);
+    // The checkbox renders from the main process's state, so a failed write
+    // leaves it visibly unchanged — say why rather than letting it look stuck.
+    if (!saved) setActionError('That preference could not be saved.');
+  };
 
-  // Only a staged update can be acted on; everything else is informational.
-  const canInstall = state.phase === 'downloaded';
-  // The skip/later pair is only meaningful while an update is actually pending.
-  const canDefer = state.phase === 'downloaded' || state.phase === 'downloading';
+  const buttonClass = (kind: 'primary' | 'neutral' | 'quiet') =>
+    kind === 'primary'
+      ? 'px-3 py-1.5 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50'
+      : kind === 'neutral'
+        ? 'px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted/50 transition-colors disabled:opacity-50'
+        : 'px-3 py-1.5 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted/50 transition-colors disabled:opacity-50';
 
   // z-250: above the app's own overlays, below the z-300 confirmation dialog,
   // which is always raised BY something and must stay on top of it.
@@ -105,11 +139,11 @@ export function UpdateDialog() {
         onClick={(event) => event.stopPropagation()}
       >
         <h3 id="update-dialog-title" className="text-base font-semibold mb-2">
-          {content.title}
+          {view.title}
         </h3>
-        <p className="text-sm text-muted-foreground whitespace-pre-line">{content.body}</p>
+        <p className="text-sm text-muted-foreground whitespace-pre-line">{view.body}</p>
 
-        {state.phase === 'downloading' && (
+        {view.showProgress && (
           <div className="mt-4">
             <div
               className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
@@ -128,38 +162,58 @@ export function UpdateDialog() {
           </div>
         )}
 
-        {installError && <p className="mt-3 text-sm text-destructive">{installError}</p>}
+        {view.autoUpdateToggle && (
+          <label className="mt-4 flex items-start gap-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={view.autoUpdateToggle.checked}
+              disabled={installing}
+              onChange={(event) => void toggleAutoUpdate(event.target.checked)}
+              className="w-4 h-4 mt-0.5"
+            />
+            <span>
+              <span className="text-sm">{view.autoUpdateToggle.label}</span>
+              <span className="block text-xs text-muted-foreground">
+                {view.autoUpdateToggle.hint}
+              </span>
+            </span>
+          </label>
+        )}
+
+        {actionError && <p className="mt-3 text-sm text-destructive">{actionError}</p>}
 
         <div className="mt-5 flex items-center justify-between gap-2">
           <div>
-            {canDefer && (
+            {view.tertiary && (
               <button
-                onClick={() => void skip()}
+                onClick={() => void run(view.tertiary!.action)}
                 disabled={installing}
-                className="px-3 py-1.5 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted/50 transition-colors disabled:opacity-50"
+                className={buttonClass('quiet')}
               >
-                Skip this version
+                {view.tertiary.label}
               </button>
             )}
           </div>
 
           <div className="flex gap-2">
             <button
-              onClick={() => void (canDefer ? remindLater() : dismiss())}
+              onClick={() => void run(view.secondary.action)}
               disabled={installing}
-              className="px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted/50 transition-colors disabled:opacity-50"
+              className={buttonClass('neutral')}
             >
-              {canDefer ? 'Remind me later' : 'Close'}
+              {view.secondary.label}
             </button>
 
-            {canInstall && (
+            {view.primary && (
               <button
-                onClick={() => void onInstall()}
+                onClick={() => void run(view.primary!.action)}
                 disabled={installing}
                 autoFocus
-                className="px-3 py-1.5 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                className={buttonClass('primary')}
               >
-                {installing ? 'Installing...' : 'Install and Relaunch'}
+                {installing && view.primary.action === 'install'
+                  ? 'Restarting…'
+                  : view.primary.label}
               </button>
             )}
           </div>

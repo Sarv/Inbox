@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updater: {
     getState: () => ipcRenderer.invoke('updater:state'),
     check: () => ipcRenderer.invoke('updater:check'),
+    download: () => ipcRenderer.invoke('updater:download'),
+    setAutoUpdate: (enabled: boolean) => ipcRenderer.invoke('updater:setAutoUpdate', enabled),
     install: () => ipcRenderer.invoke('updater:install'),
     skip: () => ipcRenderer.invoke('updater:skip'),
     remindLater: () => ipcRenderer.invoke('updater:remindLater'),
@@ -1037,6 +1039,12 @@ export interface ElectronAPI {
     getState: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
     /** Manual check. Always resolves with a state worth showing the user. */
     check: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    /** Start fetching an available update. Fails if none is waiting. */
+    download: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    /** Toggle background downloading. Returns the state the toggle should render. */
+    setAutoUpdate: (
+      enabled: boolean,
+    ) => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
     /** Quit, install the staged update and relaunch. Fails if none is staged. */
     install: () => Promise<{ success: boolean; error?: string }>;
     skip: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
