@@ -12,8 +12,24 @@ describe('resolveAppIconPath', () => {
   // Breaks: the dock/taskbar falls back to the stock Electron atom in dev. The
   // main-process bundle runs from dist-electron/, so the icon sits one level up
   // in public/ — not beside __dirname.
-  it('points at public/icon.png in dev', () => {
-    expect(resolveAppIconPath('/app/dist-electron', true)).toBe(join('/app', 'public', 'icon.png'));
+  //
+  // CHANGED: dev resolves icon-dev.png, not icon.png. A dev and a release
+  // window used to be two identical white squircles in the Dock, which is how
+  // a change gets verified against the wrong instance — and the two run on
+  // SEPARATE userData dirs ('Sarv Inbox Dev'), so confusing them is not cosmetic.
+  it('points at the blueprint dev icon in public/ in dev', () => {
+    expect(resolveAppIconPath('/app/dist-electron', true)).toBe(
+      join('/app', 'public', 'icon-dev.png')
+    );
+  });
+
+  // Breaks: the release build ships wearing the dev blueprint icon, or dev
+  // wears the release one — either way the Dock stops telling them apart.
+  it('never serves the same file to dev and to a packaged build', () => {
+    expect(resolveAppIconPath('/app/dist-electron', true)).not.toBe(
+      resolveAppIconPath('/app/dist-electron', false)
+    );
+    expect(resolveAppIconPath('/app/dist-electron', false)).not.toContain('icon-dev');
   });
 
   // Breaks: the packaged app shows no dock icon. Vite copies public/ into dist/,
@@ -38,7 +54,37 @@ describe('branded icon assets', () => {
   // try/catch) and the app quietly keeps the Electron atom. The dev path is the
   // one resolveAppIconPath() returns for isDev, so assert the real file.
   it('ships the PNG the dock resolves in dev', () => {
+    expect(existsSync(join(DESKTOP_ROOT, 'public', 'icon-dev.png'))).toBe(true);
+  });
+
+  // Breaks: the packaged build has no icon. Vite copies public/ into dist/, and
+  // dist/icon.png is what resolveAppIconPath returns in production.
+  it('ships the PNG the dock resolves once packaged', () => {
     expect(existsSync(join(DESKTOP_ROOT, 'public', 'icon.png'))).toBe(true);
+  });
+
+  // Breaks: ~200KB of dev-only artwork rides along in every release. Vite
+  // copies public/ verbatim into dist/ and `build.files` packages dist/**, so
+  // the blueprint icon ships inside the app bundle unless it is excluded by
+  // name — and the release build never has any use for it.
+  it('keeps the dev icon out of the packaged build', () => {
+    const pkg = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'package.json'), 'utf8'));
+    expect(pkg.build.files).toContain('!dist/icon-dev.png');
+  });
+
+  // Breaks: the dev icon can no longer be regenerated from the mark — someone
+  // edits public/icon.svg and the dev icon silently keeps the old artwork,
+  // with no script left to say how it was made.
+  it('keeps the dev icon regenerable from the mark it is built on', () => {
+    const generator = join(DESKTOP_ROOT, 'scripts', 'gen-dev-icon.mjs');
+    expect(existsSync(generator)).toBe(true);
+
+    const source = readFileSync(generator, 'utf8');
+    expect(source).toContain("'icon.svg'");
+    expect(source).toContain("'icon-dev.png'");
+
+    const pkg = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'package.json'), 'utf8'));
+    expect(pkg.scripts['gen:dev-icon']).toContain('scripts/gen-dev-icon.mjs');
   });
 
   // Breaks: the square mark used as the favicon, and as the medallion in front
