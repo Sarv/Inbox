@@ -15,6 +15,7 @@
     "dev": "node ../../scripts/native-abi.mjs electron && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
     "build": "tsc && vite build && node scripts/prefetch-default-extensions.mjs && electron-builder",
     "prefetch:extensions": "node scripts/prefetch-default-extensions.mjs",
+    "gen:dev-icon": "electron scripts/gen-dev-icon.mjs",
     "build:electron": "electron-builder",
     "preview": "vite preview",
     "type-check": "tsc --noEmit",
@@ -117,6 +118,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "!dist/icon-dev.png",
       "!**/build/Release/obj/**",
       "!**/build/Release/obj.target/**",
       "!**/build/Release/.deps/**",
@@ -124,7 +126,7 @@
     ],
     "asarUnpack": [
       "**/*.node",
-      "dist-electron/db-compact.worker.js"
+      "dist-electron/*.worker.js"
     ],
     "extraResources": [
       {

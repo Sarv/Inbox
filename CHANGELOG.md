@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Extensions now run in the installed app.** Every extension reported
+  "Extension sandbox is not running" and none of them did anything: the process
+  extensions run in was packed inside the app archive, where it cannot be
+  started, so it died the instant it was asked to. Development builds were
+  unaffected, which is why it reached a release.
+
 ## [1.2.1] - 2026-09-24
 
 ### Added
