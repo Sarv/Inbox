@@ -114,9 +114,11 @@ describe('fresh install reaches the current production schema', () => {
   // A fresh DB that stops short of the newest version means the app queries
   // columns/tables that do not exist yet — every sync throws "no such column".
   it('ends on the newest registered version and records every applied version', () => {
-    expect(CURRENT_VERSION).toBe(89);
+    // CHANGED: 89 -> 90 with the v88 repair migration (two branches both
+    // shipped a version 88; see email_spam_verdict_columns_repair).
+    expect(CURRENT_VERSION).toBe(90);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..89 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..90 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 

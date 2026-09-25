@@ -3232,6 +3232,45 @@ export const headerStageBacklogIndexes: Migration = {
 };
 
 /**
+ * v90 — re-run v88 on the databases that silently skipped it.
+ *
+ * Two branches landed a migration numbered 88 on the same day: this ladder's
+ * `email_spam_verdict_columns`, and the header-stage backlog indexes above,
+ * which was renumbered to 89 once the collision was spotted. Any database the
+ * app opened while the header-stage step still called itself 88 recorded 88 in
+ * `schema_version` for it — and `migrate()` runs only versions ABOVE the
+ * recorded maximum, so v88's own work never ran there and never would.
+ *
+ * What that left behind is not cosmetic: `spam_user_verdict` and
+ * `idx_emails_link_reputation_pending` were missing, so every reputation pass
+ * failed at the SQL layer and judged nothing — the body stage, the user's own
+ * spam/ham verdict and the Spam tab were all dead on those mailboxes, with
+ * only a `[Reputation] … no such column: e.spam_user_verdict` warning to say
+ * so.
+ *
+ * The repair re-runs v88's `up`, which is idempotent (it adds each column only
+ * when absent and creates the index `IF NOT EXISTS`), so a database that DID
+ * apply v88 gets a no-op.
+ *
+ * The lesson generalises: a version number is a claim about the WHOLE ladder,
+ * not about one branch. Renumbering repairs the source; only a NEW version
+ * repairs the databases that already recorded the old one.
+ */
+export const emailSpamVerdictColumnsRepair: Migration = {
+  version: 90,
+  name: 'email_spam_verdict_columns_repair',
+  up: (db, context) => {
+    emailSpamVerdictColumns.up(db, context);
+  },
+  // Deliberately empty, not absent. The columns and index belong to v88 and
+  // are dropped by ITS down — undoing them here would strip a schema v88 still
+  // claims to have. It exists because `rollback()` refuses the whole ladder
+  // when any step in range has no `down` at all, so an absent one would block
+  // rolling back past 90 to anywhere.
+  down: () => {},
+};
+
+/**
  * v84 — re-key the search index by rowid so maintaining it stops scanning it.
  *
  * `emails_fts.email_id` is UNINDEXED and fts5 has no secondary indexes, so every
@@ -3470,5 +3509,6 @@ export function createMigrationManager(
   manager.register(emailReputationColumns);
   manager.register(emailSpamVerdictColumns);
   manager.register(headerStageBacklogIndexes);
+  manager.register(emailSpamVerdictColumnsRepair);
   return manager;
 }
