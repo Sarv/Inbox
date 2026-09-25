@@ -16,8 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message row as you go. Cmd/Ctrl +, - and 0 now change the same text size and
   remember it, instead of a zoom that was lost on the next launch. Nothing
   changes until you change it: the defaults are exactly today's appearance.
+- **AI is ready the moment you sign in.** Signing in to Sarv now registers the
+  recommended model for you, so the AI features work straight away instead of
+  showing "AI is inactive" until you opened Settings and picked a provider by
+  hand.
 
 ### Fixed
+- **Connections that timed out on networks without working IPv6.** Node gives a
+  host's first address only 250ms to answer before it gives up on it, so on a
+  network that advertises IPv6 without it actually working, an ordinary 300ms
+  handshake came back as a connection timeout: Gmail accounts quietly stopped
+  refreshing their sign-in and mail stopped arriving, while the same address
+  loaded fine in a browser. Every connection the app makes now gets a fair two
+  seconds on its first address.
+- **Sender and link reputation on accounts carried over from an earlier build.**
+  Two changes each shipped a database step numbered 88, so whichever one arrived
+  second was recorded as done without ever running. The columns holding a
+  message's spam verdict were missing on those accounts and every check against
+  them failed silently. They are repaired on the next launch.
 - **Extensions now run in the installed app.** Every extension reported
   "Extension sandbox is not running" and none of them did anything: the process
   extensions run in was packed inside the app archive, where it cannot be
