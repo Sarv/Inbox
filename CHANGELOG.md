@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The Linux app refused to start on Ubuntu 22.04, Debian 12 and other
+  long-term releases.** 1.2.2's Linux builds were compiled against a newer
+  system C library than those distributions ship, so the database module could
+  not load and the app stopped at "Sarv Inbox cannot open its databases"
+  (`version 'GLIBC_2.38' not found`). Nothing was lost — the app refuses to
+  start rather than open with an empty mailbox — and Linux builds are now
+  compiled against the oldest supported distribution, which every newer one
+  accepts.
 - **No more screens of blank space in the chat view.** A table pasted from
   Google Sheets shrank to one pixel wide and pushed the rest of the message a
   page or more down; it now shows as the table it is. Column widths, merged
