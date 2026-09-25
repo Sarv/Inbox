@@ -72,25 +72,28 @@ export function isOrphanedFromLauncher(launcherPid: number, currentPpid: number)
 }
 
 /**
- * Distinctive main-process title, set on the dev main process via `process.title`
- * so it can be found by NAME in the OS process table. We match on this instead of
- * tracking a pid file because:
- * - it survives a missing/stale pid file (an orphan that never recorded its pid is
- *   still found),
- * - it carries NO pid-reuse risk — an unrelated process can't accidentally own our
- *   app-specific title the way it can inherit a recycled pid number.
+ * Distinctive main-process title for the DEV build, set via `process.title` on the
+ * platforms where that is private bookkeeping. It is a diagnostic aid (it names the
+ * dev main in `ps`/`top` among a repo full of node processes) and one of the
+ * identity markers a reclaim verifies against — it is NOT how a previous dev
+ * instance is FOUND any more. That is the pid file the dev main records under
+ * userData (see `startDevInstanceRecord` / `readDevInstancePid` in single-child.ts).
  *
- * Only the MAIN process is tagged; Electron's helper processes (GPU/renderer/
- * utility) keep the generic app name, so a title match never sweeps them in — and
- * killing the main takes its helpers down with it anyway.
+ * Sweeping the process table for this needle was the earlier design. A recorded pid
+ * beats it on three counts: it is exact (one pid, never a pattern matched against
+ * every command line on the machine), it works on Windows (where `process.title`
+ * never reaches the task list at all), and it frees macOS from having to carry a
+ * technical title — which AppKit was drawing in the dev menu bar in place of
+ * "Sarv Inbox Dev".
  */
 export const DEV_MAIN_PROCESS_TITLE = 'sarvinbox-dev-main';
 
 /**
  * PROD counterpart of {@link DEV_MAIN_PROCESS_TITLE}. The packaged main process is
- * tagged with this so a wedged prod primary can be found and reclaimed by name —
- * the same name-based mechanism the user asked for, applied uniformly to both
- * builds (prod layers it UNDER the OS single-instance lock as a recovery path).
+ * tagged with this so that a wedged prod primary — located by the pid in its
+ * heartbeat file, under the OS single-instance lock — can be positively identified
+ * as ours before it is reclaimed. Same role as in dev: a marker to verify against,
+ * never the way the process is found.
  */
 export const MAIN_PROCESS_TITLE = 'sarvinbox-main';
 
@@ -102,38 +105,29 @@ export function mainProcessTitle(isDev: boolean): string {
 /**
  * Should this process be tagged with {@link mainProcessTitle} at all?
  *
- * Everywhere except a PACKAGED macOS build, yes. On macOS `process.title` is not
- * the private bookkeeping it is elsewhere: libuv's darwin implementation also
- * hands the string to LaunchServices as the app's display name, and AppKit draws
- * the first menu from that -- ignoring the label the menu template asks for. So
- * tagging the packaged app renamed it to "sarvinbox-main" in the menu bar, next
- * to a window titled "Sarv Inbox".
+ * Everywhere except macOS, yes. On macOS `process.title` is not the private
+ * bookkeeping it is elsewhere: libuv's darwin implementation also hands the string
+ * to LaunchServices as the app's display name, and AppKit draws the first menu from
+ * that -- ignoring the label the menu template asks for. So tagging renames the app
+ * inside its own menu bar: "sarvinbox-main" next to a window titled "Sarv Inbox",
+ * and "sarvinbox-dev-main" where the user expects "Sarv Inbox Dev".
  *
- * Nothing is lost by skipping it there. The packaged macOS main process runs as
- * `.../Sarv Inbox.app/Contents/MacOS/Sarv Inbox`, and defaultHeartbeatDeps
- * already accepts the product name as proof of identity alongside the title --
- * which is why build.executableName is scoped to linux, so that path really does
- * carry the product name rather than "sarv-inbox".
- *
- * DEV on macOS keeps the title: it runs a shared Electron binary whose helper
- * processes carry the same product name, so the title is the ONLY marker that
- * picks out the main process without sweeping helpers in with it. A dev build
- * showing a technical name in its menu bar is a fair price for that.
+ * Nothing is lost by skipping it there, in EITHER build, because no reclaim needs
+ * the title to FIND a process any more:
+ * - dev finds the previous instance by the pid it recorded under userData,
+ * - prod finds a wedged holder by the pid in its heartbeat file,
+ * and both then verify identity against a marker macOS does carry (the packaged app
+ * runs as `.../Sarv Inbox.app/Contents/MacOS/Sarv Inbox`; the dev main runs the
+ * repo's own Electron binary). The title stays on Linux/Windows, where it costs
+ * nothing in the UI and still names the process for a human reading `ps`.
  */
-export function shouldTagMainProcess({
-  platform,
-  isDev,
-}: {
-  platform: string;
-  isDev: boolean;
-}): boolean {
-  return isDev || platform !== 'darwin';
+export function shouldTagMainProcess({ platform }: { platform: string }): boolean {
+  return platform !== 'darwin';
 }
 
 /**
- * DEV-ONLY reclaim selection: given every pid currently carrying our main-process
- * title, which ones should this freshly-launched instance FORCE-KILL before it
- * starts?
+ * Reclaim selection: of the pids a reclaim is considering, which ones may this
+ * freshly-launched instance FORCE-KILL?
  *
  * The reclaim (kill-old-then-take-over) is what guarantees a single dev child even
  * when a previous one is WEDGED (a beachballed main thread ignores both its own
@@ -141,9 +135,11 @@ export function shouldTagMainProcess({
  * we open the DB or any IMAP connection, so the new run never contends with, or
  * stacks Gmail connections on top of, the old one.
  *
- * The only safety rule needed is: never signal OURSELVES (we carry the same title),
- * and ignore any malformed pid. Identity is already guaranteed by the title match,
- * so — unlike a bare pid number — there is nothing else to verify.
+ * This is the last and cheapest guard only: never signal OURSELVES, and ignore any
+ * malformed pid. Proving a pid really is our app is a separate, costlier check the
+ * caller makes first — see {@link shouldReclaimRecordedDevPid}, which layers it on
+ * top of this filter, because a pid read back from a file (unlike a live title
+ * match) can have been recycled by an unrelated process.
  *
  * Pure so the selection is unit-testable without listing or signalling a process.
  */
@@ -151,6 +147,35 @@ export function selectReclaimablePids(candidatePids: number[], ourPid: number): 
   return candidatePids.filter(
     (pid) => Number.isInteger(pid) && pid > 0 && pid !== ourPid,
   );
+}
+
+/**
+ * DEV-ONLY: may the pid recorded by the PREVIOUS dev run be force-killed?
+ *
+ * Reading a pid from a file buys precision (exactly one target, no process-table
+ * sweep, and it works on Windows) at the cost of the one thing a live title match
+ * gave for free: a pid is a NUMBER, and numbers get recycled. A dev main that was
+ * SIGKILLed leaves its file behind, and by the next launch that pid may belong to
+ * someone else's shell, editor or test runner. So all of these are required:
+ * - the record exists and is a well-formed pid that isn't ours (delegated to
+ *   {@link selectReclaimablePids}),
+ * - that pid is still alive (a record left by a process that has since exited is
+ *   the ordinary case — there is simply nothing to reclaim),
+ * - and the live process is verifiably OUR app (command line / image-name check).
+ * Any doubt leaves it alone: failing to reclaim costs a duplicate dev instance,
+ * killing the wrong pid costs someone else their work.
+ *
+ * Pure so every guard is unit-testable without a pid file, a probe, or a kill.
+ */
+export function shouldReclaimRecordedDevPid(state: {
+  recordedPid: number | null;
+  ourPid: number;
+  pidAlive: boolean;
+  pidIsOurApp: boolean;
+}): boolean {
+  if (state.recordedPid === null) return false;
+  if (selectReclaimablePids([state.recordedPid], state.ourPid).length === 0) return false;
+  return state.pidAlive && state.pidIsOurApp;
 }
 
 /**

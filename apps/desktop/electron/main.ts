@@ -86,6 +86,7 @@ import {
   evaluateLockContention,
   reclaimPids,
   reclaimSingleDevInstance,
+  startDevInstanceRecord,
   startHeartbeat,
   tagMainProcess,
 } from './services/single-child';
@@ -142,15 +143,15 @@ import { classifyNavigation, type NavigationScope } from './utils/navigation-pol
 // `electron .` run working too.
 const isDev = !!process.env['VITE_DEV_SERVER_URL'] || !app.isPackaged;
 
-// Tag THIS main process with a distinctive title (build-specific) so the NEXT
-// launch can find and reclaim it by name (see single-child.ts). Must run before any
-// reclaim so a prior run is already tagged when we look. Both builds: dev sweeps by
-// title for orphans; prod reclaims a wedged holder found via its heartbeat, and the
-// title is how prod verifies that pid is really ours before killing it.
+// Tag THIS main process with a distinctive title (build-specific). A reclaim FINDS
+// the previous instance by the pid it recorded under userData, never by this title;
+// the title is one of the markers it verifies that pid against before signalling it,
+// and it names our process for a human reading `ps`.
 //
-// Skipped for a packaged macOS build, where process.title doubles as the name
-// AppKit draws in the menu bar -- see shouldTagMainProcess().
-if (shouldTagMainProcess({ platform: process.platform, isDev })) {
+// Skipped on macOS entirely, where process.title doubles as the name AppKit draws in
+// the menu bar -- it would show "sarvinbox-dev-main" instead of "Sarv Inbox Dev".
+// See shouldTagMainProcess().
+if (shouldTagMainProcess({ platform: process.platform })) {
   tagMainProcess(mainProcessTitle(isDev));
 }
 
@@ -908,10 +909,14 @@ app.whenReady().then(async () => {
     // reclaim's own grace window; must not block startup indefinitely.
     if (isDev) {
       try {
-        await reclaimSingleDevInstance(defaultDevReclaimDeps(logger));
+        await reclaimSingleDevInstance(defaultDevReclaimDeps(logger, app.getPath('userData')));
       } catch (err) {
         logger.warn('[Main] dev reclaim failed (continuing):', err);
       }
+      // Only now record OUR pid: written any earlier it would overwrite the very
+      // record the reclaim above had to read. Removed on teardown, so a leftover
+      // file means the previous run died without one -- exactly the orphan case.
+      stopDevInstanceRecord = startDevInstanceRecord(app.getPath('userData'));
       // Self-quit if our launcher (vite/pnpm) dies, so a killed `pnpm dev` doesn't
       // leave us orphaned in the dock. Responsive backstop to the reclaim above;
       // won't false-fire on vite hot-restart (the new child keeps the same ppid).
@@ -1162,6 +1167,10 @@ let quitInitiatedBySignal = false;
 // the lock; called on teardown so a clean exit leaves no stale heartbeat behind.
 let stopHeartbeatWriter: (() => void) | null = null;
 
+// DEV: stops the pid-record timer and removes its file, so a cleanly-quit dev run
+// leaves no pid for the next launch to chase.
+let stopDevInstanceRecord: (() => void) | null = null;
+
 let teardownDone = false;
 app.on('before-quit', (event) => {
   if (teardownDone) return;
@@ -1187,6 +1196,8 @@ app.on('before-quit', (event) => {
   try {
     stopHeartbeatWriter?.();
     stopHeartbeatWriter = null;
+    stopDevInstanceRecord?.();
+    stopDevInstanceRecord = null;
   } catch {
     // Best-effort.
   }

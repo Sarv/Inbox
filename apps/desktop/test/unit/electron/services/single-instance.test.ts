@@ -10,6 +10,7 @@ import {
   mainProcessTitle,
   shouldTagMainProcess,
   selectReclaimablePids,
+  shouldReclaimRecordedDevPid,
   shouldKillLauncherOnQuit,
 } from '../../../../electron/services/single-instance';
 
@@ -103,9 +104,9 @@ describe('isOrphanedFromLauncher', () => {
 });
 
 /**
- * `selectReclaimablePids` is the safety core of the kill-old-on-startup reclaim:
- * given every pid carrying our dev main-process title, it decides which we may
- * signal. The one rule that matters is never signalling ourselves.
+ * `selectReclaimablePids` is the cheap safety core of the kill-old-on-startup
+ * reclaim: given the pids a reclaim is considering, it decides which we may signal
+ * at all. The one rule that matters is never signalling ourselves.
  */
 describe('selectReclaimablePids', () => {
   // Regression: we carry the SAME title as the orphan, so our own pid is always in
@@ -173,27 +174,88 @@ describe('mainProcessTitle', () => {
 });
 
 /**
- * The regression: the shipped macOS app showed "sarvinbox-main" as its menu-bar
- * name, beside a window correctly titled "Sarv Inbox". On macOS process.title is
- * also handed to LaunchServices as the display name, and AppKit draws the first
- * menu from that, overriding the label main.ts asks for. So the packaged mac
- * build must not be tagged -- and every other build still must be, because that
- * is how a wedged instance is found and reclaimed.
+ * The regression: a macOS build showed its process title as its menu-bar name --
+ * "sarvinbox-main" beside a window correctly titled "Sarv Inbox", and
+ * "sarvinbox-dev-main" where the dev build should read "Sarv Inbox Dev". On macOS
+ * process.title is also handed to LaunchServices as the display name, and AppKit
+ * draws the first menu from that, overriding the label main.ts asks for. No mac
+ * build may be tagged; nothing depends on it there any more, because a reclaim now
+ * finds its target by a recorded pid rather than by name.
  */
 describe('shouldTagMainProcess', () => {
-  it('skips only the packaged macOS build', () => {
-    expect(shouldTagMainProcess({ platform: 'darwin', isDev: false })).toBe(false);
+  // CHANGED: dev on macOS used to be tagged (the reclaim swept the process table
+  // for the title). It no longer is -- that is what lets the menu bar read
+  // "Sarv Inbox Dev" -- and the dev reclaim reads a pid file instead.
+  it('skips macOS in BOTH builds', () => {
+    expect(shouldTagMainProcess({ platform: 'darwin' })).toBe(false);
 
-    // Dev on macOS keeps it: dev runs a shared Electron binary whose helpers
-    // carry the same product name, so the title is the only marker that finds
-    // the main process without sweeping the helpers in too.
-    expect(shouldTagMainProcess({ platform: 'darwin', isDev: true })).toBe(true);
-
-    // Linux finds the process by title (process.title rewrites argv), and
-    // Windows keeps it harmlessly -- there it never reaches any visible name.
+    // Linux still needs it (process.title rewrites argv, so it is the marker a
+    // reclaim verifies identity against), and Windows keeps it harmlessly --
+    // there it never reaches any visible name.
     for (const platform of ['linux', 'win32']) {
-      expect(shouldTagMainProcess({ platform, isDev: false }), platform).toBe(true);
-      expect(shouldTagMainProcess({ platform, isDev: true }), platform).toBe(true);
+      expect(shouldTagMainProcess({ platform }), platform).toBe(true);
+    }
+  });
+});
+
+/**
+ * `shouldReclaimRecordedDevPid` is what makes a pid FILE safe to act on. Reading a
+ * pid back from disk is precise, but a pid is a recyclable number: a dev main that
+ * was SIGKILLed leaves its record behind, and by the next launch that number may
+ * belong to someone else's shell or test runner. Every guard below is the
+ * difference between reclaiming our own orphan and killing an innocent process.
+ */
+describe('shouldReclaimRecordedDevPid', () => {
+  // The case the whole mechanism exists for: a previous dev main is still running
+  // (Ctrl+C orphan) and is verifiably ours -> reclaim it before we open the DB.
+  it('reclaims a live, verified previous dev main', () => {
+    expect(shouldReclaimRecordedDevPid({
+      recordedPid: 4242, ourPid: 1000, pidAlive: true, pidIsOurApp: true,
+    })).toBe(true);
+  });
+
+  // First launch ever (or after a clean quit, which removes the file): no record,
+  // nothing to do. Must not be mistaken for "reclaim something".
+  it('does nothing when there is no record', () => {
+    expect(shouldReclaimRecordedDevPid({
+      recordedPid: null, ourPid: 1000, pidAlive: true, pidIsOurApp: true,
+    })).toBe(false);
+  });
+
+  // Regression: a stale record for a process that already exited is the ORDINARY
+  // case after a crash. Signalling a dead pid is pointless; worse, the number may
+  // since have been reused, which is exactly what the liveness gate screens out
+  // before the identity probe even runs.
+  it('does nothing when the recorded pid is no longer alive', () => {
+    expect(shouldReclaimRecordedDevPid({
+      recordedPid: 4242, ourPid: 1000, pidAlive: false, pidIsOurApp: true,
+    })).toBe(false);
+  });
+
+  // THE pid-reuse regression: the recorded number is alive but belongs to some
+  // unrelated process. Killing it would destroy a stranger's work -- the one risk
+  // a pid file carries that a live title match did not.
+  it('never kills a live pid that is not our app', () => {
+    expect(shouldReclaimRecordedDevPid({
+      recordedPid: 4242, ourPid: 1000, pidAlive: true, pidIsOurApp: false,
+    })).toBe(false);
+  });
+
+  // Self-suicide guard: a record we wrote ourselves (or a crash mid-launch that
+  // left our own pid behind) must never make the app signal itself.
+  it('never targets our own pid', () => {
+    expect(shouldReclaimRecordedDevPid({
+      recordedPid: 1000, ourPid: 1000, pidAlive: true, pidIsOurApp: true,
+    })).toBe(false);
+  });
+
+  // Defensive: a truncated or corrupted record must not turn into a group signal
+  // (process.kill(0, ...) signals the whole process group).
+  it('drops a malformed recorded pid', () => {
+    for (const recordedPid of [0, -1, Number.NaN, 1.5]) {
+      expect(shouldReclaimRecordedDevPid({
+        recordedPid, ourPid: 1000, pidAlive: true, pidIsOurApp: true,
+      }), String(recordedPid)).toBe(false);
     }
   });
 });
