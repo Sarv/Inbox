@@ -9,7 +9,7 @@ import { useEmailStore } from '../../store/email-store';
 import { accountDisplayLabel, getEmailsPerPage, getPageSizeForView, isThreadPagedView } from '../../store/helpers';
 import { emailMatchesLiveSearchFilter, hasLiveSearchFilterTokens } from '../../utils/search-filter';
 import type { SectionData , EmailThread } from '../../utils/thread-utils';
-import { adjustTotalForFilteredOut, buildThreads, threadStaysVisible, visibleThreadsUnderFilter } from '../../utils/thread-utils';
+import { adjustTotalForFilteredOut, buildThreads, sectionIsVisible, threadStaysVisible, visibleThreadsUnderFilter } from '../../utils/thread-utils';
 import { SearchBar } from '../SearchBar';
 import { canOfferServerSearch, hasServerSearchableParsedQuery } from '../server-search';
 import { Tooltip } from '../Tooltip';
@@ -340,7 +340,10 @@ export function EmailList() {
         (t) => !usedIds.has(t.threadId) && threadMatchesFilter(t, section.filter),
       );
       bucketThreads.forEach((t) => usedIds.add(t.threadId));
-      if (section.hideWhenEmpty && bucketThreads.length === 0 && !sd?.loading) continue;
+      // Loading is NOT an exemption: a hide-when-empty section that stays on
+      // screen while it loads renders "0" and then disappears when the load
+      // resolves empty. See sectionIsVisible.
+      if (!sectionIsVisible({ hideWhenEmpty: !!section.hideWhenEmpty, threadCount: bucketThreads.length })) continue;
       result.push({
         section,
         threads: bucketThreads,
