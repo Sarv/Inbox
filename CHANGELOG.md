@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Appearance settings.** A new Settings tab for making the app look the way
+  you want it: light, dark or follow-the-system theme; seven accent colours,
+  each with its own dark-mode shade, and an optional gradient; text size from
+  70% to 160%; three row densities; and a choice of interface font. Everything
+  applies as you pick it — there is nothing to save — and a preview shows a real
+  message row as you go. Cmd/Ctrl +, - and 0 now change the same text size and
+  remember it, instead of a zoom that was lost on the next launch. Nothing
+  changes until you change it: the defaults are exactly today's appearance.
+
 ### Fixed
 - **Extensions now run in the installed app.** Every extension reported
   "Extension sandbox is not running" and none of them did anything: the process

@@ -7,7 +7,7 @@
 import '@sentry/electron/preload';
 
 import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse } from '@sarvinbox/core';
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
 import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
@@ -58,6 +58,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
   app: {
     getVersion: () => ipcRenderer.invoke('app:version'),
     openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+  },
+
+  // Appearance. The renderer owns the setting (it lives in localStorage, mirrored
+  // to the core DB); this block is only the two things it cannot do itself.
+  //
+  // `webFrame` is one of the few Electron modules a SANDBOXED preload may use
+  // (alongside ipcRenderer/contextBridge) — see the sandbox note in main.ts.
+  // Setting the zoom here rather than over IPC keeps it synchronous, so the
+  // saved zoom is in effect on the first painted frame instead of one round
+  // trip later.
+  appearance: {
+    setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor),
+    getZoomFactor: () => webFrame.getZoomFactor(),
+    // The View menu's Zoom In/Out/Actual Size. They deliberately do NOT change
+    // the zoom themselves: they report the intent here so Cmd +/- edits the one
+    // persisted setting the Appearance tab shows, instead of a second, parallel
+    // zoom that is forgotten on restart.
+    onZoomCommand: (callback: (command: 'in' | 'out' | 'reset') => void) => {
+      const handler = (_event: unknown, command: 'in' | 'out' | 'reset') => callback(command);
+      ipcRenderer.on('appearance:zoom-command', handler);
+      return () => ipcRenderer.removeListener('appearance:zoom-command', handler);
+    },
   },
 
   // Auto-update. The main process owns all update state and pushes it here;
@@ -1034,6 +1056,12 @@ export interface ElectronAPI {
   app: {
     getVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
     openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+  };
+  appearance: {
+    setZoomFactor: (factor: number) => void;
+    getZoomFactor: () => number;
+    /** Returns its own disposer so a React effect can detach on unmount. */
+    onZoomCommand: (callback: (command: 'in' | 'out' | 'reset') => void) => () => void;
   };
   updater: {
     getState: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;

@@ -7,15 +7,18 @@ import { migrateSignatures } from '../../utils/signatures';
 
 import { AccountsTab } from './AccountsTab';
 import { AdvancedTab } from './AdvancedTab';
+import { AppearanceTab } from './AppearanceTab';
 import { FiltersTab } from './FiltersTab';
 import { FoldersTab } from './FoldersTab';
 import { GeneralTab } from './GeneralTab';
 import { InboxTab } from './InboxTab';
 import { KeyboardShortcutsTab } from './KeyboardShortcutsTab';
+import { settingsContentWidthClass } from './settings-layout';
 import { type SettingsTab, type AppSettings, defaultSettings } from './types';
 
 const tabs: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
+  { id: 'appearance', label: 'Appearance' },
   { id: 'inbox', label: 'Inbox' },
   { id: 'accounts', label: 'Accounts and Import' },
   { id: 'folders', label: 'Folders' },
@@ -143,8 +146,9 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-6">
-          <div className="max-w-3xl">
+          <div className={settingsContentWidthClass(activeTab)}>
             {activeTab === 'general' && <GeneralTab settings={settings} updateSetting={updateSetting} />}
+            {activeTab === 'appearance' && <AppearanceTab />}
             {activeTab === 'inbox' && <InboxTab settings={settings} updateSetting={updateSetting} />}
             {activeTab === 'accounts' && <AccountsTab settings={settings} updateSetting={updateSetting} openAddAccount={openAddAccount} onAddAccountConsumed={onAddAccountConsumed} />}
             {activeTab === 'folders' && <FoldersTab />}

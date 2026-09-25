@@ -2,7 +2,7 @@ import type { BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
 
 import type { InboxType, InboxSection } from '../../config/inbox-types';
 
-export type SettingsTab = 'general' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'advanced' | 'keyboard-shortcuts';
+export type SettingsTab = 'general' | 'appearance' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'advanced' | 'keyboard-shortcuts';
 
 /** A named email signature. `html` is stored verbatim (never round-tripped
  *  through a rich-text schema) so pasted table/flex layouts stay pixel-faithful. */

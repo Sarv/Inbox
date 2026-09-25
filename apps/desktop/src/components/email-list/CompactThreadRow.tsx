@@ -49,7 +49,7 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
           hoverActions.setHoveredThreadId(null);
         }
       }}
-      className={`relative w-full text-left px-4 h-10 border-b border-border transition-colors cursor-pointer flex items-center gap-2 ${
+      className={`relative w-full text-left list-row border-b border-border transition-colors cursor-pointer flex items-center gap-2 ${
         isSelected ? 'bg-accent' : isHighlighted ? 'bg-accent/70 ring-1 ring-inset ring-primary/30' : 'hover:bg-accent/50'
       }`}
     >

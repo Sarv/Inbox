@@ -32,6 +32,7 @@ import { defaultSettings } from '../components/settings/types';
 //     'sarvinbox-smtp-configured' (→ account_registry table / per-account)
 const MANAGED_KEYS = [
   'sarvinbox-settings',              // the big blob: signatures, inbox, images, profile…
+  'sarvinbox-appearance',            // theme, accent, font, density, zoom (src/appearance/)
   'sarvinbox-view-mode',
   'sarvinbox-agent-config',          // AI Assist / agent runtime config
   'sarvinbox-agent-config-version',
