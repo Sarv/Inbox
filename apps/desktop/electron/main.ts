@@ -70,6 +70,7 @@ import { createExtensionUIBackend } from './services/extension-ui-backend';
 import { startExtensionWorkflowRunner, stopExtensionWorkflowRunner } from './services/extension-workflow-runner';
 import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
 import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
+import { offerMoveToApplications } from './services/mac-install-location';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 import { startNotificationService, stopNotificationService } from './services/notification-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
@@ -981,6 +982,14 @@ app.whenReady().then(async () => {
       app.exit(0);
       return;
     }
+
+    // macOS: offer to move into /Applications before anything opens. An app run
+    // from the DMG or from ~/Downloads is translocated to a read-only mount and
+    // can never install its own updates — it just reports a failed update check
+    // forever. A successful move quits and relaunches the app from its new home,
+    // so this has to happen before storage, keychains and IMAP, and the launch
+    // stops here when it does.
+    if ((await offerMoveToApplications()) === 'moving') return;
 
     // Initialize core services
     await initializeStorage();
