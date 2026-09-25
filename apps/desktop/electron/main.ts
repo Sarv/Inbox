@@ -98,6 +98,7 @@ import {
   shouldKillLauncherOnQuit,
   shouldTagMainProcess,
 } from './services/single-instance';
+import { SMOKE_TEST_OK_MARKER, readSmokeTestRequest, writeSmokeTestMarker } from './services/smoke-test';
 import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
 import { startSpamReputationScheduler, stopSpamReputationScheduler } from './services/spam-reputation-service';
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
@@ -968,6 +969,18 @@ app.whenReady().then(async () => {
     // an error — it looks like a fresh install with no accounts and no mail.
     // Stop with a named message instead of booting into that.
     if (!ensureNativeSqliteLoadable()) return;
+
+    // CI smoke gate. The packaged app has now started for real and proved it can
+    // load its native SQLite module on this machine, which is everything the
+    // release checks could not see by reading the artifact. Stop here rather
+    // than opening databases, keychains and sockets on a build runner.
+    const smokeTest = readSmokeTestRequest(process.env, process.argv);
+    if (smokeTest.enabled) {
+      writeSmokeTestMarker(smokeTest.markerFile);
+      logger.info(`[Main] ${SMOKE_TEST_OK_MARKER} — packaged app booted and loaded better-sqlite3.`);
+      app.exit(0);
+      return;
+    }
 
     // Initialize core services
     await initializeStorage();
