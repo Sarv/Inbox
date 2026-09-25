@@ -11,10 +11,10 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 
+import type { AppSection } from './app-sections';
+
 // Logo asset path (from public folder)
 const sarvLogo = './sarv.png';
-
-type AppSection = 'mail' | 'teams' | 'chat' | 'meet' | 'webinar' | 'drive' | 'calendar' | 'contacts' | 'extensions' | 'ai-settings' | 'agent' | 'settings' | 'security';
 
 interface AppSidebarProps {
   activeSection: AppSection;

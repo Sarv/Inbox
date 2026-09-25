@@ -30,6 +30,7 @@ import { SyncTroubleBanner } from './components/SyncTroubleBanner';
 import { UndoDeleteToast } from './components/UndoDeleteToast';
 import { UndoSendToast } from './components/UndoSendToast';
 import { UpdateDialog } from './components/UpdateDialog';
+import { useActiveSection } from './hooks/useActiveSection';
 import { useAppVersion } from './hooks/useAppVersion';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNotificationBridge } from './hooks/useNotificationBridge';
@@ -78,7 +79,9 @@ function App() {
       clearRestoreDraft: s.clearRestoreDraft,
     })),
   );
-  const [activeSection, setActiveSection] = useState<AppSection>('mail');
+  // Survives a reload (Cmd+R, the dev server, the error boundary's retry) so the
+  // screen you were on comes back instead of the inbox. See useActiveSection.
+  const [activeSection, setActiveSection] = useActiveSection();
   // When set, the Settings screen opens directly on this tab (e.g. the
   // no-account empty state deep-links to "accounts"). Cleared on any manual
   // section switch so the gear normally opens General.
