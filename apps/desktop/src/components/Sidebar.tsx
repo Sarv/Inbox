@@ -472,7 +472,7 @@ export function Sidebar() {
           // screen when user clicks back to a folder.
           selectFolder(folder.id);
         }}
-        className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left text-foreground ${
+        className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
           selectedFolderId === folder.id && !viewingSnoozed
             ? 'bg-accent'
             : 'hover:bg-accent/50'
@@ -534,7 +534,7 @@ export function Sidebar() {
         <Tooltip content="" shortcut={getShortcutHints('COMPOSE')} position="right" className="w-full">
           <button
             onClick={handleCompose}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-full hover:bg-primary/90 shadow-md hover:shadow-lg transition-all font-medium"
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 brand-fill text-primary-foreground rounded-full shadow-md hover:shadow-lg transition-all font-medium"
           >
             <Plus className="h-5 w-5" />
             Compose
@@ -576,7 +576,7 @@ export function Sidebar() {
               return (
                 <button
                   onClick={() => selectUnifiedInbox()}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left text-foreground ${
+                  className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
                     selectedVirtualFolder === 'virtual-unified' ? 'bg-accent' : 'hover:bg-accent/50'
                   }`}
                 >
@@ -597,7 +597,7 @@ export function Sidebar() {
               <Tooltip key={vFolder.id} content="" shortcut={vFolder.type === 'all' ? getGotoShortcutHints('all') : []} position="right" className="w-full">
                 <button
                   onClick={() => handleVirtualFolderClick(vFolder)}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left text-foreground ${
+                  className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
                     selectedVirtualFolder === vFolder.id
                       ? 'bg-accent'
                       : 'hover:bg-accent/50'
@@ -617,7 +617,7 @@ export function Sidebar() {
                   clearAICategoryView();
                   loadStarredEmails?.();
                 }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left text-foreground ${
+                className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
                   selectedVirtualFolder === 'virtual-starred'
                     ? 'bg-accent'
                     : 'hover:bg-accent/50'
@@ -635,7 +635,7 @@ export function Sidebar() {
                   clearAICategoryView();
                   loadSnoozedEmails();
                 }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left text-foreground ${
+                className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
                   viewingSnoozed
                     ? 'bg-accent'
                     : 'hover:bg-accent/50'
@@ -655,7 +655,7 @@ export function Sidebar() {
             <Tooltip content="" position="right" className="w-full">
               <button
                 onClick={() => showOutbox()}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left text-foreground ${
+                className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
                   selectedVirtualFolder === 'virtual-outbox'
                     ? 'bg-accent'
                     : 'hover:bg-accent/50'

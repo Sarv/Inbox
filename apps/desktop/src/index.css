@@ -59,6 +59,61 @@
   }
 }
 
+/* ─── Appearance ──────────────────────────────────────────────────────────
+   Defaults for every custom property the Appearance settings override inline
+   on <html> (see src/appearance/). They are declared here, not only there, so
+   the app is fully styled on the FIRST paint — before the appearance bootstrap
+   has run, and in any context that never runs it. The values reproduce the
+   stock accent and `cozy` density exactly, so an install with nothing stored
+   looks the way it always did.                                             */
+:root {
+  --app-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --brand-gradient: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary)) 100%);
+  --brand-fill: hsl(var(--primary));
+  --row-h: 2.5rem;
+  --row-px: 1rem;
+  --card-py: 0.5rem;
+  --nav-py: 0.5rem;
+}
+
+body {
+  font-family: var(--app-font);
+}
+
+/* One single-line message row (CompactThreadRow). Height and horizontal
+   padding come from the density preset, so Comfortable/Cozy/Compact is a
+   variable swap rather than three sets of Tailwind classes to keep in sync. */
+.list-row {
+  height: var(--row-h);
+  padding-left: var(--row-px);
+  padding-right: var(--row-px);
+}
+
+/* A multi-line thread card (ThreadCard). Its height is content-driven, so
+   density moves the vertical padding instead of setting a height. */
+.list-card {
+  padding: var(--card-py) var(--row-px);
+}
+
+/* A sidebar navigation row — folders, labels, system views. */
+.nav-row {
+  padding: var(--nav-py) 0.75rem;
+}
+
+/* The primary action's fill. Flat `hsl(var(--primary))` unless the user turns
+   gradient accents on, in which case --brand-fill carries a gradient. It must
+   be `background`, not `background-color`: a gradient is a background IMAGE,
+   and for the same reason the hover state brightens rather than dropping
+   opacity the way `hover:bg-primary/90` did. */
+.brand-fill {
+  background: var(--brand-fill);
+  transition: filter 150ms ease;
+}
+
+.brand-fill:hover {
+  filter: brightness(1.08);
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;

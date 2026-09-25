@@ -21,6 +21,7 @@ import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, she
 
 import { registerAllHandlers } from './ipc';
 import { sendEmailFromMain, appendSentCopy } from './ipc/smtp-handlers';
+import { buildViewMenu } from './menu/view-menu';
 import { initSentryMain, captureFatal } from './sentry';
 import {
   seedAccountRegistryFromDurableStores,
@@ -267,6 +268,20 @@ logger.info('==============================================');
 // "Check for Updates" is a menu item, and leaving Windows and Linux on
 // Electron's stock menu meant those users had no way to reach it. macOS also
 // needs a custom menu to show the app name instead of "Electron" in dev.
+// The View menu's zoom items route through the renderer so Cmd +/- edits the
+// SAME persisted zoom the Appearance tab shows, instead of Electron's own
+// frame zoom that is forgotten on the next launch. See menu/view-menu.ts.
+const viewMenu = buildViewMenu((clickedWindow, command) => {
+  // A menu click reports a BaseWindow, which has no webContents. Resolve it to
+  // the BrowserWindow it belongs to, and fall back to the focused/only window
+  // for the macOS case where the menu is up with no window clicked.
+  const target =
+    (clickedWindow ? BrowserWindow.fromId(clickedWindow.id) : null) ??
+    BrowserWindow.getFocusedWindow() ??
+    BrowserWindow.getAllWindows()[0];
+  target?.webContents.send('appearance:zoom-command', command);
+});
+
 const checkForUpdatesItem: Electron.MenuItemConstructorOptions = {
   // The ellipsis is the platform convention for "this opens something".
   label: 'Check for Updates...',
@@ -301,7 +316,7 @@ if (process.platform === 'darwin') {
       appMenu,
       { role: 'fileMenu' },
       { role: 'editMenu' },
-      { role: 'viewMenu' },
+      viewMenu,
       { role: 'windowMenu' },
     ]),
   );
@@ -310,7 +325,7 @@ if (process.platform === 'darwin') {
     Menu.buildFromTemplate([
       { role: 'fileMenu' },
       { role: 'editMenu' },
-      { role: 'viewMenu' },
+      viewMenu,
       { role: 'windowMenu' },
       {
         role: 'help',

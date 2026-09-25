@@ -36,7 +36,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
           hoverActions.setHoveredThreadId(null);
         }
       }}
-      className={`w-full text-left px-3 py-2 border-b border-border transition-colors cursor-pointer relative ${
+      className={`w-full text-left list-card border-b border-border transition-colors cursor-pointer relative ${
         isSelected ? 'bg-accent' : isHighlighted ? 'bg-accent/70 ring-1 ring-inset ring-primary/30' : 'hover:bg-accent/50'
       }`}
     >
