@@ -1,8 +1,8 @@
 {
   "name": "@sarvinbox/desktop",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "productName": "Sarv Inbox",
-  "description": "Sarv Inbox \u2014 AI-powered email client by Sarv",
+  "description": "Sarv Inbox — AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
   "homepage": "https://github.com/Sarv/Inbox",
