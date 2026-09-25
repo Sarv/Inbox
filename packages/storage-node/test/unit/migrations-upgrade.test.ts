@@ -663,4 +663,51 @@ describe('upgrading a v24-era database to the current version', () => {
     // the row a tag-based backfill would have gotten wrong.
     expect(scalar(db, "SELECT ai_categories FROM emails WHERE id = 'e-read'")).toBe(null);
   });
+  // The version-88 collision, and why a renumber alone does not repair a mailbox.
+  //
+  // Two branches each added a migration numbered 88 on the same day; the
+  // header-stage one was renumbered to 89 afterwards. A database opened in
+  // between recorded 88 for the header-stage step, and `migrate()` only runs
+  // versions ABOVE the recorded maximum — so `email_spam_verdict_columns` was
+  // skipped for good on exactly the mailboxes that had already seen 88.
+  //
+  // If this fails, those mailboxes go back to having no `spam_user_verdict`
+  // column and no body-stage index: every reputation pass dies on "no such
+  // column", the user's own spam/ham verdict has nowhere to be stored, and the
+  // Spam tab reads an error instead of mail — silently, as a warning in the log.
+  it('heals a database that recorded 88 without ever running v88', () => {
+    migrateRange(db, 24, 87);
+    // What the renumbered header-stage step left behind: the version, not the work.
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(88);
+    expect(columnsOf(db, 'emails')).not.toContain('spam_user_verdict');
+
+    createMigrationManager(db).migrate();
+
+    expect(columnsOf(db, 'emails')).toContain('spam_user_verdict');
+    expect(columnsOf(db, 'emails')).toContain('link_reputation_checked_at');
+    expect(indexesOf(db)).toContain('idx_emails_link_reputation_pending');
+  });
+
+  // The repair must be a no-op on a database that DID apply v88 — a second
+  // ALTER TABLE would throw "duplicate column name", and one throwing migration
+  // blocks every later one for good (see addColumnIfMissing).
+  it('is a no-op where v88 already ran', () => {
+    migrateRange(db, 24, CURRENT_VERSION);
+    const before = columnsOf(db, 'emails');
+
+    expect(() => migrateRange(db, 89, CURRENT_VERSION)).not.toThrow();
+
+    expect(columnsOf(db, 'emails')).toEqual(before);
+  });
+
+  // The collision itself: two migrations sharing a version number means whichever
+  // is registered second never runs on a database that recorded the first.
+  // Cheap to assert, and it catches the next merge that forgets to renumber.
+  it('has no two migrations claiming the same version', () => {
+    const versions = CHAIN.map((m) => m.version);
+    const duplicates = versions.filter((v, i) => versions.indexOf(v) !== i);
+
+    expect(duplicates).toEqual([]);
+    expect(new Set(CHAIN.map((m) => m.name)).size).toBe(CHAIN.length);
+  });
 });
