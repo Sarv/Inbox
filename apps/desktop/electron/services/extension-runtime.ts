@@ -9,25 +9,22 @@
  * knows nothing about what travels over it.
  */
 
-import { join, sep } from 'path';
+import { join } from 'path';
 
-import { createLogger, type ExtensionChannel } from '@sarvinbox/core';
+import { createLogger, resolveUnpacked, type ExtensionChannel } from '@sarvinbox/core';
 import { utilityProcess, type UtilityProcess } from 'electron';
 
 const logger = createLogger('extension-runtime');
 
 /**
- * Rewrite an `app.asar` path to the unpacked copy beside it.
+ * Where the built sandbox entry lives — emitted beside the main bundle.
  *
- * A `utilityProcess` entry is loaded by path, and paths inside the asar archive
- * cannot be spawned. Matching on the separator keeps a directory merely NAMED
- * `app.asarX` from being rewritten, and works on Windows too.
+ * `utilityProcess.fork` spawns a real file, so this entry MUST also be listed
+ * in electron-builder's `asarUnpack` (`apps/desktop/package.json`). Without it
+ * the rewrite below points at a file that was never written outside the
+ * archive, the child exits with ERR_MODULE_NOT_FOUND, and every extension
+ * reads "Extension sandbox is not running" — in packaged builds only.
  */
-export function resolveUnpacked(path: string): string {
-  return path.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`);
-}
-
-/** Where the built sandbox entry lives — emitted beside the main bundle. */
 export function sandboxEntryPath(): string {
   return resolveUnpacked(join(__dirname, 'extension-sandbox.worker.js'));
 }
