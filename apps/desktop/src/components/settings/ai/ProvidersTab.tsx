@@ -1,5 +1,5 @@
 import { Eye, EyeOff, Loader2, Trash2, Plus, Star, Pencil, Sparkles, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   AIProvider,
@@ -18,11 +18,17 @@ import {
   loadZoneSelection,
   pickRecommendedProvider,
   pickRecommendedModel,
-  buildSarvEdgeBaseUrl,
   type SarvLLMProvider,
   type SarvLLMModel,
   type SarvZone,
 } from '../../../services/sarv-cai-api';
+import {
+  buildSarvProviderDraft,
+  findRegisteredSarvProvider,
+  registerSarvProvider,
+  NO_EDGE_URL_MESSAGE,
+  type SarvProviderSelection,
+} from '../../../services/sarv-llm-provider';
 
 interface ProvidersTabProps {
   aiProviders: AIProvider[];
@@ -60,6 +66,9 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
   const [pickerProviderCode, setPickerProviderCode] = useState('');
   const [pickerModelCode, setPickerModelCode] = useState('');
   const [pickerLoading, setPickerLoading] = useState(false);
+  // Which signed-in account the recommended model was already auto-registered
+  // for — see the auto-registration effect below. Cleared on sign-out.
+  const autoRegisteredFor = useRef<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -156,6 +165,7 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
     if (!sarvAccount) return;
     try {
       await window.electronAPI.oauth.signOut('sarv', sarvAccount.email);
+      autoRegisteredFor.current = null;
       setSarvAccount(null);
       setCaiZones([]);
       setCaiZonesResolved(false);
@@ -169,28 +179,54 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
     }
   };
 
+  // The current picker selection, in the shape the shared registration helper
+  // takes. Memoised so the auto-registration effect below doesn't re-run on
+  // every render.
+  const sarvDraft = useMemo(() => {
+    if (!sarvAccount) return null;
+    const selection: SarvProviderSelection = {
+      email: sarvAccount.email,
+      providerCode: pickerProviderCode,
+      modelCode: pickerModelCode,
+      zoneCode: pickerZoneCode,
+      providers: caiProviders,
+      models: caiModels,
+      zones: caiZones,
+      fallbackEdgeBaseUrl: sarvEdgeBaseUrl,
+    };
+    return buildSarvProviderDraft(selection);
+  }, [sarvAccount, pickerProviderCode, pickerModelCode, pickerZoneCode, caiProviders, caiModels, caiZones, sarvEdgeBaseUrl]);
+
+  const readySarvDraft = sarvDraft?.ok ? sarvDraft.draft : null;
+  const sarvAlreadyAdded = Boolean(
+    readySarvDraft && findRegisteredSarvProvider(aiProviders, readySarvDraft),
+  );
+
+  // Signing in to Sarv IS the intent to use Sarv AI — don't also require a
+  // click on "Add to AI providers" for the recommended provider/model. Without
+  // this, every fresh sign-in sits behind the "AI is inactive" banner until
+  // someone notices the button.
+  //
+  // Once per signed-in account (`autoRegisteredFor`), so deliberately deleting
+  // the provider isn't undone by the next render; `registerSarvProvider` is
+  // idempotent, so a re-mount can't duplicate it either. No `makeDefault`: a
+  // provider the user already chose as default keeps it.
+  useEffect(() => {
+    if (!readySarvDraft || pickerLoading) return;
+    if (autoRegisteredFor.current === readySarvDraft.email) return;
+    autoRegisteredFor.current = readySarvDraft.email;
+    const { provider, added } = registerSarvProvider(readySarvDraft);
+    if (added) setAiProviders((prev) => [...prev, provider]);
+  }, [readySarvDraft, pickerLoading, setAiProviders]);
+
   const handleAddSarvModel = () => {
-    if (!sarvAccount || !pickerProviderCode || !pickerModelCode) return;
-    const caiProvider = caiProviders.find((p) => p.code === pickerProviderCode);
-    const caiModel = caiModels.find((m) => m.code === pickerModelCode);
-    const zone = caiZones.find((z) => z.code === pickerZoneCode);
-    // Prefer the zone's api_domain; fall back to the env default when there
-    // is no zone at all (account with credits but no org).
-    const baseUrl = buildSarvEdgeBaseUrl(zone?.api_domain, sarvEdgeBaseUrl);
-    if (!baseUrl) {
-      setSarvError('No Sarv edge URL available — no zone and no configured fallback.');
+    if (!sarvDraft) return;
+    if (!sarvDraft.ok) {
+      if (sarvDraft.reason === 'no-edge-url') setSarvError(NO_EDGE_URL_MESSAGE);
       return;
     }
-    const friendlyName = `Sarv · ${caiProvider?.name ?? pickerProviderCode} · ${caiModel?.display_name ?? caiModel?.code ?? pickerModelCode}`;
-    const provider = addProvider('sarv', '', pickerModelCode, {
-      name: friendlyName,
-      baseUrl,
-      authMethod: 'oauth',
-      oauthProvider: 'sarv',
-      oauthEmail: sarvAccount.email,
-    });
-    setAiProviders((prev) => [...prev, provider]);
-    void syncAIProviderToMain();
+    const { provider, added } = registerSarvProvider(sarvDraft.draft);
+    if (added) setAiProviders((prev) => [...prev, provider]);
   };
 
   const handleAddProvider = () => {
@@ -378,11 +414,11 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
                     </div>
                     <button
                       onClick={handleAddSarvModel}
-                      disabled={!pickerProviderCode || !pickerModelCode || pickerLoading}
+                      disabled={!pickerProviderCode || !pickerModelCode || pickerLoading || sarvAlreadyAdded}
                       className="flex items-center gap-2 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       <Plus className="h-4 w-4" />
-                      Add to AI providers
+                      {sarvAlreadyAdded ? 'Already added' : 'Add to AI providers'}
                     </button>
                   </div>
                 )}

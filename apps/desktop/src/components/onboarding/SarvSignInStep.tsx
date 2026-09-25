@@ -16,20 +16,23 @@
 import { ArrowLeft, CheckCircle2, Loader2, Sparkles, UserPlus } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
-import { addProvider, setDefaultProvider, syncAIProviderToMain } from '../../services/ai-service';
 import {
   listCaiProviders,
   listCaiModels,
   loadZoneSelection,
   pickRecommendedProvider,
   pickRecommendedModel,
-  buildSarvEdgeBaseUrl,
   RECOMMENDED_SARV_PROVIDER,
   RECOMMENDED_SARV_MODEL,
   type SarvLLMProvider,
   type SarvLLMModel,
   type SarvZone,
 } from '../../services/sarv-cai-api';
+import {
+  buildSarvProviderDraft,
+  registerSarvProvider,
+  NO_EDGE_URL_MESSAGE,
+} from '../../services/sarv-llm-provider';
 import { useEmailStore } from '../../store/email-store';
 
 interface SarvSignInStepProps {
@@ -244,33 +247,26 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
   };
 
   const handleContinue = () => {
-    if (!account || !providerCode || !modelCode) return;
-    const caiProvider = providers.find((p) => p.code === providerCode);
-    const caiModel = models.find((m) => m.code === modelCode);
-    const zone = zones.find((z) => z.code === zoneCode);
-
-    // Zone api_domain when we have a zone, env fallback when we don't (an
-    // account with no org has no zone at all — see buildSarvEdgeBaseUrl).
-    const baseUrl = buildSarvEdgeBaseUrl(zone?.api_domain, account.fallbackEdgeBaseUrl);
-    if (!baseUrl) {
-      setError('No Sarv edge URL available — no zone and no configured fallback.');
+    if (!account) return;
+    const drafted = buildSarvProviderDraft({
+      email: account.email,
+      providerCode,
+      modelCode,
+      zoneCode,
+      providers,
+      models,
+      zones,
+      fallbackEdgeBaseUrl: account.fallbackEdgeBaseUrl,
+    });
+    if (!drafted.ok) {
+      if (drafted.reason === 'no-edge-url') setError(NO_EDGE_URL_MESSAGE);
       return;
     }
-
-    const friendlyName = `Sarv · ${caiProvider?.name || providerCode} · ${caiModel?.display_name || caiModel?.code || modelCode}`;
     try {
-      const registered = addProvider('sarv', '', modelCode, {
-        name: friendlyName,
-        baseUrl,
-        authMethod: 'oauth',
-        oauthProvider: 'sarv',
-        oauthEmail: account.email,
-      });
-      setDefaultProvider(registered.id);
-      // Push BOTH the scheduler gate AND the pipeline aiConfig — not just
-      // setProviderConfigured — so categorization/drafting work right after
-      // onboarding without waiting for a sync or restart.
-      void syncAIProviderToMain();
+      // The model picked here IS the default the user chose, so override any
+      // earlier one. Registration is idempotent, so this can't duplicate an
+      // entry Settings already auto-registered for the same account.
+      registerSarvProvider(drafted.draft, { makeDefault: true });
       onNext({ mailboxConnected });
     } catch (err) {
       setError((err as Error).message || 'Failed to register LLM provider');
