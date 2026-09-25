@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -269,6 +269,58 @@ describe('electron-builder configuration', () => {
     // The root that owns pnpm-workspace.yaml is the only correct answer.
     expect(resolve(found as string)).toBe(resolve(repoRoot));
     expect(existsSync(join(found as string, 'pnpm-workspace.yaml'))).toBe(true);
+  });
+
+  // The regression this exists for, verbatim from a packaged 1.2.x build:
+  //
+  //   [extension-runtime] Starting extension sandbox:
+  //     .../app.asar.unpacked/dist-electron/extension-sandbox.worker.js
+  //   Error [ERR_MODULE_NOT_FOUND]: Cannot find module ...
+  //   [extension-runtime] Extension sandbox exited with code 1
+  //
+  // and every extension in Settings reading "Extension sandbox is not running".
+  //
+  // Anything spawned BY PATH -- `new Worker()`, `utilityProcess.fork()` -- needs
+  // a real file: Electron's asar-patched `fs` covers reads, not spawns. So each
+  // such entry calls `resolveUnpacked()` to address `app.asar.unpacked/`, and
+  // that directory only holds what `asarUnpack` put there. The two halves are
+  // written in different files (a .ts service and this package.json) with
+  // nothing connecting them, and the mismatch is invisible everywhere except a
+  // packaged build: in dev there is no archive and `resolveUnpacked` is a no-op.
+  // db-compact.worker.js was listed; extension-sandbox.worker.js, added later,
+  // was not.
+  //
+  // So derive the expectation from the code instead of restating it: every
+  // `resolveUnpacked(join(__dirname, 'x.js'))` in the main process must be
+  // covered by an asarUnpack pattern.
+  it('unpacks every worker the main process spawns by path', () => {
+    const require_ = createRequire(require.resolve('app-builder-lib/package.json'));
+    const { minimatch } = require_('minimatch') as {
+      minimatch: (target: string, pattern: string) => boolean;
+    };
+
+    const electronDir = fileURLToPath(new URL('../../electron', import.meta.url));
+    const sources = readdirSync(electronDir, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => entry.endsWith('.ts'))
+      .map((entry) => join(electronDir, entry));
+
+    const spawned = new Map<string, string>();
+    for (const source of sources) {
+      const text = readFileSync(source, 'utf8');
+      for (const match of text.matchAll(/resolveUnpacked\(\s*join\(__dirname,\s*'([^']+)'/g)) {
+        spawned.set(`dist-electron/${match[1]}`, source);
+      }
+    }
+
+    // If this is 0 the scan stopped finding anything (renamed helper, moved
+    // directory) and the rest of the test would pass vacuously.
+    expect(spawned.size).toBeGreaterThan(0);
+
+    const patterns = buildConfig['asarUnpack'] as string[];
+    for (const [packagedPath, source] of spawned) {
+      const covered = patterns.some((pattern) => minimatch(packagedPath, pattern));
+      expect(covered, `${packagedPath} (spawned by ${source}) is not in asarUnpack`).toBe(true);
+    }
   });
 
   // Every release artifact the publish job globs must have a target that
