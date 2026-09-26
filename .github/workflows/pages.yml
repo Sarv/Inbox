@@ -1,0 +1,66 @@
+name: Download page
+
+# Builds apps/site and publishes it to GitHub Pages. The page reads the latest
+# release from the GitHub API in the visitor's browser, so publishing a release
+# needs no redeploy — this runs only when the page itself changes.
+#
+# One-time setup: Settings -> Pages -> Build and deployment -> Source:
+# "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/site/**'
+      - 'apps/desktop/public/icon.svg'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push supersedes one still queued, but a
+# deployment already under way is allowed to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
+        with:
+          install: 'false'
+
+      # Only the site's own dependencies: no Electron, no native addons.
+      - name: Install site dependencies
+        run: pnpm install --frozen-lockfile --filter @sarvinbox/site
+        env:
+          SARVINBOX_SKIP_ELECTRON_REBUILD: '1'
+
+      # CI runs these too; repeated here so a red page never deploys.
+      - run: pnpm --filter @sarvinbox/site test
+      - run: pnpm --filter @sarvinbox/site build
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: apps/site/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
