@@ -21,7 +21,7 @@ import { createRequire } from 'node:module';
 
 import type Database from 'better-sqlite3';
 
-import { createMigrationManager } from '../migrations';
+import { createMigrationManager, emailTagsJoinTable } from '../migrations';
 import { describeNativeAbiFailure, probeNativeSqlite } from '../native-abi';
 import { attachSharedContacts } from '../shared-contacts';
 
@@ -131,4 +131,19 @@ export function newMigratedDb(path = ':memory:', sharedContactsPath = ''): Datab
   attachSharedContacts(db, sharedContactsPath);
   createMigrationManager(db).migrate();
   return db;
+}
+
+/**
+ * Add the `email_tags` membership index (migration 91) to a hand-built fixture.
+ *
+ * Fixtures that create their own minimal `emails` table get the real migration
+ * rather than a copy of its DDL: the join table, the covering index AND the
+ * three triggers that keep it in step with every write. Hand-rolling the table
+ * here would let a fixture pass while the triggers the app relies on are wrong,
+ * which is precisely the drift the join table exists to make impossible.
+ *
+ * `newMigratedDb` already has it — this is only for the bare-schema fixtures.
+ */
+export function createEmailTagsIndex(db: Database.Database): void {
+  emailTagsJoinTable.up(db, {});
 }

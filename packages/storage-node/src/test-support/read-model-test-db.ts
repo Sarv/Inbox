@@ -10,7 +10,7 @@
 
 import type Database from 'better-sqlite3';
 
-import { openTestDb } from './test-db';
+import { createEmailTagsIndex, openTestDb } from './test-db';
 
 /** The v64/v65 shape, trimmed to the columns the rollup actually reads. */
 const READ_MODEL_DDL = `
@@ -77,6 +77,7 @@ export function openReadModelTestDb(
 ): Database.Database {
   const db = openTestDb();
   db.exec(READ_MODEL_DDL);
+  createEmailTagsIndex(db);
   const insertFolder = db.prepare('INSERT INTO folders (id, path) VALUES (?, ?)');
   for (const folder of folders) insertFolder.run(folder.id, folder.path);
   const insertCategory = db.prepare('INSERT INTO ai_category_definitions (slug) VALUES (?)');
