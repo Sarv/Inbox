@@ -436,7 +436,7 @@ export function useEmailDetail(): EmailDetailContext | null {
   // it fires (otherwise it could mark the PREVIOUS thread's emails read).
   // Cancelled on selection change, not on every re-render, so body streaming
   // doesn't starve it.
-  const markThreadReadTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const markThreadReadTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Auto-expand logic + mark all thread emails as read on open
   useEffect(() => {

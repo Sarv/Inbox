@@ -1,6 +1,6 @@
 import type { Label } from '@sarvinbox/core';
 import { ChevronRight, ChevronDown, MoreVertical, Plus, Trash2, Pencil, Tag as TagIcon } from 'lucide-react';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type JSX } from 'react';
 
 import { LABEL_COLORS } from '../config/label-colors';
 import { useEmailStore } from '../store/email-store';

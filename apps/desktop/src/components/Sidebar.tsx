@@ -19,7 +19,7 @@ import {
   Clock,
   AlertCircle,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type JSX } from 'react';
 
 import {
   shouldHideFolder,
