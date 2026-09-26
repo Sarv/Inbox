@@ -66,7 +66,8 @@ node-gyp had deleted `build/`, and left no addon at all. The parsing lives in
 `packages/storage-node/test/unit/native-abi-args.test.ts`.
 
 Tests that open a database go through `src/test-support/test-db.ts`, which fails
-with a message naming this exact fix rather than trying to carry on. It used to
+with a message naming the fix for the runtime it is in rather than trying to
+carry on. It used to
 fall back to Node's built-in `node:sqlite` behind a better-sqlite3 facade so the
 suite could still run — but that quietly swapped the driver under test, and the
 two disagree: `node:sqlite` rejects a bound parameter the statement does not
@@ -74,6 +75,14 @@ declare, where better-sqlite3 ignores it. A fresh `pnpm install` therefore turne
 passing tests into `Unknown named parameter 'attachmentSizes'`, an error that
 names a column and points at a repository that was never broken. The fallback is
 gone; the ABI is now always named.
+
+Under plain Node, the fix it names is the package's own test script: `pnpm test`,
+or `pnpm test <file>` in the package directory. Inside Electron, it is
+`node scripts/native-abi.mjs electron`. Running the tests inside Electron is how
+to test while the dev app holds the Electron ABI, from the package directory:
+`ELECTRON_RUN_AS_NODE=1 ../../node_modules/.bin/electron ../../node_modules/vitest/vitest.mjs run`.
+The message used to tell everyone to run `pnpm test:node-abi`: the manual flip
+this section warns against, and backwards for a run inside Electron.
 
 Two rebuilds must never run in the same directory at once: `node-gyp rebuild`
 starts by deleting `build/`, so a second run removes what the first is compiling
