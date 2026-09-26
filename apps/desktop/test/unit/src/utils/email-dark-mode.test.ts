@@ -192,14 +192,48 @@ describe('darkenValue', () => {
     expect(value.match(/rgb\(/g)).toHaveLength(2);
   });
 
-  // Regression: `url(…)` and `var(…)` are opaque. Descend into them and a
-  // tracking pixel's query string or a custom property name gets "re-coloured"
-  // into garbage and the image stops loading.
-  it('never descends into url() or var()', () => {
+  // Regression: `url(…)` is opaque, and so is the NAME a `var()` references.
+  // Descend into either and a tracking pixel's query string or a custom
+  // property name gets "re-coloured" into garbage and stops resolving.
+  it('never descends into url(), nor into the name a var() references', () => {
     const image = darkenValue('#ffffff url(https://x.test/p.png?bg=red) no-repeat', 'surface', 'inverted');
     expect(image.value).toContain('url(https://x.test/p.png?bg=red)');
     expect(image.value).not.toContain('#ffffff');
     expect(darkenValue('var(--brand-red)', 'text', 'inverted').value).toBe('var(--brand-red)');
+  });
+
+  // CHANGED BEHAVIOUR (was: `var()` was skipped whole, fallback included).
+  // Regression: THE white-slab bug in a dark body. Mail composed in this app
+  // carries `background-color: var(--compose-editor-bg, white)` on its text
+  // runs; the frame never loads the stylesheet that declares that property, so
+  // the browser paints the FALLBACK. Skip it and every run keeps a white slab
+  // behind text we have just lightened for a dark page — white on white.
+  it('re-colours the fallback a var() will actually paint with', () => {
+    const { value, surface } = darkenValue('var(--compose-editor-bg, white)', 'surface', 'inverted');
+    expect(value).toMatch(/^var\(--compose-editor-bg, rgb\([\d\s,]+\)\)$/);
+    expect(value).not.toContain('white');
+    // The fallback is what paints, so it is what the text pass must read.
+    expect(surface).toBe('inverted');
+  });
+
+  // Regression: the fallback is a value in its own right — a colour function,
+  // a second var(), or something with no colour in it at all.
+  it('handles every shape a fallback comes in', () => {
+    expect(darkenValue('var(--x, rgb(255, 255, 255))', 'surface', 'inverted').value)
+      .toMatch(/^var\(--x, rgb\([\d\s,]+\)\)$/);
+    expect(darkenValue('var(--a, var(--b, #ffffff))', 'surface', 'inverted').value)
+      .toMatch(/^var\(--a, var\(--b, rgb\([\d\s,]+\)\)\)$/);
+    expect(darkenValue('var(--gap, 8px)', 'surface', 'inverted').value).toBe('var(--gap, 8px)');
+  });
+
+  // Regression: a brand colour reached through a var() is still a brand
+  // colour. Invert it and a red button comes back grey.
+  it('keeps a brand fallback the way it keeps a literal one', () => {
+    const { value, surface } = darkenValue('var(--brand, #d32f2f)', 'surface', 'inverted');
+    // Same colour, re-emitted in the walker's notation — not inverted to a grey.
+    expect(value).toBe(`var(--brand, ${darkenValue('#d32f2f', 'surface', 'inverted').value})`);
+    expect(value).toContain('rgb(211, 47, 47)');
+    expect(surface).toBe('kept');
   });
 
   // Regression: a colour function is collapsed into one word node. Leave its

@@ -118,8 +118,13 @@ const COLOR_FUNCTIONS = new Set([
   'rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'lab', 'lch', 'oklab', 'oklch', 'color', 'color-mix',
 ]);
 
-/** Functions to step over entirely: whatever is inside them is not a colour. */
-const OPAQUE_FUNCTIONS = new Set(['url', 'var', 'attr', 'counter', 'counters', 'format', 'local']);
+/**
+ * Functions to step over entirely: whatever is inside them is not a colour.
+ *
+ * `var()` is deliberately NOT here. It is not a colour either, but its fallback
+ * argument is, and that fallback is what actually paints — see `darkenValue`.
+ */
+const OPAQUE_FUNCTIONS = new Set(['url', 'attr', 'counter', 'counters', 'format', 'local']);
 
 /**
  * Which properties carry a colour, and what that colour is for.
@@ -292,9 +297,18 @@ export const darkenValue = (
     return darkenColorToken(token, role, surface);
   };
 
-  parsed.walk((node) => {
+  const visit = (node: valueParser.Node): void | boolean => {
     if (node.type === 'function') {
       const name = node.value.toLowerCase();
+      // A `var()` reference we cannot resolve: the custom property was declared
+      // in a stylesheet the frame never loads, so the browser falls back, and
+      // the fallback is the colour the reader actually sees. Re-colour inside
+      // it and leave the property name — which is not a colour — alone.
+      if (name === 'var') {
+        const comma = node.nodes.findIndex((arg) => arg.type === 'div' && arg.value === ',');
+        if (comma !== -1) valueParser.walk(node.nodes.slice(comma + 1), visit);
+        return false;
+      }
       if (OPAQUE_FUNCTIONS.has(name)) return false;
       if (!COLOR_FUNCTIONS.has(name)) return undefined;
       const next = apply(valueParser.stringify(node));
@@ -317,7 +331,9 @@ export const darkenValue = (
       }
     }
     return undefined;
-  });
+  };
+
+  parsed.walk(visit);
 
   return { value: changed ? valueParser.stringify(parsed.nodes) : value, surface: established };
 };
