@@ -158,6 +158,12 @@ export interface ThreadOptions {
   failedBodies?: ReadonlySet<string>;
   /** Resolve `sarv-image:` refs to data URLs. Injected so this module stays pure. */
   resolveImages?: (html: string) => string;
+  /**
+   * Re-colour a body for a dark page. Injected for the same reason as
+   * {@link ThreadOptions.resolveImages}: it reads an appearance setting and a
+   * resolved theme, neither of which this module should know about.
+   */
+  recolorBody?: (html: string) => string;
 }
 
 export interface AdapterOptions extends ThreadOptions {
@@ -498,7 +504,12 @@ export function chatMessagesFromThread(
   const conversational = isConversationalThread(messages);
   return messages.map((message) => {
     const inlined = inlineDocumentStyles(message.body, conversational);
-    const body = resolveImages ? resolveImages(inlined) : inlined;
+    // AFTER the stylesheet is inlined and BEFORE the refs are resolved: the
+    // rewrite only sees `style` attributes, so a mail whose colours live in a
+    // <style> block has to be flattened first; and every `url()` it would
+    // otherwise walk is still a short `sarv-image:` ref at this point.
+    const recolored = options.recolorBody ? options.recolorBody(inlined) : inlined;
+    const body = resolveImages ? resolveImages(recolored) : recolored;
     return body === message.body ? message : { ...message, body };
   });
 }
@@ -552,13 +563,14 @@ export function chatMessagesFromConversation(
   messages: readonly ConversationMessage[],
   options: AdapterOptions,
 ): ChatMessage[] {
-  const { currentUserEmail, emailsById, failedBodies, resolveImages } = options;
+  const { currentUserEmail, emailsById, failedBodies, resolveImages, recolorBody } = options;
   const drafts = draftIdsIn([...emailsById.values()]);
 
   return chronological(messages.filter((message) => !drafts.has(message.sourceEmailId))).map(
     (message) => {
       const source = emailsById.get(message.sourceEmailId);
-      const body = message.body || '';
+      const raw = message.body || '';
+      const body = recolorBody ? recolorBody(raw) : raw;
       return {
         id: message.id,
         sourceId: message.sourceEmailId,
@@ -574,7 +586,7 @@ export function chatMessagesFromConversation(
         // An extracted turn has no body of its own to download: it was carved
         // out of a source email that is already here. Only a message backed by
         // an email whose body never arrived can be pending or failed.
-        ...bodyStateOf(body, source, failedBodies),
+        ...bodyStateOf(raw, source, failedBodies),
       };
     },
   );
