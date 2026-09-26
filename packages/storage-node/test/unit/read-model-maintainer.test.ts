@@ -244,6 +244,82 @@ describe('ReadModelMaintainer — drained hook', () => {
   });
 });
 
+// Read-your-writes catch-up, run by the storage facade before every list read
+// that queries the projection. Without it a reload issued right after a write
+// read the PREVIOUS projection: new mail was stored, the badge (recounted after
+// the async drain) said 1, and the list stayed without it until a folder switch.
+describe('ReadModelMaintainer — catchUp', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = newDb(); });
+
+  // THE REGRESSION: the projection must be current when catchUp returns — no
+  // tick, no pump — or the read right after it misses the new thread.
+  it('rebuilds a small queue synchronously, before returning', () => {
+    const m = new ReadModelMaintainer(() => db);
+    insertEmail(db, 't1', 'INBOX');
+    insertEmail(db, 't2', 'INBOX|read');
+    m.catchUp();
+    expect(dirtyCount(db)).toBe(0);
+    expect(tfCount(db)).toBe(2);
+  });
+
+  // Breaks if a catch-up that did the drain skips the hook: the pump then finds
+  // an empty queue, never fires it either, and the sidebar badge goes stale.
+  it('fires the drained hook once, with the queue already empty', () => {
+    const seen: number[] = [];
+    const m = new ReadModelMaintainer(() => db, () => seen.push(dirtyCount(db)));
+    insertEmail(db, 't1', 'INBOX');
+    m.catchUp();
+    expect(seen).toEqual([0]);
+  });
+
+  // Breaks if every list read on an idle queue rewrites the folder badges.
+  it('is a silent no-op on an empty queue', () => {
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    m.catchUp();
+    expect(calls).toBe(0);
+  });
+
+  // Breaks if a large backlog (backfill, first sync) stalls a list read past its
+  // budget, or if the remainder is stranded until the 5s safety pump.
+  it('stops at its budget, skips the hook, and re-arms the pump for the rest', () => {
+    fakeDeferredSteps();
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    m.start();
+    vi.runAllTimers();          // settle start()'s own startup drain first
+    calls = 0;
+
+    for (let i = 0; i < 12; i++) insertEmail(db, `tc${i}`, 'INBOX');
+    m.catchUp(0);               // zero budget: exactly one thread, then stop
+    expect(dirtyCount(db)).toBe(11);
+    expect(calls).toBe(0);      // not drained EMPTY -> projection not consistent yet
+
+    vi.runAllTimers();          // only the re-armed pump is pending now
+    m.stop();
+    expect(dirtyCount(db)).toBe(0);
+    expect(calls).toBe(1);
+  });
+
+  // Breaks if a failing rebuild makes the list read itself throw — the read must
+  // fall back to the stored projection, and the rows must stay queued for retry.
+  it('never throws, and leaves the queue intact when the drain fails', () => {
+    insertEmail(db, 't1', 'INBOX');
+    const broken = new ReadModelMaintainer(() => ({
+      prepare: () => { throw new Error('database is locked'); },
+    }) as unknown as Database.Database);
+    expect(() => broken.catchUp()).not.toThrow();
+    expect(dirtyCount(db)).toBe(1);
+  });
+
+  // Breaks if a catch-up during close (no database) throws into the read.
+  it('does nothing while the database is closed', () => {
+    const m = new ReadModelMaintainer(() => null);
+    expect(() => m.catchUp()).not.toThrow();
+  });
+});
+
 // Launch-time repair. A badge can be wrong before this process even starts —
 // left drifted by an older build, or by a write made while no hook was wired.
 // Nothing will ever re-dirty those threads (the mail is already read), so the

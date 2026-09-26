@@ -36,6 +36,14 @@ const DRAIN_CHUNK = 100;
  * 8ms keeps a chunk inside a single 60fps frame.
  */
 const DRAIN_BUDGET_MS = 8;
+/**
+ * How long a list read may spend catching the read model up before it queries
+ * it (see catchUp). The same one-frame bound as a drain chunk: after a normal
+ * arrival the queue holds a thread or two and this costs well under a
+ * millisecond; only a large backlog ever reaches the cap, and then the rest is
+ * left to the async pump rather than stalling the read.
+ */
+const CATCH_UP_BUDGET_MS = 8;
 /** Periodic safety pump — catches rows the triggers add without an explicit
  *  schedule() (e.g. an ad-hoc UPDATE from some code path). unref'd so it never
  *  keeps the process alive. */
@@ -98,6 +106,45 @@ export class ReadModelMaintainer {
     if (this.scheduled || this.pumping || this.stopped) return;
     this.scheduled = true;
     setImmediate(() => { this.scheduled = false; this.pump(); });
+  }
+
+  /**
+   * Read-your-writes: rebuild what is still queued, within `budgetMs`, so the
+   * read that follows sees every write already committed.
+   *
+   * The drain is deliberately asynchronous, which left a window after every
+   * write where the list read the PREVIOUS projection. A new mail was stored,
+   * the sync-complete reload queried `thread_folders` before its thread had
+   * been rebuilt, found "no visible change", and the mail stayed invisible —
+   * while the badge, recounted after the drain, already said 1 — until the user
+   * switched folders. Draining at the read closes that window from the reader's
+   * side, so no write path has to remember to do it.
+   *
+   * Bounded: a large backlog (a backfill, a first sync) is left to the pump,
+   * which is re-armed so the remainder still drains promptly. The drained hook
+   * runs only when the queue actually reached EMPTY, preserving its promise of
+   * a consistent projection. Never throws — a read must not fail because
+   * derived state could not be refreshed; it just reads the stored projection.
+   */
+  catchUp(budgetMs: number = CATCH_UP_BUDGET_MS): void {
+    const deadline = Date.now() + budgetMs;
+    let drained = 0;
+    try {
+      for (;;) {
+        const processed = this.drainChunk(DRAIN_CHUNK, Math.max(0, deadline - Date.now()));
+        if (processed === 0) {
+          if (drained > 0) this.notifyDrained(drained);
+          return;
+        }
+        drained += processed;
+        if (Date.now() >= deadline) {
+          this.schedule();
+          return;
+        }
+      }
+    } catch (error) {
+      logger.error('Read-model catch-up failed:', error);
+    }
   }
 
   /** One-time backfill: enqueue every existing thread. The queue's persistence
