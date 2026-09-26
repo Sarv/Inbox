@@ -673,6 +673,62 @@ describe('SQLiteStorage section and list queries', () => {
   });
 });
 
+// Read-your-writes on the read-model fast path. The list reads `thread_folders`,
+// which the maintainer rebuilds OFF the write path; a reload issued right after a
+// write used to query the projection from BEFORE it. The field report: a new mail
+// arrived, the sidebar badge said 1, the sync-complete reload said "no visible
+// change", and the mail only appeared after switching folders. Every read here
+// runs with NO event-loop tick after the write (only microtasks), so the async
+// drain cannot have run — the read itself has to catch the projection up.
+describe('SQLiteStorage read-model reads see writes committed just before them', () => {
+  const ctx = withStorage(async (storage) => {
+    await storage.insertEmail(makeEmail({ id: 'ryw-old', threadId: 'ryw-th-old', tags: '|INBOX|read|', date: T0 }));
+    flushReadModel(storage); // backfill complete -> reads take the fast path
+  });
+
+  const ids = (rows: EmailRecord[]) => rows.map((r) => r.id).sort();
+  const inbox = { limit: 50, offset: 0, folderPath: 'INBOX' };
+
+  // THE REGRESSION: a just-stored unread mail must be in its section and in the
+  // section count on the very next read, not after a folder switch.
+  it('a newly inserted mail is in the section rows and counts immediately', async () => {
+    const storage = ctx.get();
+    await storage.insertEmail(makeEmail({ id: 'ryw-new', threadId: 'ryw-th-new', tags: '|INBOX|', date: T0 + 10 }));
+
+    expect(ids(await storage.getEmailsBySection('unread', inbox))).toEqual(['ryw-new']);
+    expect(ids(await storage.getEmailsBySection('everything_else', inbox))).toEqual(['ryw-new', 'ryw-old']);
+    expect(await storage.getSectionCount('unread', 'INBOX')).toBe(1);
+    expect(await storage.getSectionCounts(['unread'], 'INBOX')).toEqual({ unread: 1 });
+  });
+
+  // Breaks if the flat folder view (and its "of N") still lags a batch insert —
+  // the path a folder sync stores through.
+  it('a batch insert is in the collapsed folder page and the thread count immediately', async () => {
+    const storage = ctx.get();
+    const before = await storage.getFolderThreadCount('INBOX');
+    await storage.insertEmailBatch([
+      makeEmail({ id: 'ryw-b1', threadId: 'ryw-th-b1', tags: '|INBOX|', date: T0 + 20 }),
+      makeEmail({ id: 'ryw-b2', threadId: 'ryw-th-b2', tags: '|INBOX|read|', date: T0 + 30 }),
+    ]);
+
+    expect(await storage.getFolderThreadCount('INBOX')).toBe((before ?? 0) + 2);
+    const page = await storage.getEmailsByFolder('f-inbox', { limit: 2, offset: 0, collapseThreads: true });
+    expect(page.map((e) => e.id)).toEqual(['ryw-b2', 'ryw-b1']); // newest first
+  });
+
+  // Breaks if a flag flip (mark read) leaves the mail in the Unread section on
+  // the reload that follows — the same window, reached through a tag write.
+  it('a flag change moves the thread between sections on the next read', async () => {
+    const storage = ctx.get();
+    await storage.insertEmail(makeEmail({ id: 'ryw-flip', threadId: 'ryw-th-flip', tags: '|INBOX|', date: T0 + 40 }));
+    expect(ids(await storage.getEmailsBySection('unread', inbox))).toContain('ryw-flip');
+
+    await storage.updateEmail('ryw-flip', { tags: '|INBOX|read|' });
+    expect(ids(await storage.getEmailsBySection('unread', inbox))).not.toContain('ryw-flip');
+    expect(ids(await storage.getEmailsBySection('read', inbox))).toContain('ryw-flip');
+  });
+});
+
 // ===========================================================================
 // Search
 // ===========================================================================

@@ -560,6 +560,7 @@ export class SQLiteStorage implements IEmailStorage {
     });
 
     insert();
+    this.scheduleReadModelDrain();
   }
 
   async insertEmailBatch(emails: EmailRecord[]): Promise<void> {
@@ -644,6 +645,10 @@ export class SQLiteStorage implements IEmailStorage {
         await new Promise((resolve) => setImmediate(resolve));
       }
     }
+
+    // New mail dirties its thread like any tag write; settle the badge now,
+    // not on the next safety pump.
+    this.scheduleReadModelDrain();
 
     // Auto-extract contacts
     this.autoExtractContacts(emails).catch(err => {
@@ -892,6 +897,7 @@ export class SQLiteStorage implements IEmailStorage {
 
   async getEmailsBySection(filter: string, options: { limit: number; offset: number; folderPath?: string; viewFilter?: ViewFilter }): Promise<EmailRecord[]> {
     this.ensureInitialized();
+    this.catchUpReadModel();
     // Read-model fast path (thread_folders indexed scan) when enabled + ready and
     // the view is folder-scoped. Falls through to the legacy GROUP BY otherwise.
     if (this.emailRepo.readModelReadsEnabled()) {
@@ -924,11 +930,13 @@ export class SQLiteStorage implements IEmailStorage {
 
   async getSectionCount(filter: string, folderPath?: string, viewFilter?: ViewFilter): Promise<number> {
     this.ensureInitialized();
+    this.catchUpReadModel();
     return this.emailRepo.getSectionCount(filter, folderPath, viewFilter);
   }
 
   async getSectionCounts(filters: string[], folderPath?: string, viewFilter?: ViewFilter): Promise<Record<string, number>> {
     this.ensureInitialized();
+    this.catchUpReadModel();
     const counts: Record<string, number> = {};
     for (const filter of filters) {
       counts[filter] = await this.emailRepo.getSectionCount(filter, folderPath, viewFilter);
@@ -950,6 +958,7 @@ export class SQLiteStorage implements IEmailStorage {
 
   async getEmailsByFolder(folderId: string, options: PaginationOptions & { categoryTag?: string; collapseThreads?: boolean }): Promise<EmailRecord[]> {
     this.ensureInitialized();
+    this.catchUpReadModel();
     return this.emailRepo.getByFolder(folderId, options);
   }
 
@@ -959,6 +968,7 @@ export class SQLiteStorage implements IEmailStorage {
    *  caller keeps the legacy message-count total). */
   async getFolderThreadCount(folderPath?: string, viewFilter?: ViewFilter): Promise<number | null> {
     this.ensureInitialized();
+    this.catchUpReadModel();
     if (!this.emailRepo.readModelReadsEnabled()) return null;
     const folderId = this.emailRepo.folderIdForPath(folderPath);
     if (!folderId) return null;
@@ -1169,6 +1179,21 @@ export class SQLiteStorage implements IEmailStorage {
    */
   private scheduleReadModelDrain(): void {
     this.readModel?.schedule();
+  }
+
+  /**
+   * Bring the read model up to date before a list/count read that queries it.
+   * Every read the renderer's list is built from goes through this, so a reload
+   * issued right after a write — a sync storing new mail, above all — sees that
+   * write instead of the projection from before it. See
+   * ReadModelMaintainer.catchUp for the bound and why it lives on the read side.
+   *
+   * Only while reads actually use the projection: before the backfill completes
+   * they take the legacy path, which reads `emails` directly and is never stale,
+   * so catching up there would only spend each read's budget on the backfill.
+   */
+  private catchUpReadModel(): void {
+    if (this.emailRepo.readModelReadsEnabled()) this.readModel?.catchUp();
   }
 
   /** Fire the listener. Never allowed to escape: a host whose notification fails
