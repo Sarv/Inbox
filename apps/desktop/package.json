@@ -91,7 +91,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.4.17",
-    "electron": "^43.2.0",
+    "electron": "^44.4.5",
     "electron-builder": "^26.16.1",
     "happy-dom": "^20.11.1",
     "tailwindcss": "^3.4.1",
