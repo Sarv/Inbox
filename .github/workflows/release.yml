@@ -379,7 +379,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DEB=$(ls apps/desktop/release/*.deb | head -1)
+          # ABSOLUTE path, not the relative one `ls` prints. apt-get reads an
+          # argument as a local .deb only when it starts with `/` or `./`;
+          # anything else is a PACKAGE NAME, in which case a `/` inside it is
+          # the `package/suite` pin separator. So the bare relative path became
+          # a lookup for package "apps" in suite "desktop" and died with
+          #   E: Unable to locate package apps/desktop/release
+          # which reads like a missing file but is apt never having looked at
+          # the filesystem at all.
+          DEB=$(ls "$PWD"/apps/desktop/release/*.deb | head -1)
           echo "Installing $DEB"
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb "$DEB"

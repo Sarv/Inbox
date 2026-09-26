@@ -1,0 +1,196 @@
+# THROWAWAY. Generated from release.yml by filtering the build job to the
+# Linux matrix and dropping verify/publish, so the never-yet-executed Linux
+# verification steps can be proven WITHOUT pushing a release tag. The steps
+# themselves are byte-identical to release.yml (copied as data, not retyped).
+# Delete this file and the ci/linux-smoke branch once Linux is green.
+
+name: 'SCRATCH: Linux build only (delete me)'
+'on':
+  push:
+    branches:
+      - ci/linux-smoke
+permissions:
+  contents: read
+env:
+  TURBO_CACHE_DIR: .turbo
+  TURBO_TELEMETRY_DISABLED: '1'
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            id: linux-x64
+            os: ubuntu-22.04
+            platform: linux
+            args: '--linux --x64'
+            unpacked: apps/desktop/release/linux-unpacked
+          - name: Linux arm64
+            id: linux-arm64
+            os: ubuntu-22.04-arm
+            platform: linux
+            args: '--linux --arm64'
+            unpacked: apps/desktop/release/linux-arm64-unpacked
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: ${{ runner.os }}-${{ runner.arch }}-electron-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-electron-
+      - name: Install Linux packaging tools
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm clang-15
+          # Printed so the next compile failure can be read against a known
+          # compiler instead of an assumed one -- node-gyp's log does not say
+          # which version it ran.
+          clang++-15 --version
+          # node-gyp's make generator resolves its compiler from $CC/$CXX
+          # (CC.target ?= $(CC)), so exporting them for the REST of the job is
+          # all it takes. It has to be the rest of the job, not just the
+          # packaging step: `pnpm install` below runs postinstall, which builds
+          # the same addon for the same Electron ABI -- and swallows its own
+          # failure, so getting this wrong looks like a green install and a
+          # broken package.
+          echo "CC=clang-15" >> "$GITHUB_ENV"
+          echo "CXX=clang++-15" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Make the workspace-root probe answer a Windows path
+        if: runner.os == 'Windows'
+        run: node scripts/win-pwd-shim.mjs
+      - name: Build libraries
+        run: |
+          pnpm --filter @sarvinbox/core build
+          pnpm --filter @sarvinbox/storage-node build
+      - name: Build renderer and main
+        working-directory: apps/desktop
+        run: pnpm exec tsc && pnpm exec vite build
+        env:
+          NODE_ENV: production
+          SARVINBOX_GOOGLE_CLIENT_ID: ${{ secrets.SARVINBOX_GOOGLE_CLIENT_ID }}
+          SARVINBOX_GOOGLE_CLIENT_SECRET: ${{ secrets.SARVINBOX_GOOGLE_CLIENT_SECRET }}
+          SARVINBOX_SENTRY_DSN: ${{ secrets.SARVINBOX_SENTRY_DSN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      - name: Prefetch default extensions
+        working-directory: apps/desktop
+        run: pnpm prefetch:extensions
+      - name: Package ${{ matrix.platform }}
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXTRA=()
+          if [[ "${{ matrix.platform }}" == "mac" && "${HAS_APPLE_CERT}" == "true" ]]; then
+            EXTRA+=(-c.mac.notarize=true)
+            echo "Signing and notarizing with the Developer ID certificate."
+          elif [[ "${{ matrix.platform }}" == "mac" ]]; then
+            echo "WARN: APPLE_CERTIFICATE_P12 is not set — building an UNSIGNED app."
+            echo "      Gatekeeper will block it. See docs/RELEASING.md."
+          fi
+          pnpm exec electron-builder ${{ matrix.args }} "${EXTRA[@]}" --publish never
+        env:
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify macOS signature and entitlements
+        if: matrix.platform == 'mac' && env.HAS_APPLE_CERT == 'true'
+        run: |
+          set -euo pipefail
+          APP=$(find apps/desktop/release -name '*.app' -maxdepth 3 | head -1)
+          echo "Verifying $APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
+            || { echo "FAIL: signed app carries no entitlements"; exit 1; }
+          echo "OK: signature and entitlements present"
+      - name: Verify Windows native addon architecture
+        if: matrix.platform == 'win'
+        shell: bash
+        run: |
+          node scripts/verify-win-arch.mjs \
+            apps/desktop/release/win-unpacked=x64 \
+            apps/desktop/release/win-arm64-unpacked=arm64
+      - name: Verify the macOS build is really universal
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: node scripts/verify-mac-arch.mjs apps/desktop/release/mac-universal=x64,arm64
+      - name: Verify the packed app carries its native addons
+        if: matrix.platform != 'win'
+        shell: bash
+        run: node scripts/verify-packaged-addons.mjs apps/desktop/release
+      - name: Verify the Linux build runs on an older glibc
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: node scripts/verify-glibc-floor.mjs "${{ matrix.unpacked }}" --max=2.35
+      - name: Install the Linux package the way a user would
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ABSOLUTE path, not the relative one `ls` prints. apt-get reads an
+          # argument as a local .deb only when it starts with `/` or `./`;
+          # anything else is a PACKAGE NAME, in which case a `/` inside it is
+          # the `package/suite` pin separator. So the bare relative path became
+          # a lookup for package "apps" in suite "desktop" and died with
+          #   E: Unable to locate package apps/desktop/release
+          # which reads like a missing file but is apt never having looked at
+          # the filesystem at all.
+          DEB=$(ls "$PWD"/apps/desktop/release/*.deb | head -1)
+          echo "Installing $DEB"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb "$DEB"
+      - name: Smoke-launch the packaged app
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            xvfb-run -a node scripts/smoke-launch.mjs "/opt/Sarv Inbox/sarv-inbox"
+          else
+            node scripts/smoke-launch.mjs "${{ matrix.smoke }}"
+          fi
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.id }}
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.rpm
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest*.yml
+          if-no-files-found: error
+          retention-days: 14
