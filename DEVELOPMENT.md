@@ -96,10 +96,14 @@ pnpm test:watch
 pnpm --filter @sarvinbox/core test
 ```
 
-Straight after `pnpm install`, the SQLite-backed suites fail with
-`ERR_DLOPEN_FAILED`: postinstall builds `better-sqlite3` for Electron's ABI,
-while the tests run in plain Node. Flip it with `pnpm test:node-abi`, and back
-with `node scripts/native-abi.mjs electron` (or `sh scripts/dev.sh`).
+`better-sqlite3` is compiled for one ABI at a time: postinstall builds it for
+Electron's, while the tests run in plain Node. You don't flip it by hand: the
+`test*` scripts of the packages that open a database rebuild it for Node first,
+and `pnpm dev:desktop` (or `sh scripts/dev.sh`) rebuilds it for Electron, each a
+no-op when it already matches. Don't run `pnpm test:node-abi` on
+its own: an addon left on Node's ABI makes the app boot with no database (see
+[CLAUDE.md](CLAUDE.md)). To put it back for the app, run
+`node scripts/native-abi.mjs electron`.
 
 See [docs/TESTING.md](docs/TESTING.md) for the test layers, the in-memory IMAP
 server used by sync tests, and the house rules for writing new tests.

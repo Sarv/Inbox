@@ -55,6 +55,16 @@ reports before it rebuilds, so you can check without waiting for a compile;
 `SARVINBOX_SKIP_ELECTRON_REBUILD=1`, which leaves the addon on Node's ABI and
 makes the test-time guard a no-op probe.
 
+The runtime is a required argument, `node` or `electron`. Anything else the
+script cannot read (an unknown flag, no runtime, two runtimes) is refused with
+its usage text and exit code 1 before it even probes the addon, and `--help`
+(`-h`) prints that text and exits 0. It used to default to `node` and skip
+flags it did not know, so `node scripts/native-abi.mjs --help` rebuilt the addon
+for Node. On 2026-09-24 that command, piped into `head`, was killed after
+node-gyp had deleted `build/`, and left no addon at all. The parsing lives in
+`scripts/lib/native-abi-args.mjs`, tested by
+`packages/storage-node/test/unit/native-abi-args.test.ts`.
+
 Tests that open a database go through `src/test-support/test-db.ts`, which fails
 with a message naming this exact fix rather than trying to carry on. It used to
 fall back to Node's built-in `node:sqlite` behind a better-sqlite3 facade so the
