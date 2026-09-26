@@ -10,8 +10,9 @@ Windows, signing, notarizing, publishing — happens in GitHub Actions.
 That bumps the version, writes the changelog from your commits, commits, tags,
 and pushes. Pushing the tag starts
 [`.github/workflows/release.yml`](../.github/workflows/release.yml), which
-publishes a **draft** release with every artifact attached. You review it and
-click publish.
+publishes the release with every artifact attached and marks it **Latest** —
+once the test suite and every per-platform check have passed. There is no
+manual publish step.
 
 ---
 
@@ -212,13 +213,13 @@ Then watch the run:
 gh run watch --repo Sarv/Inbox
 ```
 
-When it finishes, the release is a **draft**. Download one artifact per platform,
-check it launches, then publish from
-<https://github.com/Sarv/Inbox/releases>.
+When it finishes, the release is already **published and Latest** at
+<https://github.com/Sarv/Inbox/releases>. If any job fails, nothing is
+published.
 
 Publishing is not just a listing: it is what hands the update to every installed
 copy, which will download and apply it on its own within the hour. See
-"Auto-update" below before you click it.
+"Auto-update" below — pushing the tag is effectively clicking publish.
 
 > The repository has no `v*` tag yet, so the **first** release generates notes
 > spanning the entire history — hundreds of bullets. Trim it hard at the prompt;
@@ -242,10 +243,11 @@ Three things make that work, and each is a way to break it:
    they are generated even though the build runs `--publish never`, because
    `never` only suppresses the *upload*.
 2. **The release must be PUBLISHED, not a draft.** electron-updater cannot see
-   draft releases. That is the safety gate: the workflow always creates a draft,
-   and nothing reaches a single user until you click publish. Conversely, the
-   moment you click publish, every installed copy will pick it up within the
-   hour — there is no staged rollout.
+   draft releases. The workflow publishes as soon as `verify` and every `build`
+   job pass, so the CI checks are the only gate: the moment the release job
+   finishes, every installed copy will pick it up within the hour — there is no
+   staged rollout. To hold a release back, edit it to a draft
+   (`gh release edit vX --draft`) before users update.
 3. **macOS updates require the build to be signed.** Squirrel.Mac validates the
    signature of the downloaded `.zip` against the running app, so an unsigned
    release installs for nobody. If `APPLE_CERTIFICATE_P12` was missing, the

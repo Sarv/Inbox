@@ -103,9 +103,11 @@ from a local machine, ever.
   `## [Unreleased]` in CHANGELOG.md into the new version section, commits
   `chore(release): X`, tags `vX`, and pushes the branch and the tag.
 - **The tag is the trigger.** `.github/workflows/release.yml` fires on `v*` and
-  builds macOS, Linux and Windows each on their own runner, then publishes a
-  DRAFT GitHub release carrying every artifact. Review the draft on the
-  releases page and publish it when it looks right.
+  builds macOS, Linux and Windows each on their own runner, then publishes the
+  GitHub release carrying every artifact and marks it Latest — only after the
+  full test suite and every per-platform check (including a smoke launch)
+  pass. Publishing is immediate: auto-update ships it to every installed copy
+  within the hour, so what reaches the tag must already be release-ready.
 - **Never run electron-builder, or upload/publish a release, by hand.** The app
   has two compiled native addons (better-sqlite3, lzma-native) and a native
   addon can only be built ON the platform it runs on, so a local cross-build
