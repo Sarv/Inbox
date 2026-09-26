@@ -182,9 +182,38 @@ jobs:
       # fpm (which electron-builder shells out to for .deb/.rpm) needs the rpm
       # toolchain present to emit an .rpm at all; without it the rpm target is
       # skipped silently and the release ships without Fedora/RHEL packages.
+      #
+      # g++-12 is the other half of the ubuntu-22.04 pin above. 22.04's DEFAULT
+      # compiler is gcc 11, and gcc 11 cannot parse Electron 43's V8 headers at
+      # all -- `class V8_DEPRECATE_SOON("...") V8_EXPORT Value` puts a GNU
+      # attribute after a C++11 one in a class-head, which it only learned to
+      # accept in gcc 12:
+      #   v8config.h:854:20: error: expected identifier before '__attribute__'
+      #   make: *** [better_sqlite3.target.mk:138: .../better_sqlite3.o] Error 1
+      # v1.2.3 is where that landed: the first tag built on the pinned image,
+      # and both Linux jobs died compiling better-sqlite3 for Electron. Nothing
+      # before it noticed, because gcc 11 compiles the same addon against
+      # NODE's headers fine -- which is all CI ever asks for.
+      #
+      # gcc-12 comes FROM 22.04, so it cannot raise the floor the pin exists to
+      # hold: its libstdc++ is the one jammy already ships (GLIBCXX_3.4.30) and
+      # glibc is untouched. "Verify the Linux build runs on an older glibc"
+      # below still reads the artifacts and proves it.
       - name: Install Linux packaging tools
         if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm g++-12
+          # node-gyp's make generator resolves its compiler from $CC/$CXX
+          # (CC.target ?= $(CC)), so exporting them for the REST of the job is
+          # all it takes. It has to be the rest of the job, not just the
+          # packaging step: `pnpm install` below runs postinstall, which builds
+          # the same addon for the same Electron ABI -- and swallows its own
+          # failure, so getting this wrong looks like a green install and a
+          # broken package.
+          echo "CC=gcc-12" >> "$GITHUB_ENV"
+          echo "CXX=g++-12" >> "$GITHUB_ENV"
 
       # NOTE: no SARVINBOX_SKIP_ELECTRON_REBUILD here, unlike the verify job.
       # The packaged app runs inside Electron, so the addons must be built for
