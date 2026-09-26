@@ -117,12 +117,15 @@ export function UpdateDialog() {
     if (!saved) setActionError('That preference could not be saved.');
   };
 
+  // `whitespace-nowrap` is the point of the roomier dialog: at max-w-md the
+  // three answers ("Skip this version" / "Remind me later" / "Install and
+  // Relaunch") each wrapped onto two lines and the row read as a block of text.
   const buttonClass = (kind: 'primary' | 'neutral' | 'quiet') =>
     kind === 'primary'
-      ? 'px-3 py-1.5 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50'
+      ? 'px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50'
       : kind === 'neutral'
-        ? 'px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted/50 transition-colors disabled:opacity-50'
-        : 'px-3 py-1.5 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted/50 transition-colors disabled:opacity-50';
+        ? 'px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap border border-border hover:bg-muted/50 transition-colors disabled:opacity-50'
+        : 'px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap text-muted-foreground hover:bg-muted/50 transition-colors disabled:opacity-50';
 
   // z-250: above the app's own overlays, below the z-300 confirmation dialog,
   // which is always raised BY something and must stay on top of it.
@@ -135,10 +138,10 @@ export function UpdateDialog() {
       aria-labelledby="update-dialog-title"
     >
       <div
-        className="w-full max-w-md rounded-lg border border-border bg-background p-5 shadow-xl"
+        className="w-full max-w-lg rounded-lg border border-border bg-background p-6 shadow-xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <h3 id="update-dialog-title" className="text-base font-semibold mb-2">
+        <h3 id="update-dialog-title" className="text-lg font-semibold mb-2">
           {view.title}
         </h3>
         <p className="text-sm text-muted-foreground whitespace-pre-line">{view.body}</p>
@@ -182,7 +185,7 @@ export function UpdateDialog() {
 
         {actionError && <p className="mt-3 text-sm text-destructive">{actionError}</p>}
 
-        <div className="mt-5 flex items-center justify-between gap-2">
+        <div className="mt-6 flex items-center justify-between gap-3">
           <div>
             {view.tertiary && (
               <button
@@ -195,7 +198,7 @@ export function UpdateDialog() {
             )}
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <button
               onClick={() => void run(view.secondary.action)}
               disabled={installing}
