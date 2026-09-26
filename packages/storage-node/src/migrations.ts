@@ -10,6 +10,7 @@ import type Database from 'better-sqlite3';
 import { applyFtsSchema, FTS_REBUILD_SQL, FTS_TRIGGERS } from './fts-schema';
 import { rawBodyExpression } from './repositories/body-storage';
 import { clearInlineImageCache, inflateInlineImages } from './repositories/inline-image-store';
+import { EMAIL_TAGS_TABLE, EMAIL_TAGS_TAG_INDEX, tagSplitRowsSql } from './repositories/tag-membership';
 import { hasSharedContacts, SHARED } from './shared-contacts';
 
 /**
@@ -3436,6 +3437,89 @@ function migrationAccountKey(db: Database.Database, context: MigrationContext): 
 }
 
 /**
+ * v91 — `email_tags`: tag membership as INDEXED rows.
+ *
+ * `emails.tags` stays the source of truth; this is a derived index of it. The
+ * membership test everything used, `instr(tags, '|' || ? || '|') > 0`, is a
+ * function applied to a column, so no index could serve it and every such
+ * query scanned all of `emails` — rows that carry the message bodies inline and
+ * average ~88 KB each. Measured on a real 2.46 GB / 27,785-email mailbox, ONE
+ * `syncFlags` pass spent 1,922 ms across 22 folders on those scans alone, on
+ * the main thread, delaying the IPC reply for whatever had just been clicked.
+ * The same pass over this table: 119 ms, identical rows.
+ *
+ * Maintained by TRIGGERS, exactly as the read-model dirty queue (v65) is, and
+ * for the same reason: every write path is captured — repository methods and
+ * ad-hoc `UPDATE emails SET tags = replace(tags, ...)` alike — with no
+ * derivation in TypeScript that a future writer could forget to call.
+ *
+ * The INSERT trigger deletes before it inserts. `INSERT OR REPLACE INTO emails`
+ * removes the conflicting row WITHOUT firing the DELETE trigger (SQLite only
+ * fires those under `PRAGMA recursive_triggers`), so without the delete the
+ * replaced row's old tags would survive as phantom memberships.
+ */
+export const emailTagsJoinTable: Migration = {
+  version: 91,
+  name: 'email_tags_join_table',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${EMAIL_TAGS_TABLE} (
+        email_id TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (email_id, tag)
+      ) WITHOUT ROWID;
+
+      -- (tag, email_id) and not (tag): the second column makes it COVERING for
+      -- "which emails carry this tag", so the seek never touches an emails
+      -- page -- which is the whole point, those pages are the bodies.
+      CREATE INDEX IF NOT EXISTS ${EMAIL_TAGS_TAG_INDEX}
+        ON ${EMAIL_TAGS_TABLE}(tag, email_id);
+
+      CREATE TRIGGER IF NOT EXISTS trg_email_tags_insert
+      AFTER INSERT ON emails BEGIN
+        DELETE FROM ${EMAIL_TAGS_TABLE} WHERE email_id = NEW.id;
+        INSERT OR IGNORE INTO ${EMAIL_TAGS_TABLE}(email_id, tag)
+        ${tagSplitRowsSql('NEW.id', 'NEW.tags')};
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_email_tags_update
+      AFTER UPDATE OF tags ON emails BEGIN
+        DELETE FROM ${EMAIL_TAGS_TABLE} WHERE email_id = OLD.id;
+        INSERT OR IGNORE INTO ${EMAIL_TAGS_TABLE}(email_id, tag)
+        ${tagSplitRowsSql('NEW.id', 'NEW.tags')};
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_email_tags_delete
+      AFTER DELETE ON emails BEGIN
+        DELETE FROM ${EMAIL_TAGS_TABLE} WHERE email_id = OLD.id;
+      END;
+    `);
+
+    // Backfill. Set-based and single-statement, so it runs in C: 482 ms for
+    // 27,785 emails -> 81,477 memberships on the mailbox measured above.
+    //
+    // Unconditional, and `INSERT OR IGNORE` rather than a guard on the table
+    // being empty: an interrupted first run leaves a PARTIALLY populated table,
+    // and a partial index of membership is the failure that looks like mail
+    // vanishing from a folder. Re-deriving every row is idempotent and cheap
+    // enough to simply always do.
+    const inserted = db.prepare(`
+      INSERT OR IGNORE INTO ${EMAIL_TAGS_TABLE}(email_id, tag)
+      ${tagSplitRowsSql('id', 'tags', 'FROM emails')}
+    `).run().changes;
+    logger.info(`Email tag index (v91): ${EMAIL_TAGS_TABLE} ready; ${inserted} membership(s) backfilled`);
+  },
+  down: (db) => {
+    db.exec(`
+      DROP TRIGGER IF EXISTS trg_email_tags_insert;
+      DROP TRIGGER IF EXISTS trg_email_tags_update;
+      DROP TRIGGER IF EXISTS trg_email_tags_delete;
+      DROP TABLE IF EXISTS ${EMAIL_TAGS_TABLE};
+    `);
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3510,5 +3594,6 @@ export function createMigrationManager(
   manager.register(emailSpamVerdictColumns);
   manager.register(headerStageBacklogIndexes);
   manager.register(emailSpamVerdictColumnsRepair);
+  manager.register(emailTagsJoinTable);
   return manager;
 }
