@@ -270,6 +270,16 @@ export const darkenColorToken = (
 };
 
 /**
+ * The paper a re-coloured message is drawn on: what a white page becomes.
+ *
+ * Derived from the surface mapping rather than written out, so the frame's
+ * canvas can never drift away from the colour the message's OWN white
+ * backgrounds land on. Without that agreement a `background: white` on a
+ * paragraph paints a visible slab against the page around it.
+ */
+export const DARK_PAPER = darkenColorToken('#ffffff', 'surface', 'inverted') ?? 'rgb(18, 18, 18)';
+
+/**
  * Re-colour every colour inside one declaration VALUE, leaving the rest of the
  * value (lengths, keywords, `url()`s, gradient stop positions) untouched.
  *

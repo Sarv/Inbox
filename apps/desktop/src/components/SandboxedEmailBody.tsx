@@ -10,7 +10,7 @@ import { useRef, useEffect, useMemo, useState } from 'react';
 
 import { useAppearance, useResolvedTheme } from '../appearance';
 import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
-import { applyEmailDarkMode } from '../utils/email-dark-mode';
+import { DARK_PAPER, applyEmailDarkMode } from '../utils/email-dark-mode';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
 // Shared with Chat View rather than kept in a second copy here: the two
 // renderers had the same two-step fit written twice, and the measurement is the
@@ -192,11 +192,17 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
   // still being drawn on an opaque WHITE one: light-grey text on white, which
   // is exactly what "dark email bodies does nothing" looked like. Nothing else
   // emits it, so every other view renders byte-identically to before.
+  //
+  // It paints the PAPER a re-coloured message is drawn on, not merely "not
+  // white": the mirror of the forced white canvas below it. Leave the canvas
+  // transparent and the app's chrome shows through, so a message's own
+  // `background: white` — which the engine moves to that same paper — lands as
+  // a lighter slab on top of the chrome instead of disappearing into the page.
   return `
     html, body {
       margin: 0;
       padding: 0;
-      ${darkCanvas ? 'color-scheme: dark;' : ''}
+      ${darkCanvas ? `color-scheme: dark; background-color: ${DARK_PAPER};` : ''}
       ${lightCanvas ? 'background-color: #ffffff;' : ''}
     }
     body, body * {

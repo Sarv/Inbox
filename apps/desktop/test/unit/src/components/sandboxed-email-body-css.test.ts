@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildIframeCss } from '../../../../src/components/SandboxedEmailBody';
+import { DARK_PAPER, darkenColorToken } from '../../../../src/utils/email-dark-mode';
 
 // The frame's stylesheet is built from four flags, and the flags are how one
 // component serves three different pages:
@@ -155,6 +156,18 @@ describe('the dark-bodies canvas', () => {
   // component: jsdom/happy-dom never paint a canvas.
   it('declares the dark colour scheme inside the document, not just on the frame', () => {
     expect(darkStandard()).toContain('color-scheme: dark;');
+  });
+
+  // Regression: the mirror of the forced white canvas. Left transparent, the
+  // dark canvas lets the app's chrome show through the message — and the
+  // engine's own paper, which is what it turns a sender's `background: white`
+  // into, then lands as a visibly LIGHTER slab on top of that chrome. The two
+  // have to agree, so the canvas takes the colour from the engine instead of
+  // repeating it.
+  it('paints the paper the engine inverts a white page to', () => {
+    expect(darkStandard()).toContain(`background-color: ${DARK_PAPER};`);
+    expect(DARK_PAPER).toBe(darkenColorToken('#ffffff', 'surface', 'inverted'));
+    expect(DARK_PAPER).not.toContain('255');
   });
 
   // Regression: the scheme must ride on the dark canvas alone. Emitted on the
