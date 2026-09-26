@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-09-26
+
+### Added
+- **Dark email bodies (Settings > Appearance).** In dark mode the message
+  itself still arrives on a white page, because that is the page senders write
+  their mail for. Turn this on and Sarv Inbox re-colours the message for dark
+  mode instead: white paper becomes a dark surface, black text becomes light,
+  and the parts the sender actually designed — a brand-coloured button, a
+  coloured header bar, a message that already has a dark design — are left
+  exactly as they drew them, along with every image. It is off by default and
+  has no effect in the light theme, so nothing changes unless you ask for it.
+
 ### Fixed
 - **Trash and Junk always showed no unread mail, however much was sitting in
   them.** Their badges were derived from a conversation-wide "is this thread
@@ -26,20 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the messages themselves, and the dropped-message scan runs on a timer rather
   than on every pass. The counts are identical; on a 27,000-message account the
   recount went from 147 seconds of accumulated freezing to well under a second.
-
-## [1.2.3] - 2026-09-26
-
-### Added
-- **Dark email bodies (Settings > Appearance).** In dark mode the message
-  itself still arrives on a white page, because that is the page senders write
-  their mail for. Turn this on and Sarv Inbox re-colours the message for dark
-  mode instead: white paper becomes a dark surface, black text becomes light,
-  and the parts the sender actually designed — a brand-coloured button, a
-  coloured header bar, a message that already has a dark design — are left
-  exactly as they drew them, along with every image. It is off by default and
-  has no effect in the light theme, so nothing changes unless you ask for it.
-
-### Fixed
 - **The Linux app refused to start on Ubuntu 22.04, Debian 12 and other
   long-term releases.** 1.2.2's Linux builds were compiled against a newer
   system C library than those distributions ship, so the database module could
