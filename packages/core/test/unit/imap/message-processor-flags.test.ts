@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LARGE_MAILBOX_THRESHOLD } from '../../../src/config/sync';
-import { MessageProcessor } from '../../../src/imap/message-processor';
+import { MessageProcessor, STALE_SWEEP_MIN_INTERVAL_MS } from '../../../src/imap/message-processor';
 import { FakeEmailStorage, resetFakeStorageIds } from '../../../src/test-support/fake-email-storage';
 import { FakeImapServer, resetFakeMessageIds } from '../../../src/test-support/fake-imap-server';
 import type { IEmailStorage } from '../../../src/types/storage';
@@ -27,7 +27,9 @@ import type { IEmailStorage } from '../../../src/types/storage';
 //
 // Determinism: syncFlags keeps module-global reconcile throttles keyed by
 // folder.id, so every setup() gets a FRESH folder id — no test can inherit
-// another's throttle. Nothing here depends on the wall clock otherwise.
+// another's throttle. The ONE other wall-clock dependency is the Phase-2b sweep
+// schedule; tests that cross it drive the clock with `controlClock()` rather
+// than sleeping.
 
 const INBOX = 'INBOX';
 let folderSeq = 0;
@@ -75,6 +77,19 @@ const tagsAt = (ctx: Ctx, uid: number): string[] => {
   const row = ctx.db.rowsPrimaryIn(INBOX).find((e) => e.uid === uid);
   return row ? ctx.db.tagsOf(row.id).sort() : [];
 };
+
+/**
+ * Takes over `Date.now` for the current test and hands back a stepper. The
+ * Phase-2b sweep schedule reads the wall clock directly (no timer to fake), and
+ * `vi.restoreAllMocks()` below puts the real clock back after every test.
+ */
+function controlClock(): (ms: number) => void {
+  let now = Date.now();
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  return (ms: number) => {
+    now += ms;
+  };
+}
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -1184,8 +1199,11 @@ describe('syncFlags — Phase 2b: stale tag-only memberships', () => {
 
   it('keeps a member the server DOES hold here, and never re-searches it', async () => {
     // A reply that genuinely lives in both folders must survive every sweep and
-    // cost one HEADER search per session, not one per sync.
+    // cost one HEADER search per session, not one per sync. The clock step in
+    // the middle clears the sweep's per-folder schedule gate — the verified
+    // cache is session-scoped and must outlive it, which is the point here.
     const ctx = setup();
+    const advance = controlClock();
     seedSynced(ctx);
     const legit = seedTagOnlyMember(ctx, '<both@test.local>', true);
     const stale = seedTagOnlyMember(ctx, '<stale@test.local>', false);
@@ -1198,8 +1216,9 @@ describe('syncFlags — Phase 2b: stale tag-only memberships', () => {
     expect(ctx.db.tagsOf(stale)).toEqual(['Trash']);
     expect(search).toHaveBeenCalledTimes(2);
 
-    // Next sync: a NEW stale member appears; only IT is searched (legit is cached).
+    // Next sweep: a NEW stale member appears; only IT is searched (legit is cached).
     const stale2 = seedTagOnlyMember(ctx, '<stale2@test.local>', false);
+    advance(STALE_SWEEP_MIN_INTERVAL_MS);
     await ctx.server.selectFolder(INBOX);
     const second = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
     expect(second.deleted).toBe(1);
@@ -1282,6 +1301,9 @@ describe('syncFlags — Phase 2b: stale tag-only memberships', () => {
   });
 
   it('bounds one sweep to 100 searches and finishes the rest on later syncs', async () => {
+    // No clock step: a sweep that stopped on the cap must NOT be recorded as
+    // complete, or the schedule gate would strand the remaining 3 members for
+    // the whole interval — this sweep's own bug, reintroduced by its rate limit.
     const ctx = setup();
     seedSynced(ctx);
     const ids = Array.from({ length: 103 }, (_, i) => seedTagOnlyMember(ctx, `<stale-${i}@test.local>`, false));
@@ -1313,6 +1335,110 @@ describe('syncFlags — Phase 2b: stale tag-only memberships', () => {
 
     expect(res.deleted).toBe(1); // the primary-row deletion still counted
     expect(ctx.db.allRows()).toHaveLength(2);
+  });
+
+  // ---- Phase 2b: the sweep's SCHEDULE -------------------------------------
+  //
+  // The sweep used to run on every flag sync, for every folder — on a busy
+  // account that is every few seconds, and its membership read is a query over
+  // the whole mailbox. Nothing about the condition it repairs needs that rate:
+  // a webmail delete the app never saw an expunge for happens while the app is
+  // CLOSED, so once per folder per interval catches it just as well. These pin
+  // the two halves that make that safe: a COMPLETED sweep is throttled, and a
+  // sweep that stopped early is not.
+
+  it('runs the first sweep of a session unthrottled, then skips the next one within the interval', async () => {
+    // Regression: if the gate throttled the FIRST sync too, a session could open
+    // without ever reconciling the tags a closed-app delete left behind.
+    const ctx = setup();
+    const advance = controlClock();
+    seedSynced(ctx);
+    const stale = seedTagOnlyMember(ctx, '<stale@test.local>', false);
+    await ctx.server.selectFolder(INBOX);
+
+    const first = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(first.deleted).toBe(1);
+    expect(ctx.db.tagsOf(stale)).toEqual(['Trash']);
+
+    // A new stale member inside the interval waits for the next window.
+    const later = seedTagOnlyMember(ctx, '<later@test.local>', false);
+    advance(STALE_SWEEP_MIN_INTERVAL_MS - 1);
+    await ctx.server.selectFolder(INBOX);
+    const throttled = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(throttled.deleted).toBe(0);
+    expect(ctx.db.tagsOf(later).sort()).toEqual([INBOX, 'Trash']);
+
+    // One more millisecond and the window opens.
+    advance(1);
+    await ctx.server.selectFolder(INBOX);
+    const due = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(due.deleted).toBe(1);
+    expect(ctx.db.tagsOf(later)).toEqual(['Trash']);
+  });
+
+  it('skips the membership QUERY too, not just the searches', async () => {
+    // Regression: the gate has to sit ahead of getFolderMembersOutsideUidSpace.
+    // That query is the expensive half — a throttle that still issues it every
+    // sync and only skips the round-trips saves nothing at all.
+    const ctx = setup();
+    const advance = controlClock();
+    seedSynced(ctx);
+    seedTagOnlyMember(ctx, '<stale@test.local>', false);
+    await ctx.server.selectFolder(INBOX);
+
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    const afterFirst = ctx.db.callCount('getFolderMembersOutsideUidSpace');
+    expect(afterFirst).toBe(1);
+
+    advance(STALE_SWEEP_MIN_INTERVAL_MS - 1);
+    await ctx.server.selectFolder(INBOX);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(ctx.db.callCount('getFolderMembersOutsideUidSpace')).toBe(afterFirst);
+  });
+
+  it('throttles a folder with NOTHING to sweep, and each folder on its own clock', async () => {
+    // Regression: the empty and converged early returns are the common case on a
+    // settled mailbox — exactly what is worth not re-querying every few seconds.
+    // And the stamp is per folder path: INBOX being throttled must never keep
+    // Archive from its first sweep.
+    const ctx = setup();
+    const advance = controlClock();
+    seedSynced(ctx);
+    await ctx.server.selectFolder(INBOX);
+
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(ctx.db.callCount('getFolderMembersOutsideUidSpace')).toBe(1);
+
+    advance(STALE_SWEEP_MIN_INTERVAL_MS - 1);
+    await ctx.server.selectFolder(INBOX);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(ctx.db.callCount('getFolderMembersOutsideUidSpace')).toBe(1);
+
+    // A different folder, same instant: independent schedule.
+    await ctx.server.selectFolder('Archive');
+    await ctx.mp.syncFlags(ctx.server, ctx.db.folder('Archive'), ctx.storage);
+    expect(ctx.db.callCount('getFolderMembersOutsideUidSpace')).toBe(2);
+  });
+
+  it('does NOT throttle after a failed HEADER search, so the next sync retries immediately', async () => {
+    // Regression: the error break leaves candidates unexamined. Recording that
+    // sweep as complete would strand them for the whole interval — a transient
+    // socket error turned into 15 minutes of wrong folder counts.
+    const ctx = setup();
+    controlClock();
+    seedSynced(ctx);
+    const stale = seedTagOnlyMember(ctx, '<stale@test.local>', false);
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'search').mockRejectedValueOnce(new Error('socket closed'));
+
+    const failed = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(failed.deleted).toBe(0);
+
+    // No clock step at all: the retry happens in the very next sync.
+    await ctx.server.selectFolder(INBOX);
+    const retried = await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(retried.deleted).toBe(1);
+    expect(ctx.db.tagsOf(stale)).toEqual(['Trash']);
   });
 
   it('is skipped entirely on a storage that does not expose tag-only members', async () => {

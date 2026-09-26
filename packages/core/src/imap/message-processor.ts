@@ -225,6 +225,13 @@ export interface IngestServerActions {
   move(sourcePath: string, uid: number, destPath: string): Promise<unknown>;
 }
 
+/**
+ * How long a COMPLETED stale-membership sweep suppresses the next one for the
+ * same folder. Exported so the tests can step the clock by exactly this much
+ * rather than pinning a literal that would drift from the code.
+ */
+export const STALE_SWEEP_MIN_INTERVAL_MS = 15 * 60 * 1000;
+
 export class MessageProcessor {
   private config: MessageProcessorConfig;
   // Supplies UIDs (per folder) that have a pending local flag op not yet sent to
@@ -251,6 +258,16 @@ export class MessageProcessor {
   // the tag-only set, so without this it would cost a HEADER search on every
   // sync. Session-scoped and size-capped like reconcileTriedUids.
   private staleSweepVerified = new Map<string, Set<string>>();
+
+  // Per-folder wall-clock (ms) at which the stale-membership sweep last ran to
+  // COMPLETION. The sweep is maintenance — it repairs a tag left behind by a
+  // webmail delete the app never saw an expunge for — but it was running on
+  // every single flag sync, for every folder, which on a busy account is every
+  // few seconds. Nothing about it needs that rate: the condition it repairs is
+  // created while the app is CLOSED, so once per folder per interval catches it
+  // just as well, and the first sync after launch is never throttled (no entry
+  // yet) so a session still opens by reconciling.
+  private staleSweepLastRun = new Map<string, number>();
   /** Upper bound on HEADER searches one sweep may issue — one round-trip each. */
   private static readonly STALE_SWEEP_MAX_SEARCHES = 100;
   private static readonly RECONCILE_TRIED_CAP = 50000;
@@ -2647,16 +2664,27 @@ export class MessageProcessor {
     touch?: () => void,
   ): Promise<number> {
     if (typeof storage.getFolderMembersOutsideUidSpace !== 'function' || typeof client.search !== 'function') return 0;
+    // Schedule gate FIRST, ahead of the membership read: skipping the sweep has
+    // to skip its query too, or the throttle saves nothing.
+    const lastRun = this.staleSweepLastRun.get(folder.path);
+    if (lastRun !== undefined && Date.now() - lastRun < STALE_SWEEP_MIN_INTERVAL_MS) return 0;
+
     const members = await storage.getFolderMembersOutsideUidSpace(folder.id, folder.path);
     if (members.length === 0) {
       this.staleSweepVerified.delete(folder.path);
+      this.staleSweepLastRun.set(folder.path, Date.now());
       return 0;
     }
 
     let accounted = 0;
     for (const u of localUids) if (serverUidsSet.has(u)) accounted++;
     const unaccounted = Math.max(0, serverExists - accounted);
-    if (members.length <= unaccounted) return 0; // all tag-only members can be real — converged
+    if (members.length <= unaccounted) {
+      // All tag-only members can be real — converged. A settled folder is
+      // exactly the case worth throttling, so this stamps too.
+      this.staleSweepLastRun.set(folder.path, Date.now());
+      return 0;
+    }
 
     const verified = this.staleSweepVerified.get(folder.path) ?? new Set<string>();
     const folderPathById = new Map((await storage.getFolders()).map((f) => [f.id, f.path] as const));
@@ -2665,9 +2693,12 @@ export class MessageProcessor {
     // the legitimate ones we pass on the way, bounded by the search cap.
     let searched = 0;
     let unlinked = 0;
+    // True when the loop stopped with candidates still unexamined — the search
+    // cap, or a SEARCH that failed. Either way this sweep did NOT finish.
+    let stoppedEarly = false;
     for (const m of members) {
       if (verified.has(m.id) || !m.messageId) continue;
-      if (searched >= MessageProcessor.STALE_SWEEP_MAX_SEARCHES) break;
+      if (searched >= MessageProcessor.STALE_SWEEP_MAX_SEARCHES) { stoppedEarly = true; break; }
       // A pending local op on the row's primary copy (a move in flight) means the
       // server view is about to change — leave it for the next sync.
       const primaryPath = folderPathById.get(m.folderId);
@@ -2692,6 +2723,7 @@ export class MessageProcessor {
         // The SEARCH failed: evidence about the CONNECTION, not the message. Stop
         // the sweep here (nothing unlinked on a guess); the next sync asks again.
         logger.warn(`[syncFlags] ${folder.path}: stale-membership HEADER search failed after ${searched - 1} check(s): ${(err as Error).message}`);
+        stoppedEarly = true;
         break;
       }
       touch?.();
@@ -2707,6 +2739,11 @@ export class MessageProcessor {
 
     if (verified.size > MessageProcessor.RECONCILE_TRIED_CAP) verified.clear();
     this.staleSweepVerified.set(folder.path, verified);
+    // Stamp only a sweep that got THROUGH the candidates. One that stopped on
+    // the search cap, or on a failed SEARCH, has work left — throttling it
+    // would strand the remainder for the whole interval, which is the bug this
+    // sweep exists to fix, reintroduced by its own rate limit.
+    if (!stoppedEarly) this.staleSweepLastRun.set(folder.path, Date.now());
     if (unlinked > 0) {
       logger.info(`[syncFlags] ${folder.path}: stale-membership sweep unlinked ${unlinked} tag-only member(s) no longer on the server (${searched} searched, ${members.length} tag-only, ${unaccounted} unaccounted)`);
     }
