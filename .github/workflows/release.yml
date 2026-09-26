@@ -183,28 +183,36 @@ jobs:
       # toolchain present to emit an .rpm at all; without it the rpm target is
       # skipped silently and the release ships without Fedora/RHEL packages.
       #
-      # g++-12 is the other half of the ubuntu-22.04 pin above. 22.04's DEFAULT
-      # compiler is gcc 11, and gcc 11 cannot parse Electron 43's V8 headers at
-      # all -- `class V8_DEPRECATE_SOON("...") V8_EXPORT Value` puts a GNU
-      # attribute after a C++11 one in a class-head, which it only learned to
-      # accept in gcc 12:
+      # clang is the other half of the ubuntu-22.04 pin above. NO gcc on 22.04
+      # can parse Electron's V8 headers -- `class V8_DEPRECATED("...")
+      # V8_EXPORT Value` puts a GNU attribute after a C++11 one in a
+      # class-head, and gcc rejects that ordering outright:
       #   v8config.h:854:20: error: expected identifier before '__attribute__'
       #   make: *** [better_sqlite3.target.mk:138: .../better_sqlite3.o] Error 1
-      # v1.2.3 is where that landed: the first tag built on the pinned image,
-      # and both Linux jobs died compiling better-sqlite3 for Electron. Nothing
-      # before it noticed, because gcc 11 compiles the same addon against
-      # NODE's headers fine -- which is all CI ever asks for.
+      # Only Electron's headers reach it: V8_EXPORT is the empty macro unless
+      # BUILDING_V8_SHARED is defined, which Electron does and Node does not.
+      # So CI never noticed -- every other job builds this addon against NODE's
+      # headers, where the same line compiles clean.
       #
-      # gcc-12 comes FROM 22.04, so it cannot raise the floor the pin exists to
-      # hold: its libstdc++ is the one jammy already ships (GLIBCXX_3.4.30) and
-      # glibc is untouched. "Verify the Linux build runs on an older glibc"
-      # below still reads the artifacts and proves it.
+      # v1.2.3 is where it landed, as the first tag built on the pinned image.
+      # 1.2.2 built on ubuntu-24.04 and its default gcc 13 accepted the
+      # ordering; 22.04 tops out at gcc 12, which does NOT -- 12.3.0 fails with
+      # exactly the error above, so `g++-12` was a fix for the wrong version
+      # number and both Linux jobs stayed red.
+      #
+      # clang accepts it, which is not a guess: macOS compiles this very header
+      # through the same `#else // V8_OS_WIN` branch on every green release.
+      # And clang is the one upgrade that cannot raise the floor the pin exists
+      # to hold -- it links the libstdc++ and glibc jammy already ships, so
+      # nothing newer than GLIBCXX_3.4.30 can enter the artifact. "Verify the
+      # Linux build runs on an older glibc" below still proves it from the
+      # binaries.
       - name: Install Linux packaging tools
         if: matrix.platform == 'linux'
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends rpm g++-12
+          sudo apt-get install -y --no-install-recommends rpm clang
           # node-gyp's make generator resolves its compiler from $CC/$CXX
           # (CC.target ?= $(CC)), so exporting them for the REST of the job is
           # all it takes. It has to be the rest of the job, not just the
@@ -212,8 +220,8 @@ jobs:
           # the same addon for the same Electron ABI -- and swallows its own
           # failure, so getting this wrong looks like a green install and a
           # broken package.
-          echo "CC=gcc-12" >> "$GITHUB_ENV"
-          echo "CXX=g++-12" >> "$GITHUB_ENV"
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
 
       # NOTE: no SARVINBOX_SKIP_ELECTRON_REBUILD here, unlike the verify job.
       # The packaged app runs inside Electron, so the addons must be built for
