@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ReadModelMaintainer } from '../../src/read-model-maintainer';
 import { insertReadModelEmail, openReadModelTestDb } from '../../src/test-support/read-model-test-db';
@@ -14,6 +14,15 @@ const insertEmail = insertReadModelEmail;
 const dirtyCount = (db: Database.Database) => (db.prepare('SELECT COUNT(*) c FROM read_model_dirty').get() as any).c;
 const tfCount = (db: Database.Database) => (db.prepare('SELECT COUNT(*) c FROM thread_folders').get() as any).c;
 const state = (db: Database.Database, k: string) => (db.prepare('SELECT value v FROM read_model_state WHERE key=?').get(k) as any)?.v ?? null;
+
+// start() and schedule() drain on later ticks: every step is a setImmediate, and
+// a step that did work queues the next one. A fixed sleep bets those steps beat
+// its timer; under load they lose, stop() cancels them, and the hook reads as
+// "never ran". So the async tests fake ONLY setImmediate and run every deferred
+// step to completion with vi.runAllTimers(). setInterval stays real: faked, the
+// 5s safety pump re-arms forever and runAllTimers() aborts at its loop limit.
+const fakeDeferredSteps = () => vi.useFakeTimers({ toFake: ['setImmediate', 'clearImmediate'] });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('ReadModelMaintainer', () => {
   let db: Database.Database;
@@ -197,14 +206,15 @@ describe('ReadModelMaintainer — drained hook', () => {
     expect(calls).toBe(0);
   });
 
-  it('fires from the async pump too, not just the synchronous flush', async () => {
+  it('fires from the async pump too, not just the synchronous flush', () => {
     // start() is the path the app actually uses; a hook wired only into flushNow
     // would never run outside shutdown and tests.
+    fakeDeferredSteps();
     let calls = 0;
     const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
     insertEmail(db, 't1', 'INBOX');
     m.start();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    vi.runAllTimers();   // every step start() deferred, and every step those queued
     m.stop();
     expect(calls).toBeGreaterThan(0);
     expect(dirtyCount(db)).toBe(0);
@@ -239,30 +249,56 @@ describe('ReadModelMaintainer — drained hook', () => {
 // Nothing will ever re-dirty those threads (the mail is already read), so the
 // drain alone would wait forever on unrelated activity.
 describe('ReadModelMaintainer — startup refresh', () => {
-  it('runs the hook once on start() even with an empty queue', async () => {
+  beforeEach(() => { fakeDeferredSteps(); });
+
+  it('runs the hook once on start() even with an empty queue', () => {
+    // If this fails, a badge that was already wrong at launch stays wrong:
+    // nothing re-dirties mail that is already read.
     const db = newDb();
     insertEmail(db, 't1', 'INBOX');
-    new ReadModelMaintainer(() => db).flushNow();   // read model already built and drained
+    // backfillNow, not flushNow: flushNow leaves the backfill un-run, so start()
+    // re-seeds it and the drain's own call would cover for a missing refresh.
+    new ReadModelMaintainer(() => db).backfillNow();
     expect(dirtyCount(db)).toBe(0);
+    expect(state(db, 'status')).toBe('complete');   // start() has nothing to seed or drain
 
     let calls = 0;
     const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
     m.start();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    vi.runAllTimers();
     m.stop();
     expect(calls).toBe(1);
   });
 
-  it('does not repeat it — later empty safety pumps stay silent', async () => {
+  it('runs it once, not twice, when start() also has a backfill to drain', () => {
+    // If this fails, a first launch (or one after a ROLLUP_VERSION bump) rewrites
+    // every folder's badge twice: once for the drain, once for the refresh.
+    const db = newDb();
+    insertEmail(db, 't1', 'INBOX');
+    new ReadModelMaintainer(() => db).flushNow();   // built, but never backfilled
+    expect(dirtyCount(db)).toBe(0);
+    expect(state(db, 'status')).toBeNull();         // so start() re-seeds and drains t1
+
+    let calls = 0;
+    const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
+    m.start();
+    vi.runAllTimers();
+    m.stop();
+    expect(calls).toBe(1);
+  });
+
+  it('does not repeat it — later empty safety pumps stay silent', () => {
     // Otherwise every 5s tick would rewrite every folder's badge forever.
     const db = newDb();
     let calls = 0;
     const m = new ReadModelMaintainer(() => db, () => { calls += 1; });
     m.start();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    m.schedule();
-    m.schedule();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    vi.runAllTimers();
+    expect(calls).toBe(1);   // the launch refresh, done before any later pump
+    m.schedule();            // one safety tick, run to completion...
+    vi.runAllTimers();
+    m.schedule();            // ...and a second
+    vi.runAllTimers();
     m.stop();
     expect(calls).toBe(1);
   });
