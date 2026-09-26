@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Opening a thread, and the app in general, no longer stalls while mail is
+  syncing.** Every folder Sarv Inbox checked for flag changes also recounted
+  that folder's badge by reading each message in it from end to end, bodies
+  included, and re-scanned the folder for messages the server had dropped. On a
+  large mailbox that was several hundred milliseconds of frozen interface per
+  folder, over and over, which showed up as a delay whenever you clicked into a
+  conversation. Badges are now counted from a small membership index instead of
+  the messages themselves, and the dropped-message scan runs on a timer rather
+  than on every pass. The counts are identical; on a 27,000-message account the
+  recount went from 147 seconds of accumulated freezing to well under a second.
+
 ## [1.2.3] - 2026-09-26
 
 ### Added
