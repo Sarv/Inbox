@@ -449,6 +449,53 @@ describe('chatMessagesFromThread', () => {
   it('has nothing to show for an empty thread', () => {
     expect(convert([])).toEqual([]);
   });
+
+  // Regression: a first message typed in Outlook has no quote to split on, and
+  // every Enter the sender pressed is its own empty paragraph. The bubble drew
+  // all of them, a wall of blank lines between the greeting and the update.
+  // Needs @sarv-in/email-chat-view 0.2.4, which caps a run at two blank lines.
+  it('caps a wall of blank lines in a first message typed in Outlook', () => {
+    const blank = '<p class="MsoNormal"><o:p>&nbsp;</o:p></p>';
+    const [message] = convert([
+      email({
+        id: 'e1',
+        rawBody:
+          '<div class="WordSection1"><p class="MsoNormal">Hi Sorabh,</p>' +
+          blank.repeat(7) +
+          '<p class="MsoNormal">Please find the latest update below.</p></div>',
+      }),
+    ]);
+
+    expect(message!.body.match(/<o:p>/g)).toHaveLength(2);
+    expect(message!.body).toContain('Please find the latest update below.');
+    expect(message!.applied).toContain('collapse:blank-run');
+  });
+
+  // Regression: a Google Sheets range pasted into Gmail declares
+  // `table-layout:fixed;width:0px` and is sized ONLY by its `<col width>`
+  // attributes. Losing them anywhere between the store and the frame collapses
+  // the table to one pixel wide, which reads as a screen of blank lines under
+  // "Please find the latest update below". This guards the app's half of that
+  // path; the frame's sanitizer is guarded in the library (0.2.4).
+  it('hands the view a pasted spreadsheet with its column widths intact', () => {
+    const sheet =
+      '<table cellspacing="0" cellpadding="0" dir="ltr" border="1" ' +
+      'style="table-layout:fixed;font-size:10pt;font-family:Arial;width:0px;border-collapse:collapse">' +
+      '<colgroup><col width="64"><col width="215"></colgroup><tbody>' +
+      '<tr><td>SL NO</td><td>Description</td></tr>' +
+      '<tr><td>1</td><td>Chatbot shows developer details</td></tr>' +
+      '<tr><td>2</td><td>Incorrect source links</td></tr>' +
+      '</tbody></table>';
+    const [message] = convert([
+      email({
+        id: 'e1',
+        rawBody: `<div dir="ltr">Hi Sorabh,<br><br>Please find the latest update below:<br>${sheet}</div>`,
+      }),
+    ]);
+
+    expect(message!.body).toContain('<col width="64"><col width="215">');
+    expect(message!.body).toContain('table-layout:fixed');
+  });
 });
 
 /**

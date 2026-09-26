@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **No more screens of blank space in the chat view.** A table pasted from
+  Google Sheets shrank to one pixel wide and pushed the rest of the message a
+  page or more down; it now shows as the table it is. Column widths, merged
+  cells, alignment and cell colours reach the message again, and a run of more
+  than two blank lines is cut to two. Fixed in email-chat-view 0.2.4.
+
 ## [1.2.2] - 2026-09-25
 
 ### Added
