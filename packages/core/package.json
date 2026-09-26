@@ -40,7 +40,7 @@
     "@sarv-in/mailguard": "^0.4.0",
     "@zone-eu/mailsplit": "^5.4.8",
     "chardet": "^2.2.0",
-    "date-fns": "^3.2.0",
+    "date-fns": "^4.4.0",
     "email-addresses": "^5.0.0",
     "email-reply-parser": "^2.3.9",
     "free-email-domains": "^1.12.1",
