@@ -20,8 +20,10 @@ const logger = createLogger('read-model-maintainer');
 
 /** Bump when the rollup DERIVATION logic changes so existing DBs re-derive their
  *  whole read-model on next launch (a full re-seed of the dirty queue). History:
- *  1 = initial · 2 = |deleted| no longer suppresses flag state (parity fix). */
-const ROLLUP_VERSION = '2';
+ *  1 = initial · 2 = |deleted| no longer suppresses flag state (parity fix)
+ *  · 3 = thread_folders.has_unread is folder-local, so Trash/Junk/Spam badges
+ *  are no longer structurally stuck at 0. */
+const ROLLUP_VERSION = '3';
 
 /** Dirty rows CLAIMED per transaction — an upper bound on how many ids a single
  *  chunk may look at, not a promise about how many it rebuilds. */

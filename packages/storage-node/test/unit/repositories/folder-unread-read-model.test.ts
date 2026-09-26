@@ -272,18 +272,86 @@ describe('folders.unread_count from the read model', () => {
       expect({ inbox: badge(db, 'INBOX'), inv: badge(db, 'Sarv Inbox/Invoices') }).toEqual(full);
     });
 
-    it('DELIBERATE CHANGE: Trash no longer badges unread, matching its own list', async () => {
-      // The tags scan counted an unread Trash copy for Trash itself, but the read
-      // model treats trashed copies as not-live, so the Trash LIST shows nothing.
-      // Badge 13 over an empty list is the same bug as INBOX's 7 — pinned here so
-      // the 0 reads as a decision, not an accident.
+    // REVERSED (was "DELIBERATE CHANGE: Trash no longer badges unread"). That
+    // decision read `listUnread` as proof the Trash list was empty, but
+    // `listUnread` IS the badge query — both count `thread_folders.has_unread`,
+    // so it could only ever agree with itself. The UNFILTERED Trash list does
+    // show these messages (getExcludeSpecialFolders keeps the current folder
+    // visible), with no `|read|` tag, i.e. as unread; and the server's own
+    // reconciliation reported "stored 0 thread(s) vs server unseen 14" for Trash
+    // every five minutes without ever converging. The 0 was not a decision about
+    // Trash, it was the conversation-wide LIVE flag — which drops every trashed
+    // copy — being stamped onto Trash's own row, so the badge was structurally
+    // incapable of leaving 0. Per-folder unread is now folder-local.
+    // The invariant the Trash bug actually broke (thread-sql: "a folder's badge
+    // can never count a thread its own filtered list won't show"): the tags scan
+    // and the read model are two implementations of ONE rule, so they must not
+    // disagree about any folder — least of all a special one.
+    it('the tags scan and the read model agree about Trash', async () => {
+      insertReadModelEmail(db, 't1', 'Trash', { id: 'x1' });
+      insertReadModelEmail(db, 't2', 'Trash|read', { id: 'x2' });
+      maintainer.backfillNow();
+
+      db.prepare('UPDATE emails SET tags = ? WHERE id = ?').run('|Trash|', 'x1');  // dirties the projection
+      await repo.recalculateFolderCounts(['Trash']);
+      const fromTags = badge(db, 'Trash');
+
+      maintainer.flushNow();
+      setBadge(db, 'Trash', 9);
+      await repo.recalculateFolderCounts(['Trash']);
+
+      expect(fromTags).toBe(1);
+      expect(badge(db, 'Trash')).toBe(fromTags);
+    });
+
+    it('Trash badges its own unread mail, because its own list shows it', async () => {
       insertReadModelEmail(db, 't1', 'Trash');
       maintainer.backfillNow();
 
       await repo.recalculateFolderCounts(['Trash']);
+      expect(badge(db, 'Trash')).toBe(1);
+      expect(listUnread(db, 'f-trash')).toBe(1);   // badge and filtered list still agree
+      expect(total(db, 'Trash')).toBe(1);
+    });
+
+    // The bug the reversed test WAS protecting, and it stays fixed: a thread
+    // whose only unread copy sits in Trash must not badge INBOX (that was
+    // "INBOX's 7"). Folder-local unread does not weaken this — Trash shadows the
+    // copy out of INBOX's listing scope, which is a different rule from the LIVE
+    // one and the only rule that ever mattered here.
+    it('a thread trashed out of INBOX still does not badge INBOX', async () => {
+      insertReadModelEmail(db, 't1', 'INBOX|Trash');
+      maintainer.backfillNow();
+
+      await repo.recalculateFolderCounts(['INBOX', 'Trash']);
+      expect(badge(db, 'INBOX')).toBe(0);
+      expect(listUnread(db, 'f-inbox')).toBe(0);
+      expect(badge(db, 'Trash')).toBe(1);          // it is unread, in Trash
+    });
+
+    // The same defect ran the other way and nobody reported it: one unread INBOX
+    // copy set the conversation-wide flag, which was stamped onto EVERY folder
+    // row of that thread — so a Sent/Invoices row badged unread over a copy that
+    // is read, or absent, in that folder.
+    it('an unread copy in one folder no longer badges the thread\'s OTHER folders', async () => {
+      insertReadModelEmail(db, 't1', 'INBOX');                       // unread
+      insertReadModelEmail(db, 't1', 'Sarv Inbox/Invoices|read');    // read copy, same thread
+      maintainer.backfillNow();
+
+      await repo.recalculateFolderCounts(['INBOX', 'Sarv Inbox/Invoices']);
+      expect(badge(db, 'INBOX')).toBe(1);
+      expect(badge(db, 'Sarv Inbox/Invoices')).toBe(0);
+    });
+
+    // A \\Deleted copy is not unread anywhere — unreadInFolderPredicate drops
+    // `|deleted|`, and the folder-local rule must drop it too or Trash starts
+    // badging mail that is on its way out.
+    it('a \\Deleted copy in Trash does not badge Trash', async () => {
+      insertReadModelEmail(db, 't1', 'Trash|deleted');
+      maintainer.backfillNow();
+
+      await repo.recalculateFolderCounts(['Trash']);
       expect(badge(db, 'Trash')).toBe(0);
-      expect(listUnread(db, 'f-trash')).toBe(0);
-      expect(total(db, 'Trash')).toBe(1);          // the message itself is still there
     });
   });
 });
