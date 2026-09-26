@@ -91,7 +91,7 @@ importers:
     dependencies:
       '@sarv-in/email-chat-view':
         specifier: ^0.2.4
-        version: 0.2.4(react-dom@18.3.1)(react@18.3.1)
+        version: 0.2.4(react-dom@19.3.0)(react@19.3.0)
       '@sarv-in/mailguard':
         specifier: ^0.4.0
         version: 0.4.0
@@ -130,7 +130,7 @@ importers:
         version: 3.31.3
       '@tiptap/react':
         specifier: ^3.31.3
-        version: 3.31.3(@floating-ui/dom@1.8.0)(@tiptap/core@3.31.3)(@tiptap/pm@3.31.3)(@types/react-dom@18.3.7)(@types/react@18.3.27)(react-dom@18.3.1)(react@18.3.1)
+        version: 3.31.3(@floating-ui/dom@1.8.0)(@tiptap/core@3.31.3)(@tiptap/pm@3.31.3)(@types/react-dom@19.3.0)(@types/react@19.3.0)(react-dom@19.3.0)(react@19.3.0)
       '@tiptap/starter-kit':
         specifier: ^3.31.3
         version: 3.31.3
@@ -178,7 +178,7 @@ importers:
         version: 1.13.8
       lucide-react:
         specifier: ^0.309.0
-        version: 0.309.0(react@18.3.1)
+        version: 0.309.0(react@19.3.0)
       mailparser:
         specifier: ^3.9.28
         version: 3.9.28
@@ -207,11 +207,11 @@ importers:
         specifier: ^7.1.0
         version: 7.1.0
       react:
-        specifier: ^18.2.0
-        version: 18.3.1
+        specifier: ^19.2.0
+        version: 19.3.0
       react-dom:
-        specifier: ^18.2.0
-        version: 18.3.1(react@18.3.1)
+        specifier: ^19.2.0
+        version: 19.3.0(react@19.3.0)
       sanitize-filename:
         specifier: ^1.6.4
         version: 1.6.4
@@ -232,7 +232,7 @@ importers:
         version: 3.25.76
       zustand:
         specifier: ^4.5.0
-        version: 4.5.7(@types/react@18.3.27)(react@18.3.1)
+        version: 4.5.7(@types/react@19.3.0)(react@19.3.0)
     devDependencies:
       '@electron/asar':
         specifier: ^3.4.1
@@ -256,11 +256,11 @@ importers:
         specifier: ^20.11.0
         version: 20.19.27
       '@types/react':
-        specifier: ^18.2.48
-        version: 18.3.27
+        specifier: ^19.2.0
+        version: 19.3.0
       '@types/react-dom':
-        specifier: ^18.2.18
-        version: 18.3.7(@types/react@18.3.27)
+        specifier: ^19.2.0
+        version: 19.3.0(@types/react@19.3.0)
       '@vitejs/plugin-react':
         specifier: ^4.2.1
         version: 4.7.0(vite@5.4.21)
@@ -418,7 +418,7 @@ importers:
     dependencies:
       '@op-engineering/op-sqlite':
         specifier: ^7.0.0
-        version: 7.4.3(react-native@0.87.1)(react@18.3.1)
+        version: 7.4.3(react-native@0.87.1)(react@19.3.0)
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../core
@@ -465,17 +465,17 @@ importers:
     dependencies:
       react-native:
         specifier: '*'
-        version: 0.83.1(@babel/core@7.29.7)(@types/react@18.3.27)(react@18.3.1)
+        version: 0.83.1(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.0)
     devDependencies:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.27
       '@types/react':
-        specifier: ^18.2.48
-        version: 18.3.27
+        specifier: ^19.2.0
+        version: 19.3.0
       react:
-        specifier: ^18.2.0
-        version: 18.3.1
+        specifier: ^19.2.0
+        version: 19.3.0
       tsup:
         specifier: ^8.0.1
         version: 8.5.1(typescript@5.9.3)
@@ -490,17 +490,17 @@ importers:
         version: link:../core
       zustand:
         specifier: ^4.5.0
-        version: 4.5.7(@types/react@18.3.27)(react@18.3.1)
+        version: 4.5.7(@types/react@19.3.0)(react@19.3.0)
     devDependencies:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.27
       '@types/react':
-        specifier: ^18.2.48
-        version: 18.3.27
+        specifier: ^19.2.0
+        version: 19.3.0
       react:
-        specifier: ^18.2.0
-        version: 18.3.1
+        specifier: ^19.2.0
+        version: 19.3.0
       tsup:
         specifier: ^8.0.1
         version: 8.5.1(typescript@5.9.3)
@@ -2425,14 +2425,14 @@ packages:
       fastq: 1.20.1
     dev: true
 
-  /@op-engineering/op-sqlite@7.4.3(react-native@0.87.1)(react@18.3.1):
+  /@op-engineering/op-sqlite@7.4.3(react-native@0.87.1)(react@19.3.0):
     resolution: {integrity: sha512-yR2UqhHR3bM/iX/hlc82QQcYsoVvbK2zbUli0iKg4oqvN+pQksGGSA0jTACy7X+VUv3+Il1LGihEhL12YbA2hg==}
     peerDependencies:
       react: '*'
       react-native: '>0.73.0'
     dependencies:
-      react: 18.3.1
-      react-native: 0.87.1(@babel/core@7.29.7)(react@18.3.1)
+      react: 19.3.0
+      react-native: 0.87.1(@babel/core@7.29.7)(react@19.3.0)
     dev: false
 
   /@opentelemetry/api-logs@0.214.0:
@@ -2751,7 +2751,7 @@ packages:
     resolution: {integrity: sha512-8+AutemzX+a7cuKgTUyb7JUk3sFYgLyrSnlTLrL6LuW/LKDE+FYE8lJGWYhJPJcE51Ge1D8yRzxgQEdEFZtuIw==}
     dev: false
 
-  /@react-native/virtualized-lists@0.83.1(@types/react@18.3.27)(react-native@0.83.1)(react@18.3.1):
+  /@react-native/virtualized-lists@0.83.1(@types/react@19.3.0)(react-native@0.83.1)(react@19.3.0):
     resolution: {integrity: sha512-MdmoAbQUTOdicCocm5XAFDJWsswxk7hxa6ALnm6Y88p01HFML0W593hAn6qOt9q6IM1KbAcebtH6oOd4gcQy8w==}
     engines: {node: '>= 20.19.4'}
     peerDependencies:
@@ -2762,14 +2762,14 @@ packages:
       '@types/react':
         optional: true
     dependencies:
-      '@types/react': 18.3.27
+      '@types/react': 19.3.0
       invariant: 2.2.4
       nullthrows: 1.1.1
-      react: 18.3.1
-      react-native: 0.83.1(@babel/core@7.29.7)(@types/react@18.3.27)(react@18.3.1)
+      react: 19.3.0
+      react-native: 0.83.1(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.0)
     dev: false
 
-  /@react-native/virtualized-lists@0.87.1(react-native@0.87.1)(react@18.3.1):
+  /@react-native/virtualized-lists@0.87.1(react-native@0.87.1)(react@19.3.0):
     resolution: {integrity: sha512-qSZjeX3UJrDvyfjf7yc3E68rp1XnzE+5nu8ImklhkVC0+p/XiaHPb/KGkRqDdnQyWHN55BRYSsCMEwgVI6WRNQ==}
     engines: {node: ^22.13.0 || ^24.3.0 || >= 26.0.0}
     peerDependencies:
@@ -2782,8 +2782,8 @@ packages:
     dependencies:
       invariant: 2.2.4
       nullthrows: 1.1.1
-      react: 18.3.1
-      react-native: 0.87.1(@babel/core@7.29.7)(react@18.3.1)
+      react: 19.3.0
+      react-native: 0.87.1(@babel/core@7.29.7)(react@19.3.0)
     dev: false
 
   /@rolldown/pluginutils@1.0.0-beta.27:
@@ -2994,7 +2994,7 @@ packages:
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
     dev: true
 
-  /@sarv-in/email-chat-view@0.2.4(react-dom@18.3.1)(react@18.3.1):
+  /@sarv-in/email-chat-view@0.2.4(react-dom@19.3.0)(react@19.3.0):
     resolution: {integrity: sha512-+aGAEPtkTKgJ7l9aj4VcgQBXEzPpjmVsjbngTaPOB+YL4sLMGB0UwNJczEH8+sBiux5kHn4WQSZIqt69cf8ZJg==}
     engines: {node: '>=18'}
     peerDependencies:
@@ -3009,8 +3009,8 @@ packages:
       chrono-node: 2.10.0
       dompurify: 3.4.16
       email-addresses: 5.0.0
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
+      react: 19.3.0
+      react-dom: 19.3.0(react@19.3.0)
     dev: false
 
   /@sarv-in/mailguard@0.4.0:
@@ -4066,7 +4066,7 @@ packages:
       prosemirror-view: 1.42.5
     dev: false
 
-  /@tiptap/react@3.31.3(@floating-ui/dom@1.8.0)(@tiptap/core@3.31.3)(@tiptap/pm@3.31.3)(@types/react-dom@18.3.7)(@types/react@18.3.27)(react-dom@18.3.1)(react@18.3.1):
+  /@tiptap/react@3.31.3(@floating-ui/dom@1.8.0)(@tiptap/core@3.31.3)(@tiptap/pm@3.31.3)(@types/react-dom@19.3.0)(@types/react@19.3.0)(react-dom@19.3.0)(react@19.3.0):
     resolution: {integrity: sha512-QiwQqvaLFLm5EMFu5tg7nAgXJxCUiUTLD8EsK+TqVV5P4bqOoMOCM39khbhXTJyahCuYpiFWx5YOSDtC/JiPtg==}
     peerDependencies:
       '@tiptap/core': 3.31.3
@@ -4078,13 +4078,13 @@ packages:
     dependencies:
       '@tiptap/core': 3.31.3(@tiptap/pm@3.31.3)
       '@tiptap/pm': 3.31.3
-      '@types/react': 18.3.27
-      '@types/react-dom': 18.3.7(@types/react@18.3.27)
+      '@types/react': 19.3.0
+      '@types/react-dom': 19.3.0(@types/react@19.3.0)
       '@types/use-sync-external-store': 0.0.6
       fast-equals: 5.4.0
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
-      use-sync-external-store: 1.6.0(react@18.3.1)
+      react: 19.3.0
+      react-dom: 19.3.0(react@19.3.0)
+      use-sync-external-store: 1.6.0(react@19.3.0)
     optionalDependencies:
       '@tiptap/extension-bubble-menu': 3.31.3(@tiptap/core@3.31.3)(@tiptap/pm@3.31.3)
       '@tiptap/extension-floating-menu': 3.31.3(@floating-ui/dom@1.8.0)(@tiptap/core@3.31.3)(@tiptap/pm@3.31.3)
@@ -4354,20 +4354,16 @@ packages:
       - aws-crt
     dev: true
 
-  /@types/prop-types@15.7.15:
-    resolution: {integrity: sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw==}
-
-  /@types/react-dom@18.3.7(@types/react@18.3.27):
-    resolution: {integrity: sha512-MEe3UeoENYVFXzoXEWsvcpg6ZvlrFNlOQ7EOsvhI3CfAXwzPfO8Qwuxd40nepsYKqyyVQnTdEfv68q91yLcKrQ==}
+  /@types/react-dom@19.3.0(@types/react@19.3.0):
+    resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
     peerDependencies:
-      '@types/react': ^18.0.0
+      '@types/react': ^19.3.0
     dependencies:
-      '@types/react': 18.3.27
+      '@types/react': 19.3.0
 
-  /@types/react@18.3.27:
-    resolution: {integrity: sha512-cisd7gxkzjBKU2GgdYrTdtQx1SORymWyaAFhaxQPK9bYO9ot3Y5OikQRvY0VYQtvwjeQnizCINJAenh/V7MK2w==}
+  /@types/react@19.3.0:
+    resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
     dependencies:
-      '@types/prop-types': 15.7.15
       csstype: 3.2.3
 
   /@types/responselike@1.0.3:
@@ -8324,6 +8320,7 @@ packages:
     hasBin: true
     dependencies:
       js-tokens: 4.0.0
+    dev: false
 
   /loupe@3.2.1:
     resolution: {integrity: sha512-CdzqowRJCeLU72bHvWqwRBBlLcMEtIvGrlvef74kMnV2AolS9Y8xUv1I0U/MNAWMhBlKIoyuEgoJ0t/bbwHbLQ==}
@@ -8360,12 +8357,12 @@ packages:
     engines: {node: '>=12'}
     dev: false
 
-  /lucide-react@0.309.0(react@18.3.1):
+  /lucide-react@0.309.0(react@19.3.0):
     resolution: {integrity: sha512-zNVPczuwFrCfksZH3zbd1UDE6/WYhYAdbe2k7CImVyPAkXLgIwbs6eXQ4loigqDnUFjyFYCI5jZ1y10Kqal0dg==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0
     dependencies:
-      react: 18.3.1
+      react: 19.3.0
     dev: false
 
   /magic-string@0.30.21:
@@ -9839,21 +9836,20 @@ packages:
       - utf-8-validate
     dev: false
 
-  /react-dom@18.3.1(react@18.3.1):
-    resolution: {integrity: sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==}
+  /react-dom@19.3.0(react@19.3.0):
+    resolution: {integrity: sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==}
     peerDependencies:
-      react: ^18.3.1
+      react: ^19.3.0
     dependencies:
-      loose-envify: 1.4.0
-      react: 18.3.1
-      scheduler: 0.23.2
+      react: 19.3.0
+      scheduler: 0.28.0
     dev: false
 
   /react-is@18.3.1:
     resolution: {integrity: sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg==}
     dev: false
 
-  /react-native@0.83.1(@babel/core@7.29.7)(@types/react@18.3.27)(react@18.3.1):
+  /react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.0):
     resolution: {integrity: sha512-mL1q5HPq5cWseVhWRLl+Fwvi5z1UO+3vGOpjr+sHFwcUletPRZ5Kv+d0tUfqHmvi73/53NjlQqX1Pyn4GguUfA==}
     engines: {node: '>= 20.19.4'}
     hasBin: true
@@ -9871,8 +9867,8 @@ packages:
       '@react-native/gradle-plugin': 0.83.1
       '@react-native/js-polyfills': 0.83.1
       '@react-native/normalize-colors': 0.83.1
-      '@react-native/virtualized-lists': 0.83.1(@types/react@18.3.27)(react-native@0.83.1)(react@18.3.1)
-      '@types/react': 18.3.27
+      '@react-native/virtualized-lists': 0.83.1(@types/react@19.3.0)(react-native@0.83.1)(react@19.3.0)
+      '@types/react': 19.3.0
       abort-controller: 3.0.0
       anser: 1.4.10
       ansi-regex: 5.0.1
@@ -9891,7 +9887,7 @@ packages:
       nullthrows: 1.1.1
       pretty-format: 29.7.0
       promise: 8.3.0
-      react: 18.3.1
+      react: 19.3.0
       react-devtools-core: 6.1.5
       react-refresh: 0.14.2
       regenerator-runtime: 0.13.11
@@ -9910,7 +9906,7 @@ packages:
       - utf-8-validate
     dev: false
 
-  /react-native@0.87.1(@babel/core@7.29.7)(react@18.3.1):
+  /react-native@0.87.1(@babel/core@7.29.7)(react@19.3.0):
     resolution: {integrity: sha512-DJKG6ANoD7BtrE4z9DewiSD7/RxCX73lK5Pu49aUr85P3333Dm2roTiP0rRjQNDZdVizHSOmstWfwF/o9EjCRA==}
     engines: {node: ^22.13.0 || ^24.3.0 || >= 26.0.0}
     hasBin: true
@@ -9926,7 +9922,7 @@ packages:
       '@react-native/community-cli-plugin': 0.87.1
       '@react-native/gradle-plugin': 0.87.1
       '@react-native/normalize-colors': 0.87.1
-      '@react-native/virtualized-lists': 0.87.1(react-native@0.87.1)(react@18.3.1)
+      '@react-native/virtualized-lists': 0.87.1(react-native@0.87.1)(react@19.3.0)
       anser: 1.4.10
       ansi-regex: 5.0.1
       babel-plugin-syntax-hermes-parser: 0.36.1
@@ -9941,7 +9937,7 @@ packages:
       nullthrows: 1.1.1
       pretty-format: 29.7.0
       promise: 8.3.0
-      react: 18.3.1
+      react: 19.3.0
       react-devtools-core: 6.1.5
       react-refresh: 0.14.2
       regenerator-runtime: 0.13.11
@@ -9971,11 +9967,9 @@ packages:
     engines: {node: '>=0.10.0'}
     dev: true
 
-  /react@18.3.1:
-    resolution: {integrity: sha512-wS+hAgJShR0KhEvPJArfuPVN1+Hz1t0Y6n5jLrGQbkb4urgPE/0Rve+1kMB1v/oWgHgm4WIcV+i7F2pTVj+2iQ==}
+  /react@19.3.0:
+    resolution: {integrity: sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==}
     engines: {node: '>=0.10.0'}
-    dependencies:
-      loose-envify: 1.4.0
 
   /read-binary-file-arch@1.0.6:
     resolution: {integrity: sha512-BNg9EN3DD3GsDXX7Aa8O4p92sryjkmzYYgmgTAc6CA4uGLEDzFfxOxugu21akOxpcXHiEgsYkC6nPsQvLLLmEg==}
@@ -10284,14 +10278,12 @@ packages:
   /sax@1.4.3:
     resolution: {integrity: sha512-yqYn1JhPczigF94DMS+shiDMjDowYO6y9+wB/4WgO0Y19jWYk0lQ4tuG5KI7kj4FTp1wxPj5IFfcrz/s1c3jjQ==}
 
-  /scheduler@0.23.2:
-    resolution: {integrity: sha512-UOShsPwz7NrMUqhR6t0hWjFduvOzbtv7toDH1/hIrfRNIDBnnBWd0CwJTGvTpngVlmwGCdP9/Zl/tVrDqcuYzQ==}
-    dependencies:
-      loose-envify: 1.4.0
-    dev: false
-
   /scheduler@0.27.0:
     resolution: {integrity: sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q==}
+    dev: false
+
+  /scheduler@0.28.0:
+    resolution: {integrity: sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==}
     dev: false
 
   /selderee@0.12.0:
@@ -11310,12 +11302,12 @@ packages:
       punycode: 2.3.1
     dev: true
 
-  /use-sync-external-store@1.6.0(react@18.3.1):
+  /use-sync-external-store@1.6.0(react@19.3.0):
     resolution: {integrity: sha512-Pp6GSwGP/NrPIrxVFAIkOQeyw8lFenOHijQWkUTrDvrF4ALqylP2C/KCkeS9dpUM3KvYRQhna5vt7IL95+ZQ9w==}
     peerDependencies:
       react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
     dependencies:
-      react: 18.3.1
+      react: 19.3.0
     dev: false
 
   /utf8-byte-length@1.0.5:
@@ -11757,7 +11749,7 @@ packages:
   /zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
-  /zustand@4.5.7(@types/react@18.3.27)(react@18.3.1):
+  /zustand@4.5.7(@types/react@19.3.0)(react@19.3.0):
     resolution: {integrity: sha512-CHOUy7mu3lbD6o6LJLfllpjkzhHXSBlX8B9+qPddUsIfeF5S/UZ5q0kmCsnRqT1UHFQZchNFDDzMbQsuesHWlw==}
     engines: {node: '>=12.7.0'}
     peerDependencies:
@@ -11772,7 +11764,7 @@ packages:
       react:
         optional: true
     dependencies:
-      '@types/react': 18.3.27
-      react: 18.3.1
-      use-sync-external-store: 1.6.0(react@18.3.1)
+      '@types/react': 19.3.0
+      react: 19.3.0
+      use-sync-external-store: 1.6.0(react@19.3.0)
     dev: false
