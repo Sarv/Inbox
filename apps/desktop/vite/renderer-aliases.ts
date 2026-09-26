@@ -2,7 +2,6 @@ import { resolve } from 'path';
 
 import type { Alias } from 'vite';
 
-import { browserSafeBuiltinAliases } from './browser-safe-builtins';
 
 /**
  * The renderer's resolve aliases, in ONE place.
@@ -98,21 +97,18 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
 /**
  * The renderer's resolve aliases, in the order they are matched.
  *
- * Array form, and the builtin entries FIRST, because
- * `vite-plugin-electron-renderer` appends its own Node-builtin aliases in its
- * `config` hook and the first matching entry wins — see
- * vite/browser-safe-builtins.ts for what that entry is for and why losing the
- * race blanks the window.
+ * Node builtins are NOT handled here. They are browserSafeBuiltinsPlugin()'s
+ * job, because `vite-plugin-electron-renderer` resolves them in a `'pre'`
+ * `resolveId` hook that outranks Vite's alias plugin outright — see
+ * vite/browser-safe-builtins.ts for why an alias entry cannot win that race and
+ * what losing it does to the window.
  *
  * @param desktopDir absolute path to apps/desktop (each config passes its own
  *   __dirname-derived location so the relative hops resolve correctly).
  */
 export function rendererAliases(desktopDir: string): Alias[] {
-  return [
-    ...browserSafeBuiltinAliases(desktopDir),
-    ...Object.entries(coreSubpathAliases(desktopDir)).map(([find, replacement]) => ({
-      find,
-      replacement,
-    })),
-  ];
+  return Object.entries(coreSubpathAliases(desktopDir)).map(([find, replacement]) => ({
+    find,
+    replacement,
+  }));
 }

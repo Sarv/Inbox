@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   BROWSER_SAFE_BUILTINS,
-  browserSafeBuiltinAliases,
+  browserSafeBuiltinsPlugin,
+  resolveBrowserSafeBuiltin,
   wantsEmptyBuiltin,
 } from '../../../vite/browser-safe-builtins';
 
 // Regression: the renderer is a sandboxed browser with no `require`, so
-// vite-plugin-electron-renderer's Node-builtin shim can only throw "Dynamic
-// require of \"path\" is not supported" at module-evaluation time — a white
+// vite-plugin-electron-renderer's Node-builtin shim can only throw
+// "ReferenceError: require is not defined" at module-evaluation time — a white
 // window on first paint, and nothing in app.log. postcss (the dark-mode CSS
 // rewrite) declares those builtins optional and guards every use, so it gets the
 // empty module every other bundler gives it. These pin BOTH halves: postcss is
@@ -68,24 +69,47 @@ describe('BROWSER_SAFE_BUILTINS — which specifiers are intercepted', () => {
   );
 });
 
-describe('browserSafeBuiltinAliases — the alias entry itself', () => {
-  const [entry] = browserSafeBuiltinAliases('/repo/apps/desktop');
-  // Rollup types customResolver as a hook that may also be a resolver object;
-  // ours is the plain (source, importer) function, which is all vite calls.
-  const resolveAlias = entry!.customResolver as unknown as (
-    source: string,
-    importer?: string,
-  ) => string | null;
+describe('resolveBrowserSafeBuiltin — the resolution itself', () => {
+  const DESKTOP = '/repo/apps/desktop';
+  const EMPTY = '/repo/apps/desktop/vite/empty-node-builtin.mjs';
 
   it('resolves a listed importer to the empty module', () => {
-    expect(resolveAlias('path', '/repo/node_modules/postcss/lib/input.js')).toBe(
-      '/repo/apps/desktop/vite/empty-node-builtin.mjs',
-    );
+    expect(resolveBrowserSafeBuiltin('path', '/repo/node_modules/postcss/lib/input.js', DESKTOP)).toBe(EMPTY);
   });
 
   // Regression: returning anything but null here would hand the empty module to
   // every importer, which is exactly the silent failure this file argues against.
   it('returns null for everyone else, so normal resolution continues', () => {
-    expect(resolveAlias('path', '/repo/apps/desktop/src/main.tsx')).toBeNull();
+    expect(resolveBrowserSafeBuiltin('path', '/repo/apps/desktop/src/main.tsx', DESKTOP)).toBeNull();
+  });
+
+  // Regression: we sit in front of EVERY resolve, so a specifier we have no
+  // opinion about must fall straight through rather than be swallowed.
+  it('returns null for a specifier that is not a browser-safe builtin', () => {
+    expect(resolveBrowserSafeBuiltin('stream', '/repo/node_modules/postcss/lib/input.js', DESKTOP)).toBeNull();
+    expect(resolveBrowserSafeBuiltin('./lib/parse.js', '/repo/node_modules/postcss/lib/input.js', DESKTOP)).toBeNull();
+  });
+});
+
+describe('browserSafeBuiltinsPlugin — the hook rank that makes it work', () => {
+  const plugin = browserSafeBuiltinsPlugin('/repo/apps/desktop');
+
+  // Regression: THE bug of vite-plugin-electron-renderer 1.0. It resolves Node
+  // builtins in a resolveId hook declared order:'pre', which sorts ahead of
+  // Vite's alias plugin entirely — the alias entry this guard used to be was
+  // never consulted, postcss got the require() shim, and the window went white.
+  // Only a 'pre' hook can outrank a 'pre' hook.
+  it("registers resolveId as a 'pre' hook in the 'pre' enforce group", () => {
+    expect(plugin.enforce).toBe('pre');
+    expect(typeof plugin.resolveId).toBe('object');
+    expect((plugin.resolveId as { order?: string }).order).toBe('pre');
+  });
+
+  it('routes postcss through the hook handler', () => {
+    const handler = (plugin.resolveId as { handler: (s: string, i?: string) => string | null }).handler;
+    expect(handler.call(null, 'path', '/repo/node_modules/postcss/lib/input.js')).toBe(
+      '/repo/apps/desktop/vite/empty-node-builtin.mjs',
+    );
+    expect(handler.call(null, 'path', '/repo/apps/desktop/src/main.tsx')).toBeNull();
   });
 });

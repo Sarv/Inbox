@@ -5,6 +5,7 @@ import { defineConfig } from 'vite';
 import renderer from 'vite-plugin-electron-renderer';
 
 
+import { browserSafeBuiltinsPlugin } from './browser-safe-builtins';
 import { forbidNodeOnlyInRenderer } from './forbid-node-only-renderer';
 import { rendererAliases } from './renderer-aliases';
 
@@ -25,7 +26,8 @@ const desktop = resolve(__dirname, '..');
  */
 export default defineConfig({
   root: desktop,
-  plugins: [react(), renderer(), forbidNodeOnlyInRenderer()],
+  // browserSafeBuiltinsPlugin MUST precede renderer() — see browser-safe-builtins.ts.
+  plugins: [react(), browserSafeBuiltinsPlugin(desktop), renderer(), forbidNodeOnlyInRenderer()],
   // Renderer code reads these at build time; define them (empty) so the build
   // doesn't error on an undefined replacement. Values are irrelevant to the guard.
   define: {
