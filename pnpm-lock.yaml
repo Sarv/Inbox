@@ -85,7 +85,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1)
+        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
 
   apps/desktop:
     dependencies:
@@ -295,6 +295,31 @@ importers:
         specifier: ^7.2.0
         version: 7.2.0
 
+  apps/site:
+    dependencies:
+      bowser:
+        specifier: ^2.14.1
+        version: 2.14.1
+    devDependencies:
+      happy-dom:
+        specifier: ^20.11.1
+        version: 20.11.1
+      postcss:
+        specifier: ^8.5.18
+        version: 8.5.28
+      postcss-selector-parser:
+        specifier: ^6.1.2
+        version: 6.1.2
+      postcss-value-parser:
+        specifier: ^4.2.0
+        version: 4.2.0
+      vite:
+        specifier: ^8.3.1
+        version: 8.3.1(@types/node@20.19.27)(esbuild@0.27.2)
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
+
   packages/core:
     dependencies:
       '@sarv-in/mailguard':
@@ -393,7 +418,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1)
+        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
 
   packages/extension-sdk:
     dependencies:
@@ -434,7 +459,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1)
+        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
 
   packages/storage-node:
     dependencies:
@@ -459,7 +484,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1)
+        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
 
   packages/ui-primitives:
     dependencies:
@@ -509,7 +534,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1)
+        version: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
 
 packages:
 
@@ -1011,7 +1036,7 @@ packages:
     dependencies:
       '@aws-sdk/types': 3.957.0
       '@smithy/types': 4.11.0
-      bowser: 2.13.1
+      bowser: 2.14.1
       tslib: 2.8.1
     dev: true
 
@@ -4109,7 +4134,7 @@ packages:
     dependencies:
       '@types/http-cache-semantics': 4.0.4
       '@types/keyv': 3.1.4
-      '@types/node': 20.19.27
+      '@types/node': 20.19.43
       '@types/responselike': 1.0.3
     dev: true
 
@@ -4189,7 +4214,7 @@ packages:
   /@types/keyv@3.1.4:
     resolution: {integrity: sha512-BQ5aZNSCpj7D6K2ksrRCTmKRLEpnPvWDiLPfoGyhZ++8YtiK9d/3DBKPJgry359X/P1PfruyYwvnvwFjuEiEIg==}
     dependencies:
-      '@types/node': 20.19.27
+      '@types/node': 20.19.43
     dev: true
 
   /@types/libmime@5.3.0:
@@ -4233,7 +4258,6 @@ packages:
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
     dependencies:
       undici-types: 6.21.0
-    dev: false
 
   /@types/node@24.13.3:
     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
@@ -4265,7 +4289,7 @@ packages:
   /@types/responselike@1.0.3:
     resolution: {integrity: sha512-H/+L+UkTV33uf49PH5pCAUBVPNj2nDBXTN+qS1dOwyyg24l3CcicicCA7ca+HMvJBZcFgl5r8e+RR6elsb4Lyw==}
     dependencies:
-      '@types/node': 20.19.27
+      '@types/node': 20.19.43
     dev: true
 
   /@types/retry@0.12.0:
@@ -4307,7 +4331,7 @@ packages:
   /@types/ws@8.18.1:
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
     dependencies:
-      '@types/node': 20.19.27
+      '@types/node': 20.19.43
     dev: true
 
   /@types/yargs-parser@21.0.3:
@@ -4675,7 +4699,7 @@ packages:
       obug: 2.2.1
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1)
+      vitest: 4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1)
     dev: true
 
   /@vitest/expect@4.1.11:
@@ -5265,9 +5289,8 @@ packages:
     dev: true
     optional: true
 
-  /bowser@2.13.1:
-    resolution: {integrity: sha512-OHawaAbjwx6rqICCKgSG0SAnT05bzd7ppyKLVUITZpANBaaMFBAsaNkto3LoQ31tyFP5kNujE8Cdx85G9VzOkw==}
-    dev: true
+  /bowser@2.14.1:
+    resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
 
   /brace-expansion@1.1.21:
     resolution: {integrity: sha512-9zeA+KLZNNzglF2TPKRQEDyx6Yby7daAkuy8MiPzpXPsYDWi/DRM8jmwUDxokQjYqBpv5DgPiwD4h4ZZSy1Ujw==}
@@ -7101,7 +7124,7 @@ packages:
     resolution: {integrity: sha512-XSt8tMzbW9ymE7687xztkO1ckR7qJNQ3LywY9vlYGhGi3zXrGBHuUo2Cl1ztZaICW+1eAGdkLbj6iwVqDT33kg==}
     engines: {node: '>=20.0.0'}
     dependencies:
-      '@types/node': 20.19.27
+      '@types/node': 20.19.43
       '@types/whatwg-mimetype': 3.0.2
       '@types/ws': 8.18.1
       buffer-image-size: 0.6.4
@@ -11272,7 +11295,7 @@ packages:
       fsevents: 2.3.3
     dev: true
 
-  /vitest@4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(vite@8.3.1):
+  /vitest@4.1.11(@types/node@20.19.27)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.1)(vite@8.3.1):
     resolution: {integrity: sha512-fhACrNXUidIbGSBr5FlbuBkO7VWC1ZyLl0DO4CU2DrQoAPxX84Ysxs+HeGQpii5lZWV1Q4gBZTTu49mF+A6Edw==}
     engines: {node: ^20.0.0 || ^22.0.0 || >=24.0.0}
     hasBin: true
@@ -11324,6 +11347,7 @@ packages:
       '@vitest/utils': 4.1.11
       es-module-lexer: 2.3.1
       expect-type: 1.4.0
+      happy-dom: 20.11.1
       magic-string: 0.30.21
       obug: 2.2.1
       pathe: 2.0.3
