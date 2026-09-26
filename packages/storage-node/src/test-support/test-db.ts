@@ -27,25 +27,70 @@ import { attachSharedContacts } from '../shared-contacts';
 
 const requireFromHere = createRequire(import.meta.url);
 
+/** The fix for plain Node, i.e. vitest run directly on an Electron-ABI addon. */
+const NODE_REMEDY = [
+  'The addon is compiled for exactly ONE ABI at a time, and `pnpm install` and',
+  'the dev scripts build it for ELECTRON, which plain Node — and so vitest —',
+  'cannot dlopen. This is a toolchain mismatch, NOT a broken test.',
+  '',
+  "Don't flip it to Node by hand. Run the tests through their package's test",
+  'script, which rebuilds for Node first and costs nothing once it matches:',
+  '',
+  '  pnpm test               # at the repo root: every suite',
+  '  pnpm test <test file>   # in the package directory: just that file',
+  '',
+  'While the dev app is running it needs the Electron build, so run the tests',
+  'inside Electron instead, from the package directory:',
+  '',
+  '  ELECTRON_RUN_AS_NODE=1 ../../node_modules/.bin/electron ../../node_modules/vitest/vitest.mjs run',
+  '',
+  'Starting the app with `pnpm dev:desktop` or `sh scripts/dev.sh` rebuilds it',
+  'for Electron again; any other way, run: node scripts/native-abi.mjs electron',
+  '',
+  'CI avoids the flip entirely by installing with SARVINBOX_SKIP_ELECTRON_REBUILD=1.',
+];
+
+/** The fix inside Electron (ELECTRON_RUN_AS_NODE), where only Electron's ABI loads. */
+const ELECTRON_REMEDY = [
+  'The addon is compiled for exactly ONE ABI at a time. This run is inside',
+  "Electron, so it needs Electron's build; a `pnpm test` run usually leaves",
+  "Node's behind. This is a toolchain mismatch, NOT a broken test.",
+  '',
+  'Rebuild it for Electron, which the desktop app needs too, then run again:',
+  '',
+  '  node scripts/native-abi.mjs electron',
+];
+
+/**
+ * The runtime these tests are in. Electron sets `process.versions.electron`,
+ * and still does under ELECTRON_RUN_AS_NODE, where it otherwise behaves as
+ * plain Node. Takes the versions as a parameter so both answers can be tested
+ * from either runtime.
+ */
+export function currentRuntime(versions: NodeJS.ProcessVersions = process.versions): 'node' | 'electron' {
+  return versions.electron ? 'electron' : 'node';
+}
+
 /**
  * The message shown when the addon cannot be loaded. Exported so a test can
  * assert on it without needing an actually-broken binding: this string IS the
  * feature — a developer who never reads this file has to be able to act on it.
+ *
+ * The fix depends on the runtime the tests are in, and the wrong one makes
+ * things worse. This used to tell everyone to run `pnpm test:node-abi`: the
+ * manual flip CLAUDE.md forbids, which leaves the desktop app unable to open
+ * any database, and backwards for a run inside Electron, whose addon is already
+ * on Node's ABI and has to go the other way.
  */
-export function abiFailureMessage(cause: unknown): string {
+export function abiFailureMessage(
+  cause: unknown,
+  runtime: 'node' | 'electron' = currentRuntime(),
+): string {
   const detail = cause instanceof Error ? cause.message : String(cause);
   return [
     describeNativeAbiFailure(cause),
     '',
-    'The addon is compiled for exactly ONE ABI at a time, and `pnpm install`',
-    '(scripts/postinstall.mjs) builds it for ELECTRON, which plain Node — and so',
-    'vitest — cannot dlopen. This is a toolchain mismatch, NOT a broken test:',
-    'rebuild for Node and run the suite again.',
-    '',
-    '  pnpm test:node-abi                    # build for Node, then run tests',
-    '  node scripts/native-abi.mjs electron  # switch back before starting the app',
-    '',
-    'CI avoids the flip entirely by installing with SARVINBOX_SKIP_ELECTRON_REBUILD=1.',
+    ...(runtime === 'electron' ? ELECTRON_REMEDY : NODE_REMEDY),
     '',
     `Underlying load error: ${detail}`,
   ].join('\n');
