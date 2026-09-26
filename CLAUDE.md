@@ -60,13 +60,13 @@ lands in `app.log` consistently:
 ## Native modules: better-sqlite3 has TWO ABIs — never flip it by hand
 
 `better-sqlite3` is a compiled addon and is valid for exactly ONE ABI at a time.
-The desktop app runs inside **Electron** (its own `NODE_MODULE_VERSION`, e.g. 148
-for Electron 43); the test suites run in **plain Node** (e.g. 137 for Node 24).
+The desktop app runs inside **Electron** (its own `NODE_MODULE_VERSION`, e.g. 149
+for Electron 44); the test suites run in **plain Node** (e.g. 137 for Node 24).
 Whichever it was last built for, the other one fails to load:
 
 ```
 was compiled against a different Node.js version using
-NODE_MODULE_VERSION 137. This version of Node.js requires NODE_MODULE_VERSION 148.
+NODE_MODULE_VERSION 137. This version of Node.js requires NODE_MODULE_VERSION 149.
 ```
 
 **The flip is automatic — don't do it manually.** Every test script rebuilds for
