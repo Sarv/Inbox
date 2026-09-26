@@ -5,11 +5,14 @@ import { addTag, removeTag, parseTags, buildTags, tagsToImapFlags, imapFlagsToTa
 import type { Statement } from 'better-sqlite3';
 
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
+import { EMAIL_TAGS_TABLE } from './tag-membership';
 import {
   isShadowedInFolder,
   READ_MODEL_UNREAD_COUNT_CORRELATED_SQL,
   READ_MODEL_UNREAD_COUNT_SQL,
   readModelComplete,
+  unreadByTagParams,
+  unreadByTagSql,
   unreadInFolderPredicate,
 } from './thread-sql';
 
@@ -333,13 +336,6 @@ export class FolderRepository extends BaseRepository {
     this.db.prepare('UPDATE emails SET tags = ? WHERE id = ?').run(newTags, emailId);
   }
 
-  /** At or below this many requested folders, a targeted per-folder recount (a
-   *  couple of index-free-but-C-level `instr` aggregates each) is cheaper than
-   *  materialising the WHOLE emails table into JS for a single tally pass — so
-   *  the hot realtime/sync path (which always recounts ONE folder) never pays the
-   *  full-table scan. Above it, the single JS pass wins and is used instead. */
-  private static readonly SCOPED_RECOUNT_MAX_FOLDERS = 6;
-
   /**
    * Recalculate totalCount and unreadCount for all folders (tags-based).
    *
@@ -366,15 +362,11 @@ export class FolderRepository extends BaseRepository {
 
     // ONE definition of "unread in this folder" whenever the read model can give
     // it (see readModelUnreadUsable): the badge is then counting exactly the rows
-    // the unread-filtered list renders, so the two cannot disagree. The tags scan
-    // below stays as the fallback for a DB whose backfill hasn't finished.
+    // the unread-filtered list renders, so the two cannot disagree. The tag-table
+    // count below stays as the fallback for a DB whose backfill hasn't finished.
     const fromReadModel = this.readModelUnreadUsable();
 
-    if (folders.length <= FolderRepository.SCOPED_RECOUNT_MAX_FOLDERS) {
-      this.recountFoldersTargeted(folders, fromReadModel);
-    } else {
-      this.recountFoldersFullScan(folders, fromReadModel);
-    }
+    this.recountFolders(folders, fromReadModel);
   }
 
   /**
@@ -443,30 +435,34 @@ export class FolderRepository extends BaseRepository {
   }
 
   /**
-   * Targeted recount for a small set of folders. Each folder costs exactly two
-   * `instr(tags, '|path|')` aggregate scans — the SAME membership predicate
-   * `countByFolderTag` / the sidebar-unread query use — evaluated in C without
-   * ever materialising the row set in JS. `instr` with both delimiters is what
-   * stops `Work` matching `Work/Reports` (there is no `|Work|` inside
-   * `|Work/Reports|`), so a folder that is a path-prefix of another is counted
-   * correctly.
+   * Recount `folders`, one indexed pair of aggregates each.
+   *
+   * There used to be TWO implementations here and a threshold picking between
+   * them: this one, and a `recountFoldersFullScan` that materialised
+   * `SELECT thread_id, tags FROM emails` — the whole table — into JS and
+   * tallied the tokens by hand. That existed for exactly one reason, stated in
+   * its own comment: `instr(tags, ?)` could not use an index, so per-folder
+   * counting re-scanned the table 2xN times and one JS pass was the lesser
+   * evil. Above six folders it was the path taken, and it is the single most
+   * expensive query this app runs — the slow-query log on a 27,785-email
+   * mailbox recorded 795 calls totalling 147 SECONDS of main thread, peaking at
+   * 610 ms each.
+   *
+   * `email_tags` (migration 91) removes the premise, so both the threshold and
+   * the JS tally are gone: membership is a covering-index seek, and counting
+   * only the rows that ARE members beats reading every row for any folder count.
+   *
+   * Membership is still exact for nested paths — a row of `email_tags` holds
+   * the whole token, so `Work` can no more match `Work/Reports` than
+   * `instr(tags, '|Work|')` could.
    */
-  private recountFoldersTargeted(folders: Array<{ id: string; path: string }>, fromReadModel = false): void {
+  private recountFolders(folders: Array<{ id: string; path: string }>, fromReadModel = false): void {
     const updateStmt = this.db.prepare('UPDATE folders SET total_count = ?, unread_count = ? WHERE id = ?');
     // total_count = messages tagged with the folder (one per copy, read or not).
+    // Index-only: `idx_email_tags_tag` is (tag, email_id), so this never reads
+    // an `emails` page — and those pages are the message bodies.
     const totalStmt = this.db.prepare(
-      "SELECT COUNT(*) AS c FROM emails WHERE instr(tags, '|' || ? || '|') > 0",
-    );
-    // unread_count = distinct threads with an unread copy that LISTS in the
-    // folder (unreadInFolderPredicate: not read, not \Deleted, not shadowed by
-    // Trash/Junk/Sent/…); NULL thread_ids never count (mirrors the JS tally's
-    // `thread_id != null`). The listing scope differs per folder (a folder never
-    // excludes itself), so the statement is built per folder path.
-    const unreadStmtFor = (path: string) => this.db.prepare(
-      `SELECT COUNT(DISTINCT thread_id) AS c FROM emails
-       WHERE instr(tags, '|' || ? || '|') > 0
-         AND ${unreadInFolderPredicate(path)}
-         AND thread_id IS NOT NULL`,
+      `SELECT COUNT(*) AS c FROM ${EMAIL_TAGS_TABLE} WHERE tag = ?`,
     );
     // The read-model alternative: count the folder's unread threads straight out
     // of the partial index the list reads, one constant (cache-friendly)
@@ -474,65 +470,46 @@ export class FolderRepository extends BaseRepository {
     // below migration v64 has no `thread_folders` to prepare against.
     const readModelUnreadStmt = fromReadModel ? this.db.prepare(READ_MODEL_UNREAD_COUNT_SQL) : null;
     this.timed('recalculateFolderCounts', () => {
+      // unread_count = distinct threads with an unread copy that LISTS in the
+      // folder (not read, not \Deleted, not shadowed by Trash/Junk/Sent/…);
+      // NULL thread_ids never count, mirroring the JS tally's `thread_id !=
+      // null`. One grouped query answers EVERY folder — see unreadByTagSql for
+      // why per-folder statements are the slow shape here. Folders with nothing
+      // unread are simply absent from the result, hence the `?? 0`.
+      const unreadByPath = readModelUnreadStmt ? null : this.unreadThreadsByFolderPath(folders);
       for (const folder of folders) {
         const total = (totalStmt.get(folder.path) as { c: number }).c;
         const unread = readModelUnreadStmt
           ? (readModelUnreadStmt.get(folder.id) as { c: number }).c
-          : (unreadStmtFor(folder.path).get(folder.path) as { c: number }).c;
+          : (unreadByPath!.get(folder.path) ?? 0);
         updateStmt.run(total, unread, folder.id);
       }
-    }, { folderCount: folders.length, mode: fromReadModel ? 'targeted-readmodel' : 'targeted' });
+    }, { folderCount: folders.length, mode: fromReadModel ? 'readmodel' : 'tags' });
   }
 
   /**
-   * Full recount via a SINGLE table pass + in-memory tally, NOT two `instr(tags,
-   * ?)` scans per folder. `instr(tags, ...)` can't use an index, so a per-folder
-   * approach re-scans the whole table 2×N times — for many folders that is far
-   * worse than one pass tallying each email's folder tokens (~O(emails ×
-   * tags-per-email)). Used when enough folders are requested that the single pass
-   * wins over {@link recountFoldersTargeted}.
+   * Distinct unread threads per folder path, counted from `email_tags` in one
+   * grouped query per chunk of folders. Paths absent from the map have none.
+   *
+   * Chunked at the same 500 the other `IN (...)` batches here use, so a mailbox
+   * with more folders than SQLite takes bound parameters still works.
    */
-  private recountFoldersFullScan(folders: Array<{ id: string; path: string }>, fromReadModel = false): void {
-    const updateStmt = this.db.prepare('UPDATE folders SET total_count = ?, unread_count = ? WHERE id = ?');
-    this.timed('recalculateFolderCounts', () => {
-      const byToken = new Map<string, { id: string; total: number; unreadThreads: Set<string> }>();
-      for (const f of folders) byToken.set(f.path, { id: f.id, total: 0, unreadThreads: new Set() });
-
-      const rows = this.db.prepare('SELECT thread_id, tags FROM emails').all() as Array<{
-        thread_id: string | null;
-        tags: string | null;
-      }>;
-      for (const row of rows) {
-        const tags = row.tags;
-        if (!tags) continue;
-        // Tags are '|'-delimited tokens: '|INBOX|read|Label|'. Split once and
-        // match tokens against folder paths (flag tokens like 'read'/'starred'
-        // simply won't be in byToken).
-        const parts = tags.split('|');
-        // Mirror unreadInFolderPredicate: an unread copy counts for a folder only
-        // if it's not \Deleted and not shadowed there by another special folder.
-        const unreadCopy = parts.indexOf('read') === -1 && parts.indexOf('deleted') === -1;
-        for (const part of parts) {
-          if (!part) continue;
-          const t = byToken.get(part);
-          if (!t) continue;
-          t.total++;
-          // Mirror SQL COUNT(DISTINCT thread_id): NULL thread_ids are ignored.
-          if (unreadCopy && row.thread_id != null && !isShadowedInFolder(parts, part)) {
-            t.unreadThreads.add(row.thread_id);
-          }
-        }
-      }
-
-      const readModelUnreadStmt = fromReadModel ? this.db.prepare(READ_MODEL_UNREAD_COUNT_SQL) : null;
-      for (const t of byToken.values()) {
-        const unread = readModelUnreadStmt
-          ? (readModelUnreadStmt.get(t.id) as { c: number }).c
-          : t.unreadThreads.size;
-        updateStmt.run(t.total, unread, t.id);
-      }
-    }, { folderCount: folders.length, mode: fromReadModel ? 'full-scan-readmodel' : 'full-scan' });
+  private unreadThreadsByFolderPath(folders: Array<{ path: string }>): Map<string, number> {
+    const counts = new Map<string, number>();
+    const paths = [...new Set(folders.map((folder) => folder.path))];
+    for (let i = 0; i < paths.length; i += FolderRepository.RECOUNT_CHUNK) {
+      const chunk = paths.slice(i, i + FolderRepository.RECOUNT_CHUNK);
+      const rows = this.db.prepare(unreadByTagSql(chunk.length))
+        .all(...unreadByTagParams(chunk)) as Array<{ tag: string; c: number }>;
+      for (const row of rows) counts.set(row.tag, row.c);
+    }
+    return counts;
   }
+
+  /** Folder paths bound per grouped unread query — the same chunk size the
+   *  repository's other `IN (...)` batches use, well under SQLite's parameter
+   *  limit for a mailbox with an unusual number of folders. */
+  private static readonly RECOUNT_CHUNK = 500;
 
   /** Above this many flips a single full recount is cheaper than N thread-scoped
    *  lookups, so applyReadFlagDeltaBatch defers to recalculateFolderCounts(). */

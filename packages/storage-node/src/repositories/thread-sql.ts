@@ -6,6 +6,8 @@
 
 import type Database from 'better-sqlite3';
 
+import { EMAIL_TAGS_TABLE } from './tag-membership';
+
 /** Folders whose copies don't count toward thread-level state (deleted/junk). */
 export const THREAD_STATE_EXCLUDED_FOLDERS = [
   'Trash', 'Spam', '[Gmail]/Trash', '[Gmail]/Spam', 'Junk', 'Junk Email', 'Deleted Items',
@@ -99,7 +101,68 @@ export function isShadowedInFolder(tokens: ReadonlySet<string> | readonly string
  * read/deleted rule + the folder's listing scope), so badge and list agree.
  */
 export function unreadInFolderPredicate(folderPath: string, col = 'tags'): string {
-  return `instr(${col}, '|read|') = 0 AND instr(${col}, '|deleted|') = 0 ${listingExclusion(folderPath, col)}`;
+  return `${unreadCandidatePredicate(col)} ${listingExclusion(folderPath, col)}`;
+}
+
+/**
+ * Tags that disqualify a copy from counting as unread, ANYWHERE. The one list
+ * both forms below are built from, so the per-folder predicate and the grouped
+ * count cannot drift apart.
+ */
+export const NOT_UNREAD_TAGS: readonly string[] = ['read', 'deleted'];
+
+/**
+ * The folder-INDEPENDENT half of {@link unreadInFolderPredicate}: the copy is
+ * neither read nor flagged \Deleted, tested against a `tags` STRING.
+ */
+export function unreadCandidatePredicate(col = 'tags'): string {
+  return NOT_UNREAD_TAGS.map((tag) => `instr(${col}, '|${tag}|') = 0`).join(' AND ');
+}
+
+/**
+ * Unread-thread counts for MANY folders in ONE query: rows of `{ tag, c }`
+ * mapping a folder path to its distinct unread threads. Binds `folderPaths`,
+ * then {@link NOT_UNREAD_TAGS}, then {@link LISTING_EXCLUDED_FOLDERS} — see
+ * {@link unreadByTagParams}. A folder with nothing unread yields NO row, so
+ * callers must default a missing tag to 0.
+ *
+ * The same rule as {@link unreadInFolderPredicate}, asked for every folder at
+ * once: "not shadowed by ANOTHER special folder" becomes `x.tag <> t.tag`,
+ * which is that builder's `.filter(f => f !== currentFolderPath)` evaluated per
+ * GROUP instead of per statement.
+ *
+ * EVERY disqualifying test is a membership test on `email_tags`, and THAT is
+ * the performance story here — not the join, and not the covering index. An
+ * `emails` row carries `clean_body`/`raw_body` inline (~88 KB each on a real
+ * store), so opening one is expensive. Testing read/\Deleted against
+ * `emails.tags` forces that read for EVERY member of the folder before the row
+ * can be rejected; testing them here rejects it from a small WITHOUT ROWID
+ * index first, so only the genuinely-unread rows are ever fetched — ~4k row
+ * lookups instead of ~81k. Measured over all 22 folders of a 2.46 GB /
+ * 27,785-email mailbox: 1,637 ms as one statement per folder, 77 ms grouped
+ * but reading `emails.tags`, 7 ms as written. All three agree exactly with the
+ * hand-rolled JS full-table tally this replaced (83 ms warm, 415 ms cold).
+ */
+export function unreadByTagSql(folderCount: number): string {
+  const tags = new Array(folderCount).fill('?').join(', ');
+  const notUnread = NOT_UNREAD_TAGS.map(() => '?').join(', ');
+  const excluded = LISTING_EXCLUDED_FOLDERS.map(() => '?').join(', ');
+  return `SELECT t.tag AS tag, COUNT(DISTINCT e.thread_id) AS c
+            FROM ${EMAIL_TAGS_TABLE} t
+            JOIN emails e ON e.id = t.email_id
+           WHERE t.tag IN (${tags})
+             AND e.thread_id IS NOT NULL
+             AND NOT EXISTS (
+                   SELECT 1 FROM ${EMAIL_TAGS_TABLE} x
+                    WHERE x.email_id = t.email_id
+                      AND (x.tag IN (${notUnread})
+                           OR (x.tag <> t.tag AND x.tag IN (${excluded}))))
+           GROUP BY t.tag`;
+}
+
+/** Bound parameters for {@link unreadByTagSql}, in the order its `?`s appear. */
+export function unreadByTagParams(folderPaths: readonly string[]): string[] {
+  return [...folderPaths, ...NOT_UNREAD_TAGS, ...LISTING_EXCLUDED_FOLDERS];
 }
 
 /**

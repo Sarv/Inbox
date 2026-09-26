@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { FolderRepository } from '../../../src/repositories/folder-repository';
-import { openTestDb } from '../../../src/test-support/test-db';
+import { createEmailTagsIndex, openTestDb } from '../../../src/test-support/test-db';
 
 // recalculateFolderCounts is the source of truth for the sidebar badge
 // (unread_count) and the flat-folder pagination denominator (total_count). Two
@@ -28,6 +28,7 @@ function newDb(): Database.Database {
     INSERT INTO folders (id, path) VALUES
       ('f-inbox','INBOX'), ('f-inv','Sarv Inbox/Invoices'), ('f-trash','Trash');
   `);
+  createEmailTagsIndex(db);
   return db;
 }
 
@@ -125,18 +126,20 @@ describe('recalculateFolderCounts — scoped == full, and scope isolation', () =
   });
 });
 
-// recalculateFolderCounts picks a strategy by folder count: a targeted per-folder
-// aggregate scan for a FEW folders (the hot realtime/sync path that recounts one
-// folder after new mail — this removed the repeated full-table JS scan that
-// beachballed a big mailbox), and a single full-table JS pass for MANY. Both must
-// return byte-identical numbers or the sidebar badge would flicker between a
-// scoped recount and the periodic full-recount backstop.
-describe('recalculateFolderCounts — targeted vs full-scan strategy parity', () => {
+// recalculateFolderCounts used to pick a strategy by folder count: per-folder
+// aggregates for a FEW, and above six a single full-table JS pass that read every
+// row's tag string and tallied the tokens by hand. That branch existed because
+// `instr(tags, ?)` could not use an index; `email_tags` (v91) removed the premise
+// and the branch with it, so there is now ONE implementation for every folder
+// count. These tests stay because the property they pin outlived the branch: a
+// SCOPED recount and a FULL recount must produce byte-identical numbers, or the
+// sidebar badge flickers between the two callers that trigger them.
+describe('recalculateFolderCounts — scoped vs full recount parity', () => {
   // Regression: a folder whose path is a PREFIX of another (Work vs Work/Reports)
-  // must not cross-count. The targeted path relies on instr(tags,'|path|') with
-  // BOTH delimiters to prevent it; if a bare instr(tags,'path') crept in, Work
-  // would absorb every Work/Reports message.
-  it('targeted recount does not let a path-prefix folder absorb its children', async () => {
+  // must not cross-count. Membership is per-token — a row of `email_tags` holds
+  // the whole tag — exactly as instr(tags,'|path|') with BOTH delimiters was; a
+  // prefix match creeping in either way would make Work absorb Work/Reports.
+  it('a scoped recount does not let a path-prefix folder absorb its children', async () => {
     const db = openTestDb();
     db.exec(`
       CREATE TABLE folders (
@@ -146,22 +149,23 @@ describe('recalculateFolderCounts — targeted vs full-scan strategy parity', ()
       CREATE TABLE emails (id TEXT PRIMARY KEY, thread_id TEXT, tags TEXT NOT NULL DEFAULT '||');
       INSERT INTO folders (id, path) VALUES ('f-work','Work'), ('f-rep','Work/Reports');
     `);
+    createEmailTagsIndex(db);
     const repo = new FolderRepository(() => db);
     add(db, 'e1', 't1', 'Work');            // only Work
     add(db, 'e2', 't2', 'Work/Reports');    // only the child
-    await repo.recalculateFolderCounts(['Work', 'Work/Reports']); // 2 folders → targeted
+    await repo.recalculateFolderCounts(['Work', 'Work/Reports']);
 
     const s = snapshot(db);
     expect(s.Work).toEqual({ total: 1, unread: 1 });          // e1 only, NOT e2
     expect(s['Work/Reports']).toEqual({ total: 1, unread: 1 }); // e2 only
   });
 
-  // The two implementations must agree exactly. Build >6 folders (so a full,
-  // omitted-path recount takes the full-scan branch) and compare its numbers to a
-  // per-folder targeted recount over the same data.
-  it('full-scan and targeted recounts produce identical numbers on the same data', async () => {
+  // Seven folders: the count that used to select the deleted JS-tally branch, and
+  // still the shape worth pinning — one whole-mailbox recount against seven
+  // single-folder ones over the same data.
+  it('a full recount and one-folder recounts produce identical numbers', async () => {
     const db = openTestDb();
-    const paths = ['INBOX', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6']; // 7 > SCOPED_RECOUNT_MAX_FOLDERS
+    const paths = ['INBOX', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6'];
     db.exec(`
       CREATE TABLE folders (
         id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL,
@@ -170,6 +174,7 @@ describe('recalculateFolderCounts — targeted vs full-scan strategy parity', ()
       CREATE TABLE emails (id TEXT PRIMARY KEY, thread_id TEXT, tags TEXT NOT NULL DEFAULT '||');
       ${paths.map((p, i) => `INSERT INTO folders (id, path) VALUES ('f${i}','${p}');`).join('\n')}
     `);
+    createEmailTagsIndex(db);
     const repo = new FolderRepository(() => db);
     add(db, 'e1', 't1', 'INBOX');
     add(db, 'e2', 't1', 'INBOX');            // same thread, 2nd copy
@@ -179,11 +184,11 @@ describe('recalculateFolderCounts — targeted vs full-scan strategy parity', ()
     add(db, 'e6', 't4', 'F2|read');          // read
     add(db, 'e7', 't5', 'F6');               // unread
 
-    // Full recount (omitted list, 7 folders) → full-scan branch → authoritative.
+    // Full recount (omitted list, every folder) — the authoritative backstop.
     await repo.recalculateFolderCounts();
     const full = snapshot(db);
 
-    // Now recount every folder ONE AT A TIME (each a 1-folder targeted recount)
+    // Now recount every folder ONE AT A TIME (each a 1-folder scoped recount)
     // and confirm the numbers land identically.
     for (const p of paths) await repo.recalculateFolderCounts([p]);
     const targeted = snapshot(db);
@@ -211,6 +216,7 @@ describe('recalculateFolderCounts — unread only counts copies that LIST in the
       CREATE TABLE emails (id TEXT PRIMARY KEY, thread_id TEXT, tags TEXT NOT NULL DEFAULT '||');
       ${paths.map((p, i) => `INSERT INTO folders (id, path) VALUES ('f${i}','${p}');`).join('\n')}
     `);
+    createEmailTagsIndex(db);
     add(db, 'e1', 't1', 'INBOX');                 // plain unread → counts
     add(db, 'e2', 't2', 'INBOX|Trash');           // webmail-trashed, tag never dropped → hidden from INBOX
     add(db, 'e3', 't3', 'INBOX|Junk');            // same, Junk
@@ -229,16 +235,16 @@ describe('recalculateFolderCounts — unread only counts copies that LIST in the
     Trash: { total: 3, unread: 2 },
   };
 
-  it('targeted recount (few folders) excludes trashed/junked/deleted/sent copies', async () => {
+  it('scoped recount excludes trashed/junked/deleted/sent copies', async () => {
     const { db, repo } = seeded(['INBOX', 'Trash', 'Junk', 'Sent', 'Sarv Inbox/Invoices']);
-    await repo.recalculateFolderCounts(['INBOX', 'Trash']); // 2 folders → targeted
+    await repo.recalculateFolderCounts(['INBOX', 'Trash']);
     const s = snapshot(db);
     expect(s.INBOX).toEqual(expected.INBOX);
     expect(s.Trash).toEqual(expected.Trash);
   });
 
-  it('full-scan recount (many folders) yields the SAME numbers as targeted', async () => {
-    const many = ['INBOX', 'Trash', 'Junk', 'Sent', 'Sarv Inbox/Invoices', 'F5', 'F6']; // 7 → full-scan
+  it('a full recount yields the SAME numbers as scoped ones, folder by folder', async () => {
+    const many = ['INBOX', 'Trash', 'Junk', 'Sent', 'Sarv Inbox/Invoices', 'F5', 'F6'];
     const { db, repo } = seeded(many);
     await repo.recalculateFolderCounts();
     const full = snapshot(db);
@@ -250,5 +256,37 @@ describe('recalculateFolderCounts — unread only counts copies that LIST in the
     // not e7 (Trash does) — Junk's own unread badge is 1, exactly what its list shows.
     expect(full.Junk).toEqual({ total: 2, unread: 1 });
     expect(full['Sarv Inbox/Invoices']).toEqual({ total: 1, unread: 1 });
+  });
+});
+
+describe('recalculateFolderCounts — more folders than one query can bind', () => {
+  // Regression: the grouped unread query binds one parameter per folder, so it
+  // is chunked (RECOUNT_CHUNK = 500). An off-by-one in that loop doesn't throw —
+  // it silently leaves every folder past the first chunk at whatever count it
+  // already held, which on a mailbox with hundreds of labels is a sidebar full
+  // of stale badges that no sync ever corrects.
+  const FOLDERS = 501; // deliberately one more than RECOUNT_CHUNK
+
+  it('recounts every folder past the first chunk', async () => {
+    const db = openTestDb();
+    db.exec(`
+      CREATE TABLE folders (
+        id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL,
+        total_count INTEGER NOT NULL DEFAULT 0, unread_count INTEGER NOT NULL DEFAULT 99
+      );
+      CREATE TABLE emails (id TEXT PRIMARY KEY, thread_id TEXT, tags TEXT NOT NULL DEFAULT '||');
+    `);
+    createEmailTagsIndex(db);
+    const insertFolder = db.prepare('INSERT INTO folders (id, path) VALUES (?,?)');
+    for (let i = 0; i < FOLDERS; i += 1) {
+      insertFolder.run(`f${i}`, `L${i}`);
+      add(db, `e${i}`, `t${i}`, `L${i}`); // one unread thread in each
+    }
+    await new FolderRepository(() => db).recalculateFolderCounts();
+    const counts = snapshot(db);
+    expect(Object.keys(counts)).toHaveLength(FOLDERS);
+    // Every one of them, not just the first 500 — the seeded 99 must be gone.
+    for (let i = 0; i < FOLDERS; i += 1) expect([`L${i}`, counts[`L${i}`]]).toEqual([`L${i}`, { total: 1, unread: 1 }]);
+    db.close();
   });
 });

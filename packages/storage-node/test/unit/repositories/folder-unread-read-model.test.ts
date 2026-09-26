@@ -233,16 +233,16 @@ describe('folders.unread_count from the read model', () => {
 
       db.prepare('UPDATE emails SET tags = ? WHERE id = ?').run('|INBOX|read|', 'x1');
       await repo.recalculateFolderCounts(['INBOX']);
-      expect(badge(db, 'INBOX')).toBe(1);            // tags scan: current, not the stale 2
+      expect(badge(db, 'INBOX')).toBe(1);            // counted from email_tags: current, not the stale 2
 
       maintainer.flushNow();
       expect(badge(db, 'INBOX')).toBe(1);            // read model agrees once drained
     });
 
-    it('uses the read model on the full-scan path too (many folders)', async () => {
-      // Above SCOPED_RECOUNT_MAX_FOLDERS a different code path runs; both must
-      // count unread the same way or the badge would depend on how many folders
-      // the caller happened to ask about.
+    it('uses the read model for a whole-mailbox recount too (many folders)', async () => {
+      // The folder count used to select a second implementation; it no longer
+      // does, and the badge must still not depend on how many folders the caller
+      // happened to ask about.
       const many = Array.from({ length: 8 }, (_, i) => ({ id: `f${i}`, path: `F${i}` }));
       const manyDb = openReadModelTestDb(many);
       const manyRepo = new FolderRepository(() => manyDb);
