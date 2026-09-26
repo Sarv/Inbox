@@ -88,3 +88,80 @@ describe('renderer console → app.log forwarder', () => {
     expect(forward).toHaveBeenCalled();
   });
 });
+
+describe('uncaught error + unhandled rejection forwarding', () => {
+  // What breaks if these fail: a renderer that dies at module-evaluation time (the
+  // "Dynamic require of 'path' is not supported" class of failure) writes NOTHING to
+  // app.log -- the log looks like a healthy boot next to a white window, and the only
+  // evidence lives in a DevTools console nobody has open.
+  let listeners: Record<string, (event: any) => void>;
+
+  beforeEach(() => {
+    listeners = {};
+    (globalThis as any).window = {
+      electronAPI: { log: { forward } },
+      addEventListener: (type: string, handler: (event: any) => void) => {
+        listeners[type] = handler;
+      },
+    };
+  });
+
+  it('registers both window listeners at import time', async () => {
+    await load();
+    expect(Object.keys(listeners).sort()).toEqual(['error', 'unhandledrejection']);
+  });
+
+  it('forwards an uncaught error with its stack and source location', async () => {
+    await load();
+    const error = new Error('kaboom');
+    listeners.error({ message: 'Uncaught Error: kaboom', filename: 'http://localhost:5173/x.js', lineno: 12, colno: 5, error });
+
+    const { level, text } = forward.mock.calls.at(-1)![0];
+    expect(level).toBe('error');
+    expect(text).toContain('[uncaught]');
+    expect(text).toContain('kaboom');
+    expect(text).toContain('http://localhost:5173/x.js:12:5');
+  });
+
+  it('falls back to the message when the event carries no Error (cross-origin "Script error.")', async () => {
+    await load();
+    listeners.error({ message: 'Script error.', filename: '', lineno: 0, colno: 0, error: undefined });
+    expect(forward.mock.calls.at(-1)![0].text).toBe('[uncaught] Script error.');
+  });
+
+  it('forwards an unhandled rejection at error level', async () => {
+    await load();
+    listeners.unhandledrejection({ reason: new Error('no network') });
+
+    const { level, text } = forward.mock.calls.at(-1)![0];
+    expect(level).toBe('error');
+    expect(text).toContain('[unhandled rejection]');
+    expect(text).toContain('no network');
+  });
+
+  it('renders a non-Error rejection reason (a string or an object) instead of dropping it', async () => {
+    await load();
+    listeners.unhandledrejection({ reason: 'plain string' });
+    expect(forward.mock.calls.at(-1)![0].text).toBe('[unhandled rejection] plain string');
+
+    listeners.unhandledrejection({ reason: { code: 'EAUTH' } });
+    expect(forward.mock.calls.at(-1)![0].text).toBe('[unhandled rejection] {"code":"EAUTH"}');
+  });
+
+  it('never throws out of the listener when the bridge is missing', async () => {
+    (globalThis as any).window = {
+      addEventListener: (type: string, handler: (event: any) => void) => {
+        listeners[type] = handler;
+      },
+    };
+    await load();
+    expect(() => listeners.error({ message: 'boom', filename: '', lineno: 0, colno: 0, error: new Error('boom') })).not.toThrow();
+    expect(() => listeners.unhandledrejection({ reason: undefined })).not.toThrow();
+  });
+
+  it('is a no-op where window has no addEventListener (node test env / preload-less shell)', async () => {
+    (globalThis as any).window = { electronAPI: { log: { forward } } };
+    await expect(load()).resolves.toBeUndefined();
+    expect(Object.keys(listeners)).toHaveLength(0);
+  });
+});

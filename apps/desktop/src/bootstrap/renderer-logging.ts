@@ -58,6 +58,52 @@ for (const method of methods) {
   };
 }
 
+// Uncaught errors and unhandled promise rejections do NOT go through console.* —
+// Chromium reports them straight to DevTools. Without the two listeners below, a
+// renderer that dies while evaluating a module (e.g. `Dynamic require of "path"
+// is not supported`) leaves app.log looking like a perfectly healthy boot while
+// the window is blank: every startup line is there, nothing follows, and no error
+// is recorded anywhere you can read after the fact. We forward both through the
+// patched console.error above so they take the same redacted path into app.log.
+
+// Exported for the unit tests; both are pure and must never throw (a throw inside
+// the 'error' listener would fire another 'error' event — an endless loop).
+export function describeErrorEvent(event: Pick<ErrorEvent, 'message' | 'filename' | 'lineno' | 'colno' | 'error'>): string {
+  const where = event.filename ? ` (${event.filename}:${event.lineno ?? 0}:${event.colno ?? 0})` : '';
+  // A cross-origin script reports no .error object, only the opaque "Script error." message.
+  const detail = event.error instanceof Error ? (event.error.stack ?? event.error.message) : renderArg(event.message);
+  return `[uncaught] ${detail}${where}`;
+}
+
+export function describeRejection(reason: unknown): string {
+  return `[unhandled rejection] ${renderArg(reason)}`;
+}
+
+try {
+  // Guarded: the node test env and the preload-less case have no window/addEventListener.
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    // Bubble phase on purpose: a failed <img>/<script> load fires an 'error' event
+    // that reaches window ONLY in the capture phase, and those are not renderer
+    // crashes — capturing them would flood app.log with every broken image.
+    window.addEventListener('error', (event: ErrorEvent) => {
+      try {
+        console.error(describeErrorEvent(event));
+      } catch {
+        // never re-enter the error path
+      }
+    });
+    window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
+      try {
+        console.error(describeRejection(event.reason));
+      } catch {
+        // never re-enter the error path
+      }
+    });
+  }
+} catch {
+  // listener registration unsupported — skip; instrumentation must never break startup
+}
+
 // Main-thread stall detector. Chromium fires a 'longtask' PerformanceEntry for any
 // task that blocks the thread >50ms; we log the ones long enough to surface a
 // loader/jank (>=200ms) into app.log (via the console patch above). This turns the
