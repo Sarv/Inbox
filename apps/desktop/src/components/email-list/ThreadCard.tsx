@@ -10,6 +10,7 @@ import { LabelChips } from '../LabelChips';
 import { Tooltip } from '../Tooltip';
 
 import { CategoryBadges } from './CategoryBadges';
+import { readStateTextClass } from './read-state-text';
 import { SnoozeDropdown } from './SnoozeDropdown';
 import type { ThreadRowProps } from './types';
 
@@ -80,7 +81,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
         {/* Senders + Count - count never truncated */}
         <div
           className={`flex-1 min-w-0 flex items-center text-sm ${
-            hasUnread ? 'font-semibold text-foreground' : 'text-muted-foreground'
+            readStateTextClass(hasUnread)
           }`}
         >
           <span className="truncate min-w-0">{thread.senderDisplay}</span>
@@ -196,7 +197,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
         <LabelChips tags={threadTagsString(thread)} variant="solid" className="shrink-0" />
         <div
           className={`flex-1 min-w-0 truncate text-sm ${
-            hasUnread ? 'font-medium text-foreground' : 'text-foreground'
+            readStateTextClass(hasUnread)
           }`}
         >
           {latestEmail.subject || oldestEmail.subject || '(no subject)'}
