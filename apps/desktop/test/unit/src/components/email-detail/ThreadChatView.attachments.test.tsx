@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import type { EmailRecord } from '@sarvinbox/core';
-import { act } from 'react-dom/test-utils';
+import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../../../helpers/render';

@@ -1,6 +1,5 @@
-import type { ReactElement } from 'react';
+import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { act } from 'react-dom/test-utils';
 
 /**
  * A ~30-line React render harness for the renderer's component tests.
