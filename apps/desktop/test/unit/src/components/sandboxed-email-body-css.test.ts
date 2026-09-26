@@ -144,4 +144,26 @@ describe('the dark-bodies canvas', () => {
     expect(darkStandard()).not.toContain('sec-paper');
     expect(darkStandard()).not.toContain('sec-table-sheet');
   });
+
+  // Regression: THE bug this rule exists for, and the one that made the whole
+  // feature look dead. `color-scheme: dark` on the <iframe> only decides what
+  // `prefers-color-scheme` resolves to for the document it embeds; that
+  // document's OWN scheme stays `normal`, and the UA paints the frame's canvas
+  // from the document's. Drop this line and a message whose colours have just
+  // been moved for a dark page is drawn on an opaque WHITE one — the exact
+  // "dark email bodies does nothing" report. Not reachable through the
+  // component: jsdom/happy-dom never paint a canvas.
+  it('declares the dark colour scheme inside the document, not just on the frame', () => {
+    expect(darkStandard()).toContain('color-scheme: dark;');
+  });
+
+  // Regression: the scheme must ride on the dark canvas alone. Emitted on the
+  // white Standard page it would flip that page's UA colours — form controls,
+  // scrollbars and the canvas itself — under every reader who never opted in.
+  it('says nothing about the colour scheme on any other canvas', () => {
+    expect(standard()).not.toContain('color-scheme');
+    expect(standard(true)).not.toContain('color-scheme');
+    expect(tintedBubble()).not.toContain('color-scheme');
+    expect(normalizedBubble(true)).not.toContain('color-scheme');
+  });
 });

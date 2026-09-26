@@ -183,10 +183,20 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
   // We do NOT force background-color, padding/margin on tables, or
   // image dimensions — those are part of the email's intentional
   // layout (gray-page-bg invoice cards etc.) and stay intact.
+  //
+  // The dark canvas has to be declared INSIDE the document, not only on the
+  // frame element. `color-scheme` on the <iframe> sets what
+  // `prefers-color-scheme` resolves to for the page it embeds, but that page
+  // keeps a colour scheme of its own — `normal`, i.e. light — and the UA paints
+  // the frame's canvas from THAT. So a message re-coloured for a dark page was
+  // still being drawn on an opaque WHITE one: light-grey text on white, which
+  // is exactly what "dark email bodies does nothing" looked like. Nothing else
+  // emits it, so every other view renders byte-identically to before.
   return `
     html, body {
       margin: 0;
       padding: 0;
+      ${darkCanvas ? 'color-scheme: dark;' : ''}
       ${lightCanvas ? 'background-color: #ffffff;' : ''}
     }
     body, body * {
