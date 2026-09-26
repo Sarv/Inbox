@@ -207,12 +207,28 @@ jobs:
       # nothing newer than GLIBCXX_3.4.30 can enter the artifact. "Verify the
       # Linux build runs on an older glibc" below still proves it from the
       # binaries.
+      #
+      # It must be clang-15, NOT jammy's default `clang` (14). Plain `clang`
+      # cleared every error above and then hit the next one:
+      #   v8-source-location.h:29:13: error: no type named 'source_location'
+      #   in namespace 'std'; did you mean 'SourceLocation'?
+      # V8 gates that header on the language level, and `-std=c++20` (which
+      # better-sqlite3's own binding.gyp passes) makes clang 14 claim C++20 --
+      # but libstdc++ only DEFINES std::source_location when the compiler
+      # provides __builtin_source_location, which clang gained in 15. So 14 is
+      # a compiler that promises C++20 and cannot deliver this corner of it.
+      # 15 is jammy's newest, so this still adds no apt source and still cannot
+      # move the glibc/libstdc++ floor.
       - name: Install Linux packaging tools
         if: matrix.platform == 'linux'
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends rpm clang
+          sudo apt-get install -y --no-install-recommends rpm clang-15
+          # Printed so the next compile failure can be read against a known
+          # compiler instead of an assumed one -- node-gyp's log does not say
+          # which version it ran.
+          clang++-15 --version
           # node-gyp's make generator resolves its compiler from $CC/$CXX
           # (CC.target ?= $(CC)), so exporting them for the REST of the job is
           # all it takes. It has to be the rest of the job, not just the
@@ -220,8 +236,8 @@ jobs:
           # the same addon for the same Electron ABI -- and swallows its own
           # failure, so getting this wrong looks like a green install and a
           # broken package.
-          echo "CC=clang" >> "$GITHUB_ENV"
-          echo "CXX=clang++" >> "$GITHUB_ENV"
+          echo "CC=clang-15" >> "$GITHUB_ENV"
+          echo "CXX=clang++-15" >> "$GITHUB_ENV"
 
       # NOTE: no SARVINBOX_SKIP_ELECTRON_REBUILD here, unlike the verify job.
       # The packaged app runs inside Electron, so the addons must be built for
