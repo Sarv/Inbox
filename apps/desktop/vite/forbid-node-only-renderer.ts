@@ -1,5 +1,7 @@
 import type { Plugin } from 'vite';
 
+import { packageForModuleId } from './module-package';
+
 /**
  * Build-time guard: keep Node-only modules OUT of the renderer bundle.
  *
@@ -57,39 +59,18 @@ export const DEFAULT_FORBIDDEN_RENDERER_PACKAGES: readonly string[] = [
 ];
 
 /**
- * Given a rollup module id (an absolute file path, possibly with a `?v=` query or
- * a `\0` virtual prefix) and a set of forbidden package names, return the
- * forbidden package the id belongs to, or null.
+ * Which forbidden package does this module id belong to, or null.
  *
- * Pure and side-effect free so it can be unit tested directly. Handles both the
- * flat `node_modules/<pkg>` and pnpm's `node_modules/.pnpm/<pkg>@x/node_modules/<pkg>`
- * layouts (the LAST `node_modules/` segment always precedes the real package
- * name), plus `@scope/name` packages.
+ * A thin, named-for-this-guard wrapper over the shared `packageForModuleId`
+ * matcher (vite/module-package.ts), which the browser-safe builtin aliases use
+ * too — one implementation of "what package is this path in", so the two rules
+ * can never disagree about it.
  */
 export function forbiddenPackageForId(
   moduleId: string,
   forbidden: ReadonlySet<string>,
 ): string | null {
-  // Virtual/generated modules (rollup helpers, plugin-emitted code) never map to
-  // an installed package — ignore them.
-  if (moduleId.startsWith('\0')) return null;
-
-  // Strip any query suffix (e.g. dev's `?v=<hash>`, `?worker`, `?url`).
-  const withoutQuery = moduleId.split('?')[0];
-
-  const marker = 'node_modules/';
-  const lastIndex = withoutQuery.lastIndexOf(marker);
-  if (lastIndex === -1) return null;
-
-  const afterNodeModules = withoutQuery.slice(lastIndex + marker.length);
-  const segments = afterNodeModules.split('/');
-  if (segments.length === 0 || segments[0] === '') return null;
-
-  const packageName = segments[0].startsWith('@')
-    ? `${segments[0]}/${segments[1] ?? ''}`
-    : segments[0];
-
-  return forbidden.has(packageName) ? packageName : null;
+  return packageForModuleId(moduleId, forbidden);
 }
 
 /**
