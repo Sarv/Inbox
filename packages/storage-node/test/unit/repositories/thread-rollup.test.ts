@@ -231,6 +231,61 @@ function insertEmail(db: Database.Database, threadId: string, tags: string, over
   });
 }
 
+// Per-folder unread is FOLDER-LOCAL (the listing scope), not the conversation-wide
+// LIVE flag. What breaks if these fail: the sidebar badge counts exactly these
+// rows, so a wrong scope here is a badge that cannot agree with its own list —
+// Trash and Junk sat at 0 over a list full of unread mail because of it.
+describe('deriveRollup — per-folder unread scope', () => {
+  const folderRow = (r: ReturnType<typeof deriveRollup>, path: string) =>
+    r.folders.find((f) => f.folderId === CTX.folderPaths.get(path));
+
+  it('a thread living only in Trash marks its TRASH row unread', () => {
+    const r = deriveRollup('t1', [email('Trash')], CTX);
+    expect(folderRow(r, 'Trash')?.hasUnread).toBe(true);
+    // ...while the conversation stays "not unread" — the inbox's Unread section
+    // must not resurface a trashed thread. Both scopes, one derivation.
+    expect(r.hasUnread).toBe(false);
+  });
+
+  it('a \\Deleted copy in Trash is not unread in Trash either', () => {
+    const r = deriveRollup('t1', [email('Trash|deleted')], CTX);
+    expect(folderRow(r, 'Trash')?.hasUnread).toBe(false);
+  });
+
+  it('a read copy in Trash is not unread in Trash', () => {
+    const r = deriveRollup('t1', [email('Trash|read')], CTX);
+    expect(folderRow(r, 'Trash')?.hasUnread).toBe(false);
+  });
+
+  it('an unread copy trashed out of INBOX emits no INBOX row at all', () => {
+    const r = deriveRollup('t1', [email('INBOX|Trash')], CTX);
+    expect(folderRow(r, 'INBOX')).toBeUndefined();   // shadowed out of INBOX's listing
+    expect(folderRow(r, 'Trash')?.hasUnread).toBe(true);
+  });
+
+  it('unread in one folder does not mark the thread unread in ANOTHER', () => {
+    const r = deriveRollup('t1', [email('INBOX'), email('Sarv Inbox/Reminders|read')], CTX);
+    expect(folderRow(r, 'INBOX')?.hasUnread).toBe(true);
+    expect(folderRow(r, 'Sarv Inbox/Reminders')?.hasUnread).toBe(false);
+    expect(r.hasUnread).toBe(true);                  // conversation-wide, unchanged
+  });
+
+  it('important-unread is folder-local too', () => {
+    const r = deriveRollup('t1', [email('Trash|important')], CTX);
+    expect(folderRow(r, 'Trash')?.hasImportantUnread).toBe(true);
+    expect(r.hasImportantUnread).toBe(false);
+  });
+
+  // DELIBERATE LIMIT, not an oversight: the remaining flags stay conversation-wide
+  // because no per-folder count is derived from them. Recorded so the asymmetry
+  // reads as a choice if one of them ever needs the same treatment.
+  it('starred stays conversation-wide across a threads folder rows', () => {
+    const r = deriveRollup('t1', [email('INBOX|starred'), email('Sarv Inbox/Reminders')], CTX);
+    expect(folderRow(r, 'INBOX')?.hasFlagged).toBe(true);
+    expect(folderRow(r, 'Sarv Inbox/Reminders')?.hasFlagged).toBe(true);
+  });
+});
+
 describe('rebuildThread (persistence)', () => {
   let db: Database.Database;
   beforeEach(() => { db = newDb(); });

@@ -12,9 +12,12 @@
 // thread-sql.ts so the new path can never disagree with the old one during the
 // fallback window:
 //   - "LIVE" (flag scope) excludes Trash/Spam/Junk/Deleted copies (and |deleted|),
-//     matching THREAD_STATE_EXCLUDED_FOLDERS / threadTagExists.
+//     matching THREAD_STATE_EXCLUDED_FOLDERS / threadTagExists. This is the
+//     CONVERSATION-wide scope, written to `threads`.
 //   - Per-folder rows use the folder-local listing scope (the getExcludeSpecialFolders
-//     set), matching getByFolder / the section inner query's per-email WHERE.
+//     set), matching getByFolder / the section inner query's per-email WHERE. That
+//     governs their date/priority ORDER *and* their unread flags — see the
+//     per-folder accumulation in deriveRollup.
 //   - `last_message_date` is Unix SECONDS, copied verbatim from emails.date (the
 //     source column) — no unit conversion, so no drift against the legacy path.
 
@@ -123,6 +126,18 @@ function isFolderLive(tokens: Set<string>): boolean {
   return true;
 }
 
+/** Folder-local state accumulated across a thread's copies in ONE folder. */
+interface FolderAcc {
+  lastDate: number;
+  maxPriority: number;
+  unread: boolean;
+  importantUnread: boolean;
+}
+
+const emptyFolderAcc = (): FolderAcc => ({
+  lastDate: -1, maxPriority: 0, unread: false, importantUnread: false,
+});
+
 /** True when this copy is a genuine UNSENT draft (draft tag + a Drafts folder). */
 function isUnsentDraft(tokens: Set<string>): boolean {
   return tokens.has(TAG_DRAFT) && DRAFTS_FOLDER_PATHS.some((p) => tokens.has(p));
@@ -160,7 +175,7 @@ export function deriveRollup(threadId: string, rows: RollupEmailRow[], ctx: Roll
   let liveNonDraftLastDate = -1;
   const categories = new Set<string>();
   // path -> accumulated folder-local state
-  const folderAcc = new Map<string, { lastDate: number; maxPriority: number }>();
+  const folderAcc = new Map<string, FolderAcc>();
   // sender bookkeeping over LIVE copies
   let firstSender: string | null = null, lastSender: string | null = null;
   let firstDate = Infinity, lastDate = -Infinity;
@@ -209,14 +224,26 @@ export function deriveRollup(threadId: string, rows: RollupEmailRow[], ctx: Roll
 
     // Per-folder projection: for each folder this copy belongs to, if the copy is
     // "listable in that folder" (not shadowed by another special folder), fold in
-    // its date + priority. Only folders that exist locally are mappable.
+    // its date + priority + unread. Only folders that exist locally are mappable.
     for (const token of tokens) {
       if (!ctx.folderPaths.has(token)) continue;           // not a known folder path
       if (isShadowedInFolder(tokens, token)) continue;     // hidden by another special folder
-      const acc = folderAcc.get(token) ?? { lastDate: -1, maxPriority: 0 };
+      const acc = folderAcc.get(token) ?? emptyFolderAcc();
       if (r.date > acc.lastDate) acc.lastDate = r.date;
       const p = r.priority_score ?? 0;
       if (p > acc.maxPriority) acc.maxPriority = p;
+      // Unread is folder-LOCAL, under this same listing scope — NOT the
+      // conversation-wide LIVE flag. The LIVE scope drops every Trash/Spam/Junk
+      // copy unconditionally, so a thread that lives only in Trash produced
+      // has_unread = 0 on its own Trash row and the badge (which counts exactly
+      // these rows) could never be anything but 0, while Trash's list showed the
+      // messages as unread. Same flag rule as unreadInFolderPredicate — not read,
+      // not \Deleted — so the read-model badge and the tags badge agree by
+      // construction rather than by coincidence.
+      if (!read && !deleted) acc.unread = true;
+      // Mirrors the conversation-wide rule above (which ignores |deleted|),
+      // moved to this scope; only the scope changes, not the flag test.
+      if (important && !read) acc.importantUnread = true;
       folderAcc.set(token, acc);
     }
   }
@@ -229,9 +256,13 @@ export function deriveRollup(threadId: string, rows: RollupEmailRow[], ctx: Roll
       folderId: ctx.folderPaths.get(path)!,
       lastMessageDate: acc.lastDate,
       maxPriorityScore: acc.maxPriority,
-      // Flags are conversation-wide LIVE (same on every folder row) — this is what
-      // the sectioned-inbox predicates test; folder-local date/priority order it.
-      hasUnread, hasImportant, hasImportantUnread, hasFlagged, hasAttachment, hasDraft,
+      // Unread is folder-local (see the accumulation above) so a folder's badge
+      // can never disagree with its own list. The remaining flags stay
+      // conversation-wide LIVE — that is what the sectioned-inbox predicates
+      // test, and none of them has a per-folder count behind it.
+      hasUnread: acc.unread,
+      hasImportantUnread: acc.importantUnread,
+      hasImportant, hasFlagged, hasAttachment, hasDraft,
       hasCategory: categories.size > 0,
     });
   }
