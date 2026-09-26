@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Trash and Junk always showed no unread mail, however much was sitting in
+  them.** Their badges were derived from a conversation-wide "is this thread
+  live" flag, and a message in Trash or Junk is by definition not live — so the
+  count was stamped 0 on the folder's own row and could never be anything else,
+  even while the folder's list showed the unread mail plainly and the mail
+  server reported it as unseen. Each folder now counts the unread mail its own
+  list shows. The inbox is unaffected: a thread you trashed still does not count
+  toward INBOX.
 - **Opening a thread, and the app in general, no longer stalls while mail is
   syncing.** Every folder Sarv Inbox checked for flag changes also recounted
   that folder's badge by reading each message in it from end to end, bodies
