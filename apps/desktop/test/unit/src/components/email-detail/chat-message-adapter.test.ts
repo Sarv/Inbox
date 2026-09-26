@@ -360,6 +360,7 @@ describe('chatMessagesFromThread', () => {
     emails: EmailRecord[],
     extra: Partial<{
       resolveImages: (html: string) => string;
+      recolorBody: (html: string) => string;
       failedBodies: ReadonlySet<string>;
     }> = {}
   ) {
@@ -413,6 +414,42 @@ describe('chatMessagesFromThread', () => {
     );
     expect(resolveImages).toHaveBeenCalledTimes(messages.length);
     expect(resolveImages).not.toHaveBeenCalledWith(BOB_REPLY);
+  });
+
+  // Regression: the chat view never re-coloured a body at all. Its frame takes
+  // its canvas from the app theme, so a sender's `color:black` stayed black on
+  // a dark canvas and a `background:white` painted a white slab across the
+  // bubble — the same message read correctly in the Standard view and only
+  // there. The hook is what lets the view hand its dark-mode rewrite in.
+  it('re-colours each split body through the host', () => {
+    const recolorBody = vi.fn((html: string) => `${html}<!--dark-->`);
+    const messages = convert([email({ id: 'e1', rawBody: '<p>Body</p>' })], { recolorBody });
+    expect(recolorBody).toHaveBeenCalledTimes(messages.length);
+    expect(messages[0]!.body).toContain('<!--dark-->');
+  });
+
+  // Regression: the rewrite has to run BEFORE the image refs are resolved. Put
+  // it after and every walk drags a base64 payload per inline image through a
+  // DOM parse, on the click that opens the thread. (It runs after the mail's
+  // stylesheet is inlined for the opposite reason — the rewrite reads `style`
+  // attributes and nothing else — which `chat-body-styles.test.ts` covers.)
+  it('re-colours before the image refs are resolved', () => {
+    const calls: string[] = [];
+    convert(
+      [email({ id: 'e1', rawBody: '<p><img src="sarv-image:ab">Hello</p>' })],
+      {
+        recolorBody: (html) => {
+          calls.push('recolor');
+          expect(html).toContain('sarv-image:ab');
+          return html;
+        },
+        resolveImages: (html) => {
+          calls.push('resolve');
+          return html.replace('sarv-image:ab', 'data:image/png;base64,AA');
+        },
+      },
+    );
+    expect(calls).toEqual(['recolor', 'resolve']);
   });
 
   it('leaves bodies untouched when the host resolves no images', () => {

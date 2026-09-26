@@ -3,10 +3,12 @@ import type { EmailRecord } from '@sarvinbox/core';
 import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 
+import { useAppearance, useResolvedTheme } from '../../appearance';
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
+import { applyEmailDarkMode } from '../../utils/email-dark-mode';
 import { hasTag } from '../../utils/tags';
 import { AttachmentPills } from '../attachment-viewer/AttachmentPills';
 import { InlineForward } from '../InlineForward';
@@ -112,12 +114,28 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     ? conversationMessages || undefined
     : undefined;
 
+  // Dark message bodies are opt-in (Appearance -> "Dark email bodies"). The
+  // chat frame takes its canvas from the app's theme, but nothing used to
+  // re-colour the mail inside it: a sender's `color:black` stayed black on that
+  // dark canvas, and a `background:white` painted a white slab across the
+  // bubble. `useAppearance` and `useResolvedTheme` both re-render on a change,
+  // so flipping the setting or the theme re-splits the open thread.
+  const { darkenEmails } = useAppearance();
+  const resolvedTheme = useResolvedTheme();
+  const recolorBody = useMemo(
+    () =>
+      (html: string): string =>
+        applyEmailDarkMode(html, { enabled: darkenEmails, isDark: resolvedTheme === 'dark' }).html,
+    [darkenEmails, resolvedTheme],
+  );
+
   const chatMessages = useMemo<ChatMessage[]>(() => {
     const options = {
       currentUserEmail,
       emailsById,
       failedBodies,
       resolveImages: resolveRefsInHtml,
+      recolorBody,
     };
     switch (chatSourceFor(showAIView, aiMessages?.length ?? 0)) {
       // Only what the LLM actually extracted — see `chatSourceFor` for why
@@ -133,7 +151,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       case 'none':
         return [];
     }
-  }, [showAIView, aiMessages, threadEmails, currentUserEmail, emailsById, failedBodies]);
+  }, [showAIView, aiMessages, threadEmails, currentUserEmail, emailsById, failedBodies, recolorBody]);
 
   // Per-message extraction state, keyed the way the view hands messages back.
   // AI-only: a deterministic split has no extraction to fail.
