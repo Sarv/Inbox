@@ -21,9 +21,17 @@
  * --force to rebuild regardless. A rebuild already running elsewhere (parallel
  * `pnpm test` tasks) is waited for rather than treated as a failure.
  *
- * Run: node scripts/native-abi.mjs [node|electron] [--force]   (default: node)
+ * The runtime has no default, and a command line the script cannot read (an
+ * unknown flag, no runtime, two of them) is refused with the usage text before
+ * the addon is so much as probed. It used to default to node and skip flags it
+ * did not know, so `--help` REBUILT the addon for Node; see
+ * scripts/lib/native-abi-args.mjs.
+ *
+ * Run: node scripts/native-abi.mjs <node|electron> [--force]
+ *      node scripts/native-abi.mjs --help
  */
 
+import { parseNativeAbiArgs, USAGE } from './lib/native-abi-args.mjs';
 import {
   isAbiCurrent,
   readBuiltAbi,
@@ -43,13 +51,18 @@ const LOCK_WAIT_MS = 10 * 60_000;
 const log = (msg) => console.log(`[native-abi] ${msg}`);
 const warn = (msg) => console.warn(`[native-abi] ${msg}`);
 
-const args = process.argv.slice(2);
-const force = args.includes('--force');
-const runtime = (args.find((a) => !a.startsWith('--')) ?? 'node').toLowerCase();
-if (!['node', 'electron'].includes(runtime)) {
-  console.error(`[native-abi] unknown runtime "${runtime}" — use "node" or "electron"`);
+// Before anything else, even the probe below: a command line this script
+// cannot read is one it must not act on.
+const cli = parseNativeAbiArgs(process.argv.slice(2));
+if (cli.kind === 'help') {
+  process.stdout.write(`${USAGE}\n`);
+  process.exit(0);
+}
+if (cli.kind === 'error') {
+  console.error(`[native-abi] ${cli.message}\n\n${USAGE}`);
   process.exit(1);
 }
+const { runtime, force } = cli;
 
 // Report what the addon is currently built for. readBuiltAbi probes it in a
 // child process — requiring it here would cache the binary loaded BEFORE the
