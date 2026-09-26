@@ -44,7 +44,7 @@
     "test:node-abi": "node scripts/native-abi.mjs node",
     "lint": "turbo run lint && pnpm lint:scripts",
     "lint:scripts": "eslint scripts --ext .mjs,.js,.cjs",
-    "lint:fix": "turbo run lint --fix",
+    "lint:fix": "turbo run lint -- --fix",
     "type-check": "turbo run type-check",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
@@ -70,7 +70,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.5.1",
     "prettier": "^3.2.4",
-    "turbo": "^1.11.3",
+    "turbo": "^2.11.4",
     "typescript": "^5.3.3",
     "vitest": "^3.2.7"
   },

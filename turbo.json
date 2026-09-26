@@ -1,6 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "pipeline": {
+  "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "build/**"]
@@ -16,7 +16,9 @@
     // resolve `@sarvinbox/core` to its dist), which is exactly what `^build` does.
     "test": {
       "dependsOn": ["^build"],
-      "outputs": ["coverage/**"]
+      // No `outputs`: `pnpm test` writes no coverage, and turbo 2 warns on an
+      // outputs key that never matches. Coverage belongs to `test:coverage`.
+      "outputs": []
     },
     "test:coverage": {
       "dependsOn": ["^build"],
