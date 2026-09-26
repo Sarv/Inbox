@@ -5,3 +5,5 @@ packages/*/dist/
 coverage/
 pnpm-lock.yaml
 *.min.js
+# Generated subset of sarv_theme (apps/site/scripts/sync-theme.mjs) — keep byte-identical.
+apps/site/src/theme.css

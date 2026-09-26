@@ -1,0 +1,115 @@
+/* Page layout only. Components (.card, .btn, .badge, .banner) and every value
+   come from sarv_theme — tokens here, never literals. */
+
+.page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding-block: var(--space-10);
+  padding-inline: var(--space-4);
+}
+
+.page-header {
+  gap: var(--space-3);
+  margin-bottom: var(--space-8);
+}
+.app-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--r-lg);
+}
+.app-name {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--ink);
+}
+
+.page-body {
+  gap: var(--space-6);
+}
+
+.hero {
+  gap: var(--space-4);
+}
+.hero-title {
+  margin: 0;
+  font-size: var(--fs-4xl);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-tight);
+  color: var(--ink);
+}
+
+.section-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  color: var(--ink);
+}
+.platform-title {
+  margin: 0;
+  /* Same uppercase label as sarv_theme's table headers and .nb-section-label,
+     which spell the tracking as 0.06em too (no token exists for it). */
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semi);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.download-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.download-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.download-row:first-child {
+  border-top: 0;
+}
+.download-row-text {
+  min-width: 0;
+}
+.download-row-label {
+  font-weight: var(--fw-semi);
+  color: var(--ink-2);
+}
+
+.release-version {
+  font-weight: var(--fw-semi);
+  color: var(--ink-2);
+}
+
+.page-footer {
+  margin-top: var(--space-4);
+}
+
+/* Local override of sarv_theme: its global `a:hover` underlines every link,
+   and the download buttons here are links (<a class="btn">). An underline on a
+   button reads as a bug, so buttons keep their hover colour without it. */
+a.btn:hover {
+  text-decoration: none;
+}
+
+.others-toggle .chevron {
+  color: var(--muted);
+  transition: transform var(--t-fast) var(--ease-out);
+}
+.others-toggle[aria-expanded='true'] .chevron {
+  transform: rotate(180deg);
+}
+
+@media (max-width: 480px) {
+  .page {
+    padding-block: var(--space-7);
+  }
+  .hero-title {
+    font-size: var(--fs-3xl);
+  }
+  .hero .btn-lg {
+    width: 100%;
+  }
+}
