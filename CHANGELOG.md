@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-09-26
+
 ### Added
 - **Dark email bodies (Settings > Appearance).** In dark mode the message
   itself still arrives on a white page, because that is the page senders write
@@ -228,7 +230,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/Sarv/Inbox/releases/tag/v1.2.3
 [1.2.2]: https://github.com/Sarv/Inbox/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Sarv/Inbox/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Sarv/Inbox/releases/tag/v1.2.0
