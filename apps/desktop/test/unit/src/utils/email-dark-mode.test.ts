@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { converter, parse as parseColor } from 'culori';
+import { converter, parse as parseColor, wcagContrast } from 'culori';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -12,6 +12,9 @@ import {
   darkenSurfaceColor,
   darkenTextColor,
   darkenValue,
+  splitCommentWrapper,
+  textColorOn,
+  textReadsOn,
 } from '../../../../src/utils/email-dark-mode';
 
 // This is an opt-in rewrite of SOMEONE ELSE'S markup. Two things can go wrong
@@ -127,6 +130,41 @@ describe('darkenShadowColor', () => {
   it('keeps a shadow dark', () => {
     expect(darkenShadowColor(oklch(parseColor('rgba(0, 0, 0, 0.2)')!)!).l).toBeLessThanOrEqual(0.2);
     expect(darkenShadowColor(oklch(parseColor('#cccccc')!)!).l).toBeLessThanOrEqual(0.2);
+  });
+});
+
+describe('textReadsOn / textColorOn — text against the surface it was left on', () => {
+  // Regression: the whole point of keeping a sender's surface is that the
+  // pairing on it still works. White on a brand red does, and must be left
+  // exactly as written or every CTA in the message loses its label colour.
+  it('leaves a pairing that still meets AA alone', () => {
+    expect(textReadsOn(WHITE, oklch(parseColor('#d32f2f')!)!)).toBe(true);
+  });
+
+  // Regression: THE kept-surface bug. A text colour that was written for the
+  // white page further up the tree, or a surface that was dimmed to sit on a
+  // dark one, leaves black on near-black — which the old rule froze in place
+  // because the surface was "the sender's".
+  it('reports a pairing that has stopped working', () => {
+    expect(textReadsOn(BLACK, oklch(parseColor('#1a1a2e')!)!)).toBe(false);
+    expect(textReadsOn(oklch(parseColor('#666666')!)!, oklch(parseColor('#d32f2f')!)!)).toBe(false);
+  });
+
+  // Regression: picking a fixed pole would put light ink on a pale kept tint
+  // and dark ink on a dark one — the same failure with the colours swapped.
+  it('moves the text to whichever end actually reads', () => {
+    const dark = oklch(parseColor('#1a1a2e')!)!;
+    expect(wcagContrast(textColorOn(BLACK, dark), dark)).toBeGreaterThanOrEqual(4.5);
+    const pale = oklch(parseColor('#f0e68c')!)!;
+    expect(wcagContrast(textColorOn(WHITE, pale), pale)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  // Regression: a coloured heading that is only too dark must come back as the
+  // SAME colour, lighter — not as plain white.
+  it('keeps the hue it was given', () => {
+    const lifted = textColorOn(oklch(parseColor('#1d4ed8')!)!, oklch(parseColor('#111827')!)!);
+    expect(lifted.h).toBeCloseTo(oklch(parseColor('#1d4ed8')!)!.h!, 1);
+    expect(lifted.c).toBeGreaterThan(0);
   });
 });
 
@@ -328,6 +366,58 @@ describe('darkenStyleSheet', () => {
     const broken = '.a{color:#fff';
     expect(darkenStyleSheet(broken)).toBe(broken);
   });
+
+  // Regression: THE Outlook bug. Word and Outlook wrap every <style> block they
+  // emit in `<!-- … -->`, postcss throws `Unknown word -->` on the closer, and
+  // the whole sheet came back untouched — so `body{background:white}` painted a
+  // white slab in the middle of the dark thread and `p.MsoNormal{color:black}`
+  // left every paragraph black on it. Business mail is mostly Outlook, so this
+  // was most of the mail the feature was supposed to handle.
+  it("re-colours a stylesheet wrapped in Outlook's HTML comment", () => {
+    const out = darkenStyleSheet('<!--\nbody{background:white}\np.MsoNormal{color:black}\n-->');
+    expect(out).not.toContain('white');
+    expect(out).not.toContain('black');
+    // The wrapper itself is put back: it is what the sender sent, and a
+    // stylesheet that leaves in a different shape is a second bug.
+    expect(out.startsWith('<!--')).toBe(true);
+    expect(out.trimEnd().endsWith('-->')).toBe(true);
+  });
+
+  // Regression: the closer is the token postcss chokes on, but an opener with
+  // no closer is just as common — and postcss silently glues it onto the first
+  // selector, so the rule is rewritten under a selector that matches nothing.
+  it('handles a half-written wrapper from either end', () => {
+    expect(darkenStyleSheet('<!--\np{color:black}')).toContain('<!--');
+    expect(darkenStyleSheet('<!--\np{color:black}')).not.toContain('black');
+    expect(darkenStyleSheet('p{color:black}\n-->')).not.toContain('black');
+  });
+});
+
+describe('splitCommentWrapper', () => {
+  // Regression: the wrapper has to come off EXACTLY, or postcss is handed a
+  // sheet that still throws (too little) or the sender loses a rule (too much).
+  it('splits a full wrapper into its three parts', () => {
+    expect(splitCommentWrapper('<!--\na{color:red}\n-->')).toEqual({
+      open: '<!--',
+      body: '\na{color:red}\n',
+      close: '-->',
+    });
+  });
+
+  it('leaves a sheet with no wrapper entirely alone', () => {
+    expect(splitCommentWrapper('a{color:red}')).toEqual({
+      open: '',
+      body: 'a{color:red}',
+      close: '',
+    });
+  });
+
+  // Regression: `-->` is only a CDC token at the END of the sheet. Strip one
+  // out of the middle of a value or a selector and the rule is corrupted.
+  it('does not strip a marker from the middle of the sheet', () => {
+    const css = 'a{content:"-->"}b{color:red}';
+    expect(splitCommentWrapper(css).body).toBe(css);
+  });
 });
 
 describe('applyEmailDarkMode: the paths that decline', () => {
@@ -422,6 +512,44 @@ describe('applyEmailDarkMode: the inversion', () => {
       + '</body>',
     );
     expect(out).toContain('color: #ffffff');
+  });
+
+  // Regression: a kept surface froze the text on it unconditionally, so a
+  // colour written for the white page above — or one the sender only ever
+  // inherited onto the block — stayed put and vanished into the surface. The
+  // CTA's own white-on-red is the half that must NOT move; this is the half
+  // that must.
+  it('lifts text that no longer reads on a kept surface', () => {
+    const out = invert(
+      '<body style="background:#ffffff">'
+      + '<div style="background:#d32f2f"><span style="color:#ffffff">Buy</span></div>'
+      + '<div style="background:#1a1a2e"><span style="color:#111111">Small print</span></div>'
+      + '</body>',
+    );
+    expect(out).toContain('color: #ffffff');
+    const lifted = /color: ([^;"]+)">Small print/.exec(out);
+    expect(lifted).not.toBeNull();
+    expect(
+      wcagContrast(parseColor(lifted![1]!)!, parseColor('#1a1a2e')!),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+
+  // Regression: the same Outlook wrapper, end to end. The table's INLINE
+  // `background:white` inverted correctly while the sheet's `body{background:
+  // white}` did not — which is what put a white slab of black prose above a
+  // correctly darkened table in a real thread.
+  it("inverts a Word-authored message through its commented <style>", () => {
+    const out = invert(
+      '<html><head><style><!--\n'
+      + 'body{background:white}\n'
+      + 'p.MsoNormal{color:black}\n'
+      + '--></style></head>'
+      + '<body><p class="MsoNormal">Hi team</p></body></html>',
+    );
+    expect(out).not.toContain('background:white');
+    expect(out).not.toContain('color:black');
+    expect(lightnessOf(/background:([^;}]+)/.exec(out)![1]!.trim())).toBeLessThan(0.35);
+    expect(lightnessOf(/color:([^;}]+)/.exec(out)![1]!.trim())).toBeGreaterThan(0.6);
   });
 
   // Regression: HTML4 presentational attributes are still how designed mail

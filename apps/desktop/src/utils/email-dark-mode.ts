@@ -37,7 +37,14 @@
  * Pure and DOM-boundary-only on purpose — `SandboxedEmailBody` is the only
  * caller and it passes strings in and gets strings out.
  */
-import { clampChroma, converter, formatRgb, parse as parseColor, type Oklch } from 'culori';
+import {
+  clampChroma,
+  converter,
+  formatRgb,
+  parse as parseColor,
+  wcagContrast,
+  type Oklch,
+} from 'culori';
 import postcss, { type ChildNode, type Declaration } from 'postcss';
 import valueParser from 'postcss-value-parser';
 
@@ -237,6 +244,37 @@ export const darkenLineColor = (color: Oklch): Oklch => {
 export const darkenShadowColor = (color: Oklch): Oklch => ({ ...color, l: Math.min(color.l, 0.2) });
 
 /**
+ * WCAG AA for body text. Below this the sender's own pairing has stopped
+ * working and keeping it is not deference, it is an invisible line of text.
+ */
+const MIN_CONTRAST = 4.5;
+
+/** The lightness re-coloured text lands on, at each end of the range. */
+const INK_ON_DARK = TEXT_MAX;
+const INK_ON_LIGHT = 0.2;
+
+/**
+ * Does this text colour still read against the surface it sits on?
+ *
+ * Measured with culori's WCAG contrast rather than an OKLCH lightness delta:
+ * lightness distance says black on a mid purple and black on a mid green are
+ * equally fine, and the eye disagrees.
+ */
+export const textReadsOn = (text: Oklch, surface: Oklch): boolean =>
+  wcagContrast(text, surface) >= MIN_CONTRAST;
+
+/**
+ * Move a text colour to whichever end of the range reads on this surface,
+ * keeping its hue so a coloured heading stays that colour.
+ */
+export const textColorOn = (text: Oklch, surface: Oklch): Oklch => {
+  const chroma = Math.min(text.c ?? 0, 0.15);
+  const light: Oklch = { ...text, l: INK_ON_DARK, c: chroma };
+  const dark: Oklch = { ...text, l: INK_ON_LIGHT, c: chroma };
+  return wcagContrast(light, surface) >= wcagContrast(dark, surface) ? light : dark;
+};
+
+/**
  * One colour token → its dark-mode counterpart, or null when it should not move.
  *
  * Returns null (rather than the same string) for anything that is not a colour,
@@ -248,6 +286,7 @@ export const darkenColorToken = (
   token: string,
   role: ColorRole,
   surface: Surface,
+  surfaceColor?: Oklch,
 ): string | null => {
   const parsed = parseColor(token);
   if (!parsed) return null;
@@ -262,8 +301,20 @@ export const darkenColorToken = (
     return next.surface === 'kept' && next.color === color ? null : formatColor(next.color);
   }
   // Everything else is drawn ON a surface. If that surface still looks the way
-  // the sender drew it, so must what sits on it.
-  if (surface === 'kept') return null;
+  // the sender drew it, so must what sits on it — white on a brand red has to
+  // stay white.
+  //
+  // "Usually" is not "always", and the gap is where text goes missing: the
+  // surface may have been dimmed to sit on a dark page, or the text colour may
+  // have been written for the paper further up the tree and only INHERITED onto
+  // this block. Either way a pairing that no longer meets AA is not the
+  // sender's design surviving, it is a line the reader cannot see. So a kept
+  // surface freezes its text only while that text still reads on it.
+  if (surface === 'kept') {
+    if (role !== 'text' || !surfaceColor) return null;
+    if (textReadsOn(color, surfaceColor)) return null;
+    return formatColor(textColorOn(color, surfaceColor));
+  }
   if (role === 'text') return formatColor(darkenTextColor(color));
   if (role === 'line') return formatColor(darkenLineColor(color));
   return formatColor(darkenShadowColor(color));
@@ -280,6 +331,15 @@ export const darkenColorToken = (
 export const DARK_PAPER = darkenColorToken('#ffffff', 'surface', 'inverted') ?? 'rgb(18, 18, 18)';
 
 /**
+ * The same paper as an OKLCH value, for judging text against it.
+ *
+ * The walk starts here rather than with no surface at all: a message that
+ * declares no background of its own still has one — the frame's canvas — and
+ * text has to be measured against something.
+ */
+const DARK_PAPER_OKLCH = darkenSurfaceColor(toOklch(parseColor('#ffffff')!)!).color;
+
+/**
  * Re-colour every colour inside one declaration VALUE, leaving the rest of the
  * value (lengths, keywords, `url()`s, gradient stop positions) untouched.
  *
@@ -291,8 +351,10 @@ export const darkenValue = (
   value: string,
   role: ColorRole,
   surface: Surface,
-): { value: string; surface: Surface | null } => {
+  surfaceColor?: Oklch,
+): { value: string; surface: Surface | null; color?: Oklch } => {
   let established: Surface | null = null;
+  let establishedColor: Oklch | undefined;
   const parsed = valueParser(value);
   let changed = false;
 
@@ -301,10 +363,14 @@ export const darkenValue = (
       const color = parseColor(token);
       if (color) {
         const oklch = toOklch(color);
-        if (oklch && oklch.alpha !== 0) established = darkenSurfaceColor(oklch).surface;
+        if (oklch && oklch.alpha !== 0) {
+          const next = darkenSurfaceColor(oklch);
+          established = next.surface;
+          establishedColor = next.color;
+        }
       }
     }
-    return darkenColorToken(token, role, surface);
+    return darkenColorToken(token, role, surface, surfaceColor);
   };
 
   const visit = (node: valueParser.Node): void | boolean => {
@@ -345,7 +411,11 @@ export const darkenValue = (
 
   parsed.walk(visit);
 
-  return { value: changed ? valueParser.stringify(parsed.nodes) : value, surface: established };
+  return {
+    value: changed ? valueParser.stringify(parsed.nodes) : value,
+    surface: established,
+    color: establishedColor,
+  };
 };
 
 /**
@@ -356,20 +426,28 @@ export const darkenValue = (
  * Mutates in place — both callers (a style attribute and a stylesheet rule) own
  * postcss nodes whose other declarations must survive verbatim.
  */
-const darkenDeclarationList = (declarations: Declaration[], inherited: Surface): Surface => {
+const darkenDeclarationList = (
+  declarations: Declaration[],
+  inherited: Surface,
+  inheritedColor?: Oklch,
+): { surface: Surface; color?: Oklch } => {
   let surface = inherited;
+  let color = inheritedColor;
   for (const declaration of declarations) {
     if (roleOf(declaration.prop) !== 'surface') continue;
-    const next = darkenValue(declaration.value, 'surface', surface);
+    const next = darkenValue(declaration.value, 'surface', surface, color);
     declaration.value = next.value;
-    if (next.surface) surface = next.surface;
+    if (next.surface) {
+      surface = next.surface;
+      color = next.color;
+    }
   }
   for (const declaration of declarations) {
     const role = roleOf(declaration.prop);
     if (!role || role === 'surface') continue;
-    declaration.value = darkenValue(declaration.value, role, surface).value;
+    declaration.value = darkenValue(declaration.value, role, surface, color).value;
   }
-  return surface;
+  return { surface, color };
 };
 
 const declarationsOf = (container: { nodes?: ChildNode[] }): Declaration[] =>
@@ -386,7 +464,8 @@ const declarationsOf = (container: { nodes?: ChildNode[] }): Declaration[] =>
 export const darkenStyleAttribute = (
   style: string,
   inherited: Surface,
-): { style: string; surface: Surface } | null => {
+  inheritedColor?: Oklch,
+): { style: string; surface: Surface; color?: Oklch } | null => {
   if (!MENTIONS_COLOR.test(style)) return null;
   try {
     // postcss parses stylesheets, so the declarations are handed to it as the
@@ -395,8 +474,8 @@ export const darkenStyleAttribute = (
     const root = postcss.parse(`a{${style}}`);
     const rule = root.first;
     if (!rule || rule.type !== 'rule') return null;
-    const surface = darkenDeclarationList(declarationsOf(rule), inherited);
-    return { style: serializeDeclarations(rule), surface };
+    const { surface, color } = darkenDeclarationList(declarationsOf(rule), inherited, inheritedColor);
+    return { style: serializeDeclarations(rule), surface, color };
   } catch {
     return null;
   }
@@ -417,6 +496,37 @@ const serializeDeclarations = (rule: { nodes?: ChildNode[] }): string =>
     .join('; ');
 
 /**
+ * Split off the `<!-- … -->` wrapper Word and Outlook put around every
+ * `<style>` block they emit.
+ *
+ * CDO (`<!--`) and CDC (`-->`) are legal CSS tokens — the spec has the browser
+ * drop them at the top level of a stylesheet, which is the only reason the
+ * wrapper was ever safe to write. postcss does not implement them: it glues
+ * `<!--` onto the first selector and throws `Unknown word -->` on the closer,
+ * and that throw is what made `darkenStyleSheet` hand the sheet back untouched.
+ * The whole class-driven colour scheme of an Outlook message —
+ * `body{background:white}`, `p.MsoNormal{color:black}` — then survived onto the
+ * dark canvas: a white slab of black prose in the middle of a dark thread.
+ *
+ * Hand-rolled rather than delegated: the two markers are fixed strings, and
+ * postcss-safe-parser (the obvious library answer) only stops the throw — it
+ * still folds `<!--` into the first selector, which is the half that silently
+ * kills the rule.
+ */
+export const splitCommentWrapper = (
+  css: string,
+): { open: string; body: string; close: string } => {
+  const opener = /^\s*<!--/.exec(css);
+  const rest = opener ? css.slice(opener[0].length) : css;
+  const closer = /-->\s*$/.exec(rest);
+  return {
+    open: opener?.[0] ?? '',
+    body: closer ? rest.slice(0, closer.index) : rest,
+    close: closer?.[0] ?? '',
+  };
+};
+
+/**
  * Re-colour an embedded `<style>` block.
  *
  * Rules are handled one at a time and each one resolves its OWN surface, so
@@ -426,36 +536,42 @@ const serializeDeclarations = (rule: { nodes?: ChildNode[] }): string =>
  */
 export const darkenStyleSheet = (css: string): string => {
   if (!MENTIONS_COLOR.test(css)) return css;
+  const { open, body, close } = splitCommentWrapper(css);
   try {
-    const root = postcss.parse(css);
+    const root = postcss.parse(body);
     root.walkRules((rule) => {
       darkenDeclarationList(declarationsOf(rule), 'inverted');
     });
-    return root.toString();
+    return `${open}${root.toString()}${close}`;
   } catch {
     return css;
   }
 };
 
 /** The colour an element declares for its own box, from either source. */
-const attributeSurface = (element: Element, inherited: Surface): Surface => {
+const attributeSurface = (
+  element: Element,
+  inherited: Surface,
+  inheritedColor?: Oklch,
+): { surface: Surface; color?: Oklch } => {
+  const unchanged = { surface: inherited, color: inheritedColor };
   const bgcolor = element.getAttribute('bgcolor');
-  if (!bgcolor) return inherited;
+  if (!bgcolor) return unchanged;
   const parsed = parseColor(bgcolor.trim());
-  if (!parsed) return inherited;
+  if (!parsed) return unchanged;
   const color = toOklch(parsed);
-  if (!color || color.alpha === 0) return inherited;
+  if (!color || color.alpha === 0) return unchanged;
   const next = darkenSurfaceColor(color);
   element.setAttribute('bgcolor', formatColor(next.color));
-  return next.surface;
+  return { surface: next.surface, color: next.color };
 };
 
-const darkenAttributes = (element: Element, surface: Surface): void => {
+const darkenAttributes = (element: Element, surface: Surface, surfaceColor?: Oklch): void => {
   for (const [name, role] of ATTRIBUTE_ROLES) {
     if (role === 'surface') continue;
     const value = element.getAttribute(name);
     if (!value) continue;
-    const next = darkenColorToken(value.trim(), role, surface);
+    const next = darkenColorToken(value.trim(), role, surface, surfaceColor);
     if (next) element.setAttribute(name, next);
   }
 };
@@ -468,13 +584,13 @@ const darkenAttributes = (element: Element, surface: Surface): void => {
  * per-element stack frame is a real risk.
  */
 const darkenSubtree = (root: Element): void => {
-  const stack: Array<{ element: Element; surface: Surface }> = [
+  const stack: Array<{ element: Element; surface: Surface; color?: Oklch }> = [
     // The page behind the message is the frame's own dark canvas, so anything
     // the sender left to the browser is already being drawn on a dark surface.
-    { element: root, surface: 'inverted' },
+    { element: root, surface: 'inverted', color: DARK_PAPER_OKLCH },
   ];
   while (stack.length > 0) {
-    const { element, surface } = stack.pop()!;
+    const { element, surface, color } = stack.pop()!;
     const tag = element.tagName.toLowerCase();
     // <style> is re-coloured as a stylesheet, not as an element; nothing inside
     // <script> renders (the sandbox blocks it and the stripper removes it).
@@ -482,20 +598,20 @@ const darkenSubtree = (root: Element): void => {
 
     // bgcolor first so a style attribute that also sets a background still
     // wins — it does in the cascade, and it has to here too.
-    let next = attributeSurface(element, surface);
+    let next = attributeSurface(element, surface, color);
     const style = element.getAttribute('style');
     if (style) {
-      const rewritten = darkenStyleAttribute(style, next);
+      const rewritten = darkenStyleAttribute(style, next.surface, next.color);
       if (rewritten) {
         element.setAttribute('style', rewritten.style);
-        next = rewritten.surface;
+        next = { surface: rewritten.surface, color: rewritten.color };
       }
     }
-    darkenAttributes(element, next);
+    darkenAttributes(element, next.surface, next.color);
 
     const children = element.children;
     for (let index = 0; index < children.length; index += 1) {
-      stack.push({ element: children[index]!, surface: next });
+      stack.push({ element: children[index]!, surface: next.surface, color: next.color });
     }
   }
 };
