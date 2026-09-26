@@ -273,6 +273,28 @@ file is higher than theirs; and their build is not a `.deb`/`.rpm`. The app logs
 every check to `app.log` with the `[Update]` prefix, including the reason a check
 was refused.
 
+## The download page
+
+`apps/site` is a one-page site on GitHub Pages
+(`https://sarv.github.io/Inbox/`) that detects the visitor's OS and CPU and
+offers the matching installer. It reads `/releases/latest` from the GitHub API
+in the visitor's browser, so it always offers the latest **published** release
+and needs no redeploy when you publish one — like auto-update, it cannot see a
+draft. `.github/workflows/pages.yml` redeploys it only when `apps/site` changes.
+
+- **One-time setup:** Settings → Pages → Source: *GitHub Actions*.
+- **It matches files by name.** If you change an `artifactName` in
+  `apps/desktop/package.json`, check `apps/site/src/release-assets.js` and its
+  tests, which use the real v1.2.2 asset list as a fixture.
+- **Preview locally:** `pnpm --filter @sarvinbox/site dev`.
+- **Styling** is `apps/site/src/theme.css`, generated from sarv_theme: only
+  the rules the page uses (`THEME_SELECTORS` in
+  `apps/site/scripts/theme-subset.mjs`) and the tokens they reach, so this
+  public repository does not carry the whole private design system. After
+  using a new sarv_theme class, add its selector there and run
+  `pnpm --filter @sarvinbox/site sync-theme`; never edit the file by hand.
+  A test fails if the page uses a class the file does not define.
+
 ## Rebuilding without a new version
 
 If a build fails for an environmental reason (a runner outage, a notarization
