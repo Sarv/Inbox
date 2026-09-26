@@ -37,6 +37,7 @@ import {
   relocateBodyForInsert,
   writeImageLinks,
 } from './inline-image-store';
+import { EMAIL_TAGS_TABLE, hasTagClause } from './tag-membership';
 import {
   threadFolderExclusion,
   threadTagExists,
@@ -878,16 +879,16 @@ export class EmailRepository extends BaseRepository {
    */
   countByFolderTag(folderPath: string): number {
     const row = this.db
-      .prepare(`SELECT COUNT(*) as count FROM emails WHERE instr(tags, '|' || ? || '|') > 0`)
+      .prepare(`SELECT COUNT(*) as count FROM emails WHERE ${hasTagClause()}`)
       .get(folderPath) as { count: number } | undefined;
     return row?.count ?? 0;
   }
 
   /**
    * Rows FILED in this folder — primary `folder_id`, one row per message.
-   * Indexed (idx_emails_folder_id), unlike the `instr(tags, …)` tag count which
-   * cannot use an index; and unlike that count it never counts a message twice
-   * under two names for the same mailbox.
+   * Unlike the tag count above it never counts a message twice under two names
+   * for the same mailbox. (Both are indexed now — the tag count seeks
+   * `idx_email_tags_tag`; see repositories/tag-membership.)
    */
   countByPrimaryFolder(folderId: string): number {
     const row = this.db
@@ -904,10 +905,15 @@ export class EmailRepository extends BaseRepository {
     folderId: string,
     folderPath: string,
   ): Array<{ id: string; messageId: string; folderId: string; uid: number | null }> {
+    // Driven off idx_email_tags_tag, NOT a scan of `emails`: the tag set is
+    // tiny and `folder_id != ?` (a negation, unindexable on its own) is then
+    // applied to just those rows. Measured on a 2.46 GB mailbox, one pass over
+    // all 22 folders: 1,922 ms as `instr(tags, ...)`, 119 ms as this, same rows.
     const rows = this.db
       .prepare(
-        `SELECT id, message_id, folder_id, uid FROM emails
-         WHERE instr(tags, '|' || ? || '|') > 0 AND folder_id != ?`,
+        `SELECT e.id, e.message_id, e.folder_id, e.uid
+         FROM ${EMAIL_TAGS_TABLE} t JOIN emails e ON e.id = t.email_id
+         WHERE t.tag = ? AND e.folder_id != ?`,
       )
       .all(folderPath, folderId) as Array<{ id: string; message_id: string; folder_id: string; uid: number | null }>;
     return rows.map((r) => ({ id: r.id, messageId: r.message_id, folderId: r.folder_id, uid: r.uid }));

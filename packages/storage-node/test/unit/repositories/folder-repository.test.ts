@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FolderRepository } from '../../../src/repositories/folder-repository';
-import { newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
+import { createEmailTagsIndex, newMigratedDb, openTestDb } from '../../../src/test-support/test-db';
 
 
 // Covers the folder repository's persistence and counting contracts. The three
@@ -67,6 +67,7 @@ function newMinimalDb(folders: Array<[string, string]>): Database.Database {
       id TEXT PRIMARY KEY, folder_id TEXT, thread_id TEXT, uid INTEGER, tags TEXT
     );
   `);
+  createEmailTagsIndex(db);
   const insert = db.prepare('INSERT INTO folders (id, path) VALUES (?, ?)');
   for (const [id, path] of folders) insert.run(id, path);
   return db;

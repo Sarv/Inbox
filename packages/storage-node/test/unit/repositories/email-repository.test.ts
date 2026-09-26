@@ -654,6 +654,55 @@ describe('EmailRepository write paths', () => {
     expect(repo.countByPrimaryFolder('f-nothing')).toBe(0);
   });
 
+  // getMembersOutsideUidSpace feeds the Phase-2b stale-membership sweep, which
+  // UNLINKS what it returns. Over-return and a message loses a folder it really
+  // belongs to; under-return and a webmail delete never clears. It used to be
+  // `instr(tags, '|path|') > 0 AND folder_id != ?`, a full scan of a table that
+  // stores message bodies inline — 1,922 ms per syncFlags pass on a 2.46 GB
+  // mailbox. It is now a seek on `email_tags` joined back to `emails`, and these
+  // pin that the rows did not change with the plan.
+
+  /** The predicate the join replaced, kept as the parity oracle. */
+  const membersByInstr = (folderId: string, folderPath: string): string[] =>
+    (db.prepare(
+      "SELECT id FROM emails WHERE instr(tags, '|' || ? || '|') > 0 AND folder_id != ? ORDER BY id",
+    ).all(folderPath, folderId) as { id: string }[]).map((row) => row.id);
+
+  const membersOutside = (folderId: string, folderPath: string): string[] =>
+    repo.getMembersOutsideUidSpace(folderId, folderPath).map((m) => m.id).sort();
+
+  it('getMembersOutsideUidSpace returns tag-members filed in ANOTHER folder', async () => {
+    const here = await insert(repo, db, { folderId: 'f-inbox', uid: 1, tags: '|INBOX|' });
+    const linked = await insert(repo, db, { folderId: 'f-trash', uid: 7, tags: '|INBOX|Trash|' });
+
+    const members = repo.getMembersOutsideUidSpace('f-inbox', 'INBOX');
+
+    expect(members.map((m) => m.id)).toEqual([linked.id]);   // the INBOX-primary row is NOT a candidate
+    expect(members[0].folderId).toBe('f-trash');
+    expect(members[0].uid).toBe(7);
+    expect(members[0].messageId).toBe(linked.messageId);
+    expect(members.map((m) => m.id)).not.toContain(here.id);
+  });
+
+  // Regression: the sweep searches the SERVER by Message-ID for each row it gets
+  // back. A prefix match would hand it messages from a sibling folder and unlink
+  // them from a folder they are genuinely in.
+  it('getMembersOutsideUidSpace matches nested paths exactly, as instr did', async () => {
+    await insert(repo, db, { folderId: 'f-inbox', uid: 1, tags: '|Work|' });
+    await insert(repo, db, { folderId: 'f-inbox', uid: 2, tags: '|Work/Reports|' });
+    await insert(repo, db, { folderId: 'f-inbox', uid: 3, tags: '|Work|Work/Reports|' });
+
+    for (const path of ['Work', 'Work/Reports', 'Wor', 'absent']) {
+      expect(membersOutside('f-work', path)).toEqual(membersByInstr('f-work', path));
+    }
+    expect(membersOutside('f-work', 'Work')).toHaveLength(2);
+  });
+
+  it('getMembersOutsideUidSpace returns nothing for a folder with no tag-members', async () => {
+    await insert(repo, db, { folderId: 'f-inbox', uid: 1, tags: '|INBOX|' });
+    expect(repo.getMembersOutsideUidSpace('f-drafts', 'Drafts')).toEqual([]);
+  });
+
   // ---------------- repair / sender / sent ----------------
 
   // Incremental sync skips UIDs already in the DB, so a message stored with an

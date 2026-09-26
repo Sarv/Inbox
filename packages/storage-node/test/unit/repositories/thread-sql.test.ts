@@ -14,9 +14,13 @@ import {
   liveUnreadSum,
   threadFolderExclusion,
   threadTagExists,
+  NOT_UNREAD_TAGS,
+  unreadByTagParams,
+  unreadByTagSql,
+  unreadCandidatePredicate,
   unreadInFolderPredicate,
 } from '../../../src/repositories/thread-sql';
-import { openTestDb } from '../../../src/test-support/test-db';
+import { createEmailTagsIndex, openTestDb } from '../../../src/test-support/test-db';
 
 
 // These fragments are the SINGLE definition of "what counts as part of a
@@ -419,5 +423,131 @@ describe('listing scope (listingExclusion / isShadowedInFolder / unreadInFolderP
     ).all() as { id: string }[];
     expect(trash.map((r) => r.id)).toEqual(['d', 'f']);
     db.close();
+  });
+});
+
+describe('unreadByTagSql — the SAME rule, every folder in one query', () => {
+  // Regression: the sidebar badge's unread count is now produced by ONE grouped
+  // query over `email_tags` instead of one `unreadInFolderPredicate` statement
+  // per folder (1,637 ms -> 85 ms on a 2.46 GB mailbox). The rewrite is only
+  // safe while the two agree exactly — unreadInFolderPredicate still drives the
+  // per-thread delta path in folder-repository, so a divergence would make a
+  // badge that a single read-flag flip then "corrects" to a different number.
+  // Every case below is checked against that predicate as the oracle.
+  const SEEDS: Seed[] = [
+    { id: 'a', threadId: 't1', tags: 'INBOX', date: 1 },
+    { id: 'b', threadId: 't1', tags: 'INBOX', date: 2 },                      // same thread, counted once
+    { id: 'c', threadId: 't2', tags: 'INBOX|read', date: 3 },                 // read
+    { id: 'd', threadId: 't3', tags: 'INBOX|deleted', date: 4 },              // \Deleted
+    { id: 'e', threadId: 't4', tags: 'INBOX|Trash', date: 5 },                // shadowed out of INBOX
+    { id: 'f', threadId: 't5', tags: 'INBOX|Sarv Inbox/Invoices', date: 6 },  // plain label, counts for both
+    { id: 'g', threadId: 't6', tags: 'Trash', date: 7 },                      // Trash's own unread
+    { id: 'h', threadId: 't7', tags: 'Trash|Junk', date: 8 },                 // shadowed out of Trash
+    { id: 'i', threadId: 't8', tags: 'Trash Archive', date: 9 },              // token, not a prefix of 'Trash'
+  ];
+  const PATHS = ['INBOX', 'Trash', 'Junk', 'Sarv Inbox/Invoices', 'Trash Archive', 'Empty'];
+
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = newDb();
+    createEmailTagsIndex(db);
+    seedAll(db, SEEDS);
+  });
+
+  afterEach(() => db.close());
+
+  /** The per-folder statement this replaced, kept here purely as the oracle. */
+  const oracle = (path: string): number => (db.prepare(
+    `SELECT COUNT(DISTINCT thread_id) AS c FROM emails
+      WHERE instr(tags, '|' || ? || '|') > 0
+        AND ${unreadInFolderPredicate(path)}
+        AND thread_id IS NOT NULL`,
+  ).get(path) as { c: number }).c;
+
+  const grouped = (paths: string[]): Map<string, number> => new Map(
+    (db.prepare(unreadByTagSql(paths.length)).all(...unreadByTagParams(paths)) as
+      { tag: string; c: number }[]).map((row) => [row.tag, row.c]),
+  );
+
+  it('agrees with unreadInFolderPredicate on every folder at once', () => {
+    const counts = grouped(PATHS);
+    for (const path of PATHS) expect([path, counts.get(path) ?? 0]).toEqual([path, oracle(path)]);
+    // Pinned explicitly too, so a change to BOTH sides still has to be deliberate.
+    expect(counts.get('INBOX')).toBe(2);                    // t1, t5
+    expect(counts.get('Trash')).toBe(2);                    // t4 (INBOX is no shadow), t6
+    // t7 carries Trash AND Junk, so each special folder shadows it out of the
+    // other: it counts for NEITHER. Symmetric with the Trash line above.
+    expect(counts.get('Junk') ?? 0).toBe(0);
+    expect(counts.get('Sarv Inbox/Invoices')).toBe(1);      // t5
+    expect(counts.get('Trash Archive')).toBe(1);            // exact token: 'Trash' never matches it
+  });
+
+  // Regression: a folder with nothing unread produces NO row, not a zero. The
+  // recount defaults a missing tag to 0 — miss that and a badge that should drop
+  // to zero keeps whatever it last held.
+  it('omits folders with no unread rather than returning 0', () => {
+    const counts = grouped(PATHS);
+    expect(counts.has('Empty')).toBe(false);
+    expect(oracle('Empty')).toBe(0);
+  });
+
+  // Regression: an orphaned copy has a NULL thread_id; COUNT(DISTINCT) would
+  // skip it anyway, but the explicit guard is what keeps that true if the count
+  // ever becomes COUNT(*).
+  it('ignores a NULL thread_id', () => {
+    // No explicit email_tags row: the v91 trigger writes the membership, so this
+    // also pins that the orphan really IS a member and is skipped on its merit.
+    db.prepare("INSERT INTO emails (id, thread_id, tags, date) VALUES ('z', NULL, '|Empty|', 10)").run();
+    expect(db.prepare("SELECT COUNT(*) c FROM email_tags WHERE email_id = 'z'").get()).toEqual({ c: 1 });
+    expect(grouped(PATHS).has('Empty')).toBe(false);
+  });
+
+  it('asks only about the folders it is given', () => {
+    const counts = grouped(['INBOX']);
+    expect([...counts.keys()]).toEqual(['INBOX']);
+    expect(counts.get('INBOX')).toBe(2);
+  });
+
+  it('binds the folder paths, then the not-unread tags, then the excluded folders', () => {
+    expect(unreadByTagParams(['A', 'B'])).toEqual(['A', 'B', ...NOT_UNREAD_TAGS, ...LISTING_EXCLUDED_FOLDERS]);
+    expect(unreadByTagSql(2).match(/\?/g))
+      .toHaveLength(2 + NOT_UNREAD_TAGS.length + LISTING_EXCLUDED_FOLDERS.length);
+  });
+
+  // Regression: read/\\Deleted are tested against `email_tags`, NOT against
+  // `emails.tags`. That is the whole 77 ms -> 7 ms win (an emails row is ~88 KB
+  // with the body inline, so it must not be opened just to reject the row), and
+  // a well-meaning "simplify" back to instr(e.tags, ...) would undo it silently
+  // — same answers, ten times the cost.
+  it('never reads emails.tags, so a member is rejected before its row is opened', () => {
+    const sql = unreadByTagSql(1);
+    expect(sql).not.toContain('e.tags');
+    expect(sql).not.toContain('instr(');
+  });
+
+  // Regression: a folder path is user data. It reaches the query as a bound
+  // parameter, never spliced into the SQL, so a quote in a real folder name
+  // cannot break (or rewrite) the statement.
+  it("counts a folder whose name contains a quote", () => {
+    db.prepare("INSERT INTO emails (id, thread_id, tags, date) VALUES ('q','t9','|Bob''s mail|', 11)").run();
+    expect(grouped(["Bob's mail"]).get("Bob's mail")).toBe(1);
+  });
+});
+
+describe('unreadCandidatePredicate — the folder-independent half', () => {
+  // Regression: unreadInFolderPredicate (strings) and unreadByTagSql (the join
+  // table) express the SAME rule two ways, and both are built from
+  // NOT_UNREAD_TAGS. If this drifted, the grouped badge count and the
+  // per-thread delta would use two different ideas of "unread".
+  it('is exactly the leading clause of unreadInFolderPredicate', () => {
+    expect(unreadInFolderPredicate('INBOX')).toContain(unreadCandidatePredicate());
+    expect(unreadInFolderPredicate('INBOX').startsWith(unreadCandidatePredicate())).toBe(true);
+    expect(unreadCandidatePredicate('e.tags')).toBe(
+      "instr(e.tags, '|read|') = 0 AND instr(e.tags, '|deleted|') = 0",
+    );
+    // Both forms disqualify on exactly this list — the grouped query binds it.
+    expect(NOT_UNREAD_TAGS).toEqual(['read', 'deleted']);
+    for (const tag of NOT_UNREAD_TAGS) expect(unreadByTagParams(['INBOX'])).toContain(tag);
   });
 });
