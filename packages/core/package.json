@@ -51,11 +51,11 @@
     "libmime": "^5.3.7",
     "libphonenumber-js": "^1.13.8",
     "lru-cache": "^7.18.3",
-    "mailparser": "^3.6.5",
+    "mailparser": "^3.9.28",
     "nodemailer": "^9.1.0",
     "p-retry": "^4.6.2",
     "sanitize-filename": "^1.6.4",
-    "sanitize-html": "^2.13.1",
+    "sanitize-html": "^2.17.7",
     "tldts": "^7.4.10",
     "turndown": "^7.1.2",
     "zod": "^3.22.4"
