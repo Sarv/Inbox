@@ -9,6 +9,7 @@ import renderer from 'vite-plugin-electron-renderer';
 
 
 import { injectCspMeta } from './vite/app-csp';
+import { browserSafeBuiltinsPlugin } from './vite/browser-safe-builtins';
 import { forbidNodeOnlyInRenderer } from './vite/forbid-node-only-renderer';
 import {
   linkedCjsDepsToPrebundle,
@@ -175,6 +176,10 @@ export default defineConfig(({ mode }) => ({
         },
       },
     ]),
+    // MUST precede renderer(): it gives postcss the empty `path`/`fs` its own
+    // package.json asks for, beating the Electron plugin's require() shim, which
+    // a sandboxed renderer cannot evaluate. See vite/browser-safe-builtins.ts.
+    browserSafeBuiltinsPlugin(__dirname),
     renderer(),
     // HARD guard: fail the build if any Node-only module (mailparser / imapflow /
     // nodemailer / better-sqlite3 / …) is pulled into the renderer bundle. Top-
