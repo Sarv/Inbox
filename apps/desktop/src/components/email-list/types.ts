@@ -1,3 +1,4 @@
+import type { SnippetLines } from '../../appearance';
 import type { InboxSection, SectionFilter } from '../../config/inbox-types';
 import type { EmailThread, SectionData } from '../../utils/thread-utils';
 
@@ -45,6 +46,11 @@ export interface ThreadRowProps {
   hoverActions: ThreadHoverActions;
   isHovered: boolean;
   showSnoozeDropdown: boolean;
+  /** Lines of body preview to show (Appearance -> Layout). 0 shows none.
+   *  Passed down rather than read from the appearance store inside the row,
+   *  for the same reason as the hover flags: one shared value read in the
+   *  parent, not a subscription per row. */
+  snippetLines: SnippetLines;
   /** Unified "All Inboxes" view only: color + label of the owning account, to
    *  render a per-account dot so mixed-account rows are distinguishable. */
   accountColor?: string;

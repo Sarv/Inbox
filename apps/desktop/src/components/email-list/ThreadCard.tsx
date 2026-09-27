@@ -11,11 +11,12 @@ import { Tooltip } from '../Tooltip';
 
 import { CategoryBadges } from './CategoryBadges';
 import { readStateTextClass } from './read-state-text';
+import { snippetText } from './snippet-text';
 import { SnoozeDropdown } from './SnoozeDropdown';
 import type { ThreadRowProps } from './types';
 
 
-export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, hoverActions, isHovered, showSnoozeDropdown, accountColor, accountLabel }: ThreadRowProps) {
+export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, hoverActions, isHovered, showSnoozeDropdown, snippetLines, accountColor, accountLabel }: ThreadRowProps) {
   const { latestEmail, oldestEmail, hasUnread, messageCount, hasDraft, isImportant, isStarred } = thread;
   const isSelected = thread.emails.some((e: EmailRecord) => e.id === uiState.selectedEmailId);
   const isHighlighted = !isSelected && thread.emails.some((e: EmailRecord) => e.id === uiState.highlightedEmailId);
@@ -204,10 +205,14 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
         </div>
       </div>
 
-      {/* Row 3: Body preview and Star */}
+      {/* Row 3: Body preview and Star. The preview clamps to the reader's
+          chosen number of lines (.list-snippet reads --snippet-lines); at
+          "None" the row simply doesn't render one, and keeps the star. */}
       <div className="flex items-center gap-2 mt-0.5 pl-10">
-        <div className="flex-1 min-w-0 text-sm text-muted-foreground truncate flex items-center gap-1.5">
-          <span className="truncate">{latestEmail.cleanBody?.substring(0, 80) || ''}</span>
+        <div className="flex-1 min-w-0 text-sm text-muted-foreground">
+          {snippetLines > 0 && (
+            <span className="list-snippet">{snippetText(latestEmail.cleanBody, snippetLines)}</span>
+          )}
         </div>
 
         {/* Star on the right */}

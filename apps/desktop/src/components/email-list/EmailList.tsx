@@ -2,6 +2,7 @@ import { Loader2, Filter, X, Globe } from 'lucide-react';
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
+import { useAppearance } from '../../appearance';
 import { isDraftsFolder } from '../../config/folder-mapping';
 import { SECTION_FILTER_LABELS, SETTINGS_KEY, DEFAULT_SECTIONS } from '../../config/inbox-types';
 import type { SectionFilter } from '../../config/inbox-types';
@@ -25,6 +26,7 @@ import { useSectionAssignment } from './hooks/useSectionAssignment';
 import { listHeaderTitle } from './list-header-view';
 import { ListHeader } from './ListHeader';
 import { Paginator } from './Paginator';
+import { isRowHovered } from './row-hover';
 import { SectionList } from './SectionList';
 import { ThreadCard } from './ThreadCard';
 import type { ThreadActions, ThreadHoverActions, RowUIState } from './types';
@@ -159,6 +161,9 @@ export function EmailList() {
       return stored ? new Set(JSON.parse(stored)) : new Set();
     } catch { return new Set(); }
   });
+  // Read once for the whole list rather than subscribed to per row: a row is
+  // memoized, and a hook inside it would re-render every one of them.
+  const { hoverActions: showHoverActions, snippetLines } = useAppearance();
   const [hoveredThreadId, setHoveredThreadId] = useState<string | null>(null);
   const [snoozeDropdownThreadId, setSnoozeDropdownThreadId] = useState<string | null>(null);
   const [showViewModeDropdown, setShowViewModeDropdown] = useState(false);
@@ -820,7 +825,8 @@ export function EmailList() {
   // are computed here (not read from the shared uiState inside the row) so a
   // hover change only invalidates the one affected row, not all of them.
   const renderEmailThread = (thread: EmailThread) => {
-    const isHovered = hoveredThreadId === thread.threadId;
+    // Hover actions are a preference (Appearance -> Layout) — see row-hover.ts.
+    const isHovered = isRowHovered(showHoverActions, hoveredThreadId, thread.threadId);
     const showSnoozeDropdown = snoozeDropdownThreadId === thread.threadId;
     const meta = isUnifiedView ? accountMetaById[thread.latestEmail.accountId ?? ''] : undefined;
     const rowProps = {
@@ -830,6 +836,7 @@ export function EmailList() {
       hoverActions: threadHoverActions,
       isHovered,
       showSnoozeDropdown,
+      snippetLines,
       accountColor: meta?.color,
       accountLabel: meta?.label,
     };

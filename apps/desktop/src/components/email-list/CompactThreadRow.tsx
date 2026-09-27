@@ -10,6 +10,7 @@ import { Tooltip } from '../Tooltip';
 
 import { CategoryBadges } from './CategoryBadges';
 import { readStateTextClass } from './read-state-text';
+import { snippetText } from './snippet-text';
 import { SnoozeDropdown } from './SnoozeDropdown';
 import type { ThreadRowProps } from './types';
 
@@ -28,7 +29,7 @@ function formatCompactDate(d: Date) {
   }
 }
 
-export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions, uiState, hoverActions, isHovered, showSnoozeDropdown, accountColor, accountLabel }: ThreadRowProps) {
+export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions, uiState, hoverActions, isHovered, showSnoozeDropdown, snippetLines, accountColor, accountLabel }: ThreadRowProps) {
   const { latestEmail, oldestEmail, hasUnread, messageCount, hasDraft, isImportant, isStarred } = thread;
   const isSelected = thread.emails.some((e: EmailRecord) => e.id === uiState.selectedEmailId);
   const isHighlighted = !isSelected && thread.emails.some((e: EmailRecord) => e.id === uiState.highlightedEmailId);
@@ -120,10 +121,16 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
           <span className={`shrink truncate text-sm ${readStateTextClass(hasUnread)}`}>
             {oldestEmail.subject || '(no subject)'}
           </span>
-          <span className="text-muted-foreground text-sm shrink-0">-</span>
-          <span className="text-muted-foreground text-sm truncate flex-1 min-w-0">
-            {latestEmail.cleanBody?.substring(0, 100) || ''}
-          </span>
+          {/* One line, always: this row's height is fixed by the density, so
+              it can show a preview or not, but never two lines of one. */}
+          {snippetLines > 0 && (
+            <>
+              <span className="text-muted-foreground text-sm shrink-0">-</span>
+              <span className="text-muted-foreground text-sm truncate flex-1 min-w-0">
+                {snippetText(latestEmail.cleanBody, 1)}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
