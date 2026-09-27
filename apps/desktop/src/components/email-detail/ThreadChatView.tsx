@@ -436,9 +436,11 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         // and bakes them into its document. Without a remount, flipping dark
         // bodies or the app theme re-renders the mail against the old tokens —
         // dark table rows on a white page. Keyed on exactly the two inputs
-        // that change which canvas a body is drawn on. Drop it once the app is
-        // on an email-chat-view release that re-reads the theme itself (after
-        // 0.2.4) — it costs a scroll reset on every toggle.
+        // that change which canvas a body is drawn on. The library (0.2.5+)
+        // re-reads its tokens when <html>/<body> attributes or the body change,
+        // but a theme flip with dark bodies off changes neither the body nor
+        // anything it watches in time: the canvas marker lands on the bubble,
+        // possibly after its re-read. So the remount stays, scroll reset and all.
         key={`${resolvedTheme}:${darkenEmails}`}
         messages={chatMessages}
         currentUserAddress={currentUserEmail}

@@ -1,9 +1,9 @@
 /**
  * The page a framed chat body is drawn on, decided per message.
  *
- * Up to @sarv-in/email-chat-view 0.2.4 the frame document declares no
- * `color-scheme`, so it is always a LIGHT document (newer versions copy the
- * host's scheme in; `chat-view-theme.css` sets it on the host for both). In the dark app theme the `<iframe>` element inherits
+ * Up to @sarv-in/email-chat-view 0.2.4 the frame document declared no
+ * `color-scheme`, so it was always a LIGHT document; from 0.2.5 it copies the
+ * host's scheme in, which is why `chat-view-theme.css` sets it on the host. In the dark app theme the `<iframe>` element inherits
  * `color-scheme: dark` from the root (`applyAppearance`), and Chromium answers
  * that mismatch by painting the frame an opaque white backdrop — wherever the
  * mail itself paints nothing. Two visible failures came from that one fact:
