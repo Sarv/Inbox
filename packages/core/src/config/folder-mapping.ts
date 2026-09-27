@@ -405,11 +405,11 @@ function looksLikeSameMailbox(a: ClassifiableFolder, b: ClassifiableFolder): boo
  * mail, so it keeps winning — and it decides nothing on a fresh account, where
  * both are empty and the ranking alone picks.
  */
-export function findFolderByType(
-  folders: ClassifiableFolder[],
+export function findFolderByType<F extends ClassifiableFolder>(
+  folders: F[],
   type: StandardFolderType,
-): ClassifiableFolder | null {
-  let best: ClassifiableFolder | null = null;
+): F | null {
+  let best: F | null = null;
   let bestStrength = Number.POSITIVE_INFINITY;
   for (const folder of folders) {
     const strength = folderTypeMatchStrength(folder, type);
