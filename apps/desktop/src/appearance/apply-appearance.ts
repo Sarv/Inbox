@@ -41,6 +41,11 @@ export const applyAppearance = (
   target.classList.toggle('dark', resolved === 'dark');
   target.style.setProperty('color-scheme', resolved);
   target.setAttribute('data-density', appearance.density);
+  // A switch CSS cannot make from a custom property alone, since a rule cannot
+  // branch on a variable's value: `data-motion` picks between always
+  // animating, never animating, and letting the OS's reduced-motion preference
+  // decide — see index.css.
+  target.setAttribute('data-motion', appearance.motion);
 
   const vars = appearanceCssVars(appearance, resolved);
   for (const [name, value] of Object.entries(vars)) {

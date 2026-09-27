@@ -19,8 +19,11 @@
  * bootstrap/renderer-logging.ts, which tees it into app.log. Importing the core
  * logger would pull Node-only modules into the renderer bundle.
  */
+import { SETTINGS_KEY } from '../config/inbox-types';
+
 import {
   defaultAppearance,
+  mergeLegacyLayout,
   normalizeAppearance,
   resolveTheme,
   stepZoom,
@@ -35,10 +38,26 @@ export const APPEARANCE_KEY = 'sarvinbox-appearance';
 let current: Appearance | null = null;
 const listeners = new Set<() => void>();
 
+/** The legacy settings blob, or null — never throws, and never blocks a read. */
+const readLegacySettings = (): unknown => {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    // A corrupt settings blob is the Settings screen's problem, not the
+    // appearance's: fall through to the appearance defaults for the two fields
+    // it could have seeded rather than leaving the app unstyled.
+    console.warn('[Appearance] Failed to read legacy settings for migration:', error);
+    return null;
+  }
+};
+
 const readStored = (): Appearance => {
   try {
     const raw = localStorage.getItem(APPEARANCE_KEY);
-    return normalizeAppearance(raw ? JSON.parse(raw) : null);
+    // The two layout fields moved here out of the settings blob; a profile
+    // written before that move carries them there and nowhere else.
+    return normalizeAppearance(mergeLegacyLayout(raw ? JSON.parse(raw) : null, readLegacySettings()));
   } catch (error) {
     // A corrupt blob must not leave the app unstyled — fall back to defaults and
     // say so, rather than throwing out of a module that runs before render.

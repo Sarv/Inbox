@@ -61,6 +61,17 @@ describe('applyAppearance', () => {
     expect(attributes.get('data-density')).toBe('comfortable');
   });
 
+  // Regression: the reduced-motion rules key off this attribute — a CSS rule
+  // cannot branch on a variable's VALUE. Stop writing it and "Off" silently
+  // animates exactly as before.
+  it('exposes the motion mode as an attribute for the CSS to match on', () => {
+    for (const motion of ['system', 'full', 'reduced'] as const) {
+      const { target, attributes } = makeTarget();
+      applyAppearance({ ...defaultAppearance, motion }, 'light', target);
+      expect(attributes.get('data-motion')).toBe(motion);
+    }
+  });
+
   // Regression: Electron wants a factor. Handing it the percentage renders the
   // window at 9000% — the bug this conversion exists to prevent.
   it('drives the zoom setter with a factor, not a percentage', () => {

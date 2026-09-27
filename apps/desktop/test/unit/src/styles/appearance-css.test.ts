@@ -42,6 +42,26 @@ describe('index.css appearance defaults', () => {
     expect(CSS).toMatch(/\.nav-row\s*\{[^}]*var\(--nav-py\)/);
   });
 
+  // Regression: the preview clamp is the ONLY thing keeping a whole message
+  // body out of a list row. Lose the rule and a two-line setting prints
+  // paragraphs into the list.
+  it('clamps the list preview to --snippet-lines', () => {
+    const rule = CSS.slice(CSS.indexOf('.list-snippet {'));
+    expect(rule).toMatch(/-webkit-line-clamp:\s*var\(--snippet-lines\)/);
+    expect(rule).toMatch(/overflow:\s*hidden/);
+  });
+
+  // Regression: "Off" must stop motion, and "System" must defer to the OS. The
+  // durations are near-zero rather than `none` so transitionend/animationend
+  // still fire — a component that unmounts on one would otherwise hang.
+  it('kills animation for reduced motion, and for system under the OS preference', () => {
+    expect(CSS).toMatch(/\[data-motion='reduced'\] \*[^{]*\{[^}]*animation-duration:\s*0\.01ms\s*!important/);
+    expect(CSS).toMatch(/\[data-motion='reduced'\] \*[^{]*\{[^}]*transition-duration:\s*0\.01ms\s*!important/);
+    const media = CSS.slice(CSS.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(media).toMatch(/\[data-motion='system'\] \*/);
+    expect(media).not.toMatch(/animation:\s*none/);
+  });
+
   // Regression: a gradient is a background IMAGE. Written as `background-color`
   // the flat accent still works and the gradient option does nothing at all.
   it('paints the primary fill with `background`, not `background-color`', () => {
@@ -68,5 +88,13 @@ describe('the components that consume the density classes', () => {
 
   it('uses .brand-fill for the Compose button', () => {
     expect(read('src/components/Sidebar.tsx')).toContain('brand-fill');
+  });
+
+  // Regression: the clamp only applies where the class is used. The card is
+  // the layout that can show two lines; the settings preview mirrors it so the
+  // reader sees the real effect before leaving the screen.
+  it('uses .list-snippet for the thread card preview and the settings preview', () => {
+    expect(read('src/components/email-list/ThreadCard.tsx')).toContain('list-snippet');
+    expect(read('src/components/settings/AppearanceTab.tsx')).toContain('list-snippet');
   });
 });

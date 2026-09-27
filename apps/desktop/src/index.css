@@ -82,6 +82,13 @@
   --row-px: 1rem;
   --card-py: 0.5rem;
   --nav-py: 0.5rem;
+  /* Message-body typography. The stack matches MAIL_SANS_STACK in
+     appearance.ts — the frame's own default — so a body rendered before the
+     bootstrap runs is drawn in the same face as one rendered after. */
+  --reading-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --reading-size: 16px;
+  --snippet-lines: 1;
 }
 
 body {
@@ -106,6 +113,43 @@ body {
 /* A sidebar navigation row — folders, labels, system views. */
 .nav-row {
   padding: var(--nav-py) 0.75rem;
+}
+
+/* The body preview under a multi-line thread card, clamped to the number of
+   lines the reader asked for. Only the COUNT is CSS: "none" is the row not
+   rendering a preview at all, because a 0-line clamp means "no clamp" to the
+   engine and would print the entire message body into the row. */
+.list-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--snippet-lines);
+  overflow: hidden;
+}
+
+/* Reduced motion. 'full' animates whatever the OS says; 'reduced' never
+   animates; 'system' — the default — defers to the OS preference.
+   Near-zero durations rather than `animation: none`, so `animationend` and
+   `transitionend` still fire: a component that unmounts on one of those would
+   otherwise wait forever. Spinners do stop after a single turn, which is the
+   intended trade — that is what asking for no motion means. */
+[data-motion='reduced'] *,
+[data-motion='reduced'] *::before,
+[data-motion='reduced'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-motion='system'] *,
+  [data-motion='system'] *::before,
+  [data-motion='system'] *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* The primary action's fill. Flat `hsl(var(--primary))` unless the user turns

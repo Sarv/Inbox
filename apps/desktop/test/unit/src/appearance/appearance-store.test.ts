@@ -96,6 +96,36 @@ describe('getAppearance', () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  // Regression: the two layout fields moved out of the settings blob. Read
+  // them from there when the appearance blob predates the move, or a reader
+  // who had turned hover actions off gets them back on the upgrade launch.
+  it('seeds the layout fields from the legacy settings blob', async () => {
+    storage.entries.set('sarvinbox-settings', JSON.stringify({ hoverActions: false, buttonLabels: 'both' }));
+    storage.entries.set('sarvinbox-appearance', JSON.stringify({ theme: 'dark' }));
+    const store = await loadStore();
+    expect(store.getAppearance()).toMatchObject({ hoverActions: false, buttonLabels: 'both', theme: 'dark' });
+  });
+
+  // Regression: the seed runs on every read, so a later choice here must stick.
+  it('lets a value chosen in Appearance win over the legacy blob, permanently', async () => {
+    storage.entries.set('sarvinbox-settings', JSON.stringify({ hoverActions: false }));
+    const store = await loadStore();
+    store.setAppearance({ hoverActions: true });
+    const reread = await loadStore();
+    expect(reread.getAppearance().hoverActions).toBe(true);
+  });
+
+  // A corrupt settings blob belongs to the Settings screen; appearance must
+  // still load rather than falling back to an unstyled everything.
+  it('still reads the appearance when the legacy settings blob is corrupt', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    storage.entries.set('sarvinbox-settings', '{not json');
+    storage.entries.set('sarvinbox-appearance', JSON.stringify({ theme: 'dark' }));
+    const store = await loadStore();
+    expect(store.getAppearance().theme).toBe('dark');
+    expect(warn).toHaveBeenCalled();
+  });
+
   // Same value between changes, so useSyncExternalStore does not loop.
   it('returns a stable reference until something changes', async () => {
     const store = await loadStore();
