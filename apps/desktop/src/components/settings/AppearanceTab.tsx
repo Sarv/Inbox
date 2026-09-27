@@ -1,29 +1,44 @@
-import { Check, Minus, Monitor, Moon, Paperclip, Plus, RotateCcw, Star, Sun } from 'lucide-react';
+import { Archive, Check, Minus, Monitor, Moon, Paperclip, Plus, Reply, RotateCcw, Star, Sun, Trash2 } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import {
   ACCENTS,
+  BUTTON_LABEL_CHOICES,
   DENSITIES,
   FONTS,
+  MOTION_CHOICES,
+  READING_FONTS,
+  READING_SIZE_DEFAULT,
+  READING_SIZE_MAX,
+  READING_SIZE_MIN,
+  READING_SIZE_STEP,
+  SNIPPET_CHOICES,
   ZOOM_DEFAULT,
   ZOOM_MAX,
   ZOOM_MIN,
   ZOOM_STEP,
   appearanceCssVars,
+  findReadingFont,
   resetAppearance,
   setAppearance,
+  stepReadingSize,
   stepZoom,
   useAppearance,
   useResolvedTheme,
+  type AppearanceChoice,
   type ThemeMode,
+  type ZoomCommand,
 } from '../../appearance';
+import { toolbarButtonClass } from '../email-detail/toolbar-button-view';
 import { Tooltip } from '../Tooltip';
 
-const THEME_MODES: { id: ThemeMode; label: string; hint: string; Icon: typeof Sun }[] = [
-  { id: 'light', label: 'Light', hint: 'Always light, whatever the OS is set to.', Icon: Sun },
-  { id: 'dark', label: 'Dark', hint: 'Always dark, whatever the OS is set to.', Icon: Moon },
-  { id: 'system', label: 'System', hint: 'Follows your OS, and switches with it.', Icon: Monitor },
+const THEME_MODES: AppearanceChoice<ThemeMode>[] = [
+  { id: 'light', label: 'Light', hint: 'Always light, whatever the OS is set to.' },
+  { id: 'dark', label: 'Dark', hint: 'Always dark, whatever the OS is set to.' },
+  { id: 'system', label: 'System', hint: 'Follows your OS, and switches with it.' },
 ];
+
+const THEME_ICONS: Record<ThemeMode, typeof Sun> = { light: Sun, dark: Moon, system: Monitor };
 
 /** The two-column row the rest of the Settings screen uses. */
 function Row({ title, description, children }: { title: string; description: string; children?: ReactNode }) {
@@ -48,19 +63,165 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /**
- * A miniature of the message list, styled by the SAME custom properties the
- * real one reads.
+ * A row of labelled cards, one of which is chosen — theme, density, snippet
+ * lines, motion, button labels. One component so every group on this screen
+ * behaves and reads the same, and a new setting is a list of choices rather
+ * than another twenty lines of the same markup.
+ */
+function ChoiceCards<Id extends string | number>({
+  label,
+  choices,
+  value,
+  onChange,
+  icons,
+}: {
+  label: string;
+  choices: readonly AppearanceChoice<Id>[];
+  value: Id;
+  onChange: (id: Id) => void;
+  icons?: Record<string, typeof Sun>;
+}) {
+  return (
+    <div className="flex flex-wrap gap-3" role="radiogroup" aria-label={label}>
+      {choices.map((choice) => {
+        const active = value === choice.id;
+        const Icon = icons?.[String(choice.id)];
+        return (
+          <button
+            key={String(choice.id)}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(choice.id)}
+            className={`flex-1 min-w-[10rem] text-left px-4 py-3 rounded-lg border-2 transition-colors ${
+              active ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/40'
+            }`}
+          >
+            <div className="flex items-center gap-2 font-medium">
+              {Icon && <Icon className="h-4 w-4" />}
+              {choice.label}
+              {active && <Check className="h-4 w-4 ml-auto text-primary" />}
+            </div>
+            <div className="text-sm text-muted-foreground mt-1">{choice.hint}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The on/off switch this screen uses, in one place rather than three. */
+function Switch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (next: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-muted'}`}
+    >
+      <span
+        className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+          checked ? 'translate-x-5' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
+}
+
+/**
+ * −/slider/+ with a percentage readout and a Reset that appears only off the
+ * default. Shared by interface zoom and message text size: the two scales
+ * differ, the control does not.
+ */
+function PercentStepper({
+  label,
+  value,
+  min,
+  max,
+  step,
+  fallback,
+  onStep,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  fallback: number;
+  onStep: (value: number, command: ZoomCommand) => number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <Tooltip content="Smaller" delayMs={40}>
+        <button
+          type="button"
+          aria-label={`Decrease ${label.toLowerCase()}`}
+          disabled={value <= min}
+          onClick={() => onChange(onStep(value, 'out'))}
+          className="p-1.5 rounded border border-border hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Minus className="h-4 w-4" />
+        </button>
+      </Tooltip>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={label}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-48 accent-primary"
+      />
+      <Tooltip content="Larger" delayMs={40}>
+        <button
+          type="button"
+          aria-label={`Increase ${label.toLowerCase()}`}
+          disabled={value >= max}
+          onClick={() => onChange(onStep(value, 'in'))}
+          className="p-1.5 rounded border border-border hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+      </Tooltip>
+      <span className="w-12 text-sm tabular-nums text-right">{value}%</span>
+      {value !== fallback && (
+        <button type="button" onClick={() => onChange(fallback)} className="text-sm text-primary hover:underline">
+          Reset
+        </button>
+      )}
+    </div>
+  );
+}
+
+const PREVIEW_SNIPPET =
+  'Thanks — I have access now. I will run the migration tonight and send the numbers over in the morning so you have them before the call.';
+
+/**
+ * A miniature of the message list and the open message, styled by the SAME
+ * custom properties and helpers the real ones read.
  *
- * It exists because the Settings screen covers the list it is changing: without
- * it, picking a density means saving, navigating back to the inbox, looking,
- * and navigating in again. The preview is intentionally built from the real
- * `.list-row` / `.brand-fill` classes rather than a hand-drawn imitation, so it
- * cannot drift away from what the list actually does.
+ * It exists because the Settings screen covers what it is changing: without it,
+ * picking a density means saving, navigating back to the inbox, looking, and
+ * navigating in again. Everything here is built from the real `.list-row` /
+ * `.list-snippet` / `.brand-fill` classes and the real `toolbarButtonClass`,
+ * rather than a hand-drawn imitation, so it cannot drift away from what the app
+ * actually does.
  */
 function AppearancePreview() {
+  const { snippetLines, buttonLabels } = useAppearance();
   const messages = [
-    { sender: 'Devendra Kumar', subject: 'Production Server Details', snippet: 'Thanks — I have access now', time: 'Sep 3', unread: true, starred: true },
-    { sender: 'Product Hunt Daily', subject: 'Ship fast and break things', snippet: 'chat windows, sparkles, and agent…', time: '8:39 AM', unread: false, starred: false },
+    { sender: 'Devendra Kumar', subject: 'Production Server Details', time: 'Sep 3', unread: true, starred: true },
+    { sender: 'Product Hunt Daily', subject: 'Ship fast and break things', time: '8:39 AM', unread: false, starred: false },
+  ];
+  const toolbar = [
+    { name: 'Reply', Icon: Reply },
+    { name: 'Archive', Icon: Archive },
+    { name: 'Delete', Icon: Trash2 },
   ];
   return (
     <div className="rounded-lg border border-border overflow-hidden bg-background" aria-hidden="true">
@@ -77,20 +238,40 @@ function AppearancePreview() {
           <span className={`w-24 flex-shrink-0 truncate text-sm ${message.unread ? 'font-semibold text-foreground' : 'text-muted-foreground'}`}>
             {message.sender}
           </span>
-          <span className={`flex-1 truncate text-sm ${message.unread ? 'font-semibold text-foreground' : 'text-foreground'}`}>
-            {message.subject}
-            <span className="text-muted-foreground font-normal"> — {message.snippet}</span>
+          <span className={`flex-1 min-w-0 text-sm ${message.unread ? 'font-semibold text-foreground' : 'text-foreground'}`}>
+            <span className="truncate block">{message.subject}</span>
+            {/* Mirrors the list: at "None" the row renders no preview at all. */}
+            {snippetLines > 0 && (
+              <span className="list-snippet text-muted-foreground font-normal">{PREVIEW_SNIPPET}</span>
+            )}
           </span>
           <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
           <span className="text-xs text-muted-foreground tabular-nums flex-shrink-0">{message.time}</span>
         </div>
       ))}
+
+      {/* The open message: its toolbar in the chosen label mode, and a body in
+          the chosen reading font and size. */}
+      <div className="border-t border-border flex flex-wrap items-center gap-1 px-2 py-1.5">
+        {toolbar.map(({ name, Icon }) => (
+          <span key={name} className={toolbarButtonClass(buttonLabels)}>
+            {buttonLabels !== 'text' && <Icon className="h-4 w-4" />}
+            {buttonLabels !== 'icons' && <span>{name}</span>}
+          </span>
+        ))}
+      </div>
+      <div
+        className="px-3 py-3 border-t border-border text-foreground"
+        style={{ fontFamily: 'var(--reading-font)', fontSize: 'var(--reading-size)' }}
+      >
+        Hi — here is how a message body reads at this size and in this face.
+      </div>
     </div>
   );
 }
 
 /**
- * Appearance — theme, accent, text size, density and font.
+ * Appearance — theme, accent, text size, density, font, list and layout.
  *
  * Unlike every other Settings tab this one does NOT go through `updateSetting`
  * and the "Save Changes" button: appearance applies and persists the moment it
@@ -110,30 +291,13 @@ export function AppearanceTab() {
     <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
       <div className="space-y-6 min-w-0">
         <Section title="Theme">
-          <div className="flex flex-wrap gap-3" role="radiogroup" aria-label="Theme">
-            {THEME_MODES.map(({ id, label, hint, Icon }) => {
-              const active = appearance.theme === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  onClick={() => setAppearance({ theme: id })}
-                  className={`flex-1 min-w-[10rem] text-left px-4 py-3 rounded-lg border-2 transition-colors ${
-                    active ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/40'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 font-medium">
-                    <Icon className="h-4 w-4" />
-                    {label}
-                    {active && <Check className="h-4 w-4 ml-auto text-primary" />}
-                  </div>
-                  <div className="text-sm text-muted-foreground mt-1">{hint}</div>
-                </button>
-              );
-            })}
-          </div>
+          <ChoiceCards
+            label="Theme"
+            choices={THEME_MODES}
+            icons={THEME_ICONS}
+            value={appearance.theme}
+            onChange={(theme) => setAppearance({ theme })}
+          />
           {appearance.theme === 'system' && (
             <div className="text-sm text-muted-foreground mt-3">
               Your OS is currently asking for <span className="font-medium text-foreground">{resolved}</span>.
@@ -148,20 +312,11 @@ export function AppearanceTab() {
                 : 'Re-colour the message itself for dark mode. Takes effect when the theme is dark.'
             }
           >
-            <button
-              type="button"
-              role="switch"
-              aria-checked={appearance.darkenEmails}
-              aria-label="Dark email bodies"
-              onClick={() => setAppearance({ darkenEmails: !appearance.darkenEmails })}
-              className={`relative w-11 h-6 rounded-full transition-colors ${appearance.darkenEmails ? 'bg-primary' : 'bg-muted'}`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                  appearance.darkenEmails ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
+            <Switch
+              label="Dark email bodies"
+              checked={appearance.darkenEmails}
+              onChange={(darkenEmails) => setAppearance({ darkenEmails })}
+            />
           </Row>
           {appearance.darkenEmails && (
             <div className="text-sm text-muted-foreground">
@@ -204,20 +359,11 @@ export function AppearanceTab() {
           </Row>
 
           <Row title="Gradient accents" description="Paint the primary action with a gradient instead of a flat fill.">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={appearance.gradientAccents}
-              aria-label="Gradient accents"
-              onClick={() => setAppearance({ gradientAccents: !appearance.gradientAccents })}
-              className={`relative w-11 h-6 rounded-full transition-colors ${appearance.gradientAccents ? 'bg-primary' : 'bg-muted'}`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                  appearance.gradientAccents ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
+            <Switch
+              label="Gradient accents"
+              checked={appearance.gradientAccents}
+              onChange={(gradientAccents) => setAppearance({ gradientAccents })}
+            />
           </Row>
         </Section>
 
@@ -226,77 +372,42 @@ export function AppearanceTab() {
             title="Interface zoom"
             description="Scales the whole app, exactly like Cmd/Ctrl + and −  — which now change this setting, so the size survives a restart."
           >
-            <div className="flex items-center gap-3">
-              <Tooltip content="Smaller" delayMs={40}>
-                <button
-                  type="button"
-                  aria-label="Decrease text size"
-                  disabled={appearance.zoom <= ZOOM_MIN}
-                  onClick={() => setAppearance({ zoom: stepZoom(appearance.zoom, 'out') })}
-                  className="p-1.5 rounded border border-border hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Minus className="h-4 w-4" />
-                </button>
-              </Tooltip>
-              <input
-                type="range"
-                min={ZOOM_MIN}
-                max={ZOOM_MAX}
-                step={ZOOM_STEP}
-                value={appearance.zoom}
-                aria-label="Interface zoom"
-                onChange={(e) => setAppearance({ zoom: Number(e.target.value) })}
-                className="w-48 accent-primary"
-              />
-              <Tooltip content="Larger" delayMs={40}>
-                <button
-                  type="button"
-                  aria-label="Increase text size"
-                  disabled={appearance.zoom >= ZOOM_MAX}
-                  onClick={() => setAppearance({ zoom: stepZoom(appearance.zoom, 'in') })}
-                  className="p-1.5 rounded border border-border hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Plus className="h-4 w-4" />
-                </button>
-              </Tooltip>
-              <span className="w-12 text-sm tabular-nums text-right">{appearance.zoom}%</span>
-              {appearance.zoom !== ZOOM_DEFAULT && (
-                <button
-                  type="button"
-                  onClick={() => setAppearance({ zoom: ZOOM_DEFAULT })}
-                  className="text-sm text-primary hover:underline"
-                >
-                  Reset
-                </button>
-              )}
-            </div>
+            <PercentStepper
+              label="Interface zoom"
+              value={appearance.zoom}
+              min={ZOOM_MIN}
+              max={ZOOM_MAX}
+              step={ZOOM_STEP}
+              fallback={ZOOM_DEFAULT}
+              onStep={stepZoom}
+              onChange={(zoom) => setAppearance({ zoom })}
+            />
+          </Row>
+
+          <Row
+            title="Message text"
+            description="Scales the message body only, leaving the list and the rest of the app where they are."
+          >
+            <PercentStepper
+              label="Message text size"
+              value={appearance.readingSize}
+              min={READING_SIZE_MIN}
+              max={READING_SIZE_MAX}
+              step={READING_SIZE_STEP}
+              fallback={READING_SIZE_DEFAULT}
+              onStep={stepReadingSize}
+              onChange={(readingSize) => setAppearance({ readingSize })}
+            />
           </Row>
         </Section>
 
         <Section title="Density">
-          <div className="flex flex-wrap gap-3" role="radiogroup" aria-label="Density">
-            {DENSITIES.map((density) => {
-              const active = appearance.density === density.id;
-              return (
-                <button
-                  key={density.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  onClick={() => setAppearance({ density: density.id })}
-                  className={`flex-1 min-w-[10rem] text-left px-4 py-3 rounded-lg border-2 transition-colors ${
-                    active ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/40'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 font-medium">
-                    {density.label}
-                    {active && <Check className="h-4 w-4 ml-auto text-primary" />}
-                  </div>
-                  <div className="text-sm text-muted-foreground mt-1">{density.hint}</div>
-                </button>
-              );
-            })}
-          </div>
+          <ChoiceCards
+            label="Density"
+            choices={DENSITIES}
+            value={appearance.density}
+            onChange={(density) => setAppearance({ density })}
+          />
         </Section>
 
         <Section title="Font">
@@ -315,6 +426,74 @@ export function AppearanceTab() {
               ))}
             </select>
           </Row>
+
+          <Row title="Reading font" description={findReadingFont(appearance.readingFont).hint}>
+            <select
+              value={appearance.readingFont}
+              onChange={(e) => setAppearance({ readingFont: e.target.value as typeof appearance.readingFont })}
+              aria-label="Reading font"
+              className="px-3 py-1.5 bg-background border border-border rounded text-sm"
+              style={{ fontFamily: cssVars['--reading-font'] }}
+            >
+              {READING_FONTS.map((font) => (
+                <option key={font.id} value={font.id} style={{ fontFamily: font.stack }}>
+                  {font.label}
+                </option>
+              ))}
+            </select>
+          </Row>
+          <div className="text-sm text-muted-foreground">
+            The reading font applies to plain-text mail and to messages that name no font of
+            their own. A sender who styles their mail keeps their own typography.
+          </div>
+        </Section>
+
+        <Section title="Message List">
+          <div className="text-sm text-muted-foreground mb-3">
+            How much of each message the list shows under the subject.
+          </div>
+          <ChoiceCards
+            label="Preview lines"
+            choices={SNIPPET_CHOICES}
+            value={appearance.snippetLines}
+            onChange={(snippetLines) => setAppearance({ snippetLines })}
+          />
+        </Section>
+
+        <Section title="Layout">
+          <Row
+            title="Hover actions"
+            description="Show archive, delete, mark-read and snooze on a message row when the pointer is over it."
+          >
+            <Switch
+              label="Hover actions"
+              checked={appearance.hoverActions}
+              onChange={(hoverActions) => setAppearance({ hoverActions })}
+            />
+          </Row>
+
+          <div className="text-sm text-muted-foreground mt-4 mb-3">
+            How the actions above an open message are drawn. With names shown the toolbar is
+            wider than the window and wraps onto a second line.
+          </div>
+          <ChoiceCards
+            label="Button labels"
+            choices={BUTTON_LABEL_CHOICES}
+            value={appearance.buttonLabels}
+            onChange={(buttonLabels) => setAppearance({ buttonLabels })}
+          />
+        </Section>
+
+        <Section title="Motion">
+          <div className="text-sm text-muted-foreground mb-3">
+            Animated transitions — menus, panels, spinners and smooth scrolling.
+          </div>
+          <ChoiceCards
+            label="Motion"
+            choices={MOTION_CHOICES}
+            value={appearance.motion}
+            onChange={(motion) => setAppearance({ motion })}
+          />
         </Section>
 
         <div className="flex items-center justify-between gap-4">

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { SignatureSettings } from './SignatureSettings';
-import type { SettingsTabProps, AppSettings } from './types';
+import type { SettingsTabProps } from './types';
 
 /** "HH:MM" (24h) time picker built from two clamped <select>s — no infinite
  *  wheel-scroll like the native <input type="time"> picker. */
@@ -143,53 +143,6 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
 
         <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
           <div>
-            <div className="font-medium">Conversation view</div>
-            <div className="text-sm text-muted-foreground">
-              Group emails of the same topic together
-            </div>
-          </div>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={settings.conversationView}
-                onChange={() => updateSetting('conversationView', true)}
-                className="w-4 h-4"
-              />
-              <span className="text-sm">On</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={!settings.conversationView}
-                onChange={() => updateSetting('conversationView', false)}
-                className="w-4 h-4"
-              />
-              <span className="text-sm">Off</span>
-            </label>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
-          <div>
-            <div className="font-medium">Preview pane</div>
-            <div className="text-sm text-muted-foreground">
-              Show email preview in the list view
-            </div>
-          </div>
-          <select
-            value={settings.previewPane}
-            onChange={(e) => updateSetting('previewPane', e.target.value as AppSettings['previewPane'])}
-            className="px-3 py-1.5 bg-background border border-border rounded text-sm"
-          >
-            <option value="right">Right side</option>
-            <option value="bottom">Bottom</option>
-            <option value="off">Off</option>
-          </select>
-        </div>
-
-        <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
-          <div>
             <div className="font-medium">Mark conversation as read</div>
             <div className="text-sm text-muted-foreground">
               Automatically mark emails as read after viewing
@@ -269,35 +222,6 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
         <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wider">
           Interface Settings
         </h3>
-
-        <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
-          <div>
-            <div className="font-medium">Hover actions</div>
-            <div className="text-sm text-muted-foreground">
-              Show quick action buttons when hovering over emails
-            </div>
-          </div>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={settings.hoverActions}
-                onChange={() => updateSetting('hoverActions', true)}
-                className="w-4 h-4"
-              />
-              <span className="text-sm">Enable</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={!settings.hoverActions}
-                onChange={() => updateSetting('hoverActions', false)}
-                className="w-4 h-4"
-              />
-              <span className="text-sm">Disable</span>
-            </label>
-          </div>
-        </div>
 
         <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
           <div>
@@ -463,24 +387,6 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
               <span className="text-sm">Off</span>
             </label>
           </div>
-        </div>
-
-        <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
-          <div>
-            <div className="font-medium">Button labels</div>
-            <div className="text-sm text-muted-foreground">
-              How to display toolbar buttons
-            </div>
-          </div>
-          <select
-            value={settings.buttonLabels}
-            onChange={(e) => updateSetting('buttonLabels', e.target.value as AppSettings['buttonLabels'])}
-            className="px-3 py-1.5 bg-background border border-border rounded text-sm"
-          >
-            <option value="icons">Icons only</option>
-            <option value="text">Text only</option>
-            <option value="both">Icons and text</option>
-          </select>
         </div>
       </div>
 

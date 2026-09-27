@@ -20,8 +20,6 @@ export interface AppSettings {
 
   // Display settings
   emailsPerPage: number;
-  conversationView: boolean;
-  previewPane: 'off' | 'right' | 'bottom';
   markAsReadDelay: number;
   /** How received-mail remote images are loaded (privacy vs. convenience —
    *  remote images are the tracking-pixel vector):
@@ -67,9 +65,7 @@ export interface AppSettings {
   defaultReplyBehavior: 'reply' | 'replyAll';
 
   // UI settings
-  hoverActions: boolean;
   keyboardShortcuts: boolean;
-  buttonLabels: 'icons' | 'text' | 'both';
 
   // Notifications
   desktopNotifications: 'all' | 'important' | 'off';
@@ -108,8 +104,6 @@ export const defaultSettings: AppSettings = {
   maxAIProcessingEmails: 500,
   bodyDownloadLimit: 1000,
   emailsPerPage: 25,
-  conversationView: true,
-  previewPane: 'right',
   markAsReadDelay: 3,
   remoteImageMode: 'safe',
   senderLogos: true,
@@ -120,9 +114,7 @@ export const defaultSettings: AppSettings = {
   inboxSections: [],
   undoSendDelay: 5,
   defaultReplyBehavior: 'reply',
-  hoverActions: true,
   keyboardShortcuts: true,
-  buttonLabels: 'icons',
   // Default to AI-important-only: 'all' on a busy mailbox is instant fatigue.
   desktopNotifications: 'important',
   notificationSound: true,
