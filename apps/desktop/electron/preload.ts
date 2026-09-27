@@ -443,6 +443,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     sendWithUndo: (options: SendEmailOptions, undoDelayMs: number) => ipcRenderer.invoke('smtp:sendWithUndo', options, undoDelayMs),
     commitSend: (id: number, accountId?: string) => ipcRenderer.invoke('smtp:commitSend', id, accountId),
     cancelSend: (id: number, accountId?: string) => ipcRenderer.invoke('smtp:cancelSend', id, accountId),
+    // Send later. sendAt is a UTC epoch in SECONDS (the renderer converts from
+    // the reader's local pick); reschedule/cancel go through the same outbox.
+    scheduleSend: (options: SendEmailOptions, sendAt: number) => ipcRenderer.invoke('smtp:scheduleSend', options, sendAt),
+    rescheduleSend: (id: number, sendAt: number, accountId?: string) =>
+      ipcRenderer.invoke('smtp:rescheduleSend', id, sendAt, accountId),
   },
 
   // Dialog operations
@@ -1319,6 +1324,8 @@ export interface ElectronAPI {
     sendWithUndo: (options: SendEmailOptions, undoDelayMs: number) => Promise<{ success: boolean; id?: number; error?: string }>;
     commitSend: (id: number, accountId?: string) => Promise<{ success: boolean; failed?: number; deferred?: boolean }>;
     cancelSend: (id: number, accountId?: string) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
+    scheduleSend: (options: SendEmailOptions, sendAt: number) => Promise<{ success: boolean; id?: number; error?: string }>;
+    rescheduleSend: (id: number, sendAt: number, accountId?: string) => Promise<{ success: boolean; moved: boolean; error?: string }>;
   };
   dialog: {
     pickFiles: () => Promise<{ success: boolean; data?: Array<{ filename: string; content: string; contentType: string; encoding: 'base64'; size: number }>; error?: string }>;
@@ -1901,6 +1908,8 @@ export interface OutboxSend {
   retryCount: number;
   lastError: string | null;
   nextRetryAt: number | null;
+  /** UTC epoch SECONDS the user chose, or null when this was never scheduled. */
+  scheduledAt: number | null;
   createdAt: number;
 }
 

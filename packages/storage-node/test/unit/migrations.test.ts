@@ -114,12 +114,11 @@ describe('fresh install reaches the current production schema', () => {
   // A fresh DB that stops short of the newest version means the app queries
   // columns/tables that do not exist yet — every sync throws "no such column".
   it('ends on the newest registered version and records every applied version', () => {
-    // CHANGED: 90 -> 91 with the email_tags membership index (v91), which makes
-    // "does this mail carry this tag" a covering-index seek instead of a scan
-    // of `emails` — see repositories/tag-membership.
-    expect(CURRENT_VERSION).toBe(91);
+    // CHANGED: 91 -> 92 with pending_sends.scheduled_at (v92), the delivery
+    // time a scheduled ("send later") message waits on.
+    expect(CURRENT_VERSION).toBe(92);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..91 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..92 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 

@@ -3,3 +3,4 @@
 export * from './smtp-client';
 export * from './smtp-errors';
 export * from './send-queue';
+export * from './send-status';

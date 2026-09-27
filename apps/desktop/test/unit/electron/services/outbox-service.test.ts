@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *     cross-account send persists and drains against the right DB/SMTP,
  *   - drains never throw at the caller (they log), and every drain pokes the
  *     renderer so the badge updates without polling,
- *   - stopOutbox cancels the periodic drain.
+ *   - a one-shot timer wakes ON the earliest due time, so a send scheduled for
+ *     13:08 goes out at 13:08 rather than whenever the 60s interval next fires,
+ *   - stopOutbox cancels both timers.
  */
 
 const h = vi.hoisted(() => {
@@ -31,6 +33,9 @@ const h = vi.hoisted(() => {
   const queues: QueueRecord[] = [];
   const state = {
     storage: null as unknown,
+    /** Rows the active storage reports, for the due-time wake-up timer. */
+    sends: [] as Array<Record<string, unknown>>,
+    sendsThrow: false,
     storageFor: new Map<string, unknown>(),
     smtpConnected: false,
     smtpClient: true,
@@ -67,8 +72,11 @@ const h = vi.hoisted(() => {
   return { queues, state, FakeSendQueue };
 });
 
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
   SendQueue: h.FakeSendQueue,
+  // The REAL due-time helper: the wake-up timer's whole job is to honour it, so
+  // a stub here would make these tests agree with themselves and nothing else.
+  nextDrainDelayMs: (await import('@sarvinbox/core/send-status')).nextDrainDelayMs,
   createLogger: () => ({
     info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
@@ -117,7 +125,16 @@ const appendSentFn = (async (raw: unknown, mid: unknown, opts: Record<string, un
 beforeEach(() => {
   vi.useFakeTimers();
   h.queues.length = 0;
-  h.state.storage = { tag: 'active-db' };
+  vi.setSystemTime(new Date('2026-09-27T12:00:00Z'));
+  h.state.sends = [];
+  h.state.sendsThrow = false;
+  h.state.storage = {
+    tag: 'active-db',
+    getAllSends: async () => {
+      if (h.state.sendsThrow) throw new Error('storage gone');
+      return h.state.sends;
+    },
+  };
   h.state.storageFor.clear();
   h.state.smtpConnected = false;
   h.state.smtpClient = true;
@@ -342,6 +359,109 @@ describe('per-account outbox', () => {
   });
 });
 
+describe('the due-time wake-up', () => {
+  const NOW_SECONDS = Math.floor(Date.parse('2026-09-27T12:00:00Z') / 1000);
+  /** A send the user asked to deliver `inSeconds` from now. */
+  const scheduled = (inSeconds: number) => ({
+    status: 'pending',
+    nextRetryAt: NOW_SECONDS + inSeconds,
+    scheduledAt: NOW_SECONDS + inSeconds,
+  });
+  const drains = () => h.queues[0].events.filter((e) => e === 'process').length;
+
+  // THE regression: a send scheduled for 13:08 used to leave on the next 60s
+  // tick — up to a minute late, which reads as the schedule not working.
+  it('drains AT the scheduled time, not on the next interval tick', async () => {
+    const svc = await load();
+    h.state.sends = [scheduled(10)];
+    svc.initOutbox({ sendFn });
+    await vi.advanceTimersByTimeAsync(0);
+    const before = drains();
+
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(drains()).toBe(before); // not a moment early
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(drains()).toBe(before + 1);
+  });
+
+  // "Rendering is live": the drain that sends the mail must poke the renderer
+  // itself, or the Outbox keeps showing "Scheduled" until its own 30s poll.
+  it('tells the renderer as soon as the timed drain moves something', async () => {
+    const svc = await load();
+    h.state.sends = [scheduled(10)];
+    svc.initOutbox({ sendFn });
+    await vi.advanceTimersByTimeAsync(0);
+    h.queues[0].result = { sent: 1, queued: 0, failed: 0 };
+    h.state.window!.sent.length = 0;
+
+    await vi.advanceTimersByTimeAsync(10_600);
+    expect(h.state.window!.sent).toContain('outbox:changed');
+  });
+
+  it('stays quiet when the timed drain moved nothing', async () => {
+    const svc = await load();
+    h.state.sends = [scheduled(10)];
+    svc.initOutbox({ sendFn });
+    await vi.advanceTimersByTimeAsync(0);
+    h.state.window!.sent.length = 0;
+
+    await vi.advanceTimersByTimeAsync(10_600);
+    expect(h.state.window!.sent).toEqual([]);
+  });
+
+  // A send scheduled while an earlier timer is armed has to win: every mutation
+  // announces itself through notifyOutboxChanged, which re-arms.
+  it('re-arms on the nearest due time when the outbox changes', async () => {
+    const svc = await load();
+    h.state.sends = [scheduled(50)];
+    svc.initOutbox({ sendFn });
+    await vi.advanceTimersByTimeAsync(0);
+    const before = drains();
+
+    h.state.sends = [scheduled(5), scheduled(50)];
+    svc.notifyOutboxChanged();
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(5_600);
+    expect(drains()).toBe(before + 1);
+  });
+
+  // Nothing waiting = nothing to wake for: the interval already covers that, and
+  // a second timer on the same tick would drain the same rows twice.
+  it('arms nothing when the soonest work is further off than the backstop', async () => {
+    const svc = await load();
+    h.state.sends = [scheduled(3 * 60 * 60)];
+    svc.initOutbox({ sendFn });
+    await vi.advanceTimersByTimeAsync(0);
+    const before = drains();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(drains()).toBe(before + 1); // the interval, and only the interval
+  });
+
+  // An unreadable store and an empty one are the same value: never conclude
+  // "nothing is scheduled" from a failed read — just leave the backstop to it.
+  it('survives a storage read failure and keeps the backstop drain', async () => {
+    const svc = await load();
+    h.state.sendsThrow = true;
+    svc.initOutbox({ sendFn });
+    await expect(vi.advanceTimersByTimeAsync(0)).resolves.toBeDefined();
+    const before = drains();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(drains()).toBe(before + 1);
+  });
+
+  it('arms nothing before the outbox is wired', async () => {
+    const svc = await load();
+    h.state.sends = [scheduled(5)];
+    svc.armOutboxWakeup(); // no initOutbox yet -> no sendFn
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.queues).toHaveLength(0);
+  });
+});
+
 describe('stopOutbox', () => {
   it('cancels the periodic drain so nothing fires after quit', async () => {
     const svc = await load();
@@ -353,6 +473,19 @@ describe('stopOutbox', () => {
     svc.stopOutbox();
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(q.events.filter((e) => e === 'process').length).toBe(before);
+  });
+
+  it('cancels an armed wake-up so a scheduled send cannot fire after quit', async () => {
+    const svc = await load();
+    const soon = Math.floor(Date.parse('2026-09-27T12:00:00Z') / 1000) + 10;
+    h.state.sends = [{ status: 'pending', nextRetryAt: soon, scheduledAt: soon }];
+    svc.initOutbox({ sendFn });
+    await vi.advanceTimersByTimeAsync(0);
+    const before = h.queues[0].events.filter((e) => e === 'process').length;
+
+    svc.stopOutbox();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.queues[0].events.filter((e) => e === 'process').length).toBe(before);
   });
 
   it('is safe to call when never initialised, and twice', async () => {

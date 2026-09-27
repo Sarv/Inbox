@@ -348,7 +348,8 @@ ${createQuotedHeader(prefix, extraInfo)}
     discardAndClose();
   };
 
-  const handleSend = async () => {
+  /** @param sendAt UTC epoch SECONDS to deliver at; omitted = send now. */
+  const handleSend = async (sendAt?: number) => {
     const finalTo = mergeEmails(to, pendingTo);
     const finalCc = mergeEmails(cc, pendingCc);
     const finalBcc = mergeEmails(bcc, pendingBcc);
@@ -378,6 +379,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         subject,
         body: plainBody, // Plain text fallback
         htmlBody: fullHtmlBody, // Email-friendly HTML with inline styles
+        sendAt,
         inReplyTo: mode !== 'new' ? replyToEmail?.id : undefined,
         // Send AS the replied mail's owning account (unified view). undefined = active.
         accountId: mode !== 'new' ? (replyToEmail as any)?.accountId : undefined,
@@ -715,6 +717,7 @@ ${createQuotedHeader(prefix, extraInfo)}
             // One send path, not two: the toolbar calls the same handler the
             // Cmd+Enter shortcut does, so a change to either can't skip one.
             onSend={() => { void handleSend(); }}
+            onSendLater={(sendAt) => { void handleSend(sendAt); }}
             onAttach={handleAttach}
             onPolish={() => {
               setPolishMode('full');
@@ -943,6 +946,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         readReceipt={readReceipt}
         onToggleReadReceipt={() => setReadReceipt((v) => !v)}
         onSend={() => { void handleSend(); }}
+        onSendLater={(sendAt) => { void handleSend(sendAt); }}
         onAttach={handleAttach}
         onPolish={() => {
           setPolishMode('full');

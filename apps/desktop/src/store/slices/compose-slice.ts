@@ -300,9 +300,15 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
       updatedAt: now,
     };
 
-    const newThreadEmails = [...get().threadEmails, sentEmail];
-    set({ threadEmails: newThreadEmails });
-    console.log('[Store] Added optimistic sent email to thread');
+    // A scheduled mail has NOT been sent, so it gets no optimistic row in the
+    // thread — showing one would claim a delivery that is hours away, and the
+    // real Sent copy appears when it actually goes out.
+    const scheduledAt = typeof options.sendAt === 'number' ? Math.floor(options.sendAt) : null;
+    if (scheduledAt === null) {
+      const newThreadEmails = [...get().threadEmails, sentEmail];
+      set({ threadEmails: newThreadEmails });
+      console.log('[Store] Added optimistic sent email to thread');
+    }
 
     // Store draft info and schedule actual send after delay
     const { draft, draftCleanup, ...sendOptions } = options;
@@ -321,6 +327,30 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
       from: sendOptions.from, // chosen identity/alias header From (undefined = default)
       requestReadReceipt: sendOptions.requestReadReceipt,
     };
+
+    // Send later: the same persist-first outbox, held until the time the user
+    // picked instead of until the undo window elapses. There is no undo toast
+    // and no commit timer — the drain sends it, and the Outbox's Scheduled
+    // section is where it can be cancelled, moved or sent now.
+    if (scheduledAt !== null) {
+      try {
+        const res = await window.electronAPI.smtp.scheduleSend(payload, scheduledAt);
+        if (!res?.success) throw new Error(res?.error || 'Failed to schedule send');
+      } catch (error) {
+        // Nothing was persisted: keep the draft and surface the failure rather
+        // than letting the composer close on a send that does not exist.
+        console.error('[Store] Failed to schedule send:', error);
+        set({ sendingStatus: 'idle' });
+        throw error;
+      }
+      // Durable in the outbox → the draft copy is now redundant.
+      if (draftCleanup) {
+        window.electronAPI.drafts.delete(draftCleanup).catch(() => {});
+      }
+      set({ sendingStatus: 'sent' });
+      setTimeout(() => set({ sendingStatus: 'idle' }), 2000);
+      return;
+    }
 
     // PERSIST-FIRST: write the mail to the outbox NOW, HELD for the undo window.
     // The message is durable in the DB before we touch anything else — a crash

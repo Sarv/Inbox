@@ -437,6 +437,11 @@ CREATE TABLE IF NOT EXISTS pending_sends (
   retry_count INTEGER DEFAULT 0,
   last_error TEXT,
   next_retry_at INTEGER,
+  -- Send later: the delivery time the USER picked (unix seconds), NULL for an
+  -- ordinary or undo-held send. next_retry_at carries the same time so the
+  -- drain honours it; this column records the intent, which a retry backoff
+  -- must not overwrite. See migration v92.
+  scheduled_at INTEGER,
   created_at INTEGER DEFAULT (unixepoch()),
   updated_at INTEGER DEFAULT (unixepoch())
 );

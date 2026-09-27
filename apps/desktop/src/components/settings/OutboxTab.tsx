@@ -1,10 +1,14 @@
-import { Loader2, Trash2, RefreshCw, AlertCircle, Send, Clock, Mailbox, Eye, Paperclip, X, Info } from 'lucide-react';
+import { classifySend } from '@sarvinbox/core/send-status';
+import { CalendarClock, Check, Loader2, Trash2, RefreshCw, AlertCircle, Send, SendHorizontal, Clock, Mailbox, Eye, Paperclip, X, Info } from 'lucide-react';
 import prettyBytes from 'pretty-bytes';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
+import { useClickAway } from '../../hooks/useClickAway';
+import { useSendLaterDrafts } from '../../hooks/useSendLaterDrafts';
 import { useConfirm } from '../ConfirmDialog';
 import { Paginator } from '../email-list/Paginator';
 import { SandboxedEmailBody } from '../SandboxedEmailBody';
+import { SendLaterDropdown } from '../SendLaterDropdown';
 import { Tooltip } from '../Tooltip';
 
 // Page both lists like the inbox so a large Outbox / dead-letter pile stays
@@ -19,6 +23,12 @@ interface OutboxSend {
   retryCount: number;
   lastError: string | null;
   nextRetryAt: number | null;
+  /** UTC epoch SECONDS the user chose for delivery; null when not scheduled. */
+  scheduledAt: number | null;
+  /** SMTP already accepted this message — it is delivered, and in Sent. */
+  smtpAccepted?: boolean;
+  /** …but its Sent-folder copy still has to be uploaded. */
+  sentAppendPending?: boolean;
   createdAt: number;
 }
 
@@ -96,17 +106,40 @@ export function OutboxTab() {
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [preview, setPreview] = useState<OutboxPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  /** Which scheduled row has its "pick a new time" menu open. */
+  const [reschedulingId, setReschedulingId] = useState<number | null>(null);
+  // Only the open row carries this ref, so a click anywhere else — including on
+  // another row's clock — closes the menu that is showing.
+  const rescheduleRef = useRef<HTMLDivElement | null>(null);
+  const closeReschedule = useCallback(() => setReschedulingId(null), []);
+  useClickAway(rescheduleRef, reschedulingId !== null, closeReschedule);
+  // A new time typed for a row outlives the menu closing on it — the same
+  // preservation the composer gets, kept per row so they cannot collide.
+  const { draftFor, updateDraft } = useSendLaterDrafts();
 
   // Current page's slice of each list (client-side — both are already loaded).
-  const pagedSends = sends.slice(sendsPage * PAGE_SIZE, sendsPage * PAGE_SIZE + PAGE_SIZE);
+  // A scheduled send is waiting on a time the user picked, not on a failure, so
+  // it gets its own section with its own actions. classifySend is the SAME
+  // classifier the main process schedules by — see @sarvinbox/core/send-status.
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const kindOf = (send: OutboxSend) => classifySend(send, nowSeconds);
+  const scheduledSends = sends.filter((send) => kindOf(send) === 'scheduled');
+  // A send SMTP has accepted has LEFT the outbox as far as the reader is
+  // concerned: it is in their Sent folder and in the recipient's inbox. Listing
+  // it under Messages (with a Discard bin next to it) says the opposite. What
+  // is left to do — upload the Sent copy — retries on its own and is reported
+  // as a footnote instead.
+  const deliveredSends = sends.filter((send) => kindOf(send) === 'sent');
+  const queuedSends = sends.filter((send) => !['scheduled', 'sent'].includes(kindOf(send)));
+  const pagedSends = queuedSends.slice(sendsPage * PAGE_SIZE, sendsPage * PAGE_SIZE + PAGE_SIZE);
   const pagedFailed = failedOps.slice(failedPage * PAGE_SIZE, failedPage * PAGE_SIZE + PAGE_SIZE);
 
   // Clamp the page if the list shrank (retry/discard) so we never strand the
   // view on an empty page past the end.
   useEffect(() => {
-    const maxPage = Math.max(0, Math.ceil(sends.length / PAGE_SIZE) - 1);
+    const maxPage = Math.max(0, Math.ceil(queuedSends.length / PAGE_SIZE) - 1);
     if (sendsPage > maxPage) setSendsPage(maxPage);
-  }, [sends.length, sendsPage]);
+  }, [queuedSends.length, sendsPage]);
   useEffect(() => {
     const maxPage = Math.max(0, Math.ceil(failedOps.length / PAGE_SIZE) - 1);
     if (failedPage > maxPage) setFailedPage(maxPage);
@@ -319,11 +352,78 @@ export function OutboxTab() {
     }
   };
 
+  /** Send a scheduled message now: release the wait and drain it immediately. */
+  const sendScheduledNow = async (id: number) => {
+    setBusyId(id);
+    setActionError(null);
+    try {
+      const res = await window.electronAPI.smtp.commitSend(id);
+      // A deferred commit still means persisted-and-will-drain, never lost.
+      setActionInfo(res?.deferred ? 'Sending — it will go out as soon as the server answers.' : 'Message sent.');
+      await load();
+    } catch (error) {
+      setActionError((error as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /** Move a scheduled message to a new delivery time. */
+  const moveScheduled = async (id: number, sendAt: number) => {
+    setBusyId(id);
+    setActionError(null);
+    try {
+      const res = await window.electronAPI.smtp.rescheduleSend(id, sendAt);
+      // moved === false means the drain already has it: say so rather than
+      // showing a new time for a message that is already going out.
+      if (!res?.moved) setActionInfo('Too late to move this one — it is already on its way.');
+      await load();
+    } catch (error) {
+      setActionError((error as Error).message);
+    } finally {
+      setBusyId(null);
+      setReschedulingId(null);
+    }
+  };
+
+  /** Cancel a scheduled message outright (it is never sent). */
+  const cancelScheduled = async (id: number) => {
+    const ok = await confirm({
+      title: 'Cancel scheduled message',
+      message: "Cancel this scheduled message? It won't be sent, and the text can't be recovered.",
+      confirmLabel: 'Cancel message',
+    });
+    if (!ok) return;
+    setBusyId(id);
+    setActionError(null);
+    try {
+      const res = await window.electronAPI.smtp.cancelSend(id);
+      if (!res?.cancelled) setActionInfo('Too late to cancel — it is already on its way.');
+      await load();
+    } catch (error) {
+      setActionError((error as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Read from the SAME classifier the queue drains by, never from the raw row:
+  // 'append_pending' with retryCount 0 used to fall through to "Queued" for a
+  // message that had already been delivered. (A delivered send never reaches
+  // here now — it is not in this list at all — so there is no 'sent' badge.)
   const statusBadge = (send: OutboxSend) => {
-    if (send.status === 'failed') {
+    const kind = kindOf(send);
+    if (kind === 'failed') {
       return (
         <span className="inline-flex items-center gap-1 text-xs text-destructive">
           <AlertCircle className="h-3 w-3" /> Failed
+        </span>
+      );
+    }
+    if (kind === 'sending') {
+      return (
+        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" /> Sending
         </span>
       );
     }
@@ -392,13 +492,108 @@ export function OutboxTab() {
         </Tooltip>
       </div>
 
+      {/* Scheduled sends — waiting on a time the user picked, not on a failure.
+          Hidden entirely when there are none, so the Outbox looks unchanged for
+          anyone who never schedules anything. */}
+      {scheduledSends.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium flex items-center gap-2 mb-3">
+            <CalendarClock className="h-4 w-4" /> Scheduled ({scheduledSends.length})
+          </h4>
+          {/* No `overflow-hidden` here: the "change delivery time" menu is
+              absolutely positioned inside a row, and a clipping ancestor hides
+              it however high its z-index. The rows round their own outer
+              corners instead. */}
+          <div className="border border-border rounded-lg divide-y divide-border">
+            {scheduledSends.map((send) => (
+              <div
+                key={send.id}
+                className="flex items-start justify-between px-4 py-3 hover:bg-muted/30 first:rounded-t-lg last:rounded-b-lg"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm truncate">{send.subject || '(no subject)'}</span>
+                    <span className="inline-flex items-center gap-1 text-xs text-primary">
+                      {/* Stored UTC, rendered in the reader's own zone. */}
+                      <CalendarClock className="h-3 w-3" /> {fmtDate(send.scheduledAt ?? send.nextRetryAt ?? send.createdAt)}
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1 truncate">
+                    To: {send.to || '(unknown)'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 ml-4">
+                  <Tooltip content="Preview message" delayMs={40}>
+                    <button
+                      onClick={() => openPreview(send.id)}
+                      className="p-2 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors"
+                      aria-label="Preview message"
+                    >
+                      <Eye className="h-4 w-4" />
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="Send now" delayMs={40}>
+                    <button
+                      onClick={() => sendScheduledNow(send.id)}
+                      disabled={busyId === send.id}
+                      className="p-2 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors disabled:opacity-50"
+                      aria-label="Send now"
+                    >
+                      {busyId === send.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}
+                    </button>
+                  </Tooltip>
+                  <div
+                    className="relative flex items-center"
+                    ref={reschedulingId === send.id ? rescheduleRef : undefined}
+                  >
+                    <Tooltip content="Change delivery time" delayMs={40} hidden={reschedulingId === send.id}>
+                      <button
+                        onClick={() => setReschedulingId((open) => (open === send.id ? null : send.id))}
+                        disabled={busyId === send.id}
+                        aria-label="Change delivery time"
+                        aria-expanded={reschedulingId === send.id}
+                        className="p-2 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors disabled:opacity-50"
+                      >
+                        <Clock className="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                    {reschedulingId === send.id && (
+                      <SendLaterDropdown
+                        direction="down"
+                        align="right"
+                        onPick={(sendAt) => void moveScheduled(send.id, sendAt)}
+                        onClose={() => setReschedulingId(null)}
+                        // Keyed by row: a time typed against one scheduled
+                        // message stays with it, and never leaks into another.
+                        draft={draftFor(String(send.id))}
+                        onDraftChange={(patch) => updateDraft(String(send.id), patch)}
+                      />
+                    )}
+                  </div>
+                  <Tooltip content="Cancel" delayMs={40}>
+                    <button
+                      onClick={() => cancelScheduled(send.id)}
+                      disabled={busyId === send.id}
+                      className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-md transition-colors disabled:opacity-50"
+                      aria-label="Cancel scheduled message"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Pending / failed sends */}
       <div>
         <div className="flex items-center justify-between mb-3">
           <h4 className="text-sm font-medium flex items-center gap-2">
-            <Send className="h-4 w-4" /> Messages ({sends.length})
+            <Send className="h-4 w-4" /> Messages ({queuedSends.length})
           </h4>
-          {sends.some((s) => s.status === 'failed') && (
+          {queuedSends.some((s) => s.status === 'failed') && (
             <div className="flex items-center gap-2">
               <button
                 onClick={retryAllSends}
@@ -418,7 +613,7 @@ export function OutboxTab() {
           )}
         </div>
         <div className="border border-border rounded-lg overflow-hidden">
-          {sends.length === 0 ? (
+          {queuedSends.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
               <Mailbox className="h-8 w-8 mb-2" />
               <p className="text-sm">Outbox is empty</p>
@@ -479,13 +674,13 @@ export function OutboxTab() {
                   </div>
                 </div>
               ))}
-              {sends.length > PAGE_SIZE && (
+              {queuedSends.length > PAGE_SIZE && (
                 <Paginator
                   page={sendsPage}
                   pageSize={PAGE_SIZE}
                   count={pagedSends.length}
-                  total={sends.length}
-                  hasMore={(sendsPage + 1) * PAGE_SIZE < sends.length}
+                  total={queuedSends.length}
+                  hasMore={(sendsPage + 1) * PAGE_SIZE < queuedSends.length}
                   loading={loading}
                   onGoToPage={(p) => setSendsPage(Math.max(0, p))}
                 />
@@ -493,6 +688,21 @@ export function OutboxTab() {
             </div>
           )}
         </div>
+        {/* Delivered, but the Sent copy hasn't been filed yet (IMAP offline
+            when SMTP accepted it). Said plainly instead of listed above, so
+            nobody reads a delivered message as one still waiting to go. */}
+        {deliveredSends.length > 0 && (
+          <p className="text-xs text-muted-foreground mt-2 flex items-start gap-1.5">
+            <Check className="h-3.5 w-3.5 shrink-0 mt-px text-emerald-600 dark:text-emerald-400" />
+            <span>
+              {deliveredSends.length === 1
+                ? '1 message has been sent'
+                : `${deliveredSends.length} messages have been sent`}{' '}
+              and {deliveredSends.length === 1 ? 'is' : 'are'} in your Sent folder — filing the
+              server-side copy finishes on its own once IMAP reconnects.
+            </span>
+          </p>
+        )}
       </div>
 
       {/* Failed IMAP operations */}

@@ -47,6 +47,13 @@
       // Same: the panel bridge's wire format, shared with the main-process
       // handler so a request one side accepts is never one the other drops.
       "@sarvinbox/core/panel-bridge": ["../../packages/core/src/extensions/panel-bridge.ts"],
+      // Same: what a row in the outbox means, shared so the Outbox's Scheduled
+      // section and the queue that drains it agree on which sends are waiting
+      // on a chosen time rather than on a retry.
+      "@sarvinbox/core/send-status": ["../../packages/core/src/smtp/send-status.ts"],
+      // Same: the List-Unsubscribe parser, shared so the button the reader
+      // clicks and the handler that acts on it read the header identically.
+      "@sarvinbox/core/unsubscribe": ["../../packages/core/src/utils/unsubscribe.ts"],
       "@sarvinbox/core/extension-categories": ["../../packages/core/src/extensions/categories.ts"],
       // Same: pure blocklist-preference reader, shared so the Blocklists tab
       // shows exactly what main queries.

@@ -539,7 +539,9 @@ export interface ComposeSlice {
   /** Open the full composer to EDIT an existing standalone draft (with subject). */
   editDraftInComposer: (draft: NonNullable<ComposeState['draft']>) => void;
   closeCompose: () => void;
-  sendEmail: (options: Omit<SendEmailOptions, 'inReplyTo'> & { inReplyTo?: string; draft?: PendingSend['draft']; draftCleanup?: DraftCleanup }) => Promise<void>;
+  /** `sendAt` (UTC epoch SECONDS) turns this into a scheduled send: no undo
+   *  toast, no optimistic Sent row — the outbox transmits it at that time. */
+  sendEmail: (options: Omit<SendEmailOptions, 'inReplyTo'> & { inReplyTo?: string; sendAt?: number; draft?: PendingSend['draft']; draftCleanup?: DraftCleanup }) => Promise<void>;
   undoSend: () => void;
   clearRestoreDraft: () => void;
 }

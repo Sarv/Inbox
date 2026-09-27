@@ -18,6 +18,7 @@ interface Row {
   status: string;
   retry_count: number;
   next_retry_at: number | null;
+  scheduled_at?: number | null;
   last_error?: string | null;
   smtp_accepted?: boolean;
   sent_append_pending?: boolean;
@@ -40,6 +41,7 @@ function makeFakeStorage() {
     retryCount: r.retry_count,
     lastError: r.last_error ?? null,
     nextRetryAt: r.next_retry_at,
+    scheduledAt: r.scheduled_at ?? null,
     createdAt: 0,
     updatedAt: 0,
     smtpAccepted: r.smtp_accepted ?? false,
@@ -99,7 +101,26 @@ function makeFakeStorage() {
       if (r && r.status === 'pending' && r.next_retry_at != null && r.next_retry_at > now()) { rows.delete(id); return true; }
       return false;
     },
-    async clearSendHold(id: number) { const r = rows.get(id); if (r && r.status === 'pending') r.next_retry_at = null; },
+    async clearSendHold(id: number) {
+      const r = rows.get(id);
+      // Mirrors the real SQL: releasing the wait also drops the scheduled
+      // marker, so a later retry backoff is not mistaken for a new schedule.
+      if (r && r.status === 'pending') { r.next_retry_at = null; r.scheduled_at = null; }
+    },
+    async scheduleSend(payload: unknown, sendAt: number) {
+      const id = ++seq;
+      rows.set(id, { id, payload, status: 'pending', retry_count: 0, next_retry_at: sendAt, scheduled_at: sendAt });
+      return id;
+    },
+    async rescheduleSend(id: number, sendAt: number) {
+      const r = rows.get(id);
+      if (r && r.status === 'pending' && r.next_retry_at != null && r.next_retry_at > now()) {
+        r.next_retry_at = sendAt;
+        r.scheduled_at = sendAt;
+        return true;
+      }
+      return false;
+    },
   };
 }
 
@@ -700,5 +721,128 @@ describe('SendQueue.loadFromStorage — crash recovery', () => {
 
   it('is a no-op before initialize', async () => {
     await expect(new SendQueue().loadFromStorage()).resolves.toBeUndefined();
+  });
+});
+
+// What breaks if this suite goes red: "send later". Either the mail leaves
+// immediately (a message the user deliberately delayed arriving at 2am), or it
+// never leaves at all and sits in the outbox past its time with nothing saying
+// so. Both are silent — nobody sees a scheduled mail not arrive until the
+// recipient asks about it.
+describe('SendQueue scheduled send', () => {
+  let storage: ReturnType<typeof makeFakeStorage>;
+  let sendFn: Mock<any[], any>;
+  let queue: SendQueue;
+  const inAnHour = () => Math.floor(Date.now() / 1000) + 3600;
+
+  beforeEach(() => {
+    storage = makeFakeStorage();
+    sendFn = vi.fn(async () => ({ success: true, messageId: '<m@x>', needsSentAppend: false }));
+    queue = new SendQueue();
+    queue.initialize({ storage: storage as any, sendFn: sendFn as any, isConnected: () => true });
+  });
+
+  it('persists the send immediately and transmits nothing', async () => {
+    const at = inAnHour();
+    const { id } = await queue.scheduleSend(PAYLOAD, at);
+    expect(storage.rows.get(id)!.next_retry_at).toBe(at);
+    expect(storage.rows.get(id)!.scheduled_at).toBe(at);   // the INTENT, not just a wait
+    expect(sendFn).not.toHaveBeenCalled();
+  });
+
+  // Regression: the whole point. A drain (or ten, or an app restart) before the
+  // chosen time must leave the mail exactly where it is.
+  it('survives drains before its time without sending early', async () => {
+    const { id } = await queue.scheduleSend(PAYLOAD, inAnHour());
+    await queue.processQueue();
+    await queue.processQueue();
+    expect(sendFn).not.toHaveBeenCalled();
+    expect(storage.rows.has(id)).toBe(true);
+  });
+
+  it('is transmitted by the first drain after its time', async () => {
+    const at = Math.floor(Date.now() / 1000) + 60;
+    const { id } = await queue.scheduleSend(PAYLOAD, at);
+    await queue.processQueue();
+    expect(sendFn).not.toHaveBeenCalled();
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime((at + 1) * 1000);
+    await queue.processQueue();
+    vi.useRealTimers();
+
+    expect(sendFn).toHaveBeenCalledTimes(1);
+    expect(storage.rows.has(id)).toBe(false);
+  });
+
+  // A time already past is not an error: "send at 9am" asked for at 10am means
+  // send it. Rejecting it would strand the mail; holding it a day is worse.
+  it('sends a past time on the next drain rather than rejecting it', async () => {
+    await queue.scheduleSend(PAYLOAD, Math.floor(Date.now() / 1000) - 60);
+    await queue.processQueue();
+    expect(sendFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rescheduleSend moves a waiting send to the new time', async () => {
+    const { id } = await queue.scheduleSend(PAYLOAD, inAnHour());
+    const later = inAnHour() + 3600;
+    expect(await queue.rescheduleSend(id, later)).toBe(true);
+    expect(storage.rows.get(id)!.next_retry_at).toBe(later);
+    expect(storage.rows.get(id)!.scheduled_at).toBe(later);
+  });
+
+  // Regression: showing a new delivery time for a mail that has already gone
+  // out is a lie the user acts on ("I moved it to tomorrow" — it arrived now).
+  it('rescheduleSend refuses once the send is no longer waiting', async () => {
+    const { id } = await queue.scheduleSend(PAYLOAD, inAnHour());
+    storage.rows.get(id)!.status = 'executing';
+    expect(await queue.rescheduleSend(id, inAnHour() + 60)).toBe(false);
+  });
+
+  it('cancelHeld cancels a scheduled send outright', async () => {
+    const { id } = await queue.scheduleSend(PAYLOAD, inAnHour());
+    expect(await queue.cancelHeld(id)).toBe(true);
+    await queue.processQueue();
+    expect(sendFn).not.toHaveBeenCalled();
+    expect(storage.rows.has(id)).toBe(false);
+  });
+
+  it('commitHeld is "send now": it drops the wait and transmits once', async () => {
+    const { id } = await queue.scheduleSend(PAYLOAD, inAnHour());
+    await queue.commitHeld(id);
+    expect(sendFn).toHaveBeenCalledTimes(1);
+    expect(storage.rows.has(id)).toBe(false);
+  });
+
+  // Transient vs permanent, at the moment a schedule fires: a blip must not
+  // consume the message, and the retry must NOT look like a fresh schedule.
+  it('retries a transient failure at its time and stops calling it scheduled', async () => {
+    const at = Math.floor(Date.now() / 1000) + 60;
+    const { id } = await queue.scheduleSend(PAYLOAD, at);
+    sendFn.mockImplementationOnce(async () => { throw new Error('ECONNRESET socket hang up'); });
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime((at + 1) * 1000);
+    await queue.commitHeld(id);
+    vi.useRealTimers();
+
+    const row = storage.rows.get(id)!;
+    expect(row.status).toBe('pending');            // still queued, not consumed
+    expect(row.retry_count).toBe(1);
+    expect(row.scheduled_at).toBeNull();           // a backoff, not a schedule
+  });
+
+  // Idempotent re-run: a second drain must not transmit the same mail twice.
+  it('does not send twice when the drain runs again after the schedule fired', async () => {
+    const { id } = await queue.scheduleSend(PAYLOAD, Math.floor(Date.now() / 1000) - 1);
+    await queue.processQueue();
+    await queue.processQueue();
+    expect(sendFn).toHaveBeenCalledTimes(1);
+    expect(storage.rows.has(id)).toBe(false);
+  });
+
+  it('refuses to schedule before initialize rather than dropping the mail silently', async () => {
+    await expect(new SendQueue().scheduleSend(PAYLOAD, inAnHour())).rejects.toThrow('not initialized');
+    await expect(new SendQueue().rescheduleSend(1, inAnHour())).rejects.toThrow('not initialized');
   });
 });

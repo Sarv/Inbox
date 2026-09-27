@@ -9,10 +9,19 @@
  * Drain triggers:
  *  - on startup (after loadFromStorage)
  *  - after a successful smtp:connect (see smtp-handlers)
+ *  - on a one-shot timer armed for the EARLIEST due time, so a send scheduled
+ *    for 13:08 leaves at 13:08 and not up to a minute later
  *  - on a periodic timer, as a backstop for retries whose backoff has elapsed
  */
 
-import { SendQueue, type SendFn, type AppendSentFn, type IEmailStorage, createLogger } from '@sarvinbox/core';
+import {
+  SendQueue,
+  nextDrainDelayMs,
+  type SendFn,
+  type AppendSentFn,
+  type IEmailStorage,
+  createLogger,
+} from '@sarvinbox/core';
 
 import { getStorage, getSmtpClient, getStorageFor, getSmtpClientFor, getMainWindow } from '../shared';
 const logger = createLogger('outbox-service');
@@ -20,15 +29,71 @@ const logger = createLogger('outbox-service');
 /**
  * Tell the renderer the outbox changed (enqueue / sent / failed / drained) so
  * the sidebar badge and Outbox tab update instantly instead of via polling.
+ *
+ * A change to the outbox is also exactly when the next due time can move
+ * (a send scheduled, rescheduled, cancelled or drained), so the wake-up timer
+ * is re-armed from the same point — there is no mutation site that pokes the
+ * renderer and forgets the clock.
  */
 export function notifyOutboxChanged(): void {
   try { getMainWindow()?.webContents.send('outbox:changed'); } catch { /* window gone */ }
+  armOutboxWakeup();
 }
 
 const OUTBOX_DRAIN_INTERVAL_MS = 60_000;
 
 let queue: SendQueue | null = null;
 let drainTimer: NodeJS.Timeout | null = null;
+let wakeupTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Drain in the background and, if anything actually moved, tell the renderer at
+ * once — a timed drain that sends the mail but leaves the Outbox showing
+ * "Scheduled" until the next 30s poll looks exactly like a schedule that didn't
+ * fire. Never throws: this runs from a timer with no caller to catch it.
+ */
+async function drainInBackground(reason: string): Promise<void> {
+  try {
+    const result = await getOutboxQueue().processQueue();
+    if (result.sent || result.queued || result.failed) notifyOutboxChanged();
+    else armOutboxWakeup();
+  } catch (e) {
+    logger.error(`[Outbox] ${reason} drain failed:`, e);
+    armOutboxWakeup();
+  }
+}
+
+/**
+ * Arm a single timer for the earliest moment the outbox has work — the delivery
+ * time of the soonest scheduled send, or the soonest retry backoff. Replaces
+ * any timer already armed, so the nearest due time always wins.
+ *
+ * Fire-and-forget: reading the rows can fail (storage swapping during an account
+ * switch), and the periodic backstop covers that case.
+ */
+export function armOutboxWakeup(): void {
+  const storage = getStorage();
+  if (!storage || !sendFnRef) return;
+  void (async () => {
+    let delayMs = OUTBOX_DRAIN_INTERVAL_MS;
+    try {
+      const sends = await (storage as unknown as IEmailStorage).getAllSends();
+      delayMs = nextDrainDelayMs(sends, Date.now(), {
+        maxDelayMs: OUTBOX_DRAIN_INTERVAL_MS,
+      });
+    } catch (e) {
+      logger.warn('[Outbox] Could not read sends to arm the drain timer:', e);
+      return; // the periodic backstop still runs
+    }
+    if (wakeupTimer) clearTimeout(wakeupTimer);
+    wakeupTimer = null;
+    // Nothing sooner than the backstop would fire anyway — arming here too would
+    // just drain the same rows twice at the same moment.
+    if (delayMs >= OUTBOX_DRAIN_INTERVAL_MS) return;
+    wakeupTimer = setTimeout(() => { wakeupTimer = null; void drainInBackground('Scheduled'); }, delayMs);
+    wakeupTimer.unref?.();
+  })();
+}
 
 /**
  * The outbox singleton (lazily created). Always safe to call; enqueueAndSend
@@ -69,6 +134,9 @@ function wireOutboxQueue(): void {
   // Recover crashed/pending sends for this account, then attempt an initial drain.
   q.loadFromStorage()
     .then(() => q.processQueue())
+    // Whatever is left after the startup drain — a send scheduled for this
+    // afternoon, a backoff mid-flight — decides when we next wake.
+    .then(() => armOutboxWakeup())
     .catch((e) => logger.error('[Outbox] Initial load/drain failed:', e));
 }
 
@@ -91,13 +159,10 @@ export function initOutbox(deps: { sendFn: SendFn; appendSentFn?: AppendSentFn }
   wireOutboxQueue();
 
   if (drainTimer) clearInterval(drainTimer);
-  drainTimer = setInterval(() => {
-    getOutboxQueue()
-      .processQueue()
-      .catch((e) => logger.error('[Outbox] Periodic drain failed:', e));
-  }, OUTBOX_DRAIN_INTERVAL_MS);
+  drainTimer = setInterval(() => { void drainInBackground('Periodic'); }, OUTBOX_DRAIN_INTERVAL_MS);
   // Don't keep the process alive just for the drain timer.
   drainTimer.unref?.();
+  armOutboxWakeup();
 
   logger.info('[Outbox] Initialized');
 }
@@ -161,5 +226,9 @@ export function stopOutbox(): void {
   if (drainTimer) {
     clearInterval(drainTimer);
     drainTimer = null;
+  }
+  if (wakeupTimer) {
+    clearTimeout(wakeupTimer);
+    wakeupTimer = null;
   }
 }

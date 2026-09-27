@@ -537,6 +537,21 @@ export interface IEmailStorage {
   savePendingSend(payload: unknown, nextRetryAt?: number): Promise<number>;
 
   /**
+   * Persist a send the user asked to deliver LATER (unix seconds). Identical to
+   * a held send as far as the drain is concerned — it waits on `next_retry_at`
+   * — but it also records `scheduled_at`, the intent, which a retry backoff
+   * must never overwrite. Returns the numeric rowid.
+   */
+  scheduleSend(payload: unknown, sendAt: number): Promise<number>;
+
+  /**
+   * Move a scheduled send to a new delivery time. Only while it is still
+   * waiting (status='pending', not yet transmitted): returns false once the
+   * drain has taken it, because by then there is nothing left to move.
+   */
+  rescheduleSend(id: number, sendAt: number): Promise<boolean>;
+
+  /**
    * Cancel a send that is still HELD for the undo window: delete it only when it
    * is 'pending' with a future next_retry_at (never yet attempted). Returns true
    * if a row was removed. A send already committed/executing/failed is left
@@ -705,6 +720,11 @@ export interface PendingSendRecord {
   rawMime?: string | null;
   /** The message's Message-ID, used to reconcile / dedupe the Sent copy. */
   messageId?: string | null;
+  /** Unix seconds the USER chose for delivery ("send later"); null/absent for an
+   *  immediate send, an undo hold or a retry. Cleared once the wait is released
+   *  (clearSendHold), so a later retry backoff — which also parks `nextRetryAt`
+   *  in the future — can never be mistaken for a chosen delivery time. */
+  scheduledAt?: number | null;
 }
 
 /**

@@ -1,5 +1,10 @@
-import { Loader2, Paperclip, Send, Trash2, Wand2, BellRing } from 'lucide-react';
+import { ChevronDown, Loader2, Paperclip, Send, Trash2, Wand2, BellRing } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
 
+import { useClickAway } from '../hooks/useClickAway';
+import { useSendLaterDraft } from '../hooks/useSendLaterDrafts';
+
+import { SendLaterDropdown } from './SendLaterDropdown';
 import { Tooltip } from './Tooltip';
 export interface ComposeToolbarProps {
     sending: boolean;
@@ -7,6 +12,9 @@ export interface ComposeToolbarProps {
     plainBody: string;
     hasRecipients: boolean;
     onSend: () => void;
+    /** Schedule the message instead of sending it now; UTC epoch SECONDS.
+     *  Omitted (inline reply/forward) hides the Send-later affordance. */
+    onSendLater?: (sendAt: number) => void;
     onAttach: () => void;
     onPolish: () => void;
     onDiscard: () => void;
@@ -29,6 +37,7 @@ export function ComposeToolbar({
     plainBody,
     hasRecipients,
     onSend,
+    onSendLater,
     onAttach,
     onPolish,
     onDiscard,
@@ -38,20 +47,59 @@ export function ComposeToolbar({
     readReceipt = false,
     onToggleReadReceipt,
 }: ComposeToolbarProps) {
+    const [showSendLater, setShowSendLater] = useState(false);
+    // Held HERE, not in the menu: the menu unmounts on a click outside, and a
+    // half-entered delivery time must survive that. One store per toolbar, so
+    // two open composers can hold two different times without meeting.
+    const { draft: sendLaterDraft, update: updateSendLaterDraft } = useSendLaterDraft();
+    const sendLaterRef = useRef<HTMLDivElement>(null);
+    const closeSendLater = useCallback(() => setShowSendLater(false), []);
+
+    // Click-away, so the menu can't be left open behind the composer.
+    useClickAway(sendLaterRef, showSendLater, closeSendLater);
+
+    const sendDisabled = sending || (!isForward && !plainBody.trim()) || !hasRecipients;
 
     return (
         <div className={`flex items-center justify-between px-3 py-2 border-t border-border ${isInline ? 'bg-muted/30' : 'bg-muted/50'}`}>
             <div className="flex items-center gap-2">
-                <Tooltip content="Send" shortcut={`${MOD_KEY}+Enter`} position="top">
-                    <button
-                        onClick={onSend}
-                        disabled={sending || (!isForward && !plainBody.trim()) || !hasRecipients}
-                        className="flex items-center gap-2 px-4 py-1.5 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
-                    >
-                        <Send className="h-4 w-4" />
-                        {sending ? 'Sending...' : 'Send'}
-                    </button>
-                </Tooltip>
+                <div className="flex items-stretch" ref={sendLaterRef}>
+                    <Tooltip content="Send" shortcut={`${MOD_KEY}+Enter`} position="top">
+                        <button
+                            onClick={onSend}
+                            disabled={sendDisabled}
+                            className={`flex items-center gap-2 px-4 py-1.5 bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium ${onSendLater ? 'rounded-l-md' : 'rounded-md'}`}
+                        >
+                            <Send className="h-4 w-4" />
+                            {sending ? 'Sending...' : 'Send'}
+                        </button>
+                    </Tooltip>
+
+                    {onSendLater && (
+                        <div className="relative flex">
+                            {/* Icon-only control: tooltip + aria-label, 40ms so it reads as instant. */}
+                            <Tooltip content="Send later" position="top" delayMs={40} hidden={showSendLater}>
+                                <button
+                                    onClick={() => setShowSendLater((open) => !open)}
+                                    disabled={sendDisabled}
+                                    aria-label="Send later"
+                                    aria-expanded={showSendLater}
+                                    className="flex items-center px-1.5 rounded-r-md bg-primary text-primary-foreground hover:bg-primary/90 border-l border-primary-foreground/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    <ChevronDown className="h-4 w-4" />
+                                </button>
+                            </Tooltip>
+                            {showSendLater && (
+                                <SendLaterDropdown
+                                    onPick={onSendLater}
+                                    onClose={closeSendLater}
+                                    draft={sendLaterDraft}
+                                    onDraftChange={updateSendLaterDraft}
+                                />
+                            )}
+                        </div>
+                    )}
+                </div>
 
                 {hasAIProvider && (
                     <Tooltip content="Polish with AI" position="top">

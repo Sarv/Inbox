@@ -142,6 +142,39 @@ export class SendQueue {
   }
 
   /**
+   * Persist a send the user asked to deliver LATER. Same durability as the undo
+   * hold — the row exists before this resolves — but it also records the intent
+   * in `scheduled_at`, so a 30-second schedule can still be told apart from a
+   * 30-second undo window (both are just "a future next_retry_at" otherwise).
+   *
+   * `sendAt` is a UTC epoch in SECONDS. A time already in the past is not an
+   * error: the drain picks it up on the next pass and the mail goes now, which
+   * is what "send it at 9am" means when it is already 10am.
+   */
+  async scheduleSend(payload: SendEmailOptions, sendAt: number): Promise<{ id: number }> {
+    if (!this.storage) throw new Error('SendQueue not initialized');
+    const id = await this.storage.scheduleSend(payload, Math.floor(sendAt));
+    logger.info(`[Outbox] Send ${id} scheduled for ${new Date(sendAt * 1000).toISOString()}`);
+    return { id };
+  }
+
+  /**
+   * Move a still-waiting scheduled send to a new time. Returns false when the
+   * drain already has it — at that point the mail is on its way and a new
+   * delivery time would be a lie.
+   */
+  async rescheduleSend(id: number, sendAt: number): Promise<boolean> {
+    if (!this.storage) throw new Error('SendQueue not initialized');
+    const moved = await this.storage.rescheduleSend(id, Math.floor(sendAt));
+    logger.info(
+      moved
+        ? `[Outbox] Send ${id} rescheduled for ${new Date(sendAt * 1000).toISOString()}`
+        : `[Outbox] Reschedule of send ${id} ignored: no longer waiting`,
+    );
+    return moved;
+  }
+
+  /**
    * Execute one attempt for a persisted send and update its row accordingly.
    */
   private async attempt(id: number, payload: SendEmailOptions, attemptsMade: number): Promise<SendQueueResult> {

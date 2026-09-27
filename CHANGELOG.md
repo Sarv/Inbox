@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Motion (Settings > Appearance).** Animated transitions can now follow your
   OS "reduce motion" setting, be forced on, or be turned off everywhere in the
   app.
+- **Send later.** The arrow beside Send schedules a message instead of sending
+  it: later today, tomorrow morning, Monday morning, or any date and time you
+  pick. A scheduled message waits in the Outbox under Scheduled, where you can
+  reschedule it, send it now, or cancel it and get the draft back. It is
+  written to disk before the composer closes, so it survives quitting the app,
+  and it goes out from the account you wrote it from. The date and time you
+  pick stay put while that composer is open — a click outside no longer throws
+  them away — and every composer keeps its own. A moment that has already
+  passed is refused, with a line saying so rather than a greyed-out button; a
+  pick that lapses while the menu is shut comes back moved to the next half
+  hour instead of stale. A message set for 1:08 leaves at 1:08 — the Outbox
+  wakes on the time you chose rather than on a one-minute tick, and the list
+  redraws the moment it goes, so the app never shows a send still waiting after
+  its time has come. And once the server has taken a message it leaves the
+  Outbox for your Sent folder straight away, instead of sitting there marked
+  Queued while the recipient is already reading it; if only the copy filed on
+  the server is still outstanding, a line under the list says so and it
+  finishes on its own.
 
 ### Changed
 - **Hover actions and Button labels moved from General to Appearance > Layout,

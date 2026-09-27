@@ -37,6 +37,12 @@ export function registerQueueHandlers(): void {
           retryCount: s.retryCount,
           lastError: s.lastError ?? null,
           nextRetryAt: s.nextRetryAt ?? null,
+          scheduledAt: s.scheduledAt ?? null,
+          // Delivered already: SMTP took it and only the Sent-folder copy is
+          // outstanding. Without these the Outbox lists a message the recipient
+          // has read as if it were still waiting to go out.
+          smtpAccepted: s.smtpAccepted ?? false,
+          sentAppendPending: s.sentAppendPending ?? false,
           createdAt: s.createdAt,
         };
       });

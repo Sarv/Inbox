@@ -2765,6 +2765,34 @@ export class SQLiteStorage implements IEmailStorage {
     return Number(result.lastInsertRowid);
   }
 
+  async scheduleSend(payload: unknown, sendAt: number): Promise<number> {
+    this.ensureInitialized();
+    // next_retry_at AND scheduled_at: the first is what the drain reads, the
+    // second is what the user asked for. A transient failure rewrites the
+    // former (backoff) and must leave the latter alone, or the Outbox stops
+    // being able to say when the message was meant to go.
+    const result = this.db!.prepare(`
+      INSERT INTO pending_sends (payload, status, retry_count, next_retry_at, scheduled_at)
+      VALUES (?, 'pending', 0, ?, ?)
+    `).run(JSON.stringify(payload), sendAt, sendAt);
+    return Number(result.lastInsertRowid);
+  }
+
+  async rescheduleSend(id: number, sendAt: number): Promise<boolean> {
+    this.ensureInitialized();
+    const now = Math.floor(Date.now() / 1000);
+    // Guarded exactly like cancelHeldSend: only a send still WAITING can move.
+    // Once the drain has it (executing/append_pending/failed) the message is
+    // already on its way, and pretending otherwise would show a delivery time
+    // for mail that has been delivered.
+    const res = this.db!.prepare(`
+      UPDATE pending_sends
+      SET next_retry_at = ?, scheduled_at = ?, updated_at = unixepoch()
+      WHERE id = ? AND status = 'pending' AND next_retry_at IS NOT NULL AND next_retry_at > ?
+    `).run(sendAt, sendAt, id, now);
+    return res.changes > 0;
+  }
+
   async cancelHeldSend(id: number): Promise<boolean> {
     this.ensureInitialized();
     const now = Math.floor(Date.now() / 1000);
@@ -2781,12 +2809,17 @@ export class SQLiteStorage implements IEmailStorage {
     this.ensureInitialized();
     // Release the undo-hold so the drain treats it as due now. Guarded to
     // pending+held rows so it can't disturb an executing/failed send.
+    // scheduled_at is cleared with it: the wait is over, so from here this is an
+    // ordinary outbox send. Leaving it set would make the first retry backoff
+    // (which also parks next_retry_at in the future) read as "scheduled again",
+    // and the message would reappear under Scheduled with a delivery time that
+    // is really a retry time.
     this.db!.prepare(
-      `UPDATE pending_sends SET next_retry_at = NULL, updated_at = unixepoch() WHERE id = ? AND status = 'pending'`,
+      `UPDATE pending_sends SET next_retry_at = NULL, scheduled_at = NULL, updated_at = unixepoch() WHERE id = ? AND status = 'pending'`,
     ).run(id);
   }
 
-  async getDueSends(now: number): Promise<Array<{ id: number; payload: any; status: string; retryCount: number; lastError: string | null; nextRetryAt: number | null; createdAt: number; updatedAt: number }>> {
+  async getDueSends(now: number): Promise<Array<{ id: number; payload: any; status: string; retryCount: number; lastError: string | null; nextRetryAt: number | null; scheduledAt: number | null; createdAt: number; updatedAt: number }>> {
     this.ensureInitialized();
     const rows = this.db!.prepare(`
       SELECT * FROM pending_sends
@@ -2796,7 +2829,10 @@ export class SQLiteStorage implements IEmailStorage {
     return rows.map(row => this.mapPendingSend(row));
   }
 
-  async getAllSends(): Promise<Array<{ id: number; payload: any; status: string; retryCount: number; lastError: string | null; nextRetryAt: number | null; createdAt: number; updatedAt: number }>> {
+  // Return type inferred from mapPendingSend so the durability columns
+  // (smtp_accepted, sent_append_pending) reach every caller: an explicit
+  // narrower signature here is what hid "already delivered" from the Outbox.
+  async getAllSends() {
     this.ensureInitialized();
     const rows = this.db!.prepare('SELECT * FROM pending_sends ORDER BY created_at ASC').all() as any[];
     return rows.map(row => this.mapPendingSend(row));
@@ -2816,6 +2852,7 @@ export class SQLiteStorage implements IEmailStorage {
       sentAppendPending: !!row.sent_append_pending,
       rawMime: row.raw_mime ?? null,
       messageId: row.sent_message_id ?? null,
+      scheduledAt: row.scheduled_at ?? null,
     };
   }
 
@@ -2921,10 +2958,13 @@ export class SQLiteStorage implements IEmailStorage {
 
   async getPendingSendCounts(): Promise<{ pending: number; failed: number }> {
     this.ensureInitialized();
+    // A row SMTP has already accepted is NOT pending: the mail is delivered and
+    // only its Sent-folder copy is outstanding. Counting it put a badge on the
+    // Outbox for a message the user had already received.
     const row = this.db!.prepare(`
       SELECT
-        SUM(CASE WHEN status = 'failed' THEN 0 ELSE 1 END) AS pending,
-        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+        SUM(CASE WHEN status = 'failed' OR COALESCE(smtp_accepted, 0) = 1 THEN 0 ELSE 1 END) AS pending,
+        SUM(CASE WHEN status = 'failed' AND COALESCE(smtp_accepted, 0) = 0 THEN 1 ELSE 0 END) AS failed
       FROM pending_sends
     `).get() as { pending: number | null; failed: number | null };
     return { pending: row.pending ?? 0, failed: row.failed ?? 0 };

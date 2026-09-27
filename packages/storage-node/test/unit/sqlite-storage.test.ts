@@ -1399,6 +1399,18 @@ describe('SQLiteStorage pending sends (outbox)', () => {
     expect(await storage.deleteFailedSends()).toBe(0);
     expect(await storage.getPendingSendCounts()).toEqual({ pending: 0, failed: 0 });
   });
+
+  // Regression: a row SMTP has ALREADY accepted lingers only until its Sent
+  // copy is filed. Counting it as pending put a badge on the Outbox for a
+  // message the user had already received.
+  it('stops counting a send as pending once SMTP has accepted it', async () => {
+    const storage = ctx.get();
+    const id = await storage.savePendingSend({ to: 'a@example.test' });
+    expect(await storage.getPendingSendCounts()).toEqual({ pending: 1, failed: 0 });
+
+    await storage.markSendAppendPending(id, 'raw-mime', '<mid-1@example.test>');
+    expect(await storage.getPendingSendCounts()).toEqual({ pending: 0, failed: 0 });
+  });
 });
 
 // ===========================================================================

@@ -3520,6 +3520,42 @@ export const emailTagsJoinTable: Migration = {
 };
 
 /**
+ * v92 — `pending_sends.scheduled_at`: a send the USER chose to delay.
+ *
+ * The outbox already supports a send with a future `next_retry_at`: that is how
+ * the undo window holds a message for a few seconds before transmitting it. A
+ * scheduled send ("send tomorrow at 8am") is the same mechanism with a longer
+ * hold, so nothing about the drain changes.
+ *
+ * What does need recording is the INTENT, and that is what this column is. A
+ * future `next_retry_at` on its own is ambiguous — it means "held for undo",
+ * "scheduled by the user" or "waiting out a retry backoff", three different
+ * things to show and three different things to do. Inferring which from the
+ * size of the delay would be a guess, and the guess is wrong exactly when it
+ * matters: a mail scheduled 20 seconds out would read as an undo hold and
+ * disappear from the Scheduled list.
+ *
+ * NULL = not scheduled (an immediate send, an undo hold, a retry). Non-null =
+ * the delivery time the user picked, which survives a transient failure: the
+ * backoff moves `next_retry_at`, never this, so the outbox can still say what
+ * the user asked for.
+ */
+export const pendingSendsScheduledAt: Migration = {
+  version: 92,
+  name: 'pending_sends_scheduled_at',
+  up: (db) => {
+    addColumnIfMissing(db, 'pending_sends', 'scheduled_at', 'INTEGER DEFAULT NULL');
+    logger.info('Scheduled send (v92): pending_sends.scheduled_at added');
+  },
+  down: (db) => {
+    // Null it rather than DROP COLUMN (a whole-table rewrite in SQLite). Every
+    // row then reads as "not scheduled", which is exactly the pre-v92 meaning;
+    // the sends themselves still transmit at their `next_retry_at`.
+    db.exec('UPDATE pending_sends SET scheduled_at = NULL WHERE scheduled_at IS NOT NULL;');
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3595,5 +3631,6 @@ export function createMigrationManager(
   manager.register(headerStageBacklogIndexes);
   manager.register(emailSpamVerdictColumnsRepair);
   manager.register(emailTagsJoinTable);
+  manager.register(pendingSendsScheduledAt);
   return manager;
 }

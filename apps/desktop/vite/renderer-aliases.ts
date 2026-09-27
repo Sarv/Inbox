@@ -84,6 +84,22 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/extensions/categories.ts',
     ),
+    // Pure (zero imports) — what a row in the outbox MEANS. The Outbox screen
+    // labels a send with the SAME classifier the main process schedules and
+    // cancels by, so "Scheduled" on screen can never be a row the drain treats
+    // as an ordinary retry.
+    '@sarvinbox/core/send-status': resolve(
+      desktopDir,
+      '../../packages/core/src/smtp/send-status.ts',
+    ),
+    // Pure (zero imports) — the List-Unsubscribe parser. The button the reader
+    // clicks and the main-process handler that acts on it read the header with
+    // the same module: one deciding a one-click POST is allowed while the other
+    // disagrees is an unauthenticated write on the reader's behalf.
+    '@sarvinbox/core/unsubscribe': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/unsubscribe.ts',
+    ),
     // Pure (zero imports) — the blocklist preferences, read by the Blocklists
     // tab with the SAME function main reads them with, so the ticks a user
     // sees are the lists that are actually queried.

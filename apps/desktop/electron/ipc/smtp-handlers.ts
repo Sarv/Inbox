@@ -237,6 +237,35 @@ export function registerSmtpHandlers(): void {
     }
   });
 
+  /**
+   * Send later: persist the mail held until a time the user picked. Same
+   * durability as the undo hold — the row exists before this resolves — with
+   * `sendAt` (UTC epoch SECONDS) recorded as the intent, so the Outbox can tell
+   * a chosen delivery time from an undo window or a retry backoff.
+   */
+  ipcMain.handle('smtp:scheduleSend', async (_event, options: SendEmailOptions, sendAt: number) => {
+    try {
+      const { id } = await queueFor(options.accountId).scheduleSend(options, sendAt);
+      notifyOutboxChanged();
+      return { success: true, id };
+    } catch (error) {
+      logger.error('SMTP scheduleSend error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  /** Move a still-waiting scheduled send. `moved: false` = the drain has it. */
+  ipcMain.handle('smtp:rescheduleSend', async (_event, id: number, sendAt: number, accountId?: string) => {
+    try {
+      const moved = await queueFor(accountId).rescheduleSend(id, sendAt);
+      notifyOutboxChanged();
+      return { success: true, moved };
+    } catch (error) {
+      logger.error('SMTP rescheduleSend error:', error);
+      return { success: false, moved: false, error: (error as Error).message };
+    }
+  });
+
   ipcMain.handle('smtp:cancelSend', async (_event, id: number, accountId?: string) => {
     try {
       const cancelled = await queueFor(accountId).cancelHeld(id);
