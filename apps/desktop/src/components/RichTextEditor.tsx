@@ -27,6 +27,14 @@ import {
 } from 'lucide-react';
 import { useEffect, useCallback, useState, useMemo } from 'react';
 
+/**
+ * The body a fresh composer opens with: ONE empty paragraph. TipTap's
+ * placeholder only renders while the whole document is empty, so seeding extra
+ * blank paragraphs for "typing space" hides it (the editor's min-height already
+ * gives the room) and ships those blank lines in the sent mail.
+ */
+export const EMPTY_EDITOR_HTML = '<p></p>';
+
 interface RichTextEditorProps {
   content: string;
   onChange: (html: string, text: string) => void;

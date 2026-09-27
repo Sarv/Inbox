@@ -27,7 +27,7 @@ import { reportSendFailure } from '../utils/send-failure';
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
 import { PolishModal } from './PolishModal';
-import { RichTextEditor } from './RichTextEditor';
+import { EMPTY_EDITOR_HTML, RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
 import { SmtpNotConfiguredBanner } from './SmtpNotConfiguredBanner';
 import { Tooltip } from './Tooltip';
@@ -232,9 +232,9 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     if (draft) return; // Do not overwrite restored drafts
 
     if (mode === 'new') {
-      // Blank lines for typing space; the signature is kept separate
-      // (signatureHtml) so TipTap can't flatten it — appended on send + previewed.
-      setHtmlBody('<p></p><p></p><p></p>');
+      // A single empty paragraph so the placeholder shows; the signature is kept
+      // separate (signatureHtml) so TipTap can't flatten it — appended on send + previewed.
+      setHtmlBody(EMPTY_EDITOR_HTML);
       return;
     }
 
@@ -274,7 +274,7 @@ ${createQuotedHeader(prefix, extraInfo)}
     const draftHtml = draftBody
       ? draftBody.split('\n').map(line => `<p>${line || '&nbsp;'}</p>`).join('')
       : '';
-    const editorContent = draftHtml || '<p></p>';
+    const editorContent = draftHtml || EMPTY_EDITOR_HTML;
 
     switch (mode) {
       case 'reply':
