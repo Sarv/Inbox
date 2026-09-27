@@ -62,6 +62,28 @@ const renderedClasses = () =>
 const indexHtmlClasses = () =>
   classesIn(new DOMParser().parseFromString(readSite('index.html'), 'text/html'));
 
+describe('src/styles.css', () => {
+  // Breaks if `hidden` stops actually hiding: the collapsed card is a `.stack`,
+  // and an author `display: flex` outranks the user-agent `[hidden]` rule, so
+  // "Hide other platforms" would flip the label and leave the list on screen.
+  it('hides a hidden element that a class gives a display to', () => {
+    document.head.innerHTML = `<style>${readSite('src/theme.css')}${readSite('src/styles.css')}</style>`;
+    document.body.innerHTML = '<div id="app"></div>';
+    const root = document.getElementById('app');
+    renderDownloadPage(
+      root,
+      buildDownloadView({ platform: { os: OS.WINDOWS, arch: ARCH.X64 }, release: releaseV122() }),
+      'en-US'
+    );
+    const toggle = root.querySelector('button.others-toggle');
+    toggle.click();
+    const card = root.querySelector('#other-platforms');
+    expect(getComputedStyle(card).display).not.toBe('none');
+    toggle.click();
+    expect(getComputedStyle(card).display).toBe('none');
+  });
+});
+
 describe('src/theme.css', () => {
   // Breaks if the page uses a class neither the theme subset nor styles.css defines.
   it('defines every class the page renders', () => {

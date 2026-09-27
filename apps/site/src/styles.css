@@ -102,6 +102,14 @@ a.btn:hover {
   transform: rotate(180deg);
 }
 
+/* The others list is hidden with the `hidden` property, but it is also a
+   `.stack` — and an author `display: flex` beats the user-agent
+   `[hidden] { display: none }` whatever the specificity, leaving the "hidden"
+   card fully visible. Every display rule here must lose to `hidden`. */
+[hidden] {
+  display: none !important;
+}
+
 @media (max-width: 480px) {
   .page {
     padding-block: var(--space-7);
