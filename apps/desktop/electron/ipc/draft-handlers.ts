@@ -11,7 +11,10 @@ import MailComposer from 'nodemailer/lib/mail-composer';
 import pLimit from 'p-limit';
 
 import { resolveAccountTarget } from '../services/account-target';
+import { seedAttachmentCache } from '../services/attachment-cache';
 import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
+
+import { decodeDraftAttachments, draftAttachmentColumns, draftMimeAttachments, type DecodedDraftAttachment, type DraftAttachment } from './draft-attachments';
 const logger = createLogger('draft-handlers');
 
 // Draft diagnostic log (from the "immortal draft" investigation). Kept as a
@@ -168,6 +171,8 @@ export async function saveDraftToIMAP(draft: {
    *  account) was written to / deleted from the WRONG database, which made
    *  drafts undeletable and accumulate ("immortal drafts"). */
   accountId?: string;
+  /** Files attached in the composer — kept in the draft so reopening it brings them back. */
+  attachments?: DraftAttachment[];
 }): Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }> {
   // Resolve the TARGET account's storage + sync engine (falls back to the active
   // account when no accountId is given).
@@ -223,6 +228,8 @@ export async function saveDraftToIMAP(draft: {
     mailOptions.text = draft.body;
   }
   mailOptions.date = new Date();
+  const attachments = decodeDraftAttachments(draft.attachments);
+  if (attachments.length > 0) mailOptions.attachments = draftMimeAttachments(attachments);
 
   const composer = new MailComposer(mailOptions);
   const rawMessage = await new Promise<Buffer>((resolve, reject) => {
@@ -234,7 +241,7 @@ export async function saveDraftToIMAP(draft: {
 
   // 1. Write to local DB first — instant visibility in the Drafts folder.
   try {
-    await writeLocalDraftRow(storage, {
+    const localRowId = await writeLocalDraftRow(storage, {
       messageId,
       folderPath,
       to: draft.to || '',
@@ -248,7 +255,21 @@ export async function saveDraftToIMAP(draft: {
       fromName: draft.accountName || '',
       threadId: draft.threadId,
       rawMessage: rawMessage.toString('utf-8'),
+      attachments,
     });
+    // The row has no UID until the append below lands (never, if offline), so
+    // its files are seeded where the attachment path looks first.
+    if (localRowId && attachments.length > 0) {
+      try {
+        await seedAttachmentCache(localRowId, attachments);
+      } catch (err) {
+        logger.warn('[Drafts] Could not cache draft attachments locally:', err);
+      }
+    }
+    // Tell the renderer NOW, not when the IMAP append resolves (~seconds) or the
+    // next sync lands: without this a just-closed compose's draft was missing
+    // from the Drafts list until a later sync happened to reload it.
+    try { sendToWindow('drafts:saved', { messageId, threadId: draft.threadId }); } catch { /* no window */ }
   } catch (err) {
     logger.error('[Drafts] Local mirror write failed:', err);
     // Non-fatal — IMAP save is still attempted below.
@@ -312,15 +333,17 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
   fromName?: string;
   threadId?: string;
   rawMessage: string;
-}): Promise<void> {
+  attachments?: DecodedDraftAttachment[];
+}): Promise<string | undefined> {
   const db = (storage as any).db;
-  if (!db?.prepare) return;
+  if (!db?.prepare) return undefined;
+  const attachmentColumns = draftAttachmentColumns(row.attachments ?? []);
 
   // Resolve folder id by path
   const folder = db.prepare('SELECT id FROM folders WHERE path = ?').get(row.folderPath) as any;
   if (!folder?.id) {
     logger.warn('[Drafts] No local folder row for', row.folderPath);
-    return;
+    return undefined;
   }
 
   // Tag the row with BOTH the folder-path (so getByFolder finds it via the
@@ -348,6 +371,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
       ccAddress: row.cc,
       date: Math.floor(Date.now() / 1000),
       tags: draftTags,
+      ...attachmentColumns,
     };
     // Body row first, header second — the same ordering EmailRepository.update
     // uses, and for the same reason: the FTS trigger on `emails` re-indexes a
@@ -371,11 +395,13 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
           raw_body_len = ${bodyLengthFromParam('@rawBody')},
           content_hash = @contentHash,
           subject = @subject, to_address = @toAddress, cc_address = @ccAddress,
-          date = @date, tags = @tags
+          date = @date, tags = @tags,
+          has_attachments = @hasAttachments, attachment_count = @attachmentCount,
+          attachment_names = @attachmentNames, attachment_sizes = @attachmentSizes
          WHERE id = @id
       `).run(params);
     })();
-    return;
+    return existing.id;
   }
 
   // Derive a local id — use the message-id (without brackets) for stability
@@ -409,7 +435,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
       clean_body, raw_body, clean_body_len, raw_body_len, content_type, content_hash,
       in_reply_to, "references",
       priority,
-      has_attachments, attachment_count, attachment_names,
+      has_attachments, attachment_count, attachment_names, attachment_sizes,
       importance_score, importance_source,
       extraction_status, agent_status
     ) VALUES (
@@ -430,7 +456,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
       @contentType, @contentHash,
       @inReplyTo, @refs,
       @priority,
-      @hasAttachments, @attachmentCount, @attachmentNames,
+      @hasAttachments, @attachmentCount, @attachmentNames, @attachmentSizes,
       @importanceScore, @importanceSource,
       'done', 'done'
     )
@@ -468,10 +494,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
     inReplyTo: row.inReplyTo,
     refs: '',
     priority: 'normal',
-    hasAttachments: 0,
-    attachmentCount: 0,
-    attachmentNames: '',
-    attachmentSizes: null,
+    ...attachmentColumns,
     importanceScore: 0,
     importanceSource: 'none',
   };
@@ -502,6 +525,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
   })();
 
   logger.info('[Drafts] Local draft row inserted', id, 'folder=', row.folderPath);
+  return id;
 }
 
 /**
@@ -592,6 +616,7 @@ export function registerDraftHandlers(): void {
     threadId?: string;
     accountEmail?: string;
     accountId?: string;
+    attachments?: DraftAttachment[];
   }) => {
     try {
       return await saveDraftToIMAP(draft);
@@ -621,7 +646,9 @@ export function registerDraftHandlers(): void {
                -- columns): this row is what the composer reopens, so reading
                -- the inline column would silently hand the user a blank draft.
                ${cleanBodyExpression()} as cleanBody,
-               ${rawBodyExpression()} as rawBody, in_reply_to as inReplyTo, tags
+               ${rawBodyExpression()} as rawBody, in_reply_to as inReplyTo, tags,
+               -- So the reopened draft can load its own files back.
+               attachment_names as attachmentNames, attachment_sizes as attachmentSizes
           FROM emails
          WHERE instr(tags, '|draft|') > 0
            AND in_reply_to IN (${placeholders})
@@ -705,6 +732,12 @@ export function registerDraftHandlers(): void {
     } catch (err) {
       logger.error('[Drafts] Local draft cleanup failed:', err);
       draftLog('delete:local:error', { err: String(err) });
+    }
+    // Drop the rows from open views. The autosave's replace-in-place deletes the
+    // superseded draft here; without the event it lingered beside its
+    // replacement in the Drafts list as a duplicate until the next sync.
+    if (messageIds.length > 0) {
+      try { sendToWindow('drafts:removed', { threadId: options.threadId ?? '', messageIds }); } catch { /* no window */ }
     }
 
     // 2. Delete from IMAP on the TARGET account's engine — using a POOLED

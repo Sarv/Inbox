@@ -247,6 +247,11 @@ export async function getOrCacheAttachment(
     // Not cached yet — fetch from IMAP
   }
 
+  // A draft saved while offline has no server copy yet (uid 0): its files exist
+  // only where the save seeded them into this cache, above.
+  if (!uid) {
+    throw new AttachmentError('Cannot determine folder/UID for email', 404);
+  }
   if (!syncEngine?.isConnected()) {
     throw new AttachmentError('Not connected to IMAP', 503);
   }
@@ -264,6 +269,14 @@ export async function getOrCacheAttachment(
       413,
     );
   }
+  await writeCachedFile(cacheDir, cachedPath, content);
+  // Keep the on-disk cache bounded (throttled, best-effort — never block the
+  // attachment the user asked for on cache housekeeping).
+  void pruneAttachmentCache().catch(() => {});
+  return cachedPath;
+}
+
+async function writeCachedFile(cacheDir: string, cachedPath: string, content: Buffer): Promise<void> {
   // 0o700 dir / 0o600 file: keep cached attachments non-world-readable on
   // macOS/Linux (no-op on Windows NTFS, harmless).
   await fs.promises.mkdir(cacheDir, { recursive: true, mode: 0o700 });
@@ -279,10 +292,24 @@ export async function getOrCacheAttachment(
     await fs.promises.rm(tempPath, { force: true }).catch(() => {});
     throw err;
   }
-  // Keep the on-disk cache bounded (throttled, best-effort — never block the
-  // attachment the user asked for on cache housekeeping).
+}
+
+/**
+ * Put files we already hold into the cache for `emailId` — the attachments of a
+ * draft we just wrote locally. Until the IMAP append lands (or forever, when
+ * offline) that row has no UID to fetch from, so without this a reopened draft
+ * could not get its own attachments back.
+ */
+export async function seedAttachmentCache(
+  emailId: string,
+  files: { filename: string; content: Buffer }[],
+): Promise<void> {
+  await ensureCacheGeneration(attachmentCacheRoot());
+  const cacheDir = attachmentCacheDir(emailId);
+  await Promise.all(
+    files.map((file) => writeCachedFile(cacheDir, resolveWithinDir(cacheDir, safeFilename(file.filename)), file.content)),
+  );
   void pruneAttachmentCache().catch(() => {});
-  return cachedPath;
 }
 
 /**
@@ -317,11 +344,13 @@ export async function resolveAttachmentFile(
   }
 
   const folder = await storage.getFolder(email.folderId);
-  if (!folder || !email.uid) {
+  if (!folder) {
     throw new AttachmentError('Cannot determine folder/UID for email', 404);
   }
 
-  const filePath = await getOrCacheAttachment(emailId, folder.path, email.uid, filename, syncEngine);
+  // No UID is allowed through: a cache hit needs none (a locally-saved draft),
+  // and a miss without one is refused inside.
+  const filePath = await getOrCacheAttachment(emailId, folder.path, email.uid || 0, filename, syncEngine);
   await reconcileStoredAttachmentSize(storage, email, filename, filePath);
   return { filePath, filename };
 }

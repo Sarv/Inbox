@@ -64,6 +64,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   pruneAttachmentCache,
   resolveAttachmentFile,
+  seedAttachmentCache,
 } from '../../../../electron/services/attachment-cache';
 
 const TMP = mkdtempSync(join(tmpdir(), 'attachment-handlers-'));
@@ -692,5 +693,55 @@ describe('stored attachment size reconciliation', () => {
 
     expect(h.otherStorage.updateEmail).toHaveBeenCalled();
     expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('seedAttachmentCache (a locally-saved draft\'s files)', () => {
+  const localDraft = () => h.storage.getEmail.mockResolvedValue({
+    id: EMAIL_ID, folderId: 'f1', uid: 0, attachmentNames: JSON.stringify([FILENAME]),
+  });
+
+  // Breaks: a draft saved offline (no server copy, uid 0) reopens without its
+  // attachments, because the only place they exist is this cache.
+  it('serves a seeded file for a row that has no UID yet, without touching IMAP', async () => {
+    localDraft();
+    await seedAttachmentCache(EMAIL_ID, [{ filename: FILENAME, content: BYTES }]);
+
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+
+    expect(readFileSync(filePath)).toEqual(BYTES);
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+    expect(h.syncEngine.fetchAttachment).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a UID-less miss asks IMAP for uid 0 — fetching some other message's
+  // part, or hanging — instead of failing plainly.
+  it('refuses a UID-less row whose file was never seeded', async () => {
+    localDraft();
+
+    await expect(
+      resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME }),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  // SECURITY. Breaks: a draft attachment named "../../db-key.bin" is written
+  // outside the email's cache dir, clobbering app files.
+  it('keeps a traversal filename inside the email\'s cache dir', async () => {
+    await seedAttachmentCache(EMAIL_ID, [{ filename: '../../escape.bin', content: BYTES }]);
+
+    expect(cachedNames()).toEqual(['escape.bin']);
+    expect(existsSync(join(h.userData, 'escape.bin'))).toBe(false);
+  });
+
+  // Breaks: seeding leaves a `.partial` temp beside the file, which the cache
+  // then counts and serves forever.
+  it('leaves only the finished files behind', async () => {
+    await seedAttachmentCache(EMAIL_ID, [
+      { filename: 'a.txt', content: Buffer.from('a') },
+      { filename: 'b.txt', content: Buffer.from('b') },
+    ]);
+
+    expect(cachedNames().sort()).toEqual(['a.txt', 'b.txt']);
   });
 });

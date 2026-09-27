@@ -746,7 +746,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Draft operations (auto-save to IMAP Drafts)
   drafts: {
-    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string }) =>
+    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[] }) =>
       ipcRenderer.invoke('drafts:save', draft),
     delete: (options: { messageId?: string; subject?: string; to?: string; threadId?: string; accountId?: string; savedAt?: number }) =>
       ipcRenderer.invoke('drafts:delete', options),
@@ -761,6 +761,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const handler = (_e: unknown, data: { threadId: string; messageIds: string[] }) => callback(data);
       ipcRenderer.on('drafts:removed', handler);
       return () => ipcRenderer.removeListener('drafts:removed', handler);
+    },
+    onSaved: (callback: (data: { messageId: string; threadId?: string }) => void) => {
+      const handler = (_e: unknown, data: { messageId: string; threadId?: string }) => callback(data);
+      ipcRenderer.on('drafts:saved', handler);
+      return () => ipcRenderer.removeListener('drafts:saved', handler);
     },
   },
 
@@ -1519,7 +1524,7 @@ export interface ElectronAPI {
     removeListeners: () => void;
   };
   drafts: {
-    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string }) =>
+    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[] }) =>
       Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }>;
     delete: (options: { messageId?: string; subject?: string; to?: string; threadId?: string; accountId?: string; savedAt?: number }) =>
       Promise<{ success: boolean; error?: string }>;
@@ -1527,6 +1532,7 @@ export interface ElectronAPI {
     debug: (event: string, data?: Record<string, unknown>) => Promise<{ success: boolean }>;
     cleanup: (opts: { sinceMs?: number; beforeMs?: number; accountId?: string }) => Promise<{ success: boolean; results: Array<{ accountId?: string; dbFile?: string; localDeleted?: number; imapDeleted?: number; error?: string }> }>;
     onRemoved: (callback: (data: { threadId: string; messageIds: string[] }) => void) => () => void;
+    onSaved: (callback: (data: { messageId: string; threadId?: string }) => void) => () => void;
     findForThread: (messageIds: string[], accountId?: string) => Promise<{
       success: boolean;
       data?: {
