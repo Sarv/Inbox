@@ -77,8 +77,19 @@ type Db = ReturnType<typeof newMigratedDb>;
 const SENT = 'Sent';
 const DRAFTS = 'Drafts';
 
-/** A storage stub with just the two surfaces these writers touch. */
-function storageOver(db: Db, folders?: Array<Record<string, string>>) {
+/**
+ * A storage stub with just the surfaces these writers touch.
+ *
+ * `countEmailsFiledIn` appears ONLY when a test hands over the filed split:
+ * `withFiledCounts` reads an absent method as "this storage cannot measure"
+ * and returns the folders untouched, which is the path every other test here
+ * exercises.
+ */
+function storageOver(
+  db: Db,
+  folders?: Array<Record<string, unknown>>,
+  filed?: (folderId: string) => Promise<number>,
+) {
   return {
     db,
     getFolders: async () =>
@@ -86,6 +97,7 @@ function storageOver(db: Db, folders?: Array<Record<string, string>>) {
         { id: 'f-sent', name: SENT, path: SENT, specialUse: '\\Sent' },
         { id: 'f-drafts', name: DRAFTS, path: DRAFTS, specialUse: '\\Drafts' },
       ],
+    ...(filed ? { countEmailsFiledIn: filed } : {}),
   } as never;
 }
 
@@ -370,5 +382,109 @@ describe('the two local writers agree with each other', () => {
     await writeLocalDraftRow(storageOver(db), draftRow({ bodyText: text }));
 
     expect(hashOf(db, '<draft-1@test.local>')).toBe(hashOf(db, '<sent-1@test.local>'));
+  });
+});
+
+// What breaks if this block fails: mail the user just sent is INVISIBLE.
+//
+// This account's server publishes two names for one physical Sent store —
+// `Sent`, which every one of its messages is filed under, and `Sent Mail`,
+// which carries SPECIAL-USE \Sent and holds almost nothing. The app collapses
+// the alias away everywhere it draws a folder, so a mirror row written under
+// `Sent Mail` is a row nothing can ever show: the message goes out, the
+// recipient reads it, and the user's Sent folder stays empty. Ranking alone
+// picks the alias (SPECIAL-USE is the strongest signal there is); only
+// measuring which name actually holds the mail first — what the sidebar and the
+// sync engine both do — picks the folder the user is looking at.
+describe('local sent mirror — which Sent, on an account that publishes two', () => {
+  const ALIAS = 'Sent Mail';
+
+  /** The live shape: same UID space, the alias flagged, the plain name filled. */
+  const twoSentFolders = [
+    { id: 'f-sent', name: SENT, path: SENT, uidValidity: 7, totalCount: 1718, serverMessageCount: 1713 },
+    {
+      id: 'f-alias',
+      name: ALIAS,
+      path: ALIAS,
+      specialUse: '\\Sent',
+      uidValidity: 7,
+      totalCount: 1720,
+      serverMessageCount: 1718,
+    },
+  ];
+
+  /** What the primary `folder_id` count reads: one name holds the mail. */
+  const filedCounts = async (folderId: string) => ({ 'f-sent': 1613, 'f-alias': 3 })[folderId] ?? 0;
+
+  const storedRow = (db: Db, messageId: string) =>
+    db.prepare('SELECT folder_id AS folderId, tags FROM emails WHERE message_id = ?').get(messageId) as {
+      folderId: string;
+      tags: string;
+    };
+
+  let db: Db;
+
+  beforeEach(() => {
+    db = newDb();
+    db.prepare('INSERT OR IGNORE INTO folders (id, name, path, special_use) VALUES (?, ?, ?, ?)').run(
+      'f-alias',
+      ALIAS,
+      ALIAS,
+      '\\Sent',
+    );
+  });
+
+  // THE regression the user reported: two messages sent and delivered, both gone
+  // from the Outbox, neither one in Sent.
+  it('files the row under the name holding the mail, not the SPECIAL-USE alias', async () => {
+    await writeLocalSentRow(sentRow(), storageOver(db, twoSentFolders, filedCounts));
+
+    expect(storedRow(db, '<sent-1@test.local>').folderId).toBe('f-sent');
+  });
+
+  // The folder tag is what the message list filters on, so a row filed in one
+  // folder and tagged with another is just as invisible as the wrong folder_id.
+  it('tags the row with the folder it filed it in', async () => {
+    await writeLocalSentRow(sentRow(), storageOver(db, twoSentFolders, filedCounts));
+
+    const { tags } = storedRow(db, '<sent-1@test.local>');
+    expect(tags).toContain(`|${SENT}|`);
+    expect(tags).not.toContain(`|${ALIAS}|`);
+  });
+
+  // List order is an accident of how the server enumerated the mailboxes; the
+  // answer must not depend on it.
+  it('picks the same folder whichever name the server lists first', async () => {
+    await writeLocalSentRow(sentRow(), storageOver(db, [...twoSentFolders].reverse(), filedCounts));
+
+    expect(storedRow(db, '<sent-1@test.local>').folderId).toBe('f-sent');
+  });
+
+  // Failure path: the measurement is a query per contested folder and can fail
+  // (storage swapped mid-send, DB busy). A send must still leave a row behind —
+  // losing the mirror entirely is worse than filing it by the ranking alone.
+  it('still writes the row when the filed-count measurement fails', async () => {
+    const throwing = async () => {
+      throw new Error('database is locked');
+    };
+
+    await writeLocalSentRow(sentRow(), storageOver(db, twoSentFolders, throwing));
+
+    expect(rowCount(db)).toBe(1);
+  });
+
+  // The ordinary account — one Sent, nothing contested — must be untouched by
+  // all of this, and must not pay for a measurement it doesn't need.
+  it('resolves a single-Sent account without measuring anything', async () => {
+    const measured: string[] = [];
+    const counting = async (folderId: string) => {
+      measured.push(folderId);
+      return 0;
+    };
+
+    await writeLocalSentRow(sentRow(), storageOver(db, undefined, counting));
+
+    expect(storedRow(db, '<sent-1@test.local>').folderId).toBe('f-sent');
+    expect(measured).toEqual([]);
   });
 });

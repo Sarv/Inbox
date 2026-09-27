@@ -5,6 +5,7 @@ import {
   decideMidSyncRecount,
   MID_SYNC_RECOUNT_MS,
   refreshCountsForFolders,
+  resolveStandardFolder,
   setEmailReadFlag,
   withFiledCounts,
 } from '../../../src/utils/folder-counts';
@@ -375,5 +376,76 @@ describe('decideMidSyncRecount', () => {
     const decision = decideMidSyncRecount({ ...ready, processed }, before, 10_000_000);
     expect(decision.recount).toBe(false);
     expect(decision.gate).toBe(before);
+  });
+});
+
+/**
+ * Which mailbox IS this account's Sent — asked once, by everyone.
+ *
+ * What breaks if this block fails: mail the user really sent becomes invisible.
+ * The send path writes a local Sent copy at send time; file it under the alias
+ * of a duplicated role and it lands in a folder the sidebar collapses away and
+ * no sync ever visits again. Live case: Sarv publishes `Sent` (1,718 messages)
+ * and `Sent Mail` (SPECIAL-USE \Sent, 3), and the bare ranking picks the empty
+ * one.
+ */
+describe('resolveStandardFolder', () => {
+  const folder = (path: string, over: Record<string, unknown> = {}) => ({
+    id: `f-${path}`, path, uidValidity: 7, serverMessageCount: 1718, totalCount: 1718, ...over,
+  });
+
+  const storageWith = (folders: Array<ReturnType<typeof folder>>, counts: Record<string, number> = {}) => ({
+    getFolders: vi.fn(async () => folders),
+    countEmailsFiledIn: vi.fn(async (folderId: string) => counts[folderId] ?? 0),
+  });
+
+  // Breaks: THE bug. The mail is filed under `Sent Mail`, which the app never
+  // shows, so a sent message is delivered, recorded, and nowhere on screen.
+  it('picks the name holding the mail over the SPECIAL-USE alias', async () => {
+    const storage = storageWith(
+      [folder('Sent'), folder('Sent Mail', { specialUse: '\\Sent', totalCount: 1720 })],
+      { 'f-Sent': 1718, 'f-Sent Mail': 3 },
+    );
+
+    expect((await resolveStandardFolder(storage, 'sent'))?.path).toBe('Sent');
+  });
+
+  // Breaks: the same list resolving two ways in one app. Without the filed
+  // counts the tag totals decide, and an aliased mailbox reads full under both
+  // names — so the alias wins by the two stray rows that landed under it.
+  it('measures the filed counts before deciding', async () => {
+    const storage = storageWith(
+      [folder('Sent'), folder('Sent Mail', { specialUse: '\\Sent', totalCount: 1720 })],
+      { 'f-Sent': 1718, 'f-Sent Mail': 3 },
+    );
+
+    await resolveStandardFolder(storage, 'sent');
+
+    expect(storage.countEmailsFiledIn).toHaveBeenCalled();
+  });
+
+  // Breaks: every send paying a per-folder count query. Nothing is contested on
+  // an ordinary account, so there is nothing to measure.
+  it('asks the database for no counts on an account with one Sent', async () => {
+    const storage = storageWith([folder('INBOX'), folder('Sent')]);
+
+    expect((await resolveStandardFolder(storage, 'sent'))?.path).toBe('Sent');
+    expect(storage.countEmailsFiledIn).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a storage that cannot count (a fake, an older implementation)
+  // throwing instead of falling back to the ranking.
+  it('still resolves when the storage offers no filed count', async () => {
+    const storage = { getFolders: vi.fn(async () => [folder('Sent')]) };
+
+    expect((await resolveStandardFolder(storage as never, 'sent'))?.path).toBe('Sent');
+  });
+
+  // Breaks: a caller treating "no Sent folder on this account" as a folder and
+  // filing mail against an undefined path.
+  it('returns null when the account has no folder for the role', async () => {
+    const storage = storageWith([folder('INBOX')]);
+
+    expect(await resolveStandardFolder(storage, 'sent')).toBeNull();
   });
 });

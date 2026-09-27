@@ -150,6 +150,72 @@ describe('SyncEngine — a role the server published twice', () => {
     expect(synced).not.toContain('Sent Mail');
   });
 
+  /**
+   * Breaks: mail the user really sent becomes invisible. The send path writes a
+   * local Sent copy at send time, and one filed under the alias is stranded the
+   * moment the alias stops syncing — the sidebar resolves the role to the other
+   * name, and no pass ever reads this folder again. Observed live: two messages
+   * delivered, both recorded, neither in Sent.
+   */
+  it('rescues a local-only row filed under the name it is about to stop syncing', async () => {
+    const { engine, db } = setup(
+      [
+        imapFolder('INBOX'),
+        imapFolder('Sent Mail', { specialUse: '\\Sent' }),
+        imapFolder('Sent'),
+      ],
+      {
+        'Sent Mail': { totalCount: 1, alsoTaggedAs: 'Sent' },
+        Sent: { totalCount: 1713, alsoTaggedAs: 'Sent Mail' },
+      },
+    );
+    // No uid: this copy exists on disk only — IMAP has never seen it.
+    const mirror = db.seedEmail({ folderId: db.folderId('Sent Mail'), uid: 0, tags: '|Sent Mail|read|' });
+
+    await engine.syncAll();
+
+    expect(db.row(mirror.id)?.folderId).toBe(db.folderId('Sent'));
+    expect(db.tagsOf(mirror.id)).toContain('Sent');
+    expect(db.tagsOf(mirror.id)).not.toContain('Sent Mail');
+    // The flags it carried are its own — re-filing moves the row, not its state.
+    expect(db.tagsOf(mirror.id)).toContain('read');
+  });
+
+  /**
+   * Breaks: a present message reading as "missing from the server" and being
+   * deleted. A row with a server UID belongs to the UID space of the name it was
+   * synced from; re-file it and the canonical folder's deletion reconcile diffs
+   * it against a UID list it was never in.
+   */
+  it('leaves a row carrying a server uid where it was synced from', async () => {
+    const { engine, db } = setup(
+      [
+        imapFolder('INBOX'),
+        imapFolder('Sent Mail', { specialUse: '\\Sent' }),
+        imapFolder('Sent'),
+      ],
+      {
+        'Sent Mail': { totalCount: 1, alsoTaggedAs: 'Sent' },
+        Sent: { totalCount: 1713, alsoTaggedAs: 'Sent Mail' },
+      },
+    );
+    const onServer = db.seedEmail({ folderId: db.folderId('Sent Mail'), uid: 42, tags: '|Sent Mail|' });
+
+    await engine.syncAll();
+
+    expect(db.row(onServer.id)?.folderId).toBe(db.folderId('Sent Mail'));
+  });
+
+  // Breaks: an ordinary account paying a re-file scan per sync for a collapse
+  // that never happened.
+  it('re-files nothing when no role was collapsed', async () => {
+    const { engine, db } = setup([imapFolder('INBOX'), imapFolder('Sent')]);
+
+    await engine.syncAll();
+
+    expect(db.callCount('refileLocalRows')).toBe(0);
+  });
+
   // Breaks: the ordinary account losing a folder to a collapse it never needed.
   it('leaves an account with one mailbox per role completely alone', async () => {
     const { engine, synced } = setup([

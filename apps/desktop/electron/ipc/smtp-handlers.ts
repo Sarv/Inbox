@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { SMTPClient, emailContentHash, findFolderByType, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
 
@@ -449,8 +449,7 @@ export async function sendEmailFromMain(
       const syncEngine = scopedSyncEngine;
       if (syncEngine && syncEngine.isConnected()) {
         const storage = scopedStorage;
-        const folders = storage ? await storage.getFolders() : [];
-        const sent = findFolderByType(folders as any, 'sent');
+        const sent = storage ? await resolveStandardFolder(storage as any, 'sent') : null;
         if (sent?.path) {
           (syncEngine as any).syncAll({
             folders: [sent.path],
@@ -517,8 +516,7 @@ export async function appendSentCopy(
     throw new Error('IMAP offline — Sent append deferred');
   }
 
-  const folders = await storage.getFolders();
-  const sent = findFolderByType(folders as any, 'sent');
+  const sent = await resolveStandardFolder(storage as any, 'sent');
   if (!sent?.path) {
     // No Sent folder exists on this account — nothing to append to. Returning
     // (not throwing) lets the caller clear the marker instead of looping.
@@ -606,9 +604,12 @@ export async function writeLocalSentRow(row: {
   const db = (storage as any).db;
   if (!db?.prepare) return;
 
-  // Find the Sent folder via the unified resolver (special_use → path → name).
-  const allFolders = await storage.getFolders();
-  const sentRecord = findFolderByType(allFolders as any, 'sent');
+  // Find the Sent folder via the unified resolver — the SAME answer the
+  // sidebar and the sync engine reach, filed counts and all. Resolving it from
+  // a bare folder list files the mirror row under the SPECIAL-USE alias of a
+  // duplicated Sent, which the app collapses away: the mail is sent, the row is
+  // written, and Sent shows nothing.
+  const sentRecord = await resolveStandardFolder(storage as any, 'sent');
   if (!sentRecord?.path) {
     logger.warn('[SMTP] No Sent folder found — skipping local sent mirror');
     return;

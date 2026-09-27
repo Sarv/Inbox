@@ -6,7 +6,7 @@
 
 import * as fs from 'fs';
 
-import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
 import { ipcMain, dialog, shell } from 'electron';
 import ICAL from 'ical.js';
 
@@ -1407,9 +1407,10 @@ export function registerEmailHandlers(): void {
         return { success: false, error: 'Email not found' };
       }
 
-      // Find trash folder (exact classification, not a path substring).
-      const folders = await storage.getFolders();
-      const trashFolder = findFolderByType(folders as any, 'trash') as any;
+      // Find trash folder (exact classification, not a path substring) — through
+      // the shared resolver, so a server publishing two names for one Trash
+      // files the message under the one the app actually shows.
+      const trashFolder = await resolveStandardFolder(storage as any, 'trash') as any;
 
       if (!trashFolder) {
         return { success: false, error: 'Trash folder not found' };
@@ -1529,8 +1530,7 @@ export function registerEmailHandlers(): void {
         return { success: false, error: 'Email not found' };
       }
 
-      const folders = await storage.getFolders();
-      const archiveFolder = findFolderByType(folders as any, 'archive') as any;
+      const archiveFolder = await resolveStandardFolder(storage as any, 'archive') as any;
 
       if (!archiveFolder) {
         return { success: false, error: 'Archive folder not found' };
@@ -1881,7 +1881,10 @@ export function registerEmailHandlers(): void {
       // Load the folder list ONCE and reuse it for every lookup below (per-email
       // folder resolution + the trash/archive/spam target lookups) instead of
       // refetching the whole folders table per email and per action group.
-      const allFolders = await storage.getFolders();
+      // Filed counts attached once for the whole bulk pass: the trash/archive/
+      // spam lookups below all resolve a role a server can publish twice, and
+      // the bare list resolves those to the name the app collapses away.
+      const allFolders = await withFiledCounts(storage as any, await storage.getFolders());
       const folderById = new Map<string, any>(allFolders.map((f: any) => [f.id, f]));
 
       // Load all emails and group by source folder. Fetch every email in ONE

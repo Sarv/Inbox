@@ -1043,6 +1043,11 @@ export class SQLiteStorage implements IEmailStorage {
     return this.folderRepo.linkEmail(emailId, folderId, uid, flags);
   }
 
+  async refileLocalRows(fromFolderId: string, toFolderId: string): Promise<number> {
+    this.ensureInitialized();
+    return this.folderRepo.refileLocalRows(fromFolderId, toFolderId);
+  }
+
   async unlinkEmailFromFolder(emailId: string, folderId: string): Promise<void> {
     this.ensureInitialized();
     return this.folderRepo.unlinkEmail(emailId, folderId);

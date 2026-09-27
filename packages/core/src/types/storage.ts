@@ -292,6 +292,15 @@ export interface IEmailStorage {
   countEmailsFiledIn?(folderId: string): Promise<number>;
 
   /**
+   * Re-file rows that exist ONLY here (no server UID) from one folder to
+   * another, returning how many moved. Used to rescue mail filed under a
+   * mailbox name the app collapses away — see `refileLocalRows` in the storage
+   * implementation for why only UID-less rows may move. Optional: when
+   * omitted, the collapse simply leaves them where they are.
+   */
+  refileLocalRows?(fromFolderId: string, toFolderId: string): Promise<number>;
+
+  /**
    * Every email carrying `folderPath` as a membership TAG whose PRIMARY folder is
    * a DIFFERENT folder (`folder_id != folderId`): a Trash/Junk copy of a message
    * that still carries |INBOX|, a Gmail label mirror, a reply in both Inbox and

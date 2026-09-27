@@ -3,7 +3,12 @@
 // (a label repair, a relink) and READ-FLAG flips written outside the sync
 // engine (the mark-read IPC, the agent, the triage pipeline).
 
-import { duplicateRoleCandidates, type ClassifiableFolder } from '../config/folder-mapping';
+import {
+  duplicateRoleCandidates,
+  findFolderByType,
+  type ClassifiableFolder,
+  type StandardFolderType,
+} from '../config/folder-mapping';
 import type { IEmailStorage } from '../types/storage';
 
 import { logger } from './logger';
@@ -154,6 +159,32 @@ export async function withFiledCounts<T extends ClassifiableFolder & { id: strin
   return folders.map((folder) =>
     filed.has(folder.id) ? { ...folder, ownedCount: filed.get(folder.id) } : folder,
   );
+}
+
+/** Just the slice of storage resolving a standard folder needs. */
+export type StandardFolderReader<T extends ClassifiableFolder & { id: string }> =
+  FiledCountReader & { getFolders(): Promise<T[]> };
+
+/**
+ * Which mailbox is this account's Sent (or Drafts, Trash, Spam…)? The one
+ * answer every caller must share.
+ *
+ * Resolving it from a bare folder list is NOT the same question and gives a
+ * different answer: where a server publishes two names for one mailbox, the
+ * ranking picks the one flagged SPECIAL-USE, while the mail — and the sidebar —
+ * live under the other. Deciding that needs the FILED counts, which is why
+ * `folders:list` and the sync engine both measure them before they resolve.
+ * A caller that skips the measurement disagrees with the screen, and mail it
+ * files lands in a folder the app collapses away and never shows.
+ *
+ * So the measurement and the resolution travel together, in one call, and no
+ * caller has to remember the pairing.
+ */
+export async function resolveStandardFolder<T extends ClassifiableFolder & { id: string }>(
+  storage: StandardFolderReader<T>,
+  type: StandardFolderType,
+): Promise<T | null> {
+  return findFolderByType(await withFiledCounts(storage, await storage.getFolders()), type);
 }
 
 /** Just the slice of storage a read-flag flip needs, so callers can pass a fake. */

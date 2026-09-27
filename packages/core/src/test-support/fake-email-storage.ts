@@ -383,6 +383,20 @@ export class FakeEmailStorage {
     return this.allRows().filter((email) => email.folderId === folderId).length;
   }
 
+  /** Move rows that exist only here (no server uid) between folders. */
+  async refileLocalRows(fromFolderId: string, toFolderId: string): Promise<number> {
+    this.note('refileLocalRows');
+    const from = this.folderById(fromFolderId);
+    const to = this.folderById(toFolderId);
+    if (!from || !to || fromFolderId === toFolderId) return 0;
+    const moving = this.allRows().filter((e) => e.folderId === fromFolderId && !e.uid);
+    for (const email of moving) {
+      email.folderId = toFolderId;
+      email.tags = addTag(removeTag(email.tags, from.path), to.path);
+    }
+    return moving.length;
+  }
+
   async getFolderMembersOutsideUidSpace(
     folderId: string,
     folderPath: string,

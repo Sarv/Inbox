@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were switches with nothing behind them; they will come back when the layouts
   they promise exist.
 
+### Fixed
+- **Mail you sent could be missing from Sent.** On a server that publishes two
+  names for one Sent mailbox (Sarv lists both `Sent` and `Sent Mail`), the copy
+  written the moment a message goes out was filed under the name the app hides,
+  so the message was delivered and read while your Sent folder showed nothing.
+  Every part of the app now resolves Sent — and Drafts, Trash and Spam — the
+  same way the sidebar does, by which name your mail is actually under, and
+  messages already stranded under the hidden name are moved across on the next
+  sync.
+
 ## [1.2.3] - 2026-09-26
 
 ### Added

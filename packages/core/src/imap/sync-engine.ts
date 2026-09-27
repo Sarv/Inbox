@@ -2874,7 +2874,43 @@ export class SyncEngine {
     }
 
     if (aliases.size === 0) return unchanged;
+
+    // Rescue anything filed under a name we are about to stop syncing. Every
+    // pass from here on reads the canonical mailbox only, so a local-only row
+    // left under the alias — a sent copy mirrored before IMAP had it — would
+    // never be read again by anything: not the sidebar, which resolves the role
+    // to the other name, and not a sync, which no longer visits this one.
+    await this.refileLocalRowsOutOfAliases(withSyncState, aliases);
+
     return { folders: folders.filter((f) => !aliases.has(f.path)), aliases };
+  }
+
+  /**
+   * Move local-only rows from each alias onto the name that won the role.
+   * Best effort: this rescues invisible mail, and failing a whole sync over it
+   * would cost the user far more than the rows are worth.
+   */
+  private async refileLocalRowsOutOfAliases(
+    folders: Array<{ path: string; id: string }>,
+    aliases: Map<string, string>,
+  ): Promise<void> {
+    if (typeof this.storage.refileLocalRows !== 'function') return;
+    const idByPath = new Map(folders.filter((f) => !!f.id).map((f) => [f.path, f.id]));
+    for (const [aliasPath, canonicalPath] of aliases) {
+      const from = idByPath.get(aliasPath);
+      const to = idByPath.get(canonicalPath);
+      if (!from || !to) continue;
+      try {
+        const moved = await this.storage.refileLocalRows(from, to);
+        if (moved > 0) {
+          logger.info(`Re-filed ${moved} local-only message(s) from ${aliasPath} to ${canonicalPath}`);
+        }
+      } catch (error) {
+        logger.warn(
+          `Could not re-file local rows from ${aliasPath} to ${canonicalPath}: ${(error as Error).message}`,
+        );
+      }
+    }
   }
 
   /**

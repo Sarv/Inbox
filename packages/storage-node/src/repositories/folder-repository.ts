@@ -195,6 +195,49 @@ export class FolderRepository extends BaseRepository {
   }
 
   /**
+   * Move LOCAL-ONLY rows off a mailbox name the app has collapsed away and onto
+   * the name it shows. Returns how many rows moved.
+   *
+   * A row with no server UID exists nowhere but this disk — a sent copy
+   * mirrored at send time, before IMAP has the message. Filed under the ALIAS
+   * of a duplicated role, nothing will ever correct it: the alias is excluded
+   * from every sync, so no pass reads that folder, and the sidebar resolves the
+   * role to the other name. The result is mail that was really sent, is on
+   * disk, and cannot be seen anywhere in the app.
+   *
+   * Only rows with no UID move. One carrying a server UID is the server's own
+   * copy under the name it was synced from, and re-filing that would lift it
+   * out of the UID space its folder's sync reconciles against — which is how a
+   * present message starts reading as "missing from the server" and gets
+   * deleted.
+   */
+  async refileLocalRows(fromFolderId: string, toFolderId: string): Promise<number> {
+    if (fromFolderId === toFolderId) return 0;
+    const pathOf = this.db.prepare('SELECT path FROM folders WHERE id = ?');
+    const from = pathOf.get(fromFolderId) as { path: string } | undefined;
+    const to = pathOf.get(toFolderId) as { path: string } | undefined;
+    if (!from || !to) return 0;
+
+    const rows = this.db
+      .prepare('SELECT id, tags FROM emails WHERE folder_id = ? AND COALESCE(uid, 0) = 0')
+      .all(fromFolderId) as { id: string; tags: string }[];
+    if (rows.length === 0) return 0;
+
+    // `email_tags` is maintained by triggers on `emails`, so writing the tag
+    // string is enough to move the membership with the row.
+    const move = this.db.transaction((items: { id: string; tags: string }[]) => {
+      const stmt = this.db.prepare('UPDATE emails SET folder_id = ?, tags = ? WHERE id = ?');
+      for (const item of items) {
+        stmt.run(toFolderId, addTag(removeTag(item.tags, from.path), to.path), item.id);
+      }
+    });
+    move(rows);
+
+    logger.info(`Re-filed ${rows.length} local-only row(s) from ${from.path} to ${to.path}`);
+    return rows.length;
+  }
+
+  /**
    * A message VANISHED from `folderId` on the server (expunged, or moved to
    * another folder). If it still belongs to OTHER folders — i.e. its tags carry
    * another real folder's path (a Gmail label, or a copy this sync already relinked

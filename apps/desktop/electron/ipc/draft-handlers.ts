@@ -4,7 +4,7 @@
  * Handles saving, deleting, and managing drafts on the IMAP server.
  */
 
-import { emailContentHash, findFolderByType, createLogger, withFolderSelected } from '@sarvinbox/core';
+import { emailContentHash, resolveStandardFolder, createLogger, withFolderSelected } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
@@ -66,8 +66,7 @@ function serializeDraftImap<T>(fn: () => Promise<T>): Promise<T> {
  */
 export async function findDraftsFolderPath(storage = requireStorage()): Promise<string | null> {
   try {
-    const folders = await storage.getFolders();
-    const drafts = findFolderByType(folders as any, 'drafts');
+    const drafts = await resolveStandardFolder(storage as any, 'drafts');
     return drafts?.path || null;
   } catch {
     return null;
