@@ -38,6 +38,7 @@ import { pushAgentSettingsToBackend, pushCategoryLabelSetting } from './services
 import { makeAICompletion, getDefaultProvider, hydrateAiSecrets, syncAIProviderToMain, pruneOrphanedOAuthProviders } from './services/ai-service';
 import { installEnrichmentBatchListener } from './services/contact-enrichment-service';
 import { initializeBackgroundExtractionListener, removeBackgroundExtractionListener } from './services/conversation-service';
+import { ensureSarvAiProvider } from './services/sarv-ai-auto-register';
 import { requestConfirm } from './store/confirm-service';
 import { useEmailStore } from './store/email-store';
 import { migrateCredentialsToVault, canonicalizeAccountIds } from './store/helpers';
@@ -239,7 +240,9 @@ function App() {
   // may have sent an empty key because the vault IPC hadn't resolved yet. Without
   // this re-push the pipeline categorizes with no key until a lucky sync/restart.
   useEffect(() => {
-    void hydrateAiSecrets().then(() => syncAIProviderToMain());
+    // Then make sure a signed-in Sarv account isn't left without an AI provider
+    // (e.g. onboarding closed before its picker rendered) — see sarv-ai-auto-register.
+    void hydrateAiSecrets().then(() => syncAIProviderToMain()).then(() => ensureSarvAiProvider());
   }, []);
 
   // Log app version from main process

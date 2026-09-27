@@ -16,6 +16,7 @@
 import { ArrowLeft, CheckCircle2, Loader2, Sparkles, UserPlus } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
+import { ensureSarvAiProvider } from '../../services/sarv-ai-auto-register';
 import {
   listCaiProviders,
   listCaiModels,
@@ -212,6 +213,10 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
       if (!res.success || !res.data) throw new Error(res.error || 'Sign-in failed');
 
       populateProfileFromSarv(res.data);
+      // Register the recommended model in the BACKGROUND, independent of this
+      // component: the mailbox connect below can end onboarding before the
+      // picker renders. The picker's Continue still overrides it.
+      void ensureSarvAiProvider();
       // Connect the Sarv mailbox over OAuth (best-effort, probed). Awaits only
       // the quick probe; the sync itself runs in the background.
       await tryConnectSarvMailbox(res.data);

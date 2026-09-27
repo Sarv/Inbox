@@ -12,6 +12,7 @@ import {
   testProvider,
   syncAIProviderToMain,
 } from '../../../services/ai-service';
+import { ensureSarvAiProvider } from '../../../services/sarv-ai-auto-register';
 import {
   listCaiProviders,
   listCaiModels,
@@ -154,6 +155,8 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
       setSarvAccount({ email: res.data.email, displayName: res.data.displayName });
       if (res.data.apiBaseUrl) setSarvApiBaseUrl(res.data.apiBaseUrl);
       if (res.data.llmBaseUrl) setSarvEdgeBaseUrl(res.data.llmBaseUrl);
+      // Finishes even if the user leaves this tab before the picker loads.
+      void ensureSarvAiProvider();
     } catch (err) {
       setSarvError((err as Error).message || 'Sarv sign-in failed');
     } finally {
@@ -215,8 +218,10 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
     if (!readySarvDraft || pickerLoading) return;
     if (autoRegisteredFor.current === readySarvDraft.email) return;
     autoRegisteredFor.current = readySarvDraft.email;
-    const { provider, added } = registerSarvProvider(readySarvDraft);
-    if (added) setAiProviders((prev) => [...prev, provider]);
+    // `added` is false when the background auto-register (sarv-ai-auto-register)
+    // got there first — the entry is still new to THIS list, so match by id.
+    const { provider } = registerSarvProvider(readySarvDraft);
+    setAiProviders((prev) => (prev.some((p) => p.id === provider.id) ? prev : [...prev, provider]));
   }, [readySarvDraft, pickerLoading, setAiProviders]);
 
   const handleAddSarvModel = () => {
