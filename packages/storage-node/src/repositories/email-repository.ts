@@ -450,7 +450,8 @@ export class EmailRepository extends BaseRepository {
         snooze_until, snooze_original_tags,
         has_embedding, embedding_last_generated,
         auth_status,
-        spam_score, spam_reasons, origin_ip
+        spam_score, spam_reasons, origin_ip,
+        list_unsubscribe, list_unsubscribe_post
       ) VALUES (
         @id, @messageId, @threadId, @folderId, @uid, @tags,
         @subject, @fromAddress, @fromName, @toAddress, @toNames,
@@ -480,7 +481,8 @@ export class EmailRepository extends BaseRepository {
         @snoozeUntil, @snoozeOriginalTags,
         @hasEmbedding, @embeddingLastGenerated,
         @authStatus,
-        @spamScore, @spamReasons, @originIp
+        @spamScore, @spamReasons, @originIp,
+        @listUnsubscribe, @listUnsubscribePost
       )
     `);
 
@@ -529,6 +531,9 @@ export class EmailRepository extends BaseRepository {
       spamScore: email.spamScore ?? null,
       spamReasons: email.spamReasons ?? null,
       originIp: email.originIp ?? null,
+      // Verbatim, unparsed — see core utils/unsubscribe.
+      listUnsubscribe: email.listUnsubscribe ?? null,
+      listUnsubscribePost: email.listUnsubscribePost ?? null,
     });
 
     // The body itself, in the side table. Must follow the `emails` insert: the
@@ -2157,6 +2162,10 @@ export class EmailRepository extends BaseRepository {
       spamReasons: row.spam_reasons ?? null,
       originIp: row.origin_ip ?? null,
       spamUserVerdict: row.spam_user_verdict ?? null,
+
+      // Unsubscribe headers, verbatim; parsed at display time.
+      listUnsubscribe: row.list_unsubscribe ?? null,
+      listUnsubscribePost: row.list_unsubscribe_post ?? null,
 
       // AI metadata
       aiProcessedAt: row.ai_processed_at,

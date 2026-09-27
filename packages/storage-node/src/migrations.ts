@@ -3556,6 +3556,39 @@ export const pendingSendsScheduledAt: Migration = {
 };
 
 /**
+ * v93 — `emails.list_unsubscribe` / `list_unsubscribe_post`: how to leave a list.
+ *
+ * Both headers are already FETCHed (the bulk detector reads List-Unsubscribe to
+ * stamp the `|bulk|` tag) and both were thrown away immediately afterwards, so
+ * the client knew a message was a newsletter but not how to stop it.
+ *
+ * Stored VERBATIM, not parsed. The header is a list of URIs whose useful entry
+ * depends on what the reader asks for (a one-click POST, a browser page, a
+ * mailto), and a parser improved next month should improve every message
+ * already in the mailbox — not only the ones that arrive after it. Parsing at
+ * read time costs nothing next to the round trip it saves, and the column then
+ * holds a fact about the message rather than a decision about it.
+ *
+ * Not backfilled: the values are not in the database to backfill from. Existing
+ * rows fill in as their folders re-sync; a message with no stored header simply
+ * shows no Unsubscribe action, which is the same thing the client did before.
+ */
+export const emailUnsubscribeColumns: Migration = {
+  version: 93,
+  name: 'email_unsubscribe_columns',
+  up: (db) => {
+    addColumnIfMissing(db, 'emails', 'list_unsubscribe', 'TEXT DEFAULT NULL');
+    addColumnIfMissing(db, 'emails', 'list_unsubscribe_post', 'TEXT DEFAULT NULL');
+    logger.info('Unsubscribe (v93): emails.list_unsubscribe(+_post) added');
+  },
+  down: (db) => {
+    // As v76/v92: clear rather than DROP COLUMN — dropping rewrites a table
+    // whose rows carry the message bodies (gigabytes on a real mailbox).
+    db.exec('UPDATE emails SET list_unsubscribe = NULL, list_unsubscribe_post = NULL WHERE list_unsubscribe IS NOT NULL OR list_unsubscribe_post IS NOT NULL;');
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3632,5 +3665,6 @@ export function createMigrationManager(
   manager.register(emailSpamVerdictColumnsRepair);
   manager.register(emailTagsJoinTable);
   manager.register(pendingSendsScheduledAt);
+  manager.register(emailUnsubscribeColumns);
   return manager;
 }

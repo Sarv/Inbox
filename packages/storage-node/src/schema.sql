@@ -76,6 +76,11 @@ CREATE TABLE IF NOT EXISTS emails (
   ai_confidence REAL DEFAULT 0,
   ai_reasoning TEXT,
 
+  -- Unsubscribe (RFC 2369 / RFC 8058), stored verbatim as received. Parsed at
+  -- read time by core's `parseUnsubscribe` — see migration v93.
+  list_unsubscribe TEXT,
+  list_unsubscribe_post TEXT,
+
   -- Snooze (replaces snoozed_emails table)
   snooze_until INTEGER,
   snooze_original_tags TEXT,

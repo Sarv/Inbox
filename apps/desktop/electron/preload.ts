@@ -450,6 +450,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('smtp:rescheduleSend', id, sendAt, accountId),
   },
 
+  // Leaving a mailing list. The renderer names the ROUTE, never a URL — main
+  // re-reads the message's own List-Unsubscribe headers and resolves it there,
+  // so a crafted message cannot name the address this app posts to.
+  unsubscribe: {
+    run: (emailId: string, route: 'one-click' | 'page' | 'mailto', accountId?: string) =>
+      ipcRenderer.invoke('unsubscribe:run', emailId, route, accountId),
+  },
+
   // Dialog operations
   dialog: {
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles'),
@@ -1326,6 +1334,13 @@ export interface ElectronAPI {
     cancelSend: (id: number, accountId?: string) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
     scheduleSend: (options: SendEmailOptions, sendAt: number) => Promise<{ success: boolean; id?: number; error?: string }>;
     rescheduleSend: (id: number, sendAt: number, accountId?: string) => Promise<{ success: boolean; moved: boolean; error?: string }>;
+  };
+  unsubscribe: {
+    run: (
+      emailId: string,
+      route: 'one-click' | 'page' | 'mailto',
+      accountId?: string,
+    ) => Promise<{ success: boolean; route?: 'one-click' | 'page' | 'mailto'; needsBrowser?: boolean; error?: string }>;
   };
   dialog: {
     pickFiles: () => Promise<{ success: boolean; data?: Array<{ filename: string; content: string; contentType: string; encoding: 'base64'; size: number }>; error?: string }>;

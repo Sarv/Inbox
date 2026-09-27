@@ -29,6 +29,7 @@ import { registerSmtpHandlers } from './smtp-handlers';
 import { registerSpamHandlers } from './spam-handlers';
 import { registerStorageHandlers } from './storage-handlers';
 import { registerSyncHandlers } from './sync-handlers';
+import { registerUnsubscribeHandlers } from './unsubscribe-handlers';
 import { registerUpdateHandlers } from './update-handlers';
 
 /**
@@ -65,6 +66,7 @@ export function registerAllHandlers(): void {
   registerStorageHandlers();
   registerIdentityHandlers();
   registerSpamHandlers();
+  registerUnsubscribeHandlers();
 
   logger.info('[IPC] All handlers registered');
 }

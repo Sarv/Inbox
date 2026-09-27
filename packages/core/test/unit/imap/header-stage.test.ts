@@ -128,3 +128,61 @@ describe('headerStage', () => {
     expect(r.spam).not.toBeNull();
   });
 });
+
+/**
+ * The unsubscribe headers the stage lifts out for storage (migration v93).
+ *
+ * What breaks if these go red: the Unsubscribe button never appears, or worse,
+ * appears pointing at a truncated URL. Both look like ordinary mail — nobody
+ * reports "the button I have never seen is missing".
+ */
+describe('headerStage unsubscribe headers', () => {
+  it('lifts both List-Unsubscribe headers out verbatim', () => {
+    const { unsubscribe } = headerStage(message({
+      rawHeaders: [
+        'From: news@brand.example',
+        'List-Unsubscribe: <https://brand.example/u/abc>, <mailto:u@brand.example>',
+        'List-Unsubscribe-Post: List-Unsubscribe=One-Click',
+        '',
+      ].join('\r\n'),
+    }));
+    expect(unsubscribe).toEqual({
+      listUnsubscribe: '<https://brand.example/u/abc>, <mailto:u@brand.example>',
+      listUnsubscribePost: 'List-Unsubscribe=One-Click',
+    });
+  });
+
+  // Regression: senders wrap these headers because they are long, and a value
+  // cut at the fold is a URL that 404s when the reader finally clicks it.
+  it('unfolds a header the sender wrapped across lines', () => {
+    const { unsubscribe } = headerStage(message({
+      rawHeaders: 'List-Unsubscribe: <mailto:u@brand.example>,\r\n <https://brand.example/u/abc>\r\n\r\n',
+    }));
+    expect(unsubscribe.listUnsubscribe).toContain('https://brand.example/u/abc');
+  });
+
+  // Ordinary mail is most mail. Both null, never an empty string — the column
+  // then reads as "this sender published no way off a list", which is the truth.
+  it('reports both null on a message with neither header, and with no headers at all', () => {
+    expect(headerStage(message({ rawHeaders: 'From: a@b.example\r\n\r\n' })).unsubscribe).toEqual({
+      listUnsubscribe: null,
+      listUnsubscribePost: null,
+    });
+    expect(headerStage(message()).unsubscribe).toEqual({
+      listUnsubscribe: null,
+      listUnsubscribePost: null,
+    });
+  });
+
+  // A sender who declares one-click but publishes no address, and one who
+  // publishes an address without declaring one-click, are both stored as they
+  // arrived: the parse that reconciles them runs at read time, so a better
+  // parser later improves mail already in the mailbox.
+  it('stores each header independently of the other', () => {
+    const postOnly = headerStage(message({ rawHeaders: 'List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\n' }));
+    expect(postOnly.unsubscribe).toEqual({
+      listUnsubscribe: null,
+      listUnsubscribePost: 'List-Unsubscribe=One-Click',
+    });
+  });
+});

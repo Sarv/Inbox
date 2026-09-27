@@ -89,6 +89,13 @@ export interface EmailRecord {
   // the reputation stage (blocklists, reverse DNS). NULL when no header names
   // a public one.
   originIp?: string | null;
+  // How to leave the list this message came from, VERBATIM as the sender wrote
+  // it: RFC 2369 `List-Unsubscribe` and RFC 8058 `List-Unsubscribe-Post`.
+  // Unparsed on purpose — see core utils/unsubscribe, which reads them at
+  // display time so a better parser improves mail already in the mailbox. NULL
+  // on anything that is not bulk mail (and on bulk mail synced before v93).
+  listUnsubscribe?: string | null;
+  listUnsubscribePost?: string | null;
   // The user's own verdict, which outranks every score: 'ham' = never file it
   // again, 'spam' = spam whatever the score. NULL when they have not said.
   spamUserVerdict?: 'spam' | 'ham' | null;

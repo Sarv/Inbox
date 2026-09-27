@@ -24,6 +24,7 @@ import { PhishingWarningBanner } from './PhishingWarningBanner';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
+import { UnsubscribeBanner } from './UnsubscribeBanner';
 import { stripSignatureFromHtml, formatRelativeDate, hasLoadedBody } from './utils';
 import { VerifiedBadge } from './VerifiedBadge';
 
@@ -205,6 +206,14 @@ export function EmailCard({ ctx }: EmailCardProps) {
               accountId={(displayEmail as any).accountId}
               calendarIcs={displayEmail.calendarIcs}
               calendarAdded={displayEmail.calendarAdded}
+            />
+            {/* The way off this sender's list, when they published one. Renders
+                nothing on ordinary mail. */}
+            <UnsubscribeBanner
+              emailId={displayEmail.id}
+              accountId={(displayEmail as any).accountId}
+              listUnsubscribe={(displayEmail as any).listUnsubscribe}
+              listUnsubscribePost={(displayEmail as any).listUnsubscribePost}
             />
             {(() => {
               const isBodyLoading = loadingBodies.has(displayEmail.id);

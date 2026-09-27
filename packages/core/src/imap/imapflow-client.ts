@@ -928,6 +928,12 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
           headers: [
             'from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'in-reply-to', 'references',
             ...BULK_HEADER_NAMES,
+            // RFC 8058. `list-unsubscribe` itself already rides in on
+            // BULK_HEADER_NAMES (the bulk detector reads it), but the -Post
+            // companion is not a bulk signal and nothing else asks for it —
+            // and without it every message reads as "page, not one-click",
+            // because the ONLY evidence a POST is permitted is this header.
+            'list-unsubscribe-post',
             // Mail authentication verdicts, written by the receiving server. A
             // header-only sync is the common path, so unless these ride along
             // with the envelope the client never learns whether SPF / DKIM /

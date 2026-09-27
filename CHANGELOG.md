@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Queued while the recipient is already reading it; if only the copy filed on
   the server is still outstanding, a line under the list says so and it
   finishes on its own.
+- **Unsubscribe.** Bulk mail that publishes a way off its list now shows an
+  Unsubscribe bar above the message. Where the sender supports the one-click
+  standard it is a single confirmed click and nothing opens; otherwise it
+  offers their unsubscribe page in your browser, or sends their unsubscribe
+  address a message from your account. Every route is spelled out before
+  anything leaves your machine — including that a one-click request tells the
+  sender this address is read — and the browser route says plainly that you
+  still have to finish on their page. One-click requests go over HTTPS only, so
+  the token in an unsubscribe link is never replayed in the clear; a sender who
+  published an http link gets the page route instead. Mail synced before this
+  release only grows the bar after it is re-synced.
 
 ### Changed
 - **Hover actions and Button labels moved from General to Appearance > Layout,

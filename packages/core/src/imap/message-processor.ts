@@ -925,7 +925,7 @@ export class MessageProcessor {
     // all from the headers this fetch already carried. Derived by the shared
     // `headerStage` so the backfill that sweeps older mail cannot compute a
     // different answer for the same message.
-    const { auth, spam, originIp } = headerStage(message, {
+    const { auth, spam, originIp, unsubscribe } = headerStage(message, {
       knownSpammer: opts?.knownSpammer === true,
       ownMail: opts?.ownMail === true,
     });
@@ -1049,6 +1049,11 @@ export class MessageProcessor {
       spamReasons: scored ? JSON.stringify(scored.reasons) : null,
       // The connecting client's address, for the reputation stage.
       originIp,
+
+      // How to leave the list, stored verbatim so the Unsubscribe button has
+      // something to act on. Both null for ordinary mail.
+      listUnsubscribe: unsubscribe.listUnsubscribe,
+      listUnsubscribePost: unsubscribe.listUnsubscribePost,
 
       // AI
       hasEmbedding: false,

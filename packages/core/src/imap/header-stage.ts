@@ -20,6 +20,7 @@ import {
   assessSpamSignals,
   extractOriginIp,
   headerLookupFromText,
+  headerValueFromText,
   headerValuesFromText,
   parseAuthenticationHeaders,
   type AuthStatus,
@@ -44,6 +45,31 @@ export interface HeaderStageOptions {
   ownMail?: boolean;
 }
 
+/** The two `List-Unsubscribe*` headers, verbatim — see utils/unsubscribe. */
+export interface UnsubscribeHeaders {
+  listUnsubscribe: string | null;
+  listUnsubscribePost: string | null;
+}
+
+/**
+ * Lift the unsubscribe headers out of a fetched message's header block.
+ *
+ * Verbatim, unparsed and unvalidated: which entry of `List-Unsubscribe` is
+ * useful depends on what the reader asks for later, and a parser improved next
+ * month should improve every message already stored rather than only the ones
+ * synced after it. The parsing lives in utils/unsubscribe and runs at read time.
+ *
+ * Unfolding is `headerValueFromText`'s job — these headers are long enough that
+ * real senders wrap them, and a value cut at the fold is a URL that 404s.
+ */
+export function unsubscribeHeaders(rawHeaders: string | null | undefined): UnsubscribeHeaders {
+  if (!rawHeaders) return { listUnsubscribe: null, listUnsubscribePost: null };
+  return {
+    listUnsubscribe: headerValueFromText(rawHeaders, 'list-unsubscribe'),
+    listUnsubscribePost: headerValueFromText(rawHeaders, 'list-unsubscribe-post'),
+  };
+}
+
 export interface HeaderStageResult {
   /** SPF / DKIM / DMARC as the receiving server recorded it; null when it recorded none. */
   auth: AuthStatus | null;
@@ -51,6 +77,8 @@ export interface HeaderStageResult {
   spam: SpamAssessment | null;
   /** The address that handed the message to the recipient's mail system. */
   originIp: string | null;
+  /** How to leave the list, verbatim; both null when the sender offered none. */
+  unsubscribe: UnsubscribeHeaders;
 }
 
 /**
@@ -92,5 +120,6 @@ export function headerStage(message: IMAPMessage, opts?: HeaderStageOptions): He
       authHeaders: message.authHeaders,
       received: message.rawHeaders ? headerValuesFromText(message.rawHeaders, 'received') : null,
     }),
+    unsubscribe: unsubscribeHeaders(message.rawHeaders),
   };
 }

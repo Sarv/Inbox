@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ImapFlowClient } from '../../../src/imap/imapflow-client';
 import { BULK_HEADER_NAMES } from '../../../src/utils/bulk-mail';
@@ -97,5 +97,40 @@ describe('ImapFlowClient bulk detection', () => {
     const folded = block('list-unsubscribe: <mailto:u@x.example>,', ' <https://x.example/u>', 'Subject: hi');
     expect(c.headerValue(folded, 'List-Unsubscribe')).toBe('<mailto:u@x.example>, <https://x.example/u>');
     expect(c.detectBulk(folded)).toBe(true);
+  });
+});
+
+/**
+ * The header block the FETCH asks for, as a list.
+ *
+ * What breaks if this goes red: the Unsubscribe button offers a web PAGE on
+ * every message, forever. `List-Unsubscribe-Post` is the ONLY evidence that a
+ * one-click POST is permitted (RFC 8058) — it is not a bulk signal, so nothing
+ * in BULK_HEADER_NAMES pulls it down, and a header the fetch never requests is
+ * absent from `rawHeaders` in exactly the same way as a header the sender
+ * never wrote.
+ */
+describe('ImapFlowClient fetch header list', () => {
+  it('asks for the RFC 8058 one-click companion alongside the list headers', async () => {
+    const client = internals();
+    const fetchAll = vi.fn(async () => []);
+    (client as unknown as { client: unknown }).client = {
+      usable: true,
+      mailbox: { path: 'INBOX' },
+      stats: () => ({ sent: 0, received: 0 }),
+      fetchAll,
+    };
+    (client as unknown as { connectionState: string }).connectionState = 'selected';
+    (client as unknown as { currentFolder: string }).currentFolder = 'INBOX';
+
+    await (client as unknown as {
+      fetchInternal: (range: string, useUid: boolean, options?: unknown) => Promise<unknown>;
+    }).fetchInternal('1:5', true, {});
+
+    const { headers } = fetchAll.mock.calls[0][1] as unknown as { headers: string[] };
+    expect(headers).toContain('list-unsubscribe-post');
+    // Its partner rides in on BULK_HEADER_NAMES; both are needed to decide the
+    // route, so assert the pair rather than only the new name.
+    expect(headers).toContain('list-unsubscribe');
   });
 });

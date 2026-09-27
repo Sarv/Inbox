@@ -1253,3 +1253,53 @@ describe('processBatch — reputation stage', () => {
     expect(db.allRows()[0].spamScore).toBe(0);
   });
 });
+
+/**
+ * The List-Unsubscribe headers, carried from the fetched block to the stored
+ * row (migration v93).
+ *
+ * What breaks if this goes red: the Unsubscribe button never appears on mail
+ * that published a way off the list. Ingest is the ONLY place these headers
+ * are seen — the raw block is not kept — so a value dropped here is gone for
+ * that message until a full re-sync.
+ */
+describe('MessageProcessor ingest — unsubscribe headers', () => {
+  it('stores both headers verbatim on a bulk message', async () => {
+    const { db, mp } = setup();
+    await mp.processBatch([msg({
+      uid: 1,
+      rawHeaders: 'List-Unsubscribe: <https://brand.example/u/abc>, <mailto:u@brand.example>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n',
+    })], db.folder(INBOX), db.asStorage());
+
+    expect(db.allRows()[0]).toMatchObject({
+      listUnsubscribe: '<https://brand.example/u/abc>, <mailto:u@brand.example>',
+      listUnsubscribePost: 'List-Unsubscribe=One-Click',
+    });
+  });
+
+  // Ordinary mail: NULL, not an empty string. NULL is what the banner reads as
+  // "this sender published no way off a list" and renders nothing for.
+  it('leaves both null on a message that published neither', async () => {
+    const { db, mp } = setup();
+    await mp.processBatch([msg({ uid: 1 })], db.folder(INBOX), db.asStorage());
+
+    expect(db.allRows()[0]).toMatchObject({ listUnsubscribe: null, listUnsubscribePost: null });
+  });
+
+  // A sender who published an address but never declared one-click is stored
+  // exactly that way, so the route decision at read time can only offer the
+  // page. Storing a normalised "one-click: yes" here would be the app deciding
+  // for the sender.
+  it('stores an address without the one-click declaration as-is', async () => {
+    const { db, mp } = setup();
+    await mp.processBatch([msg({
+      uid: 1,
+      rawHeaders: 'List-Unsubscribe: <https://brand.example/u/abc>\r\n',
+    })], db.folder(INBOX), db.asStorage());
+
+    expect(db.allRows()[0]).toMatchObject({
+      listUnsubscribe: '<https://brand.example/u/abc>',
+      listUnsubscribePost: null,
+    });
+  });
+});
