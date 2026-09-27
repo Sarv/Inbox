@@ -3,6 +3,8 @@ import type { EmailRecord, ViewFilter } from '@sarvinbox/core';
 import type { InboxSection, SectionFilter } from '../config/inbox-types';
 import { SECTION_FILTER_LABELS } from '../config/inbox-types';
 
+import { parseAddressList } from './email-address';
+
 export interface EmailThread {
   threadId: string;
   emails: EmailRecord[];
@@ -311,6 +313,21 @@ export function threadRowCount(emails: EmailRecord[]): number {
   return new Set(emails.map(threadRowKey)).size;
 }
 
+/** Shown for a draft with nothing in To/Cc/Bcc yet (Gmail shows the same). */
+export const NO_RECIPIENTS_LABEL = '(no recipients)';
+
+/**
+ * Row label for a draft: WHO it is going to, not who wrote it. The sender of a
+ * draft is always the user, so the sender label made every draft read as your
+ * own address. Display names are preferred, falling back to the bare address.
+ */
+export function draftRecipientDisplay(email: Pick<EmailRecord, 'toAddress' | 'ccAddress' | 'bccAddress'>): string {
+  const recipients = [email.toAddress, email.ccAddress, email.bccAddress]
+    .flatMap(field => parseAddressList(field))
+    .map(({ name, address }) => name || address);
+  return recipients.length > 0 ? [...new Set(recipients)].join(', ') : NO_RECIPIENTS_LABEL;
+}
+
 export function buildThreads(emails: EmailRecord[]): EmailThread[] {
   const threadMap = new Map<string, EmailRecord[]>();
 
@@ -393,7 +410,11 @@ export function buildThreads(emails: EmailRecord[]): EmailThread[] {
     const lastSenderFull = oldestEmail.threadLastSender || latestEmail.fromName || latestEmail.fromAddress || '';
     const toFirstName = (name: string) => name.split(/\s+/)[0] || name;
     let senderDisplay: string;
-    if (messageCount <= 1 || firstSenderFull === lastSenderFull) {
+    if (nonDraftAsc.length === 0) {
+      // Only drafts loaded (the Drafts folder, or a lone new draft): name the
+      // recipients — the sender is always the user.
+      senderDisplay = draftRecipientDisplay(latestEmail);
+    } else if (messageCount <= 1 || firstSenderFull === lastSenderFull) {
       senderDisplay = firstSenderFull;
     } else {
       senderDisplay = `${toFirstName(firstSenderFull)} .. ${toFirstName(lastSenderFull)}`;

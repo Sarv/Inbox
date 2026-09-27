@@ -6,6 +6,8 @@ import {
   adjustTotalForFilteredOut,
   assignThreadsToSections,
   buildThreads,
+  draftRecipientDisplay,
+  NO_RECIPIENTS_LABEL,
   sectionIsVisible,
   hasImportanceFlag,
   hasStarredFlag,
@@ -419,6 +421,54 @@ describe('buildThreads — senderDisplay', () => {
       email({ id: 'b', threadId: 't', date: 2 }),
     ]);
     expect(thread.senderDisplay).toBe(' Sohum Jadeja .. Advik');
+  });
+});
+
+// Regression: a draft's sender is always the user, so the Drafts list showed
+// your own address on every row instead of who the draft is going to.
+describe('buildThreads — draft rows name the recipient', () => {
+  const me = { fromName: null, fromAddress: 'me@sarv.com' };
+
+  it('shows the To recipient of a draft, not the sender', () => {
+    const [thread] = buildThreads([
+      email({ threadId: 't', tags: '|Drafts|draft|', ...me, toAddress: 'annn@gmail.com' }),
+    ]);
+    expect(thread.senderDisplay).toBe('annn@gmail.com');
+  });
+
+  it('prefers display names and lists To, Cc and Bcc once each', () => {
+    const [thread] = buildThreads([
+      email({
+        threadId: 't', tags: '|[Gmail]/Drafts|', ...me,
+        toAddress: 'Ankur Dubey <a@x.com>, b@x.com',
+        ccAddress: 'c@x.com',
+        bccAddress: 'Ankur Dubey <a@x.com>',
+      }),
+    ]);
+    expect(thread.senderDisplay).toBe('Ankur Dubey, b@x.com, c@x.com');
+  });
+
+  // An unaddressed draft must say so rather than fall back to your own name.
+  it('labels a draft with no recipients', () => {
+    const [thread] = buildThreads([
+      email({ threadId: 't', tags: '|draft|', ...me, toAddress: '', ccAddress: null, bccAddress: null }),
+    ]);
+    expect(thread.senderDisplay).toBe(NO_RECIPIENTS_LABEL);
+  });
+
+  // A draft reply inside a real conversation must keep the conversation's
+  // senders — only a thread made up entirely of drafts switches to recipients.
+  it('keeps the sender label when the thread has a real message', () => {
+    const [thread] = buildThreads([
+      email({ id: 'a', threadId: 't', date: 1, fromName: 'Sohum Jadeja', tags: '|INBOX|' }),
+      email({ id: 'b', threadId: 't', date: 2, tags: '|draft|', ...me, toAddress: 'x@y.com' }),
+    ]);
+    expect(thread.senderDisplay).not.toContain('x@y.com');
+  });
+
+  it('draftRecipientDisplay handles missing fields', () => {
+    expect(draftRecipientDisplay({ toAddress: '', ccAddress: null, bccAddress: null })).toBe(NO_RECIPIENTS_LABEL);
+    expect(draftRecipientDisplay({ toAddress: 'Z <z@z.com>', ccAddress: null, bccAddress: null })).toBe('Z');
   });
 });
 
