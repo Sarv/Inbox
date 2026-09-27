@@ -2830,12 +2830,42 @@ export class SQLiteStorage implements IEmailStorage {
     `).run(rawMime, messageId, id);
   }
 
-  async getAppendPendingSends(): Promise<Array<{ id: number; payload: any; status: string; retryCount: number; lastError: string | null; nextRetryAt: number | null; createdAt: number; updatedAt: number; smtpAccepted?: boolean; sentAppendPending?: boolean; rawMime?: string | null; messageId?: string | null }>> {
+  /**
+   * The sends whose Sent copy still has to be uploaded. `now` (unix seconds)
+   * excludes the ones parked by {@link deferAppendPending}; omitted, every
+   * append-pending row comes back, due or not.
+   */
+  async getAppendPendingSends(now?: number): Promise<Array<{ id: number; payload: any; status: string; retryCount: number; lastError: string | null; nextRetryAt: number | null; createdAt: number; updatedAt: number; smtpAccepted?: boolean; sentAppendPending?: boolean; rawMime?: string | null; messageId?: string | null }>> {
     this.ensureInitialized();
-    const rows = this.db!.prepare(
-      "SELECT * FROM pending_sends WHERE sent_append_pending = 1 ORDER BY created_at ASC"
-    ).all() as any[];
+    const rows = (now === undefined
+      ? this.db!.prepare(
+          "SELECT * FROM pending_sends WHERE sent_append_pending = 1 ORDER BY created_at ASC"
+        ).all()
+      : this.db!.prepare(
+          `SELECT * FROM pending_sends
+           WHERE sent_append_pending = 1 AND (next_retry_at IS NULL OR next_retry_at <= ?)
+           ORDER BY created_at ASC`
+        ).all(now)) as any[];
     return rows.map(row => this.mapPendingSend(row));
+  }
+
+  /**
+   * Park a Sent APPEND that could not be completed, so the next drains skip it
+   * until `nextRetryAt` instead of retrying every minute forever.
+   *
+   * Deliberately NOT updatePendingSendAttempt: that sets status='pending', and
+   * 'pending' is exactly what getDueSends selects — this row's message has
+   * already been accepted by SMTP, so putting it back there would SEND IT
+   * AGAIN. Only the retry bookkeeping moves; sent_append_pending and the
+   * 'append_pending' status stay as they are.
+   */
+  async deferAppendPending(id: number, nextRetryAt: number, attempt: number, lastError: string): Promise<void> {
+    this.ensureInitialized();
+    this.db!.prepare(`
+      UPDATE pending_sends
+      SET retry_count = ?, last_error = ?, next_retry_at = ?, updated_at = unixepoch()
+      WHERE id = ? AND sent_append_pending = 1
+    `).run(attempt, lastError, nextRetryAt, id);
   }
 
   async updatePendingSendAttempt(id: number, retryCount: number, lastError: string, nextRetryAt: number): Promise<void> {

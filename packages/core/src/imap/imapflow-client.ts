@@ -47,6 +47,7 @@ import {
   headerValueFromText,
 } from '../utils/bulk-mail';
 import { logger } from '../utils/logger';
+import { messageIdKey } from '../utils/message-id';
 import { createMutex, type Mutex } from '../utils/mutex';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
@@ -1442,19 +1443,51 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * (e.g. some Dovecot/custom IMAPs return no hits) — which otherwise leaves
    * deleted-locally messages on the server to be re-synced back. Keys are the
    * bracket-stripped, lower-cased id so both `<id>` and `id` forms match.
+   *
+   * `options.recent` bounds the scan to the newest N messages, for the caller
+   * that only asks "is the message I just sent already filed here?". The full
+   * `1:*` envelope fetch costs one envelope per message in the mailbox, so on a
+   * large Sent folder it ran past the 60s op timeout — which recycles the
+   * connection as wedged, killing the APPEND that was about to run on it. The
+   * copy was never uploaded, and the retry wedged another connection a minute
+   * later, indefinitely. A message just accepted by SMTP can only be among the
+   * newest, so the window answers the same question in bounded time.
    */
-  async fetchMessageIdToUidMap(expectedPath?: string): Promise<Map<string, number>> {
+  async fetchMessageIdToUidMap(
+    expectedPath?: string,
+    options?: { recent?: number },
+  ): Promise<Map<string, number>> {
     const selected = this.ensureCurrentFolder(expectedPath);
-    const list = await this.op('FETCH msgid-map', this.client!.fetchAll('1:*', { uid: true, envelope: true }, { uid: false }));
+    const range = this.recentSequenceRange(options?.recent);
+    const list = await this.op(
+      `FETCH msgid-map ${range}`,
+      this.client!.fetchAll(range, { uid: true, envelope: true }, { uid: false }),
+    );
     // Callers use this map to EXPUNGE on the server — a UID resolved against the
     // wrong mailbox would delete an unrelated message.
     this.ensureCurrentFolder(selected);
     const map = new Map<string, number>();
     for (const m of list) {
-      const mid = (m.envelope?.messageId || '').replace(/[<>]/g, '').trim().toLowerCase();
+      const mid = messageIdKey(m.envelope?.messageId);
       if (mid && m.uid > 0) map.set(mid, m.uid);
     }
     return map;
+  }
+
+  /**
+   * `1:*`, or a sequence range covering just the newest `recent` messages.
+   *
+   * The mailbox's live EXISTS count (kept current by untagged EXISTS) is all
+   * this needs. When the server has not given one, or the mailbox is smaller
+   * than the window, the whole mailbox IS the window — a scan we cannot bound
+   * is better made complete than made silently partial, since a caller reading
+   * a truncated map concludes the message is absent.
+   */
+  private recentSequenceRange(recent?: number): string {
+    if (!recent || recent <= 0) return '1:*';
+    const exists = (this.client as { mailbox?: { exists?: number } })?.mailbox?.exists;
+    if (typeof exists !== 'number' || exists <= recent) return '1:*';
+    return `${exists - recent + 1}:*`;
   }
 
   // ========== CONDSTORE ==========

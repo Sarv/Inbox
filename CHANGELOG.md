@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they promise exist.
 
 ### Fixed
+- **The Sent copy of a message could never finish uploading.** Filing a sent
+  message on the server began by scanning the whole Sent folder to check the
+  copy wasn't already there — which, on a large one, took longer than the
+  connection was allowed to wait. The app dropped the connection as stuck, the
+  upload that followed had nothing to travel over, and the whole thing repeated
+  a minute later for as long as the app stayed open, with the copy never
+  arriving. The check now looks only at the newest messages, an upload never
+  runs on a connection that was just dropped, and a copy that still can't be
+  filed waits a little longer before each attempt instead of retrying every
+  minute.
 - **Mail you sent could be missing from Sent.** On a server that publishes two
   names for one Sent mailbox (Sarv lists both `Sent` and `Sent Mail`), the copy
   written the moment a message goes out was filed under the name the app hides,

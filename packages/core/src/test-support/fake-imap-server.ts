@@ -40,6 +40,7 @@ import type {
   IMAPMessage,
   SearchCriteria,
 } from '../types/imap';
+import { messageIdKey } from '../utils/message-id';
 import { createMutex, type Mutex } from '../utils/mutex';
 
 export interface FakeMessageInit {
@@ -643,9 +644,18 @@ export class FakeImapServer {
       .map((m) => m.uid);
   }
 
-  async fetchMessageIdToUidMap(expectedPath?: string): Promise<Map<string, number>> {
+  /** `recent` keeps only the newest N messages, as the real client's bounded
+   *  sequence range does — so a test can prove a caller asked for a window. */
+  async fetchMessageIdToUidMap(
+    expectedPath?: string,
+    options?: { recent?: number },
+  ): Promise<Map<string, number>> {
     this.note('fetchMessageIdToUidMap');
-    return new Map(this.requireSelectedPath(expectedPath).messages.map((m) => [m.messageId, m.uid]));
+    const { messages } = this.requireSelectedPath(expectedPath);
+    const window = options?.recent && options.recent > 0 ? messages.slice(-options.recent) : messages;
+    // Keyed exactly as the real client keys it, so a test cannot pass against
+    // the fake on a lookup that would miss in production.
+    return new Map(window.map((m) => [messageIdKey(m.messageId), m.uid]));
   }
 
   supportsCondstore(): boolean {

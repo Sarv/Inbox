@@ -59,8 +59,24 @@ function makeFakeStorage() {
         .filter((r) => r.status === 'pending' && (r.next_retry_at == null || r.next_retry_at <= nowSec))
         .map(toRecord);
     },
-    async getAppendPendingSends() {
-      return [...rows.values()].filter((r) => r.sent_append_pending).map(toRecord);
+    async getAppendPendingSends(nowSec?: number) {
+      return [...rows.values()]
+        .filter((r) => r.sent_append_pending)
+        // Mirrors the real SQL's due filter: a parked append is not offered
+        // again until its backoff has elapsed.
+        .filter((r) => nowSec === undefined || r.next_retry_at == null || r.next_retry_at <= nowSec)
+        .map(toRecord);
+    },
+    async deferAppendPending(id: number, nextRetryAt: number, attempt: number, lastError: string) {
+      // Mirrors the real SQL: ONLY the retry bookkeeping moves. The status must
+      // stay 'append_pending' — a row put back to 'pending' is one getDueSends
+      // would hand back for SENDING, and this message already went out.
+      const r = rows.get(id);
+      if (r?.sent_append_pending) {
+        r.retry_count = attempt;
+        r.next_retry_at = nextRetryAt;
+        r.last_error = lastError;
+      }
     },
     async markSendAppendPending(id: number, rawMime: string, messageId: string) {
       // Mirrors the real SQL: status flips to 'append_pending', which keeps the
@@ -424,7 +440,20 @@ describe('SendQueue Sent-folder APPEND', () => {
     storage = makeFakeStorage();
     connected = true;
     appendSentFn = vi.fn(async () => {});
+    // Date only: a failed append is now parked in wall-clock seconds, so the
+    // retry tests have to be able to arrive after the backoff.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T09:00:00Z'));
   });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Arrive past the longest append backoff, so a parked retry is due again. */
+  const afterTheBackoff = () => vi.setSystemTime(Date.now() + 16 * 60_000);
+
+  const onlyRow = () => [...storage.rows.values()][0];
 
   it('appends the exact submitted MIME + Message-ID, marking the row BEFORE the upload', async () => {
     let markedBeforeAppend: { accepted?: boolean; pending?: boolean } = {};
@@ -476,7 +505,8 @@ describe('SendQueue Sent-folder APPEND', () => {
     expect(row.sent_append_pending).toBe(true);        // marker retained for retry
     expect(row.smtp_accepted).toBe(true);
 
-    await queue.processQueue();                        // the next drain / restart
+    afterTheBackoff();                                 // BEHAVIOUR CHANGE: the
+    await queue.processQueue();                        // retry now waits out a backoff
     expect(appendSentFn).toHaveBeenCalledTimes(2);
     expect(sendFn).toHaveBeenCalledTimes(1);           // NEVER re-transmitted
     expect(storage.rows.size).toBe(0);
@@ -533,6 +563,7 @@ describe('SendQueue Sent-folder APPEND', () => {
 
     await queue.loadFromStorage();                     // startup crash-recovery
     expect([...storage.rows.values()][0].status).toBe('append_pending'); // NOT reset to pending
+    afterTheBackoff();                                 // the deferred copy is due again
     await queue.processQueue();                        // the drain after restart
 
     expect(sendFn).toHaveBeenCalledTimes(1);           // never re-sent
@@ -544,6 +575,82 @@ describe('SendQueue Sent-folder APPEND', () => {
     const queue = makeQueue(true);
     storage.getAppendPendingSends = vi.fn(async () => { throw new Error('db locked'); }) as any;
     await expect(queue.processQueue()).resolves.toEqual({ sent: 0, queued: 0, failed: 0 });
+  });
+
+  // What breaks if these fail: ONE undeliverable Sent copy costs the whole app
+  // an IMAP connection every single minute, for as long as it stays open.
+  //
+  // The live failure: the dedupe scan ahead of the APPEND wedged a 60s IMAP
+  // command, the client recycled the connection as wedged, the APPEND on that
+  // dead socket failed with "Not connected", and the marker survived — so the
+  // next 60s drain did it all again. The append must back off like every other
+  // retry, and must never come back as something that can be re-SENT.
+  it('parks a failed append instead of retrying it on the very next drain', async () => {
+    appendSentFn.mockRejectedValue(new Error('Not connected to IMAP server'));
+    const queue = makeQueue(true);
+
+    await queue.enqueueAndSend(PAYLOAD);
+    expect(appendSentFn).toHaveBeenCalledTimes(1);
+
+    await queue.processQueue();                        // a drain inside the backoff
+    expect(appendSentFn).toHaveBeenCalledTimes(1);     // not tried again
+    expect(onlyRow().next_retry_at).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    expect(onlyRow().sent_append_pending).toBe(true);  // still owed
+  });
+
+  it('waits longer after each failure instead of hammering a fixed minute', async () => {
+    appendSentFn.mockRejectedValue(new Error('Not connected to IMAP server'));
+    const queue = makeQueue(true);
+
+    await queue.enqueueAndSend(PAYLOAD);
+    const firstWait = onlyRow().next_retry_at! - Math.floor(Date.now() / 1000);
+
+    afterTheBackoff();
+    await queue.processQueue();
+    const secondWait = onlyRow().next_retry_at! - Math.floor(Date.now() / 1000);
+
+    expect(appendSentFn).toHaveBeenCalledTimes(2);
+    expect(secondWait).toBeGreaterThan(firstWait);
+  });
+
+  // The parking must not be mistaken for a send retry. `updatePendingSendAttempt`
+  // sets status='pending', which is precisely what getDueSends hands back for
+  // TRANSMISSION — using it here would re-send a message the server already has.
+  it('never parks an append where the send drain could pick it up', async () => {
+    appendSentFn.mockRejectedValue(new Error('Not connected to IMAP server'));
+    const queue = makeQueue(true);
+
+    await queue.enqueueAndSend(PAYLOAD);
+    afterTheBackoff();
+    await queue.processQueue();
+
+    expect(onlyRow().status).toBe('append_pending');
+    expect(sendFn).toHaveBeenCalledTimes(1);           // never re-transmitted
+  });
+
+  // The backoff is an optimisation, not a dependency: an older store that cannot
+  // park a row must still finish the copy, the way it always did.
+  it('still retries on the next drain when the store cannot park the append', async () => {
+    appendSentFn.mockRejectedValueOnce(new Error('IMAP offline'));
+    delete (storage as { deferAppendPending?: unknown }).deferAppendPending;
+    const queue = makeQueue(true);
+
+    await queue.enqueueAndSend(PAYLOAD);
+    await queue.processQueue();                        // no parking → due at once
+
+    expect(appendSentFn).toHaveBeenCalledTimes(2);
+    expect(storage.rows.size).toBe(0);                 // the copy went up
+  });
+
+  // A store that throws while parking must not lose the copy: the marker is the
+  // only record that one is still owed.
+  it('keeps the marker when parking the append itself fails', async () => {
+    appendSentFn.mockRejectedValue(new Error('IMAP offline'));
+    storage.deferAppendPending = vi.fn(async () => { throw new Error('db locked'); }) as never;
+    const queue = makeQueue(true);
+
+    await expect(queue.enqueueAndSend(PAYLOAD)).resolves.toMatchObject({ status: 'success' });
+    expect(onlyRow().sent_append_pending).toBe(true);
   });
 
   it('does not attempt any append when no appendSentFn is wired', async () => {

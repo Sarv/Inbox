@@ -1234,6 +1234,101 @@ describe('SQLiteStorage pending sends (outbox)', () => {
     expect(await storage.getAllSends()).toEqual([]);
   });
 
+  // What breaks if this fails: one Sent copy that cannot be uploaded is retried
+  // on every drain — a minute apart, forever — and each attempt cost a wedged
+  // IMAP connection on the account that hit this.
+  it('parks a failed Sent append until its backoff has elapsed', async () => {
+    const storage = ctx.get();
+    const id = await storage.savePendingSend({ to: 'g@example.test' });
+    await storage.markSendAppendPending(id, 'From: me\r\n\r\nbody', '<sent-2@example.test>');
+
+    await storage.deferAppendPending(id, T0 + 60, 1, 'Not connected to IMAP server');
+
+    expect(await storage.getAppendPendingSends(T0)).toEqual([]);          // not due
+    expect((await storage.getAppendPendingSends(T0 + 60))[0]).toMatchObject({
+      id, retryCount: 1, lastError: 'Not connected to IMAP server',
+    });
+    // Asked without a clock, every owed copy still comes back.
+    expect(await storage.getAppendPendingSends()).toHaveLength(1);
+  });
+
+  // The whole reason parking has its own method: updatePendingSendAttempt sets
+  // status='pending', and 'pending' is what getDueSends hands back for SENDING.
+  // This message has already been accepted by SMTP — putting it back there would
+  // deliver it a second time.
+  it('never parks an append where the send drain could pick it up', async () => {
+    const storage = ctx.get();
+    const id = await storage.savePendingSend({ to: 'h@example.test' });
+    await storage.markSendAppendPending(id, 'From: me\r\n\r\nbody', '<sent-3@example.test>');
+
+    await storage.deferAppendPending(id, T0 + 60, 1, 'Not connected to IMAP server');
+
+    expect((await storage.getAllSends())[0]).toMatchObject({
+      id, status: 'append_pending', smtpAccepted: true, sentAppendPending: true,
+    });
+    expect(await storage.getDueSends(T0 + 3600)).toEqual([]);
+  });
+
+  // A row that owes no append must not be rewritten by a stray deferral — the
+  // WHERE clause is the guard, and a no-op is the correct outcome.
+  it('leaves a send that owes no append alone', async () => {
+    const storage = ctx.get();
+    const id = await storage.savePendingSend({ to: 'i@example.test' });
+
+    await storage.deferAppendPending(id, T0 + 600, 3, 'stray call');
+
+    expect((await storage.getAllSends())[0]).toMatchObject({ id, status: 'pending', retryCount: 0 });
+    expect((await storage.getDueSends(T0)).map((s) => s.id)).toEqual([id]);
+  });
+
+  it('schedules a send for a chosen time and keeps it out of the drain until then', async () => {
+    const storage = ctx.get();
+    const sendAt = T0 + 3600;
+    const id = await storage.scheduleSend({ to: 'e@example.test' }, sendAt);
+
+    // Waiting, and recorded as INTENDED for that time — not merely delayed.
+    expect((await storage.getAllSends())[0]).toMatchObject({ id, status: 'pending', nextRetryAt: sendAt, scheduledAt: sendAt });
+    expect(await storage.getDueSends(T0)).toEqual([]);
+    expect(await storage.getDueSends(sendAt)).toHaveLength(1);
+  });
+
+  it('reschedules a waiting send and refuses one the drain already has', async () => {
+    const storage = ctx.get();
+    const id = await storage.scheduleSend({ to: 'f@example.test' }, T0 + 3600);
+
+    expect(await storage.rescheduleSend(id, T0 + 7200)).toBe(true);
+    expect((await storage.getAllSends())[0]).toMatchObject({ nextRetryAt: T0 + 7200, scheduledAt: T0 + 7200 });
+
+    // Regression: a new delivery time shown for a message already going out is
+    // a promise the queue cannot keep.
+    await storage.updatePendingSendStatus(id, 'executing');
+    expect(await storage.rescheduleSend(id, T0 + 10_800)).toBe(false);
+    expect(await storage.rescheduleSend(999_999, T0 + 3600)).toBe(false);
+  });
+
+  it('cancelling and sending-now both work on a scheduled send', async () => {
+    const storage = ctx.get();
+    const cancelled = await storage.scheduleSend({ to: 'g@example.test' }, T0 + 3600);
+    expect(await storage.cancelHeldSend(cancelled)).toBe(true);
+    expect(await storage.getAllSends()).toEqual([]);
+
+    const now = await storage.scheduleSend({ to: 'h@example.test' }, T0 + 3600);
+    await storage.clearSendHold(now);
+    expect((await storage.getDueSends(T0)).map((s) => s.id)).toEqual([now]);
+  });
+
+  // Regression: the retry backoff parks next_retry_at in the future again. With
+  // scheduled_at left behind, the Outbox would re-list a retrying message under
+  // Scheduled, showing a retry time as a delivery time the user chose.
+  it('stops calling a send scheduled once its wait has been released', async () => {
+    const storage = ctx.get();
+    const id = await storage.scheduleSend({ to: 'i@example.test' }, T0 + 60);
+    await storage.clearSendHold(id);
+    await storage.updatePendingSendAttempt(id, 1, 'ETIMEDOUT', T0 + 120);
+
+    expect((await storage.getAllSends())[0]).toMatchObject({ retryCount: 1, nextRetryAt: T0 + 120, scheduledAt: null });
+  });
+
   it('records retry attempts, dead-letters, resets, and reports counts', async () => {
     const storage = ctx.get();
     const id = await storage.savePendingSend({ to: 'd@example.test' });

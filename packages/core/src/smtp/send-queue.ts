@@ -164,8 +164,9 @@ export class SendQueue {
             await this.storage!.deletePendingSend(id);
           } catch (appendErr) {
             // The SEND fully succeeded — report success. The append marker stays
-            // so processQueue/restart completes the Sent copy later.
-            logger.warn(`[Outbox] Send ${id} sent, but Sent APPEND deferred (will retry): ${(appendErr as Error)?.message ?? appendErr}`);
+            // so processQueue/restart completes the Sent copy later, on the same
+            // backoff as every other deferred append.
+            await this.deferAppend(id, 0, (appendErr as Error)?.message ?? String(appendErr));
           }
           logger.info(`[Outbox] Send ${id} succeeded (messageId=${messageId || 'n/a'})`);
           return { status: 'success', messageId: result.messageId };
@@ -255,13 +256,21 @@ export class SendQueue {
    * APPEND is still pending (crash between accept and upload, or a prior append
    * that failed because IMAP was offline). Append-only — these are NEVER
    * re-sent (smtp_accepted is set). Best-effort per row; a failure leaves the
-   * marker so the next drain retries it.
+   * marker so a later drain retries it.
+   *
+   * A failure also BACKS OFF, on the same doubling curve as a send retry. An
+   * append that fails for a standing reason fails again a minute later, and one
+   * that fails by wedging an IMAP command costs a connection each time it is
+   * tried — which is how a single undeliverable Sent copy came to recycle the
+   * account's IMAP connection every 60 seconds for as long as the app was open.
+   * Retrying more slowly finishes the copy just as surely and stops the rest of
+   * the app paying for it.
    */
   private async drainAppendPending(): Promise<void> {
     if (!this.storage || !this.appendSentFn || !this.isConnected()) return;
     let pending;
     try {
-      pending = await this.storage.getAppendPendingSends();
+      pending = await this.storage.getAppendPendingSends(Math.floor(Date.now() / 1000));
     } catch (e) {
       logger.error('[Outbox] Failed to load append-pending sends:', e);
       return;
@@ -282,8 +291,29 @@ export class SendQueue {
         await this.storage.deletePendingSend(row.id);
         logger.info(`[Outbox] Completed deferred Sent APPEND for send ${row.id}`);
       } catch (e) {
-        logger.warn(`[Outbox] Deferred Sent APPEND for send ${row.id} failed; will retry: ${(e as Error)?.message ?? e}`);
+        await this.deferAppend(row.id, row.retryCount ?? 0, (e as Error)?.message ?? String(e));
       }
+    }
+  }
+
+  /**
+   * One deferral rule for both append sites: log it, and park the row until the
+   * backoff has elapsed so the next drain skips it. `attemptsMade` is the row's
+   * retry count, which a send-accepted row no longer uses for anything else.
+   *
+   * Never throws and never drops the marker: whatever happens here, the Sent
+   * copy stays owed. A store that cannot park it (no deferAppendPending) simply
+   * retries on the next drain, as before.
+   */
+  private async deferAppend(id: number, attemptsMade: number, error: string): Promise<void> {
+    const backoff = this.backoffMs(attemptsMade);
+    logger.warn(`[Outbox] Sent APPEND for send ${id} deferred ${Math.round(backoff / 1000)}s: ${error}`);
+    if (typeof this.storage?.deferAppendPending !== 'function') return;
+    try {
+      const nextRetryAt = Math.floor(Date.now() / 1000) + Math.floor(backoff / 1000);
+      await this.storage.deferAppendPending(id, nextRetryAt, attemptsMade + 1, error);
+    } catch (e) {
+      logger.warn(`[Outbox] Could not park the deferred Sent APPEND for send ${id}: ${(e as Error)?.message ?? e}`);
     }
   }
 

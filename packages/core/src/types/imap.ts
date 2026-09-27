@@ -248,8 +248,13 @@ export interface IIMAPClient {
   getCurrentMailboxState?(): { path?: string; highestModseq?: number; uidValidity?: number; exists?: number; uidNext?: number } | null;
 
   /** Map Message-ID (bracket-stripped, lower-cased) → UID for the current folder,
-   *  via envelope fetch. Reliable delete-by-id when HEADER search is unsupported. */
-  fetchMessageIdToUidMap?(expectedPath?: string): Promise<Map<string, number>>;
+   *  via envelope fetch. Reliable delete-by-id when HEADER search is unsupported.
+   *  `recent` bounds the scan to the newest N messages — the whole-mailbox fetch
+   *  costs an envelope per message and can outrun the op timeout. */
+  fetchMessageIdToUidMap?(
+    expectedPath?: string,
+    options?: { recent?: number },
+  ): Promise<Map<string, number>>;
 
   /** Atomically \Deleted + expunge the given UIDs (no flag-then-purge race). */
   deleteAndExpunge?(uids: number[]): Promise<void>;

@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, messageIdKey, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
 
@@ -500,6 +500,19 @@ export async function sendEmailFromMain(
  * Injected into the outbox SendQueue and also called best-effort by the agent
  * auto-send path (which sends outside the queue).
  */
+/**
+ * How far back the Sent dedupe looks, in messages.
+ *
+ * The question it answers is only ever "did the server file its own copy of the
+ * message SMTP just accepted?", and such a copy is among the very newest in the
+ * mailbox. The whole-mailbox envelope scan that used to answer it costs one
+ * envelope per message: on a 1,700-message Sent folder it ran past the client's
+ * 60s op timeout, the client recycled the connection as wedged, and the APPEND
+ * that was about to run on it failed with "Not connected" — every minute, for
+ * as long as the app stayed open, with the Sent copy never uploaded.
+ */
+const SENT_DEDUPE_WINDOW = 50;
+
 export async function appendSentCopy(
   rawMime: string,
   messageId: string,
@@ -524,7 +537,7 @@ export async function appendSentCopy(
     return;
   }
   const sentPath = sent.path;
-  const midKey = messageId.replace(/[<>]/g, '').trim().toLowerCase();
+  const midKey = messageIdKey(messageId);
 
   const run = async (conn: any): Promise<void> => withFolderSelected(conn, sentPath, async () => {
 
@@ -535,10 +548,23 @@ export async function appendSentCopy(
     let alreadyOnServer = false;
     if (midKey && typeof conn.fetchMessageIdToUidMap === 'function') {
       try {
-        const map: Map<string, number> = await conn.fetchMessageIdToUidMap();
+        const map: Map<string, number> = await conn.fetchMessageIdToUidMap(sentPath, {
+          recent: SENT_DEDUPE_WINDOW,
+        });
         alreadyOnServer = map.has(midKey);
       } catch (e) {
-        logger.warn('[SMTP] Sent Message-ID scan failed (will still append):', (e as Error)?.message || e);
+        // An unanswered dedupe question is survivable — a duplicate in Sent
+        // beats a message that isn't there — so we still append. Appending over
+        // a connection the scan just KILLED is not: a timed-out command is
+        // recycled by the client (the socket is dropped), so the APPEND below
+        // would fail with "Not connected to IMAP server" every single time, and
+        // the retry a minute later would wedge another connection, forever.
+        // Defer instead, so the next attempt begins on a live connection.
+        logger.warn('[SMTP] Sent Message-ID scan failed:', (e as Error)?.message || e);
+        if (typeof conn.isConnected === 'function' && !conn.isConnected()) {
+          throw new Error('IMAP connection recycled during Sent dedupe — Sent append deferred');
+        }
+        logger.warn('[SMTP] Appending without the dedupe check (connection still live)');
       }
     }
 

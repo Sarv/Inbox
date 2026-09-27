@@ -1,6 +1,7 @@
 // Core utilities
 
 export * from './id';
+export * from './message-id';
 export * from './logger';
 export * from './validators';
 export * from './provider';

@@ -579,8 +579,18 @@ export interface IEmailStorage {
    * Sends whose SMTP submission already succeeded but whose Sent-folder APPEND
    * still needs to run (crash recovery / retry). These must NEVER be re-sent —
    * only appended — because smtp_accepted is already set.
+   *
+   * `now` (unix seconds) returns only the ones due, skipping any parked by
+   * {@link deferAppendPending}.
    */
-  getAppendPendingSends(): Promise<PendingSendRecord[]>;
+  getAppendPendingSends(now?: number): Promise<PendingSendRecord[]>;
+
+  /**
+   * Back off a Sent APPEND that failed, until `nextRetryAt` (unix seconds).
+   * Optional: a store without it simply retries on every drain, which is the
+   * behaviour this replaces.
+   */
+  deferAppendPending?(id: number, nextRetryAt: number, attempt: number, lastError: string): Promise<void>;
 
   /**
    * Reset a send back to 'pending' for an immediate manual retry.
