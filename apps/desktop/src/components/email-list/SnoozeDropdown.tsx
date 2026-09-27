@@ -1,33 +1,18 @@
-import { format, addDays, nextSaturday, startOfDay, setHours, setMinutes } from 'date-fns';
 import { Clock } from 'lucide-react';
 import { useState } from 'react';
 
+// The same presets and the same custom-pick parsing the compose "Send later"
+// menu uses — see utils/time-presets.
+import { customDateTime, dateInputValue, snoozePresets, toEpochSeconds } from '../../utils/time-presets';
+
 import type { SnoozeDropdownProps } from './types';
-
-function getSnoozeOptions() {
-  const now = new Date();
-  const tomorrow = startOfDay(addDays(now, 1));
-  const tomorrowMorning = setMinutes(setHours(tomorrow, 8), 0);
-
-  const weekend = nextSaturday(now);
-  const weekendMorning = setMinutes(setHours(startOfDay(weekend), 9), 0);
-
-  const nextWeek = startOfDay(addDays(now, 7));
-  const nextWeekMorning = setMinutes(setHours(nextWeek, 8), 0);
-
-  return [
-    { label: 'Tomorrow', time: tomorrowMorning, sublabel: format(tomorrowMorning, 'EEE, h:mm a') },
-    { label: 'This weekend', time: weekendMorning, sublabel: format(weekendMorning, 'EEE, h:mm a') },
-    { label: 'Next week', time: nextWeekMorning, sublabel: format(nextWeekMorning, 'EEE, MMM d') },
-  ];
-}
 
 export function SnoozeDropdown({ emailId, isSnoozed, onSnooze, onBulkSnooze, onUnsnooze, onClose, align = 'right' }: SnoozeDropdownProps) {
   const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
   const [customSnoozeDate, setCustomSnoozeDate] = useState('');
   const [customSnoozeTime, setCustomSnoozeTime] = useState('09:00');
 
-  const snoozeOptions = getSnoozeOptions();
+  const snoozeOptions = snoozePresets();
 
   const handleSnooze = (snoozeUntil: number, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -43,29 +28,29 @@ export function SnoozeDropdown({ emailId, isSnoozed, onSnooze, onBulkSnooze, onU
     e.stopPropagation();
     if (!customSnoozeDate) return;
 
-    const [year, month, day] = customSnoozeDate.split('-').map(Number);
-    const [hours, minutes] = customSnoozeTime.split(':').map(Number);
-    const snoozeDate = new Date(year, month - 1, day, hours, minutes);
-    const snoozeUntil = Math.floor(snoozeDate.getTime() / 1000);
+    const snoozeDate = customDateTime(customSnoozeDate, customSnoozeTime);
+    if (!snoozeDate) return;
 
-    handleSnooze(snoozeUntil, e);
+    handleSnooze(toEpochSeconds(snoozeDate), e);
   };
 
   const alignClass = align === 'left' ? 'left-0' : 'right-0';
 
   return (
-    <div className={`absolute ${alignClass} top-full mt-1 z-[100] bg-popover border border-border rounded-lg shadow-lg py-1 w-56`}>
+    <div className={`absolute ${alignClass} top-full mt-1 z-[100] bg-popover border border-border rounded-lg shadow-lg py-1 w-72`}>
       <div className="px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase">
         Snooze until
       </div>
       {snoozeOptions.map((option) => (
         <button
           key={option.label}
-          onClick={(e) => handleSnooze(Math.floor(option.time.getTime() / 1000), e)}
-          className="w-full px-3 py-2 text-left hover:bg-accent flex items-center justify-between"
+          onClick={(e) => handleSnooze(toEpochSeconds(option.time), e)}
+          className="w-full px-3 py-2 text-left hover:bg-accent flex items-center justify-between gap-3"
         >
-          <span className="text-sm">{option.label}</span>
-          <span className="text-xs text-muted-foreground">{option.sublabel}</span>
+          <span className="text-sm truncate">{option.label}</span>
+          {/* The time never wraps or shrinks: "Mon, 8:00 AM" broken over two
+              lines is what made this menu look ragged. */}
+          <span className="text-xs text-muted-foreground whitespace-nowrap flex-shrink-0">{option.sublabel}</span>
         </button>
       ))}
 
@@ -78,7 +63,9 @@ export function SnoozeDropdown({ emailId, isSnoozed, onSnooze, onBulkSnooze, onU
             setShowCustomDatePicker(true);
             const tomorrow = new Date();
             tomorrow.setDate(tomorrow.getDate() + 1);
-            setCustomSnoozeDate(tomorrow.toISOString().split('T')[0]);
+            // Local date parts: toISOString() would offer "tomorrow" a day
+            // early for anyone east of UTC late in the evening.
+            setCustomSnoozeDate(dateInputValue(tomorrow));
           }}
           className="w-full px-3 py-2 text-left hover:bg-accent flex items-center gap-2"
         >
@@ -92,7 +79,7 @@ export function SnoozeDropdown({ emailId, isSnoozed, onSnooze, onBulkSnooze, onU
             value={customSnoozeDate}
             onChange={(e) => setCustomSnoozeDate(e.target.value)}
             onClick={(e) => e.stopPropagation()}
-            min={new Date().toISOString().split('T')[0]}
+            min={dateInputValue(new Date())}
             className="w-full px-2 py-1 text-sm border border-input rounded bg-background"
           />
           <input
