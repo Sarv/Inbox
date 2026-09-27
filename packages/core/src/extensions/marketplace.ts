@@ -600,6 +600,23 @@ export function compareExtensionVersions(left: string, right: string): number {
 
 export type CatalogState = 'available' | 'installed' | 'update-available' | 'incompatible';
 
+/**
+ * Whether a registry entry is a release worth moving `currentVersion` up to:
+ * strictly newer, and able to run on this app.
+ *
+ * The one rule behind both the Update button and the first-run upgrade of a
+ * bundled system extension, so the two can never disagree on what counts as an
+ * update.
+ */
+export function isNewerCompatibleRelease(
+  entry: Pick<RegistryEntry, 'version' | 'engineRange'>,
+  currentVersion: string,
+  appVersion: string
+): boolean {
+  if (compareExtensionVersions(entry.version, currentVersion) <= 0) return false;
+  return !entry.engineRange || satisfiesVersion(appVersion, entry.engineRange);
+}
+
 export interface CatalogItem extends RegistryEntry {
   state: CatalogState;
   /** Version currently on disk, when the extension is installed. */
@@ -647,10 +664,9 @@ export function buildCatalog({ entries, installed, appVersion }: BuildCatalogOpt
       }
       if (!local) return { ...entry, state: 'available' };
 
-      const newer = compareExtensionVersions(entry.version, local.version) > 0;
       return {
         ...entry,
-        state: newer && compatible ? 'update-available' : 'installed',
+        state: isNewerCompatibleRelease(entry, local.version, appVersion) ? 'update-available' : 'installed',
         installedVersion: local.version,
         enabled: local.enabled,
       };

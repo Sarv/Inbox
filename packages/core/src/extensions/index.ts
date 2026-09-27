@@ -228,6 +228,7 @@ export {
   parseRegistryDocument,
   mergeRegistryDetail,
   compareExtensionVersions,
+  isNewerCompatibleRelease,
   buildCatalog,
   mergeRegistries,
   type RegistryDownload,

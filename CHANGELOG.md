@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whichever screen is open. Installs already stuck on "AI is inactive" with a
   signed-in Sarv account are fixed on the next launch. A provider you picked
   yourself — Sarv or another — is never replaced.
+- **A fresh install starts on the latest built-in extensions.** Built-in
+  extensions ship inside the app, so an install could start on a copy that
+  was already out of date and greet you with an Update button. On first run
+  the app now installs the newer release straight away when one is
+  available. The bundled copy stays in use if you are offline.
 
 ## [1.2.4] - 2026-09-27
 

@@ -38,6 +38,7 @@ import {
   MAX_DOWNLOAD_BYTES,
   buildCatalog,
   createLogger,
+  isNewerCompatibleRelease,
   isTrustedRegistryUrl,
   mergeRegistries,
   mergeRegistryDetail,
@@ -794,9 +795,13 @@ function seedDirFor(extensionId: string): string | null {
  * runs once per extension: anything already installed is left alone, including
  * one the user has since disabled or removed on purpose.
  *
- * The build's own verified copy is preferred over the network, so first run is
- * instant and works offline; the registry is only asked about an extension the
- * build could not seed.
+ * The build's own verified copy goes in first, so first run is instant and
+ * works offline. The registry is then asked once, for two things: every
+ * extension the build could not seed, and a newer release of every one it did.
+ * A bundled copy is only as new as the app build that carried it, and a fresh
+ * install that opened on an "Update" button for an extension it had just
+ * installed would be asking the reader to finish the install for us. A failed
+ * upgrade leaves the bundled copy in place and running.
  */
 export async function installSystemExtensions(): Promise<void> {
   const { systemExtensions } = getExtensionsConfig();
@@ -810,6 +815,7 @@ export async function installSystemExtensions(): Promise<void> {
   if (wanted.length === 0) return;
 
   const fromNetwork: string[] = [];
+  const seeded: { id: string; version: string }[] = [];
   for (const id of wanted) {
     const seed = seedDirFor(id);
     if (!seed) {
@@ -819,6 +825,7 @@ export async function installSystemExtensions(): Promise<void> {
     try {
       const installed = await manager.installExtension(seed);
       await manager.enableExtension(id);
+      seeded.push({ id, version: installed.version });
       logger.info(`System extension "${id}" v${installed.version} installed from the bundled copy`);
     } catch (error) {
       logger.warn(`Could not install the bundled copy of "${id}": ${(error as Error).message}`);
@@ -826,9 +833,7 @@ export async function installSystemExtensions(): Promise<void> {
     }
   }
 
-  if (fromNetwork.length === 0) return;
-
-  // Only ask the network once, and only for what the build could not seed.
+  // Only ask the network once, for what was not seeded and what was seeded old.
   const catalog = await fetchCatalog().catch((error: Error) => {
     logger.warn(`Could not reach a registry to install system extensions: ${error.message}`);
     return null;
@@ -849,6 +854,21 @@ export async function installSystemExtensions(): Promise<void> {
       // One failure must not stop the rest: a first run that cannot reach
       // GitHub should still start, and try again next launch.
       logger.warn(`Could not install system extension "${id}": ${(error as Error).message}`);
+    }
+  }
+
+  const appVersion = app.getVersion();
+  for (const { id, version } of seeded) {
+    const entry = catalog.items.find((item) => item.id === id);
+    if (!entry || !isNewerCompatibleRelease(entry, version, appVersion)) continue;
+    try {
+      await installFromRegistry(id, entry.permissions);
+      await manager.enableExtension(id);
+      logger.info(`System extension "${id}" upgraded from bundled v${version} to v${entry.version}`);
+    } catch (error) {
+      // The bundled copy is still installed and running; the Update button
+      // offers the newer release once the registry can be reached.
+      logger.warn(`Could not upgrade the bundled copy of "${id}" to v${entry.version}: ${(error as Error).message}`);
     }
   }
 }

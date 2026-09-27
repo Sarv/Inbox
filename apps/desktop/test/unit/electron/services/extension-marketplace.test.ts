@@ -1016,6 +1016,107 @@ describe('installFromRegistry', () => {
  * the registry — its cache key, its status row — and a mirror that is down is
  * one retry, never a lost catalogue.
  */
+describe('installSystemExtensions', () => {
+  /**
+   * A packaged-like app folder: the build config naming otp-code as a system
+   * extension, and the copy the build bundled for it at `seedVersion`.
+   */
+  function appWithSeed(seedVersion: string): void {
+    h.appDir = join(h.userData, 'app');
+    const seed = join(h.appDir, 'build', 'default-extensions', 'otp-code');
+    mkdirSync(seed, { recursive: true });
+    writeFileSync(
+      join(h.appDir, 'extensions.config.json'),
+      JSON.stringify({ registries: [REGISTRY_URL], systemExtensions: ['otp-code'] }),
+      'utf-8'
+    );
+    writeFileSync(join(seed, 'sarvinbox-extension.json'), JSON.stringify({ ...MANIFEST, version: seedVersion }), 'utf-8');
+  }
+
+  function publishRelease(): void {
+    const archive = archiveFor();
+    h.responses.set(REGISTRY_URL, { body: registryFor(archive) });
+    h.responses.set(ASSET_URL, { body: archive });
+  }
+
+  // Regression: a bundled copy is only as new as the app build. A fresh install
+  // kept it and opened on an Update button for an extension it had just installed.
+  it('upgrades a bundled copy the registry has since replaced', async () => {
+    appWithSeed('0.9.0');
+    publishRelease();
+    const { installSystemExtensions } = await loadService();
+
+    await installSystemExtensions();
+
+    expect(h.installCalls).toHaveLength(2);
+    expect(h.installCalls[0]).toContain(join('default-extensions', 'otp-code'));
+    expect(h.stagedFiles[1]).toContain('sarvinbox-extension.json');
+    expect(h.enabled).toEqual(['otp-code', 'otp-code']);
+  });
+
+  // Regression: an up-to-date bundle must not be downloaded and reinstalled.
+  it('keeps a bundled copy that is already the latest', async () => {
+    appWithSeed('1.0.0');
+    publishRelease();
+    const { installSystemExtensions } = await loadService();
+
+    await installSystemExtensions();
+
+    expect(h.installCalls).toHaveLength(1);
+    expect(h.requested).not.toContain(ASSET_URL);
+  });
+
+  // Regression: first run with no network must still start with the bundled copy.
+  it('keeps the bundled copy running when the registry is unreachable', async () => {
+    appWithSeed('0.9.0');
+    const { installSystemExtensions } = await loadService();
+
+    await expect(installSystemExtensions()).resolves.toBeUndefined();
+
+    expect(h.installCalls).toHaveLength(1);
+    expect(h.enabled).toEqual(['otp-code']);
+  });
+
+  // Regression: a failed download mid-upgrade must not leave the reader with nothing.
+  it('keeps the bundled copy when the newer archive cannot be downloaded', async () => {
+    appWithSeed('0.9.0');
+    h.responses.set(REGISTRY_URL, { body: registryFor(archiveFor()) });
+    const { installSystemExtensions } = await loadService();
+
+    await installSystemExtensions();
+
+    expect(h.installCalls).toHaveLength(1);
+    expect(h.uninstalled).toEqual([]);
+    expect(h.enabled).toEqual(['otp-code']);
+  });
+
+  // Regression: a newer release that needs a newer app must not replace a working copy.
+  it('keeps the bundled copy when the newer release needs a newer app', async () => {
+    appWithSeed('0.9.0');
+    publishRelease();
+    h.appVersion = '1.0.0';
+    const { installSystemExtensions } = await loadService();
+
+    await installSystemExtensions();
+
+    expect(h.installCalls).toHaveLength(1);
+  });
+
+  // Regression: existing installs keep their own version and their Update
+  // button; this is a first-run step, not a silent auto-updater.
+  it('leaves an extension that is already installed alone', async () => {
+    appWithSeed('0.9.0');
+    publishRelease();
+    h.installed = [{ id: 'otp-code', version: '0.9.0', enabled: false }];
+    const { installSystemExtensions } = await loadService();
+
+    await installSystemExtensions();
+
+    expect(h.installCalls).toEqual([]);
+    expect(h.requested).toEqual([]);
+  });
+});
+
 describe('the CDN mirror', () => {
   const MIRROR_INDEX_URL =
     'https://cdn.jsdelivr.net/gh/Sarv/SarvInbox-extensions@main/registry/index.json';

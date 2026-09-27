@@ -4,6 +4,7 @@ import {
   MAX_DOWNLOAD_BYTES,
   buildCatalog,
   compareExtensionVersions,
+  isNewerCompatibleRelease,
   isTrustedRegistryUrl,
   mergeRegistries,
   mergeRegistryDetail,
@@ -272,6 +273,32 @@ describe('compareExtensionVersions', () => {
   it('treats missing or non-numeric parts as zero', () => {
     expect(compareExtensionVersions('1', '1.0.0')).toBe(0);
     expect(compareExtensionVersions('1.x.0', '1.0.0')).toBe(0);
+  });
+});
+
+describe('isNewerCompatibleRelease', () => {
+  // Regression: a fresh install must upgrade a bundled copy the registry has
+  // since replaced, or it opens on an Update button for what it just installed.
+  it('is true for a newer release this app can run', () => {
+    expect(isNewerCompatibleRelease({ version: '1.2.2', engineRange: '^1.1.0' }, '1.2.1', '1.2.4')).toBe(true);
+  });
+
+  // Regression: no range means any app can run it; it must not read as incompatible.
+  it('is true for a newer release with no engine range', () => {
+    expect(isNewerCompatibleRelease({ version: '1.2.2' }, '1.2.1', '1.2.4')).toBe(true);
+  });
+
+  // Regression: reinstalling the same or an older version is churn, or a downgrade.
+  it.each([
+    ['the same version', '1.2.1'],
+    ['an older version', '1.2.0'],
+  ])('is false for %s', (_label, offered) => {
+    expect(isNewerCompatibleRelease({ version: offered }, '1.2.1', '1.2.4')).toBe(false);
+  });
+
+  // Regression: swapping a working copy for one that needs a newer app breaks it.
+  it('is false for a newer release that needs a newer app', () => {
+    expect(isNewerCompatibleRelease({ version: '2.0.0', engineRange: '^2.0.0' }, '1.2.1', '1.2.4')).toBe(false);
   });
 });
 
