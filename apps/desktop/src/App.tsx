@@ -112,6 +112,15 @@ function App() {
   const [onboardingComplete, setOnboardingComplete] = useState(() => {
     return localStorage.getItem('sarvinbox-onboarding-complete') === 'true';
   });
+  // Latched once onboarding appears, so its own addAccount (Login with Sarv,
+  // Connect Email) doesn't flip hasAccounts and unmount it mid-flow.
+  const [onboardingInProgress, setOnboardingInProgress] = useState(false);
+  const showOnboarding = shouldShowOnboarding({
+    checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection, onboardingInProgress,
+  });
+  useEffect(() => {
+    if (showOnboarding) setOnboardingInProgress(true);
+  }, [showOnboarding]);
 
   // Keep keyboard shortcuts alive across window-focus loss. On regaining focus
   // (and once on mount), if nothing meaningful is focused, focus the app root so
@@ -870,7 +879,7 @@ function App() {
 
       {/* Onboarding — first-time users only (genuinely no account in the
           registry, not merely a transient null imapConfig during boot/reconnect). */}
-      {shouldShowOnboarding({ checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection }) && (
+      {showOnboarding && (
         <Onboarding onComplete={() => setOnboardingComplete(true)} />
       )}
 
@@ -918,7 +927,7 @@ function App() {
               the mail section so Settings (and other sections) stay reachable and
               the user can add/configure there. "Add account" deep-links to
               Settings → Accounts rather than opening a popup. */}
-          {shouldShowNoAccountEmptyState({ checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection })
+          {shouldShowNoAccountEmptyState({ checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection, onboardingInProgress })
             ? <NoAccountEmptyState onAddAccount={openAddAccountFlow} />
             : renderContent()}
         </div>

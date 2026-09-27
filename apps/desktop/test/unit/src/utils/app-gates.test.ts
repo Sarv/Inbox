@@ -16,6 +16,7 @@ const bootingWithAccount: AppGateState = {
   hasAccounts: true,
   needsReauth: false,
   activeSection: 'mail',
+  onboardingInProgress: false,
 };
 
 describe('shouldShowNoAccountEmptyState', () => {
@@ -62,6 +63,7 @@ describe('shouldShowOnboarding', () => {
         hasAccounts: false,
         needsReauth: false,
         activeSection: 'mail',
+        onboardingInProgress: false,
       }),
     ).toBe(true);
   });
@@ -85,7 +87,37 @@ describe('shouldShowOnboarding', () => {
         hasAccounts: false,
         needsReauth: false,
         activeSection: 'mail',
+        onboardingInProgress: false,
       }),
     ).toBe(false);
+  });
+
+  // A brand-new user partway through onboarding, right after a step added the
+  // account (Login with Sarv auto-connects the Sarv mailbox; Connect Email adds one).
+  const midOnboardingAccountAdded: AppGateState = {
+    checkingConnection: false,
+    onboardingComplete: false,
+    hasAccounts: true,
+    needsReauth: false,
+    activeSection: 'mail',
+    onboardingInProgress: true,
+  };
+
+  it('stays up after its own step adds the account, until it is completed', () => {
+    // Regression: Login with Sarv connects the mailbox in the background, which
+    // flipped hasAccounts and unmounted onboarding before the AI provider/model
+    // picker rendered — every fresh install landed on "AI is inactive".
+    expect(shouldShowOnboarding(midOnboardingAccountAdded)).toBe(true);
+  });
+
+  it('closes once the in-progress flow is completed', () => {
+    // The latch must not keep onboarding up past its final step.
+    expect(shouldShowOnboarding({ ...midOnboardingAccountAdded, onboardingComplete: true })).toBe(false);
+  });
+
+  it('still defers to re-auth and the connection check while in progress', () => {
+    // The latch only overrides hasAccounts, not the other suppressors.
+    expect(shouldShowOnboarding({ ...midOnboardingAccountAdded, needsReauth: true })).toBe(false);
+    expect(shouldShowOnboarding({ ...midOnboardingAccountAdded, checkingConnection: true })).toBe(false);
   });
 });

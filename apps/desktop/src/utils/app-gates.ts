@@ -22,14 +22,25 @@ export interface AppGateState {
   needsReauth: boolean;
   /** The currently visible app section (the empty state only overrides 'mail'). */
   activeSection: string;
+  /**
+   * Onboarding has been shown this session and not yet finished. Its steps add
+   * the account themselves (Login with Sarv, Connect Email), so `hasAccounts`
+   * turns true MID-flow — this keeps the flow on screen until it completes.
+   */
+  onboardingInProgress: boolean;
 }
 
 /**
  * First-run onboarding: only for a brand-new user with genuinely no account —
  * never during the boot/reconnect window where imapConfig is transiently null.
+ * Once started it stays up until completed, even after its own steps add the
+ * account; otherwise the Sarv AI provider/model picker is torn down unseen.
  */
 export const shouldShowOnboarding = (state: AppGateState): boolean =>
-  !state.checkingConnection && !state.onboardingComplete && !state.hasAccounts && !state.needsReauth;
+  !state.checkingConnection &&
+  !state.onboardingComplete &&
+  !state.needsReauth &&
+  (!state.hasAccounts || state.onboardingInProgress);
 
 /**
  * Returning-user empty state: shown only on the mail view, once onboarding is
