@@ -8,7 +8,16 @@ import {
 import { ImageOff } from 'lucide-react';
 import { useRef, useEffect, useMemo, useState } from 'react';
 
-import { useAppearance, useResolvedTheme } from '../appearance';
+import {
+  CHAT_READING_BASE_PX,
+  READING_BASE_PX,
+  defaultReadingTypography,
+  readingFontSize,
+  readingFontStack,
+  useAppearance,
+  useResolvedTheme,
+  type ReadingTypography,
+} from '../appearance';
 import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
 import { DARK_PAPER, applyEmailDarkMode } from '../utils/email-dark-mode';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
@@ -101,7 +110,14 @@ interface SandboxedEmailBodyProps {
  * that has actually been got wrong, and it is not reachable through the
  * component: jsdom neither lays out nor renders `srcdoc`.
  */
-export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize: boolean, transparentCanvas: boolean, darkCanvas = false): string {
+export function buildIframeCss(
+  isDark: boolean,
+  styledTables: boolean,
+  normalize: boolean,
+  transparentCanvas: boolean,
+  darkCanvas = false,
+  reading: ReadingTypography = defaultReadingTypography,
+): string {
   // !important forces normalized typography across mismatched senders —
   // only applied when caller opts in (Chat View). Standard email view
   // keeps everything low-specificity so the email's own inline styles
@@ -124,6 +140,10 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
   // for. The rules below therefore split on TWO questions, not one — "is this
   // the Standard reading pane" (which still wants its attachment-chip and
   // wide-table fixes) and "is the canvas white" (which decides the colours.)
+  // The reader's own typography. Omitted, this is exactly what the function
+  // emitted before the setting existed, so a caller that does not care about
+  // it gets byte-identical CSS.
+  const bodyPx = readingFontSize(normalize ? CHAT_READING_BASE_PX : READING_BASE_PX, reading.size);
   const standardView = !normalize && !transparentCanvas;
   const lightCanvas = standardView && !darkCanvas;
   const emailDark = isDark && !lightCanvas;
@@ -206,12 +226,11 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
       ${lightCanvas ? 'background-color: #ffffff;' : ''}
     }
     body, body * {
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-        "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif${imp};
+      font-family: ${reading.fontStack}${imp};
       line-height: 1.55${imp};
     }
     body {
-      font-size: ${normalize ? '15px' : '16px'}${imp};
+      font-size: ${bodyPx}px${imp};
       color: ${fg};
       word-wrap: break-word;
       overflow-wrap: break-word;
@@ -233,7 +252,7 @@ export function buildIframeCss(isDark: boolean, styledTables: boolean, normalize
        emphasis (which is preserved verbatim). */
     body p, body div, body span, body li, body td, body th, body dd, body dt,
     body b, body strong, body em, body i, body u, body small, body a, body font {
-      font-size: ${normalize ? '15px' : '16px'}${imp};
+      font-size: ${bodyPx}px${imp};
     }
     /* Headings keep their proportional sizing but use the same family.
        !important when normalized so the body * rule doesn't override. */
@@ -785,8 +804,15 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
   // themed surface, and re-colouring the sender's HTML underneath one would
   // fight the tint rather than help it. `useAppearance` re-renders on the
   // change, so flipping the setting re-renders whatever message is open.
-  const { darkenEmails } = useAppearance();
+  const { darkenEmails, readingSize, readingFont } = useAppearance();
   const resolvedTheme = useResolvedTheme();
+  // The reader's message-body typography. A stable object, so it can sit in the
+  // effect dependencies below: rebuilding it every render would re-set `srcdoc`
+  // every render, which resets scroll position and re-runs every measurement.
+  const reading = useMemo<ReadingTypography>(
+    () => ({ size: readingSize, fontStack: readingFontStack(readingFont) }),
+    [readingSize, readingFont],
+  );
   const standardView = !normalize && !transparentCanvas;
   // Memoised because it parses the whole message: this must run once per
   // message, not once per render of the pane around it.
@@ -839,7 +865,14 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
     const iframe = iframeRef.current;
     if (!iframe) return;
 
-    const themeCss = buildIframeCss(resolvedTheme === 'dark', styledTables, normalize, transparentCanvas, dark.darkCanvas);
+    const themeCss = buildIframeCss(
+      resolvedTheme === 'dark',
+      styledTables,
+      normalize,
+      transparentCanvas,
+      dark.darkCanvas,
+      reading,
+    );
     // Lazy-load images BEFORE srcdoc so the iframe's load event isn't
     // gated on every image network request finishing. `dark.html` is the
     // message with its own colours already moved for a dark page (or the
@@ -854,7 +887,7 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
 
     // Setting srcdoc resets the iframe and re-fires onload.
     iframe.srcdoc = doc;
-  }, [dark, resolvedTheme, styledTables, normalize, transparentCanvas, imagesLoaded, effectiveBlock]);
+  }, [dark, resolvedTheme, styledTables, normalize, transparentCanvas, imagesLoaded, effectiveBlock, reading]);
 
   // Measure body height + intercept link clicks. Don't wait for the
   // iframe `load` event — it fires only after every subresource (images,
@@ -1012,7 +1045,14 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
       const isDark = document.documentElement.classList.contains('dark');
       const themeStyle = idoc.querySelector('style[data-sarv-theme]');
       if (themeStyle) {
-        themeStyle.textContent = buildIframeCss(isDark, styledTables, normalize, transparentCanvas, dark.darkCanvas);
+        themeStyle.textContent = buildIframeCss(
+          isDark,
+          styledTables,
+          normalize,
+          transparentCanvas,
+          dark.darkCanvas,
+          reading,
+        );
       }
     });
 
@@ -1022,7 +1062,7 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
     });
 
     return () => observer.disconnect();
-  }, [dark, styledTables, normalize, transparentCanvas]);
+  }, [dark, styledTables, normalize, transparentCanvas, reading]);
 
   return (
     <>

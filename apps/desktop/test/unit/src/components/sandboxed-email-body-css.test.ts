@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+  CHAT_READING_BASE_PX,
+  MAIL_SANS_STACK,
+  READING_BASE_PX,
+  defaultReadingTypography,
+} from '../../../../src/appearance/appearance';
 import { buildIframeCss } from '../../../../src/components/SandboxedEmailBody';
 import { DARK_PAPER, darkenColorToken } from '../../../../src/utils/email-dark-mode';
 
@@ -178,5 +184,49 @@ describe('the dark-bodies canvas', () => {
     expect(standard(true)).not.toContain('color-scheme');
     expect(tintedBubble()).not.toContain('color-scheme');
     expect(normalizedBubble(true)).not.toContain('color-scheme');
+  });
+});
+
+describe('the reading typography', () => {
+  // Regression: the parameter is sixth and optional. Every caller that omits it
+  // — including the four- and five-argument calls above — must get byte for
+  // byte the stylesheet this function produced before the setting existed.
+  it('defaults to the size and face the frame always used', () => {
+    expect(buildIframeCss(false, false, false, false, false, defaultReadingTypography)).toBe(standard());
+    expect(buildIframeCss(true, true, true, true, false, defaultReadingTypography)).toBe(
+      buildIframeCss(true, true, true, true),
+    );
+    expect(standard()).toContain(`font-size: ${READING_BASE_PX}px;`);
+    expect(normalizedBubble()).toContain(`font-size: ${CHAT_READING_BASE_PX}px !important;`);
+    expect(standard()).toContain(MAIL_SANS_STACK);
+  });
+
+  // Regression: THE point of the setting. The two panes have different base
+  // sizes, and both have to move — a reader who scales mail up and still gets
+  // 15px bubbles would reasonably call the setting broken.
+  it('scales both base sizes by the reader percentage', () => {
+    const big = { size: 150, fontStack: MAIL_SANS_STACK };
+    expect(buildIframeCss(false, false, false, false, false, big)).toContain('font-size: 24px;');
+    expect(buildIframeCss(false, false, true, false, false, big)).toContain('font-size: 23px !important;');
+  });
+
+  // Regression: an out-of-range or junk size must not reach the stylesheet as
+  // `font-size: NaNpx`, which the parser drops — leaving mail at the browser
+  // default and the setting apparently dead.
+  it('clamps a nonsense size instead of emitting one', () => {
+    const junk = buildIframeCss(false, false, false, false, false, { size: NaN, fontStack: MAIL_SANS_STACK });
+    expect(junk).not.toContain('NaN');
+    expect(junk).toBe(standard());
+    expect(
+      buildIframeCss(false, false, false, false, false, { size: 9000, fontStack: MAIL_SANS_STACK }),
+    ).toContain('font-size: 26px;');
+  });
+
+  // Regression: the chosen face has to be the one the frame declares. Keep the
+  // hardcoded stack and the Reading font control changes nothing at all.
+  it('declares the chosen font stack', () => {
+    const serif = buildIframeCss(false, false, false, false, false, { size: 100, fontStack: 'Georgia, serif' });
+    expect(serif).toContain('font-family: Georgia, serif;');
+    expect(serif).not.toContain(MAIL_SANS_STACK);
   });
 });
