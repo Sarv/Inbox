@@ -117,9 +117,10 @@ export function UpdateDialog() {
     if (!saved) setActionError('That preference could not be saved.');
   };
 
-  // `whitespace-nowrap` is the point of the roomier dialog: at max-w-md the
-  // three answers ("Skip this version" / "Remind me later" / "Install and
-  // Relaunch") each wrapped onto two lines and the row read as a block of text.
+  // `whitespace-nowrap` keeps a label on ONE line: without it "Skip this
+  // version" / "Remind me later" / "Download and install" each broke across two
+  // lines and the row read as a block of text rather than as buttons. It is
+  // only half the answer -- see the action row below for the other half.
   const buttonClass = (kind: 'primary' | 'neutral' | 'quiet') =>
     kind === 'primary'
       ? 'px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50'
@@ -165,17 +166,24 @@ export function UpdateDialog() {
           </div>
         )}
 
+        {/* The app's own checkbox shape (BlocklistsTab, AppearanceTab, the AI
+            tabs): `accent-primary` paints the tick in the brand colour instead
+            of Chromium's default blue, and the label/hint pair sits in one
+            flex-1 span so the hint wraps under the label rather than under the
+            box. The UNCHECKED box is the native control on purpose -- it is
+            already dark, because `applyAppearance` sets `color-scheme` on the
+            root; styling it by hand would only drift from every other one. */}
         {view.autoUpdateToggle && (
-          <label className="mt-4 flex items-start gap-2.5 cursor-pointer">
+          <label className="mt-4 flex items-start gap-3 cursor-pointer text-sm">
             <input
               type="checkbox"
               checked={view.autoUpdateToggle.checked}
               disabled={installing}
               onChange={(event) => void toggleAutoUpdate(event.target.checked)}
-              className="w-4 h-4 mt-0.5"
+              className="h-4 w-4 mt-0.5 accent-primary disabled:opacity-50"
             />
-            <span>
-              <span className="text-sm">{view.autoUpdateToggle.label}</span>
+            <span className="flex-1">
+              <span className="font-medium">{view.autoUpdateToggle.label}</span>
               <span className="block text-xs text-muted-foreground">
                 {view.autoUpdateToggle.hint}
               </span>
@@ -185,41 +193,43 @@ export function UpdateDialog() {
 
         {actionError && <p className="mt-3 text-sm text-destructive">{actionError}</p>}
 
-        <div className="mt-6 flex items-center justify-between gap-3">
-          <div>
-            {view.tertiary && (
-              <button
-                onClick={() => void run(view.tertiary!.action)}
-                disabled={installing}
-                className={buttonClass('quiet')}
-              >
-                {view.tertiary.label}
-              </button>
-            )}
-          </div>
-
-          <div className="flex gap-3">
+        {/* The other half: three nowrap labels do not fit side by side in a
+            narrow window, and a rigid row turns that into buttons painted
+            OUTSIDE the dialog -- worse than the wrapping it replaced, because
+            the primary action is the one that leaves. So the row stacks by
+            default and only becomes a row once there is width for one.
+            `sm:flex-wrap` is the backstop for a label longer than these. */}
+        <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end sm:gap-3">
+          {view.tertiary && (
             <button
-              onClick={() => void run(view.secondary.action)}
+              onClick={() => void run(view.tertiary!.action)}
               disabled={installing}
-              className={buttonClass('neutral')}
+              className={`${buttonClass('quiet')} w-full sm:mr-auto sm:w-auto`}
             >
-              {view.secondary.label}
+              {view.tertiary.label}
             </button>
+          )}
 
-            {view.primary && (
-              <button
-                onClick={() => void run(view.primary!.action)}
-                disabled={installing}
-                autoFocus
-                className={buttonClass('primary')}
-              >
-                {installing && view.primary.action === 'install'
-                  ? 'Restarting…'
-                  : view.primary.label}
-              </button>
-            )}
-          </div>
+          <button
+            onClick={() => void run(view.secondary.action)}
+            disabled={installing}
+            className={`${buttonClass('neutral')} w-full sm:w-auto`}
+          >
+            {view.secondary.label}
+          </button>
+
+          {view.primary && (
+            <button
+              onClick={() => void run(view.primary!.action)}
+              disabled={installing}
+              autoFocus
+              className={`${buttonClass('primary')} w-full sm:w-auto`}
+            >
+              {installing && view.primary.action === 'install'
+                ? 'Restarting…'
+                : view.primary.label}
+            </button>
+          )}
         </div>
       </div>
     </div>
