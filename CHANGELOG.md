@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Message text size (Settings > Appearance).** The size of the message you
+  are reading, on its own scale from 80% to 160%. Interface zoom (Cmd/Ctrl +
+  and -) still scales the whole app; this scales the mail alone, so you can
+  read comfortably without a list, sidebar and toolbar built for someone
+  further from the screen.
+- **Reading font (Settings > Appearance).** A separate face for the message
+  body — a serif to read in, say, with the app itself left in its interface
+  font. It applies to plain-text mail and to messages that name no font of
+  their own; a sender who styles their mail keeps their own typography.
+- **Preview lines in the list (Settings > Appearance).** How much of each
+  message shows under the subject: none for the most threads per screen, one
+  (as before), or two.
+- **Motion (Settings > Appearance).** Animated transitions can now follow your
+  OS "reduce motion" setting, be forced on, or be turned off everywhere in the
+  app.
+
+### Changed
+- **Hover actions and Button labels moved from General to Appearance > Layout,
+  and now actually do something.** Both had been switches that changed nothing.
+  Turning hover actions off keeps a row's time, attachment clip and category
+  badges visible as the pointer passes over it, instead of swapping them for
+  the quick actions. Button labels draws the actions above an open message as
+  icons (as before), as names, or as both — with names shown the toolbar wraps
+  onto a second line rather than hiding actions.
+- **Conversation view and Preview pane have been removed from General.** They
+  were switches with nothing behind them; they will come back when the layouts
+  they promise exist.
+
 ## [1.2.3] - 2026-09-26
 
 ### Added
