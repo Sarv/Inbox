@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whichever screen is open. Installs already stuck on "AI is inactive" with a
   signed-in Sarv account are fixed on the next launch. A provider you picked
   yourself — Sarv or another — is never replaced.
+- **Verification-code cards only show codes you can still use.** Setting up
+  the app or adding an account used to put up cards for every code from the
+  last few hours, some already read, some long expired, each with a fresh
+  countdown. Now a card appears only for an unread code that is still valid.
+  Validity is counted from when the mail arrived, using the time the mail
+  itself states ("expires in 10 minutes"), or 10 minutes when it states none.
+  (One-Time Passcodes 1.2.2.)
 - **A fresh install starts on the latest built-in extensions.** Built-in
   extensions ship inside the app, so an install could start on a copy that
   was already out of date and greet you with an Update button. On first run
