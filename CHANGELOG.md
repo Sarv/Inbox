@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Signing in to Sarv turns AI on, every time.** On a fresh install, Login
+  with Sarv connected your Sarv mailbox and the app jumped straight to the
+  inbox — before the step where you choose an AI provider and model had even
+  appeared — so you landed behind an "AI is inactive" banner with nothing
+  chosen. Onboarding now stays on screen until you finish it, and the
+  recommended Sarv model is set up in the background as soon as you sign in,
+  whichever screen is open. Installs already stuck on "AI is inactive" with a
+  signed-in Sarv account are fixed on the next launch. A provider you picked
+  yourself — Sarv or another — is never replaced.
+
 ## [1.2.4] - 2026-09-27
 
 ### Added
