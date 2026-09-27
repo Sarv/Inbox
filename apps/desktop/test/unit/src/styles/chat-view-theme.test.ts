@@ -9,6 +9,10 @@ import { dirname, join } from 'path';
 
 import { describe, expect, it } from 'vitest';
 
+import {
+  DARK_CANVAS_MARKER,
+  PAPER_CANVAS_MARKER,
+} from '../../../../src/components/email-detail/chat-frame-canvas';
 import { AS_SENT_MARKER } from '../../../../src/components/email-detail/chat-message-adapter';
 
 /**
@@ -153,5 +157,88 @@ describe('an ordinary bubble in the cascade', () => {
     const { asSent, plainTheirs, docTheirs } = bubbles();
     expect(asSent.backgroundColor).toBe(plainTheirs.backgroundColor);
     expect(asSent.borderInlineStartWidth).not.toBe(docTheirs.borderInlineStartWidth);
+  });
+});
+
+/**
+ * The page under a framed body in the dark theme, as the cascade resolves it.
+ *
+ * The frame document is always light and the <iframe> inherits `dark` from the
+ * root; Chromium paints that mismatch as an opaque white backdrop. These rules
+ * are what replace the accident with a chosen page and matching tokens.
+ */
+describe('the framed body canvas', () => {
+  /** A framed bubble with the given markers, inside the dark-paper token host. */
+  function framed(applied: string) {
+    document.head.innerHTML = [
+      `<style>${APP_TOKENS}:root{--paper: 0 0% 100%;--paper-foreground: 222 84% 5%;}</style>`,
+      `<style>${LIBRARY}</style><style>${THEME}</style>`,
+    ].join('');
+    document.body.innerHTML = [
+      '<div style="--sarv-dark-paper: rgb(20, 20, 20)">',
+      `<div class="sec-bubble sec-bubble--theirs sec-bubble--doc" data-sec-applied="${applied}">`,
+      '<div id="host" class="sec-frame-host"><iframe id="frame" class="sec-frame"></iframe></div>',
+      '</div></div>',
+    ].join('');
+    return {
+      host: getComputedStyle(document.getElementById('host')!),
+      frame: getComputedStyle(document.getElementById('frame')!),
+    };
+  }
+
+  // Regression: the rules key on the adapter's constants. A rename on either
+  // side is silent — the rule parses and matches nothing.
+  it('keys both canvases on the markers the adapter emits', () => {
+    expect(THEME).toContain(`[data-sec-applied~='${PAPER_CANVAS_MARKER}']`);
+    expect(THEME).toContain(`[data-sec-applied~='${DARK_CANVAS_MARKER}']`);
+  });
+
+  // Regression: dark bodies OFF. The table sheet and cell wash followed the
+  // dark theme, so the rows came out dark under the sender's black text.
+  it('gives a mail shown on paper the paper as its table sheet and page', () => {
+    const { host } = framed(PAPER_CANVAS_MARKER);
+    expect(host.getPropertyValue('--sec-frame-sheet').trim()).toBe('hsl(0 0% 100%)');
+    expect(host.getPropertyValue('--sec-ink').trim()).toBe('hsl(222 84% 5%)');
+  });
+
+  // Regression: dark bodies ON. The area beside a table showed the white
+  // backdrop instead of the paper the re-coloured prose sits on.
+  it('paints a re-coloured mail on the dark paper everywhere it paints nothing', () => {
+    const { host } = framed(DARK_CANVAS_MARKER);
+    expect(host.getPropertyValue('--sec-frame-sheet').trim()).toBe('rgb(20, 20, 20)');
+    expect(host.backgroundColor).toBe('rgb(20, 20, 20)');
+  });
+
+  // Regression: this is what removes the white backdrop itself — the frame
+  // element has to declare the same scheme as the document inside it. Set on
+  // the HOST, which the element inherits from and which a newer library reads
+  // into the document; set on the frame alone, a library that copies the
+  // host's scheme gets `dark` while the element is `normal`, and the white
+  // slab comes back.
+  it('sets one scheme on the frame host for the element and its document', () => {
+    expect(framed(PAPER_CANVAS_MARKER).host.getPropertyValue('color-scheme')).toBe('normal');
+    expect(framed(DARK_CANVAS_MARKER).host.getPropertyValue('color-scheme')).toBe('normal');
+    expect(THEME).not.toMatch(/\.sec-frame\s*[,{]/);
+  });
+
+  // Regression: coexisting with as-sent. The marker list is space-separated,
+  // and the canvas rule must still match when `as-sent` is in it too.
+  it('still applies alongside the as-sent marker', () => {
+    const { host } = framed(`${AS_SENT_MARKER} ${PAPER_CANVAS_MARKER}`);
+    expect(host.getPropertyValue('--sec-frame-sheet').trim()).toBe('hsl(0 0% 100%)');
+  });
+});
+
+/** The app's own tokens, for the paper the canvas rules draw from. */
+const INDEX_CSS = readFileSync(join(__dirname, '../../../../src/index.css'), 'utf8');
+
+describe('paper tokens', () => {
+  // Regression: redeclare `--paper` under `.dark` and a mail shown as written
+  // is drawn on a dark page again, with its black text on it.
+  it('declares the paper on :root only, never under .dark', () => {
+    const dark = INDEX_CSS.slice(INDEX_CSS.indexOf('.dark {'));
+    const darkBlock = dark.slice(0, dark.indexOf('}'));
+    expect(INDEX_CSS).toContain('--paper: 0 0% 100%');
+    expect(darkBlock).not.toContain('--paper');
   });
 });

@@ -1,20 +1,21 @@
 import { MailChatView, type ChatMessage } from '@sarv-in/email-chat-view';
 import type { EmailRecord } from '@sarvinbox/core';
 import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 
 import { useAppearance, useResolvedTheme } from '../../appearance';
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
-import { applyEmailDarkMode } from '../../utils/email-dark-mode';
+import { applyEmailDarkMode, DARK_PAPER } from '../../utils/email-dark-mode';
 import { hasTag } from '../../utils/tags';
 import { AttachmentPills } from '../attachment-viewer/AttachmentPills';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { Tooltip } from '../Tooltip';
 
+import { frameCanvasFor, type RecoloredBody } from './chat-frame-canvas';
 import {
   carrierEmailOf,
   chatMessagesFromConversation,
@@ -122,11 +123,14 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
   // so flipping the setting or the theme re-splits the open thread.
   const { darkenEmails } = useAppearance();
   const resolvedTheme = useResolvedTheme();
+  const isDark = resolvedTheme === 'dark';
   const recolorBody = useMemo(
     () =>
-      (html: string): string =>
-        applyEmailDarkMode(html, { enabled: darkenEmails, isDark: resolvedTheme === 'dark' }).html,
-    [darkenEmails, resolvedTheme],
+      (html: string): RecoloredBody => {
+        const result = applyEmailDarkMode(html, { enabled: darkenEmails, isDark });
+        return { html: result.html, canvas: frameCanvasFor(result, isDark) };
+      },
+    [darkenEmails, isDark],
   );
 
   const chatMessages = useMemo<ChatMessage[]>(() => {
@@ -333,7 +337,13 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
   );
 
   return (
-    <div className="relative border border-border rounded-lg bg-card mt-2 pt-3">
+    <div
+      className="relative border border-border rounded-lg bg-card mt-2 pt-3"
+      // The paper a re-coloured body is drawn on, for `chat-view-theme.css`.
+      // Derived in JS (email-dark-mode.ts), so it is handed over as a token
+      // rather than repeated there as a literal that could drift from it.
+      style={{ '--sarv-dark-paper': DARK_PAPER } as CSSProperties}
+    >
       {/* AI / Logical toggle — sits on the top border line. Always
           rendered so the user can switch to Standard mid-extraction;
           the re-extract icon only appears once messages exist. */}
@@ -422,6 +432,14 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       </div>
 
       <MailChatView
+        // The library reads a frame's theme tokens ONCE, when the frame mounts,
+        // and bakes them into its document. Without a remount, flipping dark
+        // bodies or the app theme re-renders the mail against the old tokens —
+        // dark table rows on a white page. Keyed on exactly the two inputs
+        // that change which canvas a body is drawn on. Drop it once the app is
+        // on an email-chat-view release that re-reads the theme itself (after
+        // 0.2.4) — it costs a scroll reset on every toggle.
+        key={`${resolvedTheme}:${darkenEmails}`}
         messages={chatMessages}
         currentUserAddress={currentUserEmail}
         loading={showAIView && conversationLoading && chatMessages.length === 0}

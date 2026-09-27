@@ -231,3 +231,50 @@
      the bubble's tint, exactly where the text of a plain bubble sits. */
   --sec-doc-page: transparent;
 }
+
+/*
+ * The page under a framed body, in the dark theme. Markers come from
+ * `chat-frame-canvas.ts`; the light theme sets none and needs none.
+ *
+ * Chromium paints an iframe an opaque backdrop in its DOCUMENT's scheme when
+ * that differs from the <iframe> element's — the white slab beside a table on
+ * a re-coloured mail, because the element inherits `dark` from the root. Up to
+ * 0.2.4 the library's frame document declared no scheme (so, light); newer
+ * versions copy the host's scheme into it (`readFrameTheme`). Setting it on the
+ * HOST satisfies both: the element inherits it, and a newer library reads the
+ * same value into the document, so the two always agree and the frame stays
+ * transparent. The host below then paints the page on purpose. Setting it on
+ * `.sec-frame` instead would split them again under the newer library.
+ */
+.sec-bubble[data-sec-applied~='canvas-paper'] .sec-frame-host,
+.sec-bubble[data-sec-applied~='canvas-dark'] .sec-frame-host {
+  color-scheme: normal;
+}
+
+/*
+ * Dark bodies OFF: the mail on the white page it was written for.
+ *
+ * The frame reads its ink, table sheet and cell wash from these tokens (see the
+ * library's `readFrameTheme`). Left to the dark theme they tint the table rows
+ * and header cells dark while the sender's black text and the prose around the
+ * table stay as written for white — dark rows of black text on a white page.
+ */
+.sec-bubble[data-sec-applied~='canvas-paper'] .sec-frame-host {
+  --sec-ink: hsl(var(--paper-foreground));
+  --sec-muted: hsl(var(--paper-muted-foreground));
+  --sec-border: hsl(var(--paper-border));
+  --sec-frame-sheet: hsl(var(--paper));
+  --sec-frame-wash: color-mix(in srgb, hsl(var(--paper)) 62%, transparent);
+  background: hsl(var(--paper));
+}
+
+/*
+ * Dark bodies ON: the paper the re-colouring engine moved the mail's white to.
+ * Everything the mail leaves unpainted — beside a table, below a short line —
+ * has to be that same paper, or the page shows through as a different colour.
+ */
+.sec-bubble[data-sec-applied~='canvas-dark'] .sec-frame-host {
+  --sec-frame-sheet: var(--sarv-dark-paper);
+  --sec-frame-wash: color-mix(in srgb, var(--sarv-dark-paper) 62%, transparent);
+  background: var(--sarv-dark-paper);
+}

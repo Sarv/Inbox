@@ -6,6 +6,11 @@ import type { EmailRecord } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  DARK_CANVAS_MARKER,
+  PAPER_CANVAS_MARKER,
+  type RecoloredBody,
+} from '../../../../../src/components/email-detail/chat-frame-canvas';
+import {
   AS_SENT_MARKER,
   asSentEmailIds,
   attachmentsOf,
@@ -197,6 +202,19 @@ describe('chatMessagesFromConversation', () => {
     });
   });
 
+  // Regression: the AI view frames bodies too, so its bubbles need the same
+  // canvas marker as the Standard view's — and none when no canvas is asked for.
+  it('tags an extracted turn with the canvas its body needs', () => {
+    const [dark] = convert([conversationMessage({ id: 'm1' })], {
+      recolorBody: (html) => ({ html, canvas: 'dark-paper' }),
+    });
+    const [light] = convert([conversationMessage({ id: 'm1' })], {
+      recolorBody: (html) => ({ html }),
+    });
+    expect(dark!.applied).toEqual([DARK_CANVAS_MARKER]);
+    expect(light!.applied).toBeUndefined();
+  });
+
   // Regression: progressive extraction APPENDS a bubble as each email
   // completes, so unsorted they arrive out of order — misordered bubbles and
   // repeated date separators ("Today" … "Yesterday" … "Today").
@@ -360,7 +378,7 @@ describe('chatMessagesFromThread', () => {
     emails: EmailRecord[],
     extra: Partial<{
       resolveImages: (html: string) => string;
-      recolorBody: (html: string) => string;
+      recolorBody: (html: string) => RecoloredBody;
       failedBodies: ReadonlySet<string>;
     }> = {}
   ) {
@@ -422,10 +440,31 @@ describe('chatMessagesFromThread', () => {
   // bubble — the same message read correctly in the Standard view and only
   // there. The hook is what lets the view hand its dark-mode rewrite in.
   it('re-colours each split body through the host', () => {
-    const recolorBody = vi.fn((html: string) => `${html}<!--dark-->`);
+    const recolorBody = vi.fn((html: string) => ({ html: `${html}<!--dark-->` }));
     const messages = convert([email({ id: 'e1', rawBody: '<p>Body</p>' })], { recolorBody });
     expect(recolorBody).toHaveBeenCalledTimes(messages.length);
     expect(messages[0]!.body).toContain('<!--dark-->');
+  });
+
+  // Regression: the page a body needs has to reach the bubble. Without the
+  // marker the dark theme leaves the frame to Chromium's white backdrop — a
+  // white slab beside a table on a re-coloured mail, dark table rows of black
+  // text on a mail shown as sent.
+  it('tags each bubble with the canvas its body was prepared for', () => {
+    const messages = convert([email({ id: 'e1', rawBody: '<p>Body</p>' })], {
+      recolorBody: (html) => ({ html, canvas: 'dark-paper' }),
+    });
+    expect(messages.every((each) => each.applied?.includes(DARK_CANVAS_MARKER))).toBe(true);
+  });
+
+  // Regression: a light-theme render must hand back the SAME message objects,
+  // or every thread re-renders every bubble for a pass that changed nothing.
+  it('keeps an untouched message as the same object when no canvas is needed', () => {
+    const emails = [email({ id: 'e1', rawBody: '<p>Body</p>' })];
+    const [plain] = convert(emails);
+    const [recolored] = convert(emails, { recolorBody: (html) => ({ html }) });
+    expect(recolored!.applied).toEqual(plain!.applied);
+    expect(recolored!.applied ?? []).not.toContain(PAPER_CANVAS_MARKER);
   });
 
   // Regression: the rewrite has to run BEFORE the image refs are resolved. Put
@@ -441,7 +480,7 @@ describe('chatMessagesFromThread', () => {
         recolorBody: (html) => {
           calls.push('recolor');
           expect(html).toContain('sarv-image:ab');
-          return html;
+          return { html };
         },
         resolveImages: (html) => {
           calls.push('resolve');
@@ -831,6 +870,16 @@ describe('as-sent mail', () => {
   it('marks the bubble as untouched so the view can style it', () => {
     const [message] = chatMessagesFromThread([digest()], { currentUserEmail: ME });
     expect(message!.applied).toEqual([AS_SENT_MARKER]);
+  });
+
+  // Regression: the canvas marker is APPENDED. Replace the list and the as-sent
+  // rule stops matching, and the per-sender pastel comes back over the mail.
+  it('keeps the as-sent marker when the canvas marker is added', () => {
+    const [message] = chatMessagesFromThread([digest()], {
+      currentUserEmail: ME,
+      recolorBody: (html) => ({ html, canvas: 'paper' }),
+    });
+    expect(message!.applied).toEqual([AS_SENT_MARKER, PAPER_CANVAS_MARKER]);
   });
 
   // The fixture has to be one the strip chain really does mangle, or the test

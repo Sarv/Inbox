@@ -24,6 +24,7 @@ import { isBulkMail } from '@sarvinbox/core/bulk-mail';
 import type { ConversationMessage } from '../../services/conversation-service';
 
 import { inlineDocumentStyles } from './chat-body-styles';
+import { withCanvasMarker, type RecoloredBody } from './chat-frame-canvas';
 import { parseAttachments } from './utils';
 
 /**
@@ -162,8 +163,11 @@ export interface ThreadOptions {
    * Re-colour a body for a dark page. Injected for the same reason as
    * {@link ThreadOptions.resolveImages}: it reads an appearance setting and a
    * resolved theme, neither of which this module should know about.
+   *
+   * Returns the page the body now needs alongside it, which reaches the bubble
+   * as a `data-sec-applied` marker — see `chat-frame-canvas.ts`.
    */
-  recolorBody?: (html: string) => string;
+  recolorBody?: (html: string) => RecoloredBody;
 }
 
 export interface AdapterOptions extends ThreadOptions {
@@ -508,9 +512,13 @@ export function chatMessagesFromThread(
     // rewrite only sees `style` attributes, so a mail whose colours live in a
     // <style> block has to be flattened first; and every `url()` it would
     // otherwise walk is still a short `sarv-image:` ref at this point.
-    const recolored = options.recolorBody ? options.recolorBody(inlined) : inlined;
-    const body = resolveImages ? resolveImages(recolored) : recolored;
-    return body === message.body ? message : { ...message, body };
+    const recolored = options.recolorBody?.(inlined);
+    const html = recolored?.html ?? inlined;
+    const body = resolveImages ? resolveImages(html) : html;
+    const applied = withCanvasMarker(message.applied, recolored?.canvas);
+    return body === message.body && applied === message.applied
+      ? message
+      : { ...message, body, applied };
   });
 }
 
@@ -570,7 +578,9 @@ export function chatMessagesFromConversation(
     (message) => {
       const source = emailsById.get(message.sourceEmailId);
       const raw = message.body || '';
-      const body = recolorBody ? recolorBody(raw) : raw;
+      const recolored = recolorBody?.(raw);
+      const body = recolored?.html ?? raw;
+      const applied = withCanvasMarker(undefined, recolored?.canvas);
       return {
         id: message.id,
         sourceId: message.sourceEmailId,
@@ -587,6 +597,7 @@ export function chatMessagesFromConversation(
         // out of a source email that is already here. Only a message backed by
         // an email whose body never arrived can be pending or failed.
         ...bodyStateOf(raw, source, failedBodies),
+        ...(applied ? { applied } : {}),
       };
     },
   );
