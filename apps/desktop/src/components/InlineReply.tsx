@@ -13,16 +13,18 @@ import prettyBytes from 'pretty-bytes';
 import { useState, useRef, useEffect, useMemo } from 'react';
 
 
+import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
+import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
-import { accountDisplayLabel } from '../store/helpers';
 import { parseAddresses } from '../utils/email-address';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { reportSendFailure } from '../utils/send-failure';
 
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
+import { FromAccountBar } from './FromAccountBar';
 import { PolishModal } from './PolishModal';
 import { RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
@@ -45,6 +47,8 @@ interface InlineReplyDraft extends ComposeDraft {
   /** Message-id of the existing draft opened into this editor — so autosave
    *  edits it in place and discard removes exactly it (not sibling drafts). */
   draftMessageId?: string;
+  /** Restored by Undo send: content is newer than the saved draft. */
+  unsaved?: boolean;
 }
 
 interface InlineReplyProps {
@@ -88,24 +92,19 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
   // do), so the reliable source is the store's viewAccountId — set when a unified
   // mail is opened, and null for normal account-inbox opens (→ no From bar,
   // active-account send).
-  const accounts = useEmailStore((s) => s.accounts);
-  const activeAccountId = useEmailStore((s) => s.activeAccountId);
-  const viewAccountId = useEmailStore((s) => s.viewAccountId);
-  const isUnifiedView = useEmailStore((s) => s.selectedVirtualFolder === 'virtual-unified');
-  const replyAccountId = ((replyToEmail as any).accountId as string | undefined) ?? (viewAccountId ?? undefined);
   // Show the From bar ONLY in All Inboxes AND when the mail is from a DIFFERENT
   // account than the active one (replying to your own active-account mail needs
   // no bar). Send-as still uses replyAccountId regardless, so sends stay correct.
-  const fromAccount = (isUnifiedView && replyAccountId && replyAccountId !== activeAccountId)
-    ? accounts.find((a) => a.id === replyAccountId)
-    : null;
+  const {
+    accountId: replyAccountId, fromAccount, accounts, activeAccountId, viewAccountId, isUnifiedView,
+  } = useInlineSendingAccount(replyToEmail as { accountId?: string });
 
   const {
     to, setTo, pendingTo, setPendingTo,
     cc, setCc, pendingCc, setPendingCc,
     subject, setSubject,
-    htmlBody, setHtmlBody,
-    plainBody, setPlainBody,
+    htmlBody,
+    plainBody, setBody,
     attachments, setAttachments,
     sending, setSending,
     showPolishModal, setShowPolishModal,
@@ -124,7 +123,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
   });
 
   // Auto-save draft to IMAP
-  const { markDiscarded } = useDraftAutosave({
+  const { markDiscarded, closeAction } = useDraftAutosave({
     to,
     cc,
     subject,
@@ -137,8 +136,10 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     inReplyTo: replyToEmail.messageId || replyToEmail.id,
     threadId: (replyToEmail as any).threadId,
     initialDraftMessageId: draft?.draftMessageId,
+    initialDraftUnsaved: draft?.unsaved,
     // Owning account — routes save/delete to the correct per-account DB + engine.
     accountId: replyAccountId,
+    attachments,
   });
 
   const [showDropdown, setShowDropdown] = useState(false);
@@ -203,10 +204,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
   // Restore a saved draft into the editor (signature stays separate).
   useEffect(() => {
     if (draft?.htmlContent) {
-      setHtmlBody(draft.htmlContent);
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = draft.htmlContent;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(draft.htmlContent);
     }
   }, []);
 
@@ -318,6 +316,10 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
           replyToEmail,
           mode,
           isInline: true,
+          draftMessageId: ownedDraftId ?? draft?.draftMessageId,
+          threadId: (replyToEmail as any).threadId,
+          accountId: replyAccountId,
+          unsaved: true,
         },
       });
     } catch (error) {
@@ -360,14 +362,27 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     onClose({ dismissed: true });
   };
 
+  // X / Escape: ask whether to keep the reply in Drafts or discard it. The
+  // toolbar's Discard stays an explicit discard. Saving is just closing — the
+  // autosave's unmount save writes the draft.
+  const { requestClose, isAsking, closePromptDialog } = useCloseComposePrompt({
+    closeAction,
+    onSave: () => onClose({ dismissed: true }),
+    onDiscard: handleDismiss,
+  });
+
   // Keyboard shortcuts
   const handleSendRef = useRef(handleSend);
   handleSendRef.current = handleSend;
-  const onCloseRef = useRef(handleDismiss);
-  onCloseRef.current = handleDismiss;
+  const onCloseRef = useRef(requestClose);
+  onCloseRef.current = requestClose;
+  const isAskingRef = useRef(isAsking);
+  isAskingRef.current = isAsking;
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // The close question owns the keyboard while it is up.
+      if (isAskingRef.current()) return;
       const isMod = e.metaKey || e.ctrlKey;
 
       // Cmd/Ctrl+Enter -> Send
@@ -388,10 +403,10 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
         return;
       }
 
-      // Escape -> Discard/Close
+      // Escape -> close (asks Save / Discard when there is work)
       if (e.key === 'Escape') {
         e.preventDefault();
-        onCloseRef.current();
+        void onCloseRef.current();
         return;
       }
     };
@@ -429,21 +444,16 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     if (polishMode === 'selection' && selectedText) {
       const escapedSelected = selectedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const newHtml = htmlBody.replace(new RegExp(escapedSelected, 'g'), result.body);
-      setHtmlBody(newHtml);
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = newHtml;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(newHtml);
     } else {
-      setHtmlBody(result.body);
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = result.body;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(result.body);
     }
   };
 
   if (isMinimized) {
     return (
       <div className="border border-border rounded-lg bg-card mt-4">
+        {closePromptDialog}
         <button
           onClick={() => setIsMinimized(false)}
           className="w-full p-3 flex items-center justify-between hover:bg-accent/50 transition-colors"
@@ -454,7 +464,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
               {mode === 'reply' ? 'Reply to' : 'Reply all to'} {replyToEmail.fromName || replyToEmail.fromAddress}
             </span>
           </div>
-          <X className="h-4 w-4 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); handleDismiss(); }} />
+          <X className="h-4 w-4 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); void requestClose(); }} />
         </button>
       </div>
     );
@@ -466,6 +476,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
 
   return (
     <div className={containerClass}>
+      {closePromptDialog}
       {/* Header with reply type selector */}
       <div className="flex items-center justify-between p-3 border-b border-border bg-muted/30">
         <div className="relative" ref={dropdownRef}>
@@ -521,9 +532,9 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
             <Minimize2 className="h-4 w-4 text-muted-foreground" />
           </button>
           <button
-            onClick={handleDismiss}
+            onClick={() => void requestClose()}
             className="p-1.5 hover:bg-accent rounded transition-colors"
-            title="Discard"
+            title="Close"
           >
             <X className="h-4 w-4 text-muted-foreground" />
           </button>
@@ -532,13 +543,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
 
       {/* From: which account this reply is sent AS — always visible so the user
           never sends from the wrong mailbox (esp. in the unified view). */}
-      {fromAccount && (
-        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border text-xs text-muted-foreground">
-          <span>From:</span>
-          <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: fromAccount.color ?? '#2563eb' }} />
-          <span className="font-medium text-foreground truncate">{accountDisplayLabel(accounts, fromAccount.id)}</span>
-        </div>
-      )}
+      {fromAccount && <FromAccountBar account={fromAccount} accounts={accounts} />}
 
       {/* Sending not set up — message will queue in the Outbox */}
       <SmtpNotConfiguredBanner />

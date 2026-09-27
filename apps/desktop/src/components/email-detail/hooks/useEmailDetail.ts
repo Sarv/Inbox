@@ -6,6 +6,7 @@ import { detectSignature, type SignatureDetectionResult, getDefaultProvider } fr
 import { extractConversation, isConversationModeEnabled, isAutoChatViewEnabled, reExtractSingleMessage, hasQuotedHistory, hasEmbeddedConversation, aiSplitFirstEmail, saveConversationCache, EXTRACTION_VERSION, EXTRACTED_MATCH_TOLERANCE_S, type ConversationMessage, type ConversationProgress } from '../../../services/conversation-service';
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
+import { loadEmailAttachments } from '../../../utils/compose-attachments';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
 import { isDraftEmail, isDraftRow } from '../../../utils/thread-utils';
 import type { EmailDetailContext } from '../types';
@@ -120,11 +121,11 @@ export function useEmailDetail(): EmailDetailContext | null {
   const [showInlineReply, setShowInlineReply] = useState(false);
   const [inlineReplyMode, setInlineReplyMode] = useState<'reply' | 'replyAll'>('reply');
   const [replyingToEmail, setReplyingToEmail] = useState<any | null>(null);
-  const [inlineReplyDraft, setInlineReplyDraft] = useState<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string } | undefined>(undefined);
+  const [inlineReplyDraft, setInlineReplyDraft] = useState<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string } | undefined>(undefined);
   const inlineReplyHandlerRef = useRef<(mode: 'reply' | 'replyAll') => void>(() => { });
   const [showInlineForward, setShowInlineForward] = useState(false);
   const [forwardingEmail, setForwardingEmail] = useState<any | null>(null);
-  const [inlineForwardDraft, setInlineForwardDraft] = useState<{ to: string; cc: string; htmlContent: string; attachments: any[] } | undefined>(undefined);
+  const [inlineForwardDraft, setInlineForwardDraft] = useState<{ to: string; cc: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean } | undefined>(undefined);
   const inlineForwardHandlerRef = useRef<() => void>(() => { });
   const [chatViewEnabled, setChatViewEnabled] = useState(() =>
     isAutoChatViewEnabled() && isConversationModeEnabled() && !!getDefaultProvider()
@@ -601,6 +602,9 @@ export function useEmailDetail(): EmailDetailContext | null {
 
       if (threadDrafts.length > 0) {
         const d: any = threadDrafts[0];
+        const draftAccountId = d.accountId ?? useEmailStore.getState().viewAccountId ?? undefined;
+        // The draft's own files, so the mail sent from it still carries them.
+        const draftAttachments = await loadEmailAttachments({ ...d, accountId: draftAccountId });
         const draftHtml = d.cleanBody
           ? d.cleanBody.split('\n').map((line: string) => `<p>${line || '&nbsp;'}</p>`).join('')
           : (d.rawBody || d.htmlBody || '');
@@ -615,10 +619,10 @@ export function useEmailDetail(): EmailDetailContext | null {
             cc: d.ccAddress || '',
             subject: d.subject || '',
             htmlContent: draftHtml,
-            attachments: [],
+            attachments: draftAttachments,
             draftMessageId: d.messageId,
             threadId: d.threadId,
-            accountId: d.accountId ?? useEmailStore.getState().viewAccountId ?? undefined,
+            accountId: draftAccountId,
           });
           // The draft now lives in the full composer, not the reading pane —
           // drop the selection so closing the composer lands back on the list.
@@ -637,7 +641,7 @@ export function useEmailDetail(): EmailDetailContext | null {
           // send), fall back to the conversation's Re: subject.
           subject: replySubjectFor(d.subject, latestThreadEmail.subject),
           htmlContent: draftHtml,
-          attachments: [],
+          attachments: draftAttachments,
           draftMessageId: d.messageId,
         });
         setShowInlineReply(true);
@@ -655,10 +659,8 @@ export function useEmailDetail(): EmailDetailContext | null {
       }
       if (messageIds.length === 0) return false;
 
-      const res = await (window.electronAPI as any).drafts?.findForThread(
-        messageIds,
-        (latestThreadEmail as any).accountId ?? useEmailStore.getState().viewAccountId ?? undefined,
-      );
+      const threadAccountId = (latestThreadEmail as any).accountId ?? useEmailStore.getState().viewAccountId ?? undefined;
+      const res = await (window.electronAPI as any).drafts?.findForThread(messageIds, threadAccountId);
       if (!res?.success || !res.data) {
         // No manual draft yet — fall back to an AI proposal's draftBody that
         // hasn't been written to IMAP yet (pipeline still processing).
@@ -701,7 +703,7 @@ export function useEmailDetail(): EmailDetailContext | null {
         cc: draft.ccAddress || '',
         subject: replySubjectFor(draft.subject, latestThreadEmail.subject),
         htmlContent: draftHtml,
-        attachments: [],
+        attachments: await loadEmailAttachments({ ...draft, accountId: threadAccountId }),
         draftMessageId: draft.messageId,
         isAIDraft,
         aiReasoning,
@@ -1547,6 +1549,8 @@ export function useEmailDetail(): EmailDetailContext | null {
         cc: restoreDraft.cc,
         htmlContent: restoreDraft.htmlContent,
         attachments: restoreDraft.attachments,
+        draftMessageId: restoreDraft.draftMessageId,
+        unsaved: restoreDraft.unsaved,
       });
       setShowInlineReply(true);
       setShowInlineForward(false);
@@ -1559,6 +1563,8 @@ export function useEmailDetail(): EmailDetailContext | null {
         cc: restoreDraft.cc,
         htmlContent: restoreDraft.htmlContent,
         attachments: restoreDraft.attachments,
+        draftMessageId: restoreDraft.draftMessageId,
+        unsaved: restoreDraft.unsaved,
       });
       setShowInlineForward(true);
       setShowInlineReply(false);

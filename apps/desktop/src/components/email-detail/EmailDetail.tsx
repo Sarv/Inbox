@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
 import { accountDisplayLabel } from '../../store/helpers';
+import { toForwardSource } from '../../utils/forward-quote';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { LabelChips } from '../LabelChips';
@@ -239,17 +240,7 @@ export function EmailDetail() {
           {showInlineForward && forwardingEmail?.id === displayEmail.id && !chatViewActive && (
             <div id="inline-forward-compose">
               <InlineForward
-                forwardEmail={{
-                  id: forwardingEmail.id,
-                  subject: forwardingEmail.subject || '',
-                  fromAddress: forwardingEmail.fromAddress,
-                  fromName: forwardingEmail.fromName,
-                  toAddress: forwardingEmail.toAddress || '',
-                  ccAddress: forwardingEmail.ccAddress,
-                  date: forwardingEmail.date,
-                  cleanBody: forwardingEmail.cleanBody,
-                  rawBody: forwardingEmail.rawBody,
-                }}
+                forwardEmail={toForwardSource(forwardingEmail)}
                 draft={inlineForwardDraft}
                 onClose={handleCloseInlineForward}
               />

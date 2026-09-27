@@ -1,20 +1,17 @@
 import {
   X,
-  Send,
   Paperclip,
-  Trash2,
   Maximize2,
   Minimize2,
   ChevronDown,
   ChevronUp,
-  Wand2,
   Sparkles,
 } from 'lucide-react';
 import prettyBytes from 'pretty-bytes';
 import { useState, useEffect, useRef, useMemo } from 'react';
 
 
-import { MOD_KEY } from '../config/keyboard-shortcuts';
+import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
@@ -30,7 +27,6 @@ import { PolishModal } from './PolishModal';
 import { EMPTY_EDITOR_HTML, RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
 import { SmtpNotConfiguredBanner } from './SmtpNotConfiguredBanner';
-import { Tooltip } from './Tooltip';
 import { useCompose, AttachmentFile } from './useCompose';
 
 
@@ -110,7 +106,7 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     bcc, setBcc, pendingBcc, setPendingBcc,
     subject, setSubject,
     htmlBody, setHtmlBody,
-    plainBody, setPlainBody,
+    plainBody, setBody,
     attachments, setAttachments,
     sending, setSending,
     showCc, setShowCc,
@@ -135,7 +131,7 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
   // Auto-save draft to IMAP. When EDITING an existing standalone draft (opened
   // from the Drafts list), thread the draft's own thread/message-id/account so it
   // replaces + deletes the right row instead of spawning a new one.
-  const { markDiscarded } = useDraftAutosave({
+  const { markDiscarded, closeAction } = useDraftAutosave({
     to,
     cc,
     bcc,
@@ -145,7 +141,9 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     inReplyTo: mode !== 'new' ? replyToEmail?.id : undefined,
     threadId: (draft as any)?.threadId,
     initialDraftMessageId: (draft as any)?.draftMessageId,
+    initialDraftUnsaved: (draft as any)?.unsaved,
     accountId: (draft as any)?.accountId ?? replyAccountId,
+    attachments,
   });
 
   const [quotedHtml, setQuotedHtml] = useState('');
@@ -189,11 +187,7 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
       // The result.body is plain text for selection mode
       const escapedSelected = selectedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const newHtml = htmlBody.replace(new RegExp(escapedSelected, 'g'), result.body);
-      setHtmlBody(newHtml);
-      // Update plain text
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = newHtml;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(newHtml);
     } else {
       // Full mode - replace entire email
       // Update subject if provided (for new emails)
@@ -202,11 +196,7 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
       }
 
       // Body is already HTML from AI, use directly
-      setHtmlBody(result.body);
-      // Extract plain text from HTML for plainBody
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = result.body;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(result.body);
     }
   };
 
@@ -341,6 +331,15 @@ ${createQuotedHeader(prefix, extraInfo)}
     setShowDiscardConfirm(true);
   };
 
+  // X / Escape: ask whether to keep the mail in Drafts or throw it away (the
+  // trash button is the explicit discard and keeps its own confirm). Saving is
+  // just closing — the autosave's unmount save writes the draft.
+  const { requestClose, isAsking, closePromptDialog } = useCloseComposePrompt({
+    closeAction,
+    onSave: onClose,
+    onDiscard: discardAndClose,
+  });
+
   const confirmDiscard = () => {
     if (dontAskDiscard) {
       localStorage.setItem('sarvinbox-skip-discard-confirm', 'true');
@@ -403,6 +402,10 @@ ${createQuotedHeader(prefix, extraInfo)}
           replyToEmail,
           mode,
           isInline: false,
+          draftMessageId: ownedDraftId ?? (draft as any)?.draftMessageId,
+          threadId: (draft as any)?.threadId,
+          accountId: cleanupAccountId,
+          unsaved: true,
         },
       });
     } catch (error) {
@@ -415,11 +418,15 @@ ${createQuotedHeader(prefix, extraInfo)}
   // Compose keyboard shortcuts: Cmd+Enter to send, Cmd+Shift+C for CC, Cmd+Shift+B for BCC, Escape to close
   const handleSendRef = useRef(handleSend);
   handleSendRef.current = handleSend;
-  const handleDiscardRef = useRef(handleDiscard);
-  handleDiscardRef.current = handleDiscard;
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
+  const isAskingRef = useRef(isAsking);
+  isAskingRef.current = isAsking;
 
   useEffect(() => {
     const handleComposeKeyDown = (e: KeyboardEvent) => {
+      // The close question owns the keyboard while it is up.
+      if (isAskingRef.current()) return;
       const isMod = e.metaKey || e.ctrlKey;
 
       // Cmd/Ctrl+Enter → Send
@@ -453,11 +460,11 @@ ${createQuotedHeader(prefix, extraInfo)}
         return;
       }
 
-      // Escape → Discard/close compose
+      // Escape → close compose (asks Save / Discard when there is work)
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
-        handleDiscardRef.current();
+        void requestCloseRef.current();
         return;
       }
     };
@@ -490,6 +497,7 @@ ${createQuotedHeader(prefix, extraInfo)}
   if (isMinimized) {
     return (
       <>
+      {closePromptDialog}
       {showDiscardConfirm && (
         <DiscardConfirm
           dontAsk={dontAskDiscard}
@@ -513,7 +521,7 @@ ${createQuotedHeader(prefix, extraInfo)}
               <ChevronUp className="h-4 w-4" />
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); handleDiscard(); }}
+              onClick={(e) => { e.stopPropagation(); void requestClose(); }}
               className="p-1 hover:bg-primary-foreground/20 rounded"
               title="Close"
             >
@@ -530,6 +538,7 @@ ${createQuotedHeader(prefix, extraInfo)}
   if (isFullScreen) {
     return (
       <>
+      {closePromptDialog}
       {showDiscardConfirm && (
         <DiscardConfirm
           dontAsk={dontAskDiscard}
@@ -559,7 +568,7 @@ ${createQuotedHeader(prefix, extraInfo)}
                 <Minimize2 className="h-4 w-4" />
               </button>
               <button
-                onClick={handleDiscard}
+                onClick={() => void requestClose()}
                 className="p-1.5 hover:bg-accent rounded-md transition-colors"
                 title="Close"
               >
@@ -703,60 +712,9 @@ ${createQuotedHeader(prefix, extraInfo)}
             isForward={mode === 'forward'}
             readReceipt={readReceipt}
             onToggleReadReceipt={() => setReadReceipt((v) => !v)}
-            onSend={() => {
-              const finalTo = mergeEmails(to, pendingTo);
-              const finalCc = mergeEmails(cc, pendingCc);
-              const finalBcc = mergeEmails(bcc, pendingBcc);
-
-              if (finalTo.length === 0) return alert('Please enter a recipient');
-
-              setSending(true);
-              try {
-                const emailFriendlyBody = convertToEmailHtml(htmlBody);
-                const fullHtmlBody = assembleOutgoingHtml(emailFriendlyBody, signatureHtml, quotedHtml);
-                // Keep the draft until the send is durably persisted — the store
-                // deletes it via draftCleanup on commit (persist-first undo-send).
-                const ownedDraftId = markDiscarded();
-                const cleanupAccountId = (draft as any)?.accountId ?? replyAccountId;
-                onClose();
-
-                sendEmail({
-                  to: finalTo,
-                  cc: finalCc.length > 0 ? finalCc : undefined,
-                  bcc: finalBcc.length > 0 ? finalBcc : undefined,
-                  subject,
-                  body: plainBody,
-                  htmlBody: fullHtmlBody,
-                  inReplyTo: mode !== 'new' ? replyToEmail?.id : undefined,
-                  accountId: mode !== 'new' ? (replyToEmail as any)?.accountId : undefined,
-                  from: resolvedFrom,
-        requestReadReceipt: readReceipt,
-                  attachments: attachments.map(a => ({ ...a, filename: a.filename || a.name || 'attachment' })) as any,
-                  draftCleanup: {
-                    threadId: (draft as any)?.threadId,
-                    messageId: ownedDraftId ?? (draft as any)?.draftMessageId,
-                    subject,
-                    to: finalTo.join(', '),
-                    accountId: cleanupAccountId,
-                  },
-                  draft: {
-                    to: finalTo.join(', '),
-                    cc: finalCc.join(', '),
-                    bcc: finalBcc.join(', '),
-                    subject,
-                    htmlContent: htmlBody,
-                    attachments,
-                    replyToEmail,
-                    mode,
-                    isInline: false,
-                  },
-                });
-              } catch (error) {
-                reportSendFailure(error);
-              } finally {
-                setSending(false);
-              }
-            }}
+            // One send path, not two: the toolbar calls the same handler the
+            // Cmd+Enter shortcut does, so a change to either can't skip one.
+            onSend={() => { void handleSend(); }}
             onAttach={handleAttach}
             onPolish={() => {
               setPolishMode('full');
@@ -839,7 +797,7 @@ ${createQuotedHeader(prefix, extraInfo)}
             <Maximize2 className="h-4 w-4" />
           </button>
           <button
-            onClick={handleDiscard}
+            onClick={() => void requestClose()}
             className="p-1 hover:bg-accent rounded text-muted-foreground hover:text-foreground"
             title="Close"
           >
@@ -973,60 +931,25 @@ ${createQuotedHeader(prefix, extraInfo)}
         )}
       </div>
 
-      {/* Footer */}
-      <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 border-t border-border bg-muted/30">
-        <div className="flex items-center gap-2">
-          <Tooltip content="Send" shortcut={`${MOD_KEY}+Enter`} position="top">
-            <button
-              onClick={handleSend}
-              disabled={sending || !to.trim()}
-              className="flex items-center gap-2 px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
-            >
-              <Send className="h-4 w-4" />
-              {sending ? 'Sending...' : 'Send'}
-            </button>
-          </Tooltip>
-
-          {hasAIProvider && (
-            <Tooltip content="Polish with AI" position="top">
-              <button
-                onClick={() => {
-                  setPolishMode('full');
-                  setShowPolishModal(true);
-                }}
-                disabled={!plainBody.trim()}
-                className="flex items-center gap-2 p-1.5 hover:bg-accent rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Wand2 className="h-4 w-4 text-primary" />
-              </button>
-            </Tooltip>
-          )}
-
-          <Tooltip content="Attach file" position="top">
-            <button
-              onClick={handleAttach}
-              className="p-1.5 hover:bg-accent rounded-md transition-colors"
-            >
-              <Paperclip className="h-4 w-4" />
-            </button>
-          </Tooltip>
-
-          {attachments.length > 0 && (
-            <span className="text-xs text-muted-foreground">
-              {attachments.length} file{attachments.length !== 1 ? 's' : ''} attached
-            </span>
-          )}
-        </div>
-
-        <Tooltip content="Discard" shortcut="Esc" position="top">
-          <button
-            onClick={handleDiscard}
-            className="p-1.5 hover:bg-accent rounded-md transition-colors text-destructive"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        </Tooltip>
-      </div>
+      {/* Footer — the SAME toolbar the fullscreen composer uses, so an action
+          added to one is never missing from the other (this panel used to carry
+          a hand-copied footer, which is how it ended up without Send later). */}
+      <ComposeToolbar
+        sending={sending}
+        hasAIProvider={hasAIProvider}
+        plainBody={plainBody}
+        hasRecipients={!!to.trim()}
+        isForward={mode === 'forward'}
+        readReceipt={readReceipt}
+        onToggleReadReceipt={() => setReadReceipt((v) => !v)}
+        onSend={() => { void handleSend(); }}
+        onAttach={handleAttach}
+        onPolish={() => {
+          setPolishMode('full');
+          setShowPolishModal(true);
+        }}
+        onDiscard={handleDiscard}
+      />
 
       {/* Attachment list */}
       {attachments.length > 0 && (
@@ -1077,6 +1000,7 @@ ${createQuotedHeader(prefix, extraInfo)}
       )}
 
       {/* Discard confirmation */}
+      {closePromptDialog}
       {showDiscardConfirm && (
         <DiscardConfirm
           dontAsk={dontAskDiscard}

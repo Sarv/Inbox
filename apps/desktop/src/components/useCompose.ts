@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 
 import { useEmailStore } from '../store/email-store';
+import { editorHtmlToText } from '../utils/editor-text';
 import { getSignatureHtml } from '../utils/signatures';
 
 export interface AttachmentFile {
@@ -48,7 +49,9 @@ export function useCompose({ initialDraft }: UseComposeProps) {
     const [subject, setSubject] = useState(initialDraft?.subject || '');
 
     const [htmlBody, setHtmlBody] = useState(initialDraft?.htmlContent || '');
-    const [plainBody, setPlainBody] = useState('');
+    // Seeded from the draft: the editor only reports text on a keystroke, and
+    // plainBody gates Send — '' here disabled Send on a reopened draft.
+    const [plainBody, setPlainBody] = useState(() => editorHtmlToText(initialDraft?.htmlContent));
     const [attachments, setAttachments] = useState<AttachmentFile[]>(initialDraft?.attachments || []);
 
     const [sending, setSending] = useState(false);
@@ -83,6 +86,13 @@ export function useCompose({ initialDraft }: UseComposeProps) {
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    /** Replace the body programmatically (draft restore, AI rewrite), keeping
+     *  the plain-text copy that gates Send in step with the HTML. */
+    const setBody = (html: string) => {
+        setHtmlBody(html);
+        setPlainBody(editorHtmlToText(html));
+    };
 
     const handleEditorChange = (html: string, text: string) => {
         setHtmlBody(html);
@@ -119,6 +129,7 @@ export function useCompose({ initialDraft }: UseComposeProps) {
         subject, setSubject,
         htmlBody, setHtmlBody,
         plainBody, setPlainBody,
+        setBody,
         attachments, setAttachments,
         sending, setSending,
         showCc, setShowCc,

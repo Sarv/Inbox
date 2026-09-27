@@ -500,17 +500,8 @@ export interface PendingSend {
   accountId?: string;
   /** Draft to remove once the send commits (deferred so a crash never loses it). */
   draftCleanup?: DraftCleanup;
-  draft: {
-    to: string;
-    cc: string;
-    bcc?: string;
-    subject?: string;
-    htmlContent: string;
-    attachments: any[];
-    replyToEmail: any;
-    mode: ComposeMode;
-    isInline?: boolean;
-  };
+  /** What an Undo reopens the composer with. */
+  draft: RestoreDraft;
 }
 
 export interface RestoreDraft {
@@ -523,6 +514,15 @@ export interface RestoreDraft {
   replyToEmail: any;
   mode: ComposeMode;
   isInline?: boolean;
+  /** The saved draft this content belongs to — kept in the DB through the undo
+   *  window as the crash backstop. The reopened composer must OWN it, so its next
+   *  save replaces it; without these the reopen saved a second copy beside it. */
+  draftMessageId?: string;
+  threadId?: string;
+  accountId?: string;
+  /** Content is newer than that saved draft (autosave trails typing by up to
+   *  10s), so closing the reopened composer unedited must still save it. */
+  unsaved?: boolean;
 }
 
 export interface ComposeSlice {

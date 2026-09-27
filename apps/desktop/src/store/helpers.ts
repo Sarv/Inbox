@@ -1406,7 +1406,30 @@ export function setupPersistedTagListener(useEmailStore: { getState: () => any }
   });
 }
 
+/**
+ * A draft appeared: refresh the sidebar Drafts count and, when the Drafts folder
+ * is the view on screen, its list. Shared by user saves and AI-drafted replies.
+ */
+export function refreshDraftsViews(s: {
+  folders?: Array<{ id: string; specialUse?: string | null; path?: string | null }>;
+  selectedFolderId?: string | null;
+  loadFolders?: () => unknown;
+  _reloadCurrentView?: () => unknown;
+}): void {
+  s.loadFolders?.();
+  const cur = (s.folders || []).find((f) => f.id === s.selectedFolderId);
+  if (cur && isDraftsFolder(cur)) {
+    s._reloadCurrentView?.();
+  }
+}
+
+/** Is this folder the account's Drafts folder? */
+export function isDraftsFolder(folder: { specialUse?: string | null; path?: string | null }): boolean {
+  return folder.specialUse === '\\Drafts' || (folder.path || '').toLowerCase().includes('draft');
+}
+
 // Set up AI categorization IPC event listeners (called once at module load)
+
 export function setupAICategorizationListeners(useEmailStore: { setState: (state: any) => void; getState: () => any }): void {
   if (typeof window === 'undefined' || !window.electronAPI?.aiCategorization) return;
 
@@ -1500,15 +1523,12 @@ export function setupAICategorizationListeners(useEmailStore: { setState: (state
 
   // F3: a background AI-drafted reply landed in the Drafts folder. Refresh the
   // sidebar Drafts count, and if the Drafts folder is the active view, its list.
-  window.electronAPI.agent?.onDraftReady?.(() => {
-    const s = useEmailStore.getState();
-    s.loadFolders?.();
-    const cur = (s.folders || []).find((f: any) => f.id === s.selectedFolderId);
-    const p = (cur?.path || '').toLowerCase();
-    if (cur && (cur.specialUse === '\\Drafts' || p.includes('draft'))) {
-      s._reloadCurrentView?.();
-    }
-  });
+  window.electronAPI.agent?.onDraftReady?.(() => refreshDraftsViews(useEmailStore.getState()));
+
+  // A draft the user wrote was saved (compose closed, autosave). Main sends this
+  // the moment the local row is written, so the Drafts list shows it without
+  // waiting on the IMAP append or the next sync.
+  window.electronAPI.drafts?.onSaved?.(() => refreshDraftsViews(useEmailStore.getState()));
 
   // Main removed the thread's draft(s) after a reply was sent (the AI auto-draft
   // or a manual one) — drop them from every open view so the stale draft doesn't

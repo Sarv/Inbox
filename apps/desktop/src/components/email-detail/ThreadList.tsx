@@ -17,6 +17,7 @@ import { isSignatureDetectionEnabled, buildPolishThreadContext, getCurrentUserEm
 import { useEmailStore } from '../../store/email-store';
 import { qualifiesForSafeAutoLoad } from '../../store/helpers';
 import { firstFlaggedEmailId } from '../../utils/email-security';
+import { toForwardSource } from '../../utils/forward-quote';
 import { useLinkRules } from '../../utils/security-rules';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
 import { InlineForward } from '../InlineForward';
@@ -409,17 +410,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
               {showInlineForward && forwardingEmail?.id === email.id && (
                 <div id="inline-forward-compose">
                   <InlineForward
-                    forwardEmail={{
-                      id: email.id,
-                      subject: email.subject || '',
-                      fromAddress: email.fromAddress,
-                      fromName: email.fromName,
-                      toAddress: email.toAddress || '',
-                      ccAddress: email.ccAddress,
-                      date: email.date,
-                      cleanBody: email.cleanBody,
-                      rawBody: email.rawBody,
-                    }}
+                    forwardEmail={toForwardSource(email)}
                     onClose={handleCloseInlineForward}
                     embedded={true}
                   />

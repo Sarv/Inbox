@@ -5,6 +5,8 @@ import { applyEmailCategories, clearCategoryBadgeCache, getCachedCategorySlugs, 
 import { DEFAULT_SECTIONS } from '../../../../src/config/inbox-types';
 import { getDefaultProvider, reportAIHealthy, reportAIUnhealthy, syncAIProviderToMain } from '../../../../src/services/ai-service';
 import {
+  isDraftsFolder,
+  refreshDraftsViews,
   ACCOUNT_COLORS,
   ALL_MAIL_PAGE_SIZE,
   SECTION_FULL_PAGE_SIZE,
@@ -2203,5 +2205,47 @@ describe('shouldAdoptSyncFolders', () => {
     ['NaN', { foldersTotal: Number.NaN }],
   ])('refuses to adopt on %s', (_case, status) => {
     expect(shouldAdoptSyncFolders(status as never, idle)).toBe(false);
+  });
+});
+
+// Breaks: a saved/removed draft never shows in (or leaves) the open Drafts
+// list until the next sync — "I closed compose but don't see the draft".
+describe('refreshDraftsViews', () => {
+  const folders = [
+    { id: 'inbox', specialUse: '\\Inbox', path: 'INBOX' },
+    { id: 'drafts', specialUse: '\\Drafts', path: 'Drafts' },
+  ];
+
+  it('refreshes folder counts and reloads the view when Drafts is open', () => {
+    const loadFolders = vi.fn();
+    const _reloadCurrentView = vi.fn();
+    refreshDraftsViews({ folders, selectedFolderId: 'drafts', loadFolders, _reloadCurrentView });
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+    expect(_reloadCurrentView).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: every draft save would reload whatever the user is reading.
+  it('only refreshes counts when another folder is open', () => {
+    const loadFolders = vi.fn();
+    const _reloadCurrentView = vi.fn();
+    refreshDraftsViews({ folders, selectedFolderId: 'inbox', loadFolders, _reloadCurrentView });
+    expect(loadFolders).toHaveBeenCalledTimes(1);
+    expect(_reloadCurrentView).not.toHaveBeenCalled();
+  });
+
+  // Breaks: an event arriving before the store is initialised would throw.
+  it('tolerates a store with nothing loaded yet', () => {
+    expect(() => refreshDraftsViews({})).not.toThrow();
+  });
+});
+
+// Breaks: providers without SPECIAL-USE (e.g. "[Gmail]/Drafts", "INBOX.Drafts")
+// would never get their open Drafts list refreshed.
+describe('isDraftsFolder', () => {
+  it('recognises the \\Drafts special-use flag and draft-named paths', () => {
+    expect(isDraftsFolder({ specialUse: '\\Drafts', path: 'Entwürfe' })).toBe(true);
+    expect(isDraftsFolder({ path: 'INBOX.Drafts' })).toBe(true);
+    expect(isDraftsFolder({ path: 'INBOX', specialUse: null })).toBe(false);
+    expect(isDraftsFolder({})).toBe(false);
   });
 });

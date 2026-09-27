@@ -9,12 +9,19 @@ import {
 import prettyBytes from 'pretty-bytes';
 import { useState, useEffect, useRef, useMemo } from 'react';
 
+import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
+import { useDraftAutosave } from '../hooks/useDraftAutosave';
+import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
+import { useEmailStore } from '../store/email-store';
+import { loadEmailAttachments } from '../utils/compose-attachments';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
+import { buildForwardQuoteHtml, composeForwardDraft, forwardSubject, type ForwardSource } from '../utils/forward-quote';
 import { reportSendFailure } from '../utils/send-failure';
 
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
+import { FromAccountBar } from './FromAccountBar';
 import { PolishModal } from './PolishModal';
 import { RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
@@ -26,19 +33,7 @@ function formatFileSize(bytes: number): string {
 }
 
 interface InlineForwardProps {
-  forwardEmail: {
-    id: string;
-    subject: string;
-    fromAddress: string;
-    fromName: string | null;
-    toAddress: string;
-    ccAddress: string | null;
-    date: number;
-    cleanBody: string | null;
-    rawBody: string | null;
-    hasAttachments?: boolean;
-    attachmentNames?: string | null;
-  };
+  forwardEmail: ForwardSource;
   draft?: any;
   onClose: () => void;
   embedded?: boolean;
@@ -47,8 +42,8 @@ interface InlineForwardProps {
 export function InlineForward({ forwardEmail, draft, onClose, embedded = false }: InlineForwardProps) {
   const {
     to, setTo, pendingTo, setPendingTo,
-    htmlBody, setHtmlBody,
-    plainBody, setPlainBody,
+    htmlBody,
+    plainBody, setBody,
     attachments, setAttachments,
     sending, setSending,
     showPolishModal, setShowPolishModal,
@@ -66,6 +61,11 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     initialDraft: draft
   });
 
+  // Send (and draft) from the account the mail was received in, not whichever
+  // account happens to be active — the All Inboxes forward went out from the
+  // wrong mailbox. The From bar says so when that isn't the active account.
+  const { accountId: forwardAccountId, fromAccount, accounts } = useInlineSendingAccount(forwardEmail);
+
   const [showQuoted, setShowQuoted] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
 
@@ -74,43 +74,49 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   // Fetch original attachments on mount
   useEffect(() => {
     if (draft) return; // don't fetch if restoring a draft with existing files
-    const loadOriginalAttachments = async () => {
-      if (!forwardEmail.hasAttachments || !forwardEmail.attachmentNames) return;
-
-      try {
-        const names = JSON.parse(forwardEmail.attachmentNames) as string[];
-        const loadedAttachments: AttachmentFile[] = [];
-
-        for (const filename of names) {
-          try {
-            const result = await window.electronAPI.emails.getAttachmentBase64(forwardEmail.id, filename);
-            if (result.success && result.base64) {
-              loadedAttachments.push({
-                filename,
-                content: result.base64,
-                contentType: 'application/octet-stream', // nodemailer infers actual mime type from filename
-                encoding: 'base64' as const,
-                size: Math.round(result.base64.length * 0.75), // rough byte size from base64
-                type: 'attachment'
-              });
-            }
-          } catch (err) {
-            console.error(`Failed to load attachment ${filename}:`, err);
-          }
-        }
-
-        if (loadedAttachments.length > 0) {
-          setAttachments(prev => [...prev, ...loadedAttachments]);
-        }
-      } catch (err) {
-        console.error('Failed to parse attachment names:', err);
-      }
-    };
-
-    loadOriginalAttachments();
+    if (!forwardEmail.hasAttachments || !forwardEmail.attachmentNames) return;
+    void loadEmailAttachments({ ...forwardEmail, accountId: forwardAccountId }).then((loaded) => {
+      if (loaded.length > 0) setAttachments(prev => [...prev, ...loaded]);
+    });
   }, [forwardEmail.id, forwardEmail.hasAttachments, forwardEmail.attachmentNames]);
 
-  const subject = forwardEmail.subject.startsWith('Fwd:') ? forwardEmail.subject : `Fwd: ${forwardEmail.subject}`;
+  const subject = forwardSubject(forwardEmail.subject);
+
+  // Auto-save the forward as a draft. It is a STANDALONE draft (no threadId /
+  // inReplyTo): kept in the original's thread, the thread view would reopen it
+  // as a reply and send it to the original sender. Its body carries the
+  // forwarded message under the note, so reopened from Drafts it is complete.
+  const { markDiscarded, closeAction } = useDraftAutosave({
+    to,
+    subject,
+    subjectPrefilled: true,
+    body: plainBody,
+    htmlBody,
+    composeForSave: (note) => composeForwardDraft(forwardEmail, note),
+    attachments,
+    // A fresh forward's files are the original's, loaded for the user; a
+    // restored forward's are the ones they chose to send.
+    attachmentsPrefilled: !draft,
+    initialDraftMessageId: draft?.draftMessageId,
+    initialDraftUnsaved: draft?.unsaved,
+    accountId: forwardAccountId,
+  });
+
+  // Throw the forward away: stop the autosave, drop any draft it wrote from
+  // every view (and the server, in the background), then close.
+  const handleDiscard = () => {
+    const messageId = markDiscarded() || draft?.draftMessageId;
+    if (messageId) useEmailStore.getState().discardDraft(messageId, undefined, forwardAccountId);
+    onClose();
+  };
+
+  // X / Escape: ask whether to keep the forward in Drafts or discard it.
+  // Saving is just closing — the autosave's unmount save writes the draft.
+  const { requestClose, isAsking, closePromptDialog } = useCloseComposePrompt({
+    closeAction,
+    onSave: onClose,
+    onDiscard: handleDiscard,
+  });
 
   // Focus editor on mount
   useEffect(() => {
@@ -122,7 +128,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
 
   // Signature is kept OUT of the TipTap editor (its schema flattens tables/flex)
   // — captured once and appended verbatim on send + shown in the preview below.
-  const signatureHtml = useMemo(() => getSignature('reply'), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const signatureHtml = useMemo(() => getSignature('reply', forwardAccountId), [forwardAccountId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Close context menu on click outside
   useEffect(() => {
@@ -149,27 +155,14 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
 
     setSending(true);
     try {
-      // Build forwarded content
-      const originalDate = new Date(forwardEmail.date * 1000).toLocaleString();
-      const originalHtmlBody = forwardEmail.rawBody;
-      const plainTextBody = forwardEmail.cleanBody || '';
-
-      const quotedBodyHtml = originalHtmlBody
-        ? originalHtmlBody
-        : plainTextBody.split('\n').map(line => `<p>${line || '&nbsp;'}</p>`).join('');
-
-      const quotedHtml = `
-<blockquote style="margin: 0 0 0 0.8ex; border-left: 1px solid #ccc; padding-left: 1ex;">
-<p style="margin: 0 0 10px 0;"><strong>---------- Forwarded Message ----------</strong><br>
-<strong>From:</strong> ${forwardEmail.fromName || forwardEmail.fromAddress}<br>
-<strong>Date:</strong> ${originalDate}<br>
-<strong>Subject:</strong> ${forwardEmail.subject}<br>
-<strong>To:</strong> ${forwardEmail.toAddress}</p>
-<div>${quotedBodyHtml}</div>
-</blockquote>`;
-
+      const quotedHtml = buildForwardQuoteHtml(forwardEmail);
       const emailFriendlyBody = convertToEmailHtml(htmlBody);
       const fullHtml = assembleOutgoingHtml(emailFriendlyBody, signatureHtml, quotedHtml);
+
+      // Stop the autosave (and the unmount save) — the mail is being sent, not
+      // drafted. Any draft it already wrote is removed once the send commits
+      // (draftCleanup), never before, so the mail is never only in memory.
+      const ownedDraftId = markDiscarded() ?? draft?.draftMessageId;
 
       // Close immediately for responsive UX — sendingStatus in store shows feedback
       onClose();
@@ -181,6 +174,8 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         htmlBody: fullHtml,
         inReplyTo: forwardEmail.id,
         attachments: attachments.map((a: AttachmentFile) => ({ ...a, filename: a.filename || 'attachment' })) as any,
+        accountId: forwardAccountId,
+        ...(ownedDraftId ? { draftCleanup: { messageId: ownedDraftId, accountId: forwardAccountId } } : {}),
         draft: {
           to: finalTo.join(', '),
           cc: '',
@@ -189,6 +184,9 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
           replyToEmail: forwardEmail,
           mode: 'forward',
           isInline: true,
+          draftMessageId: ownedDraftId,
+          accountId: forwardAccountId,
+          unsaved: true,
         },
       });
     } catch (error) {
@@ -201,11 +199,15 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   // Keyboard shortcuts
   const handleSendRef = useRef(handleSend);
   handleSendRef.current = handleSend;
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  const onCloseRef = useRef(requestClose);
+  onCloseRef.current = requestClose;
+  const isAskingRef = useRef(isAsking);
+  isAskingRef.current = isAsking;
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // The close question owns the keyboard while it is up.
+      if (isAskingRef.current()) return;
       const isMod = e.metaKey || e.ctrlKey;
 
       if (isMod && e.key === 'Enter') {
@@ -216,7 +218,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
 
       if (e.key === 'Escape') {
         e.preventDefault();
-        onCloseRef.current();
+        void onCloseRef.current();
         return;
       }
     };
@@ -251,21 +253,16 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     if (polishMode === 'selection' && selectedText) {
       const escapedSelected = selectedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const newHtml = htmlBody.replace(new RegExp(escapedSelected, 'g'), result.body);
-      setHtmlBody(newHtml);
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = newHtml;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(newHtml);
     } else {
-      setHtmlBody(result.body);
-      const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = result.body;
-      setPlainBody(tempDiv.textContent || tempDiv.innerText || '');
+      setBody(result.body);
     }
   };
 
   if (isMinimized) {
     return (
       <div className="border border-border rounded-lg bg-card mt-4">
+        {closePromptDialog}
         <button
           onClick={() => setIsMinimized(false)}
           className="w-full p-3 flex items-center justify-between hover:bg-accent/50 transition-colors"
@@ -276,7 +273,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
               Forward: {forwardEmail.subject}
             </span>
           </div>
-          <X className="h-4 w-4 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); onClose(); }} />
+          <X className="h-4 w-4 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); void requestClose(); }} />
         </button>
       </div>
     );
@@ -288,6 +285,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
 
   return (
     <div className={containerClass}>
+      {closePromptDialog}
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-border bg-muted/30">
         <div className="flex items-center gap-2 text-sm">
@@ -304,14 +302,18 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
             <Minimize2 className="h-4 w-4 text-muted-foreground" />
           </button>
           <button
-            onClick={onClose}
+            onClick={() => void requestClose()}
             className="p-1.5 hover:bg-accent rounded transition-colors"
-            title="Discard"
+            title="Close"
           >
             <X className="h-4 w-4 text-muted-foreground" />
           </button>
         </div>
       </div>
+
+      {/* From: which account this forward is sent AS (All Inboxes, when it
+          isn't the active one). */}
+      {fromAccount && <FromAccountBar account={fromAccount} accounts={accounts} />}
 
       {/* To field - always visible */}
       <div className="flex items-center border-b border-border">
@@ -385,7 +387,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
           setPolishMode('full');
           setShowPolishModal(true);
         }}
-        onDiscard={onClose}
+        onDiscard={handleDiscard}
         isInline={true}
       />
 

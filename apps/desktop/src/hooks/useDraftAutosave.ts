@@ -1,6 +1,8 @@
 import { useEffect, useRef, useCallback } from 'react';
 
+import type { AttachmentFile } from '../components/useCompose';
 import { useEmailStore } from '../store/email-store';
+import { attachmentsKey, toDraftAttachments } from '../utils/compose-attachments';
 
 interface DraftAutosaveOptions {
   to: string;
@@ -17,6 +19,25 @@ interface DraftAutosaveOptions {
    *  draft). Seeds the delete-before-resave chain so editing replaces THAT draft
    *  in place, and discard removes exactly it — never its sibling drafts. */
   initialDraftMessageId?: string;
+  /** The opened content is NEWER than the saved draft `initialDraftMessageId`
+   *  names — an Undo-send restore, where autosave last ran up to DEBOUNCE_MS
+   *  before Send. The draft is still owned (so the next save REPLACES it rather
+   *  than adding a duplicate), but closing unedited must save, not skip. */
+  initialDraftUnsaved?: boolean;
+  /** The subject was filled in FOR the user (a forward's "Fwd: …"), so on its
+   *  own it is not work worth keeping — only recipients or a typed body are. */
+  subjectPrefilled?: boolean;
+  /** Shapes what is WRITTEN as the draft body, when that is more than the
+   *  editor — a forward's draft carries the forwarded message under the note,
+   *  so it still makes sense reopened from Drafts. Change detection keeps
+   *  reading the editor content alone. */
+  composeForSave?: (content: { body: string; htmlBody: string }) => { body: string; htmlBody: string };
+  /** Files attached in the composer — saved with the draft, so reopening it
+   *  brings them back. Adding or removing one counts as an edit. */
+  attachments?: AttachmentFile[];
+  /** The attachments were filled in FOR the user (a forward's original files),
+   *  so on their own they are not work worth keeping — like subjectPrefilled. */
+  attachmentsPrefilled?: boolean;
   /** Account that owns this draft — routes save/delete to the RIGHT per-account
    *  DB + IMAP engine. Without it they hit the active account (wrong DB when the
    *  draft belongs to another account / opened from All Inboxes). */
@@ -24,6 +45,21 @@ interface DraftAutosaveOptions {
 }
 
 const DEBOUNCE_MS = 10_000; // 10 seconds
+
+/**
+ * What closing a composer should do:
+ *  - `discard` — nothing worth keeping (empty, or only an auto-filled reply
+ *    header): close and clean up, no question.
+ *  - `keep` — an opened draft the user didn't change: close and leave it as it
+ *    was, no question.
+ *  - `ask` — there is work the user hasn't said what to do with: ask Save/Discard.
+ */
+export type CloseAction = 'ask' | 'keep' | 'discard';
+
+export function decideCloseAction(state: { hasContent: boolean; unchangedSinceOpened: boolean }): CloseAction {
+  if (!state.hasContent) return 'discard';
+  return state.unchangedSinceOpened ? 'keep' : 'ask';
+}
 
 export function useDraftAutosave(opts: DraftAutosaveOptions) {
   const { imapConfig } = useEmailStore();
@@ -34,6 +70,9 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
   latestRef.current = opts;
 
   const savingRef = useRef(false);
+  // The save currently in flight, so a close can wait for it and then persist
+  // anything typed after it started (see the unmount effect).
+  const inFlightRef = useRef<Promise<void> | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sentRef = useRef(false);
   // The message-id of the draft this hook currently "owns" — either the one
@@ -51,8 +90,8 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
     // draft) — NOT plainBody, which an InlineReply effect sets one render LATER.
     // Including it made the baseline (captured while plainBody was '') never match
     // once it filled in, re-saving an unedited opened draft every time (churn).
-    const { to, cc, bcc, subject, htmlBody } = latestRef.current;
-    return [to, cc || '', bcc || '', subject, htmlBody].join('\u0000');
+    const { to, cc, bcc, subject, htmlBody, attachments } = latestRef.current;
+    return [to, cc || '', bcc || '', subject, htmlBody, attachmentsKey(attachments)].join('\u0000');
   }, []);
 
   // Baseline = the content as it was OPENED into the editor.
@@ -64,16 +103,25 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
   //    never die.
   //  - Fresh reply/compose (no initialDraftMessageId): baseline '' so the first
   //    real content counts as a change and saves normally.
-  const baselineKeyRef = useRef<string | null>(opts.initialDraftMessageId ? null : '');
+  const baselineKeyRef = useRef<string | null>(
+    opts.initialDraftMessageId && !opts.initialDraftUnsaved ? null : '',
+  );
+  // The content as OPENED, frozen for the life of the editor (the baseline above
+  // moves on every save). Only an opened, already-saved draft has one: closing it
+  // unchanged needs no question. Fresh compose and an unsaved restore stay null.
+  const openedKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (baselineKeyRef.current === null && (opts.htmlBody || opts.body)) {
       baselineKeyRef.current = contentKey();
+      openedKeyRef.current = baselineKeyRef.current;
     }
   }, [opts.htmlBody, opts.body, contentKey]);
 
   const hasContent = useCallback(() => {
-    const { to, subject, body, htmlBody, inReplyTo } = latestRef.current;
-    const bodyHasContent = !!(body.trim() || htmlBody.replace(/<[^>]*>/g, '').trim());
+    const { to, subject, body, htmlBody, inReplyTo, subjectPrefilled, attachments, attachmentsPrefilled } = latestRef.current;
+    // A file the user attached is work, even with nothing typed around it.
+    const bodyHasContent = !!(body.trim() || htmlBody.replace(/<[^>]*>/g, '').trim())
+      || (!attachmentsPrefilled && (attachments?.length ?? 0) > 0);
     // For a REPLY/reply-all the recipient + subject are auto-filled, so they must
     // NOT count as "content" — only a user-typed body makes the draft worth
     // keeping. This is what makes "open a reply, type nothing, click away" simply
@@ -81,10 +129,20 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
     // stops empty replies from piling up as drafts just by being opened.
     if (inReplyTo) return bodyHasContent;
     // New compose (or forward): any user-entered field counts.
-    return bodyHasContent || !!to.trim() || !!subject.trim();
+    return bodyHasContent || !!to.trim() || (!subjectPrefilled && !!subject.trim());
   }, []);
 
-  const saveDraft = useCallback(async () => {
+  // What the close button should do with this editor — see decideCloseAction.
+  const closeAction = useCallback(
+    (): CloseAction =>
+      decideCloseAction({
+        hasContent: !sentRef.current && hasContent(),
+        unchangedSinceOpened: openedKeyRef.current !== null && contentKey() === openedKeyRef.current,
+      }),
+    [hasContent, contentKey],
+  );
+
+  const runSave = useCallback(async () => {
     if (savingRef.current || sentRef.current) return;
     if (!hasContent()) return;
     // Unchanged since it was opened → do NOT re-save. Re-saving an untouched
@@ -94,7 +152,14 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
       return;
     }
 
-    const { to, cc, bcc, subject, body, htmlBody, inReplyTo, threadId, accountId } = latestRef.current;
+    const { to, cc, bcc, subject, inReplyTo, threadId, accountId, composeForSave, attachments } = latestRef.current;
+    const edited = { body: latestRef.current.body, htmlBody: latestRef.current.htmlBody };
+    const { body, htmlBody } = composeForSave ? composeForSave(edited) : edited;
+    // Fingerprint of exactly what THIS save writes. The baseline must be this
+    // snapshot, not contentKey() read after the await: that read picks up edits
+    // typed while the save was in flight, marks them "saved", and the next
+    // autosave/close then skips them as unchanged — they are never persisted.
+    const savedKey = contentKey();
     savingRef.current = true;
 
     // The draft this hook currently OWNS (the one being superseded). Captured
@@ -118,6 +183,7 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
         htmlBody,
         inReplyTo,
         accountId,
+        attachments: toDraftAttachments(attachments),
         // Group the draft into the SAME thread as the mail being replied to, so
         // reopening the thread finds this draft and edits it in place instead of
         // spawning a brand-new standalone draft every time (the "immortal draft"
@@ -141,7 +207,7 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
       // targets it, and update the baseline so an unchanged follow-up won't re-save.
       const newMessageId: string | undefined = res?.messageId;
       ownedMessageIdRef.current = newMessageId || ownedMessageIdRef.current;
-      baselineKeyRef.current = contentKey();
+      baselineKeyRef.current = savedKey;
 
       // Enforce ONE draft per thread: now that the new draft is persisted, remove
       // the superseded one by its Message-ID. Targeting the OLD message-id (never
@@ -160,6 +226,16 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
       savingRef.current = false;
     }
   }, [accountEmail, hasContent, contentKey]);
+
+  const saveDraft = useCallback((): Promise<void> => {
+    const run = runSave().finally(() => {
+      if (inFlightRef.current === run) inFlightRef.current = null;
+    });
+    inFlightRef.current = run;
+    return run;
+  }, [runSave]);
+  const saveDraftRef = useRef(saveDraft);
+  saveDraftRef.current = saveDraft;
 
   // Mark this draft as done WITHOUT deleting — cancels the pending autosave and
   // blocks the unmount re-save, then hands the caller the message-id it currently
@@ -208,6 +284,7 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
   }, []);
 
   // Debounced save on content change
+  const attachmentsFingerprint = attachmentsKey(opts.attachments);
   useEffect(() => {
     if (sentRef.current) return;
 
@@ -225,39 +302,26 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
         timerRef.current = null;
       }
     };
-  }, [opts.to, opts.cc, opts.bcc, opts.subject, opts.body, opts.htmlBody, saveDraft]);
+  }, [opts.to, opts.cc, opts.bcc, opts.subject, opts.body, opts.htmlBody, attachmentsFingerprint, saveDraft]);
 
-  // Save on unmount (close without send)
+  // Save on unmount (close without send). Goes through saveDraft, so it gets
+  // the same content/unchanged/discarded checks and the same save-then-delete of
+  // the superseded draft. If an autosave is still uploading, wait for it and
+  // THEN save: skipping here (the old behaviour) dropped whatever was typed after
+  // that autosave began — close within a few seconds of a pause lost the edit.
+  // The follow-up save is a no-op when nothing changed since (baseline match).
   useEffect(() => {
     return () => {
-      // Skip if discarded, if a debounced save is already in flight (it'll finish
-      // and persist — launching another here would append a SECOND draft to the
-      // thread), if there's no content, OR if the opened draft was never edited
-      // (unchanged baseline — re-saving an untouched draft on close is the churn
-      // that made drafts immortal).
-      const unchanged = baselineKeyRef.current !== null && contentKey() === baselineKeyRef.current;
-      if (!sentRef.current && !savingRef.current && hasContent() && !unchanged) {
-        // SAVE-THEN-DELETE on teardown, matching saveDraft. The old order deleted
-        // the thread's draft(s) and THEN saved fire-and-forget DURING unmount — if
-        // the quit interrupted that gap, the draft was lost. Now we persist the new
-        // draft FIRST and only delete the superseded one once the save resolves, so
-        // an interrupted teardown can at worst leave a duplicate (never zero drafts).
-        const { to, cc, bcc, subject, body, htmlBody, inReplyTo, threadId, accountId } = latestRef.current;
-        const supersededMessageId = ownedMessageIdRef.current;
-        window.electronAPI.drafts
-          .save({ to, cc, bcc, subject, body, htmlBody, inReplyTo, threadId, accountId, accountEmail })
-          .then((res: any) => {
-            // Delete the superseded draft by its Message-ID only — never the
-            // just-saved one (save mints a fresh id, so they can't collide).
-            const newMessageId: string | undefined = res?.messageId;
-            if (supersededMessageId && supersededMessageId !== newMessageId) {
-              window.electronAPI.drafts.delete({ messageId: supersededMessageId, accountId }).catch(() => {});
-            }
-          })
-          .catch(() => {});
+      // Latest saveDraft via ref — this closure is from the first render.
+      const save = () => saveDraftRef.current();
+      const pending = inFlightRef.current;
+      if (pending) {
+        void pending.then(save);
+      } else {
+        void save();
       }
     };
   }, []); // Empty deps — runs only on unmount
 
-  return { deleteDraft, markDiscarded };
+  return { deleteDraft, markDiscarded, closeAction };
 }
