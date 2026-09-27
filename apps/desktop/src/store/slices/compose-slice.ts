@@ -1,9 +1,8 @@
 import type { EmailRecord } from '@sarvinbox/core';
 
+import { readUndoSendDelayMs } from '../../utils/app-settings';
 import { fetchVaultSecrets, accountIdFor, effectiveSmtpConfig } from '../helpers';
 import type { ComposeSlice, SliceCreator } from '../types';
-
-const UNDO_SEND_DELAY = 5000;
 
 /** A Message-ID is `<...>`; a row id is `<base36>-<hex>` (see core's generateId). */
 export function looksLikeMessageId(value: string): boolean {
@@ -328,9 +327,15 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
     // during the window can only DELAY delivery (the outbox drains it on restart),
     // never lose it. The old path kept the mail only in renderer memory for 5s and
     // deleted the draft up front, so a quit within that window destroyed the email.
+    // The undo window is the user's choice (Settings -> General -> Undo send),
+    // read per send so a change applies to the very next one. Both the outbox
+    // hold and the local commit timer use this ONE value: a hold shorter than
+    // the timer transmits the mail while the Undo button is still on screen.
+    const undoDelayMs = readUndoSendDelayMs();
+
     let sendId: number | null = null;
     try {
-      const enq = await window.electronAPI.smtp.sendWithUndo(payload, UNDO_SEND_DELAY);
+      const enq = await window.electronAPI.smtp.sendWithUndo(payload, undoDelayMs);
       if (enq?.success && typeof enq.id === 'number') {
         sendId = enq.id;
       } else {
@@ -375,7 +380,7 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
     const timeoutId = window.setTimeout(() => {
       if (pendingFlush === commit) pendingFlush = null;
       void commit();
-    }, UNDO_SEND_DELAY);
+    }, undoDelayMs);
 
     pendingFlush = commit;
     set({
@@ -386,6 +391,7 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
         optimisticEmailId: optimisticId,
         sendId,
         accountId: sendAsId,
+        undoDelayMs,
         draftCleanup,
         // A caller without a draft (non-composer send) still gets the durable
         // hold + commit; only the undo-restore needs draft content.

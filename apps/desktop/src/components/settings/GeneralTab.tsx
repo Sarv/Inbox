@@ -172,7 +172,7 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
           <div>
             <div className="font-medium">Undo send</div>
             <div className="text-sm text-muted-foreground">
-              Time to cancel a sent email
+              How long Undo stays available before the message is transmitted
             </div>
           </div>
           <select
@@ -184,6 +184,9 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
             <option value={10}>10 seconds</option>
             <option value={20}>20 seconds</option>
             <option value={30}>30 seconds</option>
+            <option value={60}>1 minute</option>
+            <option value={120}>2 minutes</option>
+            <option value={300}>5 minutes</option>
           </select>
         </div>
 

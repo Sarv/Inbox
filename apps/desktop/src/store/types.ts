@@ -498,6 +498,10 @@ export interface PendingSend {
   sendId: number | null;
   /** Owning account (send-as), for routing commit/cancel to the right outbox. */
   accountId?: string;
+  /** The undo window this send was held for, in ms (Settings -> General). The
+   *  toast counts down against THIS, not a constant of its own — a progress bar
+   *  that empties before the send commits is an Undo button that looks dead. */
+  undoDelayMs: number;
   /** Draft to remove once the send commits (deferred so a crash never loses it). */
   draftCleanup?: DraftCleanup;
   /** What an Undo reopens the composer with. */

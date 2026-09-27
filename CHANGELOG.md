@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way the sidebar does, by which name your mail is actually under, and
   messages already stranded under the hidden name are moved across on the next
   sync.
+- **The Undo send delay in Settings > General did nothing.** The choice was
+  saved and then read by nobody — every message used a fixed five seconds. It
+  is now the window you picked, and it goes up to five minutes for anyone who
+  wants longer to change their mind.
 - **Closing a compose asks before throwing your mail away.** X and Escape
   used to discard the message — silently, once "Don't ask me again" had been
   ticked — so mail you closed never reached Drafts. They now ask: Save draft
