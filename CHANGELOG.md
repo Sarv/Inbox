@@ -62,6 +62,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way the sidebar does, by which name your mail is actually under, and
   messages already stranded under the hidden name are moved across on the next
   sync.
+- **Closing a compose asks before throwing your mail away.** X and Escape
+  used to discard the message — silently, once "Don't ask me again" had been
+  ticked — so mail you closed never reached Drafts. They now ask: Save draft
+  (the default, on Enter), Discard, or Keep editing. An empty compose, or a
+  draft you opened and didn't change, still just closes. The trash button
+  remains the way to discard outright. This applies to new mail, inline
+  replies and forwards.
+- **Forwards are saved as drafts.** A forward you were writing used to vanish
+  when you closed it — it was never autosaved. It now saves like any other
+  compose, as a draft of its own that carries the forwarded message under your
+  note, so it is complete when you reopen it from Drafts.
+- **Drafts keep their attachments.** Files you attached — or the original's
+  files on a forward — were dropped when a compose was saved as a draft, so
+  the draft reopened, and was sent, without them. Drafts now store their
+  attachments (on the server too, so they follow you to other devices), show
+  the paperclip in the Drafts list, and bring the files back when reopened —
+  including a draft saved while offline.
+- **Forwards keep the original's attachments.** Forwarding from the single
+  message view or from a message in the thread list sent the mail without its
+  attachments; only the chat view carried them over. Every view now attaches
+  the original's files.
+- **Forwards go out from the right account.** Forwarding a message from All
+  Inboxes sent it from whichever account was active, not the one it arrived
+  in. A forward now sends from — and drafts into — the mailbox the message
+  belongs to, uses that account's signature, and shows a From line when that
+  isn't your active account, as replies already did.
+- **A saved draft now shows up in Drafts straight away.** The Drafts list
+  used to wait for the next sync, so a draft could be missing for a while after
+  you closed the window. Closing during an autosave also dropped whatever you
+  had typed since that autosave began, and Undo on a send could leave two
+  copies of the same draft. The draft now appears as soon as it is written
+  locally, a close waits for the running save and then stores your latest text,
+  and an undone send replaces its draft instead of adding a second one.
+- **Drafts list rows name the recipient.** A draft used to show your own
+  address, the sender, where the list should show who the mail is for. It now
+  names the To, Cc and Bcc recipients, or "(no recipients)".
+- **Send works on a reopened draft.** A draft opened from the Drafts list, or
+  brought back with Undo, showed its text but kept Send disabled until you
+  typed something.
+- **The Undo toast follows the theme.** It showed as a white slab in dark mode.
 
 ## [1.2.3] - 2026-09-26
 
