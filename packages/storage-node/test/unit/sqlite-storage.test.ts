@@ -1069,6 +1069,52 @@ describe('SQLiteStorage category-definition edits survive a broken read-model qu
 });
 
 // ===========================================================================
+// Read-model catch-up for writes made outside the facade
+// ===========================================================================
+
+// What breaks if these fail: not every write to `emails` comes through this
+// facade — the draft handlers write and delete their rows on the raw handle to
+// stay off the slow path. The triggers dirty the thread either way, but only a
+// scheduled drain rebuilds the projection the sidebar badges are counted from,
+// so without a way to ask from outside, a discarded draft's badge waited on the
+// maintainer's 5-second safety pump.
+describe('SQLiteStorage read-model catch-up', () => {
+  const ctx = withStorage();
+  type WithMaintainer = { readModel: { schedule: () => void } | null };
+
+  // Breaks: the raw writers have nothing to call, and the badge lags by up to
+  // five seconds after every draft saved or discarded.
+  it('lets an outside caller schedule the drain', () => {
+    const storage = ctx.get();
+    const holder = storage as unknown as WithMaintainer;
+    const real = holder.readModel;
+    const schedule = vi.fn();
+    holder.readModel = { schedule };
+    try {
+      storage.scheduleReadModelDrain();
+    } finally {
+      holder.readModel = real;
+    }
+
+    expect(schedule).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: a poke arriving after close() — a draft deleted while the account
+  // is being torn down — throws out of a delete that already succeeded.
+  it('is a no-op when there is no maintainer', () => {
+    const storage = ctx.get();
+    const holder = storage as unknown as WithMaintainer;
+    const real = holder.readModel;
+    holder.readModel = null;
+    try {
+      expect(() => storage.scheduleReadModelDrain()).not.toThrow();
+    } finally {
+      holder.readModel = real;
+    }
+  });
+});
+
+// ===========================================================================
 // Pending operations (IMAP queue) & pending sends (SMTP outbox)
 // ===========================================================================
 

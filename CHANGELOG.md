@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they promise exist.
 
 ### Fixed
+- **The Drafts count lagged behind the draft you just discarded.** The message
+  left the list at once and the number beside Drafts kept the old count for a
+  second or five before catching up. Draft rows are written and removed by a
+  faster path than the rest of the app uses, and the counts are rebuilt from a
+  projection nothing told about it — so the correction waited for a background
+  sweep that runs every five seconds. Saving, discarding and sending a draft now
+  refresh the count immediately, as does the copy filed in Sent.
 - **The Sent copy of a message could never finish uploading.** Filing a sent
   message on the server began by scanning the whole Sent folder to check the
   copy wasn't already there — which, on a large one, took longer than the

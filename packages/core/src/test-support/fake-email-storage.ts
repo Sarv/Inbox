@@ -491,6 +491,12 @@ export class FakeEmailStorage {
     this.folders.delete(id);
   }
 
+  /** No projection to rebuild in the fake — recorded so a test can prove a
+   *  caller that wrote raw asked for the catch-up its badge depends on. */
+  scheduleReadModelDrain(): void {
+    this.note('scheduleReadModelDrain');
+  }
+
   async recalculateFolderCounts(folderPaths?: string[]): Promise<void> {
     this.note('recalculateFolderCounts');
     for (const folder of this.folders.values()) {

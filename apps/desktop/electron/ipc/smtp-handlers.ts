@@ -14,6 +14,7 @@ import { ipcMain, dialog } from 'electron';
 import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { getValidAccessToken } from '../services/oauth-service';
 import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
+import { pokeReadModel } from '../services/read-model-poke';
 import { getPipelineUserName } from '../services/unified-pipeline-service';
 import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
 
@@ -784,5 +785,8 @@ export async function writeLocalSentRow(row: {
     writeThreadKey(db, { id, subject: row.subject, date: now });
   })();
 
+  // Written on the raw handle, so the projection the Sent list and its badge
+  // are read from only learns about it on the drain.
+  pokeReadModel(storage);
   logger.info('[SMTP] Wrote local sent mirror row', id, 'thread', threadId);
 }

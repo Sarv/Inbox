@@ -12,6 +12,7 @@ import pLimit from 'p-limit';
 
 import { resolveAccountTarget } from '../services/account-target';
 import { seedAttachmentCache } from '../services/attachment-cache';
+import { pokeReadModel } from '../services/read-model-poke';
 import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
 
 import { decodeDraftAttachments, draftAttachmentColumns, draftMimeAttachments, type DecodedDraftAttachment, type DraftAttachment } from './draft-attachments';
@@ -401,6 +402,9 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
          WHERE id = @id
       `).run(params);
     })();
+    // The badge counts drafts; this row was written on the raw handle, so
+    // nothing else tells the projection it moved.
+    pokeReadModel(storage);
     return existing.id;
   }
 
@@ -525,6 +529,8 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
   })();
 
   logger.info('[Drafts] Local draft row inserted', id, 'folder=', row.folderPath);
+  // A new draft raises the Drafts badge; same raw-write gap as the update above.
+  pokeReadModel(storage);
   return id;
 }
 
@@ -564,6 +570,7 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
   } catch (err) {
     logger.error('[Drafts] send-cleanup local delete failed:', err);
   }
+  pokeReadModel(storage);
   // 2. Tell the renderer to drop the row from any open view (Drafts list / thread).
   try { sendToWindow('drafts:removed', { threadId, messageIds }); } catch { /* no window */ }
 
@@ -733,6 +740,9 @@ export function registerDraftHandlers(): void {
       logger.error('[Drafts] Local draft cleanup failed:', err);
       draftLog('delete:local:error', { err: String(err) });
     }
+    // Discarding a draft is the case the user sees: without this the row went
+    // at once and the Drafts badge kept the old number for up to five seconds.
+    pokeReadModel(storage);
     // Drop the rows from open views. The autosave's replace-in-place deletes the
     // superseded draft here; without the event it lingered beside its
     // replacement in the Drafts list as a duplicate until the next sync.
@@ -879,6 +889,7 @@ export function registerDraftHandlers(): void {
         if (rows.length > 0) {
           const ph = rows.map(() => '?').join(',');
           db.prepare(`DELETE FROM emails WHERE message_id IN (${ph})`).run(...rows.map((r) => r.message_id));
+          pokeReadModel(storage);
         }
 
         // Server delete on a pooled connection. Runs even when no local rows

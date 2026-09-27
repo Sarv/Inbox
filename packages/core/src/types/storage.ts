@@ -242,6 +242,17 @@ export interface IEmailStorage {
   applyReadFlagToFolderCountsBatch?(flips: Array<{ emailId: string; nowRead: boolean }>): Promise<void>;
 
   /**
+   * Ask the read model to catch up NOW rather than on its next safety pump.
+   *
+   * For callers that write to the email tables through the raw database handle
+   * instead of this interface: the write is recorded either way, but the badge
+   * derived from it only settles when the projection is rebuilt, which without
+   * this is up to five seconds later. Optional — a storage with no projection
+   * has nothing to catch up, and omitting it costs only that delay.
+   */
+  scheduleReadModelDrain?(): void;
+
+  /**
    * {id, uid} for every email whose PRIMARY folder is `folderId` with a server
    * UID. Optional: powers whole-folder deletion detection (non-CONDSTORE); when
    * a storage impl omits it, deletion detection falls back to a recent window.

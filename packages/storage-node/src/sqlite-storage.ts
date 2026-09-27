@@ -1181,8 +1181,15 @@ export class SQLiteStorage implements IEmailStorage {
    * from it settling, so every facade method that writes tags or removes rows
    * calls this. Cheap and idempotent — a drain already running or queued ignores
    * it (see ReadModelMaintainer.schedule).
+   *
+   * PUBLIC because not every write to `emails` comes through this facade: the
+   * draft handlers write and delete their rows on the raw handle (`storage.db`)
+   * to stay off the main thread's slow path, and the triggers dirty the thread
+   * exactly the same way — but nothing schedules the drain, so the badge they
+   * changed sat on the old number until the pump. Anything that writes through
+   * `db` directly must call this afterwards.
    */
-  private scheduleReadModelDrain(): void {
+  scheduleReadModelDrain(): void {
     this.readModel?.schedule();
   }
 
