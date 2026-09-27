@@ -20,14 +20,16 @@ import {
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
+import { useAppearance } from '../../appearance';
 import { getShortcutHints } from '../../config/keyboard-shortcuts';
 import { useEmailStore } from '../../store/email-store';
 import { SnoozeDropdown } from '../email-list/SnoozeDropdown';
 import { FolderPicker } from '../FolderPicker';
 import { LabelMenu } from '../LabelMenu';
-import { Tooltip } from '../Tooltip';
 
 import { EmailMenu } from './EmailMenu';
+import { showsToolbarIcon, showsToolbarLabel, toolbarButtonClass } from './toolbar-button-view';
+import { ToolbarButton } from './ToolbarButton';
 import type { EmailDetailContext } from './types';
 
 interface EmailToolbarProps {
@@ -74,6 +76,8 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
     isRestoring,
   } = ctx;
 
+  // Appearance > Layout: whether these actions are drawn as icons, text, or both.
+  const { buttonLabels } = useAppearance();
   const [showSnoozeDropdown, setShowSnoozeDropdown] = useState(false);
   const isSnoozed = displayEmail && (displayEmail.tags || '').includes('|snoozed|');
 
@@ -100,94 +104,84 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
   }, [displayEmail]);
 
   return (
-    <div className="h-14 flex items-center gap-1 px-4 border-b border-border bg-card/50">
-      <Tooltip content="Back to list" shortcut={getShortcutHints('GO_BACK')}>
-        <button
-          onClick={handleBack}
-          className="p-2 hover:bg-accent rounded-md transition-colors"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </button>
-      </Tooltip>
+    // Wraps rather than scrolls: with labels on, fifteen actions are wider than
+    // the window, and an overflow container would clip the snooze popover that
+    // opens inside it (it is absolutely positioned, not portalled). In icon
+    // mode the row still fits on one line and looks exactly as it always did.
+    <div className="min-h-14 flex flex-wrap items-center gap-1 px-4 py-1 border-b border-border bg-card/50">
+      <ToolbarButton
+        name="Back"
+        tooltip="Back to list"
+        icon={<ArrowLeft className="h-4 w-4" />}
+        onClick={handleBack}
+        shortcut={getShortcutHints('GO_BACK')}
+      />
 
-      <div className="h-6 w-px bg-border mx-1" />
+      <div className="h-6 w-px bg-border mx-1 shrink-0" />
 
       {/* Trash: show Restore instead of Archive/Delete */}
       {isInTrash ? (
-        <Tooltip content="Restore to Inbox">
-          <button
-            onClick={() => displayEmail && !isRestoring && handleRestore(displayEmail.id)}
-            disabled={isRestoring}
-            className="p-2 hover:bg-accent rounded-md transition-colors text-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isRestoring ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-          </button>
-        </Tooltip>
+        <ToolbarButton
+          name="Restore"
+          tooltip="Restore to Inbox"
+          icon={isRestoring ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+          onClick={() => displayEmail && !isRestoring && handleRestore(displayEmail.id)}
+          disabled={isRestoring}
+          className="text-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+        />
       ) : (
         <>
-          <Tooltip content="Archive" shortcut={getShortcutHints('ARCHIVE')}>
-            <button
-              onClick={handleArchive}
-              className="p-2 hover:bg-accent rounded-md transition-colors"
-            >
-              <Archive className="h-4 w-4" />
-            </button>
-          </Tooltip>
+          <ToolbarButton
+            name="Archive"
+            icon={<Archive className="h-4 w-4" />}
+            onClick={handleArchive}
+            shortcut={getShortcutHints('ARCHIVE')}
+          />
 
-          <Tooltip content="Delete" shortcut={getShortcutHints('DELETE')}>
-            <button
-              onClick={handleDelete}
-              className="p-2 hover:bg-accent rounded-md transition-colors text-destructive"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </Tooltip>
+          <ToolbarButton
+            name="Delete"
+            icon={<Trash2 className="h-4 w-4" />}
+            onClick={handleDelete}
+            shortcut={getShortcutHints('DELETE')}
+            className="text-destructive"
+          />
         </>
       )}
 
       {/* Spam: show Not Spam in spam folder, Report Spam elsewhere */}
       {isInSpam ? (
-        <Tooltip content="Not spam — move to Inbox">
-          <button
-            onClick={() => handleNotSpam()}
-            className="p-2 hover:bg-accent rounded-md transition-colors text-green-600"
-          >
-            <ShieldCheck className="h-4 w-4" />
-          </button>
-        </Tooltip>
+        <ToolbarButton
+          name="Not spam"
+          tooltip="Not spam — move to Inbox"
+          icon={<ShieldCheck className="h-4 w-4" />}
+          onClick={() => handleNotSpam()}
+          className="text-green-600"
+        />
       ) : !isInTrash ? (
-        <Tooltip content="Report spam">
-          <button
-            onClick={() => displayEmail && handleReportSpamThread()}
-            className="p-2 hover:bg-accent rounded-md transition-colors text-orange-500 hover:text-orange-600"
-          >
-            <AlertOctagon className="h-4 w-4" />
-          </button>
-        </Tooltip>
+        <ToolbarButton
+          name="Report spam"
+          icon={<AlertOctagon className="h-4 w-4" />}
+          onClick={() => displayEmail && handleReportSpamThread()}
+          className="text-orange-500 hover:text-orange-600"
+        />
       ) : null}
 
-      <Tooltip
-        content={isRead ? 'Mark as unread' : 'Mark as read'}
+      <ToolbarButton
+        name={isRead ? 'Mark as unread' : 'Mark as read'}
+        icon={<Mail className="h-4 w-4" />}
+        onClick={handleMarkRead}
         shortcut={isRead ? getShortcutHints('MARK_UNREAD') : getShortcutHints('MARK_READ')}
-      >
-        <button
-          onClick={handleMarkRead}
-          className="p-2 hover:bg-accent rounded-md transition-colors"
-        >
-          <Mail className="h-4 w-4" />
-        </button>
-      </Tooltip>
+      />
 
       {/* Snooze */}
-      <Tooltip content="Snooze" shortcut={getShortcutHints('SNOOZE')} hidden={showSnoozeDropdown}>
-        <div className="relative">
-          <button
-            onClick={() => setShowSnoozeDropdown(!showSnoozeDropdown)}
-            className="p-2 hover:bg-accent rounded-md transition-colors"
-          >
-            <Clock className={`h-4 w-4 ${isSnoozed ? 'text-blue-500' : ''}`} />
-          </button>
-          {showSnoozeDropdown && displayEmail && (
+      <ToolbarButton
+        name="Snooze"
+        icon={<Clock className={`h-4 w-4 ${isSnoozed ? 'text-blue-500' : ''}`} />}
+        onClick={() => setShowSnoozeDropdown(!showSnoozeDropdown)}
+        shortcut={getShortcutHints('SNOOZE')}
+        tooltipHidden={showSnoozeDropdown}
+        dropdown={
+          showSnoozeDropdown && displayEmail ? (
             <SnoozeDropdown
               emailId={displayEmail.id}
               isSnoozed={isSnoozed}
@@ -199,16 +193,20 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
               onClose={() => setShowSnoozeDropdown(false)}
               align="left"
             />
-          )}
-        </div>
-      </Tooltip>
+          ) : null
+        }
+      />
 
-      {/* Label */}
+      {/* Label. LabelMenu and FolderPicker draw their own trigger (each owns a
+          popover), so they take the same classes and label the same way rather
+          than being wrapped in a ToolbarButton. */}
       {displayEmail && (
         <LabelMenu
           applied={appliedLabels}
           onToggle={(name, on) => handleSetLabelThread(name, on)}
-          buttonClassName="p-2 hover:bg-accent rounded-md transition-colors"
+          buttonClassName={toolbarButtonClass(buttonLabels)}
+          label={showsToolbarLabel(buttonLabels) ? 'Label' : undefined}
+          showIcon={showsToolbarIcon(buttonLabels)}
           accountId={displayEmail.accountId ?? viewAccountId ?? undefined}
         />
       )}
@@ -220,61 +218,57 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
             title="Move to folder"
             placeholder="Move to…"
             icon={<FolderInput className="h-4 w-4" />}
+            label={showsToolbarLabel(buttonLabels) ? 'Move' : undefined}
+            showIcon={showsToolbarIcon(buttonLabels)}
             excludeFolderId={selectedFolderId}
             onPick={(folderId) => moveEmailToFolder(displayEmail.id, folderId)}
-            buttonClassName="p-2 hover:bg-accent rounded-md transition-colors"
+            buttonClassName={toolbarButtonClass(buttonLabels)}
           />
           <FolderPicker
             title="Copy to folder"
             placeholder="Copy to…"
             icon={<Copy className="h-4 w-4" />}
+            label={showsToolbarLabel(buttonLabels) ? 'Copy' : undefined}
+            showIcon={showsToolbarIcon(buttonLabels)}
             onPick={(folderId) => copyEmailToFolder(displayEmail.id, folderId)}
-            buttonClassName="p-2 hover:bg-accent rounded-md transition-colors"
+            buttonClassName={toolbarButtonClass(buttonLabels)}
           />
         </>
       )}
 
       {/* Remove AI Category - only show when viewing AI Box category tabs (not dashboard) */}
       {viewingAICategory === 'ai-box' && aiBoxActiveTab && aiBoxActiveTab !== 'dashboard' && (
-        <Tooltip content="Remove from AI category">
-          <button
-            onClick={handleRemoveAICategory}
-            className="p-2 hover:bg-accent rounded-md transition-colors text-orange-500 hover:text-orange-600"
-          >
-            <XCircle className="h-4 w-4" />
-          </button>
-        </Tooltip>
+        <ToolbarButton
+          name="Remove from AI category"
+          icon={<XCircle className="h-4 w-4" />}
+          onClick={handleRemoveAICategory}
+          className="text-orange-500 hover:text-orange-600"
+        />
       )}
 
-      <div className="h-6 w-px bg-border mx-1" />
+      <div className="h-6 w-px bg-border mx-1 shrink-0" />
 
-      <Tooltip content="Reply" shortcut={[...getShortcutHints('REPLY'), ...getShortcutHints('REPLY_ALL_POPUP').map(k => `${k} popup`)]}>
-        <button
-          onClick={() => handleReply()}
-          className="flex items-center gap-2 px-3 py-2 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-        >
-          <Reply className="h-4 w-4" />
-          Reply
-        </button>
-      </Tooltip>
+      <ToolbarButton
+        name="Reply"
+        icon={<Reply className="h-4 w-4" />}
+        onClick={() => handleReply()}
+        shortcut={[...getShortcutHints('REPLY'), ...getShortcutHints('REPLY_ALL_POPUP').map(k => `${k} popup`)]}
+        alwaysLabel
+      />
 
-      <Tooltip content="Reply all" shortcut={[...getShortcutHints('REPLY_ALL'), ...getShortcutHints('REPLY_ALL_POPUP').map(k => `${k} popup`)]}>
-        <button
-          onClick={() => handleReplyAll()}
-          className="p-2 hover:bg-accent rounded-md transition-colors"
-        >
-          <ReplyAll className="h-4 w-4" />
-        </button>
-      </Tooltip>
+      <ToolbarButton
+        name="Reply all"
+        icon={<ReplyAll className="h-4 w-4" />}
+        onClick={() => handleReplyAll()}
+        shortcut={[...getShortcutHints('REPLY_ALL'), ...getShortcutHints('REPLY_ALL_POPUP').map(k => `${k} popup`)]}
+      />
 
-      <Tooltip content="Forward" shortcut={getShortcutHints('FORWARD_INLINE')}>
-        <button
-          onClick={() => handleInlineForward(displayEmail)}
-          className="p-2 hover:bg-accent rounded-md transition-colors"
-        >
-          <Forward className="h-4 w-4" />
-        </button>
-      </Tooltip>
+      <ToolbarButton
+        name="Forward"
+        icon={<Forward className="h-4 w-4" />}
+        onClick={() => handleInlineForward(displayEmail)}
+        shortcut={getShortcutHints('FORWARD_INLINE')}
+      />
 
       <div className="flex-1" />
 
@@ -284,39 +278,37 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
           <span className="text-xs text-muted-foreground mr-1">
             {currentEmailPosition} of {totalEmailCount}
           </span>
-          <Tooltip content="Newer" shortcut={getShortcutHints('PREVIOUS_EMAIL')}>
-            <button
-              onClick={handlePreviousEmail}
-              disabled={!hasPreviousEmail}
-              className="p-2 hover:bg-accent rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <ChevronUp className="h-4 w-4" />
-            </button>
-          </Tooltip>
-          <Tooltip content="Older" shortcut={getShortcutHints('NEXT_EMAIL')}>
-            <button
-              onClick={handleNextEmail}
-              disabled={!hasNextEmail}
-              className="p-2 hover:bg-accent rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <ChevronDown className="h-4 w-4" />
-            </button>
-          </Tooltip>
+          <ToolbarButton
+            name="Newer"
+            icon={<ChevronUp className="h-4 w-4" />}
+            onClick={handlePreviousEmail}
+            disabled={!hasPreviousEmail}
+            shortcut={getShortcutHints('PREVIOUS_EMAIL')}
+            className="disabled:opacity-30 disabled:cursor-not-allowed"
+          />
+          <ToolbarButton
+            name="Older"
+            icon={<ChevronDown className="h-4 w-4" />}
+            onClick={handleNextEmail}
+            disabled={!hasNextEmail}
+            shortcut={getShortcutHints('NEXT_EMAIL')}
+            className="disabled:opacity-30 disabled:cursor-not-allowed"
+          />
         </div>
       )}
 
-      <div className="h-6 w-px bg-border mx-1" />
+      <div className="h-6 w-px bg-border mx-1 shrink-0" />
 
       {/* Right side actions */}
-      <Tooltip content="Print">
-        <button
-          onClick={() => displayEmail && handlePrintEmail(displayEmail)}
-          className="p-2 hover:bg-accent rounded-md transition-colors"
-        >
-          <Printer className="h-4 w-4" />
-        </button>
-      </Tooltip>
+      <ToolbarButton
+        name="Print"
+        icon={<Printer className="h-4 w-4" />}
+        onClick={() => displayEmail && handlePrintEmail(displayEmail)}
+      />
 
+      {/* The ⋮ overflow menu stays icon-only in every mode: it has no single
+          action to name, and "More" beside fifteen named actions reads as one
+          more of them. */}
       <EmailMenu
         email={displayEmail}
         onReply={() => handleReply(displayEmail)}

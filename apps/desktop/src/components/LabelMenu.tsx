@@ -14,6 +14,11 @@ interface LabelMenuProps {
   applied: Set<string>;
   onToggle: (name: string, on: boolean) => void;
   buttonClassName?: string;
+  /** Visible label beside the icon. Omit for an icon-only trigger (the default);
+   *  the toolbar passes one when the reader asked for button labels. */
+  label?: string;
+  /** Draw the icon. False gives a text-only trigger — meaningless without `label`. */
+  showIcon?: boolean;
   /** Owning account of the target message. In the unified "All Inboxes" view this
    *  can differ from the active account; the picker then shows THAT account's
    *  labels (labels are per-account). Omit for normal single-account views. */
@@ -29,7 +34,7 @@ const MENU_WIDTH = 264;
  * The popover renders in a portal with viewport-clamped fixed positioning so it
  * never opens off-screen when the trigger sits near an edge.
  */
-export function LabelMenu({ applied, onToggle, buttonClassName, accountId }: LabelMenuProps) {
+export function LabelMenu({ applied, onToggle, buttonClassName, accountId, label, showIcon = true }: LabelMenuProps) {
   const storeLabels = useEmailStore((s) => s.labels);
   const activeAccountId = useEmailStore((s) => s.activeAccountId);
   // When the target message belongs to a non-active account (unified view), show
@@ -126,7 +131,8 @@ export function LabelMenu({ applied, onToggle, buttonClassName, accountId }: Lab
           className={buttonClassName ?? 'p-2 rounded-md hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors'}
           aria-label="Label"
         >
-          <TagIcon className="h-4 w-4" />
+          {showIcon && <TagIcon className="h-4 w-4" />}
+          {label && <span>{label}</span>}
         </button>
       </Tooltip>
 

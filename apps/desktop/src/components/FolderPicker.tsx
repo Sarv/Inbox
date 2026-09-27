@@ -16,6 +16,11 @@ interface FolderPickerProps {
   title: string;
   /** Trigger icon. */
   icon: ReactNode;
+  /** Visible label beside the icon. Omit for an icon-only trigger (the default);
+   *  the toolbar passes one when the reader asked for button labels. */
+  label?: string;
+  /** Draw the icon. False gives a text-only trigger — meaningless without `label`. */
+  showIcon?: boolean;
   /** Placeholder in the filter box. */
   placeholder?: string;
   /** Hide this folder from the list (e.g. the current folder — no point moving to self). */
@@ -30,7 +35,7 @@ interface FolderPickerProps {
  * closes. Portal + viewport-clamped fixed positioning so it never opens
  * off-screen near an edge.
  */
-export function FolderPicker({ onPick, title, icon, placeholder, excludeFolderId, buttonClassName }: FolderPickerProps) {
+export function FolderPicker({ onPick, title, icon, label, showIcon = true, placeholder, excludeFolderId, buttonClassName }: FolderPickerProps) {
   const folders = useEmailStore((s) => s.folders);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -86,7 +91,8 @@ export function FolderPicker({ onPick, title, icon, placeholder, excludeFolderId
           className={buttonClassName ?? 'p-2 rounded-md hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors'}
           aria-label={title}
         >
-          {icon}
+          {showIcon && icon}
+          {label && <span>{label}</span>}
         </button>
       </Tooltip>
 
