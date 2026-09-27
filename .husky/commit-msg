@@ -1,0 +1,15 @@
+# Reject any commit message that mentions AI tooling (Claude, Anthropic).
+#
+# Commit messages here are the maintainer's own words and must never carry an
+# AI attribution. That rule was written down and still broken: 29 commits
+# between 2026-09-07 and 2026-09-27 went out with a
+# "Co-Authored-By: Claude ... <noreply@anthropic.com>" trailer. A written rule
+# depends on being remembered; this hook does not.
+#
+# Git comment lines (starting with #) are ignored, so the editor template's
+# help text cannot trip it.
+if grep -v '^#' "$1" | grep -qiE 'claude|anthropic'; then
+  echo "commit-msg: message mentions Claude/Anthropic - remove it and commit again." >&2
+  grep -v '^#' "$1" | grep -niE 'claude|anthropic' >&2
+  exit 1
+fi
