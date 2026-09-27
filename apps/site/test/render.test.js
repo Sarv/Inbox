@@ -67,6 +67,23 @@ describe('renderDownloadPage', () => {
     expect(root.querySelector('.release-line')).toBeNull();
   });
 
+  // Breaks if the page stops saying what Sarv Inbox is — the title alone only
+  // says there is something to download, on every view a visitor can land on.
+  it.each([
+    ['download', OS.MAC, ARCH.ARM64, releaseV122()],
+    ['mobile', OS.IOS, ARCH.UNKNOWN, releaseV122()],
+    ['unsupported', OS.UNKNOWN, ARCH.UNKNOWN, releaseV122()],
+    ['unavailable', OS.MAC, ARCH.ARM64, null],
+  ])('%s view: states what the product is, once, under the title', (_name, os, arch, release) => {
+    render(os, arch, release);
+    const leads = [...root.querySelectorAll('.hero-lead')];
+    expect(leads).toHaveLength(1);
+    expect(leads[0].textContent).toBe(
+      'Sarv Inbox is an Agentic AI-powered solution for intelligent email inbox management, bringing everything you need into one unified platform.'
+    );
+    expect(root.querySelector('.hero > *:nth-child(2)')).toBe(leads[0]);
+  });
+
   // Breaks if Linux users lose the .deb/.rpm choices.
   it('lists alternatives for the same OS', () => {
     render(OS.LINUX, ARCH.X64);

@@ -38,6 +38,13 @@
   color: var(--ink);
 }
 
+.hero-lead {
+  margin: 0;
+  font-size: var(--fs-lg);
+  line-height: var(--lh-base);
+  color: var(--ink-2);
+}
+
 .section-title {
   margin: 0;
   font-size: var(--fs-lg);

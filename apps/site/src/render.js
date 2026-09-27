@@ -94,6 +94,15 @@ const releaseLine = (doc, view, locale) =>
       ])
     : null;
 
+// One sentence saying what the product is, shown under the title on every view:
+// the page is the first thing a visitor sees of Sarv Inbox, and the title alone
+// only says there is something to download.
+const PRODUCT_DESCRIPTION =
+  'Sarv Inbox is an Agentic AI-powered solution for intelligent email inbox management, bringing everything you need into one unified platform.';
+
+const productLead = (doc) =>
+  element(doc, 'p', { className: 'hero-lead', text: PRODUCT_DESCRIPTION });
+
 const heroFor = (doc, view, locale) => {
   if (view.kind === VIEW.DOWNLOAD) {
     return element(doc, 'section', { className: 'stack hero' }, [
@@ -101,6 +110,7 @@ const heroFor = (doc, view, locale) => {
         className: 'hero-title',
         text: `Download Sarv Inbox for ${view.osName}`,
       }),
+      productLead(doc),
       element(doc, 'div', { className: 'row' }, [
         downloadButton(
           doc,
@@ -119,6 +129,7 @@ const heroFor = (doc, view, locale) => {
   if (view.kind === VIEW.MOBILE) {
     return element(doc, 'section', { className: 'stack hero' }, [
       element(doc, 'h1', { className: 'hero-title', text: 'Sarv Inbox is a desktop app' }),
+      productLead(doc),
       element(doc, 'p', {
         className: 'muted',
         text: `There is no ${view.osName} app yet. Open this page on a Mac, Windows or Linux computer to download it.`,
@@ -128,6 +139,7 @@ const heroFor = (doc, view, locale) => {
   if (view.kind === VIEW.UNSUPPORTED) {
     return element(doc, 'section', { className: 'stack hero' }, [
       element(doc, 'h1', { className: 'hero-title', text: 'Download Sarv Inbox' }),
+      productLead(doc),
       element(doc, 'p', {
         className: 'muted',
         text: `We couldn't match ${view.osName} to an installer. Sarv Inbox runs on macOS, Windows and Linux — pick yours below.`,
@@ -136,6 +148,7 @@ const heroFor = (doc, view, locale) => {
   }
   return element(doc, 'section', { className: 'stack hero' }, [
     element(doc, 'h1', { className: 'hero-title', text: `Download Sarv Inbox for ${view.osName}` }),
+    productLead(doc),
     element(doc, 'div', { className: 'banner warning' }, [
       element(doc, 'span', {
         text: view.reachedGitHub
