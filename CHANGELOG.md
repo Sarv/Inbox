@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs on a connection that was just dropped, and a copy that still can't be
   filed waits a little longer before each attempt instead of retrying every
   minute.
+- **A discarded draft could come back.** Removing a draft's copy from the server
+  began the same way — reading every message in the Drafts folder to find it —
+  so on a large Drafts folder the search timed out, the connection was dropped,
+  and the deletion that should have followed never ran. The draft was gone
+  locally, then reappeared on the next sync. The search now starts with the
+  newest messages and only reads further back when the draft genuinely is older,
+  so an ordinary discard is quick and an old draft is still found.
 - **Mail you sent could be missing from Sent.** On a server that publishes two
   names for one Sent mailbox (Sarv lists both `Sent` and `Sent Mail`), the copy
   written the moment a message goes out was filed under the name the app hides,

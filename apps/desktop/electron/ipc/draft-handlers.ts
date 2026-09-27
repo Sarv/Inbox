@@ -4,7 +4,7 @@
  * Handles saving, deleting, and managing drafts on the IMAP server.
  */
 
-import { emailContentHash, resolveStandardFolder, createLogger, withFolderSelected } from '@sarvinbox/core';
+import { emailContentHash, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
@@ -44,6 +44,71 @@ export function serverDeletableUids(rows: ReadonlyArray<{ uid?: number | null }>
     if (Number.isInteger(uid) && uid > 0) uids.add(uid);
   }
   return [...uids];
+}
+
+/**
+ * How far back a Drafts Message-ID scan looks before it widens to the whole
+ * mailbox, in messages.
+ *
+ * A full `1:*` envelope fetch costs one envelope per message in the folder, and
+ * past roughly a thousand it runs out the IMAP client's 60s op timeout — which
+ * recycles the connection as wedged and takes the EXPUNGE that was about to run
+ * on it down with it, so the draft survives and re-syncs. Nearly every draft we
+ * have to locate this way is one just appended, i.e. the newest message in the
+ * mailbox, so the window answers the question in bounded time.
+ *
+ * Generous on purpose: cheap enough to always pay, wide enough that the widen
+ * below stays the rare path.
+ */
+const DRAFT_SCAN_WINDOW = 200;
+
+/**
+ * The server UIDs to delete for a set of local draft rows, in the mailbox the
+ * connection already has selected.
+ *
+ * A row that carries a UID needs no lookup. A row without one (never synced, or
+ * appended by a server that gave us no UIDPLUS answer) can only be found by its
+ * Message-ID, and on servers whose HEADER MESSAGE-ID SEARCH returns nothing
+ * (sarv.com) that means fetching envelopes.
+ *
+ * So: scan the newest `DRAFT_SCAN_WINDOW` first, and widen to the whole mailbox
+ * ONLY if a row is still unaccounted for. Unlike the Sent dedupe — where a miss
+ * costs a duplicate — a miss here costs a draft that comes back, so the scan
+ * must not end up silently partial. The widen keeps the old behaviour available
+ * for the genuinely old draft while the common case never pays for it; a folder
+ * smaller than the window is one scan either way, because the client sends
+ * `1:*` when the mailbox is smaller than the window it was asked for.
+ *
+ * Exported for tests: the returned set is what gets EXPUNGEd, and `unresolved`
+ * is what tells the caller a removal did NOT complete.
+ */
+export async function resolveDraftServerUids(
+  conn: { fetchMessageIdToUidMap?: (path?: string, options?: { recent?: number }) => Promise<Map<string, number>> },
+  rows: ReadonlyArray<{ message_id?: string | null; uid?: number | null }>,
+): Promise<{ uids: number[]; scanned: boolean; widened: boolean; unresolved: number }> {
+  const uids = new Set<number>(serverDeletableUids(rows));
+  const missing = (rows ?? []).filter((row) => !(Number(row?.uid ?? 0) > 0) && !!row?.message_id);
+  if (missing.length === 0 || typeof conn.fetchMessageIdToUidMap !== 'function') {
+    return { uids: [...uids], scanned: false, widened: false, unresolved: missing.length };
+  }
+
+  const take = (map: Map<string, number>): number => {
+    let found = 0;
+    for (const row of missing) {
+      const uid = map.get(messageIdKey(row.message_id));
+      if (uid) { uids.add(uid); found++; }
+    }
+    return found;
+  };
+
+  const windowed = await conn.fetchMessageIdToUidMap(undefined, { recent: DRAFT_SCAN_WINDOW });
+  let found = take(windowed);
+  let widened = false;
+  if (found < missing.length) {
+    widened = true;
+    found = take(await conn.fetchMessageIdToUidMap());
+  }
+  return { uids: [...uids], scanned: true, widened, unresolved: missing.length - found };
 }
 
 // Serialize ALL draft IMAP work (append/select/search/delete/expunge) so it runs
@@ -488,18 +553,10 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
     // between the UID map and the EXPUNGE would delete those UIDs in whatever
     // mailbox is selected by then.
     const runDelete = async (conn: any) => withFolderSelected(conn, folderPath, async () => {
-      const uidsToDelete = new Set<number>();
-      for (const r of draftRows) if (r.uid && r.uid > 0) uidsToDelete.add(r.uid);
-      if (draftRows.some((r) => !r.uid || r.uid <= 0) && typeof conn.fetchMessageIdToUidMap === 'function') {
-        const map: Map<string, number> = await conn.fetchMessageIdToUidMap();
-        for (const r of draftRows) {
-          const uid = map.get(r.message_id.replace(/[<>]/g, '').trim().toLowerCase());
-          if (uid) uidsToDelete.add(uid);
-        }
-      }
-      if (uidsToDelete.size > 0) {
-        if (typeof conn.deleteAndExpunge === 'function') await conn.deleteAndExpunge([...uidsToDelete]);
-        else { await conn.deleteMessages([...uidsToDelete]); await conn.expunge(); }
+      const { uids: uidsToDelete } = await resolveDraftServerUids(conn, draftRows);
+      if (uidsToDelete.length > 0) {
+        if (typeof conn.deleteAndExpunge === 'function') await conn.deleteAndExpunge(uidsToDelete);
+        else { await conn.deleteMessages(uidsToDelete); await conn.expunge(); }
       }
     });
     try {
@@ -704,20 +761,8 @@ export function registerDraftHandlers(): void {
       // Resolve the server UIDs to delete: stored uid on the row (set at append
       // time), else a full-folder Message-ID→UID scan (the only reliable locator
       // when HEADER MESSAGE-ID SEARCH is unsupported, e.g. sarv.com).
-      const uidsToDelete = new Set<number>();
-      for (const r of draftRows) {
-        if (r.uid && r.uid > 0) uidsToDelete.add(r.uid);
-      }
-      let scanMatched = 0;
-      const needScan = draftRows.some((r) => !r.uid || r.uid <= 0);
-      if (needScan && typeof conn.fetchMessageIdToUidMap === 'function') {
-        const map: Map<string, number> = await conn.fetchMessageIdToUidMap();
-        for (const r of draftRows) {
-          const key = r.message_id.replace(/[<>]/g, '').trim().toLowerCase();
-          const uid = map.get(key);
-          if (uid) { uidsToDelete.add(uid); scanMatched++; }
-        }
-      }
+      const resolved = await resolveDraftServerUids(conn, draftRows);
+      const uidsToDelete = new Set<number>(resolved.uids);
 
       // Legacy subject-only fallback (no message-ids known).
       if (uidsToDelete.size === 0 && messageIds.length === 0 && options.subject) {
@@ -725,7 +770,14 @@ export function registerDraftHandlers(): void {
         uids.forEach((u: number) => uidsToDelete.add(u));
       }
 
-      draftLog('delete:imap:resolve', { folderPath, storedUids: draftRows.map((r) => r.uid), scanMatched, uidsToDelete: [...uidsToDelete] });
+      draftLog('delete:imap:resolve', {
+        folderPath,
+        storedUids: draftRows.map((r) => r.uid),
+        scanned: resolved.scanned,
+        widened: resolved.widened,
+        unresolved: resolved.unresolved,
+        uidsToDelete: [...uidsToDelete],
+      });
 
       let totalDeleted = 0;
       if (uidsToDelete.size > 0) {
@@ -742,8 +794,7 @@ export function registerDraftHandlers(): void {
       // deleted when it never had a server copy to begin with (uid 0). If it had
       // one and the scan still found nothing, say so — the caller must not treat
       // that as a completed removal.
-      const unscannable = needScan && typeof conn.fetchMessageIdToUidMap !== 'function'
-        && draftRows.some((r) => !r.uid || r.uid <= 0);
+      const unscannable = !resolved.scanned && resolved.unresolved > 0;
       draftLog('delete:imap:done', { folderPath, deletedUids: totalDeleted, unscannable });
       return { success: true, imap: true, deleted: totalDeleted, unscannable };
     });
@@ -816,13 +867,9 @@ export function registerDraftHandlers(): void {
                 const uids = new Set<number>();
 
                 // (a) locally-known copies
-                if (rows.length > 0 && typeof conn.fetchMessageIdToUidMap === 'function') {
-                  const map: Map<string, number> = await conn.fetchMessageIdToUidMap();
-                  for (const r of rows) {
-                    if (r.uid > 0) uids.add(r.uid);
-                    const u = map.get(r.message_id.replace(/[<>]/g, '').trim().toLowerCase());
-                    if (u) uids.add(u);
-                  }
+                if (rows.length > 0) {
+                  const resolved = await resolveDraftServerUids(conn, rows);
+                  resolved.uids.forEach((u) => uids.add(u));
                 }
 
                 // (b) server-only copies, by INTERNALDATE window
