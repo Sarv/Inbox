@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-09-27
+
 ### Fixed
 - **Signing in to Sarv turns AI on, every time.** On a fresh install, Login
   with Sarv connected your Sarv mailbox and the app jumped straight to the
@@ -409,7 +411,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.4...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.5...HEAD
+[1.2.5]: https://github.com/Sarv/Inbox/releases/tag/v1.2.5
 [1.2.4]: https://github.com/Sarv/Inbox/releases/tag/v1.2.4
 [1.2.3]: https://github.com/Sarv/Inbox/releases/tag/v1.2.3
 [1.2.2]: https://github.com/Sarv/Inbox/releases/tag/v1.2.2
