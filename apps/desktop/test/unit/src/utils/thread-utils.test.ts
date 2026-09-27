@@ -1,4 +1,3 @@
-import type { EmailRecord } from '@sarvinbox/core';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { InboxSection, SectionFilter } from '../../../../src/config/inbox-types';
@@ -24,6 +23,7 @@ import {
   threadTagsString,
   visibleThreadsUnderFilter,
 } from '../../../../src/utils/thread-utils';
+import { emailRecord } from '../../../helpers/email-fixtures';
 
 /**
  * Minimal in-memory localStorage. The renderer's Smart-Prioritize switch is read
@@ -41,43 +41,7 @@ const installLocalStorage = (seed: Record<string, string> = {}) => {
 };
 
 /** Build an EmailRecord with only the fields a test cares about. */
-const email = (over: Partial<EmailRecord> & Record<string, unknown> = {}): EmailRecord =>
-  ({
-    id: 'e1',
-    messageId: '<m1@x>',
-    threadId: 't1',
-    folderId: 'INBOX',
-    uid: 1,
-    tags: '|INBOX|',
-    subject: 'Subject',
-    fromAddress: 'sender@x.com',
-    fromName: 'Sender',
-    toAddress: 'advik.d@sarv.com',
-    toNames: null,
-    ccAddress: null,
-    ccNames: null,
-    bccAddress: null,
-    bccNames: null,
-    replyTo: null,
-    date: 1_000,
-    receivedDate: null,
-    cleanBody: '',
-    rawBody: '',
-    contentType: 'html',
-    contentHash: 'h',
-    inReplyTo: null,
-    references: null,
-    priority: null,
-    hasAttachments: false,
-    attachmentCount: 0,
-    attachmentNames: null,
-    attachmentSizes: null,
-    hasEmbedding: false,
-    embeddingLastGenerated: null,
-    createdAt: 0,
-    updatedAt: 0,
-    ...over,
-  }) as EmailRecord;
+const email = emailRecord;
 
 beforeEach(() => installLocalStorage());
 afterEach(() => {
