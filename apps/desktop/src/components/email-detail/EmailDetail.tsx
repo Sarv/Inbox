@@ -1,4 +1,4 @@
-import { Mail, Loader2, List, MessageSquare, ArrowDown, X } from 'lucide-react';
+import { Mail, Loader2, ArrowDown, X } from 'lucide-react';
 import { useMemo } from 'react';
 
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
@@ -12,6 +12,7 @@ import { ThreadSummary } from '../ThreadSummary';
 import { Tooltip } from '../Tooltip';
 
 import { useChatPrewarm } from './chat-prewarm';
+import { chatMountsComposer } from './chat-view-rules';
 import { EmailCard } from './EmailCard';
 import { EmailToolbar } from './EmailToolbar';
 import { FollowUpBanner } from './FollowUpBanner';
@@ -21,6 +22,7 @@ import { SignatureDetectionModal } from './SignatureDetectionModal';
 import { threadHeaderLabel } from './thread-header-label';
 import { ThreadChatView } from './ThreadChatView';
 import { ThreadList } from './ThreadList';
+import { ViewModeToggle } from './ViewModeToggle';
 
 
 /** Stable empty thread, so the prewarm effect does not restart on every render. */
@@ -174,32 +176,7 @@ export function EmailDetail() {
                       copy headed "(2)" under a list row that said "(3)". */}
                   {threadHeaderLabel(threadEmails, threadMessageTotal)}
                 </span>
-                {/* View Mode Toggle */}
-                <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
-                  <button
-                    onClick={() => handleChatViewToggle(false)}
-                    className={`p-1.5 rounded-md transition-colors ${!chatViewEnabled
-                        ? 'bg-background shadow-sm text-foreground'
-                        : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    title="List view"
-                  >
-                    <List className="h-4 w-4" />
-                  </button>
-                  {/* Never disabled — chat view always has something to
-                      show now (skeleton while extracting, standard-bubble
-                      fallback when extraction fails). */}
-                  <button
-                    onClick={() => handleChatViewToggle(true)}
-                    className={`p-1.5 rounded-md transition-colors ${chatViewEnabled
-                        ? 'bg-background shadow-sm text-foreground'
-                        : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    title="Chat view"
-                  >
-                    <MessageSquare className="h-4 w-4" />
-                  </button>
-                </div>
+                <ViewModeToggle chatViewEnabled={chatViewEnabled} onToggle={handleChatViewToggle} />
                 <div className="h-px flex-1 bg-border" />
               </div>
 
@@ -218,8 +195,11 @@ export function EmailDetail() {
               the compose box below, not a read-only message. */}
           {!isStandaloneDraft && <EmailCard ctx={ctx} />}
 
-          {/* Inline Reply for main email — hidden in conversation mode */}
-          {showInlineReply && replyingToEmail?.id === displayEmail.id && !chatViewActive && (
+          {/* Inline Reply for main email — hidden in conversation mode. The
+              chat view mounts every box this one does not (chatMountsComposer
+              decides both sides), so a reply never gets two composers. */}
+          {showInlineReply && replyingToEmail &&
+            !chatMountsComposer({ chatViewActive, targetId: replyingToEmail.id, anchorId: displayEmail.id }) && (
             <div id="inline-reply-compose">
               <InlineReply
                 replyToEmail={{
@@ -246,7 +226,8 @@ export function EmailDetail() {
           )}
 
           {/* Inline Forward for main email — hidden in conversation mode */}
-          {showInlineForward && forwardingEmail?.id === displayEmail.id && !chatViewActive && (
+          {showInlineForward && forwardingEmail &&
+            !chatMountsComposer({ chatViewActive, targetId: forwardingEmail.id, anchorId: displayEmail.id }) && (
             <div id="inline-forward-compose">
               <InlineForward
                 forwardEmail={toForwardSource(forwardingEmail)}

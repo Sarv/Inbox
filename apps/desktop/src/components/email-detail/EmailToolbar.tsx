@@ -27,6 +27,7 @@ import { SnoozeDropdown } from '../email-list/SnoozeDropdown';
 import { FolderPicker } from '../FolderPicker';
 import { LabelMenu } from '../LabelMenu';
 
+import { buildEmailMenuHandlers } from './email-menu-handlers';
 import { EmailMenu } from './EmailMenu';
 import { showsToolbarIcon, showsToolbarLabel, toolbarButtonClass } from './toolbar-button-view';
 import { ToolbarButton } from './ToolbarButton';
@@ -52,14 +53,7 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
     handleReply,
     handleReplyAll,
     handleInlineForward,
-    handleForward,
     handlePrintEmail,
-    handleDownloadEmail,
-    handleShowOriginal,
-    handleFilterLikeThis,
-    handleTranslate,
-    handleDetectSignature,
-    markAsRead,
     handleNextEmail,
     handlePreviousEmail,
     hasNextEmail,
@@ -69,7 +63,6 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
     handleSnoozeThread,
     handleUnsnoozeThread,
     handleSetLabelThread,
-    handleReportSpam,
     handleReportSpamThread,
     handleNotSpam,
     handleRestore,
@@ -252,7 +245,9 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
         name="Reply"
         icon={<Reply className="h-4 w-4" />}
         onClick={() => handleReply()}
-        shortcut={[...getShortcutHints('REPLY'), ...getShortcutHints('REPLY_ALL_POPUP').map(k => `${k} popup`)]}
+        // Its own key only. It used to list reply ALL's popup keys (Shift+R /
+        // Shift+A) as its own "popup" variant; Reply has none.
+        shortcut={getShortcutHints('REPLY')}
         alwaysLabel
       />
 
@@ -311,19 +306,9 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
           more of them. */}
       <EmailMenu
         email={displayEmail}
-        onReply={() => handleReply(displayEmail)}
-        onReplyAll={() => handleReplyAll(displayEmail)}
-        onForward={() => handleForward(displayEmail)}
-        onDelete={handleDelete}
-        onArchive={handleArchive}
-        onMarkUnread={async () => { await markAsRead(displayEmail.id, false); useEmailStore.getState().clearSelectedEmail(); }}
-        onReportSpam={() => handleReportSpam(displayEmail.id)}
-        onPrint={() => handlePrintEmail(displayEmail)}
-        onDownload={() => handleDownloadEmail(displayEmail)}
-        onShowOriginal={() => handleShowOriginal(displayEmail)}
-        onFilterLikeThis={() => handleFilterLikeThis(displayEmail)}
-        onTranslate={() => handleTranslate(displayEmail)}
-        onDetectSignature={() => handleDetectSignature(displayEmail)}
+        // The toolbar acts on the conversation, like its own Delete and
+        // Archive buttons: Forward in the popup, removal thread-wide.
+        {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', removes: 'thread' })}
       />
     </div>
   );

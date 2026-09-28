@@ -60,7 +60,9 @@
       "@sarvinbox/core/extension-categories": ["../../packages/core/src/extensions/categories.ts"],
       // Same: pure blocklist-preference reader, shared so the Blocklists tab
       // shows exactly what main queries.
-      "@sarvinbox/core/blocklist-prefs": ["../../packages/core/src/utils/blocklist-prefs.ts"]
+      "@sarvinbox/core/blocklist-prefs": ["../../packages/core/src/utils/blocklist-prefs.ts"],
+      // Same: the structured logger, so renderer lines reach app.log in main's shape.
+      "@sarvinbox/core/logger": ["../../packages/core/src/utils/logger.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],

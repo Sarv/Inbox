@@ -113,6 +113,13 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/blocklist-prefs.ts',
     ),
+    // Pure (zero imports; guards `process`) — the structured logger, so
+    // renderer lines reach app.log with the same `[ts] [LEVEL] [name]` shape as
+    // main's instead of raw console output.
+    '@sarvinbox/core/logger': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/logger.ts',
+    ),
   };
 }
 

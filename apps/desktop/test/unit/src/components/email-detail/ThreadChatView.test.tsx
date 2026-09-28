@@ -30,25 +30,32 @@ vi.mock('@sarv-in/email-chat-view', async (importOriginal) => ({
     messages,
     renderHeaderMeta,
     renderFooter,
+    renderQuickActions,
   }: {
     messages: readonly { id: string; body: string }[];
     renderHeaderMeta?: (message: { id: string }) => unknown;
     renderFooter?: (message: { id: string }) => unknown;
+    renderQuickActions?: (message: { id: string }) => unknown;
   }) => (
     <div data-testid="chat-view">
-      {messages.map((message) => (
-        <div key={message.id} data-testid="bubble" data-message-id={message.id}>
-          {/* The real header is sender, recipients, then the time — the mock
-              keeps only the time, because the time is what the meta slot has
-              to land after. */}
-          <div data-testid="bubble-head">
-            <time data-testid="bubble-time">10:00</time>
-            {renderHeaderMeta?.(message) as never}
+      {messages.map((message) => {
+        // Like the library: a falsy answer renders no element at all.
+        const quick = renderQuickActions?.(message);
+        return (
+          <div key={message.id} data-testid="bubble" data-message-id={message.id}>
+            {/* The real header is sender, recipients, then the time — the mock
+                keeps only the time, because the time is what the meta slot has
+                to land after. */}
+            <div data-testid="bubble-head">
+              <time data-testid="bubble-time">10:00</time>
+              {renderHeaderMeta?.(message) as never}
+            </div>
+            <div data-testid="bubble-body" dangerouslySetInnerHTML={{ __html: message.body }} />
+            <div data-testid="bubble-footer">{renderFooter?.(message) as never}</div>
+            {quick ? <div data-testid="bubble-quick">{quick as never}</div> : null}
           </div>
-          <div data-testid="bubble-body" dangerouslySetInnerHTML={{ __html: message.body }} />
-          <div data-testid="bubble-footer">{renderFooter?.(message) as never}</div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   ),
 }));
@@ -135,11 +142,16 @@ const context = (threadEmails: EmailRecord[]) =>
       conversationError: null,
       conversationProgress: null,
       showAIView: false,
+      // The chat is the reading surface, which is what gates its closing reply
+      // row. Spelled out: the fallback's function would read as true anyway,
+      // and a test must not depend on that by accident.
+      chatViewActive: true,
       showInlineReply: false,
       showInlineForward: false,
       replyingToEmail: null,
       forwardingEmail: null,
       inlineReplyDraft: null,
+      inlineForwardDraft: undefined,
       inlineReplyMode: 'reply',
       handleReExtractMessage: undefined,
     } as Record<string, unknown>,

@@ -1,4 +1,13 @@
-import { useState, useRef, useEffect, useCallback, ReactNode } from 'react';
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  type AriaAttributes,
+  type MouseEvent,
+  type ReactNode,
+  type Ref,
+} from 'react';
 
 interface TooltipProps {
   children: ReactNode;
@@ -114,24 +123,94 @@ export function Tooltip({ children, content, shortcut, className, hidden, delayM
 }
 
 /**
- * IconButton with built-in tooltip - shows immediately
+ * Padding per size: 'md' for a toolbar, 'sm' for a compact control on a header
+ * line (the List/Chat switch), 'xs' for one that sits on content (a chat
+ * bubble's corner).
  */
+const ICON_BUTTON_PADDING = { md: 'p-2', sm: 'p-1.5', xs: 'p-1' } as const;
+
+/**
+ * How the button is drawn, beyond its padding:
+ *  - 'ghost' — no background until hovered; the usual icon button.
+ *  - 'bare'  — nothing: the caller's `className` draws it. For a button whose
+ *    colours carry state (a selected segment, a warning tint), where a ghost
+ *    hover background would fight the caller's own — two background utilities
+ *    on one element leave the winner to stylesheet order.
+ */
+const ICON_BUTTON_LOOK = {
+  ghost: 'hover:bg-accent rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+  bare: '',
+} as const;
+
 interface IconButtonProps {
-  onClick?: () => void;
+  /** Receives the click, so a button inside a clickable surface can stop it. */
+  onClick?: (event: MouseEvent<HTMLButtonElement>) => void;
   icon: ReactNode;
+  /** What the button does. It is the tooltip AND the accessible name — one
+   *  string, so what a sighted reader hovers and what a screen reader
+   *  announces can never disagree. */
   tooltip: string;
   shortcut?: string | string[];
   className?: string;
   disabled?: boolean;
+  /** Hover delay before the tooltip shows. Defaults to the project's 40ms: an
+   *  icon-only control is unreadable until its name feels instant. */
+  delayMs?: number;
+  size?: keyof typeof ICON_BUTTON_PADDING;
+  variant?: keyof typeof ICON_BUTTON_LOOK;
+  /** A toggle's state (`aria-pressed`) — for a button whose NAME stays the
+   *  same whichever way it is set, such as one segment of a switch. Left out,
+   *  the button is a plain action and carries no pressed state at all. */
+  pressed?: boolean;
+  /** The button element — for a caller that measures it or returns focus to
+   *  it (a menu trigger). */
+  ref?: Ref<HTMLButtonElement>;
+  /** Suppress the tooltip while something the button opened covers it (its
+   *  menu). The name stays on `aria-label` either way. */
+  tooltipHidden?: boolean;
+  /** For a button that opens something (a menu): what it opens, whether that
+   *  is open, and its id. */
+  'aria-haspopup'?: AriaAttributes['aria-haspopup'];
+  'aria-expanded'?: boolean;
+  'aria-controls'?: string;
 }
 
-export function IconButton({ onClick, icon, tooltip, shortcut, className = '', disabled = false }: IconButtonProps) {
+/**
+ * An icon-only button that always carries its name: the shared Tooltip on
+ * hover and the same string as its `aria-label`. The UI convention requires
+ * both on every icon-only control, so build them from here rather than pairing
+ * a Tooltip and a button by hand.
+ */
+export function IconButton({
+  onClick,
+  icon,
+  tooltip,
+  shortcut,
+  className = '',
+  disabled = false,
+  delayMs = 40,
+  size = 'md',
+  variant = 'ghost',
+  pressed,
+  ref,
+  tooltipHidden,
+  'aria-haspopup': ariaHasPopup,
+  'aria-expanded': ariaExpanded,
+  'aria-controls': ariaControls,
+}: IconButtonProps) {
   return (
-    <Tooltip content={tooltip} shortcut={shortcut}>
+    <Tooltip content={tooltip} shortcut={shortcut} delayMs={delayMs} hidden={tooltipHidden}>
       <button
+        ref={ref}
+        type="button"
         onClick={onClick}
         disabled={disabled}
-        className={`p-2 hover:bg-accent rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        aria-label={tooltip}
+        aria-pressed={pressed}
+        aria-haspopup={ariaHasPopup}
+        aria-expanded={ariaExpanded}
+        aria-controls={ariaControls}
+        className={[ICON_BUTTON_PADDING[size], ICON_BUTTON_LOOK[variant], className].filter(Boolean).join(' ')}
       >
         {icon}
       </button>
