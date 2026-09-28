@@ -76,7 +76,7 @@
     "tldts": "^7.4.10",
     "turndown": "^7.1.2",
     "uniqolor": "^1.1.1",
-    "zod": "^3.22.4",
+    "zod": "^4.6.5",
     "zustand": "^4.5.0"
   },
   "devDependencies": {

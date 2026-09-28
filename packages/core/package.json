@@ -58,7 +58,7 @@
     "sanitize-html": "^2.17.7",
     "tldts": "^7.4.10",
     "turndown": "^7.1.2",
-    "zod": "^3.22.4"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/html-to-text": "^9.0.4",
