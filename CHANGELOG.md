@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Follow-up reminders: "remind me if nobody replies".** A bell button beside
+  Send (in the composer, inline reply and forward) sets a reminder for 1 day,
+  2 days, 3 days, 1 week or a date you pick, counted from when the message
+  actually goes out. If nobody but you has answered by then, you get a
+  notification that opens the conversation, and the thread shows "No reply
+  since ..." with a Follow up button that starts a reply to everyone you
+  wrote to. A reply that arrives first cancels the reminder on its own. All
+  open reminders, across every account, are listed under Follow-ups in the
+  sidebar, below Snoozed, with a count of the ones that are due.
+- **Missing-attachment warning.** If your message says something like "see
+  attached" or "I've enclosed the file" but has nothing attached, the app asks
+  before sending. Quoted text from earlier messages is ignored. It can be
+  turned off in Settings → General.
+
 ### Fixed
+- **Replying to your own sent message goes to the people you wrote to.**
+  Reply on a message you sent used to address it back to yourself. It now
+  goes to that message's recipients (and Reply All keeps its Cc), leaving you
+  out.
 - **Test notification tells you when Focus is hiding it.** On macOS, while
   Focus / Do Not Disturb is on, notifications go straight to Notification
   Center with no banner, and the app can't tell. Settings → Test notification
