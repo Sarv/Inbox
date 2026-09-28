@@ -37,6 +37,9 @@ export interface AppSettings {
   /** When a sender has no photo or logo, use the domain's favicon. One fetch
    *  per domain, which tells that domain a client here looked, once. */
   senderFavicons: boolean;
+  /** Ask Gravatar for contacts' photos (sends a hash of each contact's address
+   *  to Gravatar). Opt-in: off unless the user turns it on. */
+  contactGravatar: boolean;
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
    *  have no labels/keywords (Outlook, Yahoo, …): copy = keep in Inbox + a
@@ -110,6 +113,7 @@ export const defaultSettings: AppSettings = {
   remoteImageMode: 'safe',
   senderLogos: true,
   senderFavicons: true,
+  contactGravatar: false,
   categoryLabels: { enabled: true, folderMode: 'copy' },
   inboxType: 'priority_first',
   showImportanceMarkers: true,

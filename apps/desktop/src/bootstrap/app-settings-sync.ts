@@ -135,7 +135,8 @@ function pushBacklogCap(rawSettings: string | null): void {
 }
 
 /**
- * Mirror the sender-identity toggles (BIMI logos, domain favicons) into main,
+ * Mirror the sender-identity toggles (BIMI logos, domain favicons, Gravatar
+ * contact photos) into main,
  * which owns the lookups and the cache. Off must mean off — no fetch, and
  * nothing cached shown — so main has to know, and the renderer's own identity
  * cache is cleared once main has acknowledged the change.
@@ -146,9 +147,10 @@ function pushSenderIdentityPolicy(rawSettings: string | null): void {
     if (!parsed || typeof parsed !== 'object') return;
     const logos = typeof parsed.senderLogos === 'boolean' ? parsed.senderLogos : true;
     const favicons = typeof parsed.senderFavicons === 'boolean' ? parsed.senderFavicons : true;
+    const gravatar = parsed.contactGravatar === true; // opt-in: anything but true is off
     const api = (window as any)?.electronAPI?.identity;
     if (!api?.setPolicy) return;
-    void Promise.resolve(api.setPolicy({ logos, favicons })).then(() => {
+    void Promise.resolve(api.setPolicy({ logos, favicons, gravatar })).then(() => {
       window.dispatchEvent(new Event('sarvinbox:identity-policy-changed'));
     }).catch(() => { /* best-effort */ });
   } catch { /* a malformed settings blob must not break boot */ }

@@ -57,9 +57,16 @@ export interface SenderIdentityPolicy {
   logos: boolean;
   /** Look up and show domain favicons. */
   favicons: boolean;
+  /**
+   * Ask Gravatar for contacts' photos. OFF by default: it sends a hash of
+   * every contact's address to a third party, with the contact list coming
+   * from the user's mail — that is mailbox-derived data leaving the device, so
+   * it needs the user's say-so (Google Limited Use; see the privacy policy).
+   */
+  gravatar: boolean;
 }
 
-export const DEFAULT_SENDER_IDENTITY_POLICY: SenderIdentityPolicy = { logos: true, favicons: true };
+export const DEFAULT_SENDER_IDENTITY_POLICY: SenderIdentityPolicy = { logos: true, favicons: true, gravatar: false };
 const POLICY_BLOB_KEY = 'sender-identity-policy';
 let cachedPolicy: SenderIdentityPolicy | null = null;
 
@@ -69,6 +76,7 @@ export function normalizeSenderIdentityPolicy(raw: unknown): SenderIdentityPolic
   return {
     logos: typeof r.logos === 'boolean' ? r.logos : DEFAULT_SENDER_IDENTITY_POLICY.logos,
     favicons: typeof r.favicons === 'boolean' ? r.favicons : DEFAULT_SENDER_IDENTITY_POLICY.favicons,
+    gravatar: typeof r.gravatar === 'boolean' ? r.gravatar : DEFAULT_SENDER_IDENTITY_POLICY.gravatar,
   };
 }
 

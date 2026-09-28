@@ -59,7 +59,7 @@ function harness(over: Partial<{ policy: SenderIdentityPolicy; maxConcurrent: nu
   const lookupBimi = vi.fn(async (_d: string) => none());
   const discoverFavicon = vi.fn(async (_d: string) => found());
   const onUpdated = vi.fn();
-  const policy = over.policy ?? { logos: true, favicons: true };
+  const policy = over.policy ?? { logos: true, favicons: true, gravatar: false };
   const svc = new SenderIdentityService({
     store, lookupBimi, discoverFavicon, policy: () => policy, now: () => clock, onUpdated, maxConcurrent: over.maxConcurrent,
   });
@@ -80,11 +80,21 @@ describe('senderDomain', () => {
 
 describe('policy', () => {
   it('normalises, persists and reloads; garbage means the defaults', () => {
-    expect(normalizeSenderIdentityPolicy({ logos: false })).toEqual({ logos: false, favicons: true });
-    expect(normalizeSenderIdentityPolicy('junk')).toEqual({ logos: true, favicons: true });
-    setSenderIdentityPolicy({ logos: false, favicons: false });
+    expect(normalizeSenderIdentityPolicy({ logos: false })).toEqual({ logos: false, favicons: true, gravatar: false });
+    expect(normalizeSenderIdentityPolicy('junk')).toEqual({ logos: true, favicons: true, gravatar: false });
+    setSenderIdentityPolicy({ logos: false, favicons: false, gravatar: true });
     resetSenderIdentityPolicyCache();
-    expect(getSenderIdentityPolicy()).toEqual({ logos: false, favicons: false });
+    expect(getSenderIdentityPolicy()).toEqual({ logos: false, favicons: false, gravatar: true });
+  });
+
+  // Gravatar sends a hash of every contact's address to a third party, so it
+  // is opt-in: a missing, malformed or pre-existing (no `gravatar` key) policy
+  // must read as OFF, never as on.
+  it('keeps Gravatar off unless explicitly true', () => {
+    expect(normalizeSenderIdentityPolicy(null).gravatar).toBe(false);
+    expect(normalizeSenderIdentityPolicy({ logos: true, favicons: true }).gravatar).toBe(false);
+    expect(normalizeSenderIdentityPolicy({ gravatar: 'yes' }).gravatar).toBe(false);
+    expect(normalizeSenderIdentityPolicy({ gravatar: true }).gravatar).toBe(true);
   });
 });
 
@@ -132,7 +142,7 @@ describe('SenderIdentityService.getForAddress', () => {
 
   // Off means off: no fetch, and nothing already cached is shown either.
   it('under a policy that turns a feature off, neither fetches nor shows it', async () => {
-    const { svc, store, lookupBimi, discoverFavicon } = harness({ policy: { logos: false, favicons: false } });
+    const { svc, store, lookupBimi, discoverFavicon } = harness({ policy: { logos: false, favicons: false, gravatar: false } });
     store.upsertBimi('brand.example', verified(), T0);
     store.upsertFavicon('brand.example', found(), T0);
     const id = svc.getForAddress('a@brand.example');
@@ -202,7 +212,7 @@ describe('SenderIdentityService.refreshStale', () => {
     expect(n).toBe(2);
     expect(lookupBimi.mock.calls.map((c) => c[0])).toEqual(['a.example', 'b.example']);
 
-    const off = harness({ policy: { logos: false, favicons: false } });
+    const off = harness({ policy: { logos: false, favicons: false, gravatar: false } });
     expect(await off.svc.refreshStale(['a.example'], 5)).toBe(0);
   });
 });
@@ -213,10 +223,10 @@ describe('identityFromRow', () => {
     store.upsertBimi('brand.example', verified(), T0);
     store.upsertFavicon('brand.example', found(), T0);
     const row = store.get('brand.example');
-    const all = identityFromRow('a@brand.example', 'brand.example', row, { logos: true, favicons: true }, null, false);
+    const all = identityFromRow('a@brand.example', 'brand.example', row, { logos: true, favicons: true, gravatar: false }, null, false);
     expect(all.bimi).toMatchObject({ status: 'verified', organization: 'Example Inc', issuer: 'Test Root', logo: verified().logo, dmarcPolicy: 'reject', expires: T0 + 86_400 });
     expect(all.favicon).toBe(found().dataUri);
-    const logosOnly = identityFromRow('a@brand.example', 'brand.example', row, { logos: true, favicons: false }, 'data:photo', true);
+    const logosOnly = identityFromRow('a@brand.example', 'brand.example', row, { logos: true, favicons: false, gravatar: false }, 'data:photo', true);
     expect(logosOnly).toMatchObject({ favicon: null, faviconStatus: null, contactPhoto: 'data:photo', pending: true });
     expect(logosOnly.bimi?.status).toBe('verified');
   });

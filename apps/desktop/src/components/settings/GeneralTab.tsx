@@ -286,7 +286,8 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
               Brand logos come from the sender domain’s BIMI record and appear only on mail that passed DMARC; a domain whose
               Verified Mark Certificate checks out also gets the blue verified tick beside the sender. When a sender has no
               photo or logo, the domain’s favicon is used instead. Each is looked up once per domain in the background —
-              never per message, and never from inside a message.
+              never per message, and never from inside a message. Gravatar photos are off unless you turn them on:
+              the app then sends Gravatar a one-way hash of each contact’s address to ask whether a photo exists.
             </div>
           </div>
           <div className="flex flex-col gap-2">
@@ -307,6 +308,15 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
                 className="w-4 h-4"
               />
               <span className="text-sm whitespace-nowrap">Domain favicons</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.contactGravatar === true}
+                onChange={(e) => updateSetting('contactGravatar', e.target.checked)}
+                className="w-4 h-4"
+              />
+              <span className="text-sm whitespace-nowrap">Contact photos from Gravatar</span>
             </label>
           </div>
         </div>

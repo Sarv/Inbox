@@ -1,6 +1,9 @@
 /**
  * Avatar discovery — the (only) network part of confirm-gated contact avatars.
  *
+ * Opt-in: nothing is sent unless the user turned on "Contact photos from
+ * Gravatar" (the `gravatar` sender-identity policy, off by default).
+ *
  * Runs in the MAIN process, in the background, throttled. For contacts that have
  * never been checked (avatar_status IS NULL), it asks Gravatar ONCE whether a
  * real photo exists (`d=404` → a real picture or an HTTP 404, never a generic
@@ -20,6 +23,7 @@ import { createLogger } from '@sarvinbox/core';
 import { getStorage, getMainWindow } from '../shared';
 
 import { chromiumFetch } from './net-fetch';
+import { getSenderIdentityPolicy } from './sender-identity-service';
 
 const logger = createLogger('avatar-discovery');
 
@@ -41,6 +45,9 @@ function gravatarPhotoUrl(email: string): string {
 
 async function tick(): Promise<void> {
   if (running) return;
+  // Opt-in (Settings → General → Contact photos from Gravatar). Checked every
+  // tick, so turning it off stops the very next batch.
+  if (!getSenderIdentityPolicy().gravatar) return;
   running = true;
   try {
     const storage = getStorage() as any;
