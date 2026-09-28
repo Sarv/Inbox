@@ -66,11 +66,11 @@ export function useNotificationBridge(): void {
     });
 
     // A notification click opens that mail (switching account first if needed).
-    const offOpen = api.onOpenEmail(({ accountId, emailId }: { accountId: string; emailId: string }) => {
+    const offOpen = api.onOpenEmail(({ accountId, emailId, threadId }: { accountId: string; emailId: string; threadId?: string }) => {
       // A notification can be clicked from ANY app section (Contacts, Settings…).
       // Navigate to the Mail view first — otherwise selecting the email in the
       // store has no visible effect and the user stays on the current page.
-      openEmailFromNotification(emailId, accountId);
+      openEmailFromNotification(emailId, accountId, threadId);
     });
 
     return () => {

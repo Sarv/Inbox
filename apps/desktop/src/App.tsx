@@ -12,6 +12,7 @@ import { ExtensionManager } from './components/ExtensionManager';
 import { ExtensionNotification } from './components/ExtensionNotification';
 import { MailDetailWithPanels } from './components/extensions/MailDetailWithPanels';
 import { useExtensionOpenMessage } from './components/extensions/useExtensionOpenMessage';
+import { FollowUpsList } from './components/FollowUpsList';
 import { GlobalConfirmDialog } from './components/GlobalConfirmDialog';
 import { InAppNotification } from './components/InAppNotification';
 import { NoAccountEmptyState } from './components/NoAccountEmptyState';
@@ -768,6 +769,8 @@ function App() {
 
   // Render content based on active section
   const renderContent = () => {
+    // Follow-ups stand in for the mail list pane; the reading pane is unchanged.
+    const listPane = selectedVirtualFolder === 'virtual-follow-ups' ? <FollowUpsList /> : <EmailList />;
     switch (activeSection) {
       case 'mail':
         // Outbox is a virtual view (the send-queue) — show it full-pane in the
@@ -791,7 +794,7 @@ function App() {
             <>
               <Sidebar />
               <div className="flex-1 flex flex-col overflow-hidden">
-                {selectedEmailId ? <MailDetailWithPanels /> : <EmailList />}
+                {selectedEmailId ? <MailDetailWithPanels /> : listPane}
               </div>
             </>
           );
@@ -802,7 +805,7 @@ function App() {
               <Sidebar />
               <div className="flex-1 flex flex-col overflow-hidden">
                 <div className="h-1/2 border-b border-border overflow-hidden flex flex-col">
-                  <EmailList />
+                  {listPane}
                 </div>
                 <div className="h-1/2 overflow-hidden">
                   <MailDetailWithPanels />
@@ -817,7 +820,7 @@ function App() {
               <Sidebar />
               <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
                 <div className="flex flex-1 min-w-0 overflow-hidden">
-                  <EmailList />
+                  {listPane}
                   <MailDetailWithPanels />
                 </div>
               </div>

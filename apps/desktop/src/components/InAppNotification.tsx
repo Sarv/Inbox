@@ -19,6 +19,8 @@ interface Toast {
   subtitle?: string;
   accountId?: string;
   emailId?: string;
+  /** Set for a follow-up reminder: open this thread rather than select the email. */
+  threadId?: string;
 }
 
 const AUTO_DISMISS_MS = 6000;
@@ -43,7 +45,7 @@ export function InAppNotification() {
   const open = (t: Toast) => {
     remove(t.id);
     if (!t.emailId) return;
-    openEmailFromNotification(t.emailId, t.accountId);
+    openEmailFromNotification(t.emailId, t.accountId, t.threadId);
   };
 
   if (toasts.length === 0) return null;

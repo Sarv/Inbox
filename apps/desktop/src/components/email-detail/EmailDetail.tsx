@@ -14,6 +14,7 @@ import { Tooltip } from '../Tooltip';
 import { useChatPrewarm } from './chat-prewarm';
 import { EmailCard } from './EmailCard';
 import { EmailToolbar } from './EmailToolbar';
+import { FollowUpBanner } from './FollowUpBanner';
 import { useEmailDetail } from './hooks/useEmailDetail';
 import { ShowOriginalModal } from './ShowOriginalModal';
 import { SignatureDetectionModal } from './SignatureDetectionModal';
@@ -114,6 +115,7 @@ export function EmailDetail() {
     handleCloseInlineReply,
     handleSaveSignatureSelector,
     setInlineReplyMode,
+    handleReplyAll,
   } = ctx;
 
   return (
@@ -150,6 +152,13 @@ export function EmailDetail() {
               onRemove={(name) => setEmailLabel(displayEmail.id, name, false)}
             />
           </div>
+
+          <FollowUpBanner
+            threadId={displayEmail.threadId}
+            accountId={displayEmail.accountId ?? viewAccountId}
+            threadEmails={threadEmails}
+            onFollowUp={(email) => handleReplyAll(email)}
+          />
 
           {/* Thread info: message count + view toggle + summary.
               Shown for real threads AND single emails with embedded

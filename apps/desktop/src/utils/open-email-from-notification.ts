@@ -15,8 +15,11 @@ import { useEmailStore } from '../store/email-store';
  *
  * The selection is attempted even if the account switch rejects: a failed
  * switch should not swallow the click entirely.
+ *
+ * With a `threadId` (a follow-up reminder about a message we SENT, which is
+ * not in the visible list) the thread is opened by id instead of selecting.
  */
-export function openEmailFromNotification(emailId: string, accountId?: string): void {
+export function openEmailFromNotification(emailId: string, accountId?: string, threadId?: string): void {
   if (!emailId) return;
 
   document.dispatchEvent(new CustomEvent('sarvinbox:open-mail'));
@@ -24,7 +27,8 @@ export function openEmailFromNotification(emailId: string, accountId?: string): 
   const store = useEmailStore.getState() as any;
   const select = () => {
     try {
-      store.selectEmail?.(emailId);
+      if (threadId) store.openThread?.(emailId, threadId, accountId);
+      else store.selectEmail?.(emailId);
     } catch {
       /* the list is not mounted yet; nothing to select into */
     }

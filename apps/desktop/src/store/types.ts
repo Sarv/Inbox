@@ -324,6 +324,12 @@ export interface EmailsSlice {
   loadSnoozedEmails: () => Promise<void>;
   clearSnoozedView: () => void;
   showOutbox: () => void;
+  /** Follow-ups: every open "remind me if no reply" reminder, as the list pane. */
+  showFollowUps: () => void;
+  /** Open a thread by id when its message may not be in the visible list (a
+   *  sent message opened from a follow-up reminder). `accountId` routes the
+   *  read to that account's DB when it isn't the active one. */
+  openThread: (emailId: string, threadId: string, accountId?: string) => void;
 
   loadSectionEmails: (sectionId: string, filter: string, folderPath?: string) => Promise<void>;
   loadMoreSectionEmails: (sectionId: string, filter: string, folderPath?: string) => Promise<void>;

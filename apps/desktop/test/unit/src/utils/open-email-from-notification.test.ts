@@ -135,4 +135,19 @@ describe('openEmailFromNotification', () => {
 
     expect(h.state.selectEmail).toHaveBeenCalledWith('email-1');
   });
+
+  it('opens the thread by id for a follow-up reminder', async () => {
+    // Regression: a follow-up is about a message WE sent, which is not in the
+    // visible list, so selectEmail finds nothing and the click opens nothing.
+    const openThread = vi.fn((id: string, threadId: string, accountId?: string) => {
+      order.push(`thread:${id}:${threadId}:${accountId}`);
+    });
+    h.state = makeState({ openThread });
+
+    openEmailFromNotification('sent-1', 'account-2', 'thread-9');
+    await flush();
+
+    expect(order).toEqual(['open-mail', 'switch:account-2', 'thread:sent-1:thread-9:account-2']);
+    expect(h.state.selectEmail).not.toHaveBeenCalled();
+  });
 });

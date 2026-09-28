@@ -1363,6 +1363,34 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     viewingSection: null, viewingSectionLabel: null, viewingSectionPageSize: SECTION_FULL_PAGE_SIZE,
   }),
 
+  // Same virtual-view shape as Outbox, so the same resets clear it.
+  showFollowUps: () => set({
+    selectedVirtualFolder: 'virtual-follow-ups',
+    selectedFolderId: null,
+    selectedEmailId: null,
+    highlightedEmailId: null,
+    viewingSnoozed: false,
+    viewingAICategory: null,
+    searchQuery: '',
+    searchResults: [],
+    searchInterpretation: null,
+    viewingSection: null, viewingSectionLabel: null, viewingSectionPageSize: SECTION_FULL_PAGE_SIZE,
+  }),
+
+  // selectEmail only loads a thread whose email is in the visible list; a
+  // follow-up's sent message usually isn't, so this goes by thread id.
+  openThread: (emailId, threadId, accountId) => {
+    const sameThread = get().threadEmails[0]?.threadId === threadId;
+    set({
+      selectedEmailId: emailId,
+      manuallyMarkedUnreadId: null,
+      failedBodies: new Set(),
+      viewAccountId: accountId && accountId !== get().activeAccountId ? accountId : null,
+      ...(sameThread ? {} : { threadEmails: [] as EmailRecord[], pendingThreadEmailIds: [] as string[] }),
+    });
+    get().loadThread(threadId);
+  },
+
   loadLabels: async () => {
     try {
       const res = await window.electronAPI.labels.list();

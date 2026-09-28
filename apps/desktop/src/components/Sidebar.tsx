@@ -18,6 +18,7 @@ import {
   WifiOff,
   Clock,
   AlertCircle,
+  BellRing,
 } from 'lucide-react';
 import { useEffect, useState, type JSX } from 'react';
 
@@ -37,6 +38,7 @@ import {
 import { getShortcutHints, getGotoShortcutHints } from '../config/keyboard-shortcuts';
 import { useAppVersion } from '../hooks/useAppVersion';
 import { useEmailStore } from '../store/email-store';
+import { countDue, subscribeFollowUps, useFollowUpsStore } from '../store/follow-ups-store';
 // Folder mapping configuration (browser-safe local copy)
 
 import { AccountSwitcher } from './AccountSwitcher';
@@ -132,6 +134,12 @@ export function Sidebar() {
   useEffect(() => {
     if (accounts.length > 1) refreshUnreadSummary();
   }, [refreshUnreadSummary, accounts.length, folders]);
+
+  // Follow-ups badge: reminders that fell due unanswered. The store follows
+  // main-process changes, so a checker pass updates it live.
+  const showFollowUps = useEmailStore((s) => s.showFollowUps);
+  const followUpsDue = useFollowUpsStore((s) => countDue(s.items));
+  useEffect(() => subscribeFollowUps(), []);
 
   // Outbox badge count (pending + failed sends), refreshed periodically.
   const [outboxCount, setOutboxCount] = useState(0);
@@ -650,6 +658,22 @@ export function Sidebar() {
                 )}
               </button>
             </Tooltip>
+
+            {/* Follow-ups - "remind me if no reply" reminders */}
+            <button
+              onClick={() => showFollowUps()}
+              className={`w-full flex items-center gap-3 nav-row rounded-md text-left text-foreground ${
+                selectedVirtualFolder === 'virtual-follow-ups'
+                  ? 'bg-accent'
+                  : 'hover:bg-accent/50'
+              }`}
+            >
+              <BellRing className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm flex-1 truncate">Follow-ups</span>
+              {followUpsDue > 0 && (
+                <span className="text-xs text-muted-foreground tabular-nums">{followUpsDue}</span>
+              )}
+            </button>
 
             {/* Outbox - virtual view (send queue), like Thunderbird's Outbox */}
             <Tooltip content="" position="right" className="w-full">
