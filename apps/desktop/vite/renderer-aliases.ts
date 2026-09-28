@@ -69,6 +69,12 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/image-allowlist.ts',
     ),
+    // Pure — the renderer's Sentry filter scrubs with the SAME code as main's,
+    // so neither side lets an address through that the other would catch.
+    '@sarvinbox/core/telemetry-scrub': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/telemetry-scrub.ts',
+    ),
     // Pure (html-to-text, which is browser-safe) — the chat view decides which
     // mail to render as sent with the SAME predicate the sync layer tags with,
     // so the two can never disagree about what a blast is.

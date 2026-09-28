@@ -106,6 +106,9 @@ const ensureDeps = (overrides: Partial<EnsureSarvAiDeps> = {}): EnsureSarvAiDeps
   resolveDraft: vi.fn().mockResolvedValue({ ok: true, draft }),
   hasDefaultProvider: vi.fn().mockReturnValue(false),
   register: vi.fn().mockReturnValue({ provider: { id: 'p1' }, added: true }),
+  // The user already agreed; the consent gate has its own tests below.
+  getConsent: vi.fn().mockReturnValue('granted'),
+  askConsent: vi.fn().mockResolvedValue('granted'),
   ...overrides,
 });
 
@@ -153,6 +156,43 @@ describe('runEnsureSarvAiProvider', () => {
     const deps = ensureDeps({ resolveDraft: vi.fn().mockResolvedValue({ ok: false, reason }) });
     expect(await runEnsureSarvAiProvider(deps)).toBe(reason);
     expect(deps.register).not.toHaveBeenCalled();
+  });
+
+  // Consent gate. Breaks if: Sarv AI starts reading mail (Gmail data included)
+  // on sign-in with no agreement — a Google Limited Use / privacy-policy breach.
+  it('asks once when never asked, and registers only on yes', async () => {
+    const deps = ensureDeps({ getConsent: vi.fn().mockReturnValue(null) });
+    expect(await runEnsureSarvAiProvider(deps)).toBe('registered');
+    expect(deps.askConsent).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers nothing and walks no catalog when the user says no', async () => {
+    const deps = ensureDeps({
+      getConsent: vi.fn().mockReturnValue(null),
+      askConsent: vi.fn().mockResolvedValue('declined'),
+    });
+    expect(await runEnsureSarvAiProvider(deps)).toBe('declined');
+    expect(deps.resolveDraft).not.toHaveBeenCalled();
+    expect(deps.register).not.toHaveBeenCalled();
+  });
+
+  // Idempotent re-run: an earlier "no" is not asked again on every launch.
+  it('does not ask again after an earlier no', async () => {
+    const deps = ensureDeps({ getConsent: vi.fn().mockReturnValue('declined') });
+    expect(await runEnsureSarvAiProvider(deps)).toBe('declined');
+    expect(deps.askConsent).not.toHaveBeenCalled();
+    expect(deps.register).not.toHaveBeenCalled();
+  });
+
+  // Only a signed-in user with no provider is ever asked.
+  it('does not ask when nobody is signed in or a provider already exists', async () => {
+    const signedOut = ensureDeps({ getConsent: vi.fn().mockReturnValue(null), readAccount: vi.fn().mockResolvedValue(null) });
+    expect(await runEnsureSarvAiProvider(signedOut)).toBe('not-signed-in');
+    expect(signedOut.askConsent).not.toHaveBeenCalled();
+
+    const hasOne = ensureDeps({ getConsent: vi.fn().mockReturnValue(null), hasDefaultProvider: vi.fn().mockReturnValue(true) });
+    expect(await runEnsureSarvAiProvider(hasOne)).toBe('has-default');
+    expect(hasOne.askConsent).not.toHaveBeenCalled();
   });
 
   it('returns failed (never throws) on a transient catalog error', async () => {
@@ -238,6 +278,8 @@ describe('ensureSarvAiProvider (wired to main + stored settings)', () => {
     catalogMocks.listCaiProviders.mockResolvedValue([{ code: 'sarv_partners', name: 'Sarv LLM' }]);
     catalogMocks.listCaiModels.mockResolvedValue([{ code: 'gpt-oss-120b', display_name: 'Sarv Mati' }]);
     vi.spyOn(console, 'info').mockImplementation(() => {});
+    // The user agreed to Sarv AI earlier (the consent prompt).
+    store.set('sarvinbox-ai-consent', 'granted');
 
     expect(await ensureSarvAiProvider()).toBe('registered');
     const [stored] = loadAISettings().providers;

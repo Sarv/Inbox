@@ -95,14 +95,45 @@ describe('setOAuthClientId / setOAuthClientSecret', () => {
     expect(gmail.clientSecret).toBe('secret-from-env');
   });
 
-  // microsoft/yahoo are spread-derived from the Gmail template, so a shared
-  // object would make configuring one configure all three.
+  // yahoo is spread-derived from the Gmail template, so a shared object would
+  // make configuring one provider configure the others.
   it('scopes credentials to ONE provider (microsoft/yahoo/gmail stay independent)', () => {
     providers.setOAuthClientId('microsoft', 'ms-id');
 
     expect(providers.getOAuthProvider('microsoft').clientId).toBe('ms-id');
     expect(providers.getOAuthProvider('gmail').clientId).toBe('');
     expect(providers.getOAuthProvider('yahoo').clientId).toBe('');
+  });
+
+  // Microsoft used to be a clone of the Gmail template: "Sign in with Outlook"
+  // opened accounts.google.com, asked Google for its scopes and would have
+  // pointed SMTP at smtp.gmail.com. Pins the real Microsoft identity platform.
+  it('points Microsoft at the Microsoft identity platform, not the Gmail template', () => {
+    const ms = providers.getOAuthProvider('microsoft');
+
+    expect(ms.authEndpoint).toBe('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
+    expect(ms.tokenEndpoint).toBe('https://login.microsoftonline.com/common/oauth2/v2.0/token');
+    expect(ms.scopes).toEqual(expect.arrayContaining([
+      'https://outlook.office.com/IMAP.AccessAsUser.All',
+      'https://outlook.office.com/SMTP.Send',
+      'offline_access', // without it Microsoft returns no refresh token → NO_REFRESH_TOKEN
+    ]));
+    expect(ms.scopes).not.toContain('https://mail.google.com/');
+    expect(ms.extraAuthParams).toEqual({ prompt: 'select_account' }); // no Google-only access_type
+    expect(ms.imap).toEqual({ host: 'outlook.office365.com', port: 993, secure: true });
+    expect(ms.smtp).toEqual({ host: 'smtp.office365.com', port: 587, secure: false });
+  });
+
+  // Public client: Microsoft rejects a client_secret from a desktop app
+  // (AADSTS700025), and an Outlook-audience access token can't call Graph's
+  // userinfo, so identity must come from the id_token.
+  it('configures Microsoft as a secretless public client that reads identity from the id_token', () => {
+    const ms = providers.getOAuthProvider('microsoft');
+
+    expect(ms.clientSecret).toBeUndefined();
+    expect(ms.identityFrom).toBe('id_token');
+    expect(ms.tokenBodyFormat).toBe('form');
+    expect(providers.getOAuthProvider('gmail').identityFrom).toBeUndefined(); // Gmail keeps userinfo
   });
 
   it('throws for an unknown provider id instead of silently creating an entry', () => {

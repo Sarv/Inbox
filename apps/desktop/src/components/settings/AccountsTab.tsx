@@ -250,14 +250,8 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
     // Remove the account the popup is showing (falls back to the active one).
     const targetId = detailsAccountId || activeAccountId;
     try {
-      const cfg = imapConfig as any;
-      // Only sign OAuth out when we're removing the currently-active account
-      // (imapConfig belongs to it). Fire-and-forget: it's best-effort token
-      // revocation, and awaiting it delayed the "Deleting…" state (removeAccountById
-      // is what sets it) behind a network round-trip.
-      if (targetId === activeAccountId && cfg?.authMethod === 'oauth2' && cfg.oauthProvider && cfg.username) {
-        void window.electronAPI.oauth.signOut(cfg.oauthProvider, cfg.username).catch(() => {});
-      }
+      // OAuth sign-out (local token delete + revocation at the provider) happens
+      // in main as part of accounts:remove, for whichever account is removed.
       if (targetId) await removeAccountById(targetId);
       else await disconnect();
       setImapForm({ host: 'imap.gmail.com', port: '993', username: '', password: '' });

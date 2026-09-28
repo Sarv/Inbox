@@ -124,3 +124,25 @@ describe('initializeOAuth — Sarv client_id', () => {
     expect(src).not.toMatch(/['"`]client_[A-Za-z0-9_-]{16,}['"`]/);
   });
 });
+
+describe('initializeOAuth — Microsoft client_id', () => {
+  // Regression: without this the "Sign in with Outlook" option stays
+  // "not configured" even though the release build carries the id.
+  it('applies SARVINBOX_MICROSOFT_CLIENT_ID and leaves Microsoft unconfigured without it', () => {
+    const prev = process.env.SARVINBOX_MICROSOFT_CLIENT_ID;
+    try {
+      delete process.env.SARVINBOX_MICROSOFT_CLIENT_ID;
+      setOAuthClientId('microsoft', '');
+      initializeOAuth();
+      expect(isOAuthProviderConfigured('microsoft')).toBe(false);
+
+      process.env.SARVINBOX_MICROSOFT_CLIENT_ID = 'ms-app-id';
+      initializeOAuth();
+      expect(getOAuthProvider('microsoft').clientId).toBe('ms-app-id');
+    } finally {
+      if (prev === undefined) delete process.env.SARVINBOX_MICROSOFT_CLIENT_ID;
+      else process.env.SARVINBOX_MICROSOFT_CLIENT_ID = prev;
+      setOAuthClientId('microsoft', '');
+    }
+  });
+});

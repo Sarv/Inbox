@@ -17,6 +17,7 @@ import http from 'http';
 import { AddressInfo } from 'net';
 
 import {
+  decodeJwtPayload,
   exchangeCodeForTokens,
   generatePkcePair,
   generateState,
@@ -24,6 +25,7 @@ import {
   isOAuthProviderConfigured,
   OAuthError,
   refreshAccessToken,
+  revokeToken,
   isTerminalOAuthError,
   SARV_PRODUCTION_CLIENT_ID,
   scopesLost,
@@ -31,10 +33,12 @@ import {
   setOAuthClientId,
   setOAuthClientSecret,
   setSarvBaseUrl,
+  userInfoFromIdToken,
   type OAuthAccount,
   type OAuthProviderId,
   type OAuthProviderConfig,
   type OAuthUserInfo,
+  type RevokeOutcome,
   type IMAPConfig,
   createLogger,
 } from '@sarvinbox/core';
@@ -80,7 +84,10 @@ export function initializeOAuth(): void {
     logger.info('[OAuth] Gmail client_secret loaded from env');
   }
   const msId = process.env.SARVINBOX_MICROSOFT_CLIENT_ID;
-  if (msId) setOAuthClientId('microsoft', msId);
+  if (msId) {
+    setOAuthClientId('microsoft', msId);
+    logger.info('[OAuth] Microsoft client_id loaded from env');
+  }
   const yhId = process.env.SARVINBOX_YAHOO_CLIENT_ID;
   if (yhId) setOAuthClientId('yahoo', yhId);
 
@@ -151,7 +158,10 @@ export async function startOAuthFlow(providerId: OAuthProviderId): Promise<OAuth
     );
   }
 
-  const userInfo = await fetchUserInfo(provider, tokens.access_token);
+  const userInfo =
+    provider.identityFrom === 'id_token'
+      ? userInfoFromIdToken(tokens.id_token)
+      : await fetchUserInfo(provider, tokens.access_token);
 
   const now = Math.floor(Date.now() / 1000);
   const account: OAuthAccount = {
@@ -486,21 +496,34 @@ function shouldRefresh(account: OAuthAccount): boolean {
  * every API call anyway. Returns null for non-JWT tokens.
  */
 function decodeJwtClaims(token: string): { exp?: number; iat?: number } | null {
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  try {
-    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
-    const claims = JSON.parse(payload) as Record<string, unknown>;
-    const exp = typeof claims.exp === 'number' ? claims.exp : undefined;
-    const iat = typeof claims.iat === 'number' ? claims.iat : undefined;
-    return { exp, iat };
-  } catch {
-    return null;
-  }
+  const claims = decodeJwtPayload(token);
+  if (!claims) return null;
+  const exp = typeof claims.exp === 'number' ? claims.exp : undefined;
+  const iat = typeof claims.iat === 'number' ? claims.iat : undefined;
+  return { exp, iat };
 }
 
-export async function signOut(providerId: OAuthProviderId, email: string): Promise<void> {
+/**
+ * Sign out: forget the tokens on this device (awaited, so they are gone before
+ * this resolves, even if the provider is unreachable), then revoke the grant at
+ * the provider where it supports RFC 7009 (Google). The revocation is handed
+ * back as its own promise so a caller can finish its own work without waiting
+ * on a network round-trip. It never rejects: a 'failed' outcome is logged and
+ * the user can still revoke from their account page (see the privacy policy).
+ */
+export async function signOut(
+  providerId: OAuthProviderId,
+  email: string,
+): Promise<{ revocation: Promise<RevokeOutcome | 'no-account'> }> {
+  const account = await getAccount(providerId, email);
   await removeAccount(providerId, email);
+  if (!account) return { revocation: Promise.resolve('no-account') };
+  const revocation = revokeToken({ provider: getOAuthProvider(providerId), token: account.refreshToken })
+    .then((outcome) => {
+      logger.info(`[OAuth] ${providerId}:${email} signed out — revocation ${outcome}`);
+      return outcome;
+    });
+  return { revocation };
 }
 
 export async function listSignedInAccounts(): Promise<OAuthAccount[]> {

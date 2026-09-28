@@ -584,3 +584,25 @@ describe('module surface', () => {
     }
   });
 });
+
+describe('oauthIdentityOf', () => {
+  // Sign-out on removal keys the token store by exactly this pair; a wrong
+  // answer revokes the wrong grant or none at all.
+  it('returns provider + username for an oauth2 account', async () => {
+    const { oauthIdentityOf } = await import('../../../../electron/services/accounts-registry');
+    expect(oauthIdentityOf({ imapConfig: { authMethod: 'oauth2', oauthProvider: 'gmail', username: 'a@gmail.com' } }))
+      .toEqual({ provider: 'gmail', email: 'a@gmail.com' });
+  });
+
+  // Never act on a guess: password accounts, unknown providers and blank
+  // usernames all mean "no grant".
+  it('returns null for password, unknown-provider, blank and missing configs', async () => {
+    const { oauthIdentityOf } = await import('../../../../electron/services/accounts-registry');
+    expect(oauthIdentityOf({ imapConfig: { authMethod: 'password', username: 'a@b.c' } })).toBeNull();
+    expect(oauthIdentityOf({ imapConfig: { authMethod: 'oauth2', oauthProvider: '__proto__', username: 'a@b.c' } })).toBeNull();
+    expect(oauthIdentityOf({ imapConfig: { authMethod: 'oauth2', oauthProvider: 'gmail', username: '' } })).toBeNull();
+    expect(oauthIdentityOf({ imapConfig: { authMethod: 'oauth2', oauthProvider: 'gmail', username: 42 } })).toBeNull();
+    expect(oauthIdentityOf({ imapConfig: null })).toBeNull();
+    expect(oauthIdentityOf(undefined)).toBeNull();
+  });
+});

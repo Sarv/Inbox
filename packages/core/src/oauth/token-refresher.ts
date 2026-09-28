@@ -309,3 +309,52 @@ export async function refreshAccessToken(opts: {
     'Token refresh',
   );
 }
+
+/**
+ * Outcome of a revocation attempt. Never thrown: sign-out must finish locally
+ * whatever the provider says, so the caller only needs to know what to log.
+ *  - revoked:     the provider confirmed (2xx)
+ *  - already-invalid: 400 — the token was already revoked or expired, which is
+ *                 the state we wanted
+ *  - unsupported: the provider has no revocation endpoint
+ *  - failed:      network error, timeout or 5xx/429 — the grant may still be
+ *                 live on the provider's side
+ */
+export type RevokeOutcome = 'revoked' | 'already-invalid' | 'unsupported' | 'failed';
+
+/**
+ * RFC 7009 token revocation. Pass the REFRESH token: revoking it ends the
+ * whole grant (and, at Google, every access token issued from it).
+ */
+export async function revokeToken(opts: {
+  provider: OAuthProviderConfig;
+  token: string;
+} & TokenRequestControl): Promise<RevokeOutcome> {
+  if (!opts.provider.revokeEndpoint) return 'unsupported';
+  const params: Record<string, string> = {
+    token: opts.token,
+    token_type_hint: 'refresh_token',
+    client_id: opts.provider.clientId,
+  };
+  if (opts.provider.clientSecret) params.client_secret = opts.provider.clientSecret;
+  const { headers, body } = encodeTokenBody(opts.provider, params);
+  try {
+    const res = await postToTokenEndpoint(
+      opts.provider.revokeEndpoint,
+      { headers, body },
+      {
+        network: 'TOKEN_REVOKE_NETWORK_ERROR',
+        timeout: 'TOKEN_REVOKE_TIMEOUT',
+        aborted: 'TOKEN_REVOKE_ABORTED',
+      },
+      { signal: opts.signal, timeoutMs: opts.timeoutMs },
+    );
+    if (res.ok) return 'revoked';
+    if (res.status === 400) return 'already-invalid';
+    logger.warn(`[OAuth] ${opts.provider.id} token revocation answered ${res.status}`);
+    return 'failed';
+  } catch (err) {
+    logger.warn(`[OAuth] ${opts.provider.id} token revocation failed: ${(err as Error)?.message}`);
+    return 'failed';
+  }
+}

@@ -29,6 +29,7 @@ export * from './filters';
 export * from './ai-error';
 export * from './calendar';
 export * from './email-address';
+export * from './telemetry-scrub';
 export * from './unsubscribe';
 export * from './attachment-kind';
 export * from './bulk-mail';

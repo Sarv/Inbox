@@ -17,6 +17,7 @@ const MAX_BYTES = 256 * 1024;
 interface Contact { id: string; email: string }
 
 const h = vi.hoisted(() => ({
+  gravatar: true,
   storage: null as unknown,
   window: null as { sent: string[]; sendThrows: boolean } | null,
   fetches: [] as string[],
@@ -46,6 +47,10 @@ vi.mock('../../../../electron/services/net-fetch', () => ({
     if (!h.respond) throw new Error('network down');
     return h.respond(url);
   },
+}));
+
+vi.mock('../../../../electron/services/sender-identity-service', () => ({
+  getSenderIdentityPolicy: () => ({ logos: true, favicons: true, gravatar: h.gravatar }),
 }));
 
 vi.mock('@sarvinbox/core', () => ({
@@ -118,6 +123,7 @@ const advance = async (ms: number): Promise<void> => {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
   vi.setSystemTime(Date.UTC(2026, 5, 15, 12, 0, 0));
+  h.gravatar = true;
   h.storage = null;
   h.window = { sent: [], sendThrows: false };
   h.fetches.length = 0;
@@ -319,5 +325,37 @@ describe('robustness', () => {
     release();
     await settle();
     expect(h.fetches).toHaveLength(2); // the original tick finishes its batch
+  });
+});
+
+describe('opt-in', () => {
+  // Breaks if: Gravatar receives contact-address hashes while the user left
+  // "Contact photos from Gravatar" off (the default) — a privacy-policy breach.
+  it('sends nothing and touches no contact while Gravatar is off', async () => {
+    h.gravatar = false;
+    const { state, storage } = makeStorage([{ id: 'c1', email: 'a@example.com' }]);
+    h.storage = storage;
+
+    startAvatarDiscoveryScheduler();
+    await advance(FIRST_TICK_MS + TICK_MS);
+
+    expect(h.fetches).toHaveLength(0);
+    expect(state.listArgs).toHaveLength(0);
+    expect(state.checked).toHaveLength(0); // not stamped: turning it on later still probes them
+  });
+
+  // Turning it on takes effect at the next tick, without a restart.
+  it('starts probing at the next tick once turned on', async () => {
+    h.gravatar = false;
+    const { storage } = makeStorage([{ id: 'c1', email: 'a@example.com' }]);
+    h.storage = storage;
+
+    startAvatarDiscoveryScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(h.fetches).toHaveLength(0);
+
+    h.gravatar = true;
+    await advance(TICK_MS);
+    expect(h.fetches).toHaveLength(1);
   });
 });

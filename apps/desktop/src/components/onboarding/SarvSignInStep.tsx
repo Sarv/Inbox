@@ -16,6 +16,7 @@
 import { ArrowLeft, CheckCircle2, Loader2, Sparkles, UserPlus } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
+import { SARV_AI_DISCLOSURE } from '../../services/ai-consent';
 import { ensureSarvAiProvider } from '../../services/sarv-ai-auto-register';
 import {
   listCaiProviders,
@@ -215,7 +216,8 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
       populateProfileFromSarv(res.data);
       // Register the recommended model in the BACKGROUND, independent of this
       // component: the mailbox connect below can end onboarding before the
-      // picker renders. The picker's Continue still overrides it.
+      // picker renders. It asks for consent first (the app-wide dialog); the
+      // picker's Continue, shown with the same disclosure, still overrides it.
       void ensureSarvAiProvider();
       // Connect the Sarv mailbox over OAuth (best-effort, probed). Awaits only
       // the quick probe; the sync itself runs in the background.
@@ -482,6 +484,9 @@ export function SarvSignInStep({ onNext }: SarvSignInStepProps) {
               Continue
             </button>
           </div>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {SARV_AI_DISCLOSURE} Choosing Continue turns it on; Skip leaves it off.
+          </p>
 
           {/* Escape hatch — when zones/providers can't load (e.g. the Sarv
               account isn't linked to a CAI org) Continue stays disabled, so

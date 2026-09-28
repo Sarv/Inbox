@@ -28,8 +28,9 @@ const APP_VERSION: string = JSON.parse(
 const SENTRY_RELEASE = `sarvinbox@${APP_VERSION}`;
 
 // Build-time string replacements shared by the main and renderer bundles.
-//  - Google OAuth creds: inlined so a shipped app (which carries no .env) still
-//    has Gmail sign-in. Non-confidential per Google's installed-app docs.
+//  - Google / Microsoft OAuth creds: inlined so a shipped app (which carries no
+//    .env) still has Gmail and Outlook sign-in. Non-confidential per both
+//    providers' installed-app docs (Microsoft's is a public client: no secret).
 //  - Sentry DSN: public by design (safe to embed in a client). ALWAYS defined
 //    (empty when unset) so renderer code can read process.env.* without a
 //    ReferenceError in the browser, and Sentry stays inert without a DSN.
@@ -39,7 +40,7 @@ const SENTRY_RELEASE = `sarvinbox@${APP_VERSION}`;
 function buildDefines(mode: string): Record<string, string> {
   const env = loadEnv(mode, resolve(__dirname, '../..'), 'SARVINBOX');
   const defines: Record<string, string> = {};
-  for (const key of ['SARVINBOX_GOOGLE_CLIENT_ID', 'SARVINBOX_GOOGLE_CLIENT_SECRET']) {
+  for (const key of ['SARVINBOX_GOOGLE_CLIENT_ID', 'SARVINBOX_GOOGLE_CLIENT_SECRET', 'SARVINBOX_MICROSOFT_CLIENT_ID']) {
     if (env[key]) defines[`process.env.${key}`] = JSON.stringify(env[key]);
   }
   defines['process.env.SARVINBOX_SENTRY_DSN'] = JSON.stringify(env.SARVINBOX_SENTRY_DSN ?? '');

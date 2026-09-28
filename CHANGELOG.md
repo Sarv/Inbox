@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of their messages as spam also removes them.
 
 ### Fixed
+- **Sarv AI asks before it reads your mail.** Signing in with Sarv used to
+  switch Sarv AI on straight away, and new mail from every account was sent
+  to it. The app now asks first, and nothing is sent unless you agree or pick
+  a Sarv AI model yourself.
+- **Crash reports no longer contain email addresses**, and you can turn them
+  off in Settings → General → Send crash reports.
+- **Gravatar contact photos are now opt-in.** The app used to ask Gravatar
+  about every contact in the background. Turn it on in Settings → General →
+  Contact photos from Gravatar.
+- **Removing an account now ends its access.** Its sign-in is deleted and,
+  for Google accounts, the app's access is revoked at Google. Before, this
+  only happened for the account that was selected at the time.
+- **Sign in with Outlook now goes to Microsoft.** It used to open Google's
+  sign-in page. Outlook.com, Hotmail and Microsoft 365 accounts now sign in
+  with Microsoft directly, with no app password.
 - **Bank alerts from the new `.bank.in` domains are no longer flagged.**
   Indian banks now send from addresses like `alerts@axis.bank.in`, which the
   spam filter read as someone else borrowing the bank's name. Axis Bank, SBI,

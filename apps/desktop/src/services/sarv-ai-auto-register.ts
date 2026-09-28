@@ -1,6 +1,10 @@
 // Background auto-registration of the recommended Sarv AI provider.
 //
-// Signing in to Sarv IS the intent to use Sarv AI. The onboarding picker and
+// Signing in to Sarv is the intent to use Sarv AI — but not, by itself,
+// agreement to have mail processed by it. Registration therefore waits for the
+// user's answer to the consent question (ai-consent.ts), asked once.
+//
+// The onboarding picker and
 // Settings → AI → Providers both register the recommended model, but only
 // while they are on screen — and onboarding can be replaced by the inbox the
 // moment the Sarv mailbox connects, before its picker ever renders. That left
@@ -10,6 +14,7 @@
 // finishes whatever screen is open. App runs it on boot and both sign-in
 // surfaces run it right after a Sarv sign-in; it is safe to call any time.
 
+import { askAiConsent, getAiConsent, type AiConsent } from './ai-consent';
 import { getDefaultProvider } from './ai-service';
 import {
   listCaiModels,
@@ -90,6 +95,8 @@ export type EnsureSarvAiOutcome =
   | 'incomplete'
   /** No zone and no configured fallback edge URL. */
   | 'no-edge-url'
+  /** The user said no (now or earlier) to Sarv AI processing their mail. */
+  | 'declined'
   /** Catalog or IPC failure — transient; the next boot or sign-in retries. */
   | 'failed';
 
@@ -98,6 +105,10 @@ export interface EnsureSarvAiDeps {
   resolveDraft: (account: SarvAccountEndpoints) => Promise<SarvProviderDraftResult>;
   hasDefaultProvider: () => boolean;
   register: typeof registerSarvProvider;
+  /** The stored consent answer, null when never asked. */
+  getConsent: () => AiConsent | null;
+  /** Ask the user (and record the answer). */
+  askConsent: () => Promise<AiConsent>;
 }
 
 const defaultDeps: EnsureSarvAiDeps = {
@@ -105,12 +116,15 @@ const defaultDeps: EnsureSarvAiDeps = {
   resolveDraft: (account) => resolveRecommendedSarvDraft(account),
   hasDefaultProvider: () => getDefaultProvider() !== null,
   register: registerSarvProvider,
+  getConsent: getAiConsent,
+  askConsent: askAiConsent,
 };
 
 /**
- * Register the recommended Sarv model when a Sarv account is signed in and NO
- * AI provider exists yet. Never replaces a provider the user already has, so a
- * deliberately chosen model (or a non-Sarv provider) is left alone.
+ * Register the recommended Sarv model when a Sarv account is signed in, NO AI
+ * provider exists yet, and the user agreed to Sarv AI processing their mail
+ * (asked here the first time). Never replaces a provider the user already has,
+ * so a deliberately chosen model (or a non-Sarv provider) is left alone.
  */
 export async function runEnsureSarvAiProvider(
   deps: EnsureSarvAiDeps = defaultDeps,
@@ -119,6 +133,8 @@ export async function runEnsureSarvAiProvider(
     if (deps.hasDefaultProvider()) return 'has-default';
     const account = await deps.readAccount();
     if (!account) return 'not-signed-in';
+    const consent = deps.getConsent() ?? (await deps.askConsent());
+    if (consent !== 'granted') return 'declined';
     const drafted = await deps.resolveDraft(account);
     if (!drafted.ok) {
       console.warn(`[sarv-ai-auto-register] nothing to register for ${account.email}: ${drafted.reason}`);

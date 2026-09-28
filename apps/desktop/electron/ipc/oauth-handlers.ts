@@ -12,12 +12,11 @@ import {
 } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import { rescheduleOAuthAccount, unscheduleOAuthAccount } from '../services/oauth-refresh-scheduler';
+import { rescheduleOAuthAccount, signOutOAuthAccount } from '../services/oauth-refresh-scheduler';
 import {
   cancelOAuthFlow,
   getValidAccessToken,
   listSignedInAccounts,
-  signOut,
   startOAuthFlow,
 } from '../services/oauth-service';
 import { listReauthRequired } from '../services/reauth-registry';
@@ -124,9 +123,8 @@ export function registerOAuthHandlers(): void {
     'oauth:signOut',
     async (_event, providerId: OAuthProviderId, email: string) => {
       try {
-        await signOut(providerId, email);
-        unscheduleOAuthAccount(providerId, email);
-        return { success: true };
+        const { revocation } = await signOutOAuthAccount(providerId, email);
+        return { success: true, data: { revocation: await revocation } };
       } catch (error) {
         return { success: false, error: (error as Error).message };
       }

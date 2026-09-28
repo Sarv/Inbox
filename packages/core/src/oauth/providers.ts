@@ -17,6 +17,9 @@ const GMAIL: OAuthProviderConfig = {
   clientSecret: undefined,
   authEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenEndpoint: 'https://oauth2.googleapis.com/token',
+  // Revoking the refresh token ends the whole grant: the app disappears from
+  // the user's Google "Third-party apps with account access" list.
+  revokeEndpoint: 'https://oauth2.googleapis.com/revoke',
   userInfoEndpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
   scopes: [
     'https://mail.google.com/',
@@ -31,6 +34,44 @@ const GMAIL: OAuthProviderConfig = {
   tokenBodyFormat: 'form',
   imap: { host: 'imap.gmail.com', port: 993, secure: true },
   smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
+};
+
+// Microsoft identity platform (Entra ID, v2.0 endpoints) — Outlook.com,
+// Hotmail/Live AND Microsoft 365 work/school accounts via the `common` tenant.
+// Register a "Mobile and desktop applications" (public client) app — no
+// client_secret: Microsoft REJECTS a secret from a public client, PKCE is the
+// defence. Supply the id via SARVINBOX_MICROSOFT_CLIENT_ID (see OAUTH_SETUP.md).
+const MICROSOFT: OAuthProviderConfig = {
+  id: 'microsoft',
+  label: 'Outlook / Microsoft 365',
+  purpose: 'email',
+  clientId: '',
+  clientSecret: undefined,
+  authEndpoint: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+  tokenEndpoint: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+  // No revokeEndpoint: Microsoft has no RFC 7009 endpoint for public clients.
+  // Sign-out deletes the tokens locally; the user revokes consent at
+  // account.live.com/consent/Manage (see the privacy policy).
+  // Never called: an access token is minted for ONE resource, and ours is for
+  // outlook.office.com (IMAP/SMTP), so Graph's userinfo would answer 401.
+  // Identity comes from the id_token instead (identityFrom below).
+  userInfoEndpoint: 'https://graph.microsoft.com/oidc/userinfo',
+  identityFrom: 'id_token',
+  scopes: [
+    'https://outlook.office.com/IMAP.AccessAsUser.All',
+    'https://outlook.office.com/SMTP.Send',
+    // Microsoft only issues a refresh token when offline_access is requested.
+    'offline_access',
+    'openid',
+    'email',
+    'profile',
+  ],
+  extraAuthParams: {
+    prompt: 'select_account',
+  },
+  tokenBodyFormat: 'form',
+  imap: { host: 'outlook.office365.com', port: 993, secure: true },
+  smtp: { host: 'smtp.office365.com', port: 587, secure: false },
 };
 
 // Sarv OAuth 2.1 + PKCE. The base URL can be swapped for the dev server
@@ -145,14 +186,15 @@ function cloneProviderConfig(cfg: OAuthProviderConfig): OAuthProviderConfig {
   return copy;
 }
 
-// microsoft/yahoo start from the Gmail template. They MUST be deep-cloned:
-// a bare `{ ...GMAIL }` leaves all three sharing one `scopes` array and one
+// yahoo starts from the Gmail template. It MUST be deep-cloned: a bare
+// `{ ...GMAIL }` leaves both sharing one `scopes` array and one
 // `imap`/`smtp`/`extraAuthParams` object, so touching Yahoo's imap host would
 // also move Gmail's.
 const REGISTRY: Record<OAuthProviderId, OAuthProviderConfig> = {
   gmail: GMAIL,
-  microsoft: { ...cloneProviderConfig(GMAIL), id: 'microsoft', label: 'Outlook / Microsoft 365', clientId: '' },
-  yahoo: { ...cloneProviderConfig(GMAIL), id: 'yahoo', label: 'Yahoo Mail', clientId: '' },
+  microsoft: MICROSOFT,
+  // revokeEndpoint cleared: Google's endpoint must never receive a Yahoo token.
+  yahoo: { ...cloneProviderConfig(GMAIL), id: 'yahoo', label: 'Yahoo Mail', clientId: '', revokeEndpoint: undefined },
   sarv: buildSarvProvider(),
 };
 

@@ -46,6 +46,7 @@ import {
   isTerminalOAuthError,
   isAccountGoneError,
   isRefreshDeferredError,
+  signOut,
 } from './oauth-service';
 import { listAccounts, getAccount } from './oauth-token-store';
 import {
@@ -344,6 +345,19 @@ export function rescheduleOAuthAccount(provider: OAuthProviderId, email: string)
   if (!started) return; // startOAuthRefreshScheduler() will pick it up
   failCounts.delete(keyFor(provider, email));
   void scheduleAccount(provider, email);
+}
+
+/**
+ * THE sign-out path (IPC sign-out and account removal both use it): cancel the
+ * refresh timer first so no refresh races the revocation, then delete the
+ * tokens locally and start revoking the grant at the provider (see `signOut`).
+ */
+export async function signOutOAuthAccount(
+  provider: OAuthProviderId,
+  email: string,
+): Promise<Awaited<ReturnType<typeof signOut>>> {
+  unscheduleOAuthAccount(provider, email);
+  return signOut(provider, email);
 }
 
 /** An account signed out / removed → cancel its refresh. */

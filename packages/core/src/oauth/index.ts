@@ -6,3 +6,4 @@ export * from './token-refresher';
 export * from './oauth-errors';
 export * from './sarv-catalog';
 export * from './scope-diff';
+export * from './id-token';
