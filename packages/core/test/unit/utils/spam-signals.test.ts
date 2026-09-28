@@ -231,8 +231,15 @@ describe('assessSpamSignals — plumbing a real client gets right', () => {
 describe('assessSpamSignals — bulk mail that breaks the bulk-mail rules', () => {
   it('scores declared bulk mail with no List-Unsubscribe 1', () => {
     expect(points(clean({ headers: withHeaders('List-Id: <blast.example>\r\n') }), 'bulk-no-unsubscribe')).toBe(1);
-    expect(points(clean({ headers: withHeaders('Feedback-ID: 1:2:3:campaign\r\n') }), 'bulk-no-unsubscribe')).toBe(1);
     expect(ids(clean({ headers: withHeaders('List-Id: <blast.example>\r\nList-Unsubscribe: <mailto:u@blast.example>\r\n') }))).toEqual([]);
+  });
+
+  // Regression (behaviour changed in mailguard 0.4.1, 2026-09-27): Feedback-ID
+  // names the sending pipe, not bulk mail — a bank alert or OTP through an ESP
+  // carries it with no unsubscribe, rightly. Axis Bank's genuine AutoPay notice
+  // gained this point on its way to being filed as spam.
+  it('does not score transactional mail that only carries a Feedback-ID', () => {
+    expect(ids(clean({ headers: withHeaders('Feedback-ID: 1:2:3:campaign\r\n') }))).not.toContain('bulk-no-unsubscribe');
   });
 
   it('scores a self-declared Precedence: junk 1', () => {
