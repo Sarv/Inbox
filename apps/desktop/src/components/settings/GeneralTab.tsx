@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { SignatureSettings } from './SignatureSettings';
+import { FAILED_MESSAGE, describeTestNotificationResult } from './test-notification-message';
 import type { SettingsTabProps } from './types';
 
 /** "HH:MM" (24h) time picker built from two clamped <select>s — no infinite
@@ -29,16 +30,9 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
   const sendTestNotification = async () => {
     setTestNotifMsg('Sending…');
     try {
-      const res = await window.electronAPI.notifications.test();
-      if (res?.success && res.supported) {
-        setTestNotifMsg('Sent. If nothing appears: check System Settings → Notifications for this app (Allow + Banners), turn off Focus/Do Not Disturb, and look in Notification Center (the app must not be the frontmost window).');
-      } else if (res && res.supported === false) {
-        setTestNotifMsg('This OS reports notifications are not available for the app.');
-      } else {
-        setTestNotifMsg(res?.error || 'Failed to send a test notification.');
-      }
+      setTestNotifMsg(describeTestNotificationResult(await window.electronAPI.notifications.test()));
     } catch (e) {
-      setTestNotifMsg((e as Error).message || 'Failed to send a test notification.');
+      setTestNotifMsg((e as Error).message || FAILED_MESSAGE);
     }
   };
   const applyLabelsToRecentMail = async () => {

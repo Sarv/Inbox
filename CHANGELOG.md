@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Test notification tells you when Focus is hiding it.** On macOS, while
+  Focus / Do Not Disturb is on, notifications go straight to Notification
+  Center with no banner, and the app can't tell. Settings → Test notification
+  used to say "Sent" anyway. Now it checks for a Focus you turned on yourself
+  and says so, with how to turn it off or allow Sarv Inbox through. A Focus
+  that starts on a schedule can't be detected yet, so the general checklist
+  still mentions it.
 - **Mail the spam filter just filed opens normally.** A message filed into
   Spam as it arrived briefly has no server ID, until the Spam folder next
   syncs. The app tried to download its body in that window, failed, and

@@ -1505,7 +1505,7 @@ export interface ElectronAPI {
   notifications: {
     setConfig: (config: unknown) => Promise<{ success: boolean; error?: string }>;
     /** `supported: false` = the OS reports notifications unavailable for the app. */
-    test: () => Promise<{ success: boolean; supported?: boolean; error?: string }>;
+    test: () => Promise<{ success: boolean; supported?: boolean; focus?: 'on' | 'off' | 'unknown'; error?: string }>;
     onOpenEmail: (cb: (data: { accountId: string; emailId: string }) => void) => () => void;
     onInApp: (cb: (data: InAppToast) => void) => () => void;
     onReauthRequired: (cb: (data: { provider: string; email: string; reason: string }) => void) => () => void;
