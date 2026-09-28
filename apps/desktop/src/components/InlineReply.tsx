@@ -19,8 +19,8 @@ import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
-import { parseAddresses } from '../utils/email-address';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
+import { replyRecipients } from '../utils/reply-recipients';
 import { reportSendFailure } from '../utils/send-failure';
 
 import { ComposeToolbar } from './ComposeToolbar';
@@ -152,26 +152,8 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
   const hasAIProvider = !!getDefaultProvider();
 
   // Calculate initial recipients based on mode
-  const getInitialRecipients = () => {
-    if (mode === 'reply') {
-      return {
-        to: replyToEmail.fromAddress,
-        cc: '',
-      };
-    } else {
-      // Reply All
-      const myEmail = imapConfig?.username || '';
-      const allRecipients = [
-        ...parseAddresses(replyToEmail.toAddress),
-        ...parseAddresses(replyToEmail.ccAddress),
-      ].filter(e => e && e.toLowerCase() !== myEmail.toLowerCase() && e.toLowerCase() !== replyToEmail.fromAddress.toLowerCase());
-
-      return {
-        to: replyToEmail.fromAddress,
-        cc: allRecipients.join(', '),
-      };
-    }
-  };
+  const getInitialRecipients = () =>
+    replyRecipients(replyToEmail, mode, imapConfig?.username || '');
 
   // Initialize recipients when mode changes (skip if restoring from draft)
   const draftUsedRef = useRef(!!draft);
