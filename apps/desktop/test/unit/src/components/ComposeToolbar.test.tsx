@@ -112,3 +112,68 @@ describe('ComposeToolbar send later', () => {
     view.unmount();
   });
 });
+
+// The follow-up bell: "remind me if nobody replies". What breaks: a pick that
+// never reaches the composer (no reminder is recorded on send), a custom date
+// typed into the bell that leaks into Send later's fields, or no way to turn
+// a reminder back off.
+describe('ComposeToolbar follow-up bell', () => {
+  const DAY = 86_400;
+  const bell = (view: ReturnType<typeof render>, label = 'Remind me if no reply') => labelled(view, label);
+  const button = (view: ReturnType<typeof render>, text: string) =>
+    within(view, 'button').find((candidate) => candidate.textContent?.includes(text)) ?? null;
+
+  it('hides the bell when the composer takes no reminder', () => {
+    const view = render(<ComposeToolbar {...props} />);
+    expect(bell(view)).toBeNull();
+    view.unmount();
+  });
+
+  // A preset arms a relative delay and closes the menu.
+  it('arms a preset delay', () => {
+    const onFollowUpChange = vi.fn();
+    const view = render(<ComposeToolbar {...props} onFollowUpChange={onFollowUpChange} />);
+    fire(bell(view), 'click');
+    fire(button(view, 'In 3 days'), 'click');
+    expect(onFollowUpChange).toHaveBeenCalledWith({ afterSeconds: 3 * DAY });
+    expect(button(view, 'In 3 days')).toBeNull();
+    view.unmount();
+  });
+
+  // A custom date arms an absolute time, in its own fields — never Send later's.
+  it('arms a picked date from its own reminder fields', () => {
+    const onFollowUpChange = vi.fn();
+    const view = render(<ComposeToolbar {...props} onFollowUpChange={onFollowUpChange} />);
+    fire(bell(view), 'click');
+    openCustom(view);
+    typeInto(labelled(view, 'Reminder date'), '2026-10-01');
+    typeInto(labelled(view, 'Reminder time'), '09:00');
+    fire(button(view, 'Set reminder'), 'click');
+    expect(onFollowUpChange).toHaveBeenCalledWith({ at: Math.floor(new Date(2026, 9, 1, 9, 0).getTime() / 1000) });
+    expect(labelled(view, 'Delivery date')).toBeNull();
+    view.unmount();
+  });
+
+  // An armed bell says what it will do and offers to turn it off.
+  it('shows the active reminder and can clear it', () => {
+    const onFollowUpChange = vi.fn();
+    const view = render(<ComposeToolbar {...props} followUp={{ afterSeconds: 2 * DAY }} onFollowUpChange={onFollowUpChange} />);
+    const armed = bell(view, 'Remind me if no reply in 2 days');
+    expect(armed?.getAttribute('aria-pressed')).toBe('true');
+    fire(armed, 'click');
+    fire(button(view, 'Don'), 'click');
+    expect(onFollowUpChange).toHaveBeenCalledWith(null);
+    expect(button(view, 'In 1 day')).toBeNull();
+    view.unmount();
+  });
+
+  // With nothing armed there is nothing to clear.
+  it('offers no "don\'t remind me" when no reminder is set', () => {
+    const view = render(<ComposeToolbar {...props} onFollowUpChange={vi.fn()} />);
+    fire(bell(view), 'click');
+    expect(button(view, 'Don')).toBeNull();
+    clickAway();
+    expect(button(view, 'In 1 day')).toBeNull();
+    view.unmount();
+  });
+});

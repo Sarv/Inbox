@@ -1,9 +1,12 @@
-import { ChevronDown, Loader2, Paperclip, Send, Trash2, Wand2, BellRing } from 'lucide-react';
+import type { SendFollowUpRequest } from '@sarvinbox/core';
+import { Bell, BellDot, ChevronDown, Loader2, Paperclip, Send, Trash2, Wand2, BellRing } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
 import { useClickAway } from '../hooks/useClickAway';
 import { useSendLaterDraft } from '../hooks/useSendLaterDrafts';
+import { describeFollowUp } from '../utils/follow-up-presets';
 
+import { FollowUpDropdown } from './FollowUpDropdown';
 import { SendLaterDropdown } from './SendLaterDropdown';
 import { Tooltip } from './Tooltip';
 export interface ComposeToolbarProps {
@@ -26,6 +29,9 @@ export interface ComposeToolbarProps {
     /** Read-receipt (MDN) toggle. Only rendered when a handler is provided. */
     readReceipt?: boolean;
     onToggleReadReceipt?: () => void;
+    /** "Remind me if nobody replies". Only rendered when a handler is provided. */
+    followUp?: SendFollowUpRequest | null;
+    onFollowUpChange?: (value: SendFollowUpRequest | null) => void;
 }
 
 // OS specific modifier key for tooltips
@@ -46,6 +52,8 @@ export function ComposeToolbar({
     isForward = false,
     readReceipt = false,
     onToggleReadReceipt,
+    followUp = null,
+    onFollowUpChange,
 }: ComposeToolbarProps) {
     const [showSendLater, setShowSendLater] = useState(false);
     // Held HERE, not in the menu: the menu unmounts on a click outside, and a
@@ -57,6 +65,14 @@ export function ComposeToolbar({
 
     // Click-away, so the menu can't be left open behind the composer.
     useClickAway(sendLaterRef, showSendLater, closeSendLater);
+
+    const [showFollowUp, setShowFollowUp] = useState(false);
+    // Its own draft, so a half-typed reminder date never shows up as a delivery time.
+    const { draft: followUpDraft, update: updateFollowUpDraft } = useSendLaterDraft();
+    const followUpRef = useRef<HTMLDivElement>(null);
+    const closeFollowUp = useCallback(() => setShowFollowUp(false), []);
+    useClickAway(followUpRef, showFollowUp, closeFollowUp);
+    const followUpSummary = describeFollowUp(followUp);
 
     const sendDisabled = sending || (!isForward && !plainBody.trim()) || !hasRecipients;
 
@@ -100,6 +116,32 @@ export function ComposeToolbar({
                         </div>
                     )}
                 </div>
+
+                {onFollowUpChange && (
+                    <div className="relative flex" ref={followUpRef}>
+                        {/* Icon-only control: tooltip + aria-label, 40ms so it reads as instant. */}
+                        <Tooltip content={followUpSummary ?? 'Remind me if no reply'} position="top" delayMs={40} hidden={showFollowUp}>
+                            <button
+                                onClick={() => setShowFollowUp((open) => !open)}
+                                aria-label={followUpSummary ?? 'Remind me if no reply'}
+                                aria-expanded={showFollowUp}
+                                aria-pressed={!!followUp}
+                                className={`p-1.5 rounded-md transition-colors ${followUp ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground'}`}
+                            >
+                                {followUp ? <BellDot className="h-4 w-4" /> : <Bell className="h-4 w-4" />}
+                            </button>
+                        </Tooltip>
+                        {showFollowUp && (
+                            <FollowUpDropdown
+                                value={followUp}
+                                onChange={onFollowUpChange}
+                                onClose={closeFollowUp}
+                                draft={followUpDraft}
+                                onDraftChange={updateFollowUpDraft}
+                            />
+                        )}
+                    </div>
+                )}
 
                 {hasAIProvider && (
                     <Tooltip content="Polish with AI" position="top">

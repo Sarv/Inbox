@@ -1,3 +1,4 @@
+import type { SendFollowUpRequest } from '@sarvinbox/core';
 import {
   X,
   Paperclip,
@@ -155,6 +156,8 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
   const signatureHtml = useMemo(() => getSignature(mode === 'new' ? 'new' : 'reply', mode === 'new' ? undefined : (replyToEmail as any)?.accountId), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
   const [isMinimized, setIsMinimized] = useState(false);
   const [readReceipt, setReadReceipt] = useState(false);
+  // Armed by the toolbar bell; recorded by the main process once the send succeeds.
+  const [followUp, setFollowUp] = useState<SendFollowUpRequest | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [dontAskDiscard, setDontAskDiscard] = useState(false);
@@ -395,6 +398,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         // Send-as identity/alias header From within that account (undefined = default).
         from: resolvedFrom,
         requestReadReceipt: readReceipt,
+        followUp: followUp ?? undefined,
         attachments: attachments.map(a => ({ ...a, filename: a.filename || a.name || 'attachment' })) as any,
         draftCleanup: {
           threadId: (draft as any)?.threadId,
@@ -723,6 +727,8 @@ ${createQuotedHeader(prefix, extraInfo)}
             isForward={mode === 'forward'}
             readReceipt={readReceipt}
             onToggleReadReceipt={() => setReadReceipt((v) => !v)}
+            followUp={followUp}
+            onFollowUpChange={setFollowUp}
             // One send path, not two: the toolbar calls the same handler the
             // Cmd+Enter shortcut does, so a change to either can't skip one.
             onSend={() => { void handleSend(); }}
@@ -954,6 +960,8 @@ ${createQuotedHeader(prefix, extraInfo)}
         isForward={mode === 'forward'}
         readReceipt={readReceipt}
         onToggleReadReceipt={() => setReadReceipt((v) => !v)}
+        followUp={followUp}
+        onFollowUpChange={setFollowUp}
         onSend={() => { void handleSend(); }}
         onSendLater={(sendAt) => { void handleSend(sendAt); }}
         onAttach={handleAttach}

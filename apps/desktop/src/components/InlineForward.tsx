@@ -1,3 +1,4 @@
+import type { SendFollowUpRequest } from '@sarvinbox/core';
 import {
   MoreHorizontal,
   Sparkles,
@@ -142,6 +143,9 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Armed by the toolbar bell; recorded by the main process once the send succeeds.
+  const [followUp, setFollowUp] = useState<SendFollowUpRequest | null>(null);
+
   const handleSend = async () => {
     // Merge committed emails with any pending typed text that looks like an email
     const mergeEmails = (committed: string, pending: string) => {
@@ -182,6 +186,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         body: plainBody,
         htmlBody: fullHtml,
         inReplyTo: forwardEmail.id,
+        followUp: followUp ?? undefined,
         attachments: attachments.map((a: AttachmentFile) => ({ ...a, filename: a.filename || 'attachment' })) as any,
         accountId: forwardAccountId,
         ...(ownedDraftId ? { draftCleanup: { messageId: ownedDraftId, accountId: forwardAccountId } } : {}),
@@ -398,6 +403,8 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         }}
         onDiscard={handleDiscard}
         isInline={true}
+        followUp={followUp}
+        onFollowUpChange={setFollowUp}
       />
 
       {/* Attachment list */}

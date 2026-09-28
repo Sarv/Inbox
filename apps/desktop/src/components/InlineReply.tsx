@@ -1,3 +1,4 @@
+import type { SendFollowUpRequest } from '@sarvinbox/core';
 import {
   Reply,
   ReplyAll,
@@ -213,6 +214,9 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Armed by the toolbar bell; recorded by the main process once the send succeeds.
+  const [followUp, setFollowUp] = useState<SendFollowUpRequest | null>(null);
+
   // Override handleSend for inline specifically
   const handleSend = async () => {
     // Merge committed emails with any pending typed text that looks like an email
@@ -291,6 +295,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
           : replyToEmail.id,
         // Send AS the account that owns this mail (unified "All Inboxes" replies).
         accountId: replyAccountId,
+        followUp: followUp ?? undefined,
         attachments: attachments.map((a: AttachmentFile) => ({ ...a, filename: a.filename || 'attachment' })) as any,
         draftCleanup: {
           threadId: (replyToEmail as any).threadId,
@@ -654,6 +659,8 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
         }}
         onDiscard={handleDismiss}
         isInline={true}
+        followUp={followUp}
+        onFollowUpChange={setFollowUp}
       />
 
       {/* Attachment list */}
