@@ -6,6 +6,9 @@ Every statement below describes what the code does at the time of writing.
 If a behaviour changes, update this file in the same change. Google's reviewers
 compare the policy against the app, and a mismatch fails verification.
 Items marked [CONFIRM] need a business answer before publishing.
+The AI consent prompt, crash-report scrubbing and opt-out, opt-in Gravatar, and
+token revocation on removal described below shipped with this draft; keep the
+text in step with them.
 -->
 
 # Sarv Inbox Privacy Policy
@@ -88,9 +91,9 @@ AI search) work by sending parts of your mail to the AI provider you choose. **N
 mail is sent to any AI provider until you connect one.**
 
 - **Which provider:** Sarv AI, or your own account with OpenAI, Google Gemini or
-  another OpenAI-compatible service. Signing in with Sarv makes Sarv AI your AI
-  provider. [CONFIRM: add a consent step at that point; see the note to
-  maintainers.]
+  another OpenAI-compatible service. Signing in with Sarv does not turn Sarv AI
+  on by itself: the app first asks "Let Sarv AI read your new mail?", and
+  nothing is sent unless you agree (or choose a Sarv AI model yourself).
 - **What is sent:** depending on the feature:
   - the sender, recipients, subject and date of a message, and part of its
     text (the first 1,000 characters, for sorting);
@@ -125,13 +128,13 @@ Inc.), which we use to find and fix bugs. A report can contain:
   same installation;
 - a trail of recent app activity, such as connection and sync steps.
 
-[CONFIRM: once addresses are removed from these reports, say so here. Until
-then this sentence must stay:] That activity trail can include email addresses
-of senders. Reports do not include message bodies or attachments. A native
-crash can include a snapshot of app memory at the moment of the crash.
+Email addresses are removed from reports before they leave your device, and
+web addresses are sent without their query strings. Reports do not include
+message bodies or attachments. A native crash can include a snapshot of app
+memory at the moment of the crash.
 
-[CONFIRM: add "You can turn crash reports off in Settings → …" once that setting
-exists.]
+You can turn crash reports off in Settings → General → Send crash reports. When
+off, nothing is sent, including reports of crashes that happened earlier.
 
 ### 4.3 Spam and phishing protection
 
@@ -149,10 +152,10 @@ shared with Sarv to improve protection for all users. Both are off by default.
 
 ### 4.4 Sender pictures and logos
 
-To show a picture next to a contact, the app asks Gravatar (Automattic Inc.)
-whether a picture exists for that address. It sends a one-way MD5 hash of the
-email address, never the address itself. [CONFIRM: add a setting to turn this
-off, then document it here.]
+Only if you turn on **Contact photos from Gravatar** (Settings → General; off by
+default), the app asks Gravatar (Automattic Inc.) whether a picture exists for
+each contact. It sends a one-way MD5 hash of the email address, never the
+address itself.
 
 To show a company logo, the app looks up the sender domain's published brand
 logo (BIMI) and website icon, directly from that domain. You can turn these
@@ -192,10 +195,10 @@ the AI requests described above, and your account details under the
 Your mail stays on your device for as long as the account is connected in the
 app.
 
-- **Remove an account:** Settings → Accounts removes it and deletes that
-  account's local mail database. [CONFIRM: tokens are only deleted locally, and
-  only for the currently selected account. Fix, then keep this text:] Its sign-in
-  tokens are deleted from your device.
+- **Remove an account:** Settings → Accounts removes it, deletes that
+  account's local mail database and its sign-in tokens, and, for Google
+  accounts, revokes the app's access at Google. Microsoft has no way for an app
+  to revoke its own access, so for Outlook accounts also use the link below.
 - **Revoke access:** you can revoke the app's access at any time, whether or not
   it is installed:
   - Google: <https://myaccount.google.com/permissions>
