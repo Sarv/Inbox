@@ -1,14 +1,24 @@
 <!--
-DRAFT: not legal advice. Have counsel review before publishing.
-Publish at: https://sarv.com/inbox/privacy (must be on the domain verified for
-the Google Cloud project, and linked from the app's homepage).
-Every statement below describes what the code does at the time of writing.
-If a behaviour changes, update this file in the same change. Google's reviewers
+FOR THE WEB TEAM: publishing notes (delete this comment block before publishing).
+
+- Publish this page at https://sarv.com/inbox/privacy-policy (or another URL on
+  sarv.com; the domain must be the one verified for the Google Cloud project).
+- Link it from the Sarv Inbox homepage AND from https://sarv.com/privacy-policy
+  (add a line there: "For the Sarv Inbox app, see the Sarv Inbox Privacy
+  Policy"). Google's reviewers check both.
+- Do NOT rely on https://sarv.com/privacy-policy alone: it covers only the
+  website, says nothing about Gmail data, and its general sharing/marketing/
+  caching terms conflict with Google's Limited Use rules. This page's
+  precedence clause (Introduction) is what keeps those terms off Google data.
+- The exact same URL goes into Google Cloud Console → Branding → Privacy policy.
+- Keep the "Limited Use" sentence in section 3 word for word; Google requires it.
+- Replace every [CONFIRM: …] with the real answer. A published placeholder fails
+  Google's review. Have counsel review before publishing (this is a draft, not
+  legal advice).
+
+FOR DEVELOPERS: every statement below describes what the code does. If a
+behaviour changes, update this file in the same change; Google's reviewers
 compare the policy against the app, and a mismatch fails verification.
-Items marked [CONFIRM] need a business answer before publishing.
-The AI consent prompt, crash-report scrubbing and opt-out, opt-in Gravatar, and
-token revocation on removal described below shipped with this draft; keep the
-text in step with them.
 -->
 
 # Sarv Inbox Privacy Policy
@@ -20,7 +30,12 @@ published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
 Industrial Area, Sitapura, Jaipur, Rajasthan 302022, India.
 
 This policy explains what information the app handles, where it goes, and the
-choices you have. The short version: **your mail is stored on your own computer,
+choices you have. It applies to the Sarv Inbox app. Sarv's general
+[Privacy Policy](https://sarv.com/privacy-policy) covers Sarv's website and other
+services; **where the two differ, this policy governs everything Sarv Inbox
+handles, including all data received from Google APIs**, and nothing in the
+general policy permits any use or sharing of that data beyond what is described
+here. The short version: **your mail is stored on your own computer,
 encrypted. We do not run a server that stores or syncs your mail. We do not sell
 your data, show you ads, or use your mail to train AI models.**
 
@@ -181,7 +196,7 @@ the rest it asks first. You can change this in Settings.
 
 If you sign in with a Sarv account, Sarv processes your mailbox (for Sarv Mail),
 the AI requests described above, and your account details under the
-[Sarv privacy policy](https://sarv.com/privacy) [CONFIRM: URL].
+[Sarv privacy policy](https://sarv.com/privacy-policy).
 
 ## 5. What we do not do
 
@@ -221,8 +236,9 @@ support@sarv.com with the subject "[Sarv Inbox] Security".
 
 ## 8. Children
 
-The app is not directed to children under 13 (or the minimum age in your
-country), and we do not knowingly collect their data.
+Sarv Inbox is not intended for or directed to persons under the age of 18, in
+line with Sarv's general Privacy Policy, and we do not knowingly collect their
+data.
 
 ## 9. Your rights
 
