@@ -11,6 +11,11 @@
  * renderer processes, so identity/tags/breadcrumbs set here are attached to
  * renderer events too — we don't have to duplicate them in the renderer.
  *
+ * Privacy: every event and breadcrumb passes through filterEvent /
+ * filterBreadcrumb — dropped entirely when the user turned crash reports off,
+ * otherwise scrubbed of email addresses and URL query strings (see
+ * telemetry-scrub in core). Mailbox data must never reach Sentry.
+ *
  * The DSN comes from SARVINBOX_SENTRY_DSN, baked at build time by Vite's
  * `define` (see vite.config.ts) and also present in process.env in dev via the
  * repo-root .env. A Sentry DSN is public by design (safe to embed in a shipped
@@ -18,14 +23,48 @@
  */
 import { createHash } from 'crypto';
 
-import { setLogSink, type LogLevel } from '@sarvinbox/core';
+import { scrubBreadcrumb, scrubEvent, setLogSink, type LogLevel } from '@sarvinbox/core';
 import { setSlowQueryReporter, type SlowQueryEvent } from '@sarvinbox/storage-node';
 import * as Sentry from '@sentry/electron/main';
 import { app } from 'electron';
 
+import { readCrashReportsEnabled, writeCrashReportsEnabled } from './services/crash-report-pref';
 import { redactSecrets } from './utils/file-logger';
 
 let sentryEnabled = false;
+/**
+ * The user's "Send crash reports" choice. Sentry is still initialised when it
+ * is off (so turning it back on needs no restart), but every event and
+ * breadcrumb is dropped in beforeSend/beforeBreadcrumb — nothing is queued or
+ * sent, including native crash reports uploaded on the next launch.
+ */
+let reportingAllowed = true;
+
+/** Apply and persist the user's choice. */
+export function setCrashReportsEnabled(enabled: boolean): void {
+  reportingAllowed = enabled;
+  writeCrashReportsEnabled(enabled);
+}
+
+export function crashReportsEnabled(): boolean {
+  return reportingAllowed;
+}
+
+/**
+ * The single filter every outgoing breadcrumb passes through: dropped when the
+ * user opted out, otherwise email addresses redacted and URL queries stripped.
+ * Exported for tests.
+ */
+export function filterBreadcrumb<T extends Sentry.Breadcrumb>(crumb: T): T | null {
+  return reportingAllowed ? scrubBreadcrumb(crumb) : null;
+}
+
+/** The single filter every outgoing event passes through. Exported for tests. */
+export function filterEvent<T extends Sentry.ErrorEvent>(event: T, originalException?: unknown): T | null {
+  if (!reportingAllowed) return null;
+  if (isTransientConnectionError(originalException)) return null;
+  return scrubEvent(event);
+}
 
 // Slow-query telemetry → Sentry. The DB layer logs anything ≥ 40ms to the
 // console (local dev); we only forward the genuinely-bad ones to Sentry, and
@@ -44,9 +83,18 @@ function reportSlowQueryToSentry(e: SlowQueryEvent): void {
   Sentry.captureMessage(`Slow query: ${e.label}`, {
     level: 'warning',
     tags: { slow_query: e.label },
-    // All non-PII: timing, counts, and the folder path / filter from meta.
-    extra: { ms: e.ms, rows: e.rows, totalEmails: e.totalEmails, ...e.meta },
+    // Numbers and flags only: string meta can be a folder path, and folder
+    // names are the user's own (often people's names).
+    extra: { ms: e.ms, rows: e.rows, totalEmails: e.totalEmails, ...numericMeta(e.meta) },
   });
+}
+
+function numericMeta(meta: Record<string, unknown> | undefined): Record<string, number | boolean> {
+  const out: Record<string, number | boolean> = {};
+  for (const [k, v] of Object.entries(meta ?? {})) {
+    if (typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+  }
+  return out;
 }
 
 // Transient network blips are logged as breadcrumbs (so the trail is kept) but
@@ -111,6 +159,7 @@ export function captureFatal(error: unknown, tag?: string): void {
 export function initSentryMain(): void {
   const dsn = process.env.SARVINBOX_SENTRY_DSN;
   if (!dsn) return; // inert without a DSN — nothing is sent
+  reportingAllowed = readCrashReportsEnabled();
 
   Sentry.init({
     dsn,
@@ -121,10 +170,10 @@ export function initSentryMain(): void {
     // Keep a long trail so the full reconnect ladder survives in breadcrumbs
     // (default 100 can be exhausted by a chatty sync burst before a crash).
     maxBreadcrumbs: 300,
-    beforeSend(event, hint) {
-      if (isTransientConnectionError(hint?.originalException)) return null;
-      return event;
-    },
+    // Never attach IP address, cookies or other default PII.
+    sendDefaultPii: false,
+    beforeBreadcrumb: (crumb) => filterBreadcrumb(crumb),
+    beforeSend: (event, hint) => filterEvent(event, hint?.originalException),
   });
 
   sentryEnabled = true;

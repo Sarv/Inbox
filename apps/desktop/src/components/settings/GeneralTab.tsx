@@ -323,6 +323,27 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
 
         <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
           <div>
+            <div className="font-medium">Send crash reports</div>
+            <div className="text-sm text-muted-foreground">
+              When the app hits an error, send a report to Sarv so it can be fixed. Reports carry the error, app version
+              and operating system — email addresses are removed and message contents are never included.
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.crashReports !== false}
+                onChange={(e) => updateSetting('crashReports', e.target.checked)}
+                className="w-4 h-4"
+              />
+              <span className="text-sm whitespace-nowrap">Send crash reports</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
+          <div>
             <div className="font-medium">Mirror AI categories to my mailbox</div>
             <div className="text-sm text-muted-foreground">
               Show your AI categories as labels in your provider (Gmail, sarv webmail, other clients).

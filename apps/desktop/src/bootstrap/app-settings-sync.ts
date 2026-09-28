@@ -105,7 +105,7 @@ function initAppSettingsSync(): void {
   localStorage.setItem = function patchedSetItem(key: string, value: string): void {
     nativeSet(key, value);
     if (MANAGED.has(key)) { try { void api.set(key, value); } catch { /* ignore */ } }
-    if (key === 'sarvinbox-settings') { pushBacklogCap(value); pushSenderIdentityPolicy(value); }
+    if (key === 'sarvinbox-settings') { pushBacklogCap(value); pushSenderIdentityPolicy(value); pushCrashReportPref(value); }
   };
   localStorage.removeItem = function patchedRemoveItem(key: string): void {
     nativeRemove(key);
@@ -156,9 +156,23 @@ function pushSenderIdentityPolicy(rawSettings: string | null): void {
   } catch { /* a malformed settings blob must not break boot */ }
 }
 
+/**
+ * Mirror "Send crash reports" into main, which owns Sentry delivery and
+ * persists the choice for the next launch. Only an explicit false opts out.
+ */
+function pushCrashReportPref(rawSettings: string | null): void {
+  try {
+    const parsed = rawSettings ? JSON.parse(rawSettings) : null;
+    if (!parsed || typeof parsed !== 'object') return;
+    void Promise.resolve((window as any)?.electronAPI?.diagnostics?.setCrashReports?.(parsed.crashReports !== false))
+      .catch(() => { /* best-effort */ });
+  } catch { /* a malformed settings blob must not break boot */ }
+}
+
 initAppSettingsSync();
 // Boot push: main persists the cap, but a profile restored from the DB (or a
 // value changed while main was down) would otherwise not reach it until the
 // next time the user opened Settings.
 try { pushBacklogCap(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
 try { pushSenderIdentityPolicy(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
+try { pushCrashReportPref(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }

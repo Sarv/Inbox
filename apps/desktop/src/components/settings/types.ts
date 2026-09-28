@@ -40,6 +40,9 @@ export interface AppSettings {
   /** Ask Gravatar for contacts' photos (sends a hash of each contact's address
    *  to Gravatar). Opt-in: off unless the user turns it on. */
   contactGravatar: boolean;
+  /** Send crash and error reports (addresses removed) so bugs can be fixed.
+   *  On unless the user turns it off. */
+  crashReports: boolean;
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
    *  have no labels/keywords (Outlook, Yahoo, …): copy = keep in Inbox + a
@@ -114,6 +117,7 @@ export const defaultSettings: AppSettings = {
   senderLogos: true,
   senderFavicons: true,
   contactGravatar: false,
+  crashReports: true,
   categoryLabels: { enabled: true, folderMode: 'copy' },
   inboxType: 'priority_first',
   showImportanceMarkers: true,

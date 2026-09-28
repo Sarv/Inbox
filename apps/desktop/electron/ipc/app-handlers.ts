@@ -9,6 +9,9 @@ import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
 import { ipcMain, shell } from 'electron';
+
+import { crashReportsEnabled, setCrashReportsEnabled } from '../sentry';
+
 const logger = createLogger('app-handlers');
 
 // Read version from package.json
@@ -35,6 +38,21 @@ function isSafeExternalUrl(url: string): boolean {
 }
 
 export function registerAppHandlers(): void {
+  // Settings → General → Send crash reports. Applied at once and persisted for
+  // the next launch (Sentry reads it before the window exists).
+  ipcMain.handle('diagnostics:getCrashReports', () => ({ success: true, data: crashReportsEnabled() }));
+  ipcMain.handle('diagnostics:setCrashReports', (_event, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') return { success: false, error: 'enabled must be a boolean' };
+    try {
+      setCrashReportsEnabled(enabled);
+      logger.info(`[Diagnostics] crash reports ${enabled ? 'enabled' : 'disabled'}`);
+      return { success: true };
+    } catch (error) {
+      logger.warn('[Diagnostics] crash-report preference not saved:', (error as Error).message);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
   /**
    * Get app version from package.json
    */

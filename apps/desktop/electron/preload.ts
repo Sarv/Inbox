@@ -345,6 +345,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // Crash/error reporting consent (Settings → General → Send crash reports).
+  diagnostics: {
+    getCrashReports: () => ipcRenderer.invoke('diagnostics:getCrashReports'),
+    setCrashReports: (enabled: boolean) => ipcRenderer.invoke('diagnostics:setCrashReports', enabled),
+  },
+
   // Sender identity: the domain's BIMI logo / verified mark, its favicon, and the
   // contact's confirmed photo — cached in main, never fetched by the renderer.
   identity: {
@@ -1259,6 +1265,10 @@ export interface ElectronAPI {
     kickHeaderBackfill: () => Promise<{ success: boolean; data?: HeaderBackfillState; error?: string }>;
     /** Subscribe to backfill progress. Returns an unsubscribe fn. */
     onHeaderBackfillProgress: (cb: (state: HeaderBackfillState) => void) => () => void;
+  };
+  diagnostics: {
+    getCrashReports: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
+    setCrashReports: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   };
   identity: {
     getSender: (address: string) => Promise<{ success: boolean; data?: SenderIdentity; error?: string }>;
