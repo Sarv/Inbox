@@ -15,7 +15,7 @@
 import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
-import { accountIdFor, oauthImapPreset, createLogger } from '@sarvinbox/core';
+import { accountIdFor, oauthImapPreset, createLogger, type OAuthProviderId } from '@sarvinbox/core';
 import { app } from 'electron';
 
 
@@ -56,6 +56,24 @@ export interface RegistryAccount {
   includeInUnified?: boolean;
   backgroundSync?: boolean;
   notify?: boolean;
+}
+
+const OAUTH_PROVIDERS: readonly OAuthProviderId[] = ['gmail', 'microsoft', 'yahoo', 'sarv'];
+
+/**
+ * The OAuth grant a registry account signs in with — `{ provider, email }` as
+ * the oauth-token-store keys it — or null for a password account (or a config
+ * too malformed to trust; sign-out must never act on a guess).
+ */
+export function oauthIdentityOf(
+  account: Pick<RegistryAccount, 'imapConfig'> | undefined,
+): { provider: OAuthProviderId; email: string } | null {
+  const cfg = account?.imapConfig;
+  if (!cfg || cfg.authMethod !== 'oauth2') return null;
+  const provider = cfg.oauthProvider as OAuthProviderId;
+  const email = typeof cfg.username === 'string' ? cfg.username : '';
+  if (!OAUTH_PROVIDERS.includes(provider) || !email) return null;
+  return { provider, email };
 }
 
 // Secret fields that must NEVER be written to the registry (they live in the

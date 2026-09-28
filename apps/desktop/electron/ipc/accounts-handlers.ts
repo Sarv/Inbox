@@ -22,6 +22,7 @@ import { ipcMain } from 'electron';
 
 import {
   listRegistryAccounts,
+  oauthIdentityOf,
   readRegistryAccounts,
   upsertRegistryAccounts,
   removeRegistryAccount,
@@ -33,6 +34,7 @@ import {
   type RegistryAccount,
 } from '../services/accounts-registry';
 import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accountInboxUnread, rekeyAccount, deleteAccountData, legacyDbExists, cleanupOrphanedAccountDbs } from '../services/accounts-runtime';
+import { signOutOAuthAccount } from '../services/oauth-refresh-scheduler';
 import { rebindOutboxStorage } from '../services/outbox-service';
 import { noteAppSettingChanged } from '../services/reputation-service';
 import { disablePipelineAIIfProviderRemoved } from '../services/unified-pipeline-service';
@@ -158,6 +160,9 @@ export function registerAccountsHandlers(): void {
   ipcMain.handle('accounts:remove', async (_event, accountId: string) => {
     try {
       if (!accountId) return { success: false, error: 'No accountId provided' };
+      // Read BEFORE the registry row is dropped: it is the only record of which
+      // OAuth grant this mailbox used.
+      const removedOAuth = oauthIdentityOf(listRegistryAccounts().find((a) => a.id === accountId));
       await deleteAccountData(accountId);
       // Drop it from the durable registry too, so it doesn't reappear on the
       // next hydrate/seed.
@@ -187,6 +192,31 @@ export function registerAccountsHandlers(): void {
       // categorization would now throw "No OAuth account" forever — disable AI
       // cleanly and surface it instead. Best-effort; no-op for API-key providers
       // or when the provider account is still present.
+      // Sign the removed mailbox's OAuth grant out: delete its tokens and revoke
+      // it at the provider. Any removed account, not just the active one — the
+      // renderer used to do this only for the active account, leaving a removed
+      // background account's refresh token on disk and its grant live.
+      // Skipped when another mailbox still uses the same grant, or when the
+      // registry can't be read (unknown ≠ unused: never revoke on a guess).
+      // The local token delete IS awaited (the AI revalidation below must see the
+      // grant gone); the network revocation is not — it must not hold the
+      // "Deleting…" state.
+      if (removedOAuth) {
+        let stillUsed = true;
+        try {
+          stillUsed = readRegistryAccounts().some((a) => {
+            const o = oauthIdentityOf(a);
+            return o?.provider === removedOAuth.provider && o.email === removedOAuth.email;
+          });
+        } catch (e) {
+          logger.warn('[Accounts] OAuth sign-out after removal SKIPPED (registry unreadable):', (e as Error).message);
+        }
+        if (!stillUsed) {
+          try { await signOutOAuthAccount(removedOAuth.provider, removedOAuth.email); }
+          catch (e) { logger.warn('[Accounts] OAuth sign-out after removal failed:', (e as Error).message); }
+        }
+      }
+
       try { await disablePipelineAIIfProviderRemoved(); }
       catch (e) { logger.warn('[Accounts] AI provider revalidation after removal failed:', (e as Error).message); }
 

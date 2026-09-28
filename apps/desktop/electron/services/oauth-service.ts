@@ -25,6 +25,7 @@ import {
   isOAuthProviderConfigured,
   OAuthError,
   refreshAccessToken,
+  revokeToken,
   isTerminalOAuthError,
   SARV_PRODUCTION_CLIENT_ID,
   scopesLost,
@@ -37,6 +38,7 @@ import {
   type OAuthProviderId,
   type OAuthProviderConfig,
   type OAuthUserInfo,
+  type RevokeOutcome,
   type IMAPConfig,
   createLogger,
 } from '@sarvinbox/core';
@@ -501,8 +503,27 @@ function decodeJwtClaims(token: string): { exp?: number; iat?: number } | null {
   return { exp, iat };
 }
 
-export async function signOut(providerId: OAuthProviderId, email: string): Promise<void> {
+/**
+ * Sign out: forget the tokens on this device (awaited, so they are gone before
+ * this resolves, even if the provider is unreachable), then revoke the grant at
+ * the provider where it supports RFC 7009 (Google). The revocation is handed
+ * back as its own promise so a caller can finish its own work without waiting
+ * on a network round-trip. It never rejects: a 'failed' outcome is logged and
+ * the user can still revoke from their account page (see the privacy policy).
+ */
+export async function signOut(
+  providerId: OAuthProviderId,
+  email: string,
+): Promise<{ revocation: Promise<RevokeOutcome | 'no-account'> }> {
+  const account = await getAccount(providerId, email);
   await removeAccount(providerId, email);
+  if (!account) return { revocation: Promise.resolve('no-account') };
+  const revocation = revokeToken({ provider: getOAuthProvider(providerId), token: account.refreshToken })
+    .then((outcome) => {
+      logger.info(`[OAuth] ${providerId}:${email} signed out — revocation ${outcome}`);
+      return outcome;
+    });
+  return { revocation };
 }
 
 export async function listSignedInAccounts(): Promise<OAuthAccount[]> {

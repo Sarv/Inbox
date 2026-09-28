@@ -17,6 +17,9 @@ const GMAIL: OAuthProviderConfig = {
   clientSecret: undefined,
   authEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenEndpoint: 'https://oauth2.googleapis.com/token',
+  // Revoking the refresh token ends the whole grant: the app disappears from
+  // the user's Google "Third-party apps with account access" list.
+  revokeEndpoint: 'https://oauth2.googleapis.com/revoke',
   userInfoEndpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
   scopes: [
     'https://mail.google.com/',
@@ -46,6 +49,9 @@ const MICROSOFT: OAuthProviderConfig = {
   clientSecret: undefined,
   authEndpoint: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
   tokenEndpoint: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+  // No revokeEndpoint: Microsoft has no RFC 7009 endpoint for public clients.
+  // Sign-out deletes the tokens locally; the user revokes consent at
+  // account.live.com/consent/Manage (see the privacy policy).
   // Never called: an access token is minted for ONE resource, and ours is for
   // outlook.office.com (IMAP/SMTP), so Graph's userinfo would answer 401.
   // Identity comes from the id_token instead (identityFrom below).
@@ -187,7 +193,8 @@ function cloneProviderConfig(cfg: OAuthProviderConfig): OAuthProviderConfig {
 const REGISTRY: Record<OAuthProviderId, OAuthProviderConfig> = {
   gmail: GMAIL,
   microsoft: MICROSOFT,
-  yahoo: { ...cloneProviderConfig(GMAIL), id: 'yahoo', label: 'Yahoo Mail', clientId: '' },
+  // revokeEndpoint cleared: Google's endpoint must never receive a Yahoo token.
+  yahoo: { ...cloneProviderConfig(GMAIL), id: 'yahoo', label: 'Yahoo Mail', clientId: '', revokeEndpoint: undefined },
   sarv: buildSarvProvider(),
 };
 

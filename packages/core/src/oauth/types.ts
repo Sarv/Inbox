@@ -27,6 +27,12 @@ export interface OAuthProviderConfig {
   clientSecret?: string;
   authEndpoint: string;
   tokenEndpoint: string;
+  /**
+   * RFC 7009 revocation endpoint, called on sign-out so the provider forgets
+   * the grant instead of only this device forgetting the token. Absent when
+   * the provider has none for this client type (Microsoft public clients).
+   */
+  revokeEndpoint?: string;
   userInfoEndpoint: string;
   /**
    * Where the signed-in user's email/name come from. 'userinfo' (default)
