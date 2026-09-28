@@ -6,7 +6,7 @@
 
 import * as fs from 'fs';
 
-import { fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
 import { ipcMain, dialog, shell } from 'electron';
 import ICAL from 'ical.js';
 
@@ -642,8 +642,17 @@ export function registerEmailHandlers(): void {
       }
 
       const folder = await storage.getFolder(email.folderId);
-      if (!folder || !email.uid) {
+      if (!folder) {
         return failed('Cannot determine folder/UID');
+      }
+      // No UID yet: a local-first move (the spam filter or a rule at ingest, or a
+      // user move) repointed the row and cleared its UID, and the destination
+      // folder's next sync stamps the new one. That is "ask again later", not a
+      // verdict — answering with a plain failure parked the mail in the
+      // renderer's failedBodies, so opening it showed "Unable to load email
+      // content" until restart.
+      if (!email.uid) {
+        return failed(createDeferredFetchError('awaiting the server UID after a move').message);
       }
 
       const fetchResult = await syncEngine.fetchBody(emailId, folder.path, email.uid);

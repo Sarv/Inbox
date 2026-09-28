@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Mail the spam filter just filed opens normally.** A message filed into
+  Spam as it arrived briefly has no server ID, until the Spam folder next
+  syncs. The app tried to download its body in that window, failed, and
+  remembered the failure. Opening the message later showed "Unable to load
+  email content" until you restarted. It now waits and tries again. The same
+  applies to any message opened right after it was moved.
+
 ## [1.2.5] - 2026-09-27
 
 ### Fixed

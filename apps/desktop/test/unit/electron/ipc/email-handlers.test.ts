@@ -55,6 +55,7 @@ import {
   claimCidRepairAttempt,
   registerEmailHandlers,
 } from '../../../../electron/ipc/email-handlers';
+import { isRetryableBodyFetchError, looksGoneFromServer } from '../../../../src/store/body-fetch-failures';
 
 const fetchBodiesBatch = () => h.handlers.get('emails:fetchBodiesBatch')!;
 const fetchBody = () => h.handlers.get('emails:fetchBody')!;
@@ -323,6 +324,77 @@ describe('emails:fetchBody — cid: repair', () => {
     await expect(fetchBody()(null, 'empty-1')).resolves.toEqual({
       success: false, error: 'Not connected to IMAP',
     });
+  });
+});
+
+/**
+ * emails:fetchBody — a row with no UID.
+ *
+ * A local-first move (the spam filter or a rule at ingest, or a user move)
+ * repoints the row and clears its UID until the destination folder's next sync
+ * stamps the new one. The realtime path fetches the body of every arrival
+ * straight away, so a mail the spam filter just filed hits this window every
+ * time. Answering with a plain failure parked it in the renderer's failedBodies:
+ * opening it later showed "Unable to load email content" until restart.
+ */
+describe('emails:fetchBody — row awaiting its UID after a move', () => {
+  const moved = (over: Record<string, unknown> = {}) => ({
+    id: 'moved-1', rawBody: null, folderId: 'junk', uid: null, hasAttachments: false, ...over,
+  });
+
+  // Breaks: a just-filed spam mail can never be opened this session.
+  it('answers with a retryable deferred error the renderer will not memoise', async () => {
+    h.storage.getEmail.mockResolvedValue(moved());
+
+    const res = await fetchBody()(null, 'moved-1');
+
+    expect(res.success).toBe(false);
+    expect(isRetryableBodyFetchError(res.error)).toBe(true);
+    expect(h.syncEngine.fetchBody).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the renderer reads the error as "gone from server" and asks the
+  // guarded deletion reconcile to look at live mail.
+  it('never words the deferral like a server-side deletion', async () => {
+    h.storage.getEmail.mockResolvedValue(moved());
+
+    const res = await fetchBody()(null, 'moved-1');
+
+    expect(looksGoneFromServer(res.error)).toBe(false);
+  });
+
+  // Breaks: a folder row that genuinely vanished gets retried forever instead
+  // of reported — only the missing UID is transient.
+  it('still fails outright when the folder itself is unknown', async () => {
+    h.storage.getEmail.mockResolvedValue(moved({ uid: 5 }));
+    h.storage.getFolder.mockResolvedValue(null);
+
+    const res = await fetchBody()(null, 'moved-1');
+
+    expect(res).toEqual({ success: false, error: 'Cannot determine folder/UID' });
+    expect(isRetryableBodyFetchError(res.error)).toBe(false);
+  });
+
+  // Breaks: once the destination sync stamps the UID the body still never loads.
+  it('fetches normally from the destination once the UID is stamped', async () => {
+    h.storage.getEmail.mockResolvedValue(moved({ uid: 41 }));
+    h.storage.getFolder.mockResolvedValue({ path: 'Junk' });
+    h.syncEngine.fetchBody.mockResolvedValue({ rawBody: 'r', cleanBody: 'c', contentType: 'text/html' });
+
+    const res = await fetchBody()(null, 'moved-1');
+
+    expect(h.syncEngine.fetchBody).toHaveBeenCalledWith('moved-1', 'Junk', 41);
+    expect(res.success).toBe(true);
+  });
+
+  // Breaks: an image-repair re-fetch on a moved row takes away the body the
+  // user already has.
+  it('keeps the stored body when a cid repair meets a missing UID', async () => {
+    h.storage.getEmail.mockResolvedValue(moved({ id: 'moved-2', rawBody: '<img src="cid:a@b">' }));
+
+    const res = await fetchBody()(null, 'moved-2');
+
+    expect(res).toEqual({ success: true, data: expect.objectContaining({ id: 'moved-2' }) });
   });
 });
 
