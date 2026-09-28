@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const requestConfirm = vi.hoisted(() => vi.fn(async () => true));
 vi.mock('../../../../../src/store/confirm-service', () => ({ requestConfirm }));
 
-import { UnsubscribeBanner } from '../../../../../src/components/email-detail/UnsubscribeBanner';
+import { UnsubscribeButton } from '../../../../../src/components/email-detail/UnsubscribeButton';
 import { fire, render, settle } from '../../../../helpers/render';
 
 /**
@@ -12,8 +12,12 @@ import { fire, render, settle } from '../../../../helpers/render';
  * their list.
  *
  * What breaks if this suite goes red, in the order it costs:
- *  - The banner appears on ordinary mail — every message grows an Unsubscribe
+ *  - The button appears on ordinary mail — every message grows an Unsubscribe
  *    button that cannot do anything.
+ *  - It appears on dangerous mail, where a click only confirms to a phisher
+ *    that this address is read.
+ *  - A click also toggles the message open/closed, because it sits on the
+ *    sender line whose click does that.
  *  - The button sends a URL instead of a route, which is the whole security
  *    boundary: a crafted message would then name the address the app posts to.
  *  - A browser route reports "Unsubscribed" when the reader still has a form
@@ -24,7 +28,7 @@ const ONE_CLICK = '<https://brand.example/u/abc>';
 const run = vi.fn(async () => ({ success: true }) as Record<string, unknown>);
 
 const mount = (over: Record<string, unknown> = {}) =>
-  render(<UnsubscribeBanner emailId="e1" listUnsubscribe={ONE_CLICK} listUnsubscribePost="List-Unsubscribe=One-Click" {...over} />);
+  render(<UnsubscribeButton emailId="e1" listUnsubscribe={ONE_CLICK} listUnsubscribePost="List-Unsubscribe=One-Click" {...over} />);
 
 const button = (view: ReturnType<typeof mount>) =>
   view.all('button').find((element) => element.textContent?.includes('Unsubscribe')) ?? null;
@@ -42,14 +46,14 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-describe('UnsubscribeBanner', () => {
-  // Most mail publishes nothing. A banner there is noise on every message.
+describe('UnsubscribeButton', () => {
+  // Most mail publishes nothing. A button there is noise on every message.
   it('renders nothing when the sender published no way off a list', () => {
-    const view = render(<UnsubscribeBanner emailId="e1" />);
+    const view = render(<UnsubscribeButton emailId="e1" />);
     expect(view.container.textContent).toBe('');
     view.unmount();
 
-    const empty = render(<UnsubscribeBanner emailId="e1" listUnsubscribe="" listUnsubscribePost="List-Unsubscribe=One-Click" />);
+    const empty = render(<UnsubscribeButton emailId="e1" listUnsubscribe="" listUnsubscribePost="List-Unsubscribe=One-Click" />);
     expect(empty.container.textContent).toBe('');
     empty.unmount();
   });
@@ -86,7 +90,7 @@ describe('UnsubscribeBanner', () => {
     const view = mount({ listUnsubscribePost: null });
 
     const trigger = button(view);
-    expect(trigger?.textContent).toContain('Unsubscribe in browser');
+    expect(trigger?.querySelector('[aria-label="Opens in your browser"]')).not.toBeNull();
 
     fire(trigger, 'click');
     await settle();
@@ -123,7 +127,7 @@ describe('UnsubscribeBanner', () => {
     view.unmount();
   });
 
-  // A dead IPC bridge throws rather than answering; the banner must not be
+  // A dead IPC bridge throws rather than answering; the button must not be
   // left spinning on a promise that already rejected.
   it('recovers when the bridge itself throws', async () => {
     run.mockRejectedValue(new Error('bridge gone'));
@@ -143,8 +147,43 @@ describe('UnsubscribeBanner', () => {
     fire(button(view), 'click');
     await settle();
 
-    expect(view.container.textContent).toContain('Done');
+    expect(view.container.textContent).toContain('Unsubscribed. It can take a couple of days to stop.');
     expect(button(view)).toBeNull();
+    expect(run).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
+  // Dangerous mail: the caller hides it, and nothing of it may render.
+  it('renders nothing when hidden, even with a usable route', () => {
+    const view = mount({ hidden: true });
+    expect(view.container.textContent).toBe('');
+    view.unmount();
+  });
+
+  // After the sender address it leads with a separator; alone it must not
+  // start the line with a stray dot.
+  it('leads with a separator only when asked to', () => {
+    const joined = mount({ separated: true });
+    expect(joined.container.textContent?.startsWith('·')).toBe(true);
+    joined.unmount();
+
+    const alone = mount();
+    expect(alone.container.textContent?.startsWith('·')).toBe(false);
+    alone.unmount();
+  });
+
+  // The sender line collapses the message on click; unsubscribing must not.
+  it('keeps its click from reaching the sender line', async () => {
+    const toggle = vi.fn();
+    const view = render(
+      <div onClick={toggle}>
+        <UnsubscribeButton emailId="e1" listUnsubscribe={ONE_CLICK} listUnsubscribePost="List-Unsubscribe=One-Click" />
+      </div>,
+    );
+    fire(button(view), 'click');
+    await settle();
+
+    expect(toggle).not.toHaveBeenCalled();
     expect(run).toHaveBeenCalledTimes(1);
     view.unmount();
   });

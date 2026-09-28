@@ -1,9 +1,10 @@
 import type { LinkMismatch } from '@sarv-in/mailguard/links';
 import { ShieldAlert, ShieldX, Check, Ban } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
-import { assessEmailSecurity, LEVEL_RANK } from '../../utils/email-security';
-import { addLinkRule, useLinkRules } from '../../utils/security-rules';
+import { LEVEL_RANK } from '../../utils/email-security';
+import { addLinkRule } from '../../utils/security-rules';
+import { useEmailSecurity } from '../../utils/use-email-security';
 
 interface PhishingWarningBannerProps {
   fromName?: string | null;
@@ -46,11 +47,7 @@ export function PhishingWarningBanner({
   spamScore,
   spamReasons,
 }: PhishingWarningBannerProps) {
-  const { sets } = useLinkRules();
-  const assessment = useMemo(
-    () => assessEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, rules: sets }),
-    [fromName, fromAddress, html, authStatus, spamScore, spamReasons, sets],
-  );
+  const assessment = useEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons });
   const [busy, setBusy] = useState<string | null>(null);
 
   if (LEVEL_RANK[assessment.level] < LEVEL_RANK.caution) return null;

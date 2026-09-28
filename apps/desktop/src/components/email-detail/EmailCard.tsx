@@ -13,6 +13,7 @@ import {
 import { isSignatureDetectionEnabled } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
 import { qualifiesForSafeAutoLoad } from '../../store/helpers';
+import { useEmailSecurity } from '../../utils/use-email-security';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
 import { SandboxedEmailBody } from '../SandboxedEmailBody';
 
@@ -24,7 +25,7 @@ import { PhishingWarningBanner } from './PhishingWarningBanner';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
-import { UnsubscribeBanner } from './UnsubscribeBanner';
+import { UnsubscribeButton } from './UnsubscribeButton';
 import { stripSignatureFromHtml, formatRelativeDate, hasLoadedBody } from './utils';
 import { VerifiedBadge } from './VerifiedBadge';
 
@@ -68,6 +69,27 @@ export function EmailCard({ ctx }: EmailCardProps) {
   } = ctx;
 
   const { fetchEmailBody } = useEmailStore();
+  // Same level the shield and the warning banner show. On dangerous mail an
+  // unsubscribe click only tells a phisher this address is read, so it goes.
+  const security = useEmailSecurity({
+    fromName: displayEmail.fromName,
+    fromAddress: displayEmail.fromAddress,
+    authStatus: displayEmail.authStatus,
+    spamScore: displayEmail.spamScore,
+    spamReasons: displayEmail.spamReasons,
+    html: displayEmail.rawBody,
+    bodyLoaded: hasLoadedBody(displayEmail),
+  });
+  const unsubscribe = (
+    <UnsubscribeButton
+      emailId={displayEmail.id}
+      accountId={(displayEmail as any).accountId}
+      listUnsubscribe={(displayEmail as any).listUnsubscribe}
+      listUnsubscribePost={(displayEmail as any).listUnsubscribePost}
+      hidden={security.level === 'danger'}
+      separated={Boolean(displayEmail.fromName)}
+    />
+  );
 
   return (
     <div className={`border border-border rounded-lg bg-card overflow-hidden ${chatViewActive ? 'hidden' : ''}`}>
@@ -105,11 +127,13 @@ export function EmailCard({ ctx }: EmailCardProps) {
                     bodyLoaded={hasLoadedBody(displayEmail)}
                   />
                 </div>
-                {displayEmail.fromName && (
-                  <div className="text-sm text-muted-foreground">
-                    &lt;{displayEmail.fromAddress}&gt;
-                  </div>
-                )}
+                {/* Sender address, then the way off their list when they
+                    published one — Gmail's placement: findable, and it costs
+                    no height. */}
+                <div className="flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">
+                  {displayEmail.fromName && <span>&lt;{displayEmail.fromAddress}&gt;</span>}
+                  {unsubscribe}
+                </div>
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button
@@ -206,14 +230,6 @@ export function EmailCard({ ctx }: EmailCardProps) {
               accountId={(displayEmail as any).accountId}
               calendarIcs={displayEmail.calendarIcs}
               calendarAdded={displayEmail.calendarAdded}
-            />
-            {/* The way off this sender's list, when they published one. Renders
-                nothing on ordinary mail. */}
-            <UnsubscribeBanner
-              emailId={displayEmail.id}
-              accountId={(displayEmail as any).accountId}
-              listUnsubscribe={(displayEmail as any).listUnsubscribe}
-              listUnsubscribePost={(displayEmail as any).listUnsubscribePost}
             />
             {(() => {
               const isBodyLoading = loadingBodies.has(displayEmail.id);

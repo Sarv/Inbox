@@ -1,10 +1,11 @@
 import { canUnsubscribe, parseUnsubscribe, preferredRoute, type UnsubscribeRoute } from '@sarvinbox/core/unsubscribe';
-import { Check, ExternalLink, Loader2, MailX } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Check, ExternalLink, Loader2 } from 'lucide-react';
+import { useMemo, useState, type MouseEvent } from 'react';
 
 import { requestConfirm } from '../../store/confirm-service';
+import { Tooltip } from '../Tooltip';
 
-interface UnsubscribeBannerProps {
+interface UnsubscribeButtonProps {
   emailId: string;
   /** Owning account, so main reads the message from ITS database (All Inboxes). */
   accountId?: string;
@@ -12,7 +13,19 @@ interface UnsubscribeBannerProps {
   listUnsubscribe?: string | null;
   /** `emails.list_unsubscribe_post`, verbatim (RFC 8058). */
   listUnsubscribePost?: string | null;
+  /** Suppress it entirely — set on mail assessed as dangerous, where a click
+   *  would only confirm to a phisher that this address is read. */
+  hidden?: boolean;
+  /** Lead with a `·` — set when it follows the sender address on one line. */
+  separated?: boolean;
 }
+
+/** The tooltip: what this sender's route will do, before the reader commits. */
+const ROUTE_HINT: Record<UnsubscribeRoute, string> = {
+  'one-click': 'One click and this sender stops emailing you.',
+  page: 'Their unsubscribe page opens in your browser.',
+  mailto: 'They take unsubscribes by email.',
+};
 
 /** What the reader is told BEFORE anything leaves the machine, per route. */
 const CONFIRMATION: Record<UnsubscribeRoute, { message: string; confirmLabel: string }> = {
@@ -34,8 +47,13 @@ const CONFIRMATION: Record<UnsubscribeRoute, { message: string; confirmLabel: st
 };
 
 /**
- * The way off a mailing list, shown above the body of any message whose sender
- * published one (`List-Unsubscribe`).
+ * The way off a mailing list, as a small labelled button on the sender line of
+ * any message whose sender published one (`List-Unsubscribe`). A text label,
+ * not an icon: there is no glyph people read as "unsubscribe", and a control
+ * people go looking for must be findable without hovering. It sits in the
+ * header rather than a banner above the body so newsletters — a large share of
+ * mail — don't lose a slab of height to an option, and so banners stay
+ * reserved for warnings.
  *
  * The button names a ROUTE, never a URL: the main process re-reads this
  * message's own headers and resolves the route there, so nothing a crafted
@@ -47,7 +65,7 @@ const CONFIRMATION: Record<UnsubscribeRoute, { message: string; confirmLabel: st
  * leaves the app, a mailto sends mail from the reader's own account. Renders
  * nothing when the sender offered no route at all, which is most mail.
  */
-export function UnsubscribeBanner({ emailId, accountId, listUnsubscribe, listUnsubscribePost }: UnsubscribeBannerProps) {
+export function UnsubscribeButton({ emailId, accountId, listUnsubscribe, listUnsubscribePost, hidden, separated }: UnsubscribeButtonProps) {
   const target = useMemo(
     () => parseUnsubscribe(listUnsubscribe, listUnsubscribePost),
     [listUnsubscribe, listUnsubscribePost],
@@ -58,9 +76,11 @@ export function UnsubscribeBanner({ emailId, accountId, listUnsubscribe, listUns
   const [done, setDone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  if (!canUnsubscribe(target) || !route) return null;
+  if (hidden || !canUnsubscribe(target) || !route) return null;
 
-  const run = async () => {
+  const run = async (event: MouseEvent) => {
+    // The sender line toggles the message open/closed; this click is not that.
+    event.stopPropagation();
     const { message, confirmLabel } = CONFIRMATION[route];
     // Not destructive — nothing of the reader's is deleted, so the primary
     // button is the ordinary one rather than the red one.
@@ -91,43 +111,32 @@ export function UnsubscribeBanner({ emailId, accountId, listUnsubscribe, listUns
     }
   };
 
-  const Icon = route === 'page' ? ExternalLink : MailX;
-
   return (
-    <div className="mb-4 rounded-lg border border-border bg-muted/40 overflow-hidden">
-      <div className="flex flex-wrap items-center gap-3 p-3">
-        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-background text-muted-foreground">
-          <Icon className="h-5 w-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-foreground">
-            {done ? 'Unsubscribe requested' : "You\u2019re on this sender\u2019s mailing list"}
-          </div>
-          <div className="text-xs text-muted-foreground break-words">
-            {error ??
-              done ??
-              (route === 'page'
-                ? "Their unsubscribe page opens in your browser."
-                : route === 'mailto'
-                  ? 'They take unsubscribes by email.'
-                  : 'One click and this sender stops emailing you.')}
-          </div>
-        </div>
-        {done ? (
-          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Check className="h-3.5 w-3.5" /> Done
-          </span>
-        ) : (
-          <button
-            onClick={run}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted/60 disabled:opacity-50 transition-colors"
-          >
-            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
-            {route === 'page' ? 'Unsubscribe in browser' : 'Unsubscribe'}
-          </button>
-        )}
-      </div>
-    </div>
+    <span className="inline-flex flex-wrap items-center gap-x-1.5 text-xs">
+      {separated && <span aria-hidden>·</span>}
+      {done ? (
+        // The button is gone once the request has landed, so an impatient
+        // second click cannot fire a second POST.
+        <span role="status" className="inline-flex items-center gap-1 text-muted-foreground">
+          <Check className="h-3.5 w-3.5" /> {done}
+        </span>
+      ) : (
+        <>
+          <Tooltip content={ROUTE_HINT[route]} delayMs={40}>
+            <button
+              type="button"
+              onClick={run}
+              disabled={busy}
+              className="inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium text-foreground hover:bg-muted/60 disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              {busy && <Loader2 className="h-3 w-3 animate-spin" />}
+              Unsubscribe
+              {route === 'page' && <ExternalLink className="h-3 w-3" aria-label="Opens in your browser" />}
+            </button>
+          </Tooltip>
+          {error && <span role="alert" className="text-red-600 dark:text-red-400">{error}</span>}
+        </>
+      )}
+    </span>
   );
 }

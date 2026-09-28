@@ -1,9 +1,8 @@
 import { Loader2, ShieldAlert, ShieldCheck, ShieldQuestion, ShieldX, Shield } from 'lucide-react';
-import { useMemo } from 'react';
 
-import { assessEmailSecurity, LEVEL_COPY, LEVEL_RANK, PENDING_COPY, type SecurityLevel, type SecurityCheck } from '../../utils/email-security';
-import { useLinkRules } from '../../utils/security-rules';
+import { LEVEL_COPY, LEVEL_RANK, PENDING_COPY, type SecurityLevel, type SecurityCheck } from '../../utils/email-security';
 import { useSenderIdentity } from '../../utils/sender-identity';
+import { useEmailSecurity } from '../../utils/use-email-security';
 import { Tooltip } from '../Tooltip';
 
 interface SecurityIndicatorProps {
@@ -71,13 +70,9 @@ const STATUS_TONE: Record<SecurityCheck['status'], string> = {
  * so: those come from the headers, which arrived with the message.
  */
 export function SecurityIndicator({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, bodyLoaded, className = '' }: SecurityIndicatorProps) {
-  const { sets } = useLinkRules();
   const identity = useSenderIdentity(fromAddress);
   const bimi = identity ? identity.bimi : null;
-  const assessment = useMemo(
-    () => assessEmailSecurity({ fromName, fromAddress, html, bodyLoaded, authStatus, spamScore, spamReasons, bimi, rules: sets }),
-    [fromName, fromAddress, html, bodyLoaded, authStatus, spamScore, spamReasons, bimi, sets],
-  );
+  const assessment = useEmailSecurity({ fromName, fromAddress, html, bodyLoaded, authStatus, spamScore, spamReasons, bimi });
   const checking = assessment.pending && LEVEL_RANK[assessment.level] < LEVEL_RANK.caution;
   const Icon = checking ? Loader2 : ICON[assessment.level];
   const copy = checking ? PENDING_COPY : LEVEL_COPY[assessment.level];
