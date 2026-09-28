@@ -32,6 +32,20 @@ describe('renderLegalMarkdown', () => {
     const page = renderLegalMarkdown('<!--\nINTERNAL NOTE\n-->\n# T\n\ntext <!-- inline secret --> more');
     expect(page.html).not.toContain('INTERNAL NOTE');
     expect(page.html).not.toContain('inline secret');
+    expect(page.html).toContain('text');
+    expect(page.html).toContain('more');
+  });
+
+  // CodeQL: a single regex pass over nested/overlapping comments could leave a
+  // fresh `<!--` in the output. Token-level removal leaves none.
+  it('leaves no comment opener behind for nested or overlapping comments', () => {
+    const page = renderLegalMarkdown('# T\n\n<!<!-- x -->-- hidden -->\n\na <!-- b <!-- c --> d -->');
+    expect(page.html).not.toContain('<!--');
+  });
+
+  // Draft state is judged on what is published, not on the internal notes.
+  it('ignores a [CONFIRM] that only appears inside a comment', () => {
+    expect(renderLegalMarkdown('<!-- items marked [CONFIRM] -->\n# T\n\nDone.').draft).toBe(false);
   });
 
   it('marks a document with a [CONFIRM] placeholder as a draft, and falls back to a default title', () => {

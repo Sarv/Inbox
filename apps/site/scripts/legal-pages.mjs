@@ -8,7 +8,7 @@
 // A page that still carries a `[CONFIRM: …]` placeholder is published as a
 // visibly marked DRAFT and kept out of search indexes: Google's reviewers read
 // the linked policy, and a placeholder must never look like the final text.
-import { marked } from 'marked';
+import { Marked } from 'marked';
 
 /** Page name (URL path, HTML file) → source file in docs/legal/. */
 export const LEGAL_PAGES = {
@@ -18,15 +18,30 @@ export const LEGAL_PAGES = {
 
 const MARKER = /<!--\s*legal:(\w+)\s*-->/g;
 
+// HTML comments hold notes for the web team and developers — never publish
+// them. Dropped at the token level (marked has already parsed where a comment
+// starts and ends), not with a regex over the text: a single-pass pattern can
+// leave a new `<!--` behind when comments are nested or overlap.
+const isComment = (html) => html.trimStart().startsWith('<!--');
+const markdown = new Marked({
+  gfm: true,
+  renderer: {
+    html({ text }) {
+      return isComment(text) ? '' : text;
+    },
+  },
+});
+
 /** Title, HTML body and draft state of one legal Markdown document. */
-export function renderLegalMarkdown(markdown) {
-  // HTML comments hold notes for the web team and developers — never publish them.
-  const source = markdown.replace(/<!--[\s\S]*?-->/g, '').trim();
-  const title = source.match(/^#\s+(.+)$/m)?.[1].trim() ?? 'Sarv Inbox';
+export function renderLegalMarkdown(source) {
+  const tokens = markdown.lexer(source);
+  const heading = tokens.find((t) => t.type === 'heading' && t.depth === 1);
+  const html = markdown.parser(tokens);
   return {
-    title,
-    html: marked.parse(source, { gfm: true }),
-    draft: source.includes('[CONFIRM'),
+    title: heading?.text.trim() || 'Sarv Inbox',
+    html,
+    // Judged on what is published, so a [CONFIRM] inside a comment doesn't count.
+    draft: html.includes('[CONFIRM'),
   };
 }
 
