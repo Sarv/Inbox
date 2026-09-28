@@ -69,6 +69,7 @@ import { createSandboxChannel } from './services/extension-runtime';
 import { createExtensionUIBackend } from './services/extension-ui-backend';
 import { startExtensionWorkflowRunner, stopExtensionWorkflowRunner } from './services/extension-workflow-runner';
 import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
+import { startFollowUpChecker, stopFollowUpChecker } from './services/follow-up-checker';
 import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
 import { offerMoveToApplications } from './services/mac-install-location';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
@@ -250,6 +251,7 @@ function stopBackgroundTimers(): void {
   if (backgroundTimersStopped) return;
   backgroundTimersStopped = true;
   try { stopSnoozeChecker(); } catch {}
+  try { stopFollowUpChecker(); } catch {}
   try { stopConversationScheduler(); } catch {}
   try { stopContactEnrichmentScheduler(); } catch {}
   try { stopBodyPrefetchScheduler(); } catch {}
@@ -1011,6 +1013,7 @@ app.whenReady().then(async () => {
 
     // Start background services
     startSnoozeChecker();
+    startFollowUpChecker();
     startConversationScheduler();
     startContactEnrichmentScheduler();
     startBodyPrefetchScheduler();

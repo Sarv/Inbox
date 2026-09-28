@@ -6,7 +6,7 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse } from '@sarvinbox/core';
+import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
@@ -26,6 +26,8 @@ interface InAppToast {
   subtitle?: string;
   accountId?: string;
   emailId?: string;
+  /** Set when the mail may not be in the list on screen (a sent message). */
+  threadId?: string;
 }
 
 /** Per-account secrets kept in the main-process vault (never renderer disk). */
@@ -512,6 +514,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // Follow-up reminders ("remind me if nobody replies"). Set on send via
+  // SendEmailOptions.followUp; these read and end them. onChanged fires when
+  // the checker marks one due or sees a reply.
+  followUps: {
+    list: () => ipcRenderer.invoke('followUps:list'),
+    dismiss: (id: string, accountId?: string) => ipcRenderer.invoke('followUps:dismiss', id, accountId),
+    onChanged: (cb: (data: { due: number; replied: number }) => void) => {
+      const handler = (_e: unknown, data: { due: number; replied: number }) => cb(data);
+      ipcRenderer.on('follow-ups:changed', handler);
+      return () => ipcRenderer.removeListener('follow-ups:changed', handler);
+    },
+  },
+
   // AI Box operations
   ai: {
     getByCategory: (category: string, limit?: number, offset?: number, folderId?: string) =>
@@ -660,8 +675,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   notifications: {
     setConfig: (config: unknown) => ipcRenderer.invoke('notifications:setConfig', config),
     test: () => ipcRenderer.invoke('notifications:test'),
-    onOpenEmail: (cb: (data: { accountId: string; emailId: string }) => void) => {
-      const handler = (_e: unknown, data: { accountId: string; emailId: string }) => cb(data);
+    onOpenEmail: (cb: (data: { accountId: string; emailId: string; threadId?: string }) => void) => {
+      const handler = (_e: unknown, data: { accountId: string; emailId: string; threadId?: string }) => cb(data);
       ipcRenderer.on('notifications:open-email', handler);
       return () => ipcRenderer.removeListener('notifications:open-email', handler);
     },
@@ -1368,6 +1383,12 @@ export interface ElectronAPI {
     listVip: () => Promise<{ success: boolean; data?: SenderStats[]; error?: string }>;
     listBlocked: () => Promise<{ success: boolean; data?: SenderStats[]; error?: string }>;
   };
+  followUps: {
+    /** Every open reminder across all accounts, due ones first. */
+    list: () => Promise<{ success: boolean; data?: AccountFollowUp[]; error?: string }>;
+    dismiss: (id: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    onChanged: (cb: (data: { due: number; replied: number }) => void) => () => void;
+  };
   snooze: {
     set: (emailId: string, snoozeUntil: number) => Promise<{ success: boolean; data?: SnoozedEmail; error?: string }>;
     remove: (emailId: string) => Promise<{ success: boolean; error?: string }>;
@@ -1506,7 +1527,7 @@ export interface ElectronAPI {
     setConfig: (config: unknown) => Promise<{ success: boolean; error?: string }>;
     /** `supported: false` = the OS reports notifications unavailable for the app. */
     test: () => Promise<{ success: boolean; supported?: boolean; focus?: 'on' | 'off' | 'unknown'; error?: string }>;
-    onOpenEmail: (cb: (data: { accountId: string; emailId: string }) => void) => () => void;
+    onOpenEmail: (cb: (data: { accountId: string; emailId: string; threadId?: string }) => void) => () => void;
     onInApp: (cb: (data: InAppToast) => void) => () => void;
     onReauthRequired: (cb: (data: { provider: string; email: string; reason: string }) => void) => () => void;
     onReauthResolved: (cb: (data: { provider: string; email: string }) => void) => () => void;

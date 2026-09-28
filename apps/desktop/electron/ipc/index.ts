@@ -18,6 +18,7 @@ import { registerEmailHandlers } from './email-handlers';
 import { registerExtensionHandlers } from './extension-handlers';
 import { registerFilterHandlers } from './filter-handlers';
 import { registerFolderHandlers } from './folder-handlers';
+import { registerFollowUpHandlers } from './follow-up-handlers';
 import { registerIdentityHandlers } from './identity-handlers';
 import { registerLabelHandlers } from './label-handlers';
 import { registerMiscHandlers } from './misc-handlers';
@@ -52,6 +53,7 @@ export function registerAllHandlers(): void {
   registerAIHandlers();
   registerExtensionHandlers();
   registerMiscHandlers();
+  registerFollowUpHandlers();
   registerAICategorizationHandlers();
   registerDraftHandlers();
   registerAgentHandlers();

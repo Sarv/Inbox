@@ -878,3 +878,71 @@ describe('setNotificationConfig', () => {
     expect(h.notifications[0].opts.silent).toBe(false); // default sound=true
   });
 });
+
+describe('notifyFollowUpDue', () => {
+  const notice = (over: Partial<Parameters<Service['notifyFollowUpDue']>[0]> = {}) => ({
+    accountId: 'acct-a',
+    subject: 'Quote for the roof',
+    recipients: 'Alice <alice@example.com>',
+    emailId: 'sent-1',
+    threadId: 't1',
+    ...over,
+  });
+
+  // The reminder the user explicitly asked for must fire even with new-mail
+  // notifications switched off, and clicking it must open the sent thread.
+  it('shows whatever the new-mail mode and opens the thread on click', async () => {
+    const svc = await load();
+    svc.setNotificationConfig({ mode: 'off' });
+    svc.notifyFollowUpDue(notice());
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0].opts).toMatchObject({ title: 'No reply from Alice <alice@example.com>', body: 'Quote for the roof' });
+    h.notifications[0].handlers.get('click')!();
+    expect(h.state.win!.sent).toEqual([
+      { channel: 'notifications:open-email', payload: { accountId: 'acct-a', emailId: 'sent-1', threadId: 't1' } },
+    ]);
+  });
+
+  // With no local copy of the sent message there is nothing to open; the click
+  // must still bring the app forward rather than route to a missing email.
+  it('falls back to focusing the window and fills empty fields', async () => {
+    const svc = await load();
+    svc.notifyFollowUpDue(notice({ emailId: null, threadId: null, subject: '', recipients: '' }));
+    expect(h.notifications[0].opts).toMatchObject({ title: 'No reply from your recipients', body: '(no subject)' });
+    h.notifications[0].handlers.get('click')!();
+    expect(h.state.win!.shown).toBe(true);
+    expect(h.state.win!.sent).toHaveLength(0);
+  });
+
+  // Same quiet-hours rule as mail: outside working hours it shows, silently.
+  it('is silent outside working hours', async () => {
+    const svc = await load();
+    const tomorrow = (new Date().getDay() + 1) % 7;
+    svc.setNotificationConfig({ sound: true, workingHours: { enabled: true, days: [tomorrow], start: '00:00', end: '23:59' } });
+    svc.notifyFollowUpDue(notice());
+    expect(h.notifications[0].opts.silent).toBe(true);
+  });
+
+  // The account label tells a multi-account user which mailbox it's about.
+  it('labels the account when several exist', async () => {
+    const svc = await load();
+    svc.setNotificationConfig({ accounts: { 'acct-a': { notify: true, label: 'Work' }, 'acct-b': { notify: true, label: 'Home' } } });
+    svc.notifyFollowUpDue(notice());
+    expect(h.notifications[0].opts.subtitle).toBe('Work');
+  });
+
+  // No native notifications (dev / Linux without a daemon): the in-app card
+  // carries the thread so its click opens the same place.
+  it('mirrors in-app with the thread when native toasts are unavailable', async () => {
+    const svc = await load();
+    h.state.supported = false;
+    svc.notifyFollowUpDue(notice());
+    expect(h.notifications).toHaveLength(0);
+    expect(h.state.win!.sent).toEqual([
+      {
+        channel: 'notifications:in-app',
+        payload: expect.objectContaining({ title: 'No reply from Alice <alice@example.com>', emailId: 'sent-1', threadId: 't1' }),
+      },
+    ]);
+  });
+});

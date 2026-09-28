@@ -50,6 +50,18 @@ export interface SendEmailOptions {
   from?: string;
   /** Request a read receipt (MDN): adds a Disposition-Notification-To header. */
   requestReadReceipt?: boolean;
+  /** Remind the sender if nobody replies. Recorded only once the send succeeds. */
+  followUp?: SendFollowUpRequest;
+}
+
+/**
+ * "Remind me if nobody replies". Unix epoch seconds (UTC). `afterSeconds`
+ * counts from the moment the message actually goes out; `at` is a fixed time
+ * and wins when both are set.
+ */
+export interface SendFollowUpRequest {
+  afterSeconds?: number;
+  at?: number;
 }
 
 /**

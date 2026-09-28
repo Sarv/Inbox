@@ -179,7 +179,7 @@ function wantsInAppToast(): boolean {
 
 let inAppSeq = 0;
 /** Mirror a toast into the renderer, which renders it as an in-app card. */
-function sendInApp(p: { title: string; body: string; subtitle?: string; accountId?: string; emailId?: string }): void {
+function sendInApp(p: { title: string; body: string; subtitle?: string; accountId?: string; emailId?: string; threadId?: string }): void {
   const win = getMainWindow();
   try { win?.webContents.send('notifications:in-app', { id: String(++inAppSeq), ...p }); } catch { /* ignore */ }
 }
@@ -245,10 +245,39 @@ function focusWindow(): void {
   }
 }
 
-function openEmail(accountId: string, emailId: string): void {
+/** `threadId` lets the renderer open a message that isn't in the list on screen (a sent one). */
+function openEmail(accountId: string, emailId: string, threadId?: string): void {
   focusWindow();
   const win = getMainWindow();
-  try { win?.webContents.send('notifications:open-email', { accountId, emailId }); } catch { /* ignore */ }
+  try { win?.webContents.send('notifications:open-email', { accountId, emailId, threadId }); } catch { /* ignore */ }
+}
+
+export interface FollowUpDueNotice {
+  accountId: string;
+  subject: string;
+  recipients: string;
+  emailId: string | null;
+  threadId: string | null;
+}
+
+/**
+ * "No reply yet" for a follow-up reminder the user set. Shown whatever the
+ * new-mail mode is — the user asked for exactly this one — but silent outside
+ * working hours like every other toast. Clicking opens the sent message's thread.
+ */
+export function notifyFollowUpDue(notice: FollowUpDueNotice): void {
+  const title = `No reply from ${notice.recipients || 'your recipients'}`;
+  const body = notice.subject || '(no subject)';
+  const multiAccount = Object.keys(config.accounts).length > 1;
+  const subtitle = multiAccount ? config.accounts[notice.accountId]?.label || undefined : undefined;
+  const target = notice.emailId ? { accountId: notice.accountId, emailId: notice.emailId, threadId: notice.threadId ?? undefined } : null;
+  const silent = !(config.sound && withinWorkingHours());
+  if (Notification.isSupported()) {
+    const toast = new Notification({ title, subtitle, body, silent });
+    toast.on('click', () => (target ? openEmail(target.accountId, target.emailId, target.threadId) : focusWindow()));
+    toast.show();
+  }
+  if (wantsInAppToast()) sendInApp({ title, body, subtitle, ...(target ?? {}) });
 }
 
 /**

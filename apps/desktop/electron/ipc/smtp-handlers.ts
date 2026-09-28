@@ -21,6 +21,7 @@ import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine,
 // Static import (not require()): the bundled main.js has no on-disk services
 // file, so a runtime require() throws "Cannot find module".
 import { deleteDraftsForThread } from './draft-handlers';
+import { recordFollowUpForSend } from './follow-up-handlers';
 
 const logger = createLogger('smtp-handlers');
 
@@ -456,6 +457,10 @@ export async function sendEmailFromMain(
     } catch (err) {
       logger.error('[SMTP] Local sent mirror write failed (non-fatal):', err);
     }
+
+    // "Remind me if nobody replies" — recorded only now that the send
+    // succeeded, keyed by Message-ID so an outbox retry can't add a second.
+    await recordFollowUpForSend(scopedStorage, options, result.messageId, fromAddress);
 
     // Belt-and-suspenders: resolve this thread's pending reply-proposals so the
     // pipeline never re-drafts a reply the user just sent, AND remove any

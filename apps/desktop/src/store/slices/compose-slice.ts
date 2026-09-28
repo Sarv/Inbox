@@ -326,6 +326,7 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
       accountId: sendAsId, // send AS the mail's owning account (undefined = active)
       from: sendOptions.from, // chosen identity/alias header From (undefined = default)
       requestReadReceipt: sendOptions.requestReadReceipt,
+      followUp: sendOptions.followUp, // "remind me if nobody replies" — recorded by main after the send succeeds
     };
 
     // Send later: the same persist-first outbox, held until the time the user
