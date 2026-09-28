@@ -29,14 +29,34 @@ export interface Mounted {
   byLabel: (label: string) => HTMLElement | null;
 }
 
+// Every root still mounted, so `cleanup()` can unmount what a test left behind.
+const mountedRoots = new Set<{ root: Root; container: HTMLElement }>();
+
+/**
+ * Unmount every root `render` created and not yet unmounted. Call it from
+ * `afterEach`: a root left mounted keeps React's scheduler holding work, which
+ * then runs after the file's DOM environment is torn down and throws
+ * "window is not defined" as an unhandled error — that fails the whole run
+ * even when every assertion passed.
+ */
+export function cleanup(): void {
+  for (const entry of mountedRoots) {
+    act(() => entry.root.unmount());
+    entry.container.remove();
+  }
+  mountedRoots.clear();
+}
+
 export function render(element: ReactElement): Mounted {
   const container = document.createElement('div');
   document.body.appendChild(container);
-  let root: Root;
+  let root!: Root;
   act(() => {
     root = createRoot(container);
     root.render(element);
   });
+  const entry = { root, container };
+  mountedRoots.add(entry);
 
   const all = (selector: string) =>
     // Portalled content (tooltips, overlays) lives outside `container`, so search
@@ -51,6 +71,7 @@ export function render(element: ReactElement): Mounted {
       all('[aria-label]').find((el) => el.getAttribute('aria-label') === label) ?? null,
     rerender: (next) => act(() => root.render(next)),
     unmount: () => {
+      if (!mountedRoots.delete(entry)) return; // already unmounted (or cleaned up)
       act(() => root.unmount());
       container.remove();
     },

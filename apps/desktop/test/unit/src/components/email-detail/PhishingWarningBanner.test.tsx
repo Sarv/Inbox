@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { render } from '../../../../helpers/render';
+import { cleanup, render } from '../../../../helpers/render';
 
 /**
  * "I trust this sender" on the warning banner.
@@ -31,6 +31,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // Unmount before the environment is torn down; a mounted root left React work
+  // queued that ran after `window` was gone ("window is not defined", CI red).
+  cleanup();
   vi.clearAllMocks();
   stored = [];
   const { resetTrustedSenders } = await import('../../../../../src/utils/trusted-senders');
