@@ -22,7 +22,7 @@ import type {
   LabelInput,
   DatabasePageStats,
 } from '@sarvinbox/core';
-import { parseAddresses , createLogger } from '@sarvinbox/core';
+import { bareSenderAddress, parseAddresses , createLogger } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 
 import { BodyStorageBackfill } from './body-storage-backfill';
@@ -2458,6 +2458,43 @@ export class SQLiteStorage implements IEmailStorage {
     const addr = (email || '').trim().toLowerCase();
     if (!addr) return;
     this.db!.prepare('INSERT OR IGNORE INTO image_allowed_senders (email) VALUES (?)').run(addr);
+  }
+
+  // ========== Trusted senders (see migration v95) ==========
+
+  /**
+   * Vouch for a sender: their authenticated mail bypasses the spam filter from
+   * now on. Idempotent. Exact address — "Name <addr>" is reduced to `addr`.
+   */
+  async trustSender(email: string): Promise<void> {
+    this.ensureInitialized();
+    const addr = bareSenderAddress(email);
+    if (!addr) return;
+    this.db!.prepare('INSERT OR IGNORE INTO trusted_senders (email) VALUES (?)').run(addr);
+  }
+
+  /** Withdraw trust (the Security page's remove, or a Report spam). */
+  async untrustSender(email: string): Promise<void> {
+    this.ensureInitialized();
+    const addr = bareSenderAddress(email);
+    if (!addr) return;
+    this.db!.prepare('DELETE FROM trusted_senders WHERE email = ?').run(addr);
+  }
+
+  async isTrustedSender(email: string): Promise<boolean> {
+    this.ensureInitialized();
+    const addr = bareSenderAddress(email);
+    if (!addr) return false;
+    return !!this.db!.prepare('SELECT 1 FROM trusted_senders WHERE email = ?').get(addr);
+  }
+
+  /** Every trusted sender, newest first. */
+  async getTrustedSenders(): Promise<Array<{ email: string; createdAt: number }>> {
+    this.ensureInitialized();
+    const rows = this.db!.prepare(
+      'SELECT email, created_at FROM trusted_senders ORDER BY created_at DESC, email',
+    ).all() as Array<{ email: string; created_at: number }>;
+    return rows.map((r) => ({ email: r.email, createdAt: r.created_at }));
   }
 
   // ---- link trust/block rules (see migration v85) --------------------------

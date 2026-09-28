@@ -33,6 +33,8 @@ export interface VerdictStorage {
   updateEmail(id: string, updates: { tags?: string; folderId?: string }): Promise<void>;
   addSpammer(spammer: { email: string; name?: string; reason?: string }): Promise<void>;
   removeSpammer(email: string): Promise<void>;
+  trustSender(email: string): Promise<void>;
+  untrustSender(email: string): Promise<void>;
   setSpamUserVerdict(id: string, verdict: SpamUserVerdict | null): Promise<void>;
   recalculateFolderCounts(): Promise<void>;
 }
@@ -119,8 +121,14 @@ export async function applyUserSpamVerdict(deps: VerdictDeps, emailId: string, v
 
   if (email.fromAddress) {
     try {
-      if (verdict === 'spam') await storage.addSpammer({ email: email.fromAddress, name: email.fromName || undefined, reason: 'Marked as spam by user' });
-      else await storage.removeSpammer(email.fromAddress);
+      if (verdict === 'spam') {
+        await storage.addSpammer({ email: email.fromAddress, name: email.fromName || undefined, reason: 'Marked as spam by user' });
+        // Reporting a sender you trusted is a change of mind about them: the
+        // trust goes, or their next message would bypass the filter again.
+        await storage.untrustSender(email.fromAddress);
+      } else {
+        await storage.removeSpammer(email.fromAddress);
+      }
     } catch (e) {
       logger.warn(`[SpamVerdict] spammer list not updated for ${email.fromAddress}: ${(e as Error).message}`);
     }
@@ -136,4 +144,21 @@ export async function applyUserSpamVerdict(deps: VerdictDeps, emailId: string, v
 
   deps.report?.({ domain: senderDomainOf(email.fromAddress), ip: email.originIp ?? null, verdict });
   return { success: true, email, moved };
+}
+
+/**
+ * "Trust this sender": remember the address, and take it off the spammer list
+ * — trusting someone you once reported is a change of mind about them. From
+ * here on their mail arrives with the `ham` verdict and is never filed, as
+ * long as it authenticates (the ingest path's rule, not this one's).
+ *
+ * The message the user clicked on is NOT touched here: the renderer clears it
+ * through the ordinary Not spam path for the view it is in, so there stays one
+ * way to act on a message.
+ */
+export async function trustSender(storage: Pick<VerdictStorage, 'trustSender' | 'removeSpammer'>, address: string): Promise<void> {
+  const addr = (address || '').trim();
+  if (!addr) throw new Error('No sender address to trust');
+  await storage.trustSender(addr);
+  await storage.removeSpammer(addr);
 }

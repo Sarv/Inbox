@@ -271,6 +271,18 @@ describe('AIRepository', () => {
       expect(tagsOf(db, 'e1')).not.toContain('|spam|');
     });
 
+    // Regression: the user's "Not spam" — or a trusted sender's mail, stored
+    // with the same `ham` verdict — outranks the model. Tagging it spam would
+    // pull it back under the spam shield (and out of the AI's own view).
+    it('does not tag spam over the user\'s ham verdict, on either save path', () => {
+      db.prepare("UPDATE emails SET spam_user_verdict = 'ham' WHERE id = 'e1'").run();
+      repo.saveEmailCategories('e1', [], true, 'scam?', 10, 0.9);
+      expect(tagsOf(db, 'e1')).not.toContain('|spam|');
+
+      repo.saveEmailCategoriesBatch([{ emailId: 'e1', categories: [], isSpam: true, reasoning: '', processedAt: 12, confidence: 0.9 }]);
+      expect(tagsOf(db, 'e1')).not.toContain('|spam|');
+    });
+
     it('is a silent no-op for an unknown email id', () => {
       expect(() => repo.saveEmailCategories('missing', [{ slug: 'invoice', confidence: 1 }], false, 'x', 1, 1)).not.toThrow();
       expect(db.prepare('SELECT COUNT(*) AS n FROM emails').get()).toEqual({ n: 1 });

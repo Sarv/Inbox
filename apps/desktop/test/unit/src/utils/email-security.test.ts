@@ -224,6 +224,20 @@ describe('firstFlaggedEmailId — where the one thread banner goes', () => {
     expect(firstFlaggedEmailId([clean('a', 1), clean('b', 2)])).toBeNull();
   });
 
+  // Regression: a sender the user trusts must not keep drawing the thread's
+  // warning banner — "I trust this sender" would appear to do nothing.
+  it('passes over a trusted sender, whose authenticated mail raises no banner', () => {
+    const bank = (id: string, date: number) => ({
+      id, date, fromName: 'Axis Bank Alerts', fromAddress: 'alerts@unlisted-bank.example', rawBody: '<p>ok</p>',
+      authStatus: JSON.stringify({ spf: 'pass', dkim: 'pass', dmarc: 'pass', overall: 'pass' }),
+    });
+    expect(firstFlaggedEmailId([bank('a', 1)])).toBe('a');
+    const trusted = (address?: string | null) => address === 'alerts@unlisted-bank.example';
+    expect(firstFlaggedEmailId([bank('a', 1)], undefined, trusted)).toBeNull();
+    // Trust in one sender does not hide another's spoof in the same thread.
+    expect(firstFlaggedEmailId([bank('a', 1), spoof('b', 2)], undefined, trusted)).toBe('b');
+  });
+
   it('does not mutate the caller’s array order', () => {
     const arr = [clean('b', 2), clean('a', 1)];
     firstFlaggedEmailId(arr);

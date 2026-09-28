@@ -393,6 +393,13 @@ export interface IEmailStorage {
    */
   isSpammer(email: string): Promise<boolean>;
 
+  /**
+   * Has the user vouched for this sender ("Trust this sender")? Read at ingest:
+   * an authenticated message from a trusted sender is stored as not-spam and
+   * never filed. A failing lookup must read as "not trusted".
+   */
+  isTrustedSender(email: string): Promise<boolean>;
+
   // ========== Remote-image sender allowlist (per account) ==========
 
   /** Remember a sender so their future mail auto-loads remote images

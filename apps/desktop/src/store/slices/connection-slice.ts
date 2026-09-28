@@ -3,6 +3,7 @@ import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
 import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
+import { resetTrustedSenders } from '../../utils/trusted-senders';
 import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, clearImageAllowedCache, loadQuotaCache, saveQuotaCache } from '../helpers';
 import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
 
@@ -147,7 +148,10 @@ async function doConnect(
       };
       // Switching to a different account? Drop the per-account image allowlist
       // so it re-warms from the new account's DB (harmless no-op on reconnect).
-      if (acctId !== get().activeAccountId) clearImageAllowedCache();
+      if (acctId !== get().activeAccountId) {
+        clearImageAllowedCache();
+        resetTrustedSenders();
+      }
       saveActiveAccountId(acctId);
       // Keep the global store fields + legacy localStorage in sync with THIS
       // account, so the SMTP form and banner read the active account's own
@@ -575,6 +579,7 @@ export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =
     // view so the previous account's folders/emails don't linger. The image
     // auto-load allowlist is per-account — drop it so it re-warms for this one.
     clearImageAllowedCache();
+    resetTrustedSenders();
     saveActiveAccountId(accountId);
     saveCredentials(acct.imapConfig);
     // Resolve the account's REAL sending config: OAuth accounts always send via

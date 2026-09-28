@@ -308,6 +308,8 @@ export interface SecuritySourceRow {
   fromAddress?: string | null;
   spamScore?: number | null;
   spamReasons?: string | null;
+  /** 'ham' when the user said "Not spam" or trusts the sender — see below. */
+  spamUserVerdict?: 'spam' | 'ham' | null;
   rawBody?: string | null;
   contentType?: string | null;
 }
@@ -322,8 +324,13 @@ export interface SecuritySourceRow {
  * model is shown exactly what the shield shows.
  */
 export function buildSecurityContext(email: SecuritySourceRow): EmailSecurityContext | undefined {
-  const verdict = spamVerdict(email.spamScore);
-  const reasons = parseSpamReasons(email.spamReasons);
+  // The user overruled the filter on this message ("Not spam", or a trusted
+  // sender's authenticated mail). Its score is not evidence any more: handed
+  // on, the gate below would force `isSpam` right back onto a message the
+  // user took out of spam. The link facts are still facts and still go in.
+  const overruled = email.spamUserVerdict === 'ham';
+  const verdict = overruled ? null : spamVerdict(email.spamScore);
+  const reasons = overruled ? [] : parseSpamReasons(email.spamReasons);
   const html = email.contentType === 'html' ? (email.rawBody ?? null) : null;
   const deceptiveLinks = linkMismatches(html);
   const domains = linkDomains(email.rawBody ?? null, {
@@ -335,7 +342,7 @@ export function buildSecurityContext(email: SecuritySourceRow): EmailSecurityCon
   }
   return {
     verdict,
-    score: typeof email.spamScore === 'number' ? email.spamScore : null,
+    score: !overruled && typeof email.spamScore === 'number' ? email.spamScore : null,
     reasons: reasons.map((reason) => reason.detail),
     deceptive: reasons.some((reason) => DECEPTION_REASON_IDS.has(reason.id)) || deceptiveLinks.length > 0,
     deceptiveLinks,

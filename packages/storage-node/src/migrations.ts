@@ -3629,6 +3629,30 @@ export const followUps: Migration = {
 };
 
 /**
+ * v95 — `trusted_senders`: addresses the user vouched for with "Trust this
+ * sender". Mail from one bypasses the spam filter at ingest (stored with the
+ * `ham` verdict, never tagged or filed) — but only when it authenticated, which
+ * the ingest path checks, not this table. Exact addresses, lowercased; per
+ * account, like `spammers` and `image_allowed_senders`.
+ */
+export const trustedSenders: Migration = {
+  version: 95,
+  name: 'trusted_senders',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS trusted_senders (
+        email TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+    `);
+    logger.info('Trusted senders (v95): trusted_senders table created');
+  },
+  down: (db) => {
+    db.exec('DROP TABLE IF EXISTS trusted_senders;');
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3707,5 +3731,6 @@ export function createMigrationManager(
   manager.register(pendingSendsScheduledAt);
   manager.register(emailUnsubscribeColumns);
   manager.register(followUps);
+  manager.register(trustedSenders);
   return manager;
 }

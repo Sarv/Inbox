@@ -369,6 +369,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listJudged: (limit?: number, accountId?: string) => ipcRenderer.invoke('spam:listJudged', limit, accountId),
     setUserVerdict: (emailId: string, verdict: SpamUserVerdict, accountId?: string) =>
       ipcRenderer.invoke('spam:setUserVerdict', emailId, verdict, accountId),
+    trustSender: (address: string, accountId?: string) =>
+      ipcRenderer.invoke('spam:trustSender', address, accountId),
+    listTrustedSenders: (accountId?: string) =>
+      ipcRenderer.invoke('spam:listTrustedSenders', accountId),
+    untrustSender: (address: string, accountId?: string) =>
+      ipcRenderer.invoke('spam:untrustSender', address, accountId),
     onReputationProgress: (cb: (state: SpamReputationState) => void) => {
       const listener = (_e: unknown, state: SpamReputationState) => cb(state);
       ipcRenderer.on('spam:reputation-progress', listener);
@@ -1269,6 +1275,10 @@ export interface ElectronAPI {
     kickReputation: () => Promise<{ success: boolean; data?: SpamReputationState; error?: string }>;
     listJudged: (limit?: number, accountId?: string) => Promise<{ success: boolean; data?: SpamJudgedRow[]; error?: string }>;
     setUserVerdict: (emailId: string, verdict: SpamUserVerdict, accountId?: string) => Promise<{ success: boolean; data?: { moved: boolean }; error?: string }>;
+    /** "Trust this sender": their authenticated mail bypasses the spam filter. */
+    trustSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    listTrustedSenders: (accountId?: string) => Promise<{ success: boolean; data?: Array<{ email: string; createdAt: number }>; error?: string }>;
+    untrustSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     /** Subscribe to reputation-pass progress. Returns an unsubscribe fn. */
     onReputationProgress: (cb: (state: SpamReputationState) => void) => () => void;
   };

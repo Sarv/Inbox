@@ -229,6 +229,10 @@ describe('SQLiteStorage before initialize()', () => {
     ['deleteEmail', (s) => s.deleteEmail('x')],
     ['syncFolders', (s) => s.syncFolders([])],
     ['getFolders', (s) => s.getFolders()],
+    // Read at every ingest: before initialize it must throw, not answer "not
+    // trusted" from a DB that is not open.
+    ['isTrustedSender', (s) => s.isTrustedSender('a@b.test')],
+    ['trustSender', (s) => s.trustSender('a@b.test')],
     ['recalculateFolderCounts', (s) => s.recalculateFolderCounts()],
     ['upsertThread', (s) => s.upsertThread({ id: 't' } as ThreadRecord)],
     ['getThreads', (s) => s.getThreads({ limit: 1, offset: 0 })],
@@ -981,6 +985,77 @@ describe('SQLiteStorage contact and sender-stat operations', () => {
 // Filter rules run in priority order on every incoming message; labels are the
 // tag vocabulary the UI colours. Both are user-authored data that must survive a
 // restart exactly as entered — a lost condition silently stops filtering mail.
+// ===========================================================================
+// Trusted senders (migration v95) — "I trust this sender"
+// ===========================================================================
+
+// Read at every ingest to decide whether a sender's authenticated mail
+// bypasses the spam filter. A lost row sends a trusted bank alert back to
+// Spam; a row that cannot be removed keeps waving mail through after the user
+// changed their mind.
+describe('SQLiteStorage trusted senders', () => {
+  const a = withStorage(async (storage) => {
+    await storage.syncFolders([makeFolder('f-inbox', 'INBOX')]);
+  });
+  const b = withStorage();
+
+  it('trusts, lists and withdraws an address', async () => {
+    const storage = a.get();
+    await storage.trustSender('alerts@axis.bank.in');
+    expect(await storage.isTrustedSender('alerts@axis.bank.in')).toBe(true);
+    expect((await storage.getTrustedSenders()).map((t) => t.email)).toEqual(['alerts@axis.bank.in']);
+
+    await storage.untrustSender('alerts@axis.bank.in');
+    expect(await storage.isTrustedSender('alerts@axis.bank.in')).toBe(false);
+    expect(await storage.getTrustedSenders()).toEqual([]);
+  });
+
+  // Regression: the sender arrives as "Name <addr>" from one path and a bare,
+  // mixed-case address from another. Stored and matched one way, or the trust
+  // silently fails to apply to the very sender it was given for.
+  it('normalises "Name <addr>" and case to one bare address, idempotently', async () => {
+    const storage = a.get();
+    await storage.trustSender('Axis Bank Alerts <Alerts@Axis.Bank.IN>');
+    await storage.trustSender('alerts@axis.bank.in');
+    expect(await storage.isTrustedSender('ALERTS@AXIS.BANK.IN')).toBe(true);
+    expect((await storage.getTrustedSenders()).map((t) => t.email)).toEqual(['alerts@axis.bank.in']);
+    await storage.untrustSender('Alerts@Axis.Bank.IN');
+  });
+
+  // Per ADDRESS: not the domain, not another mailbox there; and a blank
+  // address is never stored as a row that would match nothing.
+  it('trusts one address only, and ignores a blank one', async () => {
+    const storage = a.get();
+    await storage.trustSender('alerts@axis.bank.in');
+    await storage.trustSender('   ');
+    expect(await storage.isTrustedSender('offers@axis.bank.in')).toBe(false);
+    expect(await storage.isTrustedSender('')).toBe(false);
+    expect(await storage.getTrustedSenders()).toHaveLength(1);
+    await storage.untrustSender('alerts@axis.bank.in');
+  });
+
+  // Multi-account: each account has its own DB.
+  it('keeps each account\'s list to itself', async () => {
+    await a.get().trustSender('alerts@axis.bank.in');
+    expect(await b.get().isTrustedSender('alerts@axis.bank.in')).toBe(false);
+    await a.get().untrustSender('alerts@axis.bank.in');
+  });
+
+  // Regression: ingest stores a trusted sender's authenticated mail with the
+  // `ham` verdict in the same INSERT. Drop the column from the statement and
+  // the message lands with no verdict — and the reputation pass or the AI can
+  // file it as spam after all.
+  it('persists the verdict a message is inserted with, and NULL when there is none', async () => {
+    const storage = a.get();
+    await storage.insertEmailBatch([
+      makeEmail({ id: 'trusted-mail', messageId: '<trusted@x>', uid: 11, spamUserVerdict: 'ham' }),
+      makeEmail({ id: 'plain-mail', messageId: '<plain@x>', uid: 12 }),
+    ]);
+    expect((await storage.getEmail('trusted-mail'))?.spamUserVerdict).toBe('ham');
+    expect((await storage.getEmail('plain-mail'))?.spamUserVerdict ?? null).toBeNull();
+  });
+});
+
 describe('SQLiteStorage filter rules and labels', () => {
   const ctx = withStorage();
 

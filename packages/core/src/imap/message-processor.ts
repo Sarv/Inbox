@@ -2,6 +2,7 @@
 
 import {
   assessAttachmentSignals,
+  authenticationFailed,
   domainOfAddress,
   isSpamScore,
   mergeAssessments,
@@ -528,6 +529,10 @@ export class MessageProcessor {
           // in quiet/backfill mode with the rest of the reactive work; a
           // failing lookup is "unknown", never a failed message.
           let knownSpammer = false;
+          // ...and has the user vouched for them ("Trust this sender")? Read
+          // here for the same reason, and a failing lookup is "not trusted":
+          // the mail is then judged like anyone's, never lost.
+          let trustedSender = false;
           const fromAddress = message.envelope.from?.[0]?.address;
           if (!quiet && fromAddress) {
             try {
@@ -535,11 +540,17 @@ export class MessageProcessor {
             } catch (err) {
               logger.error(`[AutoSpam] Check failed for ${fromAddress}:`, err);
             }
+            try {
+              trustedSender = await storage.isTrustedSender(fromAddress);
+            } catch (err) {
+              logger.error(`[AutoSpam] Trust check failed for ${fromAddress}:`, err);
+            }
           }
 
           // Convert to EmailRecord
           const email = await this.convertMessage(message, folder.id, folderPath, labelCtx, {
             knownSpammer,
+            trustedSender,
             ownMail,
             // Withheld in quiet/backfill mode with the rest of the reactive
             // work: a sweep of old mail must not become thousands of DNS
@@ -597,7 +608,9 @@ export class MessageProcessor {
         if (!quiet) {
           let filed = 0;
           for (const email of emailRecords) {
-            if (!isSpamScore(email.spamScore)) continue;
+            // The user's word outranks the score: a trusted sender's
+            // authenticated mail arrives with the `ham` verdict and stays put.
+            if (!isSpamScore(email.spamScore) || email.spamUserVerdict === 'ham') continue;
             try {
               const folders = await getAllFolders();
               const moved = computeFilterActionResult(email, [{ type: 'moveToSpam' }], folders);
@@ -827,6 +840,11 @@ export class MessageProcessor {
     opts?: {
       /** The user has reported this sender (a `spammers` row). */
       knownSpammer?: boolean;
+      /**
+       * The user trusts this sender (a `trusted_senders` row). Honoured only
+       * when the message did not fail authentication — see `trusted` below.
+       */
+      trustedSender?: boolean;
       /** The user's own outgoing mail (Sent / Drafts) — never spam-scored. */
       ownMail?: boolean;
       /**
@@ -984,9 +1002,23 @@ export class MessageProcessor {
     // place the arithmetic lives.
     const scored = spam ? mergeAssessments(spam, reputation, body) : null;
 
+    // Trust. A sender the user vouched for is stored with the `ham` verdict —
+    // the standing form of their "Not spam" — so this message is never tagged
+    // or filed, and every later stage (reputation, body rescore, the AI)
+    // honours it the way it honours a click. The score and reasons are still
+    // stored, so the shield can show what was set aside.
+    //
+    // NOT when authentication failed. The From address is exactly what a
+    // forger copies, so a trusted address that did not authenticate is the
+    // likeliest forgery of all, and it is judged like anyone's mail.
+    const trusted = !!scored && opts?.trustedSender === true && !authenticationFailed(auth);
+    if (scored && opts?.trustedSender === true && !trusted) {
+      logger.warn(`[AutoSpam] Trust set aside for ${envelopeFields.fromAddress}: the message failed authentication`);
+    }
+
     // The classification tag the AI pipeline excludes on and the Spam filter
     // view lists — the same lowercase `spam` the AI's own verdict writes.
-    if (scored?.isSpam) tagList.push('spam');
+    if (scored?.isSpam && !trusted) tagList.push('spam');
     const tags = buildTags(tagList);
 
     return {
@@ -1047,6 +1079,7 @@ export class MessageProcessor {
       // and "judged clean" stay distinct.
       spamScore: scored ? scored.score : null,
       spamReasons: scored ? JSON.stringify(scored.reasons) : null,
+      spamUserVerdict: trusted ? 'ham' : null,
       // The connecting client's address, for the reputation stage.
       originIp,
 
@@ -1519,7 +1552,9 @@ export class MessageProcessor {
         // a message, and mail must not disappear out of the folder a reader is
         // looking at. Tagged-but-unmoved is the state a mailbox with no spam
         // folder is already in, and the shield says why.
-        if (isSpamScore(scored.score) && !hasTag(target.tags, 'spam')) {
+        // Never on a message the user cleared ("Not spam", or a trusted
+        // sender): their verdict outranks whatever the body scored.
+        if (isSpamScore(scored.score) && !hasTag(target.tags, 'spam') && target.spamUserVerdict !== 'ham') {
           update.tags = addTag(target.tags, 'spam');
         }
       }

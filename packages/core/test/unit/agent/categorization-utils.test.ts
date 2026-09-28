@@ -843,6 +843,24 @@ describe('buildSecurityContext', () => {
     expect(nuisance.linkDomains).toEqual(['vendor.example']);
   });
 
+  // Regression: a message the user cleared ("Not spam", or a trusted sender's
+  // mail, stored as `ham`) must not hand the model the filter's spam verdict —
+  // the gate would force isSpam straight back onto it. The link FACTS still go
+  // in: trusting a sender is not trusting every URL in their mail.
+  it('drops the filter verdict for a message the user cleared, keeping the link facts', () => {
+    const ctx = buildSecurityContext(lureRow({ spamUserVerdict: 'ham' }))!;
+    expect(ctx.verdict).toBeNull();
+    expect(ctx.score).toBeNull();
+    expect(ctx.reasons).toEqual([]);
+    expect(ctx.deceptiveLinks).toEqual([{ shown: 'sarv.com', actual: 'kuaiyudh.top' }]);
+    expect(ctx.deceptive).toBe(true);
+    const [result] = applySecurityGate(
+      [{ emailId: 'e1', isSpam: false, categories: ['finance'], shouldAutoDraft: false, reasoning: '' } as never],
+      [{ id: 'e1', security: ctx }],
+    );
+    expect((result as { isSpam: boolean }).isSpam).toBe(false);
+  });
+
   it('treats a lying link as deception even when the stored reasons carry none', () => {
     const ctx = buildSecurityContext(lureRow({ spamScore: 0, spamReasons: '[]' }))!;
     expect(ctx.verdict).toBe('clean');

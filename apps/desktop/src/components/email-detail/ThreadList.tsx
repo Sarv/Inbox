@@ -19,6 +19,7 @@ import { qualifiesForSafeAutoLoad } from '../../store/helpers';
 import { firstFlaggedEmailId } from '../../utils/email-security';
 import { toForwardSource } from '../../utils/forward-quote';
 import { useLinkRules } from '../../utils/security-rules';
+import { useTrustedSenders } from '../../utils/trusted-senders';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
@@ -27,7 +28,7 @@ import { SandboxedEmailBody } from '../SandboxedEmailBody';
 import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
-import { PhishingWarningBanner } from './PhishingWarningBanner';
+import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
@@ -105,9 +106,12 @@ export function ThreadList({ ctx }: ThreadListProps) {
   // at the render site). Includes the anchor, so a clean anchor with a spoofed
   // reply puts the banner on the reply — and a spoofed anchor keeps it there.
   const { sets: linkRuleSets } = useLinkRules();
+  // The list itself, not the stable lookup, is the memo key: it is a new array
+  // whenever a sender is trusted or removed, so the banner moves with it.
+  const { senders: trustedSenders, isTrusted } = useTrustedSenders();
   const firstFlaggedId = useMemo(
-    () => firstFlaggedEmailId(threadEmails, linkRuleSets),
-    [threadEmails, linkRuleSets],
+    () => firstFlaggedEmailId(threadEmails, linkRuleSets, isTrusted),
+    [threadEmails, linkRuleSets, trustedSenders, isTrusted],
   );
 
   return (
@@ -300,9 +304,14 @@ export function ThreadList({ ctx }: ThreadListProps) {
                         (see firstFlaggedEmailId). */}
                     {email.id === firstFlaggedId && (
                       <PhishingWarningBanner
+                        emailId={email.id}
+                        accountId={(email as any).accountId}
+                        onTrusted={() => clearAfterTrust(ctx, email.id, (email as any).accountId)}
                         fromName={email.fromName}
                         fromAddress={email.fromAddress}
                         authStatus={email.authStatus}
+                        spamScore={email.spamScore}
+                        spamReasons={email.spamReasons}
                         html={email.rawBody}
                       />
                     )}

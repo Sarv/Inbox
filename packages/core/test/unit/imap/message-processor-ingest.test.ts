@@ -1303,3 +1303,153 @@ describe('MessageProcessor ingest — unsubscribe headers', () => {
     });
   });
 });
+
+describe('processBatch — a sender the user trusts', () => {
+  // "I trust this sender": their authenticated mail bypasses the filter. Each
+  // test names the regression it guards, because the failure modes are quiet
+  // ones — a trusted bank alert in Spam again, or a forgery waved through.
+  const spamHeaders = 'X-Spam-Flag: YES\r\n';
+  const PASS = 'Authentication-Results: mx.test.local; spf=pass; dkim=pass; dmarc=pass';
+  const FAIL = 'Authentication-Results: mx.test.local; spf=fail; dkim=fail; dmarc=fail';
+  const from = (address: string) => ({ from: [{ address, name: 'Axis Bank Alerts' }] }) as never;
+
+  afterEach(() => vi.restoreAllMocks());
+
+  // Regression: the reason this exists. A trusted, authenticated message that
+  // scores spam must stay in INBOX, untagged, with the user's `ham` verdict so
+  // every later stage leaves it alone — and must not be moved on the server.
+  it('keeps a trusted sender\'s authenticated mail out of spam, with the ham verdict', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted('alerts@axis.bank.in');
+    const mover = vi.fn().mockResolvedValue(undefined);
+    mp.setServerActions({ moveToSpam: mover });
+
+    await mp.processBatch(
+      [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders, authHeaders: PASS })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId(INBOX));
+    expect(db.tagsOf(row.id)).toEqual([INBOX]);
+    expect(row.spamUserVerdict).toBe('ham');
+    // Still scored, so the shield can show what was set aside.
+    expect(row.spamScore).toBe(5);
+    expect(mover).not.toHaveBeenCalled();
+  });
+
+  // Regression, the security edge: From is what a forger copies. A trusted
+  // address on mail that FAILED authentication must be judged like anyone's
+  // — tagged, filed, no ham verdict — or trust is a bypass for any spammer
+  // who knows whom you trust.
+  it('files a trusted address that failed authentication — a forgery of it', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted('alerts@axis.bank.in');
+
+    await mp.processBatch(
+      [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders, authHeaders: FAIL })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    const row = db.allRows()[0];
+    expect(row.folderId).toBe(db.folderId('Spam'));
+    expect(db.tagsOf(row.id).sort()).toEqual(['Spam', 'spam']);
+    expect(row.spamUserVerdict ?? null).toBeNull();
+  });
+
+  // No authentication verdict recorded is not a failure: nothing contradicts
+  // the address, so trust applies (the same rule the scorer uses).
+  it('honours trust when the server recorded no authentication verdict', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted('alerts@axis.bank.in');
+
+    await mp.processBatch(
+      [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(db.allRows()[0].folderId).toBe(db.folderId(INBOX));
+    expect(db.allRows()[0].spamUserVerdict).toBe('ham');
+  });
+
+  // Regression: trust is per ADDRESS. Another sender at the same domain, or
+  // an untrusted one, is filed as before.
+  it('does not extend trust to another address', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted('alerts@axis.bank.in');
+
+    await mp.processBatch(
+      [msg({ uid: 1, envelope: from('offers@axis.bank.in'), rawHeaders: spamHeaders, authHeaders: PASS })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(db.allRows()[0].folderId).toBe(db.folderId('Spam'));
+  });
+
+  // Transient failure: a trust lookup that throws must not lose or break the
+  // message — it is judged as untrusted, which at worst files a trusted
+  // sender's spam-scoring mail (recoverable), never drops it.
+  it('a FAILING trust lookup does not break the sync and reads as untrusted', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted('alerts@axis.bank.in');
+    vi.spyOn(db, 'isTrustedSender').mockRejectedValue(new Error('db busy'));
+
+    const result = await mp.processBatch(
+      [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders, authHeaders: PASS })],
+      db.folder(INBOX), db.asStorage(),
+    );
+
+    expect(result.errors).toBe(0);
+    expect(db.allRows()).toHaveLength(1);
+    expect(db.allRows()[0].folderId).toBe(db.folderId('Spam'));
+  });
+
+  // Idempotent re-run: syncing the trusted message again must not duplicate
+  // it, re-file it, or lose the verdict.
+  it('a re-run leaves the trusted message where it was', async () => {
+    const { db, mp } = setup();
+    db.addFolder('Spam');
+    db.markTrusted('alerts@axis.bank.in');
+    const batch = [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders, authHeaders: PASS })];
+
+    await mp.processBatch(batch, db.folder(INBOX), db.asStorage());
+    await mp.processBatch(batch, db.folder(INBOX), db.asStorage());
+
+    expect(db.allRows()).toHaveLength(1);
+    expect(db.allRows()[0].folderId).toBe(db.folderId(INBOX));
+    expect(db.allRows()[0].spamUserVerdict).toBe('ham');
+  });
+
+  // Multi-account: trust lives in each account's own storage. The same
+  // sender trusted in one account is filed in another that never trusted it.
+  it('trust in one account does not reach another', async () => {
+    const a = setup();
+    const b = setup();
+    a.db.addFolder('Spam');
+    b.db.addFolder('Spam');
+    a.db.markTrusted('alerts@axis.bank.in');
+    const mail = () => [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders, authHeaders: PASS })];
+
+    await a.mp.processBatch(mail(), a.db.folder(INBOX), a.db.asStorage());
+    await b.mp.processBatch(mail(), b.db.folder(INBOX), b.db.asStorage());
+
+    expect(a.db.allRows()[0].folderId).toBe(a.db.folderId(INBOX));
+    expect(b.db.allRows()[0].folderId).toBe(b.db.folderId('Spam'));
+  });
+
+  // Quiet (backfill) mode does no reactive work, the trust lookup included —
+  // the same rule as the spammer lookup.
+  it('does not look trust up in quiet mode', async () => {
+    const { db, mp } = setup();
+    const spy = vi.spyOn(db, 'isTrustedSender');
+
+    await mp.processBatch([msg({ uid: 1 })], db.folder(INBOX), db.asStorage(), undefined, { quiet: true });
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+});

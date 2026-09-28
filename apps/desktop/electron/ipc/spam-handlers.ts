@@ -13,10 +13,17 @@ import { ipcMain } from 'electron';
 import { resolveAccountTarget } from '../services/account-target';
 import { reportSenderVerdict } from '../services/reputation-service';
 import { getSpamReputationState, kickSpamReputation } from '../services/spam-reputation-service';
-import { applyUserSpamVerdict } from '../services/spam-verdict-actions';
+import { applyUserSpamVerdict, trustSender, type VerdictDeps } from '../services/spam-verdict-actions';
 
 const logger = createLogger('spam-handlers');
 const fail = (error: unknown) => ({ success: false as const, error: (error as Error)?.message ?? String(error) });
+
+/** What a verdict needs for one account: its storage, its server queue, the report hook. */
+async function verdictDepsFor(accountId?: string): Promise<VerdictDeps> {
+  const { storage, syncEngine } = await resolveAccountTarget(accountId);
+  const queue = (syncEngine as unknown as { operationQueue?: VerdictDeps['queue'] } | null)?.operationQueue ?? null;
+  return { storage, queue, report: (r) => reportSenderVerdict(r) };
+}
 
 export function registerSpamHandlers(): void {
   ipcMain.handle('spam:getReputationState', async () => {
@@ -40,12 +47,42 @@ export function registerSpamHandlers(): void {
   ipcMain.handle('spam:setUserVerdict', async (_event, emailId: string, verdict: SpamUserVerdict, accountId?: string) => {
     try {
       if (verdict !== 'spam' && verdict !== 'ham') return { success: false, error: 'verdict must be spam or ham' };
-      const { storage, syncEngine } = await resolveAccountTarget(accountId);
-      const queue = (syncEngine as unknown as { operationQueue?: { moveToSpam(f: string, u: number): Promise<unknown>; move(s: string, u: number, d: string): Promise<unknown> } } | null)?.operationQueue ?? null;
-      const outcome = await applyUserSpamVerdict({ storage, queue, report: (r) => reportSenderVerdict(r) }, emailId, verdict);
+      const deps = await verdictDepsFor(accountId);
+      const outcome = await applyUserSpamVerdict(deps, emailId, verdict);
       return outcome.success ? { success: true, data: { moved: outcome.moved } } : { success: false, error: outcome.error };
     } catch (error) {
       logger.error('spam:setUserVerdict failed:', error);
+      return fail(error);
+    }
+  });
+
+  // "Trust this sender": their authenticated mail bypasses the filter from now on.
+  ipcMain.handle('spam:trustSender', async (_event, address: string, accountId?: string) => {
+    try {
+      const { storage } = await resolveAccountTarget(accountId);
+      await trustSender(storage, address);
+      return { success: true };
+    } catch (error) {
+      logger.error('spam:trustSender failed:', error);
+      return fail(error);
+    }
+  });
+
+  // The Security page's list, and its remove.
+  ipcMain.handle('spam:listTrustedSenders', async (_event, accountId?: string) => {
+    try {
+      const { storage } = await resolveAccountTarget(accountId);
+      return { success: true, data: await storage.getTrustedSenders() };
+    } catch (error) {
+      return fail(error);
+    }
+  });
+  ipcMain.handle('spam:untrustSender', async (_event, address: string, accountId?: string) => {
+    try {
+      const { storage } = await resolveAccountTarget(accountId);
+      await storage.untrustSender(address);
+      return { success: true };
+    } catch (error) {
       return fail(error);
     }
   });

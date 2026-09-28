@@ -618,6 +618,9 @@ export class UnifiedPipeline {
     const sender = email.fromAddress?.toLowerCase() || '';
     const domain = sender.split('@')[1] || '';
     if (['delete', 'spam'].includes(action) && this.config.neverAutoDeleteFrom.some(s => sender.includes(s.toLowerCase()) || domain.includes(s.toLowerCase()))) return false;
+    // The user cleared this message ("Not spam", or a trusted sender): the
+    // model may still think it spam, but it must not act on that alone.
+    if (action === 'spam' && email.spamUserVerdict === 'ham') return false;
     if (['reply', 'reply_all'].includes(action) && this.config.neverAutoReplyTo.some(s => sender.includes(s.toLowerCase()) || domain.includes(s.toLowerCase()))) return false;
     return true;
   }

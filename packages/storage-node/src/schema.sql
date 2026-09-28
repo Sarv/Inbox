@@ -398,6 +398,13 @@ CREATE TABLE IF NOT EXISTS image_allowed_senders (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+-- Senders the user trusts (per account): their mail bypasses the spam filter
+-- when it authenticates. See migration v95.
+CREATE TABLE IF NOT EXISTS trusted_senders (
+  email TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 -- Signature patterns
 CREATE TABLE IF NOT EXISTS signature_patterns (
   id TEXT PRIMARY KEY,

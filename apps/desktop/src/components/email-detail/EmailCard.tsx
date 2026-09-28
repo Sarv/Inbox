@@ -21,7 +21,7 @@ import { CalendarInviteBanner } from './CalendarInviteBanner';
 import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
-import { PhishingWarningBanner } from './PhishingWarningBanner';
+import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
@@ -216,6 +216,9 @@ export function EmailCard({ ctx }: EmailCardProps) {
             {/* Phishing warning (sender impersonation / deceptive links) — shown
                 above everything so the user sees it before reading the body. */}
             <PhishingWarningBanner
+              emailId={displayEmail.id}
+              accountId={(displayEmail as any).accountId}
+              onTrusted={() => clearAfterTrust(ctx, displayEmail.id, (displayEmail as any).accountId)}
               fromName={displayEmail.fromName}
               fromAddress={displayEmail.fromAddress}
               authStatus={displayEmail.authStatus}

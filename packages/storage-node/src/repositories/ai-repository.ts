@@ -20,6 +20,16 @@ import { addTag, removeTag, parseTags, hasTag } from './email-repository';
 const logger = createLogger('ai-repository');
 
 /**
+ * Whether the AI's spam call may tag the row. Not when the user has said
+ * "Not spam" — or trusts the sender, which stores the same verdict at ingest:
+ * their word outranks the model's as it outranks the filter's, and a tag here
+ * would pull the message back under the spam shield.
+ */
+export function aiMayTagSpam(isSpam: boolean, userVerdict: string | null | undefined): boolean {
+  return isSpam && userVerdict !== 'ham';
+}
+
+/**
  * Repository for AI-related operations — tags-based
  */
 export class AIRepository extends BaseRepository {
@@ -59,7 +69,7 @@ export class AIRepository extends BaseRepository {
   ): void {
     const txn = this.db.transaction(() => {
       // Get current tags
-      const row = this.db.prepare('SELECT tags FROM emails WHERE id = ?').get(emailId) as any;
+      const row = this.db.prepare('SELECT tags, spam_user_verdict FROM emails WHERE id = ?').get(emailId) as any;
       if (!row) return;
 
       let tags = row.tags || '||';
@@ -75,7 +85,7 @@ export class AIRepository extends BaseRepository {
       for (const cat of categories) {
         tags = addTag(tags, cat.slug);
       }
-      if (isSpam) {
+      if (aiMayTagSpam(isSpam, row.spam_user_verdict)) {
         tags = addTag(tags, 'spam');
       }
 
@@ -107,7 +117,7 @@ export class AIRepository extends BaseRepository {
     const catSlugs = allCats.map(c => c.slug);
 
     const txn = this.db.transaction((items: typeof batch) => {
-      const selectStmt = this.db.prepare('SELECT tags FROM emails WHERE id = ?');
+      const selectStmt = this.db.prepare('SELECT tags, spam_user_verdict FROM emails WHERE id = ?');
       // Also stamp agent_status='done' + agent_at (mirroring markAgentDone) so
       // the unified pipeline's poll — which selects agent_status='pending' —
       // treats bulk/propagated categorization as complete and does NOT re-send
@@ -138,7 +148,7 @@ export class AIRepository extends BaseRepository {
         for (const cat of item.categories) {
           tags = addTag(tags, cat.slug);
         }
-        if (item.isSpam) {
+        if (aiMayTagSpam(item.isSpam, row.spam_user_verdict)) {
           tags = addTag(tags, 'spam');
         }
 

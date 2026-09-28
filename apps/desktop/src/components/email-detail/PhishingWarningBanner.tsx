@@ -1,12 +1,23 @@
 import type { LinkMismatch } from '@sarv-in/mailguard/links';
-import { ShieldAlert, ShieldX, Check, Ban } from 'lucide-react';
+import { authenticationFailed } from '@sarv-in/mailguard/verdict';
+import { ShieldAlert, ShieldX, Check, Ban, UserCheck, Loader2 } from 'lucide-react';
 import { useState } from 'react';
 
-import { LEVEL_RANK } from '../../utils/email-security';
+import { LEVEL_RANK, parseAuthStatus } from '../../utils/email-security';
 import { addLinkRule } from '../../utils/security-rules';
+import { trustSender } from '../../utils/trusted-senders';
 import { useEmailSecurity } from '../../utils/use-email-security';
 
 interface PhishingWarningBannerProps {
+  /** The message, for "Trust this sender". Without it the button is not offered. */
+  emailId?: string;
+  accountId?: string;
+  /**
+   * Clear THIS message once its sender is trusted, the way the view it is in
+   * does "Not spam" (out of the Spam folder, or just un-flagged in place).
+   * Without it the button is not offered.
+   */
+  onTrusted?: () => Promise<unknown> | void;
   fromName?: string | null;
   fromAddress?: string | null;
   /** Rendered HTML body — scanned for deceptive links (anchor text ≠ href). */
@@ -37,8 +48,18 @@ interface PhishingWarningBannerProps {
  * only. "Block this link" records the opposite, so any future message from
  * this sender carrying it is marked dangerous. Both land in Security →
  * Trusted & blocked links, where they can be revoked.
+ *
+ * "Trust this sender" is offered when the warning is about WHO sent it — the
+ * sender name or the spam score — and the message authenticated. It stores the
+ * address (Security → Spam → Trusted senders), clears this message, and from
+ * then on their authenticated mail is never filed. Never offered on a message
+ * that failed authentication: that is where a forged copy of a trusted address
+ * would be, and one click must not wave it through.
  */
 export function PhishingWarningBanner({
+  emailId,
+  accountId,
+  onTrusted,
   fromName,
   fromAddress,
   html,
@@ -49,6 +70,7 @@ export function PhishingWarningBanner({
 }: PhishingWarningBannerProps) {
   const assessment = useEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons });
   const [busy, setBusy] = useState<string | null>(null);
+  const [trustError, setTrustError] = useState<string | null>(null);
 
   if (LEVEL_RANK[assessment.level] < LEVEL_RANK.caution) return null;
 
@@ -56,6 +78,22 @@ export function PhishingWarningBanner({
   const Icon = isDanger ? ShieldX : ShieldAlert;
   // Only the checks that went wrong belong in a warning.
   const reasons = assessment.checks.filter((c) => c.status === 'fail' || c.status === 'warn');
+  const canTrust =
+    !!emailId && !!fromAddress && !!onTrusted && !assessment.trusted
+    && !authenticationFailed(parseAuthStatus(authStatus ?? null))
+    && reasons.some((r) => r.id === 'sender' || r.id === 'spam');
+
+  const trust = async () => {
+    setBusy('trust-sender');
+    setTrustError(null);
+    try {
+      const res = await trustSender(fromAddress, accountId);
+      if (!res.success) { setTrustError(res.error ?? 'Could not trust this sender'); return; }
+      await onTrusted?.();
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const decide = async (m: LinkMismatch, verdict: 'trust' | 'block') => {
     const id = `${m.shown}->${m.actual}:${verdict}`;
@@ -77,7 +115,7 @@ export function PhishingWarningBanner({
 
   const title = isDanger
     ? 'This message may not be from who it claims to be'
-    : assessment.spam.verdict === 'spam'
+    : assessment.spam.verdict === 'spam' && !assessment.trusted
       ? 'The spam filter flagged this message'
       : 'Be careful with this message';
 
@@ -124,6 +162,20 @@ export function PhishingWarningBanner({
               })}
             </ul>
           )}
+          {canTrust && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <button
+                onClick={() => void trust()}
+                disabled={busy !== null}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-0.5 hover:bg-muted/60 disabled:opacity-50 transition-colors"
+              >
+                {busy === 'trust-sender' ? <Loader2 className="h-3 w-3 animate-spin" /> : <UserCheck className="h-3 w-3" />}
+                I trust this sender
+              </button>
+              <span className="text-muted-foreground">Their mail to you won&apos;t be marked as spam again.</span>
+              {trustError && <span className="text-red-700 dark:text-red-300">{trustError}</span>}
+            </div>
+          )}
           <div className="mt-1.5 text-xs text-muted-foreground">
             Don&apos;t click links, open attachments, or share passwords or payment details unless you&apos;re sure the sender is genuine.
           </div>
@@ -131,4 +183,19 @@ export function PhishingWarningBanner({
       </div>
     </div>
   );
+}
+
+/**
+ * What "I trust this sender" does to the message it was clicked on: the same
+ * as the view's own Not spam. In the Spam folder that is the view's handler —
+ * out of Spam, list updated. Anywhere else the message stays where it is and
+ * only loses its spam verdict (it may carry the tag without having been filed).
+ */
+export function clearAfterTrust(
+  ctx: { isInSpam: boolean; handleNotSpam: () => Promise<void> },
+  emailId: string,
+  accountId?: string,
+): Promise<unknown> {
+  if (ctx.isInSpam) return ctx.handleNotSpam();
+  return window.electronAPI.spam.setUserVerdict(emailId, 'ham', accountId);
 }

@@ -11,6 +11,7 @@ import { BlockedSendersPanel } from '../settings/BlockedSendersPanel';
 import { Tooltip } from '../Tooltip';
 
 import { BlocklistsTab } from './BlocklistsTab';
+import { TrustedSendersPanel } from './TrustedSendersPanel';
 
 type SecurityTab = 'overview' | 'links' | 'senders' | 'images' | 'identity' | 'blocklists' | 'spam';
 
@@ -829,6 +830,7 @@ function SpamTab() {
           </table>
         </div>
       )}
+      <TrustedSendersPanel />
     </div>
   );
 }

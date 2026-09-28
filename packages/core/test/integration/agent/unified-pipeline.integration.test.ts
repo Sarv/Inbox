@@ -31,7 +31,7 @@ const mkEmail = (over: Partial<EmailRecord> = {}): EmailRecord => ({
   ...over,
 } as EmailRecord);
 
-function makePipeline(over: Partial<UnifiedPipelineDeps> = {}) {
+function makePipeline(over: Partial<UnifiedPipelineDeps> = {}, config: Record<string, unknown> = {}) {
   const saved = {
     categories: [] as Array<{ emailId: string; categories: { slug: string; confidence: number }[]; isSpam: boolean }>,
     notes: [] as Array<{ email: string; note: string; category: string; sourceEmailId?: string }>,
@@ -57,7 +57,7 @@ function makePipeline(over: Partial<UnifiedPipelineDeps> = {}) {
     getNotesForPrompt: () => '',
     ...over,
   };
-  const pipeline = new UnifiedPipeline(deps, { interBatchDelayMs: 0 });
+  const pipeline = new UnifiedPipeline(deps, { interBatchDelayMs: 0, ...config });
   return { pipeline, callAI, saved };
 }
 
@@ -117,6 +117,27 @@ describe('UnifiedPipeline — received-email → AI flow (integration)', () => {
     expect(result!.isSpam).toBe(true);
     expect(result!.predictedAction).toBe('spam');
     expect(saved.decisions).toHaveLength(0); // spam isn't a reply proposal
+  });
+
+  // Regression: with auto-triage on, the model's own "spam" on a message the
+  // user cleared ("Not spam", or a trusted sender — stored as `ham`) must not
+  // be acted on. Without the guard a trusted bank alert the filter let through
+  // would be moved to Spam by the AI instead.
+  it('does not auto-file a message the user cleared, even when the AI calls it spam', async () => {
+    const spamCall = aiResponse([{ emailId: 'e1', categories: [], is_spam: true, confidence: 0.99, reasoning: 'Looks like a scam' }]);
+
+    const cleared = makePipeline({}, { enabled: true, autoTriage: true });
+    cleared.callAI.mockResolvedValue(spamCall);
+    const kept = await cleared.pipeline.processEmail(mkEmail({ spamUserVerdict: 'ham' }));
+    expect(kept!.executed).toBe(false);
+    expect(cleared.saved.actions).toEqual([]);
+
+    // The control: the same call on a message nobody cleared IS acted on.
+    const plain = makePipeline({}, { enabled: true, autoTriage: true });
+    plain.callAI.mockResolvedValue(spamCall);
+    const filed = await plain.pipeline.processEmail(mkEmail());
+    expect(filed!.executed).toBe(true);
+    expect(plain.saved.actions).toEqual([{ id: 'e1', action: 'spam', value: undefined }]);
   });
 
   it('keeps a TRANSIENT AI failure pending (does not save categories, marks categorizationFailed)', async () => {

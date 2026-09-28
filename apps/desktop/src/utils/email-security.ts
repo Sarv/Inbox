@@ -58,6 +58,8 @@ export type BimiIdentity = BrandIdentity;
  *   up: null = not known yet, an object = the cached standing. Omit it entirely
  *   when brand identity is not part of this view, and no check line appears.
  * @param input.rules the user's trust/block rules (defaults to none)
+ * @param input.trustedSender the user trusts this sender (utils/trusted-senders):
+ *   the name and spam checks are set aside when the message authenticated
  * @param input.bodyLoaded false while the body is still being fetched. Bodies
  *   load lazily here, so most callers know this and must say it: without it an
  *   unread message is assessed as one whose links were checked and found
@@ -74,6 +76,7 @@ export function assessEmailSecurity(input: {
   spamReasons?: string | null;
   bimi?: BimiIdentity | null;
   rules?: LinkRuleSets;
+  trustedSender?: boolean;
 }): SecurityAssessment {
   const assessment = assessSecurity({
     fromName: input.fromName,
@@ -84,6 +87,7 @@ export function assessEmailSecurity(input: {
     spamScore: input.spamScore,
     spamReasons: input.spamReasons,
     rules: input.rules,
+    trustedSender: input.trustedSender,
     ...('bimi' in input ? { bimi: input.bimi } : {}),
   });
   return { ...assessment, checks: assessment.checks.map((check) => inboxCopy(check, input.bimi)) };
@@ -176,12 +180,15 @@ export function firstFlaggedEmailId(
     spamReasons?: string | null;
   }>,
   rules: LinkRuleSets = EMPTY_RULES,
+  /** Whether the user trusts a sender — so a trusted sender's mail raises no banner. */
+  isTrusted: (address?: string | null) => boolean = () => false,
 ): string | null {
   const sorted = [...emails].sort((a, b) => a.date - b.date);
   for (const e of sorted) {
     const { level } = assessEmailSecurity({
       fromName: e.fromName, fromAddress: e.fromAddress, html: e.rawBody, authStatus: e.authStatus,
       spamScore: e.spamScore, spamReasons: e.spamReasons, rules,
+      trustedSender: isTrusted(e.fromAddress),
     });
     if (LEVEL_RANK[level] >= LEVEL_RANK.caution) return e.id;
   }

@@ -1007,4 +1007,30 @@ describe('fetchBody — the body stage', () => {
     expect(ctx.db.tagsOf(row.id)).not.toContain('spam');
     expect(ctx.db.row(row.id)!.spamScore).toBe(3);
   });
+
+  // Regression: the user's word outranks the body. A message they cleared
+  // ("Not spam", or a trusted sender's mail, both stored as `ham`) used to be
+  // re-tagged spam the moment its body was opened and crossed the line — the
+  // shield turned red again on a message the user had just rescued.
+  it('does not re-tag a message the user cleared, however the body scores', async () => {
+    const ctx = setup();
+    const messageId = '<cleared@test.local>';
+    const uid = ctx.server.addMessage(INBOX, { messageId, body: withDisguisedExecutable(messageId) });
+    const row = ctx.db.seedEmail({
+      folderId: ctx.db.folderId(INBOX),
+      uid,
+      tags: `|${INBOX}|`,
+      messageId,
+      subject: 'Your account',
+      spamScore: 3,
+      spamReasons: HEADER_VERDICT,
+      spamUserVerdict: 'ham',
+    });
+
+    await ctx.mp.fetchBody(ctx.server, INBOX, uid, ctx.db.asStorage(), row.id);
+
+    // Still scored — the reasons stay visible — but not tagged.
+    expect(ctx.db.row(row.id)!.spamScore).toBe(7);
+    expect(ctx.db.tagsOf(row.id)).not.toContain('spam');
+  });
 });

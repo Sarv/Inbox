@@ -1,7 +1,7 @@
 import type { EmailRecord, FolderRecord, SenderReport } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
-import { applyUserSpamVerdict, senderDomainOf, type VerdictStorage } from '../../../../electron/services/spam-verdict-actions';
+import { applyUserSpamVerdict, senderDomainOf, trustSender, type VerdictStorage } from '../../../../electron/services/spam-verdict-actions';
 
 /**
  * Report spam / Not spam, the one implementation behind three doors.
@@ -39,6 +39,8 @@ function harness(e: EmailRecord | null, folders: FolderRecord[] = [INBOX, SPAM, 
     updateEmail: vi.fn(async (id, u) => { calls.push(`update ${id} ${u.folderId ?? '-'} ${u.tags ?? '-'}`); }),
     addSpammer: vi.fn(async (s) => { calls.push(`addSpammer ${s.email}`); }),
     removeSpammer: vi.fn(async (a) => { calls.push(`removeSpammer ${a}`); }),
+    trustSender: vi.fn(async (a) => { calls.push(`trust ${a}`); }),
+    untrustSender: vi.fn(async (a) => { calls.push(`untrust ${a}`); }),
     setSpamUserVerdict: vi.fn(async (id, v) => { calls.push(`verdict ${id} ${v}`); }),
     recalculateFolderCounts: vi.fn(async () => { calls.push('recount'); }),
   };
@@ -187,3 +189,47 @@ describe('applyUserSpamVerdict — spammer list details', () => {
     expect(anonymous.reports).toEqual([{ domain: null, ip: '5.6.7.8', verdict: 'spam' }]);
   });
 });
+
+describe('trust — "I trust this sender" and its undoing', () => {
+  // Regression: reporting a sender you had trusted is a change of mind. If
+  // the trust stayed, their next message would bypass the filter again —
+  // straight after the user said it was spam.
+  it('Report spam withdraws trust in the sender', async () => {
+    const h = harness(email({ fromAddress: 'alerts@axis.bank.in' }));
+    await applyUserSpamVerdict(h.deps, 'e1', 'spam');
+    expect(h.calls).toContain('untrust alerts@axis.bank.in');
+  });
+
+  // ...and Not spam does NOT create trust by itself: clearing one message is
+  // not vouching for everything the sender will ever send.
+  it('Not spam leaves the trusted list alone', async () => {
+    const h = harness(email({ folderId: 'f-spam', tags: '|spam|Spam|' }));
+    await applyUserSpamVerdict(h.deps, 'e1', 'ham');
+    expect(h.calls.some((c) => c.startsWith('trust ') || c.startsWith('untrust '))).toBe(false);
+  });
+
+  // Trusting someone you once reported must take them off the spammer list,
+  // or `known-spammer` (5 points) would keep scoring their mail as spam and
+  // the stored trust would be fighting the user's own old report.
+  it('trustSender records the address and takes it off the spammer list', async () => {
+    const h = harness(email());
+    await trustSender(h.storage, 'alerts@axis.bank.in');
+    expect(h.calls).toEqual(['trust alerts@axis.bank.in', 'removeSpammer alerts@axis.bank.in']);
+  });
+
+  it('trustSender refuses a blank address instead of storing one', async () => {
+    const h = harness(email());
+    await expect(trustSender(h.storage, '  ')).rejects.toThrow(/No sender address/);
+    expect(h.calls).toEqual([]);
+  });
+
+  // A storage failure surfaces to the caller (the IPC reports it to the
+  // banner), rather than claiming a trust that was never stored.
+  it('trustSender surfaces a storage failure', async () => {
+    const h = harness(email());
+    (h.storage.trustSender as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('db busy'));
+    await expect(trustSender(h.storage, 'alerts@axis.bank.in')).rejects.toThrow('db busy');
+    expect(h.calls).not.toContain('removeSpammer alerts@axis.bank.in');
+  });
+});
+

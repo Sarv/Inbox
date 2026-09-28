@@ -106,6 +106,7 @@ export class FakeEmailStorage {
   private emails = new Map<string, StoredEmail>();
   private folders = new Map<string, FolderRecord>();
   private spammers = new Set<string>();
+  private trusted = new Set<string>();
   private filterRules: FilterRule[] = [];
 
   /** Every mutating call, in order — lets a test assert "we never deleted". */
@@ -184,6 +185,10 @@ export class FakeEmailStorage {
 
   markSpammer(address: string): void {
     this.spammers.add(address.toLowerCase());
+  }
+
+  markTrusted(address: string): void {
+    this.trusted.add(address.toLowerCase());
   }
 
   setFilterRules(rules: FilterRule[]): void {
@@ -433,6 +438,10 @@ export class FakeEmailStorage {
 
   async isSpammer(email: string): Promise<boolean> {
     return this.spammers.has((email || '').toLowerCase());
+  }
+
+  async isTrustedSender(email: string): Promise<boolean> {
+    return this.trusted.has((email || '').toLowerCase());
   }
 
   async getEnabledFilterRules(): Promise<FilterRule[]> {
