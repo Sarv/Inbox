@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembered the failure. Opening the message later showed "Unable to load
   email content" until you restarted. It now waits and tries again. The same
   applies to any message opened right after it was moved.
+- **An expired extension card no longer stays on screen.** If an extension
+  (such as One-Time Passcodes) sent a card that had already expired, the app
+  dropped only the expiry and kept the card. It then had no countdown and
+  never closed, so an old code could sit on screen until you closed it
+  yourself. Cards that have already expired are now not shown at all.
 
 ## [1.2.5] - 2026-09-27
 
