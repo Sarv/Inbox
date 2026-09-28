@@ -231,3 +231,21 @@ describe('the remembered answer', () => {
     expect(parseDismissedVersion('1.2.3')).toBeNull();
   });
 });
+
+describe('offerMoveToApplications — live facts', () => {
+  // The regression: the dev binary is renamed, so Electron reports
+  // isPackaged === true and the modal blocked every dev launch behind the
+  // window. Under the vite dev server it must never ask.
+  it('never asks on a dev run, even though Electron reports packaged', async () => {
+    const { dialog } = await import('electron');
+    const previous = process.env['VITE_DEV_SERVER_URL'];
+    process.env['VITE_DEV_SERVER_URL'] = 'http://localhost:5173';
+    try {
+      expect(await offerMoveToApplications({ log: () => {} })).toBe('not-offered');
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env['VITE_DEV_SERVER_URL'];
+      else process.env['VITE_DEV_SERVER_URL'] = previous;
+    }
+  });
+});

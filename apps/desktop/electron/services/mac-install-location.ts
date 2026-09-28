@@ -30,6 +30,8 @@ import { join } from 'node:path';
 import { createLogger } from '@sarvinbox/core';
 import { app, dialog } from 'electron';
 
+import { isDevBuild } from '../utils/dev-mode';
+
 const logger = createLogger('mac-install-location');
 
 /** Where the "don't ask again" answer is remembered, under userData. */
@@ -175,7 +177,9 @@ export async function offerMoveToApplications(deps: MoveOfferDeps = {}): Promise
 function currentInstallLocation(): InstallLocation {
   return {
     platform: process.platform,
-    isPackaged: app.isPackaged,
+    // NOT `app.isPackaged`: the renamed dev binary reports true, which put this
+    // modal — hidden behind other windows — in front of every dev launch.
+    isPackaged: !isDevBuild(),
     // macOS-only API; never reached on another platform because `platform` is
     // checked first, but guarded so a future caller cannot crash on it.
     isInApplicationsFolder: process.platform === 'darwin' ? app.isInApplicationsFolder() : true,

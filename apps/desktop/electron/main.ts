@@ -127,6 +127,7 @@ import {
   hasAccountRuntime,
 } from './shared';
 import { resolveAppIconPath } from './utils/app-icon';
+import { isDevBuild } from './utils/dev-mode';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
 import { classifyNavigation, type NavigationScope } from './utils/navigation-policy';
@@ -139,12 +140,8 @@ import { classifyNavigation, type NavigationScope } from './utils/navigation-pol
 // folder and, worse, made safeStorage try the wrong keychain master (decrypt
 // failed). So this block runs first, before any userData consumer.
 //
-// Reliable dev detection: do NOT use `!app.isPackaged` alone — this dev setup
-// runs a RENAMED Electron binary and Electron reports app.isPackaged === true for
-// any renamed executable. vite-plugin-electron sets VITE_DEV_SERVER_URL only in
-// dev, so that's the reliable signal; `|| !app.isPackaged` keeps a plain
-// `electron .` run working too.
-const isDev = !!process.env['VITE_DEV_SERVER_URL'] || !app.isPackaged;
+// Reliable dev detection — never `!app.isPackaged` alone; see `isDevBuild`.
+const isDev = isDevBuild();
 
 // Tag THIS main process with a distinctive title (build-specific). A reclaim FINDS
 // the previous instance by the pid it recorded under userData, never by this title;
