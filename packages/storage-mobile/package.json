@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@sarvinbox/core": "workspace:*",
-    "@op-engineering/op-sqlite": "^7.0.0"
+    "@op-engineering/op-sqlite": "^18.2.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

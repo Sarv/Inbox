@@ -445,8 +445,8 @@ importers:
   packages/storage-mobile:
     dependencies:
       '@op-engineering/op-sqlite':
-        specifier: ^7.0.0
-        version: 7.4.3(react-native@0.87.1)(react@19.3.0)
+        specifier: ^18.2.5
+        version: 18.2.5(react-native@0.87.1)(react@19.3.0)
       '@sarvinbox/core':
         specifier: workspace:*
         version: link:../core
@@ -1077,7 +1077,7 @@ packages:
     resolution: {integrity: sha512-cjQ7ZlQ0Mv3b47hABuTevyTuYN4i+loJKGeV9flcCgIK37cCXRh+L1bd3iBHlynerhQ7BhCkn2BPbQUL+rGqFg==}
     engines: {node: '>=6.9.0'}
     dependencies:
-      '@babel/helper-validator-identifier': 7.28.5
+      '@babel/helper-validator-identifier': 7.29.7
       js-tokens: 4.0.0
       picocolors: 1.1.1
 
@@ -1146,7 +1146,7 @@ packages:
     engines: {node: '>=6.9.0'}
     dependencies:
       '@babel/parser': 7.29.9
-      '@babel/types': 7.28.5
+      '@babel/types': 7.29.8
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/trace-mapping': 0.3.31
       jsesc: 3.1.0
@@ -1215,7 +1215,7 @@ packages:
     dependencies:
       '@babel/core': 7.28.5
       '@babel/helper-module-imports': 7.27.1
-      '@babel/helper-validator-identifier': 7.28.5
+      '@babel/helper-validator-identifier': 7.29.7
       '@babel/traverse': 7.28.5
     transitivePeerDependencies:
       - supports-color
@@ -1266,8 +1266,8 @@ packages:
     resolution: {integrity: sha512-HFN59MmQXGHVyYadKLVumYsA9dBFun/ldYxipEjzA4196jpLZd8UjEEBLkbEkvfYreDqJhZxYAWFPtrfhNpj4w==}
     engines: {node: '>=6.9.0'}
     dependencies:
-      '@babel/template': 7.27.2
-      '@babel/types': 7.28.5
+      '@babel/template': 7.29.7
+      '@babel/types': 7.29.8
 
   /@babel/helpers@7.29.7:
     resolution: {integrity: sha512-1k2lAGRMfHTcwuNYcCNUmaUffmQv8KWMfh2iJUUeRlwlwH4FdNG7mfPI10NPfLHJFThE4Tyr4mv7kTNZOiPuBg==}
@@ -1444,9 +1444,9 @@ packages:
     resolution: {integrity: sha512-LPDZ85aEJyYSd18/DkjNh4/y1ntkE5KwUHWTiqgRxruuZL2F1yuHligVHLvcHY2vMHXttKFpJn6LwfI7cw7ODw==}
     engines: {node: '>=6.9.0'}
     dependencies:
-      '@babel/code-frame': 7.27.1
+      '@babel/code-frame': 7.29.7
       '@babel/parser': 7.29.9
-      '@babel/types': 7.28.5
+      '@babel/types': 7.29.8
 
   /@babel/template@7.29.7:
     resolution: {integrity: sha512-puq+Gf35oI24FeN11LkoUQFqv9uwNeWpxXZi/Ji3rRIoKAzKnxRaZ+Gkj0vKS9ZCiTESfng1N9LyOyXvo+m+Gg==}
@@ -2209,11 +2209,15 @@ packages:
       fastq: 1.20.1
     dev: true
 
-  /@op-engineering/op-sqlite@7.4.3(react-native@0.87.1)(react@19.3.0):
-    resolution: {integrity: sha512-yR2UqhHR3bM/iX/hlc82QQcYsoVvbK2zbUli0iKg4oqvN+pQksGGSA0jTACy7X+VUv3+Il1LGihEhL12YbA2hg==}
+  /@op-engineering/op-sqlite@18.2.5(react-native@0.87.1)(react@19.3.0):
+    resolution: {integrity: sha512-OLmcM0SQLapP1p5Q6Ck5P+V3N6RsAhBozIG07PbQr+8wgB0gYoFgFjuWZK0JvNBY+UYgYPxkOQDd4rk4naWNGw==}
     peerDependencies:
+      '@sqlite.org/sqlite-wasm': '*'
       react: '*'
-      react-native: '>0.73.0'
+      react-native: '*'
+    peerDependenciesMeta:
+      '@sqlite.org/sqlite-wasm':
+        optional: true
     dependencies:
       react: 19.3.0
       react-native: 0.87.1(@babel/core@7.29.7)(react@19.3.0)
