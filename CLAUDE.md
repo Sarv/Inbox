@@ -124,6 +124,20 @@ from a local machine, ever.
   through a pull request when branch protection forbids a direct push. See
   [docs/RELEASING.md](docs/RELEASING.md).
 
+## Branches: feature-friendly names, never `claude/…` (thumb rule)
+
+Name every branch after the change it carries, as `<type>/<short-feature-name>`
+in lowercase kebab-case, where `<type>` matches the Conventional Commit type:
+`feature/outlook-sign-in`, `fix/crash-report-privacy`,
+`docs/sarv-inbox-privacy-policy`, `chore/bump-electron`.
+
+- **Never create or push a branch named `claude/…`** (or any auto-generated
+  name), even if a tool or session setup suggests one. If a session starts on
+  such a branch, move the work to a feature-named branch before pushing.
+- Once a branch's pull request is merged, delete the branch (remote and local).
+- `main` is protected: changes reach it through a pull request, never a
+  direct push.
+
 ## Debugging: there IS a log file — read it, don't ask
 
 When the user reports a problem ("X is not working", "why is it doing Y",
