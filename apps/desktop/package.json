@@ -80,7 +80,7 @@
     "zustand": "^4.5.0"
   },
   "devDependencies": {
-    "@electron/asar": "^3.4.1",
+    "@electron/asar": "^4.3.0",
     "@electron/rebuild": "^4.2.0",
     "@sentry/vite-plugin": "^5.4.0",
     "@types/culori": "^4.0.1",
