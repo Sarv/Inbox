@@ -451,6 +451,23 @@ CREATE TABLE IF NOT EXISTS pending_sends (
   updated_at INTEGER DEFAULT (unixepoch())
 );
 
+-- Follow-up reminders: "remind me if nobody replies" on a sent message, keyed
+-- by its RFC Message-ID. status: 'pending' | 'due' | 'replied' | 'dismissed'.
+-- See migration v94.
+CREATE TABLE IF NOT EXISTS follow_ups (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL UNIQUE,
+  subject TEXT NOT NULL DEFAULT '',
+  recipients TEXT NOT NULL DEFAULT '',
+  from_address TEXT NOT NULL DEFAULT '',
+  sent_at INTEGER NOT NULL,
+  due_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'due', 'replied', 'dismissed')),
+  resolved_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_follow_ups_status_due ON follow_ups(status, due_at);
+
 -- User-defined inbox filter rules: match incoming mail on conditions, apply actions.
 -- conditions/actions are JSON arrays (see @sarvinbox/core types/filters).
 CREATE TABLE IF NOT EXISTS filter_rules (

@@ -3589,6 +3589,46 @@ export const emailUnsubscribeColumns: Migration = {
 };
 
 /**
+ * v94 — `follow_ups`: "remind me if nobody replies".
+ *
+ * One row per sent message the user asked to be reminded about, keyed by the
+ * RFC Message-ID the SMTP send stamped. That id is the only handle that
+ * survives the local Sent mirror being replaced by the server's copy, so the
+ * row references it rather than an `emails.id` that can change under it.
+ *
+ * `status` walks pending -> due (the time passed with no reply) and ends at
+ * replied or dismissed; rows are kept after they end so a re-run of the same
+ * send (an outbox retry after a crash) hits the UNIQUE message_id and does not
+ * resurrect a reminder the user already dealt with.
+ */
+export const followUps: Migration = {
+  version: 94,
+  name: 'follow_ups',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS follow_ups (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL UNIQUE,
+        subject TEXT NOT NULL DEFAULT '',
+        recipients TEXT NOT NULL DEFAULT '',
+        from_address TEXT NOT NULL DEFAULT '',
+        sent_at INTEGER NOT NULL,
+        due_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'due', 'replied', 'dismissed')),
+        resolved_at INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+      CREATE INDEX IF NOT EXISTS idx_follow_ups_status_due ON follow_ups(status, due_at);
+    `);
+    logger.info('Follow-ups (v94): follow_ups table added');
+  },
+  down: (db) => {
+    // A small table of reminders, not mail: dropping it loses only the reminders.
+    db.exec('DROP TABLE IF EXISTS follow_ups;');
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3666,5 +3706,6 @@ export function createMigrationManager(
   manager.register(emailTagsJoinTable);
   manager.register(pendingSendsScheduledAt);
   manager.register(emailUnsubscribeColumns);
+  manager.register(followUps);
   return manager;
 }

@@ -10,6 +10,7 @@ export * from './types/smtp';
 export * from './types/embeddings';
 export * from './types/llm';
 export * from './types/agent';
+export * from './types/follow-ups';
 
 // ========== Modules ==========
 

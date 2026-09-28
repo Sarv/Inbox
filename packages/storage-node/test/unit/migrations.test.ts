@@ -115,10 +115,11 @@ describe('fresh install reaches the current production schema', () => {
   // columns/tables that do not exist yet — every sync throws "no such column".
   it('ends on the newest registered version and records every applied version', () => {
     // CHANGED: 91 -> 93 with pending_sends.scheduled_at (v92) and the
-    // List-Unsubscribe columns on emails (v93).
-    expect(CURRENT_VERSION).toBe(93);
+    // List-Unsubscribe columns on emails (v93); 93 -> 94 with the follow_ups
+    // table (v94).
+    expect(CURRENT_VERSION).toBe(94);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..93 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..94 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -139,6 +140,7 @@ describe('fresh install reaches the current production schema', () => {
       'pending_operations',
       'pending_sends',
       'filter_rules',
+      'follow_ups',
       'labels',
       'image_allowed_senders',
       'thread_summaries',

@@ -11,3 +11,4 @@ export { AgentRepository } from './agent-repository';
 export { PromptRepository, type AgentPromptTemplate } from './prompt-repository';
 export { FilterRepository } from './filter-repository';
 export { LabelRepository } from './label-repository';
+export { FollowUpRepository } from './follow-up-repository';

@@ -16,6 +16,9 @@ import type {
   PaginationOptions,
   StorageStats,
   FilterRuleInput,
+  FollowUp,
+  FollowUpInput,
+  FollowUpStatus,
   LabelInput,
   DatabasePageStats,
 } from '@sarvinbox/core';
@@ -48,6 +51,7 @@ import {
   AgentRepository,
   PromptRepository,
   FilterRepository,
+  FollowUpRepository,
   LabelRepository,
 } from './repositories';
 import { missingBodyClause } from './repositories/agent-eligibility';
@@ -138,6 +142,7 @@ export class SQLiteStorage implements IEmailStorage {
   private _agentRepo: AgentRepository | null = null;
   private _promptRepo: PromptRepository | null = null;
   private _filterRepo: FilterRepository | null = null;
+  private _followUpRepo: FollowUpRepository | null = null;
   private _labelRepo: LabelRepository | null = null;
 
   constructor(private config: SQLiteStorageConfig) {}
@@ -204,6 +209,13 @@ export class SQLiteStorage implements IEmailStorage {
       this._filterRepo = new FilterRepository(() => this.db!);
     }
     return this._filterRepo;
+  }
+
+  private get followUpRepo(): FollowUpRepository {
+    if (!this._followUpRepo) {
+      this._followUpRepo = new FollowUpRepository(() => this.db!);
+    }
+    return this._followUpRepo;
   }
 
   private get labelRepo(): LabelRepository {
@@ -402,6 +414,7 @@ export class SQLiteStorage implements IEmailStorage {
       this._agentRepo = null;
       this._promptRepo = null;
       this._filterRepo = null;
+      this._followUpRepo = null;
       this._labelRepo = null;
     }
   }
@@ -3000,6 +3013,28 @@ export class SQLiteStorage implements IEmailStorage {
   async reorderFilterRules(orderedIds: string[]) {
     this.ensureInitialized();
     this.filterRepo.reorder(orderedIds);
+  }
+
+  // ========== Follow-up reminders ==========
+
+  async createFollowUp(input: FollowUpInput) {
+    this.ensureInitialized();
+    return this.followUpRepo.create(input);
+  }
+
+  async listOpenFollowUps(limit?: number) {
+    this.ensureInitialized();
+    return this.followUpRepo.listOpen(limit);
+  }
+
+  async followUpHasReply(followUp: Pick<FollowUp, 'messageId' | 'fromAddress' | 'sentAt'>) {
+    this.ensureInitialized();
+    return this.followUpRepo.hasReply(followUp);
+  }
+
+  async setFollowUpStatus(id: string, status: FollowUpStatus) {
+    this.ensureInitialized();
+    return this.followUpRepo.setStatus(id, status);
   }
 
   // ========== Labels ==========
