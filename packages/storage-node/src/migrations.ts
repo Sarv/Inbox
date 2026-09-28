@@ -4,7 +4,14 @@
 import { readFileSync } from 'fs';
 import { basename, join } from 'path';
 
-import { logger, isRoleAddress, isNoReplyAddress, contactNameForAddress, normalizeSubject } from '@sarvinbox/core';
+import {
+  logger,
+  isRoleAddress,
+  isNoReplyAddress,
+  contactNameForAddress,
+  normalizeSubject,
+  parseSpamReasons,
+} from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 import { applyFtsSchema, FTS_REBUILD_SQL, FTS_TRIGGERS } from './fts-schema';
@@ -3653,6 +3660,100 @@ export const trustedSenders: Migration = {
 };
 
 /**
+ * The table the main-process spam repair drains (`spam-verdict-repair.ts`).
+ * One row per message whose stored verdict has to be re-derived with code a
+ * migration cannot run: the body's content stage lives in core and the
+ * library, and taking a message back out of the spam folder is an IMAP move.
+ */
+export const SPAM_REPAIR_QUEUE_TABLE = 'spam_repair_queue';
+
+/**
+ * v96 — undo the self-referencing In-Reply-To an IMAP server's ENVELOPE put on
+ * nearly every message, and queue the verdicts that were built on it.
+ *
+ * The server repeated each message's Message-ID in the ENVELOPE's In-Reply-To
+ * slot, and the client trusted the ENVELOPE over the raw header it had also
+ * fetched (fixed in `imapflow-client.ts`). On the reporting mailbox 6,558 of
+ * 6,587 rows claimed to answer themselves. The column now says what the
+ * message says: NULL, because a message cannot be its own parent.
+ *
+ * Each of those rows was also charged `in-reply-to-self` (1–2 points, by
+ * version) at ingest. The reason comes off and the score is re-summed from
+ * what remains — the score IS that sum, every stage having capped its points
+ * when it charged them. Rows whose reasons will not parse keep their score:
+ * unreadable and clean are the same value and opposite facts (see
+ * `rescoreWithBody`).
+ *
+ * A genuine self-reference — a phishing kit's, or a mailer that really does
+ * write one — cannot be told from the server's without the headers, which are
+ * not stored. It loses the point with the rest; new mail is judged on the
+ * real header from now on.
+ *
+ * Queued for the main process, each with the score it had before this
+ * migration (the score the filter filed on — the `spam` tag alone cannot say
+ * whether the filter or the AI wrote it): every row whose score moved, and
+ * every row carrying `link-display-mismatch`,
+ * because mailguard 0.4.2 stopped reading numbers (`₹3.2`) as domains and
+ * stopped charging the SendClean click tracker — verdicts only a re-run of
+ * the content stage over the stored body can correct.
+ *
+ * Idempotent: a second run finds no self-reference and re-queues nothing new.
+ */
+export const inReplyToSelfRepair: Migration = {
+  version: 96,
+  name: 'in_reply_to_self_repair',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${SPAM_REPAIR_QUEUE_TABLE} (
+        email_id TEXT PRIMARY KEY,
+        score_before INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+    `);
+    // First write wins: a self-reply row is queued with the score it had
+    // BEFORE the points came off, which is the score the filter filed on.
+    const enqueue = db.prepare(
+      `INSERT OR IGNORE INTO ${SPAM_REPAIR_QUEUE_TABLE} (email_id, score_before) VALUES (?, ?)`,
+    );
+
+    const selfReplies = db.prepare(`
+      SELECT id, spam_score, spam_reasons FROM emails
+      WHERE in_reply_to IS NOT NULL
+        AND trim(in_reply_to) = '<' || trim(trim(message_id), '<>') || '>'
+    `).all() as Array<{ id: string; spam_score: number | null; spam_reasons: string | null }>;
+    const clear = db.prepare('UPDATE emails SET in_reply_to = NULL WHERE id = ?');
+    const rescore = db.prepare('UPDATE emails SET spam_score = ?, spam_reasons = ? WHERE id = ?');
+    let rescored = 0;
+    for (const row of selfReplies) {
+      clear.run(row.id);
+      if (typeof row.spam_score !== 'number') continue;
+      const reasons = parseSpamReasons(row.spam_reasons);
+      if (!reasons.some((reason) => reason.id === 'in-reply-to-self')) continue;
+      const kept = reasons.filter((reason) => reason.id !== 'in-reply-to-self');
+      const score = kept.reduce((sum, reason) => sum + reason.points, 0);
+      rescore.run(score, JSON.stringify(kept), row.id);
+      enqueue.run(row.id, row.spam_score);
+      rescored += 1;
+    }
+
+    const linkRows = db.prepare(`
+      SELECT id, spam_score FROM emails
+      WHERE spam_reasons LIKE '%"link-display-mismatch"%'
+    `).all() as Array<{ id: string; spam_score: number | null }>;
+    for (const row of linkRows) enqueue.run(row.id, row.spam_score);
+
+    logger.info(
+      `In-Reply-To self repair (v96): ${selfReplies.length} self-reference(s) cleared, ${rescored} verdict(s) re-summed, `
+        + `${linkRows.length} link verdict(s) queued for the content stage`,
+    );
+  },
+  down: (db) => {
+    // The cleared In-Reply-To was the server's error, not data: nothing to put back.
+    db.exec(`DROP TABLE IF EXISTS ${SPAM_REPAIR_QUEUE_TABLE};`);
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3732,5 +3833,6 @@ export function createMigrationManager(
   manager.register(emailUnsubscribeColumns);
   manager.register(followUps);
   manager.register(trustedSenders);
+  manager.register(inReplyToSelfRepair);
   return manager;
 }

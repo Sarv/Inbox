@@ -116,10 +116,11 @@ describe('fresh install reaches the current production schema', () => {
   it('ends on the newest registered version and records every applied version', () => {
     // CHANGED: 91 -> 93 with pending_sends.scheduled_at (v92) and the
     // List-Unsubscribe columns on emails (v93); 93 -> 94 with the follow_ups
-    // table (v94); 94 -> 95 with the trusted_senders table (v95).
-    expect(CURRENT_VERSION).toBe(95);
+    // table (v94); 94 -> 95 with the trusted_senders table (v95); 95 -> 96
+    // with the In-Reply-To self-reference repair and its spam_repair_queue (v96).
+    expect(CURRENT_VERSION).toBe(96);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..95 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..96 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -146,6 +147,8 @@ describe('fresh install reaches the current production schema', () => {
       // v95: read at every ingest for a sender's trust. Missing, every sync
       // would fail its lookup and trusted mail would be filed as spam again.
       'trusted_senders',
+      // v96: drained by the main-process spam repair at startup.
+      'spam_repair_queue',
       'thread_summaries',
       'conversation_extractions',
       'ai_category_definitions',
