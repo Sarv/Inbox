@@ -52,7 +52,7 @@
     "libphonenumber-js": "^1.13.8",
     "lru-cache": "^7.18.3",
     "mailparser": "^3.9.28",
-    "nodemailer": "^9.1.0",
+    "nodemailer": "^10.0.10",
     "p-retry": "^4.6.2",
     "sanitize-filename": "^1.6.4",
     "sanitize-html": "^2.17.7",
