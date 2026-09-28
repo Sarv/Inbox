@@ -17,6 +17,7 @@ import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { accountDisplayLabel } from '../store/helpers';
 import { normalizeIdentities, sendAsFrom } from '../store/identities';
+import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
 import { parseAddresses } from '../utils/email-address';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { reportSendFailure } from '../utils/send-failure';
@@ -358,6 +359,14 @@ ${createQuotedHeader(prefix, extraInfo)}
       alert('Please enter a recipient');
       return;
     }
+
+    const goAhead = await checkAttachmentBeforeSend({
+      subject,
+      body: plainBody,
+      attachmentCount: attachments.length,
+      subjectIsOwn: mode === 'new',
+    });
+    if (!goAhead) return;
 
     setSending(true);
     try {

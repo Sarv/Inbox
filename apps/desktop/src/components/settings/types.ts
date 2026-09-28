@@ -63,6 +63,8 @@ export interface AppSettings {
   // Compose settings
   undoSendDelay: number;
   defaultReplyBehavior: 'reply' | 'replyAll';
+  /** Ask before sending a message that mentions an attachment but has none. */
+  attachmentReminder: boolean;
 
   // UI settings
   keyboardShortcuts: boolean;
@@ -114,6 +116,7 @@ export const defaultSettings: AppSettings = {
   inboxSections: [],
   undoSendDelay: 5,
   defaultReplyBehavior: 'reply',
+  attachmentReminder: true,
   keyboardShortcuts: true,
   // Default to AI-important-only: 'all' on a busy mailbox is instant fatigue.
   desktopNotifications: 'important',

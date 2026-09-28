@@ -14,6 +14,7 @@ import { useDraftAutosave } from '../hooks/useDraftAutosave';
 import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
+import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
 import { loadEmailAttachments } from '../utils/compose-attachments';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { buildForwardQuoteHtml, composeForwardDraft, forwardSubject, type ForwardSource } from '../utils/forward-quote';
@@ -152,6 +153,14 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     const finalTo = mergeEmails(to, pendingTo);
 
     if (finalTo.length === 0) return;
+
+    const goAhead = await checkAttachmentBeforeSend({
+      subject,
+      body: plainBody,
+      attachmentCount: attachments.length,
+      subjectIsOwn: false,
+    });
+    if (!goAhead) return;
 
     setSending(true);
     try {

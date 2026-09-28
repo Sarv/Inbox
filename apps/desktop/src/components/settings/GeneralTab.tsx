@@ -212,6 +212,24 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
             </label>
           </div>
         </div>
+
+        <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
+          <div>
+            <div className="font-medium">Missing attachment warning</div>
+            <div className="text-sm text-muted-foreground">
+              Ask before sending a message that mentions an attachment but has none
+            </div>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.attachmentReminder}
+              onChange={(e) => updateSetting('attachmentReminder', e.target.checked)}
+              className="w-4 h-4 rounded"
+            />
+            <span className="text-sm">Enable</span>
+          </label>
+        </div>
       </div>
 
       {/* UI Settings */}
