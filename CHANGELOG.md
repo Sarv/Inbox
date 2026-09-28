@@ -21,8 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attached" or "I've enclosed the file" but has nothing attached, the app asks
   before sending. Quoted text from earlier messages is ignored. It can be
   turned off in Settings → General.
+- **Trust a sender.** A message the spam filter flagged now offers "I trust
+  this sender". Their mail is then never marked or filed as spam, as long as
+  it passes authentication — a message that fails it is still checked, since
+  that is what a forged copy of a trusted address looks like. Trusted senders
+  are listed under Security → Spam, where they can be removed; reporting one
+  of their messages as spam also removes them.
 
 ### Fixed
+- **Bank alerts from the new `.bank.in` domains are no longer flagged.**
+  Indian banks now send from addresses like `alerts@axis.bank.in`, which the
+  spam filter read as someone else borrowing the bank's name. Axis Bank, SBI,
+  HDFC Bank, ICICI Bank, Kotak and HSBC mail from these domains is recognised,
+  and two header checks no longer count against ordinary transactional mail
+  (alerts, one-time passcodes, receipts).
+- **A message you marked Not spam stays that way.** Opening it could tag it as
+  spam again once its body was checked, and the AI could re-tag it when it
+  sorted it.
 - **Replying to your own sent message goes to the people you wrote to.**
   Reply on a message you sent used to address it back to yourself. It now
   goes to that message's recipients (and Reply All keeps its Cc), leaving you
