@@ -268,10 +268,11 @@ jobs:
         env:
           NODE_ENV: production
           # Inlined into the bundle by vite.config.ts. Without them the shipped
-          # app has no Gmail sign-in and no crash reporting. Vite's loadEnv
+          # app has no Gmail/Outlook sign-in and no crash reporting. Vite's loadEnv
           # merges SARVINBOX_*-prefixed process.env vars, so no .env is needed.
           SARVINBOX_GOOGLE_CLIENT_ID: ${{ secrets.SARVINBOX_GOOGLE_CLIENT_ID }}
           SARVINBOX_GOOGLE_CLIENT_SECRET: ${{ secrets.SARVINBOX_GOOGLE_CLIENT_SECRET }}
+          SARVINBOX_MICROSOFT_CLIENT_ID: ${{ secrets.SARVINBOX_MICROSOFT_CLIENT_ID }}
           SARVINBOX_SENTRY_DSN: ${{ secrets.SARVINBOX_SENTRY_DSN }}
           # Source-map upload is skipped entirely when the token is absent.
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}

@@ -28,6 +28,14 @@ export interface OAuthProviderConfig {
   authEndpoint: string;
   tokenEndpoint: string;
   userInfoEndpoint: string;
+  /**
+   * Where the signed-in user's email/name come from. 'userinfo' (default)
+   * calls `userInfoEndpoint` with the access token; 'id_token' reads the
+   * claims of the id_token returned by the token endpoint — needed when the
+   * access token is minted for a different resource than the userinfo API
+   * (Microsoft: an Outlook IMAP token can't call Graph).
+   */
+  identityFrom?: 'userinfo' | 'id_token';
   scopes: string[];
   extraAuthParams?: Record<string, string>;
   /**

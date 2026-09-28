@@ -17,6 +17,7 @@ import http from 'http';
 import { AddressInfo } from 'net';
 
 import {
+  decodeJwtPayload,
   exchangeCodeForTokens,
   generatePkcePair,
   generateState,
@@ -31,6 +32,7 @@ import {
   setOAuthClientId,
   setOAuthClientSecret,
   setSarvBaseUrl,
+  userInfoFromIdToken,
   type OAuthAccount,
   type OAuthProviderId,
   type OAuthProviderConfig,
@@ -80,7 +82,10 @@ export function initializeOAuth(): void {
     logger.info('[OAuth] Gmail client_secret loaded from env');
   }
   const msId = process.env.SARVINBOX_MICROSOFT_CLIENT_ID;
-  if (msId) setOAuthClientId('microsoft', msId);
+  if (msId) {
+    setOAuthClientId('microsoft', msId);
+    logger.info('[OAuth] Microsoft client_id loaded from env');
+  }
   const yhId = process.env.SARVINBOX_YAHOO_CLIENT_ID;
   if (yhId) setOAuthClientId('yahoo', yhId);
 
@@ -151,7 +156,10 @@ export async function startOAuthFlow(providerId: OAuthProviderId): Promise<OAuth
     );
   }
 
-  const userInfo = await fetchUserInfo(provider, tokens.access_token);
+  const userInfo =
+    provider.identityFrom === 'id_token'
+      ? userInfoFromIdToken(tokens.id_token)
+      : await fetchUserInfo(provider, tokens.access_token);
 
   const now = Math.floor(Date.now() / 1000);
   const account: OAuthAccount = {
@@ -486,17 +494,11 @@ function shouldRefresh(account: OAuthAccount): boolean {
  * every API call anyway. Returns null for non-JWT tokens.
  */
 function decodeJwtClaims(token: string): { exp?: number; iat?: number } | null {
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  try {
-    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
-    const claims = JSON.parse(payload) as Record<string, unknown>;
-    const exp = typeof claims.exp === 'number' ? claims.exp : undefined;
-    const iat = typeof claims.iat === 'number' ? claims.iat : undefined;
-    return { exp, iat };
-  } catch {
-    return null;
-  }
+  const claims = decodeJwtPayload(token);
+  if (!claims) return null;
+  const exp = typeof claims.exp === 'number' ? claims.exp : undefined;
+  const iat = typeof claims.iat === 'number' ? claims.iat : undefined;
+  return { exp, iat };
 }
 
 export async function signOut(providerId: OAuthProviderId, email: string): Promise<void> {
