@@ -163,7 +163,7 @@ jobs:
       # directories live outside it. Paths that do not exist on a given OS are
       # skipped, so one step serves all three.
       - name: Cache Electron binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/electron
