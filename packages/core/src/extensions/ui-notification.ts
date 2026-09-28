@@ -71,7 +71,8 @@ function sanitizeField(field: unknown): ExtensionUIField | null {
  * Normalise a card an extension asked to show.
  *
  * Returns null when the card cannot be rendered meaningfully — no id (the
- * renderer could not replace or dismiss it) or no title (nothing to read).
+ * renderer could not replace or dismiss it), no title (nothing to read), or an
+ * `expiresAt` that has already passed (it is stale before it is shown).
  * Every other malformed part is dropped rather than rejected, so one bad field
  * never costs the user the whole notification.
  */
@@ -105,12 +106,14 @@ export function sanitizeExtensionNotification(
   if (body) sanitized.body = body;
   if (fields.length > 0) sanitized.fields = fields;
 
-  // An expiry already in the past would render a card that is instantly stale,
-  // and one far in the future a countdown nobody will watch. Drop the first,
-  // clamp the second.
+  // An expiry already in the past means the extension itself says the card is
+  // no longer true — an expired code, a finished countdown. Reject the whole
+  // card: dropping only the expiry would leave it with no lifetime at all, so
+  // it would sit on screen until dismissed. One far in the future is a
+  // countdown nobody will watch, so clamp it.
   if (typeof candidate.expiresAt === 'number' && Number.isFinite(candidate.expiresAt)) {
-    const expiresAt = Math.min(candidate.expiresAt, now + MAX_NOTIFICATION_LIFETIME_MS);
-    if (expiresAt > now) sanitized.expiresAt = expiresAt;
+    if (candidate.expiresAt <= now) return null;
+    sanitized.expiresAt = Math.min(candidate.expiresAt, now + MAX_NOTIFICATION_LIFETIME_MS);
   }
 
   // `timeoutMs` is only meaningful without an expiry — with one, the countdown

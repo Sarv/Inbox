@@ -111,15 +111,38 @@ describe('sanitizeExtensionNotification', () => {
   });
 
   describe('expiry', () => {
-    // Regression: a countdown that starts already expired renders "-0:03" and
-    // dismisses instantly — worse than showing no countdown at all.
-    it('drops an expiry in the past', () => {
+    // Regression: an already-expired card used to keep its content and lose
+    // only its expiry, so with no timeout it stayed on screen forever — an
+    // expired verification code pinned under the reader with no countdown.
+    it('rejects a card whose expiry is in the past', () => {
       const card = sanitizeExtensionNotification(
         'otp-code',
-        { id: 'c', title: 'T', expiresAt: NOW - 1 },
+        { id: 'c', title: 'T', expiresAt: NOW - 1, timeoutMs: 5_000 },
         NOW
       );
-      expect(card!.expiresAt).toBeUndefined();
+      expect(card).toBeNull();
+    });
+
+    // Boundary: expiring exactly now leaves zero time to read it — as stale as
+    // one in the past.
+    it('rejects a card that expires exactly now', () => {
+      const card = sanitizeExtensionNotification(
+        'otp-code',
+        { id: 'c', title: 'T', expiresAt: NOW },
+        NOW
+      );
+      expect(card).toBeNull();
+    });
+
+    // Guards the line between stale and live: one millisecond left is still a
+    // card to show, with its countdown.
+    it('keeps a card expiring one millisecond from now', () => {
+      const card = sanitizeExtensionNotification(
+        'otp-code',
+        { id: 'c', title: 'T', expiresAt: NOW + 1 },
+        NOW
+      );
+      expect(card!.expiresAt).toBe(NOW + 1);
     });
 
     it('keeps an expiry in the future', () => {

@@ -4,8 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * Extension UI backend. Pinned behaviour:
  *   - a card an extension asks to show reaches the renderer on the notify
  *     channel, sanitised and with its id namespaced by extension,
- *   - a card that cannot be rendered is dropped with a warning instead of being
- *     forwarded raw,
+ *   - a card that cannot be rendered, or has already expired, is dropped with a
+ *     warning instead of being forwarded,
  *   - a dismiss carries the SAME namespaced id the notify used, so an extension
  *     can take its own card away and cannot take away anyone else's,
  *   - nothing is sent for a dismiss whose id is unusable,
@@ -110,6 +110,22 @@ describe('createExtensionUIBackend - notify', () => {
     expect(sent).toHaveLength(0);
     expect(h.warnings).toHaveLength(4);
     expect(h.warnings[0]).toContain('otp-code');
+  });
+
+  it('never forwards a card that has already expired', () => {
+    // Regression: an expired verification-code card reached the renderer with
+    // no expiry and no timeout, so it stayed on screen until closed by hand.
+    const { backend, sent } = makeBackend();
+
+    backend.notify('otp-code', {
+      id: 'code-1',
+      title: 'Verification code',
+      fields: [{ label: 'Code', value: '796830', copyable: true }],
+      expiresAt: Date.now() - 60_000,
+    });
+
+    expect(sent).toHaveLength(0);
+    expect(h.warnings).toHaveLength(1);
   });
 
   it('caps the strings an extension supplies', () => {
