@@ -8,20 +8,14 @@ import './styles.css';
 // under the dev server. The desktop app's icon, not a second copy of it.
 import appIconUrl from '../../desktop/public/icon.svg';
 
+import { showAppIcon } from './app-icon.js';
 import { buildDownloadView } from './download-view.js';
 import { fetchLatestRelease } from './latest-release.js';
 import { detectPlatform } from './platform.js';
 import { renderDownloadPage } from './render.js';
 
-/** Points the header image at the app icon and adds it as the favicon. */
-export const showAppIcon = (doc, iconUrl) => {
-  doc.querySelectorAll('[data-app-icon]').forEach((image) => image.setAttribute('src', iconUrl));
-  const favicon = doc.createElement('link');
-  Object.entries({ rel: 'icon', type: 'image/svg+xml', href: iconUrl }).forEach(([name, value]) =>
-    favicon.setAttribute(name, value)
-  );
-  doc.head.append(favicon);
-};
+// Re-exported: the download page's tests (and history) know it from here.
+export { showAppIcon };
 
 // Chromium exposes the real CPU architecture only through high-entropy client
 // hints; everywhere else there is none to read.

@@ -19,8 +19,11 @@ order; the detail for each step is in the provider sections further down.
 
 **Google (existing app, currently in Testing)**
 
-- [ ] Branding: app name, logo, support email, **homepage URL** and **privacy
-      policy URL** on a domain you own ([Branding](#google-branding)).
+- [ ] Branding: app name, logo, support email, and these URLs
+      ([Branding](#google-branding)): homepage `https://inbox.sarv.com`,
+      privacy policy `https://inbox.sarv.com/privacy-policy`, terms
+      `https://inbox.sarv.com/terms`. They are served by GitHub Pages from
+      `apps/site`, rendered from `docs/legal/*.md`.
 - [ ] That domain is verified in Google Search Console and listed under
       *Authorized domains*.
 - [ ] Data access lists exactly `https://mail.google.com/`, `openid`,

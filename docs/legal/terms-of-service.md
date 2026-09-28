@@ -1,7 +1,9 @@
 <!--
 DRAFT: not legal advice. Have counsel review before publishing.
-Publish at: https://sarv.com/inbox/terms (link it from the Sarv Inbox homepage;
-the same URL goes into Google Cloud Console → Branding → Terms of service).
+Published automatically at https://inbox.sarv.com/terms by the site workflow
+whenever this file changes on main (the homepage links it). The same URL goes
+into Google Cloud Console → Branding → Terms of service. This comment is never
+published.
 These terms cover USE of the app and the Sarv services it connects to. The
 LICENSE file (Sarv Community License) covers copying, modifying and
 distributing the software; the two are meant to agree. Where these terms repeat
@@ -63,7 +65,7 @@ We may suspend access to Sarv services for breach of this section.
 
 ## 5. Privacy
 
-Our [Privacy Policy](https://sarv.com/inbox/privacy-policy) explains what data the app
+Our [Privacy Policy](https://inbox.sarv.com/privacy-policy) explains what data the app
 handles and where it goes. Your mail is stored on your device and with your
 email provider, not by us.
 

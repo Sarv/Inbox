@@ -1,9 +1,12 @@
 <!--
-FOR THE WEB TEAM: publishing notes (delete this comment block before publishing).
+FOR THE WEB TEAM: publishing notes (this comment is never published).
 
-- Publish this page at https://sarv.com/inbox/privacy-policy (or another URL on
-  sarv.com; the domain must be the one verified for the Google Cloud project).
-- Link it from the Sarv Inbox homepage AND from https://sarv.com/privacy-policy
+- It is published automatically at https://inbox.sarv.com/privacy-policy by the
+  site workflow (.github/workflows/pages.yml) whenever this file changes on
+  main — edit it here, not on the website. sarv.com must be verified for the
+  Google Cloud project; that covers the inbox.sarv.com subdomain.
+- The Sarv Inbox homepage (https://inbox.sarv.com) already links it. Also link
+  it from https://sarv.com/privacy-policy
   (add a line there: "For the Sarv Inbox app, see the Sarv Inbox Privacy
   Policy"). Google's reviewers check both.
 - Do NOT rely on https://sarv.com/privacy-policy alone: it covers only the
@@ -12,7 +15,8 @@ FOR THE WEB TEAM: publishing notes (delete this comment block before publishing)
   precedence clause (Introduction) is what keeps those terms off Google data.
 - The exact same URL goes into Google Cloud Console → Branding → Privacy policy.
 - Keep the "Limited Use" sentence in section 3 word for word; Google requires it.
-- Replace every [CONFIRM: …] with the real answer. A published placeholder fails
+- Replace every [CONFIRM: …] with the real answer. Until then the page shows a
+  "Draft" banner and is kept out of search indexes; a placeholder fails
   Google's review. Have counsel review before publishing (this is a draft, not
   legal advice).
 

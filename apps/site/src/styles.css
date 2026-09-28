@@ -128,3 +128,56 @@ a.btn:hover {
     width: 100%;
   }
 }
+
+/* Legal pages (privacy policy, terms): long-form text rendered from Markdown. */
+.page-header-link {
+  gap: var(--space-3);
+  color: inherit;
+}
+.page-header-link:hover {
+  text-decoration: none;
+}
+.site-links {
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+.legal {
+  line-height: var(--lh-base);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.legal h1 {
+  font-size: var(--fs-3xl);
+  line-height: var(--lh-tight);
+  color: var(--ink);
+}
+.legal h2 {
+  margin-top: var(--space-8);
+  font-size: var(--fs-xl);
+  color: var(--ink);
+}
+.legal h3 {
+  margin-top: var(--space-6);
+  font-size: var(--fs-lg);
+  color: var(--ink);
+}
+.legal table {
+  width: 100%;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+.legal th,
+.legal td {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.legal code {
+  font-size: 0.9em;
+}
+.page-body + .page-footer,
+.legal + .page-footer {
+  margin-top: var(--space-10);
+}
