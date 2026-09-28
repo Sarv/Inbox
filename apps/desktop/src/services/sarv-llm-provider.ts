@@ -6,6 +6,7 @@
 // addProvider". This is the single source for that, so the two surfaces
 // cannot drift the way their recommended-model defaults once did.
 
+import { setAiConsent } from './ai-consent';
 import {
   addProvider,
   loadAISettings,
@@ -119,6 +120,9 @@ export function registerSarvProvider(
       oauthProvider: 'sarv',
       oauthEmail: draft.email,
     });
+  // Registering Sarv AI — from the consent prompt or by choosing a model on a
+  // screen that shows SARV_AI_DISCLOSURE — is the user's agreement to it.
+  setAiConsent('granted');
   // addProvider already makes the FIRST provider the default; only force it
   // when the caller means to override an existing default.
   if (options?.makeDefault) setDefaultProvider(provider.id);

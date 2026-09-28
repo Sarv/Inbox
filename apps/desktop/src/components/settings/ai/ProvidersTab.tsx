@@ -1,6 +1,7 @@
 import { Eye, EyeOff, Loader2, Trash2, Plus, Star, Pencil, Sparkles, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { getAiConsent, SARV_AI_DISCLOSURE } from '../../../services/ai-consent';
 import {
   AIProvider,
   AIProviderType,
@@ -205,10 +206,11 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
     readySarvDraft && findRegisteredSarvProvider(aiProviders, readySarvDraft),
   );
 
-  // Signing in to Sarv IS the intent to use Sarv AI — don't also require a
-  // click on "Add to AI providers" for the recommended provider/model. Without
-  // this, every fresh sign-in sits behind the "AI is inactive" banner until
-  // someone notices the button.
+  // Once the user has agreed to Sarv AI processing their mail (the consent
+  // prompt, ai-consent.ts), don't also require a click on "Add to AI
+  // providers" for the recommended provider/model. Without consent it waits
+  // for that click: the button sits next to the disclosure, so pressing it is
+  // the agreement.
   //
   // Once per signed-in account (`autoRegisteredFor`), so deliberately deleting
   // the provider isn't undone by the next render; `registerSarvProvider` is
@@ -216,6 +218,7 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
   // provider the user already chose as default keeps it.
   useEffect(() => {
     if (!readySarvDraft || pickerLoading) return;
+    if (getAiConsent() !== 'granted') return;
     if (autoRegisteredFor.current === readySarvDraft.email) return;
     autoRegisteredFor.current = readySarvDraft.email;
     // `added` is false when the background auto-register (sarv-ai-auto-register)
@@ -425,6 +428,9 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
                       <Plus className="h-4 w-4" />
                       {sarvAlreadyAdded ? 'Already added' : 'Add to AI providers'}
                     </button>
+                    {!sarvAlreadyAdded && (
+                      <p className="text-xs text-muted-foreground leading-relaxed">{SARV_AI_DISCLOSURE}</p>
+                    )}
                   </div>
                 )}
               </div>
