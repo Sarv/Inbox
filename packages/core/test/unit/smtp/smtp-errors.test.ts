@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { isAuthTokenError, isTransientSendError } from '../../../src/smtp/smtp-errors';
+import { isAuthTokenError, isTransientSendError, OutgoingMimeError } from '../../../src/smtp/smtp-errors';
 
 describe('isAuthTokenError', () => {
   it('matches the Sarv expired-token phrasing (the reported failure)', () => {
@@ -39,6 +39,13 @@ describe('isAuthTokenError', () => {
 // "dead-letter now", so a misclassification either loses mail (permanent when it
 // was a hiccup) or hammers the server forever (transient when it was rejected).
 describe('isTransientSendError', () => {
+  // Breaks: an encryption failure would be classified by its message text
+  // instead of the retry class the transform stated.
+  it('trusts the transient flag of an OutgoingMimeError', () => {
+    expect(isTransientSendError(new OutgoingMimeError('timed out', true))).toBe(true);
+    expect(isTransientSendError(new OutgoingMimeError('connection reset', false))).toBe(false);
+  });
+
   it('treats a 4xx SMTP reply as transient (greylisting / mailbox busy)', () => {
     expect(isTransientSendError(Object.assign(new Error('450 try later'), { responseCode: 450 }))).toBe(true);
     expect(isTransientSendError(Object.assign(new Error('421 too busy'), { responseCode: 421 }))).toBe(true);

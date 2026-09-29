@@ -13,6 +13,21 @@ type NodemailerErr = Error & {
 };
 
 /**
+ * A failure raised by an outgoing MIME transform (encryption, signing) that
+ * states its own retry class: "recipient has no key" is permanent — retrying
+ * cannot conjure a key — while "the key lookup timed out" may be transient.
+ */
+export class OutgoingMimeError extends Error {
+  constructor(
+    message: string,
+    public readonly transient: boolean,
+  ) {
+    super(message);
+    this.name = 'OutgoingMimeError';
+  }
+}
+
+/**
  * True when a send failure is worth retrying (offline, dropped socket, timeout,
  * greylisting, transient 4xx) rather than permanent (auth failure, invalid
  * recipient, any 5xx). Deliberately conservative: an ambiguous/unknown failure
@@ -21,6 +36,7 @@ type NodemailerErr = Error & {
  */
 export function isTransientSendError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  if (error instanceof OutgoingMimeError) return error.transient;
   const e = error as NodemailerErr;
 
   // A numeric SMTP reply code is authoritative: 4xx = transient (greylist /
