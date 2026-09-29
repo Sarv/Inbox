@@ -42,6 +42,10 @@ interface DraftAutosaveOptions {
    *  DB + IMAP engine. Without it they hit the active account (wrong DB when the
    *  draft belongs to another account / opened from All Inboxes). */
   accountId?: string;
+  /** The message will go encrypted, so its draft is saved encrypted too. */
+  encrypt?: boolean;
+  /** The draft opened into this editor was saved encrypted. */
+  initialDraftEncrypted?: boolean;
 }
 
 const DEBOUNCE_MS = 10_000; // 10 seconds
@@ -82,6 +86,10 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
   // identity, so a thread with several drafts only ever loses the one in play
   // (Gmail-style 6→5) instead of all of them.
   const ownedMessageIdRef = useRef<string | undefined>(opts.initialDraftMessageId);
+  // Whether the copy this hook owns is stored encrypted. Turning encryption on
+  // leaves a plaintext copy behind until the next save, so that save must
+  // happen even when the text itself did not change.
+  const savedEncryptedRef = useRef(opts.initialDraftEncrypted === true);
 
   // A stable fingerprint of the editable content. Used to detect whether the
   // user actually CHANGED an opened draft — if not, we must never re-save it.
@@ -148,11 +156,12 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
     // Unchanged since it was opened → do NOT re-save. Re-saving an untouched
     // draft mints a new message-id every cycle and that churn outpaces discard,
     // making the draft effectively immortal. Only a real edit gets saved.
-    if (baselineKeyRef.current !== null && contentKey() === baselineKeyRef.current) {
+    const { to, cc, bcc, subject, inReplyTo, threadId, accountId, composeForSave, attachments, encrypt = false } = latestRef.current;
+    const plaintextToReplace = encrypt && !savedEncryptedRef.current;
+    if (baselineKeyRef.current !== null && contentKey() === baselineKeyRef.current && !plaintextToReplace) {
       return;
     }
 
-    const { to, cc, bcc, subject, inReplyTo, threadId, accountId, composeForSave, attachments } = latestRef.current;
     const edited = { body: latestRef.current.body, htmlBody: latestRef.current.htmlBody };
     const { body, htmlBody } = composeForSave ? composeForSave(edited) : edited;
     // Fingerprint of exactly what THIS save writes. The baseline must be this
@@ -191,6 +200,7 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
         // message-id and the draft is orphaned in its own one-message thread.
         threadId,
         accountEmail,
+        pgp: encrypt ? { encrypt: true } : undefined,
       });
 
       // If the user discarded WHILE this save was in flight, undo it — otherwise
@@ -205,9 +215,16 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
 
       // Take ownership of the freshly written draft so the next save/discard
       // targets it, and update the baseline so an unchanged follow-up won't re-save.
+      // A refused save stored nothing (an encrypted draft that could not be
+      // encrypted is not saved at all), so this content still needs saving.
+      if (res?.success === false) {
+        console.warn('[DraftAutosave] Draft not saved:', res.error);
+        return;
+      }
       const newMessageId: string | undefined = res?.messageId;
       ownedMessageIdRef.current = newMessageId || ownedMessageIdRef.current;
       baselineKeyRef.current = savedKey;
+      savedEncryptedRef.current = encrypt;
 
       // Enforce ONE draft per thread: now that the new draft is persisted, remove
       // the superseded one by its Message-ID. Targeting the OLD message-id (never
@@ -302,7 +319,7 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
         timerRef.current = null;
       }
     };
-  }, [opts.to, opts.cc, opts.bcc, opts.subject, opts.body, opts.htmlBody, attachmentsFingerprint, saveDraft]);
+  }, [opts.to, opts.cc, opts.bcc, opts.subject, opts.body, opts.htmlBody, attachmentsFingerprint, opts.encrypt, saveDraft]);
 
   // Save on unmount (close without send). Goes through saveDraft, so it gets
   // the same content/unchanged/discarded checks and the same save-then-delete of
