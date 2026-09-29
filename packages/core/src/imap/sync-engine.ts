@@ -27,6 +27,7 @@ import { IMAPConnectionPool, PoolConnectionParkedError, type ConnectionPoolConfi
 import { mapEnvelopeFields } from './envelope-mapper';
 import { isFolderSyncEnabled, folderHeadersOnly } from './folder-sync-policy';
 import { FolderSyncer, type FolderSyncResult } from './folder-syncer';
+import type { AutocryptSink } from './header-stage';
 import { getSuggestedBackoffMs } from './imap-errors';
 import { MessageProcessor, isExpectedMessage, type IngestServerActions } from './message-processor';
 import { OperationQueue, type OperationResult } from './operation-queue';
@@ -462,6 +463,17 @@ export class SyncEngine {
     this.messageProcessor.setReputationLookup(fn);
     this.folderSyncer.setReputationLookup(fn);
     this.realtimeManager.setReputationLookup(fn);
+  }
+
+  /**
+   * Where the Autocrypt headers of incoming mail go — the OpenPGP keyring, in
+   * the desktop app, which learns senders' keys from them. Every ingest path
+   * gets the same sink, so a key is learned whichever path saw the message.
+   */
+  setAutocryptSink(fn: AutocryptSink): void {
+    this.messageProcessor.setAutocryptSink(fn);
+    this.folderSyncer.setAutocryptSink(fn);
+    this.realtimeManager.setAutocryptSink(fn);
   }
 
   // ========== Connection ==========

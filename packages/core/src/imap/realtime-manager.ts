@@ -7,6 +7,7 @@ import type { IEmailStorage } from '../types/storage';
 import { logger } from '../utils/logger';
 import { createMutex, type Mutex } from '../utils/mutex';
 
+import type { AutocryptSink } from './header-stage';
 import { isConnectionError } from './imap-errors';
 import { fetchNewMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
@@ -196,6 +197,11 @@ export class RealtimeManager extends EventEmitter {
    * arriving live is scored while the listing is still current. */
   setReputationLookup(fn: ReputationLookup): void {
     this.messageProcessor.setReputationLookup(fn);
+  }
+
+  /** Forward the Autocrypt sink, so a key offered by live mail is learned too. */
+  setAutocryptSink(fn: AutocryptSink): void {
+    this.messageProcessor.setAutocryptSink(fn);
   }
 
   /**

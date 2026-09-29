@@ -13,10 +13,12 @@ import { simpleParser, type ParsedMail } from 'mailparser';
 
 import { classifyFolder, findFolderByType, isOwnMailFolder, type ClassifiableFolder } from '../config/folder-mapping';
 import { LARGE_MAILBOX_THRESHOLD, STALE_FLAG_VERIFY_MAX, SYNC_RECENT_WINDOW_DAYS, recentWindowCutoffDate } from '../config/sync';
+import { detectInlinePgp, detectPgpMime } from '../pgp/mime-structure';
+import { PGP_ENCRYPTED_PLACEHOLDER } from '../pgp/types';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
 import type { FilterRule } from '../types/filters';
 import type { IMAPMessage, IIMAPClient } from '../types/imap';
-import type { EmailRecord, FolderRecord } from '../types/models';
+import type { EmailRecord, FolderRecord, PgpStatus } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { sanitizeIcsText } from '../utils/calendar';
 import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
@@ -43,7 +45,7 @@ import {
   transcodeDetectedCharset,
 } from './charset-repair';
 import { mapEnvelopeFields } from './envelope-mapper';
-import { headerStage } from './header-stage';
+import { autocryptSighting, headerStage, type AutocryptSink } from './header-stage';
 import { attachmentSizesFromSource } from './raw-mime-part';
 import type { ReputationLookup } from './reputation-stage';
 import { withFolderSelected } from './with-folder';
@@ -55,6 +57,8 @@ export interface ShapedBody {
   contentType: 'text' | 'html' | 'multipart';
   attachments: { name: string; size: number; contentType: string }[];
   calendarIcs: string | null;
+  /** OpenPGP shape — see EmailRecord.pgpStatus. Absent means neither. */
+  pgp?: PgpStatus | null;
 }
 
 /** {@link ShapedBody} plus the one verdict only a live parse can produce. */
@@ -65,6 +69,33 @@ export interface ParsedBody extends ShapedBody {
    */
   attachmentSpam: SpamAssessment | null;
 }
+
+/** The first line of a text — where inline PGP armor must stand; see parseBody. */
+const firstLine = (text: string): string => text.split('\n', 1)[0].trimEnd();
+
+/** The top-level PGP/MIME shape, or null — never a throw: a message that
+ * does not parse as MIME here is simply not PGP/MIME. */
+function pgpMimeShape(bytes: Buffer): 'encrypted' | 'signed' | null {
+  try {
+    const kind = detectPgpMime(bytes);
+    return kind === 'encrypted' || kind === 'signed' ? kind : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What an encrypted message stores: a placeholder, no parts, no verdict. */
+const encryptedPlaceholder = (): ParsedBody => ({
+  rawBody: PGP_ENCRYPTED_PLACEHOLDER,
+  cleanBody: PGP_ENCRYPTED_PLACEHOLDER,
+  contentType: 'text',
+  attachments: [],
+  calendarIcs: null,
+  pgp: 'encrypted',
+  // Not judged: the parts cannot be read, and a verdict on ciphertext would
+  // be a verdict on nothing.
+  attachmentSpam: null,
+});
 
 /** Filter actions that relocate a message. Labels and flags are not moves. */
 const MOVE_ACTIONS: ReadonlySet<string> = new Set(['archive', 'delete', 'moveToSpam', 'moveToFolder']);
@@ -342,6 +373,15 @@ export class MessageProcessor {
   /** Wire the blocklist lookups (see SyncEngine). Absent means the stage is off. */
   setReputationLookup(fn: ReputationLookup): void {
     this.reputationLookup = fn;
+  }
+
+  // Where Autocrypt headers on incoming mail go (the OpenPGP keyring, in the
+  // desktop app). Absent means they are ignored.
+  private autocryptSink?: AutocryptSink;
+
+  /** Wire the Autocrypt sink (see SyncEngine). */
+  setAutocryptSink(fn: AutocryptSink): void {
+    this.autocryptSink = fn;
   }
 
   constructor(config: Partial<MessageProcessorConfig> = {}) {
@@ -948,6 +988,19 @@ export class MessageProcessor {
       ownMail: opts?.ownMail === true,
     });
 
+    // The sender's key, offered in their Autocrypt header. Own mail carries
+    // the user's own key, which the keyring already holds.
+    if (this.autocryptSink && opts?.ownMail !== true) {
+      const sighting = autocryptSighting(message);
+      if (sighting) {
+        try {
+          this.autocryptSink(sighting);
+        } catch (error) {
+          logger.warn(`Autocrypt sink failed: ${(error as Error)?.message ?? String(error)}`);
+        }
+      }
+    }
+
     // What the blocklists say about the sender, added to the header stage's
     // own signals. This is the only part of the score that costs a network
     // round trip, which is why it is the only part that is injected, governed
@@ -1088,6 +1141,9 @@ export class MessageProcessor {
       listUnsubscribe: unsubscribe.listUnsubscribe,
       listUnsubscribePost: unsubscribe.listUnsubscribePost,
 
+      // OpenPGP shape, when this fetch carried the body (see parseBody).
+      pgpStatus: parsedBody?.pgp ?? null,
+
       // AI
       hasEmbedding: false,
       embeddingLastGenerated: null,
@@ -1110,8 +1166,20 @@ export class MessageProcessor {
       // mailparser decodes the message's OWN charset/transfer-encoding correctly
       // instead of choking on a pre-UTF-8-mangled string.
       const bytes = Buffer.from(body || '', 'latin1');
+      // An encrypted message is NOT parsed: its only text is ciphertext, and
+      // the plaintext must never reach the body columns (and from there FTS,
+      // snippets and every AI prompt). The reader decrypts from the source.
+      const pgpMime = pgpMimeShape(bytes);
+      if (pgpMime === 'encrypted') return encryptedPlaceholder();
       const parsed = await simpleParser(bytes, SIMPLE_PARSER_OPTIONS);
-      const shaped = await this.repairMisdeclaredCharset(bytes, this.shapeParsedBody(parsed, body));
+      const repaired = await this.repairMisdeclaredCharset(bytes, this.shapeParsedBody(parsed, body));
+      // Inline ("traditional") PGP lives inside an ordinary text part, and IS
+      // that part: the armor opens the body. One merely quoted further down
+      // (a mail about PGP, a forwarded key) leaves the message ordinary.
+      const inline = detectInlinePgp(firstLine(repaired.cleanBody.trimStart()));
+      if (inline === 'inline-encrypted') return encryptedPlaceholder();
+      const pgp: PgpStatus | null = pgpMime === 'signed' || inline === 'inline-signed' ? 'signed' : null;
+      const shaped: ShapedBody = pgp ? { ...repaired, pgp } : repaired;
       // The attachment stage runs HERE, and only here, because this is the
       // only moment the decoded bytes exist. Nothing stores them: an
       // attachment is re-downloaded when the user asks for it, so a scorer
@@ -1165,6 +1233,9 @@ export class MessageProcessor {
       // cid: images and `related` parts are the message's own presentation,
       // not files sent to the reader.
       .filter((a) => a.contentDisposition !== 'inline' && !a.related)
+      // A PGP/MIME signature (signature.asc) is the message's own envelope,
+      // shown as the reader's badge, not a file sent to the reader.
+      .filter((a) => (a.contentType || '').toLowerCase() !== 'application/pgp-signature')
       .map((part) => ({
         part,
         name: this.resolveAttachmentName(part),
@@ -1487,6 +1558,7 @@ export class MessageProcessor {
       rawBody: parsed.rawBody,
       cleanBody: parsed.cleanBody,
       contentType: parsed.contentType,
+      pgpStatus: parsed.pgp ?? null,
     };
     // Reconcile attachment metadata from the source (authoritative, matches the
     // download path). When the source has none, correct the flag/count — a

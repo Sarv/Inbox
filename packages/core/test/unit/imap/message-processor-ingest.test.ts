@@ -1453,3 +1453,48 @@ describe('processBatch — a sender the user trusts', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('processBatch — Autocrypt sink', () => {
+  const autocrypt = 'Autocrypt: addr=sender@test.local; keydata=bWVudGlvbmVk\r\n';
+
+  // Breaks: a sender's Autocrypt key is never learned, so replying to them can
+  // never be encrypted automatically.
+  it('hands the sink the Autocrypt header of incoming mail', async () => {
+    const { db, mp } = setup();
+    const sink = vi.fn();
+    mp.setAutocryptSink(sink);
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: autocrypt })], db.folder(INBOX), db.asStorage());
+
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(sink.mock.calls[0][0]).toMatchObject({
+      fromAddress: 'sender@test.local',
+      header: 'addr=sender@test.local; keydata=bWVudGlvbmVk',
+    });
+  });
+
+  // Breaks: the user's own Sent copy would be fed back to the keyring as a
+  // "contact" key for their own address.
+  it('does not read Autocrypt from the user\'s own Sent mail', async () => {
+    const { db, mp } = setup();
+    const sink = vi.fn();
+    mp.setAutocryptSink(sink);
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: autocrypt })], db.folder(SENT), db.asStorage());
+
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a keyring failure would drop the message it rode in on — the sink
+  // is advisory, the mail is not.
+  it('still stores the message when the sink throws', async () => {
+    const { db, mp } = setup();
+    mp.setAutocryptSink(() => {
+      throw new Error('keyring closed');
+    });
+
+    await mp.processBatch([msg({ uid: 1, rawHeaders: autocrypt })], db.folder(INBOX), db.asStorage());
+
+    expect(db.allRows()).toHaveLength(1);
+  });
+});
