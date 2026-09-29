@@ -180,7 +180,9 @@ CREATE TABLE IF NOT EXISTS threads (
   live_message_count INTEGER NOT NULL DEFAULT 0,
   state_version INTEGER NOT NULL DEFAULT 0,
 
-  -- Background conversation extraction tracking
+  -- DEPRECATED, inert: the retired whole-thread conversation extraction's
+  -- tracking. Nothing reads or writes them since v98; kept because dropping a
+  -- column rewrites the table (and v25 still adds them on upgrade).
   chat_extracted_at INTEGER DEFAULT NULL,
   chat_email_count INTEGER DEFAULT 0,
 
@@ -518,18 +520,28 @@ CREATE TABLE IF NOT EXISTS thread_summaries (
   updated_at INTEGER DEFAULT (unixepoch())
 );
 
--- Conversation extractions
-CREATE TABLE IF NOT EXISTS conversation_extractions (
-  id TEXT PRIMARY KEY,
-  thread_id TEXT NOT NULL UNIQUE,
-  messages TEXT NOT NULL,
-  email_count INTEGER,
-  processed_email_ids TEXT,
-  processed_at INTEGER NOT NULL,
+-- First-email AI splits (the chat view's AI mode): one row per thread, keyed by
+-- the thread's first email and the fingerprint of its stored body. Every write
+-- replaces the whole row; the cascade drops it with its thread. See v97
+-- (migrations.ts) — the two declarations must stay the same shape.
+CREATE TABLE IF NOT EXISTS first_email_splits (
+  thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+  first_key TEXT NOT NULL,
+  first_email_id TEXT NOT NULL,
+  source_fingerprint TEXT NOT NULL,
+  split_version INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok', 'partial', 'skipped', 'transient', 'failed')),
+  quote_count INTEGER,
+  parts TEXT,
+  error_kind TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_retry_at INTEGER,
   model_used TEXT,
-  created_at INTEGER DEFAULT (unixepoch()),
-  updated_at INTEGER DEFAULT (unixepoch())
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  CHECK ((status IN ('ok', 'partial')) = (parts IS NOT NULL))
 );
+CREATE INDEX IF NOT EXISTS idx_first_email_splits_retry
+  ON first_email_splits(next_retry_at) WHERE status = 'transient';
 
 -- ============================================================
 -- Indexes
@@ -595,7 +607,6 @@ CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);
 -- over the WHOLE table. The extra column is free for every older date-only user.
 CREATE INDEX IF NOT EXISTS idx_threads_last_message_date ON threads(last_message_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_has_unread ON threads(has_unread);
-CREATE INDEX IF NOT EXISTS idx_threads_chat_extraction ON threads(chat_extracted_at, chat_email_count, message_count);
 
 -- Folder-less flag views (Starred / Important): partial covering indexes so the
 -- page is an indexed range scan over the few flagged threads instead of a full
@@ -647,9 +658,6 @@ CREATE INDEX IF NOT EXISTS idx_signature_patterns_email ON signature_patterns(em
 CREATE INDEX IF NOT EXISTS idx_pending_ops_type ON pending_operations(type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_ops_unique ON pending_operations(type, folder_path, uid);
 CREATE INDEX IF NOT EXISTS idx_pending_ops_status ON pending_operations(status);
-
--- Conversation extraction indexes
-CREATE INDEX IF NOT EXISTS idx_conversation_extractions_thread ON conversation_extractions(thread_id);
 
 -- ============================================================
 -- Triggers

@@ -4,23 +4,149 @@
 // participants, or starred/important state. The outer query must expose the
 // base table as `emails` — every fragment correlates on `emails.thread_id`.
 
+import {
+  CONVERSATION_EXCLUDED_FOLDERS,
+  DRAFT_MARKER_TAG,
+  SENT_FOLDER_TAGS,
+  STANDARD_DRAFT_FOLDERS,
+  conversationFoldersOf,
+  createLogger,
+  type ConversationFolders,
+} from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
+
+import { prepared } from '../statement-cache';
 
 import { EMAIL_TAGS_TABLE } from './tag-membership';
 
-/** Folders whose copies don't count toward thread-level state (deleted/junk). */
-export const THREAD_STATE_EXCLUDED_FOLDERS = [
-  'Trash', 'Spam', '[Gmail]/Trash', '[Gmail]/Spam', 'Junk', 'Junk Email', 'Deleted Items',
-];
+const log = createLogger('ThreadSql');
 
 /**
- * SQL fragment excluding DRAFT copies from a thread's message count — both our
- * local `|draft|` mirrors and IMAP-synced drafts retagged with just their Drafts
- * folder path. A draft is never a real conversation message, so the list row's
- * "(N)" must not count it (otherwise a reply-with-draft shows an inflated count).
+ * Folders whose copies don't count toward thread-level state (deleted/junk).
+ * Core's `CONVERSATION_EXCLUDED_FOLDERS` — the conversation-membership
+ * predicate's list — so the SQL here and the JS the thread view, the drafter
+ * and the split scheduler run can never disagree about a trashed copy.
  */
-export function draftExclusion(alias: string): string {
-  return `AND instr(${alias}.tags, '|draft|') = 0 AND instr(${alias}.tags, '|Drafts|') = 0 AND instr(${alias}.tags, '|[Gmail]/Drafts|') = 0`;
+export const THREAD_STATE_EXCLUDED_FOLDERS: readonly string[] = CONVERSATION_EXCLUDED_FOLDERS;
+
+/** SQLite's message for a database that has no `folders` table at all. */
+const NO_FOLDERS_TABLE = /no such table: folders\b/;
+
+/**
+ * This database's Drafts and Sent folder paths (core `conversationFoldersOf`,
+ * the classifier the thread view uses). Read per call: the folders table is a
+ * few dozen rows, and a cached answer would go stale the moment a sync adds
+ * the provider's Drafts folder.
+ *
+ * A database with NO folders table (a bare fixture) has no provider folders:
+ * empty roles, and the standard `Drafts`/`Sent` names still apply. A table
+ * without `name`/`special_use` (a minimal fixture) is classified from what it
+ * has, its paths. Any OTHER failure THROWS — a failed read, or rows with no
+ * path to classify. An unreadable folders table and an empty one are the same
+ * value and opposite facts: read as "no provider Drafts folder", it would make
+ * an `INBOX.Drafts` draft a conversation MEMBER — counted in "(N)", picked as
+ * the first email the AI splits, handed to the reply drafter, invisible to the
+ * live-draft gate that must stop an auto-draft. Failing loudly makes every
+ * caller fail closed instead.
+ */
+export function conversationFoldersIn(db: Database.Database): ConversationFolders {
+  let rows: Array<Record<string, unknown>>;
+  try {
+    // `*`, not a column list: the classifier uses whatever of path / name /
+    // special_use the table has.
+    rows = prepared(db, 'SELECT * FROM folders').all() as typeof rows;
+  } catch (error) {
+    if (NO_FOLDERS_TABLE.test(String((error as Error)?.message ?? error))) return conversationFoldersOf([]);
+    log.warn('conversationFoldersIn: folders table unreadable; refusing to guess the Drafts/Sent folders', error);
+    throw error;
+  }
+  if (rows.length > 0 && typeof rows[0].path !== 'string') {
+    const error = new Error('conversationFoldersIn: folders rows carry no path');
+    log.warn('conversationFoldersIn: folders table unreadable; refusing to guess the Drafts/Sent folders', error);
+    throw error;
+  }
+  return conversationFoldersOf(rows.map((row) => ({
+    path: row.path as string,
+    name: typeof row.name === 'string' ? row.name : undefined,
+    specialUse: typeof row.special_use === 'string' ? row.special_use : null,
+  })));
+}
+
+/**
+ * A folder path as an SQL string LITERAL, quote-doubled.
+ *
+ * Literal rather than bound: the fragments below are spliced into eight list
+ * and search statements whose `?` parameters are positional, and a bound
+ * parameter here would shift every one of them. A folder name is server data,
+ * so the quoting is the whole defence — a `'` in a name must end up as `''`,
+ * never as the end of the string. NUL never reaches here
+ * (core's folder-role builders drop such paths); it is refused outright anyway,
+ * because SQLite stops reading a statement at one.
+ */
+export function sqlStringLiteral(value: string): string {
+  if (value.includes('\0')) throw new Error('sqlStringLiteral: NUL in value');
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** `instr(<alias>.tags, '|<name>|')` with the name safely quoted. */
+const tagInstr = (alias: string, name: string): string => `instr(${alias}.tags, ${sqlStringLiteral(`|${name}|`)})`;
+
+/** Folder paths that can be spliced as literals: non-empty, NUL-free, deduplicated. */
+function quotablePaths(...lists: ReadonlyArray<readonly string[]>): string[] {
+  // A path that could not be quoted (NUL) is skipped rather than failing the
+  // whole list query; core's folder-role builders never produce one.
+  return [...new Set(lists.flat().filter((path) => !!path && !path.includes('\0')))];
+}
+
+/**
+ * Per-row SQL: true when the row on `alias` is a DRAFT — the SQL twin of core's
+ * `isDraftRow`, clause for clause:
+ *
+ *   1. a Sent copy — the standard `Sent`, `[Gmail]/Sent Mail`, `Sent Items`,
+ *      or one of `folders.sentPaths` (this account's classified Sent folders,
+ *      `INBOX.Sent`, iCloud's `Sent Messages`) — is never a draft, even with a
+ *      stale `|draft|` tag;
+ *   2. the local `|draft|` marker, or
+ *   3. one of `folders.draftPaths` (this account's classified Drafts folders), or
+ *   4. the standard `Drafts` / `[Gmail]/Drafts` names, means draft.
+ *
+ * Trash does not un-draft a row: a discarded draft is still not a message.
+ */
+export function draftRowSql(alias: string, folders?: ConversationFolders | null): string {
+  const sent = quotablePaths(SENT_FOLDER_TAGS, folders?.sentPaths ?? []);
+  const notSent = sent.map((folder) => `${tagInstr(alias, folder)} = 0`).join(' AND ');
+  const markers = [DRAFT_MARKER_TAG, ...quotablePaths(folders?.draftPaths ?? [], STANDARD_DRAFT_FOLDERS)];
+  const isDraft = markers.map((name) => `${tagInstr(alias, name)} > 0`).join(' OR ');
+  return `(${notSent} AND (${isDraft}))`;
+}
+
+/**
+ * {@link draftRowSql} with the account's OWN Drafts/Sent folders, read from
+ * `db` — for main's raw draft deletes (discard, post-send cleanup, the junk
+ * sweep). The bare tag markers those used to match take a Sent copy that kept
+ * a stale `|draft|` tag for a draft, and deleting it loses the reader's own
+ * reply and hands its Sent-folder UID to the Drafts-folder expunge. Throws when
+ * the folders table is unreadable ({@link conversationFoldersIn}): a caller that
+ * deletes must then delete nothing rather than guess.
+ */
+export function accountDraftRowSql(db: Database.Database, alias: string): string {
+  return draftRowSql(alias, conversationFoldersIn(db));
+}
+
+/**
+ * SQL fragment (leading `AND`) excluding DRAFT rows ({@link draftRowSql}) —
+ * our local `|draft|` mirrors, IMAP-synced drafts retagged with just their
+ * Drafts folder path, and the account's provider-specific Drafts folders. A
+ * draft is never a real conversation message, so the list row's "(N)" must not
+ * count it.
+ *
+ * Since the membership predicate moved to core, a SENT copy that kept a stale
+ * `|draft|` tag is NOT excluded (it is a message the user sent), and a
+ * provider-path draft (`INBOX.Drafts`) IS — pass `folders` to catch the
+ * provider paths of both.
+ */
+export function draftExclusion(alias: string, folders?: ConversationFolders | null): string {
+  return `AND NOT ${draftRowSql(alias, folders)}`;
 }
 
 /**
@@ -61,9 +187,14 @@ export function threadFolderExclusion(alias: string): string {
  * a folder's badge can never count a thread its own filtered list won't show.
  */
 export const LISTING_EXCLUDED_FOLDERS: readonly string[] = [
-  'Trash', 'Spam', 'Drafts', 'Sent',
-  '[Gmail]/Trash', '[Gmail]/Spam', '[Gmail]/Drafts', '[Gmail]/Sent Mail',
-  'Junk', 'Junk Email', 'Deleted Items', 'Sent Items',
+  // Built from core's conversation-membership lists — the deleted/junk
+  // folders, the Sent names and the standard Drafts names — so a name added to
+  // one of them reaches the listing scope and the sidebar badge too, instead
+  // of the two lists silently diverging. (Bound in this order by
+  // unreadByTagParams; every consumer reads this one array.)
+  ...CONVERSATION_EXCLUDED_FOLDERS,
+  ...SENT_FOLDER_TAGS,
+  ...STANDARD_DRAFT_FOLDERS,
 ];
 
 /**
@@ -182,17 +313,38 @@ export function threadTagExists(alias: string, cond: string): string {
 }
 
 /**
- * Whole-conversation message count EXCLUDING Trash/Spam/Junk, so the list
- * row's "(N)" reflects the real conversation size AND matches what getByThread
- * shows when the thread is opened. Falls back to the unfiltered count when the
- * exclusion empties the thread (an all-junk conversation, e.g. viewing the Junk
- * folder) — mirroring getByThread's own fallback so all-junk threads still
- * report their real size instead of collapsing to 0.
+ * The list row's "(N)": the number of CONVERSATION MEMBERS — the SQL twin of
+ * core's `conversationMembers(rows, folders).length`, which the thread view,
+ * the AI view and the drafter all use, so the count agrees with what the thread
+ * opens with (a parity test in `conversation-count-parity.test.ts` holds the two
+ * together on a real database).
+ *
+ * Three tiers, first non-zero wins:
+ *
+ *   1. live members — neither a draft ({@link draftRowSql}) nor a Trash/Spam/Junk
+ *      copy;
+ *   2. every non-draft row — the all-junk conversation (reading the Junk folder),
+ *      mirroring the membership predicate's own fallback;
+ *   3. every row — a thread that is nothing but drafts. DISPLAY-ONLY: it has no
+ *      members, but a Drafts-folder row must not read "(0)". The one place the
+ *      count and `conversationMembers` deliberately differ.
+ *
+ * DELIBERATE CHANGE (AI-view redesign): this used the old tag-only draft rule,
+ * which (a) dropped the user's own Sent copies that kept a stale `|draft|` tag,
+ * and (b) counted a provider-path draft (`|INBOX.Drafts|`) as a message. Both
+ * now follow the membership predicate: a `|Sent|draft|` copy (and one in the
+ * account's own Sent folder, `|INBOX.Sent|draft|`) counts, an `INBOX.Drafts`
+ * draft does not. `folders` comes from {@link conversationFoldersIn}; the
+ * statement text changes only when the account's Drafts or Sent folders do.
  */
-export const THREAD_MESSAGE_COUNT_SQL = `COALESCE(
-    NULLIF((SELECT COUNT(*) FROM emails tmc WHERE tmc.thread_id = emails.thread_id ${threadFolderExclusion('tmc')} ${draftExclusion('tmc')}), 0),
+export function threadMessageCountSql(folders?: ConversationFolders | null): string {
+  const notDraft = (alias: string): string => draftExclusion(alias, folders);
+  return `COALESCE(
+    NULLIF((SELECT COUNT(*) FROM emails tmc WHERE tmc.thread_id = emails.thread_id ${threadFolderExclusion('tmc')} ${notDraft('tmc')}), 0),
+    NULLIF((SELECT COUNT(*) FROM emails tmd WHERE tmd.thread_id = emails.thread_id ${notDraft('tmd')}), 0),
     (SELECT COUNT(*) FROM emails tmcAll WHERE tmcAll.thread_id = emails.thread_id)
   )`;
+}
 
 /** Oldest sender name across the conversation (Trash/Spam/Junk excluded). */
 export const THREAD_FIRST_SENDER_SQL = `(SELECT COALESCE(tfs.from_name, tfs.from_address) FROM emails tfs WHERE tfs.thread_id = emails.thread_id ${threadFolderExclusion('tfs')} ORDER BY tfs.date ASC LIMIT 1)`;
@@ -203,12 +355,18 @@ export const THREAD_LAST_SENDER_SQL = `(SELECT COALESCE(tls.from_name, tls.from_
 /**
  * Thread metadata subqueries shared by list AND search SELECTs. EmailRepository
  * appends its extra tag aggregates (starred/important/draft) after these.
+ *
+ * A function of the account's Drafts and Sent folders (see
+ * {@link threadMessageCountSql}); callers build it per query from
+ * {@link conversationFoldersIn} on their own database.
  */
-export const THREAD_META_SHARED = `
-  ${THREAD_MESSAGE_COUNT_SQL} as thread_message_count,
+export function threadMetaSharedSql(folders?: ConversationFolders | null): string {
+  return `
+  ${threadMessageCountSql(folders)} as thread_message_count,
   ${THREAD_FIRST_SENDER_SQL} as thread_first_sender,
   ${THREAD_LAST_SENDER_SQL} as thread_last_sender
 `;
+}
 
 /**
  * `unread_count` for one folder, taken from the MATERIALIZED read model.

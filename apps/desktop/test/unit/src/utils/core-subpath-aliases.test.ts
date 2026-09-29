@@ -146,6 +146,48 @@ describe('renderer core-subpath aliases', () => {
     expect(withRelatives, 'no aliased module has a relative import to walk').toBeDefined();
   });
 
+  // Breaks: the walk stops after one hop, so ai-error's second-level import
+  // (imap-errors -> oauth-errors) or quoted-text's leaf packages go unchecked
+  // and a Node-only package two files deep reaches the renderer unseen.
+  it('walks the AI-view aliases to their second-level imports and leaf packages', () => {
+    const { files, packages } = reachablePackages(resolve(CORE_SRC, 'utils/ai-error.ts'));
+    expect(files).toContain(resolve(CORE_SRC, 'imap/imap-errors.ts'));
+    expect(files).toContain(resolve(CORE_SRC, 'oauth/oauth-errors.ts'));
+    const quoted = reachablePackages(resolve(CORE_SRC, 'utils/quoted-text.ts'));
+    expect(quoted.packages).toContain('@sarv-in/mailguard/quote');
+    expect(quoted.packages).toContain('html-to-text');
+    expect(packages.size).toBe(0);
+  });
+
+  // Breaks: an alias added for the AI-view redesign does not resolve under the
+  // renderer's own resolver config (vitest runs with the same aliases), or
+  // resolves to a module without the exports the renderer will call.
+  it('resolves every alias added for the conversation/first-split work', async () => {
+    const membership = await import('@sarvinbox/core/conversation-membership');
+    expect(membership.conversationMembers([
+      { id: 'b', date: 2, tags: '|INBOX|' },
+      { id: 'd', date: 3, tags: '|Drafts|' },
+      { id: 'a', date: 1, tags: '|INBOX|' },
+    ]).map((r) => r.id)).toEqual(['a', 'b']);
+
+    const firstSplit = await import('@sarvinbox/core/first-split');
+    expect(firstSplit.FIRST_SPLIT_VERSION).toBeGreaterThan(0);
+    expect(firstSplit.firstMemberKeyOf({ id: 'x', messageId: '<A@h>' })).toBe('a@h');
+
+    const quoted = await import('@sarvinbox/core/quoted-text');
+    expect(quoted.quoteMarkerCount('Hi\n> a\n> > b', 'text')).toBe(2);
+
+    const htmlText = await import('@sarvinbox/core/html-text');
+    expect(htmlText.htmlToPlainText('<p>Hello <b>there</b></p>').trim()).toBe('Hello there');
+
+    const fnv = await import('@sarvinbox/core/fnv1a');
+    expect(fnv.fnv1a32('foobar')).toBe(0xbf9cf968);
+
+    const aiError = await import('@sarvinbox/core/ai-error');
+    expect(aiError.classifyAIError(Object.assign(new Error('Too Many Requests'), { status: 429 })).kind)
+      .toBe('rate_limit');
+  });
+
   // Breaks: the renderer's structured logger does not resolve under the
   // renderer's own resolver config (vitest runs with the same aliases), so
   // renderer code falls back to raw console output that app.log cannot parse.

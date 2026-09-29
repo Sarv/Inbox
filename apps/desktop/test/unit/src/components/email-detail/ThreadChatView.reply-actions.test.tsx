@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toForwardSource } from '../../../../../src/utils/forward-quote';
 import { act, render, toggle, type Mounted } from '../../../../helpers/render';
 
+import { chatFieldsFor, type ChatFieldsOptions } from './chat-context-fixture';
 import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
+import { LOOPED_AT, loopedInEmail, loopedInParts } from './looped-in-fixture';
 
 /**
  * Answering from the chat view: the Reply / Reply All / Forward row at the end
@@ -107,7 +109,6 @@ vi.mock('../../../../../src/components/attachment-viewer/useAttachmentActions', 
   useAttachmentActions: () => ({ saveCopy: vi.fn() }),
 }));
 vi.mock('../../../../../src/services/ai-service', () => ({
-  buildPolishThreadContext: () => '',
   getCurrentUserEmail: () => 'me@acme.example',
 }));
 vi.mock('../../../../../src/services/image-cache', () => ({
@@ -181,15 +182,15 @@ const context = (
   threadEmails: EmailRecord[],
   handlers: Handlers,
   overrides: Record<string, unknown> = {},
+  chat: ChatFieldsOptions = {},
 ) =>
   new Proxy(
     {
       displayEmail: threadEmails[0],
       threadEmails,
-      conversationMessages: null,
-      conversationLoading: false,
-      conversationError: null,
-      conversationProgress: null,
+      // Standard's turns (and, with `chat.parts`, the AI view's), derived the
+      // way useEmailDetail derives them.
+      ...chatFieldsFor(threadEmails, chat),
       showAIView: false,
       chatViewActive: true,
       showInlineReply: false,
@@ -199,7 +200,6 @@ const context = (
       inlineReplyDraft: undefined,
       inlineForwardDraft: undefined,
       inlineReplyMode: 'reply',
-      handleReExtractMessage: undefined,
       ...handlers,
       ...overrides,
     } as Record<string, unknown>,
@@ -325,26 +325,41 @@ describe('ThreadChatView — the reply row at the end', () => {
     expect(endBar(view)).toBeNull();
   });
 
-  // No bubbles, no row: under the "Process now" invitation it would answer a
-  // message the reader cannot see.
-  it('hides under the "Process now" invitation', () => {
+  // CHANGED on purpose (with the AI-view redesign): the "Process now"
+  // invitation used to REPLACE the bubbles, so the row hid under it. It is
+  // now a banner above them — the AI view always carries every email — and
+  // the row closes the conversation as usual.
+  it('keeps the row under the bubbles while the AI view offers "Process now"', () => {
     const view = mount(
-      <ThreadChatView ctx={context([OPENER, ANSWER], newHandlers(), { showAIView: true })} />,
-    );
-    expect(view.all('button').some((b) => b.textContent === 'Process now')).toBe(true);
-    expect(endBar(view)).toBeNull();
-  });
-
-  it('hides under the placeholders while the AI view is loading, and on an empty thread', () => {
-    const loading = mount(
       <ThreadChatView
-        ctx={context([OPENER, ANSWER], newHandlers(), { showAIView: true, conversationLoading: true })}
+        ctx={context([OPENER, ANSWER], newHandlers(), { showAIView: true }, {
+          chatRules: { eligibility: 'on_demand', showAiToggle: true, aiAvailable: true },
+          firstSplit: { state: 'miss' },
+        })}
       />,
     );
-    expect(endBar(loading)).toBeNull();
-    loading.unmount();
-    mounted.splice(0);
+    expect(view.all('button').some((b) => b.textContent === 'Process now')).toBe(true);
+    expect(view.all('[data-testid="bubble"]')).toHaveLength(2);
+    expect(endBar(view)).not.toBeNull();
+  });
 
+  // …and while a split runs: the bubbles are Standard's until it lands.
+  it('keeps the row while the first email is being split', () => {
+    const view = mount(
+      <ThreadChatView
+        ctx={context([OPENER, ANSWER], newHandlers(), { showAIView: true }, {
+          chatRules: { eligibility: 'auto', showAiToggle: true, aiAvailable: true, autoRunAI: true },
+          firstSplit: { state: 'miss', running: true },
+        })}
+      />,
+    );
+    expect(view.find('[data-first-slot="running"]')).not.toBeNull();
+    expect(endBar(view)).not.toBeNull();
+  });
+
+  // No bubbles, no row: on an empty thread it would answer a message nobody
+  // can see.
+  it('hides on an empty thread', () => {
     const empty = mount(<ThreadChatView ctx={context([], newHandlers())} />);
     expect(endBar(empty)).toBeNull();
   });
@@ -395,7 +410,7 @@ describe('ThreadChatView — the reply row stays in view', () => {
     const h = newHandlers();
     const view = mount(<ThreadChatView ctx={context([OPENER, ANSWER], h)} />);
     scrolled.length = 0;
-    view.rerender(<ThreadChatView ctx={context([OPENER, ANSWER], h, { conversationError: null })} />);
+    view.rerender(<ThreadChatView ctx={context([OPENER, ANSWER], h, { inlineReplyMode: 'replyAll' })} />);
     expect(scrolled).toEqual([]);
   });
 
@@ -648,6 +663,21 @@ describe('ThreadChatView — the one composer', () => {
     expect(composerLog).toEqual(['reply:mount:answer']);
   });
 
+  // Reply polish reads the ONE transcript useEmailDetail built — the chat no
+  // longer builds its own from the old extraction's turns.
+  it('hands the reply composer the thread transcript from the context', () => {
+    mount(
+      <ThreadChatView
+        ctx={context([OPENER, ANSWER], newHandlers(), {
+          showInlineReply: true,
+          replyingToEmail: ANSWER,
+          polishThreadContext: '[Bob Ray] Mar 3, 2026: On it.',
+        })}
+      />,
+    );
+    expect(composerProps.reply!.threadContext).toBe('[Bob Ray] Mar 3, 2026: On it.');
+  });
+
   // The reply side already passed its draft; pinned so it stays passed.
   it('opens the reply with the restored draft', () => {
     const draft = { to: 'bob@acme.example', cc: '', htmlContent: '<p>Thanks</p>', attachments: [] };
@@ -664,43 +694,43 @@ describe('ThreadChatView — the one composer', () => {
   });
 });
 
-describe('ThreadChatView — the re-extract icons', () => {
-  /** The AI view's turns for OPENER and ANSWER, one per mail. */
-  const turns = (failed = false) =>
-    [OPENER, ANSWER].map((mail) => ({
-      id: mail.id,
-      sourceEmailId: mail.id,
-      fromAddress: mail.fromAddress,
-      fromName: mail.fromName,
-      toAddress: mail.toAddress,
-      date: mail.date,
-      body: mail.rawBody,
-      isExtracted: false,
-      extractionFailed: failed && mail.id === 'opener',
-    }));
+// REPLACED on purpose (with the whole-thread extraction): the thread-level
+// "Re-extract conversation" icon and the per-message re-extract on EVERY
+// bubble are gone. The AI touches only the first email now, so the icons are
+// the first email's re-split — in the pill, and on that email's AI bubbles.
+describe('ThreadChatView — the re-split icons', () => {
+  const FIRST = loopedInEmail();
+  const REPLY = email({
+    id: 'e2',
+    date: LOOPED_AT + 3600,
+    fromName: 'Bob Ray',
+    fromAddress: 'bob@acme.example',
+    rawBody: '<p>Thanks, I will bring the forecast.</p>',
+  });
+  const AI_RULES = { eligibility: 'auto', showAiToggle: true, aiAvailable: true, autoRunAI: true } as const;
 
-  const aiView = (overrides: Record<string, unknown> = {}) =>
-    context([OPENER, ANSWER], newHandlers(), {
-      showAIView: true,
-      conversationMessages: turns(),
-      handleReExtractMessage: vi.fn(async () => {}),
-      ...overrides,
+  /** The AI view over a usable split of the looped-in first email. */
+  const aiView = (chat: ChatFieldsOptions = {}) =>
+    context([FIRST, REPLY], newHandlers(), { showAIView: true }, {
+      parts: loopedInParts(),
+      chatRules: AI_RULES,
+      ...chat,
     });
 
-  // Regression: the thread-level icon had a tooltip but no accessible name,
+  // Regression guard: the pill's icon had a tooltip but no accessible name,
   // and the default 150ms delay.
-  it('names the thread-level re-extract icon, in a 40ms tooltip', () => {
+  it('names the pill\'s re-split icon, in a 40ms tooltip', () => {
     vi.useFakeTimers();
     const view = mount(<ThreadChatView ctx={aiView()} />);
-    const button = view.byLabel('Re-extract conversation')!;
+    const button = view.byLabel('Re-split the first email with AI')!;
     expect(button.tagName).toBe('BUTTON');
 
     hoverFor(button, 39);
-    expect(tooltipShowing(view, 'Re-extract conversation')).toBe(false);
+    expect(tooltipShowing(view, 'Re-split the first email with AI')).toBe(false);
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(tooltipShowing(view, 'Re-extract conversation')).toBe(true);
+    expect(tooltipShowing(view, 'Re-split the first email with AI')).toBe(true);
   });
 
   // Regression: the pill's `backdrop-filter` made it the containing block of
@@ -709,7 +739,7 @@ describe('ThreadChatView — the re-extract icons', () => {
   // frosted glass is now a layer beside the controls, never around them.
   it('keeps the frosted glass off the tooltip\'s ancestors', () => {
     const view = mount(<ThreadChatView ctx={aiView()} />);
-    const button = view.byLabel('Re-extract conversation')!;
+    const button = view.byLabel('Re-split the first email with AI')!;
     const frosted = view.find('[data-pill-backdrop]')!;
     expect(frosted.className).toMatch(/\bbackdrop-blur-md\b/);
     expect(frosted.contains(button)).toBe(false);
@@ -718,45 +748,79 @@ describe('ThreadChatView — the re-extract icons', () => {
     }
   });
 
-  // The thread-level icon's warning tint is its state: no ghost hover
-  // background beside the orange one.
-  it('draws the thread-level icon\'s own tint, with no competing hover background', () => {
-    const view = mount(<ThreadChatView ctx={aiView({ conversationMessages: turns(true) })} />);
-    const classes = view
-      .byLabel('Some messages need AI processing — click to extract again')!
-      .className.split(/\s+/);
-    expect(classes).toContain('hover:bg-orange-500/10');
-    expect(classes).not.toContain('hover:bg-accent');
-  });
-
-  // Its name follows its state, the same string as the tooltip.
-  it('names the thread-level icon by its state', () => {
-    const failed = mount(<ThreadChatView ctx={aiView({ conversationMessages: turns(true) })} />);
-    expect(failed.byLabel('Some messages need AI processing — click to extract again')).not.toBeNull();
-    failed.unmount();
+  // Its name follows its state, the same string as the tooltip; a click
+  // re-runs the split (the hook joins a run already going).
+  it('names the icon by its state and re-splits on click', () => {
+    const running = mount(<ThreadChatView ctx={aiView({ firstSplit: { running: true } })} />);
+    const spinner = running.byLabel('Splitting the first email with AI…')!;
+    expect((spinner as HTMLButtonElement).disabled).toBe(true);
+    running.unmount();
     mounted.splice(0);
 
-    const running = mount(<ThreadChatView ctx={aiView({ conversationLoading: true })} />);
-    expect(running.byLabel('Extracting…')).not.toBeNull();
+    const ctx = aiView();
+    const view = mount(<ThreadChatView ctx={ctx} />);
+    toggle(view.byLabel('Re-split the first email with AI'));
+    expect((ctx as unknown as { firstSplit: { run: ReturnType<typeof vi.fn> } }).firstSplit.run).toHaveBeenCalledTimes(1);
   });
 
-  // Regression: the per-bubble icon had a tooltip and no accessible name.
-  it('names the per-bubble re-extract icon by its state', () => {
-    const view = mount(<ThreadChatView ctx={aiView({ conversationMessages: turns(true) })} />);
-    expect(iconIn(bubble(view, 'answer'), 'Re-extract this message with AI')).not.toBeNull();
-    expect(iconIn(bubble(view, 'opener'), 'Process this message with AI')).not.toBeNull();
-  });
-
-  // Its tooltip at the project's 40ms, not sooner.
-  it('shows the per-bubble re-extract tooltip at 40ms', () => {
-    vi.useFakeTimers();
+  // Per-message retry ONLY on the first email's AI bubbles: nothing else in
+  // the AI view was made by AI, and nothing at all in Standard.
+  it('puts a retry on the first email\'s AI bubbles only', () => {
     const view = mount(<ThreadChatView ctx={aiView()} />);
-    hoverFor(iconIn(bubble(view, 'answer'), 'Re-extract this message with AI')!, 39);
-    expect(tooltipShowing(view, 'Re-extract this message with AI')).toBe(false);
+    // Dan's own words: his mail, its menu, and the split's retry.
+    expect(iconIn(bubble(view, 'e1'), 'Re-split the first email with AI')).not.toBeNull();
+    // A quote of someone else's: no mail of its own, but still the split's.
+    expect(iconIn(bubble(view, 'e1#ai1'), 'Re-split the first email with AI')).not.toBeNull();
+    // The later reply is Standard's own bubble: no retry.
+    expect(iconIn(bubble(view, 'e2'), 'Re-split the first email with AI')).toBeNull();
+    expect(iconIn(bubble(view, 'e2'), 'Star')).not.toBeNull();
+
+    // Standard, over the same cached split: no retry anywhere.
+    const standard = mount(
+      <ThreadChatView
+        ctx={context([FIRST, REPLY], newHandlers(), { showAIView: false }, { parts: loopedInParts(), chatRules: AI_RULES })}
+      />,
+    );
+    expect(standard.container.querySelector('[aria-label="Re-split the first email with AI"]')).toBeNull();
+  });
+
+  // A region the AI did not cover shows as Standard renders it; its bubble's
+  // retry is tinted and says so, so a partial split is visible at a glance.
+  it('tints the retry on a part the AI did not cover', () => {
+    const parts = loopedInParts();
+    parts[0] = { ...parts[0]!, fallback: true };
+    const view = mount(<ThreadChatView ctx={aiView({ parts })} />);
+    const label = 'Not split by AI (shown as in Standard) — retry the AI split';
+    const fallback = iconIn(bubble(view, 'e1#ai1'), label)!;
+    expect(fallback).not.toBeNull();
+    expect(fallback.querySelector('svg')!.getAttribute('class')).toContain('text-orange-500');
+    expect(iconIn(bubble(view, 'e1#ai2'), 'Re-split the first email with AI')).not.toBeNull();
+  });
+
+  // The retry's tooltip at the project's 40ms; its click stays off the bubble
+  // and re-runs the split.
+  it('shows the per-bubble retry tooltip at 40ms and keeps its click to itself', () => {
+    vi.useFakeTimers();
+    const ctx = aiView();
+    const view = mount(<ThreadChatView ctx={ctx} />);
+    const retry = iconIn(bubble(view, 'e1#ai2'), 'Re-split the first email with AI')!;
+    hoverFor(retry, 39);
+    expect(tooltipShowing(view, 'Re-split the first email with AI')).toBe(false);
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(tooltipShowing(view, 'Re-extract this message with AI')).toBe(true);
+    expect(tooltipShowing(view, 'Re-split the first email with AI')).toBe(true);
+    toggle(retry);
+    expect((ctx as unknown as { firstSplit: { run: ReturnType<typeof vi.fn> } }).firstSplit.run).toHaveBeenCalledTimes(1);
+    expect(bubbleClick).not.toHaveBeenCalled();
+  });
+
+  // No provider (or conversation mode off): a retry could only fail, so
+  // there is none — the cached split still shows.
+  it('offers no retry without AI', () => {
+    const view = mount(<ThreadChatView ctx={aiView({ chatRules: { ...AI_RULES, aiAvailable: false, showAiToggle: true } })} />);
+    expect(view.container.querySelector('[aria-label="Re-split the first email with AI"]')).toBeNull();
+    expect(view.find('[data-message-id="e1#ai1"]')).not.toBeNull();
   });
 });
 

@@ -2,11 +2,9 @@ import { MailChatView, type ChatMessage, type MessageMenuRequest } from '@sarv-i
 import type { EmailRecord } from '@sarvinbox/core';
 import { createLogger } from '@sarvinbox/core/logger';
 import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 
 import { useAppearance, useResolvedTheme } from '../../appearance';
-import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
-import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
 import { writeClipboard } from '../../utils/clipboard';
@@ -20,19 +18,18 @@ import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { IconButton } from '../Tooltip';
 
+import { AI_SPLIT_FALLBACK_MARKER, AI_SPLIT_MARKER } from './ai-view-compose';
 import { frameCanvasFor, type RecoloredBody } from './chat-frame-canvas';
-import {
-  carrierEmailOf,
-  chatMessagesFromConversation,
-  chatMessagesFromThread,
-  ownerEmailOf,
-} from './chat-message-adapter';
+import { carrierEmailOf, ownerEmailOf, presentTurns } from './chat-message-adapter';
 import {
   blockRemoteImagesFor,
   chatMountsComposer,
   chatSourceFor,
+  firstSlotPromptFor,
+  manualRunNoticeFor,
   shouldShowEndReplyBar,
-  shouldShowProcessPrompt,
+  splitFailureReason,
+  type FirstSlotPrompt,
 } from './chat-view-rules';
 import { buildEmailMenuHandlers, buildReplyHandlers, type EmailMenuWiring } from './email-menu-handlers';
 import { EmailMenu, EmailMenuPopover, type EmailMenuHandlers } from './EmailMenu';
@@ -42,9 +39,6 @@ import { SecurityIndicator } from './SecurityIndicator';
 import type { EmailDetailContext } from './types';
 import { hasLoadedBody, messageAccessibleName, parseAttachments } from './utils';
 import { VerifiedBadge } from './VerifiedBadge';
-
-// getCurrentUserEmail used to live here; it moved to ai-service so
-// EmailDetail can share it (priority: IMAP username > profile email > fallback).
 
 const log = createLogger('ThreadChatView');
 
@@ -87,6 +81,29 @@ interface PointMenu extends MessageMenuTarget {
  */
 const MAX_RENDERED_BUBBLES = 40;
 
+/** Stable empty turn list, so the presentation memo does not re-run on every render. */
+const NO_TURNS: readonly ChatMessage[] = [];
+
+/**
+ * Whether a bubble is one of the first email's AI split parts — `fallback`
+ * when it is Standard's rendering of a region the AI did not cover. Read off
+ * the audit trail composition writes (`applied`), so it survives presentation.
+ */
+function splitMarkOf(message: ChatMessage): 'ai' | 'fallback' | null {
+  if (message.applied?.includes(AI_SPLIT_FALLBACK_MARKER)) return 'fallback';
+  if (message.applied?.includes(AI_SPLIT_MARKER)) return 'ai';
+  return null;
+}
+
+/** The per-bubble retry on a first-email AI bubble. */
+interface SplitRetry {
+  /** This bubble is a region the AI did not cover (shown as in Standard). */
+  fallback: boolean;
+  /** A split is in flight for this thread. */
+  running: boolean;
+  onRetry: () => void;
+}
+
 interface ThreadChatViewProps {
   ctx: EmailDetailContext;
 }
@@ -95,14 +112,14 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
   const {
     displayEmail,
     threadEmails,
-    conversationMessages,
-    conversationLoading,
-    conversationError,
-    conversationProgress,
     showAIView,
     setShowAIView,
-    handleRetryConversation,
-    handleReExtractMessage,
+    chatRules,
+    firstSplit,
+    standardTurns,
+    aiTurns,
+    polishThreadContext,
+    currentUserEmail,
     handleReply,
     handleReplyAll,
     handleInlineForward,
@@ -119,16 +136,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     chatViewActive,
   } = ctx;
 
-  // A run is in flight when loading (cold open, pre-first-bubbles) OR
-  // when progressive counters are live (loading flips false as soon as
-  // the first bubbles render, but progress stays non-null to the end).
-  const extractionInFlight = conversationLoading || conversationProgress != null;
-
-  const currentUserEmail = useMemo(
-    () => getCurrentUserEmail(displayEmail?.toAddress || ''),
-    [displayEmail?.toAddress],
-  );
-
   const emailsById = useMemo(
     () => new Map(threadEmails.map((email) => [email.id, email])),
     [threadEmails],
@@ -136,7 +143,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
 
   // Bodies that permanently failed to fetch — so chat bubbles show a Retry
   // affordance instead of an endless "Loading content…" spinner.
-  const failedBodies = useEmailStore((s) => s.failedBodies);
   const retryBody = useCallback((emailId: string) => {
     // fetchEmailBody skips ids already in failedBodies, so clear it first.
     useEmailStore.setState((s) => {
@@ -147,19 +153,24 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     useEmailStore.getState().fetchEmailBody(emailId);
   }, []);
 
-  // The LLM-extracted turns, when the AI view is the one on screen. Standard
-  // has none: it is the library's deterministic split, which produces chat
-  // messages directly and needs no ConversationMessage of its own.
-  const aiMessages: ConversationMessage[] | undefined = showAIView
-    ? conversationMessages || undefined
-    : undefined;
+  // The AI view: Standard's bubbles as they are, except the thread's FIRST
+  // email, whose quoted history the AI split into the messages it quotes. Its
+  // half of the pill exists only where there is AI to show (the first email
+  // quotes earlier messages, or a split of it is cached).
+  const aiView = showAIView && chatRules.showAiToggle;
+  // Without a usable split the AI view IS Standard's list — every later email
+  // stays, and the first email's slot shows Standard's bubbles under the
+  // banner rather than going blank.
+  const turns = chatSourceFor(aiView, aiTurns !== null) === 'ai'
+    ? aiTurns!
+    : (standardTurns?.turns ?? NO_TURNS);
 
   // Dark message bodies are opt-in (Appearance -> "Dark email bodies"). The
   // chat frame takes its canvas from the app's theme, but nothing used to
   // re-colour the mail inside it: a sender's `color:black` stayed black on that
   // dark canvas, and a `background:white` painted a white slab across the
   // bubble. `useAppearance` and `useResolvedTheme` both re-render on a change,
-  // so flipping the setting or the theme re-splits the open thread.
+  // so flipping the setting or the theme re-presents the open thread.
   const { darkenEmails } = useAppearance();
   const resolvedTheme = useResolvedTheme();
   const isDark = resolvedTheme === 'dark';
@@ -172,70 +183,29 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [darkenEmails, isDark],
   );
 
-  const chatMessages = useMemo<ChatMessage[]>(() => {
-    const options = {
-      currentUserEmail,
-      emailsById,
-      failedBodies,
-      resolveImages: resolveRefsInHtml,
-      recolorBody,
-    };
-    switch (chatSourceFor(showAIView, aiMessages?.length ?? 0)) {
-      // Only what the LLM actually extracted — see `chatSourceFor` for why
-      // there is no fallback to the deterministic split here.
-      case 'ai':
-        return chatMessagesFromConversation(aiMessages!, options);
-      // `@sarv-in/email-chat-view` splits the thread's own mails into one bubble per
-      // message — quotes, signatures and banners stripped, and the messages
-      // that exist only as quotes inside other mails recovered. All of that
-      // lives in the library now; the app just hands it stored rows.
-      case 'thread':
-        return chatMessagesFromThread(threadEmails, options);
-      case 'none':
-        return [];
-    }
-  }, [showAIView, aiMessages, threadEmails, currentUserEmail, emailsById, failedBodies, recolorBody]);
-
-  // Per-message extraction state, keyed the way the view hands messages back.
-  // AI-only: a deterministic split has no extraction to fail.
-  const conversationById = useMemo(() => {
-    const map = new Map<string, ConversationMessage>();
-    for (const message of aiMessages || []) map.set(message.id, message);
-    return map;
-  }, [aiMessages]);
-
-  // The thread-level "needs attention" state (orange reload icon) reflects
-  // whether any message ACTUALLY failed AI cleanup — i.e. a message showing a
-  // per-message re-extract affordance. Computed over the SAME set the view
-  // renders (drafts already dropped by the adapter), so a draft whose cleanup
-  // fell back to the heuristic cannot turn the icon orange with no visible
-  // message to act on. conversationPartial also flips true for benign
-  // truncation, which isn't a per-message failure, so it deliberately doesn't
-  // colour on that.
-  const hasFailedMessage = useMemo(
-    () => chatMessages.some((message) => conversationById.get(message.id)?.extractionFailed),
-    [chatMessages, conversationById],
+  // The turns as the view renders them: stylesheets inlined, re-coloured for
+  // the page, image refs resolved. The split itself (the library's, cached per
+  // mail) happened in useEmailDetail, shared with reply polish.
+  const chatMessages = useMemo<ChatMessage[]>(
+    () => presentTurns(turns, { resolveImages: resolveRefsInHtml, recolorBody }),
+    [turns, recolorBody],
   );
 
-  // AI view with nothing extracted: offer the extraction rather than bubbles.
-  // Deliberately NOT gated on `conversationPartial` any more — a thread the
-  // pipeline never touched at all is not "partial", and that gate was why the
-  // prompt stayed hidden while the fallback quietly rendered Standard's
-  // bubbles here instead.
-  const showProcessPrompt = shouldShowProcessPrompt({
-    showAIView,
-    extractionInFlight,
-    conversationLoading,
-    renderedCount: chatMessages.length,
+  // The banner over the first email's slot (see firstSlotPromptFor).
+  const slotPrompt = firstSlotPromptFor({
+    showAIView: aiView,
+    aiAvailable: chatRules.aiAvailable,
+    eligibility: chatRules.eligibility,
+    state: firstSplit.state,
+    running: firstSplit.running,
+    autoRunAI: chatRules.autoRunAI,
+    automaticRunAllowed: firstSplit.automaticRunAllowed,
   });
-
-  // Whole-thread transcript for AI polish of the inline reply. Memoized on the
-  // thread data so it is NOT rebuilt on every keystroke or unrelated ctx change
-  // while the user types their reply.
-  const polishThreadContext = useMemo(
-    () => buildPolishThreadContext({ conversationMessages, threadEmails, currentUserEmail }),
-    [conversationMessages, threadEmails, currentUserEmail],
-  );
+  const runSplit = firstSplit.run;
+  const splitRunning = firstSplit.running;
+  // The per-bubble retry: only on the first email's AI bubbles, only while the
+  // AI view shows them, and only where a run can work.
+  const canRetrySplit = aiView && chatRules.aiAvailable;
 
   // NOT `emailsById.get(message.sourceId)`: on a bubble recovered from a quote
   // that is the mail which QUOTED it, so the actions and the attachment strip
@@ -303,23 +273,30 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
   const renderActions = useCallback(
     (message: ChatMessage) => {
       const email = emailFor(message);
-      if (!email) return null;
+      const mark = canRetrySplit ? splitMarkOf(message) : null;
+      const splitRetry: SplitRetry | undefined = mark
+        ? { fallback: mark === 'fallback', running: splitRunning, onRetry: () => void runSplit() }
+        : undefined;
+      // A message the first email QUOTES from someone else has no mail of its
+      // own to act on — but it IS the split's output, so its retry stays.
+      if (!email) {
+        return splitRetry ? (
+          <div role="group" aria-label="AI split" className="flex items-center gap-0.5">
+            <SplitRetryButton {...splitRetry} />
+          </div>
+        ) : null;
+      }
       return (
         <BubbleActions
           email={email}
           isStarred={hasTag(email.tags, 'starred')}
           onToggleStar={(starred) => useEmailStore.getState().markMessageStarred(email.id, starred)}
-          extractionFailed={!!conversationById.get(message.id)?.extractionFailed}
-          onReExtract={
-            showAIView && handleReExtractMessage
-              ? () => handleReExtractMessage(message.id)
-              : undefined
-          }
+          splitRetry={splitRetry}
           {...menuHandlersFor(email)}
         />
       );
     },
-    [emailFor, conversationById, showAIView, handleReExtractMessage, menuHandlersFor],
+    [emailFor, canRetrySplit, splitRunning, runSplit, menuHandlersFor],
   );
 
   /**
@@ -467,106 +444,84 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       // rather than repeated there as a literal that could drift from it.
       style={{ '--sarv-dark-paper': DARK_PAPER } as CSSProperties}
     >
-      {/* AI / Logical toggle — sits on the top border line. Always
-          rendered so the user can switch to Standard mid-extraction;
-          the re-extract icon only appears once messages exist. */}
-      <div className="absolute -top-3 left-0 right-0 flex items-center justify-center z-10">
-        {/* `isolate` keeps the frosted layer below inside the pill. */}
-        <div className="group relative isolate flex items-center p-1 border border-border shadow-sm rounded-lg">
-          {/* The frosted glass, on a layer of its own BEHIND the controls
-              rather than on the pill itself. A `backdrop-filter` makes its
-              element the containing block of every `position: fixed`
-              descendant — and the Tooltip is one, placed in viewport
-              coordinates. On the pill, the re-extract icon's tooltip landed
-              offset by the pill's own position, far from the icon. */}
-          <div
-            aria-hidden
-            data-pill-backdrop
-            className="absolute inset-0 -z-10 rounded-lg bg-muted/70 group-hover:bg-muted/90 backdrop-blur-md transition-colors"
-          />
-          {/* Animated pill background — Standard sits LEFT (default), AI right. */}
-          <div
-            className={`absolute top-1 bottom-1 w-[82px] bg-background rounded-md shadow-[0_1px_3px_rgba(0,0,0,0.1)] border border-border/50 transition-all duration-300 ease-out z-0 ${showAIView ? 'left-[83px]' : 'left-1'
-              }`}
-          />
-          <button
-            onClick={() => setShowAIView(false)}
-            className={`relative z-10 flex items-center justify-center w-[80px] gap-1.5 py-1 rounded-md text-xs font-semibold transition-colors duration-300 ${!showAIView
-                ? 'text-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-              }`}
-          >
-            Standard
-          </button>
-          <button
-            onClick={() => setShowAIView(true)}
-            className={`relative z-10 flex items-center justify-center w-[80px] gap-1.5 py-1 rounded-md text-xs font-semibold transition-colors duration-300 ml-1 ${showAIView
-                ? 'text-violet-600 dark:text-violet-400'
-                : 'text-muted-foreground hover:text-foreground'
-              }`}
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            AI View
-          </button>
-          {showAIView && conversationMessages && (
-            <div className="relative z-10 flex items-center border-l border-border/50 ml-1 pl-1">
-              <IconButton
-                size="sm"
-                // Its tint IS its state (orange: some message needs AI), so
-                // it draws its own hover rather than the ghost one.
-                variant="bare"
-                tooltip={
-                  conversationLoading
-                    ? 'Extracting…'
-                    : hasFailedMessage
-                      ? 'Some messages need AI processing — click to extract again'
-                      : 'Re-extract conversation'
-                }
-                onClick={handleRetryConversation}
-                disabled={conversationLoading}
-                className={`flex items-center justify-center rounded-md transition-all duration-200 ${
-                  hasFailedMessage && !conversationLoading
-                    ? 'text-orange-500 hover:text-orange-600 hover:bg-orange-500/10'
-                    : 'text-muted-foreground hover:bg-accent/80 hover:text-foreground'
+      {/* Standard / AI toggle — sits on the top border line. Only where the
+          AI view has something to show (chatRules.showAiToggle: the first
+          email quotes earlier messages, or a split of it is cached); a
+          thread whose first email quotes nothing reads in Standard alone. */}
+      {chatRules.showAiToggle && (
+        <div className="absolute -top-3 left-0 right-0 flex items-center justify-center z-10">
+          {/* `isolate` keeps the frosted layer below inside the pill. */}
+          <div className="group relative isolate flex items-center p-1 border border-border shadow-sm rounded-lg">
+            {/* The frosted glass, on a layer of its own BEHIND the controls
+                rather than on the pill itself. A `backdrop-filter` makes its
+                element the containing block of every `position: fixed`
+                descendant — and the Tooltip is one, placed in viewport
+                coordinates. On the pill, the re-split icon's tooltip landed
+                offset by the pill's own position, far from the icon. */}
+            <div
+              aria-hidden
+              data-pill-backdrop
+              className="absolute inset-0 -z-10 rounded-lg bg-muted/70 group-hover:bg-muted/90 backdrop-blur-md transition-colors"
+            />
+            {/* Animated pill background — Standard sits LEFT (default), AI right. */}
+            <div
+              className={`absolute top-1 bottom-1 w-[82px] bg-background rounded-md shadow-[0_1px_3px_rgba(0,0,0,0.1)] border border-border/50 transition-all duration-300 ease-out z-0 ${aiView ? 'left-[83px]' : 'left-1'
                 }`}
-                icon={
-                  <RefreshCw
-                    className={`h-3 w-3 ${
-                      conversationLoading
-                        ? 'animate-spin text-violet-500'
-                        : hasFailedMessage
-                          ? 'text-orange-500 hover:text-orange-600'
-                          : ''
-                    }`}
-                  />
-                }
-              />
-            </div>
-          )}
-        </div>
-        {extractionInFlight && (
-          <div className="flex items-center gap-1.5 ml-2 px-2 py-0.5 text-[11px] text-muted-foreground bg-card border border-border rounded-md">
-            <Loader2 className="h-3 w-3 animate-spin text-violet-500" />
-            <span className="font-medium tabular-nums">
-              {conversationProgress && conversationProgress.total > 0
-                ? `${conversationProgress.done}/${conversationProgress.total}`
-                : 'Extracting…'}
-            </span>
-          </div>
-        )}
-        {conversationError && (
-          <div className="flex items-center gap-1 ml-2">
-            <span className="text-xs text-destructive bg-card px-2 py-0.5 rounded border border-border">{conversationError}</span>
+            />
             <button
-              onClick={handleRetryConversation}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground bg-card px-2 py-0.5 rounded border border-border transition-colors"
+              type="button"
+              aria-pressed={!aiView}
+              onClick={() => setShowAIView(false)}
+              className={`relative z-10 flex items-center justify-center w-[80px] gap-1.5 py-1 rounded-md text-xs font-semibold transition-colors duration-300 ${!aiView
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+                }`}
             >
-              <RefreshCw className="h-3 w-3" />
-              Retry
+              Standard
             </button>
+            <button
+              type="button"
+              aria-pressed={aiView}
+              onClick={() => setShowAIView(true)}
+              className={`relative z-10 flex items-center justify-center w-[80px] gap-1.5 py-1 rounded-md text-xs font-semibold transition-colors duration-300 ml-1 ${aiView
+                  ? 'text-violet-600 dark:text-violet-400'
+                  : 'text-muted-foreground hover:text-foreground'
+                }`}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              AI View
+            </button>
+            {/* Re-split: over a usable split, where a provider can redo it. */}
+            {aiView && firstSplit.usable && chatRules.aiAvailable && (
+              <div className="relative z-10 flex items-center border-l border-border/50 ml-1 pl-1">
+                <IconButton
+                  size="sm"
+                  // While it runs, the spinning glyph IS the progress
+                  // indicator — the ghost look would dim it.
+                  variant="bare"
+                  tooltip={splitRunning ? 'Splitting the first email with AI…' : 'Re-split the first email with AI'}
+                  onClick={() => void runSplit()}
+                  disabled={splitRunning}
+                  className="flex items-center justify-center rounded-md transition-all duration-200 text-muted-foreground hover:bg-accent/80 hover:text-foreground"
+                  icon={<RefreshCw className={`h-3 w-3 ${splitRunning ? 'animate-spin text-violet-500' : ''}`} />}
+                />
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* The first email's banner — ABOVE the bubbles, never instead of them:
+          the library shows `emptyState` only for an empty list, and the AI
+          view always carries every later email. */}
+      <FirstSlotBanner
+        prompt={slotPrompt}
+        status={firstSplit.status}
+        errorKind={firstSplit.row?.errorKind ?? null}
+        partial={firstSplit.row?.status === 'partial'}
+        notice={manualRunNoticeFor(firstSplit.lastManualRun)}
+        onRun={() => void runSplit()}
+      />
 
       <MailChatView
         // The library reads a frame's theme tokens ONCE, when the frame mounts,
@@ -581,7 +536,9 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         key={chatViewKey}
         messages={chatMessages}
         currentUserAddress={currentUserEmail}
-        loading={showAIView && conversationLoading && chatMessages.length === 0}
+        // Never a full-pane spinner: the bubbles are Standard's (or the
+        // split's) and are always there; a run in flight is the banner's.
+        loading={false}
         maxRendered={MAX_RENDERED_BUBBLES}
         className="px-3 py-4"
         // The library blocks every remote image unless told otherwise, and it
@@ -608,23 +565,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         renderQuickActions={renderQuickActions}
         renderHeaderMeta={renderHeaderMeta}
         renderFooter={renderFooter}
-        emptyState={
-          showProcessPrompt ? (
-            <div className="flex flex-col items-center gap-2 py-8 text-center">
-              <Sparkles className="h-5 w-5 text-violet-500" />
-              <p className="text-xs text-muted-foreground max-w-xs">
-                This thread hasn’t been processed with AI yet. Standard view has the
-                full content in the meantime.
-              </p>
-              <button
-                onClick={handleRetryConversation}
-                className="text-xs font-medium text-primary hover:underline"
-              >
-                Process now
-              </button>
-            </div>
-          ) : undefined
-        }
       />
 
       {/* The right-click menu — out here, not in the view, so the view's
@@ -712,8 +652,7 @@ function BubbleActions({
   email,
   isStarred,
   onToggleStar,
-  onReExtract,
-  extractionFailed,
+  splitRetry,
   ...menu
 }: {
   email: EmailRecord;
@@ -721,23 +660,9 @@ function BubbleActions({
    *  `|starred|` tag the list rows and the folder counts read. */
   isStarred: boolean;
   onToggleStar: (starred: boolean) => void;
-  onReExtract?: () => void;
-  /** This message's AI cleanup failed → tint the re-extract icon orange (like the
-   *  thread-level reload) so an unprocessed message is visible at a glance. */
-  extractionFailed?: boolean;
+  /** Only on the first email's AI bubbles: re-run that email's split. */
+  splitRetry?: SplitRetry;
 } & EmailMenuHandlers) {
-  const [reExtracting, setReExtracting] = useState(false);
-
-  const runReExtract = async () => {
-    if (!onReExtract || reExtracting) return;
-    setReExtracting(true);
-    try {
-      await onReExtract();
-    } finally {
-      setReExtracting(false);
-    }
-  };
-
   return (
     <div
       // Named for its message, like the reply icons: every bubble has a
@@ -746,35 +671,7 @@ function BubbleActions({
       aria-label={`Message actions for ${messageAccessibleName(email)}`}
       className="flex items-center gap-0.5"
     >
-      {onReExtract && (
-        <IconButton
-          size="xs"
-          // 'bare': the ghost look dims a disabled button, and while it runs
-          // the spinning glyph IS the progress indicator.
-          variant="bare"
-          tooltip={
-            reExtracting
-              ? 'Re-extracting with AI…'
-              : extractionFailed
-                ? 'Process this message with AI'
-                : 'Re-extract this message with AI'
-          }
-          onClick={(e) => { e.stopPropagation(); void runReExtract(); }}
-          disabled={reExtracting}
-          className="hover:bg-accent rounded transition-colors"
-          icon={
-            <RefreshCw
-              className={`h-3.5 w-3.5 ${
-                reExtracting
-                  ? 'animate-spin text-violet-500'
-                  : extractionFailed
-                    ? 'text-orange-500 hover:text-orange-600'
-                    : 'text-muted-foreground'
-              }`}
-            />
-          }
-        />
-      )}
+      {splitRetry && <SplitRetryButton {...splitRetry} />}
       {/* Named by what a click does ("Star" / "Unstar"), so no aria-pressed:
           a name that flips AND a pressed state would announce the change
           twice ("Unstar, pressed"). */}
@@ -792,6 +689,149 @@ function BubbleActions({
         }
       />
       <EmailMenu email={email} {...menu} />
+    </div>
+  );
+}
+
+/**
+ * The retry on one of the first email's AI bubbles. Every AI bubble comes
+ * from the ONE split of the first email, so each re-runs that split (a run
+ * already going is joined, not repeated). Orange on a region the AI did not
+ * cover — shown as Standard renders it — so a partial split is visible at a
+ * glance; no other bubble has one (nothing else was made by AI).
+ */
+function SplitRetryButton({ fallback, running, onRetry }: SplitRetry) {
+  return (
+    <IconButton
+      size="xs"
+      // 'bare': the ghost look dims a disabled button, and while it runs the
+      // spinning glyph IS the progress indicator.
+      variant="bare"
+      tooltip={
+        running
+          ? 'Splitting the first email with AI…'
+          : fallback
+            ? 'Not split by AI (shown as in Standard) — retry the AI split'
+            : 'Re-split the first email with AI'
+      }
+      onClick={(e) => {
+        e.stopPropagation();
+        onRetry();
+      }}
+      disabled={running}
+      className="hover:bg-accent rounded transition-colors"
+      icon={
+        <RefreshCw
+          className={`h-3.5 w-3.5 ${
+            running
+              ? 'animate-spin text-violet-500'
+              : fallback
+                ? 'text-orange-500 hover:text-orange-600'
+                : 'text-muted-foreground'
+          }`}
+        />
+      }
+    />
+  );
+}
+
+/**
+ * The line above the bubbles about the first email's split (see
+ * `firstSlotPromptFor` for when each shows). Every state keeps the bubbles
+ * under it: without a usable split they are Standard's.
+ */
+function FirstSlotBanner({
+  prompt,
+  status,
+  errorKind,
+  partial,
+  notice,
+  onRun,
+}: {
+  prompt: FirstSlotPrompt;
+  /** The provider's status text for a run in flight. */
+  status: string | null;
+  /** The stored failure's kind, for the reason. */
+  errorKind: string | null;
+  /** The usable split fell back to Standard for some regions. */
+  partial: boolean;
+  /** What the reader's last click did when it changed nothing on screen (`manualRunNoticeFor`). */
+  notice: string | null;
+  onRun: () => void;
+}) {
+  if (!prompt) return null;
+  const action = (label: string) => (
+    <button type="button" onClick={onRun} className="shrink-0 text-xs font-medium text-primary hover:underline">
+      {label}
+    </button>
+  );
+  let body: ReactNode;
+  switch (prompt) {
+    case 'process':
+      body = (
+        <>
+          <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+          <span className="flex-1">
+            The first email’s quoted history hasn’t been split with AI yet. Its messages show as in
+            Standard meanwhile.
+          </span>
+          {action('Process now')}
+        </>
+      );
+      break;
+    case 'running':
+      body = (
+        <>
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-violet-500" />
+          <span className="flex-1">{status || 'Splitting the first email’s quoted history with AI…'}</span>
+        </>
+      );
+      break;
+    case 'retry':
+      body = (
+        <>
+          <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="flex-1">
+            {splitFailureReason(errorKind)} The AI split will retry automatically.
+          </span>
+          {action('Retry now')}
+        </>
+      );
+      break;
+    case 'failed':
+      body = (
+        <>
+          <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="flex-1">{splitFailureReason(errorKind)}</span>
+          {action('Try again')}
+        </>
+      );
+      break;
+    case 'resplit':
+      body = (
+        <>
+          <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+          <span className="flex-1">
+            {partial
+              ? 'The first email’s quoted history is split by AI; parts it could not split show as in Standard.'
+              : 'The first email’s quoted history is split by AI.'}
+          </span>
+        </>
+      );
+      break;
+  }
+  return (
+    <div
+      role="status"
+      data-first-slot={prompt}
+      className="mx-3 mt-3 rounded-md border border-border bg-accent/20 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex items-center gap-2">{body}</div>
+      {notice && prompt !== 'running' && (
+        <div data-first-slot-notice className="mt-1 pl-[1.375rem] text-amber-600 dark:text-amber-400">
+          {notice}
+        </div>
+      )}
     </div>
   );
 }

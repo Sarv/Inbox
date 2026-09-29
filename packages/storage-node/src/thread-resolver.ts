@@ -411,8 +411,8 @@ export function resolveThreadId(
  *
  * Returns the number of orphan emails reattached plus the thread_ids
  * they were pulled OUT of, so the caller can recompute (or delete)
- * those threads — otherwise husk rows with phantom message_count
- * linger and get re-queued by getPendingExtractionThreads forever.
+ * those threads — otherwise husk rows with a phantom message_count
+ * linger in the thread list forever.
  */
 export function reattachOrphans(
   db: Database.Database,

@@ -28,7 +28,7 @@
  * entirely (never downloaded — the body-prefetch's job) and are dropped by a
  * cheap probe rather than spending the repair budget; see drainEmptyBodies.
  */
-import { createLogger, createLoopYielder, isDeferredFetchError, repairedCleanBody } from '@sarvinbox/core';
+import { createLogger, createLoopYielder, isDeferredFetchError, isFirstSplitCurrent, repairedCleanBody } from '@sarvinbox/core';
 import { areBodyLengthsReady, cleanBodyExpression, rawBodyExpression, rawBodyLengthExpression } from '@sarvinbox/storage-node';
 
 import { getAllAccountRuntimes } from '../shared';
@@ -210,6 +210,30 @@ async function drainEmptyBodies(
 }
 
 /**
+ * After a re-heal, drop the thread's saved first-email AI split — in THIS
+ * account's storage — but only when the heal made it STALE.
+ *
+ * The split is keyed by the thread's first email and the fingerprint of its
+ * stored body. Healing the FIRST email changes that fingerprint, so its split
+ * (made from the garbled body) is never shown again — yet a stale row is not
+ * what the background split re-nominates, so without the delete the repaired
+ * body would only be split again when the reader opens the thread; with no row,
+ * the next nomination scan picks the thread up. Healing a LATER email leaves the
+ * key as it was: that split is still the right one, and dropping it would send
+ * the reader back to "Process now" (a single-quote thread) or spend another AI
+ * run, with no split at all if that run fails.
+ *
+ * Best-effort: a cache that cannot be read or written must not turn a repaired
+ * body into a failed one.
+ */
+function dropStaleFirstSplit(storage: any, threadId: string): void {
+  try {
+    const row = storage.getFirstSplitSync(threadId);
+    if (row && !isFirstSplitCurrent(row, storage.firstMemberKeySync(threadId))) storage.deleteFirstSplit(threadId);
+  } catch { /* best-effort */ }
+}
+
+/**
  * Re-fetch a bounded batch of corrupted bodies for one account. Returns what the
  * batch did so the caller can log ONE aggregated line per tick instead of a line
  * per email (the per-item detail lives at trace).
@@ -236,13 +260,7 @@ async function drainAccount(
       // Re-downloads the raw source, re-parses (now with the corrected decode),
       // and updates clean_body/raw_body. Has its own retry cap internally.
       await engine.fetchBody(item.id, folder.path, item.uid);
-      // Bust the thread's AI conversation extraction — it's keyed by email ID, so
-      // without this the chat view keeps serving the OLD garbled bubble even though
-      // the body underneath is now repaired. Best-effort; the renderer also
-      // self-heals a stale cache on open.
-      if (item.threadId) {
-        try { await storage.deleteConversation(item.threadId); } catch { /* best-effort */ }
-      }
+      if (item.threadId) dropStaleFirstSplit(storage, item.threadId);
       // TRACE: one line per repaired email, and a re-heal pass walks a whole
       // backlog. `tick` logs the aggregated per-account count at debug instead.
       repaired += 1;

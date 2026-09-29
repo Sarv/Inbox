@@ -237,6 +237,13 @@ export interface EmailsSlice {
   emailsTotal: number;
 
   threadEmails: EmailRecord[];
+  /**
+   * The account `threadEmails` were read from (`viewAccountId ?? activeAccountId`
+   * when the thread loaded), stamped together with them. Account-scoped IPC
+   * for the open thread (the first-email split cache) names this account —
+   * never "whichever is active now".
+   */
+  threadAccountId: string | null;
   loadingThread: boolean;
 
   // Ids of messages that arrived (via IMAP IDLE) into the currently-open
@@ -480,7 +487,6 @@ export interface SearchAISlice {
   processRecentEmailsForSignatures: () => Promise<void>;
   processEmailsForAICategorization: () => Promise<void>;
   startAutoAICategorization: () => void;
-  autoExtractRecentConversations: () => Promise<void>;
 }
 
 export type SendingStatus = 'idle' | 'sending' | 'sent';

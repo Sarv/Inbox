@@ -6,8 +6,8 @@ import { jsonrepair } from 'jsonrepair';
 // rather than @sarvinbox/core because the core barrel re-exports
 // imapflow/nodemailer, which drag Node's `events` module into the Vite
 // renderer bundle and fail with "Dynamic require of 'events' is not
-// supported". Keeping them here lets both ai-service and
-// conversation-service import the single source of truth without pulling
+// supported". Keeping them here lets ai-service and the first-email split
+// (services/first-split) import the single source of truth without pulling
 // core into the renderer.
 
 /**
@@ -16,8 +16,8 @@ import { jsonrepair } from 'jsonrepair';
  * code fence.
  *
  * This is the superset of every prior inline copy:
- * - conversation-service's local `cleanLLMJsonResponse` (thinking-block
- *   removal + fence stripping) — behavior-identical.
+ * - the old conversation extractor's local `cleanLLMJsonResponse`
+ *   (thinking-block removal + fence stripping) — behavior-identical.
  * - ai-service's inline "strip ```json fence then JSON.parse" blocks,
  *   which only did the fence stripping. Routing them through this helper
  *   additionally removes stray <think>/<thinking>/<reasoning>/<thought>

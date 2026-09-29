@@ -1,6 +1,11 @@
-// The Phase 1 prompt under iteration. Edit this file, re-run the
-// runner, see scorecard. When happy, copy the systemPrompt back into
-// `aiSplitFirstEmail` in apps/desktop/src/services/conversation-service.ts.
+// The RETIRED V1 split prompt, kept so the harness still runs. It is NOT the
+// prompt the app sends, and must NOT be pasted back into the app: it asks for
+// ISO-8601 dates (the model then guesses day/month order, so a 7 Aug mail can
+// come back as Jul 8), and it has no [[REGION k]] protocol. The live prompts
+// are OWN_CHUNK_PROMPT / HISTORY_CHUNK_PROMPT, returned by systemPromptFor()
+// in apps/desktop/src/services/first-split/prompt.ts — they ask for each date
+// VERBATIM so parseHumanDate reads it day-first. To evaluate the live prompt,
+// port the harness to those first.
 
 /**
  * The system prompt. This is the most-tweaked piece — the LLM's

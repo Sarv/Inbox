@@ -7,13 +7,14 @@
 
 import type { UserActionType, ActionSource } from '@sarvinbox/core';
 import { createLogger, setEmailReadFlag } from '@sarvinbox/core';
-import { cleanBodyExpression } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 
-import { resolveAccountEmail } from '../services/accounts-registry';
+import { openAccountStorages, requireAccountStorage } from '../services/account-target';
+import { resolveAccountIdentity } from '../services/accounts-registry';
 import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
+import { buildThreadMessages } from '../services/thread-context';
 import { getIntelligence, getUnifiedPipeline, setPipelineUserProfile, getPipelineAIConfig } from '../services/unified-pipeline-service';
-import { requireStorage, getSyncEngine, getAllAccountRuntimes, getCurrentAccountId } from '../shared';
+import { requireStorage, getSyncEngine } from '../shared';
 // Static imports (NOT require()): the app bundles into a single dist-electron/
 // main.js, so a runtime require('../services/...') has no file to resolve and
 // throws "Cannot find module" — which silently broke every agent config/enable
@@ -84,15 +85,10 @@ function runBackfillForNewAccounts(limit: number): void {
     const v = loadAgentConfig().backfillRequeuedAccounts;
     return Array.isArray(v) ? (v as string[]) : [];
   })();
-  const seen = new Set<any>();
-  const targets: Array<[string, any]> = [];
-  try {
-    const active = requireStorage();
-    if (active) { targets.push([getCurrentAccountId() ?? 'default', active]); seen.add(active); }
-  } catch { /* no active storage yet */ }
-  for (const [id, rt] of getAllAccountRuntimes()) {
-    if (rt.storage && !seen.has(rt.storage)) { targets.push([id, rt.storage]); seen.add(rt.storage); }
-  }
+  // The pre-account default slot is recorded as 'default' (the persisted
+  // backfillRequeuedAccounts entries depend on that label).
+  const targets: Array<[string, any]> = openAccountStorages()
+    .map(({ accountId, storage }) => [accountId ?? 'default', storage]);
 
   let changed = false;
   for (const [id, store] of targets) {
@@ -665,24 +661,30 @@ export function registerAgentHandlers(): void {
 
   // ========== Agentic Reply Drafting ==========
 
-  ipcMain.handle('agent:draftReply', async (_event, emailId: string) => {
+  // `accountId` names the account the email belongs to (a row in the unified
+  // view can be any account's). Resolved STRICTLY: an account that cannot be
+  // resolved is an error, never the active account's database, where the id
+  // does not exist (or, worse, the same thread id holds another conversation).
+  ipcMain.handle('agent:draftReply', async (_event, emailId: string, accountId?: string) => {
     try {
-      const storage = requireStorage();
+      const storage = accountId ? await requireAccountStorage(accountId) : requireStorage();
       const email = await storage.getEmail(emailId);
       if (!email) return { success: false, error: 'Email not found' };
 
-      const agentRepo = getAgentRepo();
+      const agentRepo = (storage as any).getRepositories().agent;
 
       // Build drafter deps
       const { AgentReplyDrafter } = require('@sarvinbox/core');
       const { callAIWithRetry } = require('@sarvinbox/core');
 
       // Shared identity resolver (registry-first) — same source as the pipeline.
-      const userEmail = resolveAccountEmail(storage);
+      const identity = resolveAccountIdentity(storage);
+      const userEmail = identity.email;
 
       const drafter = new AgentReplyDrafter({
         userEmail,
         userName: userEmail.split('@')[0] || '',
+        userAliases: identity.aliases,
         callAI: async (sys: string, msg: string) => {
           // aiConfig is module-local in the pipeline service — reach it via
           // the exported getter (svc.aiConfig was always undefined).
@@ -691,25 +693,10 @@ export function registerAgentHandlers(): void {
           return callAIWithRetry(cfg, sys, msg);
         },
         getNotes: (e: string) => agentRepo.getNotesForPrompt(e),
-        getThreadMessages: (threadId: string) => {
-          try {
-            // storage.getEmailsByThread is async but this drafter dep is
-            // synchronous — query via better-sqlite3 directly.
-            // Body read through email_bodies (migration 73 empties the inline
-            // column) — otherwise the reply drafter sees an empty thread and
-            // writes a reply with no context, which reads as the model being bad
-            // rather than as a storage bug.
-            const emails = ((storage as any).db?.prepare?.(
-              `SELECT from_address AS fromAddress, date, ${cleanBodyExpression()} AS cleanBody ` +
-                'FROM emails WHERE thread_id = ? ORDER BY date ASC'
-            )?.all(threadId) || []) as any[];
-            return emails.slice(-10).map((e: any) => ({
-              from: e.fromAddress || '',
-              date: e.date,
-              body: (e.cleanBody || '').substring(0, 300),
-            }));
-          } catch { return []; }
-        },
+        // The ONE thread builder the pipeline's drafter uses too
+        // (thread-context.ts): real ThreadMessage objects, conversation members
+        // only (never a draft), from THIS account's storage.
+        getThreadMessages: (threadId: string) => buildThreadMessages(storage, threadId, { userAliases: identity.aliases }),
         getSenderMemory: (e: string) => {
           try {
             const row = (storage as any).db?.prepare?.(

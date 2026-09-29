@@ -33,8 +33,6 @@ vi.mock('../../../../../src/components/InlineReply', () => ({ InlineReply: () =>
 vi.mock('../../../../../src/components/InlineForward', () => ({ InlineForward: () => null }));
 vi.mock('../../../../../src/services/ai-service', () => ({
   isSignatureDetectionEnabled: () => false,
-  buildPolishThreadContext: () => '',
-  getCurrentUserEmail: () => 'me@acme.example',
 }));
 // The identity cache asks the main process over IPC; there is none here.
 // Alice's domain publishes a BIMI logo, Bob's publishes nothing.
@@ -80,7 +78,7 @@ const context = (threadEmails: EmailRecord[], expanded: string[]) =>
       displayEmail: ANCHOR,
       threadEmails,
       duplicatesByEmailId: new Map<string, unknown[]>(),
-      conversationMessages: null,
+      polishThreadContext: '',
       expandedThreads: new Set(expanded),
       showFullContent: new Set<string>(),
       showSignatures: new Set<string>(),
@@ -244,6 +242,42 @@ describe('ThreadList — the sender avatar', () => {
     const avatar = view.find('[data-avatar-source="initials"]')!;
     expect(avatar).not.toBeNull();
     expect(avatar.textContent).toContain('BR');
+    view.unmount();
+  });
+});
+
+describe('ThreadList — the rows it renders', () => {
+  const rowIds = (view: { all: (selector: string) => HTMLElement[] }) =>
+    view.all('[id^="thread-"]').map((row) => row.id.replace(/^thread-/, ''));
+
+  // Regression: ThreadList kept its OWN `|draft|` filter on top of the members
+  // it is handed, so it and the chat view answered "is this a draft?" with two
+  // different rules. Its input is the conversation's members (useEmailDetail,
+  // core `conversationMembers`); it renders every one of them but the anchor.
+  it('renders exactly the member rows it is given, the anchor excepted', () => {
+    // The reader's own reply, sent from Gmail: its Sent copy keeps the stale
+    // `|draft|` tag from the compose. It IS a member — the chat view shows it —
+    // and the old `|draft|` filter hid it here.
+    const sentReply = email({
+      id: 'sent',
+      date: ELEVEN_AM + 7200,
+      fromAddress: 'me@acme.example',
+      tags: '|[Gmail]/Sent Mail|draft|',
+      rawBody: '<p>My reply.</p>',
+    });
+    const view = render(<ThreadList ctx={context([ANCHOR, SPOOFED, CLEAN, sentReply], [])} />);
+    expect(rowIds(view)).toEqual(['reply', 'clean', 'sent']);
+    view.unmount();
+  });
+
+  // The one conversation order: an undated row goes LAST (it used to sort as
+  // 1970, first), and equal timestamps tie-break by id, as main orders them.
+  it('orders rows by the conversation order', () => {
+    const undated = email({ id: 'aaa-undated', date: 0, rawBody: '<p>?</p>' });
+    const tieB = email({ id: 'tie-b', date: ELEVEN_AM, rawBody: '<p>b</p>' });
+    const tieA = email({ id: 'tie-a', date: ELEVEN_AM, rawBody: '<p>a</p>' });
+    const view = render(<ThreadList ctx={context([ANCHOR, undated, tieB, tieA], [])} />);
+    expect(rowIds(view)).toEqual(['tie-a', 'tie-b', 'aaa-undated']);
     view.unmount();
   });
 });

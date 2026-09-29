@@ -289,7 +289,6 @@ describe('SQLiteStorage before initialize()', () => {
     ['incrementParseFailureCount', (s) => s.incrementParseFailureCount('x')],
     ['resetParseFailureCount', (s) => s.resetParseFailureCount('x')],
     ['getParseFailureCounts', (s) => s.getParseFailureCounts(3)],
-    ['getChatViewBodyForEmail', (s) => s.getChatViewBodyForEmail('t', 'x')],
   ];
 
   it.each(syncEntryPoints)('%s throws "Storage not initialized"', (_name, call) => {

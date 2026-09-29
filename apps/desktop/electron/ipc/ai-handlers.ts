@@ -4,16 +4,25 @@
  * Handles AI categorization, thread summaries, and AI search operations.
  */
 
-import { createLogger } from '@sarvinbox/core';
-import { processingBreakdown } from '@sarvinbox/storage-node';
+import {
+  conversationSenders,
+  createLogger,
+  type FirstSplitClearAllResult,
+  type FirstSplitClearCounts,
+  type FirstSplitGetResult,
+  type FirstSplitSaveRequest,
+} from '@sarvinbox/core';
+import { processingBreakdown, type SQLiteStorage } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 
+import { openAccountStorages, requireAccountStorage } from '../services/account-target';
+import { readRegistryAccounts } from '../services/accounts-registry';
 import { getAutoBacklogCap, setAutoBacklogCap } from '../services/ai-backlog-cap';
 import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
-import { setAIProviderConfigured } from '../services/conversation-extraction-scheduler';
+import { setAIProviderConfigured, setBackgroundSplitEnabled } from '../services/conversation-extraction-scheduler';
 import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
 import { onCategoryDefinitionUpserted } from '../services/unified-pipeline-service';
-import { requireStorage, getAllAccountRuntimes } from '../shared';
+import { requireStorage } from '../shared';
 const logger = createLogger('ai-handlers');
 
 /**
@@ -22,13 +31,95 @@ const logger = createLogger('ai-handlers');
  * must resolve categories across ALL accounts — not just the active one.
  */
 function allAccountStorages(): any[] {
-  const seen = new Set<any>();
-  const out: any[] = [];
-  try { const a = requireStorage(); if (a) { out.push(a); seen.add(a); } } catch { /* none active */ }
-  for (const [, rt] of getAllAccountRuntimes()) {
-    if (rt.storage && !seen.has(rt.storage)) { out.push(rt.storage); seen.add(rt.storage); }
+  return openAccountStorages().map((entry) => entry.storage);
+}
+
+// ========== First-email split cache (ai:firstSplit:*) ==========
+// Account-scoped, STRICTLY: every handler resolves its storage through
+// requireAccountStorage, which throws rather than falling back to the active
+// account. The cache is keyed by thread id, and the same thread id exists in
+// every account's database — a fallback would serve one account's split for
+// another's thread, or write it into the wrong database.
+
+/**
+ * Main's answer to `ai:firstSplit:get`: the stored row, the thread's CURRENT
+ * key (its first conversation member and that email's stored-body
+ * fingerprint) with the member and distinct-sender counts, and — with
+ * `withSource` — the first member's full record and the senders' roster.
+ *
+ * Read in one synchronous block (no await), so the key, the counts and the
+ * source are one snapshot: no other IPC can land a body write between them,
+ * and the record a run splits is exactly the one the key describes.
+ */
+export function readFirstSplit(storage: SQLiteStorage, threadId: string, withSource: boolean): FirstSplitGetResult {
+  const key = storage.firstMemberKeySync(threadId);
+  const members = storage.getConversationMemberRowsSync(threadId);
+  // Core's one distinct-sender answer, over MEMBERS only (see conversationSenders).
+  const roster = conversationSenders(members);
+  const result: FirstSplitGetResult = {
+    row: storage.getFirstSplitSync(threadId),
+    current: key ? { ...key, memberCount: members.length, distinctSenders: roster.length } : null,
+  };
+  if (withSource) {
+    result.source = key ? storage.getRepositories().email.getByIdsSync([key.firstEmailId])[0] ?? null : null;
+    result.roster = roster;
   }
-  return out;
+  return result;
+}
+
+/**
+ * How Clear Cache names a failed storage that belongs to no account id (the
+ * pre-account default slot). The user reads it in "Could not clear …".
+ */
+export const UNNAMED_MAILBOX_LABEL = 'this mailbox';
+
+/**
+ * Clear the cache in EVERY configured account — the registry's list, not only
+ * the runtimes open this session (runtimes open lazily: the active account,
+ * the unified view, background sync), plus any other open storage.
+ *
+ * Each account resolves through the strict resolver inside its own try/catch:
+ * one that cannot be resolved or cleared (closed, locked, mid-maintenance) is
+ * reported in `failedAccounts` — never counted as 0 cleared, which would tell
+ * the user the cache is empty when it is not. The registry is read with the
+ * THROWING reader: when it cannot be read this throws, and the caller reports
+ * a failure rather than a partial success that looks complete.
+ */
+export async function clearFirstSplitsInEveryAccount(): Promise<FirstSplitClearAllResult> {
+  const accounts = readRegistryAccounts();
+  const seen = new Set<unknown>();
+  let cleared = 0;
+  let splits = 0;
+  const failedAccounts: string[] = [];
+  const fail = (accountId: string, error: unknown): void => {
+    failedAccounts.push(accountId);
+    logger.warn(`firstSplit:clearAll failed for account ${accountId}: ${(error as Error)?.message ?? error}`);
+  };
+  const add = (counts: FirstSplitClearCounts): void => {
+    cleared += counts.removed;
+    splits += counts.splits;
+  };
+  for (const { id } of accounts) {
+    try {
+      const storage = await requireAccountStorage(id);
+      if (seen.has(storage)) continue;
+      seen.add(storage);
+      add(storage.clearAllFirstSplits());
+    } catch (error) {
+      fail(id, error);
+    }
+  }
+  // Anything open that the registry did not name (the pre-account default slot).
+  for (const { accountId, storage } of openAccountStorages()) {
+    if (seen.has(storage)) continue;
+    seen.add(storage);
+    try {
+      add(storage.clearAllFirstSplits());
+    } catch (error) {
+      fail(accountId ?? UNNAMED_MAILBOX_LABEL, error);
+    }
+  }
+  return { cleared, splits, failedAccounts };
 }
 
 export function registerAIHandlers(): void {
@@ -217,45 +308,47 @@ export function registerAIHandlers(): void {
     }
   });
 
-  /**
-   * Get conversation extraction
-   */
-  ipcMain.handle('ai:getConversation', async (_event, threadId: string) => {
+  /** The first-email split cache row + main's current key for a thread, in ONE account. */
+  ipcMain.handle(
+    'ai:firstSplit:get',
+    async (_event, accountId: string, threadId: string, options?: { withSource?: boolean }) => {
+      try {
+        const storage = await requireAccountStorage(accountId);
+        return { success: true, data: readFirstSplit(storage, threadId, !!options?.withSource) };
+      } catch (error) {
+        logger.warn(`firstSplit:get failed acct=${accountId} thread=${threadId}: ${(error as Error).message}`);
+        return { success: false, error: (error as Error).message };
+      }
+    },
+  );
+
+  /** Store a run's result in ONE account; main re-checks the key inside the write. */
+  ipcMain.handle('ai:firstSplit:save', async (_event, accountId: string, request: FirstSplitSaveRequest) => {
     try {
-      const storage = requireStorage();
-      const data = await storage.getConversation(threadId);
-      return { success: true, data };
+      const storage = await requireAccountStorage(accountId);
+      const result = storage.saveFirstSplit(request);
+      if (result.reason === 'invalid') {
+        logger.warn(`firstSplit:save refused an invalid payload acct=${accountId} thread=${request?.key?.threadId ?? '?'} status=${request?.status ?? '?'}`);
+      }
+      return { success: true, data: result };
     } catch (error) {
-      logger.error('AI getConversation error:', error);
+      logger.warn(`firstSplit:save failed acct=${accountId} thread=${request?.key?.threadId ?? '?'}: ${(error as Error).message}`);
       return { success: false, error: (error as Error).message };
     }
   });
 
-  /**
-   * Save conversation extraction
-   */
-  ipcMain.handle('ai:saveConversation', async (_event, conversation: any) => {
+  /** Clear the cache in every account (Settings → Clear Cache). */
+  ipcMain.handle('ai:firstSplit:clearAll', async () => {
     try {
-      const storage = requireStorage();
-      await storage.upsertConversation(conversation);
-      return { success: true };
+      const result = await clearFirstSplitsInEveryAccount();
+      logger.info(`firstSplit:clearAll cleared=${result.cleared} splits=${result.splits} failedAccounts=${result.failedAccounts.length}`);
+      return { success: true, data: result };
     } catch (error) {
-      logger.error('AI saveConversation error:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
-
-  /**
-   * Clear all conversation extractions
-   */
-  ipcMain.handle('ai:clearAllConversations', async () => {
-    try {
-      const storage = requireStorage();
-      const count = await storage.clearAllConversations();
-      return { success: true, data: count };
-    } catch (error) {
-      logger.error('AI clearAllConversations error:', error);
-      return { success: false, error: (error as Error).message };
+      // Only the registry read can throw here: which accounts exist is unknown,
+      // so nothing may be reported as cleared.
+      const message = (error as Error)?.message ?? String(error);
+      logger.warn(`firstSplit:clearAll could not read the account list: ${message}`);
+      return { success: false, error: `Could not read the account list: ${message}` };
     }
   });
 
@@ -360,20 +453,6 @@ export function registerAIHandlers(): void {
   });
 
   /**
-   * Update thread chat extraction metadata (called after renderer extracts)
-   */
-  ipcMain.handle('ai:updateThreadExtraction', async (_event, threadId: string, emailCount: number) => {
-    try {
-      const storage = requireStorage();
-      await (storage as any).threadRepo.updateChatExtraction(threadId, emailCount);
-      return { success: true };
-    } catch (error) {
-      logger.error('AI updateThreadExtraction error:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
-
-  /**
    * Push the user's "AI Processing Limit" setting into the main process.
    *
    * The setting lives in the renderer's localStorage, but the BACKGROUND poll
@@ -408,6 +487,16 @@ export function registerAIHandlers(): void {
     // No provider anymore → forget the persisted pipeline config so a later
     // restart doesn't restore a removed provider and try to use it.
     if (!configured) void clearPipelineAIConfig();
+    return { success: true };
+  });
+
+  /**
+   * Set whether the background first-email split is switched on (conversation
+   * mode AND 'Auto Chat Extract'); the nomination scheduler neither scans nor
+   * nominates while it is off. Anything but `true` reads as off.
+   */
+  ipcMain.handle('ai:setBackgroundSplitEnabled', async (_event, enabled: unknown) => {
+    setBackgroundSplitEnabled(enabled === true);
     return { success: true };
   });
 

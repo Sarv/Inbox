@@ -1,3 +1,4 @@
+import { conversationFoldersOf } from '@sarvinbox/core/conversation-membership';
 import { Loader2, Filter, X, Globe } from 'lucide-react';
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useShallow } from 'zustand/react/shallow';
@@ -195,10 +196,7 @@ export function EmailList() {
   // the rest of the view uses, so a provider-specific path (INBOX.Drafts,
   // [Gmail]/Drafts) is covered without a hardcoded name.
   const viewIsDrafts = !!selectedFolder && isDraftsFolder(selectedFolder as never);
-  const draftFolderPaths = useMemo(
-    () => new Set(folders.filter(f => isDraftsFolder(f as never)).map(f => f.path)),
-    [folders],
-  );
+  const conversationFolders = useMemo(() => conversationFoldersOf(folders), [folders]);
   const isInboxFolder = selectedFolder?.path === 'INBOX';
   // True while this folder's mail is still resolving (global sync or this
   // folder's own sync) — lets empty sections show "checking…" not "none".
@@ -467,9 +465,9 @@ export function EmailList() {
     // Narrowed for Drafts by the SAME rule the bulk toolbar uses: the hover
     // trash icon on a draft row must not delete the mail it replies to either.
     return thread
-      ? actionableEmailIds(thread.emails, viewIsDrafts, draftFolderPaths)
+      ? actionableEmailIds(thread.emails, viewIsDrafts, conversationFolders)
       : [emailId];
-  }, [visibleThreads, viewIsDrafts, draftFolderPaths]);
+  }, [visibleThreads, viewIsDrafts, conversationFolders]);
 
   const toggleStar = useCallback((emailId: string, currentlyStarred: boolean, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -553,7 +551,7 @@ export function EmailList() {
   // --- Bulk Action Handlers ---
 
   const getSelectedEmailIds = (): string[] =>
-    selectedEmailIdsFor({ visibleThreads, selectedThreadIds, viewIsDrafts, draftFolderPaths });
+    selectedEmailIdsFor({ visibleThreads, selectedThreadIds, viewIsDrafts, conversationFolders });
 
   const handleBulkArchive = () => {
     const ids = getSelectedEmailIds();

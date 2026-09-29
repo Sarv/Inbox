@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 
+import { classifyAIError } from '@sarvinbox/core/ai-error';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { addProvider, getDefaultProvider, loadAISettings, parseSearchQuery, pruneOrphanedOAuthProviders, removeOAuthProvidersForAccount } from '../../../../src/services/ai-service';
+import { addProvider, getDefaultProvider, loadAISettings, makeAICompletion, parseSearchQuery, pruneOrphanedOAuthProviders, removeOAuthProvidersForAccount } from '../../../../src/services/ai-service';
 
 // removeOAuthProvidersForAccount is the fix for the "delete account → app
 // beachballs" bug: the Sarv account is BOTH mailbox AND LLM provider, so when the
@@ -32,6 +33,42 @@ afterEach(() => {
   delete (globalThis as any).localStorage;
   delete (globalThis as any).window;
   vi.restoreAllMocks();
+});
+
+describe('Gemini HTTP failures carry their status', () => {
+  const failWith = (status: number) =>
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      { ok: false, status, text: async () => 'nope' } as unknown as Response,
+    );
+  const errorOf = async () => {
+    try {
+      await makeAICompletion({ systemPrompt: 's', userPrompt: 'u' });
+    } catch (error) {
+      return error;
+    }
+    throw new Error('expected makeAICompletion to reject');
+  };
+
+  // Breaks: a bad Gemini key (401/403) classified as `unknown` — retried as a
+  // transient per-thread failure up to five times per thread, instead of
+  // reported once as the provider's (auth) problem.
+  it('classifies a 401 and a 403 as auth', async () => {
+    addProvider('gemini', 'key-123', 'gemini-model');
+    for (const status of [401, 403]) {
+      failWith(status);
+      const error = await errorOf();
+      expect((error as { status?: number }).status).toBe(status);
+      expect(classifyAIError(error).kind).toBe('auth');
+    }
+  });
+
+  // Breaks: a request Gemini will keep rejecting (400) is retried forever as
+  // `unknown` rather than recorded as a client failure.
+  it('classifies another 4xx as client', async () => {
+    addProvider('gemini', 'key-123', 'gemini-model');
+    failWith(400);
+    expect(classifyAIError(await errorOf()).kind).toBe('client');
+  });
 });
 
 describe('removeOAuthProvidersForAccount', () => {

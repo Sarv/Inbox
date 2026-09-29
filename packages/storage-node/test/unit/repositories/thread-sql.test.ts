@@ -1,15 +1,27 @@
+import {
+  CONVERSATION_EXCLUDED_FOLDERS,
+  SENT_FOLDER_TAGS,
+  STANDARD_DRAFT_FOLDERS,
+  conversationMembers,
+  isDraftRow,
+  type ConversationFolders,
+} from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   THREAD_FIRST_SENDER_SQL,
   THREAD_LAST_SENDER_SQL,
-  THREAD_MESSAGE_COUNT_SQL,
-  THREAD_META_SHARED,
   THREAD_STATE_EXCLUDED_FOLDERS,
   LISTING_EXCLUDED_FOLDERS,
+  accountDraftRowSql,
+  conversationFoldersIn,
   draftExclusion,
+  draftRowSql,
   isShadowedInFolder,
+  sqlStringLiteral,
+  threadMessageCountSql,
+  threadMetaSharedSql,
   listingExclusion,
   liveUnreadSum,
   threadFolderExclusion,
@@ -96,7 +108,11 @@ describe('thread-sql fragment shape', () => {
     expect(THREAD_STATE_EXCLUDED_FOLDERS).toEqual([
       'Trash', 'Spam', '[Gmail]/Trash', '[Gmail]/Spam', 'Junk', 'Junk Email', 'Deleted Items',
     ]);
-    expect(draftExclusion('x')).toContain("instr(x.tags, '|draft|') = 0");
+    // draftExclusion is now the negation of the core-twin draftRowSql (a Sent
+    // copy with a stale |draft| is no longer excluded), so its text is
+    // `AND NOT (...)` over positive matches rather than a chain of `= 0`s.
+    expect(draftExclusion('x')).toBe(`AND NOT ${draftRowSql('x')}`);
+    expect(draftRowSql('x')).toContain("instr(x.tags, '|draft|') > 0");
     expect(threadFolderExclusion('tmc')).toContain("instr(tmc.tags, '|Trash|') = 0");
   });
 });
@@ -312,7 +328,7 @@ describe('thread metadata SQL agrees with the per-message truth', () => {
     seedAll(db, SEEDS);
 
     const meta = db.prepare(`
-      SELECT emails.id AS id, emails.thread_id AS threadId, ${THREAD_META_SHARED}
+      SELECT emails.id AS id, emails.thread_id AS threadId, ${threadMetaSharedSql()}
       FROM emails ORDER BY emails.id
     `).all() as Array<{
       id: string;
@@ -346,7 +362,7 @@ describe('thread metadata SQL agrees with the per-message truth', () => {
   it('falls back to the unfiltered count for all-junk and all-draft threads', () => {
     seedAll(db, SEEDS);
     const countFor = (id: string): number =>
-      (db.prepare(`SELECT ${THREAD_MESSAGE_COUNT_SQL} AS n FROM emails WHERE emails.id = ?`).get(id) as { n: number }).n;
+      (db.prepare(`SELECT ${threadMessageCountSql()} AS n FROM emails WHERE emails.id = ?`).get(id) as { n: number }).n;
 
     // Without the COALESCE fallback these collapse to 0 and the Junk/Drafts
     // folder would show "(0)" rows.
@@ -389,6 +405,16 @@ describe('listing scope (listingExclusion / isShadowedInFolder / unreadInFolderP
   it('excludes every other special folder but never the folder being listed', () => {
     expect(LISTING_EXCLUDED_FOLDERS).toContain('Trash');
     expect(LISTING_EXCLUDED_FOLDERS).toContain('Sent');
+    // Breaks: deriving the list from core's membership constants changes the
+    // listing scope (and the sidebar badge) — pinned to the exact 12-name set.
+    expect([...LISTING_EXCLUDED_FOLDERS].sort()).toEqual([
+      'Deleted Items', 'Drafts', 'Junk', 'Junk Email', 'Sent', 'Sent Items', 'Spam', 'Trash',
+      '[Gmail]/Drafts', '[Gmail]/Sent Mail', '[Gmail]/Spam', '[Gmail]/Trash',
+    ]);
+    // ...and it is those constants, so a name added to one reaches the scope.
+    expect(LISTING_EXCLUDED_FOLDERS).toEqual([
+      ...CONVERSATION_EXCLUDED_FOLDERS, ...SENT_FOLDER_TAGS, ...STANDARD_DRAFT_FOLDERS,
+    ]);
     expect(listingExclusion('INBOX')).toContain("instr(tags, '|Trash|') = 0");
     expect(listingExclusion('Trash')).not.toContain("'|Trash|'");
     expect(listingExclusion('Trash')).toContain("instr(tags, '|Junk|') = 0");
@@ -549,5 +575,247 @@ describe('unreadCandidatePredicate — the folder-independent half', () => {
     // Both forms disqualify on exactly this list — the grouped query binds it.
     expect(NOT_UNREAD_TAGS).toEqual(['read', 'deleted']);
     for (const tag of NOT_UNREAD_TAGS) expect(unreadByTagParams(['INBOX'])).toContain(tag);
+  });
+});
+
+describe('draftRowSql — the SQL twin of core isDraftRow', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = newDb(); });
+  afterEach(() => { db.close(); });
+
+  // Provider Drafts and Sent paths as the folder classifier finds them, and
+  // ones whose names carry a quote — server data spliced into SQL as literals.
+  const ROLES: ConversationFolders = {
+    draftPaths: ['INBOX.Drafts', "Bob's Drafts"],
+    sentPaths: ['INBOX.Sent', 'Sent Messages', "Bob's Sent"],
+  };
+
+  const SHAPES: Array<[string, string]> = [
+    ['plain', 'INBOX'],
+    ['marker', 'INBOX|draft'],
+    ['imap', 'Drafts'],
+    ['gmail', '[Gmail]/Drafts'],
+    ['provider', 'INBOX.Drafts'],
+    ['quoted', "Bob's Drafts"],
+    ['drafting', 'Drafting'],
+    ['sentdraft', 'Sent|draft'],
+    ['gsentdraft', '[Gmail]/Sent Mail|draft'],
+    ['itemsdraft', 'Sent Items|draft'],
+    ['trashdraft', 'Trash|draft'],
+    ['nearmarker', 'INBOX|drafted'],
+    ['providersent', 'INBOX.Sent|draft'],
+    ['icloudsent', 'Sent Messages|draft'],
+    ['quotedsent', "Bob's Sent|draft"],
+    ['sentprovdraft', 'INBOX.Sent|INBOX.Drafts'],
+  ];
+
+  // Breaks: the list count and the thread view disagree about what a draft is
+  // — the "count that disagrees with the list" this twin exists to prevent.
+  it('classifies every shape exactly as core isDraftRow does', () => {
+    for (const [id, tags] of SHAPES) add(db, { id, threadId: 't', tags, date: 1 });
+    const sqlDrafts = (db.prepare(`SELECT id FROM emails e WHERE ${draftRowSql('e', ROLES)} ORDER BY id`)
+      .all() as Array<{ id: string }>).map((r) => r.id);
+    const jsDrafts = SHAPES.filter(([, tags]) => isDraftRow(`|${tags}|`, ROLES)).map(([id]) => id).sort();
+    expect(sqlDrafts).toEqual(jsDrafts);
+    expect(sqlDrafts).toEqual(['gmail', 'imap', 'marker', 'provider', 'quoted', 'trashdraft']);
+  });
+
+  // Breaks: the SQL twin knows only the three standard Sent names while the
+  // JS predicate reads the account's Sent paths — a provider Sent copy with a
+  // stale |draft| (iCloud 'Sent Messages', 'INBOX.Sent') is a draft to the
+  // list count and a message to the thread view.
+  it("treats the account's own Sent paths as sent, exactly as core does", () => {
+    for (const [id, tags] of SHAPES) add(db, { id, threadId: 't', tags, date: 1 });
+    const sql = (folders?: ConversationFolders) =>
+      (db.prepare(`SELECT id FROM emails e WHERE ${draftRowSql('e', folders)} ORDER BY id`)
+        .all() as Array<{ id: string }>).map((r) => r.id);
+    const js = (folders?: ConversationFolders) =>
+      SHAPES.filter(([, tags]) => isDraftRow(`|${tags}|`, folders)).map(([id]) => id).sort();
+    // Without the Sent paths those copies are drafts by their marker...
+    expect(sql()).toEqual(js());
+    expect(sql()).toEqual(expect.arrayContaining(['providersent', 'icloudsent', 'quotedsent']));
+    // ...with them, they are messages in both implementations.
+    expect(sql(ROLES)).not.toContain('providersent');
+    expect(sql(ROLES)).not.toContain('icloudsent');
+    expect(sql(ROLES)).not.toContain('quotedsent');
+    expect(sql(ROLES)).toEqual(js(ROLES));
+  });
+
+  // Breaks: a server-supplied folder name ends the SQL string early — a
+  // statement that fails to parse (every list query down) or, worse, one
+  // rewritten by the name (`' OR 1=1 OR '` would make every row a draft and
+  // empty every "(N)").
+  it('matches a path containing quotes literally and cannot be injected through it', () => {
+    const hostile = "Drafts' OR 1=1 OR '";
+    add(db, { id: 'plain', threadId: 't', tags: 'INBOX', date: 1 });
+    add(db, { id: 'hostile', threadId: 't', tags: hostile, date: 2 });
+    const hits = (db.prepare(`SELECT id FROM emails e WHERE ${draftRowSql('e', { draftPaths: [hostile], sentPaths: [] })} ORDER BY id`)
+      .all() as Array<{ id: string }>).map((r) => r.id);
+    expect(hits).toEqual(['hostile']);
+    // The same through the Sent list: a hostile Sent name must not un-draft every row.
+    add(db, { id: 'marker', threadId: 't', tags: 'INBOX|draft', date: 3 });
+    const sentHostile = "Sent' OR 1=1 OR '";
+    const drafts = (db.prepare(`SELECT id FROM emails e WHERE ${draftRowSql('e', { draftPaths: [], sentPaths: [sentHostile] })} ORDER BY id`)
+      .all() as Array<{ id: string }>).map((r) => r.id);
+    expect(drafts).toEqual(['marker']);
+    expect(sqlStringLiteral("it's")).toBe("'it''s'");
+  });
+
+  // Breaks: one unquotable path takes every list query down instead of being
+  // ignored (SQLite stops reading a statement at a NUL).
+  it('skips empty and NUL-bearing paths, and refuses to quote a NUL', () => {
+    expect(draftRowSql('e', { draftPaths: ['', 'Bad\0Path'], sentPaths: ['', 'Sent\0'] })).toBe(draftRowSql('e'));
+    // A path equal to a standard name is not spliced twice.
+    expect(draftRowSql('e', { draftPaths: ['Drafts'], sentPaths: ['Sent'] })).toBe(draftRowSql('e'));
+    expect(() => sqlStringLiteral('a\0b')).toThrow(/NUL/);
+  });
+});
+
+describe('accountDraftRowSql — main\'s draft deletes', () => {
+  // Breaks: main's discard / post-send cleanup selects drafts WITHOUT the
+  // account's folders, so a provider Sent copy that kept a stale |draft| tag
+  // ('INBOX.Sent|draft') is taken for a draft and deleted — the reader's own
+  // reply lost, its Sent-folder UID expunged from Drafts.
+  it("is draftRowSql with this database's own Drafts/Sent folders", () => {
+    const db = newDb();
+    db.exec('CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT UNIQUE NOT NULL, special_use TEXT)');
+    const insertFolder = db.prepare('INSERT INTO folders (id, name, path, special_use) VALUES (?, ?, ?, ?)');
+    insertFolder.run('1', 'Drafts', 'INBOX.Drafts', '\\Drafts');
+    insertFolder.run('2', 'Sent', 'INBOX.Sent', '\\Sent');
+    expect(accountDraftRowSql(db, 'e')).toBe(draftRowSql('e', conversationFoldersIn(db)));
+    const sql = accountDraftRowSql(db, 'e');
+    expect(sql).toContain("instr(e.tags, '|INBOX.Sent|') = 0");
+    expect(sql).toContain("instr(e.tags, '|INBOX.Drafts|') > 0");
+    db.close();
+  });
+
+  // Breaks: an unreadable folders table falls back to the bare markers, and a
+  // delete built on that guess takes provider Sent copies. It must throw so
+  // the delete does nothing.
+  it('throws when the folders table cannot be read', () => {
+    const failing = {
+      prepare: () => { throw new Error('database disk image is malformed'); },
+    } as unknown as Database.Database;
+    expect(() => accountDraftRowSql(failing, 'e')).toThrow(/malformed/);
+  });
+});
+
+describe('conversationFoldersIn', () => {
+  // Breaks: the count reads Drafts/Sent paths with a different rule than the
+  // thread view (a substring rule would hide mail filed in a "Drafting" folder).
+  it("reads this database's folders through the core classifier", () => {
+    const db = newDb();
+    db.exec('CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT UNIQUE NOT NULL, special_use TEXT)');
+    const insertFolder = db.prepare('INSERT INTO folders (id, name, path, special_use) VALUES (?, ?, ?, ?)');
+    insertFolder.run('1', 'INBOX', 'INBOX', null);
+    insertFolder.run('2', 'Drafts', 'INBOX.Drafts', '\\Drafts');
+    insertFolder.run('3', 'Drafting', 'Drafting', null);
+    insertFolder.run('4', 'Drafts', '[Gmail]/Drafts', null);
+    insertFolder.run('5', 'Sent', 'INBOX.Sent', '\\Sent');
+    insertFolder.run('6', 'Sent Messages', 'Sent Messages', null);
+    expect(conversationFoldersIn(db)).toEqual({
+      draftPaths: ['INBOX.Drafts', '[Gmail]/Drafts'],
+      sentPaths: ['INBOX.Sent', 'Sent Messages'],
+    });
+    db.close();
+  });
+
+  // Breaks: a bare fixture (or a half-migrated DB) with no folders table
+  // throws out of every list query instead of falling back to the standard
+  // Drafts/Sent names.
+  it('answers empty roles when there is no folders table', () => {
+    const db = newDb();
+    expect(conversationFoldersIn(db)).toEqual({ draftPaths: [], sentPaths: [] });
+    db.close();
+  });
+
+  // Breaks: an UNREADABLE folders table reads as "no provider Drafts folder"
+  // — the same value as an empty one, and the opposite fact. An INBOX.Drafts
+  // user draft would then be a conversation member: counted, handed to the
+  // drafter or the AI as a message, and invisible to the live-draft gate that
+  // must stop an auto-draft. It must throw so every gate fails closed.
+  it('throws (never answers empty) when the folders read fails for any other reason', () => {
+    const failing = {
+      prepare: () => { throw Object.assign(new Error('database disk image is malformed'), { code: 'SQLITE_CORRUPT' }); },
+    } as unknown as Database.Database;
+    expect(() => conversationFoldersIn(failing)).toThrow(/malformed/);
+    // A non-Error throw is still a failure, never "no folders table".
+    const throwsString = { prepare: () => { throw 'SQLITE_IOERR'; } } as unknown as Database.Database;
+    expect(() => conversationFoldersIn(throwsString)).toThrow('SQLITE_IOERR');
+
+    const db = newDb();
+    // Rows with no path to classify are unreadable, not "no Drafts folder".
+    db.exec("CREATE TABLE folders (id TEXT PRIMARY KEY, label TEXT); INSERT INTO folders VALUES ('1', 'Drafts')");
+    expect(() => conversationFoldersIn(db)).toThrow(/no path/);
+    db.close();
+  });
+
+  // Breaks: a minimal folders table (id, path — the shape several fixtures
+  // use) throws out of every list query; it is readable, just less informed.
+  it('classifies a folders table without name/special_use from its paths', () => {
+    const db = newDb();
+    db.exec(`CREATE TABLE folders (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL);
+             INSERT INTO folders VALUES ('1', 'INBOX'), ('2', 'Sent Messages'), ('3', 'Work/Draft')`);
+    expect(conversationFoldersIn(db)).toEqual({ draftPaths: ['Work/Draft'], sentPaths: ['Sent Messages'] });
+    db.exec('DELETE FROM folders');
+    expect(conversationFoldersIn(db)).toEqual({ draftPaths: [], sentPaths: [] });
+    db.close();
+  });
+});
+
+describe('threadMessageCountSql — the list "(N)" is the conversation-member count', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = newDb(); });
+  afterEach(() => { db.close(); });
+
+  const countFor = (id: string, draftPaths: string[], sentPaths: string[] = []): number =>
+    (db.prepare(`SELECT ${threadMessageCountSql({ draftPaths, sentPaths })} AS n FROM emails WHERE emails.id = ?`)
+      .get(id) as { n: number }).n;
+
+  // DELIBERATE BEHAVIOUR CHANGE. Breaks: the user's own Sent reply that kept a
+  // stale |draft| tag vanishes from the count, and a provider-path draft
+  // (INBOX.Drafts) inflates it — both disagreeing with the thread they open.
+  it('counts a |Sent|draft| copy and excludes a provider-path draft', () => {
+    seedAll(db, [
+      { id: 'a', threadId: 't', tags: 'INBOX', date: 1 },
+      { id: 'b', threadId: 't', tags: 'Sent|draft', date: 2 },
+      { id: 'c', threadId: 't', tags: 'INBOX.Drafts', date: 3 },
+      { id: 'd', threadId: 't', tags: 'Trash|draft', date: 4 },
+    ]);
+    expect(countFor('a', ['INBOX.Drafts'])).toBe(2);
+    // Without the account's paths, the provider draft is invisible as a draft —
+    // which is why every list query now builds the SQL from conversationFoldersIn.
+    expect(countFor('a', [])).toBe(3);
+  });
+
+  // DELIBERATE BEHAVIOUR CHANGE. Breaks: the user's own reply in a provider
+  // Sent folder (iCloud 'Sent Messages', Dovecot 'INBOX.Sent') that kept a
+  // stale |draft| tag drops out of "(N)" while the thread view shows it.
+  it("counts a stale-marker copy in the account's own Sent folder", () => {
+    seedAll(db, [
+      { id: 'a', threadId: 't', tags: 'INBOX', date: 1 },
+      { id: 'b', threadId: 't', tags: 'Sent Messages|draft', date: 2 },
+    ]);
+    expect(countFor('a', [], ['Sent Messages'])).toBe(2);
+    expect(countFor('a', [], [])).toBe(1);
+  });
+
+  // Breaks: an all-junk conversation whose only live row is a draft counts
+  // the draft (tier 2 must be NON-draft rows) — parity with conversationMembers.
+  it('falls back to non-draft rows, then to every row, matching conversationMembers', () => {
+    seedAll(db, [
+      { id: 'j1', threadId: 'junk', tags: 'Junk', date: 1 },
+      { id: 'j2', threadId: 'junk', tags: 'Junk', date: 2 },
+      { id: 'jd', threadId: 'junk', tags: 'INBOX|draft', date: 3 },
+      { id: 'd1', threadId: 'drafts', tags: 'Drafts', date: 4 },
+      { id: 'd2', threadId: 'drafts', tags: 'INBOX|draft', date: 5 },
+    ]);
+    const rows = (threadId: string) => (db.prepare('SELECT id, tags, date FROM emails WHERE thread_id = ?')
+      .all(threadId) as Array<{ id: string; tags: string; date: number }>);
+    expect(countFor('j1', [])).toBe(2);
+    expect(countFor('j1', [])).toBe(conversationMembers(rows('junk')).length);
+    // The drafts-only tier is display-only: no members, but not "(0)".
+    expect(conversationMembers(rows('drafts'))).toHaveLength(0);
+    expect(countFor('d1', [])).toBe(2);
   });
 });

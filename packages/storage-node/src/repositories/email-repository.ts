@@ -16,6 +16,13 @@ import {
   bodyContentHash,
   createLogger,
   hasInlineImageRefs,
+  conversationMembers,
+  firstSplitKeyFor,
+  hasNewerMember as coreHasNewerMember,
+  hasLiveUserDraftAmong,
+  isDraftRow,
+  type ConversationFolders,
+  type FirstSplitKey,
 } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
@@ -39,9 +46,10 @@ import {
 } from './inline-image-store';
 import { EMAIL_TAGS_TABLE, hasTagClause } from './tag-membership';
 import {
+  conversationFoldersIn,
   threadFolderExclusion,
   threadTagExists,
-  THREAD_META_SHARED,
+  threadMetaSharedSql,
   liveUnreadSum,
   listingExclusion,
   LISTING_EXCLUDED_FOLDERS,
@@ -49,6 +57,20 @@ import {
 } from './thread-sql';
 
 const log = createLogger('EmailRepo');
+
+/**
+ * One thread row with only what the conversation-membership predicate reads —
+ * no bodies. The input to core's `conversationMembers` and friends.
+ */
+export interface ConversationLightRow {
+  id: string;
+  messageId: string;
+  tags: string;
+  /** Unix seconds, as stored. */
+  date: number;
+  fromAddress: string;
+  fromName: string | null;
+}
 
 // ========== Tag Helpers ==========
 // Single source of truth lives in @sarvinbox/core; re-exported here so existing
@@ -292,9 +314,13 @@ const THREAD_HAS_IMPORTANT_UNREAD = threadTagExists(
   'tiu1', `instr(tiu1.tags, '|important|') > 0 AND instr(tiu1.tags, '|read|') = 0`
 );
 
-/** Thread metadata subqueries appended to SELECT * for list views */
-const THREAD_META = `
-  ${THREAD_META_SHARED},
+/**
+ * Thread metadata subqueries appended to SELECT * for list views: the shared
+ * block (count, first/last sender — per account, see `threadMetaSharedSql`)
+ * followed by these list-only tag aggregates.
+ */
+const threadMetaSql = (folders: ConversationFolders): string => `
+  ${threadMetaSharedSql(folders)},
   -- True if ANY email in the thread has the |starred| tag, regardless of which folder it lives in.
   -- Lets the list-view star icon and the Starred section both reflect the thread's real state when
   -- the user is viewing INBOX (Gmail puts starred emails in the separate [Gmail]/Starred folder
@@ -378,6 +404,17 @@ export class EmailRepository extends BaseRepository {
       // prefetch for it forever.
       `, (${rawBodyLengthExpression('', lengthsReady)} > 0) AS has_body`;
     return this._listSelect;
+  }
+
+  /**
+   * The thread-metadata columns for a list or search SELECT, built for THIS
+   * database's Drafts and Sent folders, so the list row's "(N)" excludes a
+   * provider-path draft (`INBOX.Drafts`) and keeps a provider Sent copy
+   * exactly as the thread view does. The statement text only changes when the
+   * account's Drafts or Sent folders change.
+   */
+  private threadMeta(): string {
+    return threadMetaSql(conversationFoldersIn(this.db));
   }
 
   /**
@@ -744,6 +781,11 @@ export class EmailRepository extends BaseRepository {
    * stay under SQLite's bound-parameter limit. Order is not guaranteed.
    */
   async getByIds(ids: string[]): Promise<EmailRecord[]> {
+    return this.getByIdsSync(ids);
+  }
+
+  /** Synchronous {@link getByIds} — for callers that must not yield. */
+  getByIdsSync(ids: readonly string[]): EmailRecord[] {
     if (ids.length === 0) return [];
     const results: EmailRecord[] = [];
     for (let i = 0; i < ids.length; i += 500) {
@@ -1100,7 +1142,7 @@ export class EmailRepository extends BaseRepository {
     const { sql: filterSql, params: filterParams } = this.viewFilterSql(options.filter, options.categoryTag);
     const rows = this.timed('getByFolder', () => this.db
       .prepare(`
-        SELECT ${this.listSelect()}, ${THREAD_META}
+        SELECT ${this.listSelect()}, ${this.threadMeta()}
         FROM emails
         WHERE instr(tags, '|' || ? || '|') > 0
         ${excludeSpecial}
@@ -1209,7 +1251,7 @@ export class EmailRepository extends BaseRepository {
     const placeholders = threadIds.map(() => '?').join(',');
     const rows = this.db
       .prepare(`
-        SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
+        SELECT ${this.listSelect()}, ${this.threadMeta()} FROM emails
         WHERE instr(tags, '|snoozed|') > 0
           AND snooze_until IS NOT NULL
           AND COALESCE(thread_id, id) IN (${placeholders})
@@ -1238,7 +1280,9 @@ export class EmailRepository extends BaseRepository {
   }
 
   /**
-   * Get emails by thread
+   * Get emails by thread — what the thread view opens (`emails:thread`):
+   * every conversation row plus the thread's live drafts (the compose box
+   * needs them), with Trash/Spam/Junk copies left out.
    */
   async getByThread(threadId: string): Promise<EmailRecord[]> {
     this.logQuery('getByThread', { threadId });
@@ -1252,18 +1296,125 @@ export class EmailRepository extends BaseRepository {
       .prepare(`SELECT ${this.emailSelect()} FROM emails WHERE thread_id = ? ${excludeTrash} ORDER BY date ASC`)
       .all(threadId) as any[];
 
-    // If the exclusion empties the thread, the WHOLE conversation lives in
+    // If the exclusion leaves no MESSAGE, the whole conversation lives in
     // Trash/Spam/Junk (e.g. the user is viewing the Junk folder). The exclusion
     // is only meant to hide trashed/spam copies from an otherwise-normal
-    // conversation — it shouldn't make an all-junk thread un-openable (it would
-    // collapse to a single message). Fall back to the unfiltered thread.
-    if (rows.length === 0) {
-      rows = this.db
+    // conversation — it shouldn't make an all-junk thread un-openable. Fall
+    // back to the unfiltered thread, exactly when core's conversationMembers
+    // falls back to the excluded copies (and the list row's "(N)" counts them).
+    //
+    // "No message", not "no row": a live draft reply is a row but never a
+    // message. Checking only for an empty result let a Junk thread with a
+    // draft open as that draft alone — every real message hidden while the
+    // list row said (2). A thread that is nothing but drafts keeps its
+    // filtered rows: falling back would only add trashed drafts.
+    const folders = conversationFoldersIn(this.db);
+    const isMessage = (row: { tags: string }): boolean => !isDraftRow(row.tags, folders);
+    if (!rows.some(isMessage)) {
+      const all = this.db
         .prepare(`SELECT ${this.emailSelect()} FROM emails WHERE thread_id = ? ORDER BY date ASC`)
         .all(threadId) as any[];
+      if (rows.length === 0 || all.some(isMessage)) rows = all;
     }
 
     return rows.map(row => this.rowToRecord(row));
+  }
+
+  // ========== Conversation membership ==========
+  // Main's questions about a conversation — which rows are in it, which is
+  // first, is there anything after this email — answered by core's ONE
+  // membership predicate over light rows, never by SQL of its own. The
+  // renderer asks the same questions with the same functions, so the two
+  // processes cannot disagree about drafts, Trash copies or order (see
+  // core `utils/conversation-membership.ts`).
+
+  /** Every row of a thread (drafts and Trash copies included), light columns only. */
+  getThreadLightRowsSync(threadId: string): ConversationLightRow[] {
+    const rows = prepared(
+      this.db,
+      'SELECT id, message_id, tags, date, from_address, from_name FROM emails WHERE thread_id = ?',
+    ).all(threadId) as Array<{
+      id: string; message_id: string; tags: string; date: number; from_address: string; from_name: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      messageId: row.message_id,
+      tags: row.tags,
+      date: row.date,
+      fromAddress: row.from_address,
+      fromName: row.from_name,
+    }));
+  }
+
+  /** The conversation's members as light rows, in conversation order. */
+  getConversationMemberRowsSync(threadId: string): ConversationLightRow[] {
+    return conversationMembers(this.getThreadLightRowsSync(threadId), conversationFoldersIn(this.db));
+  }
+
+  /**
+   * The conversation's members as full records (bodies included, inline images
+   * inflated), in conversation order. Unlike {@link getByThread} it never
+   * returns a draft, and it orders by core's total order rather than SQL's
+   * `ORDER BY date` (which leaves same-second ties unspecified). Only the
+   * members' bodies are read.
+   */
+  getConversationMembers(threadId: string): EmailRecord[] {
+    const members = this.getConversationMemberRowsSync(threadId);
+    if (members.length === 0) return [];
+    const byId = new Map(this.getByIdsSync(members.map((m) => m.id)).map((record) => [record.id, record]));
+    return members
+      .map((member) => byId.get(member.id))
+      .filter((record): record is EmailRecord => record !== undefined);
+  }
+
+  /**
+   * The key of the thread's FIRST member for the first-email split cache — its
+   * Message-ID key and the fingerprint of its STORED raw body — or null when
+   * the thread has no member.
+   *
+   * The stored form, deliberately: `raw_body` keeps inline images as
+   * `sarv-inline:` refs, while every record handed out (`rowToRecord`) has them
+   * inflated back to base64, and a body streamed from IMAP keeps its own
+   * whitespace. A fingerprint of either would never match this one, so only
+   * main computes it, from here.
+   */
+  firstMemberKeySync(threadId: string): FirstSplitKey | null {
+    const first = this.getConversationMemberRowsSync(threadId)[0];
+    if (!first) return null;
+    const row = prepared(
+      this.db,
+      `SELECT ${rawBodyExpression('emails')} AS raw_body FROM emails WHERE id = ?`,
+    ).get(first.id) as { raw_body: string | null } | undefined;
+    // No row means it vanished between the two reads: no key, rather than a
+    // key for an empty body that a split could then be saved against.
+    if (!row) return null;
+    return firstSplitKeyFor(threadId, first, row.raw_body);
+  }
+
+  /**
+   * Does `emailId`'s conversation hold a member AFTER it (core
+   * `hasNewerMember`)? Newer drafts and newer Trash copies do not count, nor —
+   * for a dated email — do rows with an unreadable date; for an UNDATED email
+   * any other member counts, since doubt must read as "already answered".
+   * False when the email does not exist.
+   */
+  hasNewerMember(threadId: string, emailId: string): boolean {
+    const rows = this.getThreadLightRowsSync(threadId);
+    const email = rows.find((row) => row.id === emailId)
+      ?? (prepared(this.db, 'SELECT id, date FROM emails WHERE id = ?').get(emailId) as
+        { id: string; date: number } | undefined);
+    if (!email) return false;
+    return coreHasNewerMember(rows, email, conversationFoldersIn(this.db));
+  }
+
+  /**
+   * Does the thread hold a LIVE draft the user is writing (core
+   * `hasLiveUserDraftAmong`)? Any live draft counts, not only the newest row;
+   * drafts in Trash, `\Deleted` ones and Sent copies do not; the agent's own
+   * drafts are excluded by `agentDraftKeys` (Message-ID keys).
+   */
+  hasLiveUserDraftSync(threadId: string, agentDraftKeys: Iterable<string>): boolean {
+    return hasLiveUserDraftAmong(this.getThreadLightRowsSync(threadId), conversationFoldersIn(this.db), agentDraftKeys);
   }
 
   /**
@@ -1357,7 +1508,7 @@ export class EmailRepository extends BaseRepository {
    */
   async search(query: SearchQuery): Promise<EmailRecord[]> {
     this.logQuery('search', { folderPath: query.folderPath, scope: query.scope, aiCategory: query.aiCategory, from: query.from, to: query.to, subject: query.subject, isUnread: query.isUnread, isFlagged: query.isFlagged, hasAttachments: query.hasAttachments, limit: query.limit });
-    let sql = `SELECT ${this.listSelect()}, ${THREAD_META} FROM emails WHERE 1=1`;
+    let sql = `SELECT ${this.listSelect()}, ${this.threadMeta()} FROM emails WHERE 1=1`;
     const params: any[] = [];
 
     // Folder scoping: specific folder or "all" (excludes special folders)
@@ -1648,7 +1799,7 @@ export class EmailRepository extends BaseRepository {
     const orderBy = options.orderBy || 'MAX(date) DESC';
     const rows = this.timed('getSectionByThreads', () => this.db
       .prepare(`
-        SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
+        SELECT ${this.listSelect()}, ${this.threadMeta()} FROM emails
         WHERE COALESCE(thread_id, id) IN (
           SELECT COALESCE(thread_id, id) as tid FROM emails
           WHERE 1=1
@@ -1832,7 +1983,7 @@ export class EmailRepository extends BaseRepository {
     if (threadIds.length === 0) return [];
     const placeholders = threadIds.map(() => '?').join(',');
     const rows = this.db.prepare(`
-      SELECT ${this.listSelect()}, ${THREAD_META} FROM emails
+      SELECT ${this.listSelect()}, ${this.threadMeta()} FROM emails
       WHERE COALESCE(thread_id, id) IN (${placeholders})
       ORDER BY date DESC
     `).all(...threadIds) as any[];

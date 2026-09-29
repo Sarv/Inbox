@@ -3,6 +3,7 @@
 // "Dynamic require of 'stream' is not supported". folder-mapping is pure (no
 // imports at all), so the renderer shares the one implementation. Alias is
 // declared in vite.config.ts, vitest.config.ts and tsconfig.json.
+import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
 import { classifyFolder } from '@sarvinbox/core/folder-mapping';
 
 import { addTag, removeTag, hasTag } from '../../utils/tags';
@@ -1364,10 +1365,12 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
   // the delete fails. Keyed by the draft's unique message-id. This is the draft
   // instance of the app-wide "act instantly, reconcile in the background" model.
   discardDraft: async (messageId: string, threadId?: string, accountId?: string) => {
-    const isDraftRow = (e: any) => {
-      const t = e?.tags || '';
-      return t.includes('|draft|') || t.includes('|Drafts|') || t.includes('|[Gmail]/Drafts|');
-    };
+    // The ONE draft predicate (core `isDraftRow`), with the account's own
+    // Drafts/Sent paths: a sent copy that kept a stale `|draft|` tag
+    // (`|Sent|draft|`, `|INBOX.Sent|draft|`) is the reader's own reply, not a
+    // draft — a hand-rolled tag check took it out of the open thread.
+    const folders = conversationFoldersOf(get().folders);
+    const isThreadDraft = (e: any) => isDraftRow(e?.tags, folders);
     // Snapshot every view BEFORE removal so a failed server delete can restore
     // them all (not just the flat list).
     const before = {
@@ -1388,7 +1391,7 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     const removedIds = new Set<string>();
     if (threadId) {
       for (const e of [...before.emails, ...before.threadEmails, ...before.searchResults]) {
-        if ((e as any).threadId === threadId && isDraftRow(e)) removedIds.add(e.id);
+        if ((e as any).threadId === threadId && isThreadDraft(e)) removedIds.add(e.id);
       }
     }
     if (single) removedIds.add(single.id);

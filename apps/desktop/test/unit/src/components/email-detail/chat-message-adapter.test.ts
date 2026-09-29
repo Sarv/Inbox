@@ -15,7 +15,6 @@ import {
   asSentEmailIds,
   attachmentsOf,
   carrierEmailOf,
-  chatMessagesFromConversation,
   bodyOf,
   chatMessagesFromThread,
   draftIdsIn,
@@ -23,30 +22,19 @@ import {
   isFromMe,
   normalizedContent,
   ownerEmailOf,
+  polishEntriesOf,
+  isAsSentMail,
+  isSameContent,
   isThreadSegmentWarm,
   mailsFromEmails,
+  presentTurns,
+  threadTurns,
   toEpochMs,
   toEpochSeconds,
   warmThreadSegments,
 } from '../../../../../src/components/email-detail/chat-message-adapter';
-import type { ConversationMessage } from '../../../../../src/services/conversation-service';
 
 import { ELEVEN_AM, email, ME, TEN_AM } from './email-fixture';
-
-function conversationMessage(
-  overrides: Partial<ConversationMessage> & { id: string },
-): ConversationMessage {
-  return {
-    fromAddress: 'alice@acme.example',
-    fromName: 'Alice Chen',
-    toAddress: ME,
-    date: TEN_AM,
-    body: '<p>Hi</p>',
-    isExtracted: true,
-    sourceEmailId: 'e1',
-    ...overrides,
-  };
-}
 
 function mapOf(...emails: EmailRecord[]) {
   return new Map(emails.map((each) => [each.id, each]));
@@ -163,134 +151,28 @@ describe('attachmentsOf', () => {
   });
 });
 
-describe('chatMessagesFromConversation', () => {
-  const source = email({
-    id: 'e1',
-    ccAddress: 'cc@acme.example',
-    ccNames: 'Carol',
-    attachmentNames: '["report.pdf"]',
-    attachmentSizes: '[20480]',
-  });
+// The reply-polish transcript is built from the chat turns (the old AI
+// adapter, `chatMessagesFromConversation`, went with the whole-thread
+// extraction it rendered): who wrote each, when — back in stored SECONDS —
+// and its body.
+describe('polishEntriesOf', () => {
+  const turn = (over: Partial<ChatMessage>): ChatMessage =>
+    ({ id: 'e1', fromAddress: 'alice@acme.example', fromName: 'Alice Chen', date: TEN_AM * 1000, body: '<p>Hi</p>', ...over }) as ChatMessage;
 
-  function convert(
-    messages: ConversationMessage[],
-    extra: Partial<Parameters<typeof chatMessagesFromConversation>[1]> = {},
-  ) {
-    return chatMessagesFromConversation(messages, {
-      currentUserEmail: ME,
-      emailsById: mapOf(source),
-      ...extra,
-    });
-  }
-
-  it('carries every field the view needs across', () => {
-    const [message] = convert([conversationMessage({ id: 'm1' })]);
-    expect(message).toMatchObject({
-      id: 'm1',
-      // The source id is what routes an action — reply, download, open
-      // original — back to the real underlying mail.
-      sourceId: 'e1',
-      fromAddress: 'alice@acme.example',
-      fromName: 'Alice Chen',
-      toAddress: ME,
-      ccAddress: 'cc@acme.example',
-      ccNames: 'Carol',
-      date: TEN_AM * 1000,
-      body: '<p>Hi</p>',
-      isFromMe: false,
-      attachments: [{ filename: 'report.pdf', sizeBytes: 20480 }],
-    });
-  });
-
-  // Regression: the AI view frames bodies too, so its bubbles need the same
-  // canvas marker as the Standard view's — and none when no canvas is asked for.
-  it('tags an extracted turn with the canvas its body needs', () => {
-    const [dark] = convert([conversationMessage({ id: 'm1' })], {
-      recolorBody: (html) => ({ html, canvas: 'dark-paper' }),
-    });
-    const [light] = convert([conversationMessage({ id: 'm1' })], {
-      recolorBody: (html) => ({ html }),
-    });
-    expect(dark!.applied).toEqual([DARK_CANVAS_MARKER]);
-    expect(light!.applied).toBeUndefined();
-  });
-
-  // Regression: progressive extraction APPENDS a bubble as each email
-  // completes, so unsorted they arrive out of order — misordered bubbles and
-  // repeated date separators ("Today" … "Yesterday" … "Today").
-  it('puts the turns in chronological order however they arrived', () => {
-    const messages = convert([
-      conversationMessage({ id: 'later', date: ELEVEN_AM }),
-      conversationMessage({ id: 'earlier', date: TEN_AM }),
-    ]);
-    expect(messages.map((each) => each.id)).toEqual(['earlier', 'later']);
-  });
-
-  // Regression: also covers bubbles left in an older cache, built before drafts
-  // were excluded from extraction at all.
-  it('drops a turn extracted from an unsent draft', () => {
-    const draft = email({ id: 'e2', tags: '|draft|' });
-    const messages = chatMessagesFromConversation(
-      [conversationMessage({ id: 'm1' }), conversationMessage({ id: 'm2', sourceEmailId: 'e2' })],
-      { currentUserEmail: ME, emailsById: mapOf(source, draft) },
-    );
-    expect(messages.map((each) => each.id)).toEqual(['m1']);
-  });
-
-  it('right-aligns the reader’s own turn', () => {
-    const [message] = convert([conversationMessage({ id: 'm1', fromAddress: ME })]);
-    expect(message!.isFromMe).toBe(true);
-  });
-
-  // Regression: inline images are stored as `sarv-image:<id>` refs, not data
-  // URLs. Unresolved, every inline image in the thread renders broken.
-  it('resolves inline image refs through the host’s cache', () => {
-    const [message] = convert(
-      [conversationMessage({ id: 'm1', body: '<img src="sarv-image:ab">' })],
-      {
-        resolveImages: (html) => html.replace('sarv-image:ab', 'data:image/png;base64,AA'),
-      }
-    );
-    expect(message!.body).toBe('<img src="data:image/png;base64,AA">');
-  });
-
-  describe('body state', () => {
-    // Regression: a spinner that never stops is the failure the reader cannot
-    // act on — a permanently failed body must offer a retry instead.
-    it('marks a body that failed for good as failed, not pending', () => {
-      const [message] = convert([conversationMessage({ id: 'm1', body: '' })], {
-        failedBodies: new Set(['e1']),
-      });
-      expect(message).toMatchObject({ bodyFailed: true });
-      expect(message!.bodyPending).toBeUndefined();
-    });
-
-    it('marks a body that has not arrived yet as pending', () => {
-      const [message] = convert([conversationMessage({ id: 'm1', body: '' })]);
-      expect(message).toMatchObject({ bodyPending: true });
-      expect(message!.bodyFailed).toBeUndefined();
-    });
-
-    // Regression: a body that HAS arrived must carry neither flag, or the view
-    // flickers back to a spinner over content it already has.
-    it('leaves a body that arrived alone', () => {
-      const [message] = convert([conversationMessage({ id: 'm1' })], {
-        failedBodies: new Set(['e1']),
-      });
-      expect(message!.bodyPending).toBeUndefined();
-      expect(message!.bodyFailed).toBeUndefined();
-    });
-
-    // Known limitation, stated rather than hidden: a turn whose source email is
-    // not in the thread map cannot be pending OR failed, because there is no id
-    // to retry with. It renders as an empty bubble.
-    it('claims neither state for a turn whose source email is missing', () => {
-      const [message] = convert([
-        conversationMessage({ id: 'm1', body: '', sourceEmailId: 'gone' }),
+  // Regression: the view's dates are MILLISECONDS; the transcript formats
+  // SECONDS. Unconverted, every message in the polish prompt is dated in the
+  // year 58,000 — and an unreadable date must be 0, never NaN.
+  it('hands each turn over with its date back in seconds', () => {
+    expect(polishEntriesOf([turn({}), turn({ id: 'e2', date: Number.NaN, fromName: null, fromAddress: 'bob@acme.example' })]))
+      .toEqual([
+        { sender: 'Alice Chen', address: 'alice@acme.example', date: TEN_AM, body: '<p>Hi</p>' },
+        { sender: 'bob@acme.example', address: 'bob@acme.example', date: 0, body: '<p>Hi</p>' },
       ]);
-      expect(message!.bodyPending).toBeUndefined();
-      expect(message!.bodyFailed).toBeUndefined();
-    });
+  });
+
+  it('keeps a body-less turn as an empty body (the transcript skips it)', () => {
+    expect(polishEntriesOf([turn({ body: undefined as unknown as string, fromAddress: undefined as unknown as string, fromName: null })]))
+      .toEqual([{ sender: '', address: '', date: TEN_AM, body: '' }]);
   });
 });
 
@@ -914,6 +796,27 @@ describe('as-sent mail', () => {
     expect(messages.find((each) => each.id === 'keka-1')!.body).not.toBe(DIGEST);
   });
 
+  // Deliberate change (decision 6, one membership predicate): the reader's own
+  // reply whose Sent copy kept a stale `|draft|` tag is a MESSAGE, not a draft,
+  // so it is a second sender and the thread is a conversation. The old tag-only
+  // draft check hid that reply and restored the newsletter as sent beside it.
+  // What breaks if this goes red: the stale-tag sent copy is treated as a draft
+  // again, and the reader's own reply disappears from the thread.
+  it('counts the reader’s sent copy with a stale draft tag as a second sender', () => {
+    const sentCopy = email({
+      id: 'my-reply',
+      date: ELEVEN_AM,
+      fromAddress: ME,
+      tags: '|[Gmail]/Sent Mail|draft|',
+      rawBody: '<p>Thanks, noted.</p>',
+    });
+    expect(draftIdsIn([digest(), sentCopy]).size).toBe(0);
+    expect(asSentEmailIds([digest(), sentCopy]).size).toBe(0);
+    const messages = chatMessagesFromThread([digest(), sentCopy], { currentUserEmail: ME });
+    expect(messages.map((each) => each.id)).toEqual(['keka-1', 'my-reply']);
+    expect(messages.some((each) => each.applied?.includes(AS_SENT_MARKER))).toBe(false);
+  });
+
   // Regression: a person's reply carrying a signature logo passes BOTH of the
   // per-mail rules — `looksDesigned` fires on the one image, and the `|bulk|`
   // tag is set from headers a corporate server puts on ordinary mail. Without
@@ -1120,5 +1023,142 @@ describe('warmThreadSegments', () => {
 
   it('has nothing to do for an empty slice', () => {
     expect(() => warmThreadSegments([], { currentUserEmail: ME })).not.toThrow();
+  });
+});
+
+describe('drafts, by the shared membership predicate', () => {
+  // Regression: the adapter recognised a draft by its `|draft|` tag alone, so a
+  // draft synced back from IMAP — tagged only with its Drafts folder — reached
+  // the Standard view as a message the reader appeared to have SENT, and its
+  // sender counted toward "who wrote in this thread".
+  it('never turns a Drafts-folder-only draft into a bubble or a sender', () => {
+    const received = email({ id: 'e1', rawBody: '<p>Can we meet on Friday?</p>' });
+    const draft = email({
+      id: 'd1',
+      date: ELEVEN_AM,
+      fromAddress: ME,
+      tags: '|Drafts|',
+      rawBody: '<p>Friday works for me.</p>',
+    });
+    const messages = chatMessagesFromThread([received, draft], { currentUserEmail: ME });
+    expect(messages.map((each) => each.id)).toEqual(['e1']);
+    expect(mailsFromEmails([received, draft]).find((mail) => mail.id === 'd1')!.isDraft).toBe(true);
+    // A second sender would have disqualified a designed single-sender mail
+    // from the as-sent path; the draft is nobody's message.
+    expect(draftIdsIn([received, draft])).toEqual(new Set(['d1']));
+  });
+
+  // The same, for a provider path the standard names do not cover: only the
+  // account's folder roles say `INBOX.Drafts` is a Drafts folder.
+  it('recognises a provider Drafts path when handed the account’s folders', () => {
+    const draft = email({ id: 'd1', tags: '|INBOX.Drafts|', rawBody: '<p>half-written</p>' });
+    const folders = { draftPaths: ['INBOX.Drafts'], sentPaths: [] };
+    expect(draftIdsIn([draft]).size).toBe(0);
+    expect(draftIdsIn([draft], folders)).toEqual(new Set(['d1']));
+    expect(chatMessagesFromThread([draft], { currentUserEmail: ME, folders })).toEqual([]);
+  });
+
+  // A deleted draft (in Trash) is still a draft row: deleting a draft used to
+  // make it appear in the thread as an ordinary message.
+  it('keeps a draft that was deleted into Trash out of the bubbles', () => {
+    const trashed = email({ id: 'd1', tags: '|Trash|draft|', rawBody: '<p>discarded</p>' });
+    expect(chatMessagesFromThread([trashed], { currentUserEmail: ME })).toEqual([]);
+  });
+
+  // A sent copy keeps a stale `|draft|` tag from the compose that made it; it
+  // is the reader's own sent reply and must stay in the conversation.
+  it('keeps a sent copy that still carries a stale draft tag', () => {
+    const sent = email({ id: 's1', fromAddress: ME, tags: '|[Gmail]/Sent Mail|draft|', rawBody: '<p>Sent it.</p>' });
+    expect(chatMessagesFromThread([sent], { currentUserEmail: ME }).map((each) => each.id)).toEqual(['s1']);
+  });
+});
+
+describe('threadTurns / presentTurns', () => {
+  /** Two replies quoting the same earlier message, so the host dedupe has work. */
+  const QUOTED = 'The capacity sheet from finance arrives on Thursday morning, together with the headcount plan.';
+  const reply = (id: string, date: number, own: string) =>
+    email({
+      id,
+      date,
+      fromAddress: `${id}@acme.example`,
+      rawBody: [
+        `<div dir="ltr">${own}</div>`,
+        '<div class="gmail_quote"><div dir="ltr" class="gmail_attr">',
+        'On Mon, 2 Mar 2026 at 10:00, Carol Diaz &lt;carol@acme.example&gt; wrote:<br></div>',
+        `<blockquote class="gmail_quote"><div dir="ltr">${QUOTED}</div></blockquote></div>`,
+      ].join(''),
+    });
+
+  // Regression guard for the refactor: Standard is EXACTLY the presented
+  // turns — the split, the host's dedupe and the as-sent restore, in that
+  // order — so the AI view can be built from the same turn objects.
+  it('composes to exactly what chatMessagesFromThread renders', () => {
+    const emails = [reply('e1', TEN_AM, 'First reply, thanks.'), reply('e2', ELEVEN_AM, 'Second reply, agreed.')];
+    const standard = threadTurns(emails, { currentUserEmail: ME });
+    expect(presentTurns(standard.turns, {})).toEqual(chatMessagesFromThread(emails, { currentUserEmail: ME }));
+  });
+
+  // The AI view counts and replaces the first email's quotes from `raw`: the
+  // turns each mail carries BEFORE the host dedupe, which may keep a later
+  // mail's copy of a quote instead of the first email's.
+  it('keeps every carried turn in raw and the deduped list in turns', () => {
+    const emails = [reply('e1', TEN_AM, 'First reply, thanks.'), reply('e2', ELEVEN_AM, 'Second reply, agreed.')];
+    const standard = threadTurns(emails, { currentUserEmail: ME });
+    expect(standard.raw.filter((turn) => turn.sourceId === 'e1')).toHaveLength(1);
+    expect(standard.turns.length).toBeLessThanOrEqual(standard.raw.length);
+    expect(standard.turns.every((turn) => standard.raw.includes(turn) || turn.applied?.includes(AS_SENT_MARKER))).toBe(true);
+  });
+
+  // presentTurns hands back an untouched turn as the same object, so the AI
+  // view's untouched bubbles never re-render.
+  it('returns an untouched turn as the same object', () => {
+    const turns = threadTurns([email({ id: 'e1', rawBody: '<p>plain</p>' })], { currentUserEmail: ME }).turns;
+    expect(presentTurns(turns, {})[0]).toBe(turns[0]);
+  });
+});
+
+describe('isAsSentMail', () => {
+  const DESIGNED = '<table role="presentation" bgcolor="#fff"><tr><td><h2>Digest</h2></td></tr></table>';
+  const bulk = email({
+    id: 'k1',
+    fromAddress: 'no-reply@kekamail.com',
+    messageId: '<k1@kekamail.com>',
+    rawBody: DESIGNED,
+    tags: '|INBOX|bulk|',
+  });
+
+  // The per-mail half of the as-sent rule, shared with the first-email facts:
+  // if it disagreed with asSentEmailIds, Standard would show a mail as sent
+  // while the AI view offered to split it (or the reverse).
+  it('agrees with asSentEmailIds for a single-sender thread', () => {
+    expect(isAsSentMail(bulk, 1)).toBe(true);
+    expect(asSentEmailIds([bulk]).has('k1')).toBe(true);
+  });
+
+  it('is never true once a second sender is in the thread', () => {
+    expect(isAsSentMail(bulk, 2)).toBe(false);
+  });
+
+  it('is false for a plain body or a person’s designed-looking mail', () => {
+    expect(isAsSentMail(email({ id: 'p1', rawBody: '<p>hello</p>', tags: '|INBOX|bulk|' }), 1)).toBe(false);
+    expect(isAsSentMail(email({ id: 'p2', rawBody: DESIGNED, tags: '|INBOX|' }), 1)).toBe(false);
+  });
+
+  // The sender count is core's `conversationSenders`, the count main hands the
+  // renderer: a row with no From address is nobody, not a second sender.
+  it('does not count a header-less row as a second sender', () => {
+    expect(asSentEmailIds([bulk, email({ id: 'x', fromAddress: '', rawBody: '<p>?</p>' })]).has('k1')).toBe(true);
+  });
+});
+
+describe('isSameContent', () => {
+  // The AI view's "same message?" — without the exact-key half, a short
+  // quoted reply ("Approved.") never matched and was shown twice.
+  it('matches short bodies by the exact key and long ones by containment', () => {
+    expect(isSameContent('approved', 'approved')).toBe(true);
+    expect(isSameContent('approved', 'rejected')).toBe(false);
+    const long = 'a'.repeat(60) + 'b'.repeat(60);
+    expect(isSameContent(`confidential${long}`, long)).toBe(true);
+    expect(isSameContent('', '')).toBe(false);
   });
 });

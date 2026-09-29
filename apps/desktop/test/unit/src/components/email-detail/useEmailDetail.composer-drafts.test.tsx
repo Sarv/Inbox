@@ -38,24 +38,24 @@ beforeEach(() => {
         bridge.storedDraft ? { success: true, data: bridge.storedDraft } : { success: false },
     },
     agent: { getProposals: async () => ({ success: true, data: bridge.proposals }) },
-    ai: { getConversation: async () => ({ success: false }) },
+    ai: { getFirstSplit: async () => ({ success: false }) },
   };
 });
 
 vi.mock('../../../../../src/services/ai-service', () => ({
   getDefaultProvider: () => null,
+  getAIHealth: () => ({ healthy: true, reason: '' }),
+  getCurrentUserEmail: (fallback: string) => fallback,
+  buildPolishThreadContext: () => '',
   detectSignature: vi.fn(),
   makeAICompletion: vi.fn(),
-  loadAIFeatures: () => ({}),
+  loadAIFeatures: () => [],
 }));
-vi.mock('../../../../../src/services/conversation-service', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
+vi.mock('../../../../../src/services/ai-features', () => ({
   // Chat view off, no AI: the composers are all this file is about.
   isConversationModeEnabled: () => false,
   isAutoChatViewEnabled: () => false,
-  hasEmbeddedConversation: () => false,
-  extractConversation: vi.fn(),
-  aiSplitFirstEmail: vi.fn(),
+  isAutoChatExtractEnabled: () => false,
 }));
 vi.mock('../../../../../src/services/image-cache', () => ({
   populateCacheFromHtml: vi.fn(),

@@ -25,7 +25,8 @@ const email = (id: string, tags: string) => ({ id, tags }) as never;
 const thread = (threadId: string, emails: Row[]) =>
   ({ threadId, emails: emails.map((e) => email(e.id, e.tags)) }) as never;
 
-const DRAFT_PATHS = new Set(['Drafts']);
+/** The account's folder roles, as the list computes them (`conversationFoldersOf`). */
+const DRAFT_FOLDERS = { draftPaths: ['Drafts'], sentPaths: [] };
 
 /** A reply-in-progress plus the message it answers — the shape that broke. */
 const draftThread = thread('t1', [
@@ -42,7 +43,7 @@ describe('selectedEmailIdsFor — outside Drafts', () => {
         visibleThreads: [draftThread],
         selectedThreadIds: new Set(['t1']),
         viewIsDrafts: false,
-        draftFolderPaths: DRAFT_PATHS,
+        conversationFolders: DRAFT_FOLDERS,
       }),
     ).toEqual(['received-1', 'draft-1']);
   });
@@ -77,7 +78,7 @@ describe('selectedEmailIdsFor — in Drafts', () => {
       visibleThreads: [draftThread],
       selectedThreadIds: new Set(['t1']),
       viewIsDrafts: true,
-      draftFolderPaths: DRAFT_PATHS,
+      conversationFolders: DRAFT_FOLDERS,
     });
 
     expect(ids).toEqual(['draft-1']);
@@ -100,7 +101,7 @@ describe('selectedEmailIdsFor — in Drafts', () => {
         visibleThreads: threads,
         selectedThreadIds: new Set(['t1', 't2']),
         viewIsDrafts: true,
-        draftFolderPaths: DRAFT_PATHS,
+        conversationFolders: DRAFT_FOLDERS,
       }),
     ).toEqual(['draft-1', 'draft-2']);
   });
@@ -119,7 +120,7 @@ describe('selectedEmailIdsFor — in Drafts', () => {
         visibleThreads: [synced],
         selectedThreadIds: new Set(['t3']),
         viewIsDrafts: true,
-        draftFolderPaths: new Set(['INBOX.Drafts']),
+        conversationFolders: { draftPaths: ['INBOX.Drafts'], sentPaths: [] },
       }),
     ).toEqual(['draft-3']);
   });
@@ -136,7 +137,7 @@ describe('selectedEmailIdsFor — in Drafts', () => {
         visibleThreads: [sent],
         selectedThreadIds: new Set(['t4']),
         viewIsDrafts: true,
-        draftFolderPaths: DRAFT_PATHS,
+        conversationFolders: DRAFT_FOLDERS,
       }),
     ).toEqual([]);
   });
@@ -151,7 +152,7 @@ describe('selectedEmailIdsFor — in Drafts', () => {
         visibleThreads: [trashed],
         selectedThreadIds: new Set(['t5']),
         viewIsDrafts: true,
-        draftFolderPaths: DRAFT_PATHS,
+        conversationFolders: DRAFT_FOLDERS,
       }),
     ).toEqual([]);
   });
@@ -168,7 +169,7 @@ describe('selectedEmailIdsFor — in Drafts', () => {
         visibleThreads: [allDrafts],
         selectedThreadIds: new Set(['t6']),
         viewIsDrafts: true,
-        draftFolderPaths: DRAFT_PATHS,
+        conversationFolders: DRAFT_FOLDERS,
       }),
     ).toEqual(['d1', 'd2']);
   });
@@ -199,15 +200,15 @@ describe('actionableEmailIds — the rule both paths share', () => {
   ].map((e) => email(e.id, e.tags));
 
   it('takes the whole conversation outside Drafts', () => {
-    expect(actionableEmailIds(emails, false, DRAFT_PATHS)).toEqual(['received-1', 'draft-1']);
+    expect(actionableEmailIds(emails, false, DRAFT_FOLDERS)).toEqual(['received-1', 'draft-1']);
   });
 
   // THE regression, at the row level: the hover trash icon on a draft row.
   it('takes only the draft inside Drafts', () => {
-    expect(actionableEmailIds(emails, true, DRAFT_PATHS)).toEqual(['draft-1']);
+    expect(actionableEmailIds(emails, true, DRAFT_FOLDERS)).toEqual(['draft-1']);
   });
 
   it('returns nothing for an empty thread', () => {
-    expect(actionableEmailIds([], true, DRAFT_PATHS)).toEqual([]);
+    expect(actionableEmailIds([], true, DRAFT_FOLDERS)).toEqual([]);
   });
 });

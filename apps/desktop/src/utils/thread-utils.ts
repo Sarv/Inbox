@@ -1,4 +1,11 @@
 import type { EmailRecord, ViewFilter } from '@sarvinbox/core';
+// Deep import, not the barrel: the core barrel pulls in Node-only transports
+// and crashes the renderer. See `vite/renderer-aliases.ts`.
+import {
+  isDraftRow as isDraftRowTags,
+  isLiveDraft,
+  type ConversationFolders,
+} from '@sarvinbox/core/conversation-membership';
 
 import type { InboxSection, SectionFilter } from '../config/inbox-types';
 import { SECTION_FILTER_LABELS } from '../config/inbox-types';
@@ -46,44 +53,27 @@ export function threadTagsString(thread: EmailThread): string {
 }
 
 /**
- * Robust "is this an unsent draft?" — the single source of truth for every
- * draft check (transcript filter, list count, discard).
+ * Robust "is this an unsent draft?" — "may I edit (or discard) this?".
  *
- * A draft is any message currently living in a Drafts folder. We detect that
- * three ways so no provider slips through:
- *   1. the local mirror marker `|draft|` (rows we wrote ourselves), and
- *   2. membership in a real Drafts folder path (pass `draftFolderPaths` from
- *      the store's folder list so provider-specific paths like `INBOX.Drafts`
- *      are covered — this is what catches IMAP-synced drafts that come back
- *      tagged only with their folder, e.g. `|Drafts|`, and NOT `|draft|`), and
+ * A thin wrapper over the ONE membership predicate in core
+ * (`isLiveDraft`, `@sarvinbox/core/conversation-membership`), which main's
+ * counts, drafter and auto-draft gates use too — so this view and those can
+ * never disagree about what is a draft. A draft is a row in a Drafts folder:
+ *   1. the local mirror marker `|draft|` (rows we wrote ourselves),
+ *   2. one of the account's own Drafts paths (pass `folders` —
+ *      `conversationFoldersOf(store.folders)` — so provider-specific paths like
+ *      `INBOX.Drafts` are covered; this is what catches IMAP-synced drafts
+ *      that come back tagged only with their folder, NOT `|draft|`), and
  *   3. the provider-standard `|Drafts|` / `|[Gmail]/Drafts|` fallbacks.
  *
- * A message that has been sent, trashed, or junked is never a live draft, even
- * if it kept a stale `|draft|` tag (a sent copy tagged `|Sent|draft|`, or a
- * discarded draft moved to `|Trash|`).
+ * A message that has been sent, trashed, junked or flagged `\Deleted` is never
+ * a live draft, even if it kept a stale `|draft|` tag. EVERY Sent folder counts
+ * as sent — `|Sent|`, `|[Gmail]/Sent Mail|`, `|Sent Items|` and the account's
+ * own Sent paths. (This wrapper used to know only `|Sent|`, so a Gmail or
+ * Outlook sent copy with a stale `|draft|` tag read as an editable draft.)
  */
-export function isDraftEmail(email: EmailRecord, draftFolderPaths?: Set<string>): boolean {
-  const tags = email.tags || '';
-  if (
-    tags.includes('|Sent|') ||
-    tags.includes('|Trash|') ||
-    tags.includes('|[Gmail]/Trash|') || // Gmail's trash path (doesn't contain '|Trash|')
-    tags.includes('|Deleted Items|') ||
-    tags.includes('|deleted|') || // \Deleted flag — marked for expunge, not a live draft
-    tags.includes('|Junk|') ||
-    tags.includes('|Junk Email|') ||
-    tags.includes('|Spam|') ||
-    tags.includes('|[Gmail]/Spam|')
-  ) {
-    return false;
-  }
-  if (tags.includes('|draft|')) return true;
-  if (draftFolderPaths) {
-    for (const path of draftFolderPaths) {
-      if (path && tags.includes(`|${path}|`)) return true;
-    }
-  }
-  return tags.includes('|Drafts|') || tags.includes('|[Gmail]/Drafts|');
+export function isDraftEmail(email: EmailRecord, folders?: ConversationFolders | null): boolean {
+  return isLiveDraft(email.tags, folders);
 }
 
 export function isDraft(email: EmailRecord): boolean {
@@ -91,38 +81,24 @@ export function isDraft(email: EmailRecord): boolean {
 }
 
 /**
- * Is this row a draft — LIVE or DISCARDED?
+ * Is this row a draft — LIVE or DISCARDED? "Should this render as a message in
+ * the conversation?" is answered NO for every draft row.
  *
  * `isDraftEmail` answers "may I edit this?", so it says no once a draft is in
- * Trash. The thread view asks a different question: "should this render as a
- * message in the conversation?", and for a discarded draft the answer is also
- * no. Filtering the message list on `isDraftEmail` alone meant deleting a draft
- * MADE IT APPEAR: the delete added `|Trash|`, the row stopped being a live
- * draft, and it fell straight through the filter into the thread as an ordinary
- * message. Reported from the field as "draft is deleted but when I open the
- * main thread it's showing".
+ * Trash. Filtering the message list on it alone meant deleting a draft MADE IT
+ * APPEAR: the delete added `|Trash|`, the row stopped being a live draft, and
+ * it fell straight through the filter into the thread as an ordinary message.
+ * Reported from the field as "draft is deleted but when I open the main thread
+ * it's showing".
  *
- * A SENT copy is the deliberate exception. It keeps a stale `|draft|` tag from
- * the compose that produced it, but it is a real message the user sent and
- * belongs in the conversation — excluding it would hide their own replies from
- * every thread they ever answered.
+ * A SENT copy is the deliberate exception: it keeps a stale `|draft|` tag from
+ * the compose that produced it, but it is a message the user sent.
+ *
+ * A thin wrapper over core's `isDraftRow` — the one predicate (see
+ * `conversationMembers`).
  */
-export function isDraftRow(email: EmailRecord, draftFolderPaths?: Set<string>): boolean {
-  const tags = email.tags || '';
-  if (
-    tags.includes('|Sent|') ||
-    tags.includes('|[Gmail]/Sent Mail|') ||
-    tags.includes('|Sent Items|')
-  ) {
-    return false;
-  }
-  if (tags.includes('|draft|')) return true;
-  if (draftFolderPaths) {
-    for (const path of draftFolderPaths) {
-      if (path && tags.includes(`|${path}|`)) return true;
-    }
-  }
-  return tags.includes('|Drafts|') || tags.includes('|[Gmail]/Drafts|');
+export function isDraftRow(email: EmailRecord, folders?: ConversationFolders | null): boolean {
+  return isDraftRowTags(email.tags, folders);
 }
 
 export function hasImportanceFlag(email: EmailRecord): boolean {
