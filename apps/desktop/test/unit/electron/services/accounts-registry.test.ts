@@ -74,6 +74,7 @@ import {
   getRegistryActiveAccountId,
   listRegistryAccounts,
   readRegistryAccounts,
+  registryAccountEmail,
   removeRegistryAccount,
   resolveAccountEmail,
   resolveAccountIdentity,
@@ -380,6 +381,44 @@ describe('resolveAccountIdentity', () => {
     expect(resolveAccountIdentity(storage)).toEqual({
       email: '', name: 'No Address', aliases: [],
     });
+  });
+});
+
+describe('registryAccountEmail (strict: this account id, nothing else)', () => {
+  // Picks whose Gmail grant a label pass acts with: returning another row's
+  // address sends one account's label writes to a different mailbox.
+  it('returns the address of exactly the row with this id', () => {
+    upsertRegistryAccount(account({ id: 'acct-a', email: 'a@gmail.com' }));
+    upsertRegistryAccount(account({ id: 'acct-b', email: 'b@gmail.com' }));
+    expect(registryAccountEmail('acct-b')).toBe('b@gmail.com');
+    expect(registryAccountEmail('acct-a')).toBe('a@gmail.com');
+  });
+
+  // The lenient resolver falls back to the ACTIVE and then the SOLE account.
+  // Copying either fallback here would hand an unknown account a real
+  // mailbox's grant, which is the wrong-mailbox bug this function exists to stop.
+  it('never falls back to the active or the sole account for an unknown id', () => {
+    upsertRegistryAccount(account({ id: 'acct-a', email: 'a@gmail.com' }));
+    setRegistryActiveAccountId('acct-a');
+    expect(registryAccountEmail('acct-gone')).toBe('');
+    expect(resolveAccountEmail()).toBe('a@gmail.com'); // the lenient sibling does guess
+  });
+
+  // The pre-account default slot maps to a null id; it must get "unknown",
+  // never a lookup that happens to match something.
+  it('is empty for a missing id', () => {
+    upsertRegistryAccount(account({ id: 'acct-a', email: 'a@gmail.com' }));
+    expect(registryAccountEmail(null)).toBe('');
+    expect(registryAccountEmail(undefined)).toBe('');
+    expect(registryAccountEmail('')).toBe('');
+  });
+
+  // An unreadable registry must answer "unknown" (callers then skip the
+  // Gmail API), not throw into a label pass.
+  it('is empty, not a throw, when the registry cannot be read', () => {
+    upsertRegistryAccount(account({ id: 'acct-a', email: 'a@gmail.com' }));
+    dbState.fail.add('select');
+    expect(registryAccountEmail('acct-a')).toBe('');
   });
 });
 

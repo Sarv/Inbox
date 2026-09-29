@@ -50,7 +50,7 @@ import { saveDraftToIMAP } from '../ipc/draft-handlers';
 import { sendEmailFromMain, appendSentCopy } from '../ipc/smtp-handlers';
 import { getStorage, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient, findStorageForEmail } from '../shared';
 
-import { resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
+import { registryAccountEmail, resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
 import { loadAgentConfig } from './agent-config-store';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
@@ -2005,25 +2005,37 @@ export function setCategoryLabelConfig(cfg: { enabled: boolean; folderMode: Fold
 }
 
 /**
- * Resolve a valid Gmail API token by finding a stored GOOGLE-OAUTH account
- * (preferring one whose email matches `preferEmail`), rather than trusting the
- * pipeline's profile email. Returns null when no Gmail account is OAuth-
- * connected — the signal to leave labels plain (app-password / non-Gmail).
+ * The Gmail API token for ONE account runtime: the stored GOOGLE-OAUTH grant
+ * whose email is that account's own registry address (`registryAccountEmail`).
+ * Returns null, the signal to leave labels plain (IMAP only), when the account
+ * is unknown (no id, the pre-account default slot, no registry row), when no
+ * Gmail grant matches its address (app-password Gmail, non-Gmail), or when the
+ * token can't be fetched right now.
+ *
+ * It fails CLOSED and never substitutes another account's grant. It used to
+ * fall back to the FIRST Gmail grant on file, so with two Gmail accounts every
+ * per-account pass (provision, backfill, rename, "Remove all labels") and a
+ * background account's categorization acted on the first mailbox, and never on
+ * the second. A missing colour is cosmetic; a label
+ * written into, renamed in or deleted from the wrong mailbox is not.
  */
-async function resolveGmailToken(preferEmail?: string): Promise<string | null> {
+async function resolveGmailToken(accountId: string | null): Promise<string | null> {
   try {
-    const gmails = (await listAccounts()).filter((a) => a.provider === 'gmail' && a.email);
-    if (gmails.length === 0) {
-      if (traceEnabled()) logger.trace('[Pipeline] resolveGmailToken: no gmail OAuth account on file → plain labels');
+    const email = registryAccountEmail(accountId).toLowerCase();
+    if (!email) {
+      if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: no address for acct=${accountId ?? 'default'} → plain labels`);
       return null;
     }
-    const pick =
-      (preferEmail && gmails.find((a) => a.email.toLowerCase() === preferEmail.toLowerCase())) || gmails[0];
-    const token = await getValidAccessToken('gmail' as any, pick.email).catch((e) => {
-      logger.warn(`[Pipeline] resolveGmailToken: token fetch failed for ${pick.email}:`, e?.message || e);
+    const grant = (await listAccounts()).find((a) => a.provider === 'gmail' && a.email?.toLowerCase() === email);
+    if (!grant) {
+      if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: no gmail OAuth grant for ${email} → plain labels`);
+      return null;
+    }
+    const token = await getValidAccessToken('gmail' as any, grant.email).catch((e) => {
+      logger.warn(`[Pipeline] resolveGmailToken: token fetch failed for ${grant.email}:`, e?.message || e);
       return null;
     });
-    if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: ${gmails.length} gmail account(s), token=${token ? 'yes' : 'no'} (${pick.email})`);
+    if (traceEnabled()) logger.trace(`[Pipeline] resolveGmailToken: token=${token ? 'yes' : 'no'} (${grant.email})`);
     return token;
   } catch (e) {
     logger.warn('[Pipeline] resolveGmailToken error:', (e as Error).message);
@@ -2127,8 +2139,11 @@ const mirrorDeferrals = new LogAggregator<number>({
 
 const noteMirrorDeferred = (acct: string, uid: number): void => mirrorDeferrals.note(acct, uid);
 
-async function mirrorCategoryLabels(storage: any, email: any, categorySlugs: string[]): Promise<void> {
-  const acct = getAccountIdForStorage(storage) ?? 'active';
+/** Mirror one email's categories onto ITS OWN account's server. Exported only
+ *  so the per-account Gmail-token tests can drive it directly. */
+export async function mirrorCategoryLabels(storage: any, email: any, categorySlugs: string[]): Promise<void> {
+  const accountId = getAccountIdForStorage(storage);
+  const acct = accountId ?? 'active';
   try {
     // NOTE: an EMPTY categorySlugs is valid and MUST proceed — that's how a mail
     // the AI cleared gets its stale account labels stripped (applyEmailLabels
@@ -2165,7 +2180,10 @@ async function mirrorCategoryLabels(storage: any, email: any, categorySlugs: str
 
     const folders = await storage.getFolders();
     const isGmail = engine.operationQueue.isGmailCapable?.() ?? isGmailAccount(folders);
-    const token = isGmail ? await resolveGmailToken(serviceConfig.userEmail || getPipelineUserEmail()) : null;
+    // THIS account's grant, never the pipeline's profile address: that is the
+    // ACTIVE account, so a background Gmail account's labels used to be created
+    // and coloured in the active account's mailbox instead of its own.
+    const token = isGmail ? await resolveGmailToken(accountId) : null;
     if (traceEnabled()) logger.trace(`[Pipeline] mirror acct=${acct} uid=${email.uid} folder="${folder.path}" isGmail=${isGmail} token=${token ? 'yes' : 'no'} cats=[${cats.map((c) => c.slug).join(',')}]`);
     const result = await applyEmailLabels(engine, email, folder.path, cats, isGmail, token, bySlug);
     // Flip label_status → 'done' ONLY on a CONFIRMED apply. A merely-'queued' op
@@ -2193,7 +2211,7 @@ export async function backfillCategoryLabels(limit = 50): Promise<{ accounts: nu
   // an explicit user action ("Apply to recent mail"), so honor it even if the
   // on-boot enabled-push hasn't landed. Only the folderMode is taken from config.
   let accounts = 0, labeled = 0;
-  for (const [, rt] of getAllAccountRuntimes()) {
+  for (const [accountId, rt] of getAllAccountRuntimes()) {
     try {
       const storage: any = rt.storage;
       const engine: any = rt.syncEngine;
@@ -2206,7 +2224,7 @@ export async function backfillCategoryLabels(limit = 50): Promise<{ accounts: nu
       const inbox = folders.find((f: any) => f.specialUse === '\\Inbox' || (f.path || '').toLowerCase() === 'inbox');
       if (!inbox) continue;
       const isGmail = engine.operationQueue.isGmailCapable?.() ?? isGmailAccount(folders);
-      const token = isGmail ? await resolveGmailToken() : null;
+      const token = isGmail ? await resolveGmailToken(accountId) : null;
       const emails = await storage.getEmailsByFolder(inbox.id, { limit, offset: 0 });
       for (const email of emails) {
         if (!email?.uid) continue;
@@ -2246,7 +2264,10 @@ export async function backfillCategoryLabels(limit = 50): Promise<{ accounts: nu
  * connected/ready, so a caller tracking "provisioned this session" must NOT mark
  * it done (it needs to retry on a later connect). Never throws.
  */
-async function provisionAccountLabels(rt: { storage: any; syncEngine: any } | undefined): Promise<{ handled: boolean; created: number }> {
+async function provisionAccountLabels(
+  accountId: string,
+  rt: { storage: any; syncEngine: any } | undefined,
+): Promise<{ handled: boolean; created: number }> {
   try {
     const storage: any = rt?.storage;
     const engine: any = rt?.syncEngine;
@@ -2259,7 +2280,7 @@ async function provisionAccountLabels(rt: { storage: any; syncEngine: any } | un
     if (cats.length === 0) return { handled: true, created: 0 };
     const folders = await storage.getFolders();
     const isGmail = engine.operationQueue.isGmailCapable?.() ?? isGmailAccount(folders);
-    const token = isGmail ? await resolveGmailToken() : null;
+    const token = isGmail ? await resolveGmailToken(accountId) : null;
     let created = 0;
     if (isGmail && token) {
       // Count only labels we ACTUALLY created/recoloured (ensureGmailLabelColor
@@ -2289,8 +2310,8 @@ export async function provisionCategoryLabels(): Promise<{ accounts: number; cre
   if (provisionInFlight) return provisionInFlight;
   provisionInFlight = (async () => {
     let accounts = 0, created = 0;
-    for (const [, rt] of getAllAccountRuntimes()) {
-      const { handled, created: n } = await provisionAccountLabels(rt);
+    for (const [accountId, rt] of getAllAccountRuntimes()) {
+      const { handled, created: n } = await provisionAccountLabels(accountId, rt);
       if (handled) { accounts++; created += n; }
     }
     // Only log when something actually changed — a repeat pass that finds every
@@ -2347,7 +2368,7 @@ export function provisionCategoryLabelsOnConnect(accountId: string | null | unde
   provisioningNow.add(accountId);
   void (async () => {
     try {
-      const { handled } = await provisionAccountLabels(getAccountRuntime(accountId));
+      const { handled } = await provisionAccountLabels(accountId, getAccountRuntime(accountId));
       if (handled) provisionedThisSession.add(accountId);
     } finally {
       provisioningNow.delete(accountId);
@@ -2371,13 +2392,13 @@ export function getCategoryLabelDiag(): { enabled: boolean; connected: number; g
  *  (Gmail via the API, others via IMAP RENAME; keyword providers no-op). */
 export async function renameCategoryLabelEverywhere(oldName: string, newName: string): Promise<void> {
   if (!oldName || !newName || oldName === newName) return;
-  for (const [, rt] of getAllAccountRuntimes()) {
+  for (const [accountId, rt] of getAllAccountRuntimes()) {
     try {
       const engine: any = rt.syncEngine;
       const queue = engine?.operationQueue;
       if (!engine?.isConnected?.() || !queue) continue;
       const isGmail = queue.isGmailCapable?.();
-      const token = isGmail ? await resolveGmailToken() : null;
+      const token = isGmail ? await resolveGmailToken(accountId) : null;
       if (isGmail && token) {
         await renameGmailLabel(token, folderPathForCategory({ slug: '', name: oldName }, '/'), folderPathForCategory({ slug: '', name: newName }, '/'));
       } else {
@@ -2410,14 +2431,14 @@ export async function onCategoryDefinitionUpserted(oldName: string | undefined, 
  */
 export async function removeAllCategoryLabels(): Promise<{ accounts: number; removed: number }> {
   let accounts = 0, removed = 0;
-  for (const [, rt] of getAllAccountRuntimes()) {
+  for (const [accountId, rt] of getAllAccountRuntimes()) {
     try {
       const engine: any = rt.syncEngine;
       const queue = engine?.operationQueue;
       if (!engine?.isConnected?.() || !queue) continue;
       accounts++;
       const isGmail = queue.isGmailCapable?.();
-      const token = isGmail ? await resolveGmailToken() : null;
+      const token = isGmail ? await resolveGmailToken(accountId) : null;
       if (isGmail && token) {
         removed += await deleteGmailLabelsUnder(token, SARV_LABEL_PARENT);
       } else {

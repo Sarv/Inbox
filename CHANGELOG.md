@@ -75,6 +75,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped only the expiry and kept the card. It then had no countdown and
   never closed, so an old code could sit on screen until you closed it
   yourself. Cards that have already expired are now not shown at all.
+- **Each Gmail account's category labels stay in that account.** With more
+  than one Gmail account signed in with Google, the app made the second
+  account's label changes in the first account's Gmail: its labels were
+  created and coloured there, renaming a category renamed only the first
+  account's label, and Remove all labels (Settings → General) left the second
+  account's labels in place. A background Gmail account's new mail was also
+  labelled through the account you had selected. Each account now changes only
+  its own labels. When an account's Google sign-in can't be used at that
+  moment, its labels are still applied, without colours, and the colours
+  follow later.
 
 ## [1.2.5] - 2026-09-27
 

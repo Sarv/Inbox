@@ -270,6 +270,20 @@ export function resolveAccountEmail(storage?: unknown): string {
 }
 
 /**
+ * The address of exactly the account `accountId` (its own registry row), or ''
+ * when the id is missing, not in the registry, or the registry can't be read.
+ *
+ * The STRICT sibling of `resolveAccountEmail`: no active-account or
+ * sole-account fallback. Use it wherever the answer picks the mailbox an action
+ * lands in, such as whose OAuth grant to act with. A missing address only skips
+ * the action; a guessed one performs it on another user's mailbox.
+ */
+export function registryAccountEmail(accountId: string | null | undefined): string {
+  if (!accountId) return '';
+  return listRegistryAccounts().find((a) => a.id === accountId)?.email ?? '';
+}
+
+/**
  * Seed the registry from the durable MAIN-side stores so accounts survive even a
  * total localStorage loss. Only fills in accounts the registry is MISSING (by
  * id) — it never overwrites a renderer-mirrored entry. Sources:
