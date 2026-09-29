@@ -19,6 +19,9 @@ import {
   LOOPED_IN_BODY,
 } from '../../components/email-detail/looped-in-fixture';
 
+/** A region's text as the DOM reads it: tags gone, entities decoded once. */
+const textOf = (html: string): string => new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '';
+
 /**
  * The first email's body, cut into RAW regions at the library's quote
  * boundaries, and packed into chunks.
@@ -48,7 +51,7 @@ describe('splitRegions', () => {
     const senders = ['Carol Diaz', 'Bob Ray', 'Alice Chen'];
     regions.slice(1).forEach((region, index) => {
       expect(region.html).toContain(bodies[index]!);
-      const text = region.html.replace(/<[^>]*>/g, '');
+      const text = textOf(region.html);
       expect(text.indexOf(`On `)).toBeLessThan(text.indexOf(bodies[index]!.slice(0, 20)));
       expect(region.attribution?.name).toBe(senders[index]);
       // Each region holds its own message only, not the ones quoted under it.
@@ -81,7 +84,10 @@ describe('splitRegions', () => {
       '</body></html>',
     ].join('');
     const [only] = regionsOf(body);
-    expect(only!.html).not.toMatch(/<style|<script|<!--|<title|<meta|office/);
+    const doc = new DOMParser().parseFromString(only!.html, 'text/html');
+    expect(doc.querySelector('style, script, title, meta')).toBeNull();
+    expect(doc.createTreeWalker(doc, NodeFilter.SHOW_COMMENT).nextNode()).toBeNull();
+    expect(only!.html).not.toContain('office');
     expect(only!.html).toContain('src="sarv-image:');
     expect(only!.html).not.toContain('base64');
   });

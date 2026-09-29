@@ -49,7 +49,9 @@ function harness(api: Record<string, unknown>, initial: Record<string, unknown> 
   const holder: { slice?: any } = {};
   // The slice carries its own initial values; the harness state wins over them.
   const get = () => ({ ...holder.slice, ...state });
-  holder.slice = createEmailsSlice(set as any, get as any, undefined as any);
+  // The slice reads only set and get; zustand's store api is not needed.
+  const create = createEmailsSlice as unknown as (s: typeof set, g: typeof get) => any;
+  holder.slice = create(set, get);
   return { state, slice: holder.slice };
 }
 

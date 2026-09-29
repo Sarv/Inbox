@@ -39,7 +39,8 @@ vi.mock('../../../../../src/services/ai-service', () => ({
   getAIHealth: () => ({ healthy: health.healthy, reason: 'test' }),
   getCurrentUserEmail: () => 'me@acme.example',
   buildPolishThreadContext: (args: { entries: Array<{ sender: string; body: string }> }) =>
-    args.entries.map((entry) => `[${entry.sender}] ${entry.body.replace(/<[^>]+>/g, '')}`).join('\n\n'),
+    args.entries.map((entry) =>
+      `[${entry.sender}] ${new DOMParser().parseFromString(entry.body, 'text/html').body.textContent ?? ''}`).join('\n\n'),
   detectSignature: vi.fn(),
   makeAICompletion: vi.fn(),
   loadAIFeatures: () => [],
