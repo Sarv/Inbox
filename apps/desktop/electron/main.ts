@@ -103,6 +103,7 @@ import {
 import { SMOKE_TEST_OK_MARKER, readSmokeTestRequest, writeSmokeTestMarker } from './services/smoke-test';
 import { startSnoozeChecker, stopSnoozeChecker } from './services/snooze-checker';
 import { startSpamReputationScheduler, stopSpamReputationScheduler } from './services/spam-reputation-service';
+import { startSpamVerdictRepair, stopSpamVerdictRepair } from './services/spam-verdict-repair';
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
 import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
 import { checkForUpdates, startUpdateService, stopUpdateService } from './services/update-service';
@@ -256,6 +257,7 @@ function stopBackgroundTimers(): void {
   try { stopContactEnrichmentScheduler(); } catch {}
   try { stopBodyPrefetchScheduler(); } catch {}
   try { stopHeaderBackfill(); } catch {}
+  try { stopSpamVerdictRepair(); } catch {}
   try { stopBackfillScheduler(); } catch {}
   try { stopStartupThreadRepair(); } catch {}
   try { stopAvatarDiscoveryScheduler(); } catch {}
@@ -1023,6 +1025,7 @@ app.whenReady().then(async () => {
     startAvatarDiscoveryScheduler();
     startSenderIdentityScheduler();
     startSpamReputationScheduler();
+    startSpamVerdictRepair();
     startBodyRehealScheduler();
     startPipelineEventPersister();
     startNotificationService();

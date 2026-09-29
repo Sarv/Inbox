@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of their messages as spam also removes them.
 
 ### Fixed
+- **Mail no longer marked "a reply to itself".** Some mail servers report
+  every message's own ID as the one it replies to, and the app believed them,
+  so almost every message picked up spam-filter points for "claims to be a reply to
+  itself". The app now reads the message's own header. Mail already in your
+  mailbox is corrected on the next launch, and anything that was moved to Spam
+  only because of it goes back to your Inbox.
+- **Prices in links are no longer mistaken for web addresses.** An invoice
+  whose amounts (₹3.2, 136.25) link to the biller was flagged as a message
+  with deceptive links. Links in Sarv email signatures, which go through a
+  click-tracking address, are no longer flagged as pretending to be your own
+  domain either. Existing mail is re-checked on the next launch.
 - **Sarv AI asks before it reads your mail.** Signing in with Sarv used to
   switch Sarv AI on straight away, and new mail from every account was sent
   to it. The app now asks first, and nothing is sent unless you agree or pick

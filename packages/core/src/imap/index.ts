@@ -104,7 +104,7 @@ export { withFolderSelected } from './with-folder';
 // and the header backfill, so mail scored at either moment gets one answer.
 export { headerStage } from './header-stage';
 export type { HeaderStageOptions, HeaderStageResult } from './header-stage';
-export { bodyStage, rescoreWithBody } from './body-stage';
+export { bodyStage, recipientDomainsOf, rescoreContent, rescoreWithBody } from './body-stage';
 export type { BodyStageInput } from './body-stage';
 
 // The reputation stage — blocklist lookups for the sender as mail arrives and
