@@ -26,7 +26,50 @@
           >
         </noscript>
       </div>
-      <!-- Google requires the app's homepage to link its privacy policy. -->
+      <!--
+        Google's OAuth verification reads this page: it must describe what the
+        app does and how it uses Google data, in static HTML (no script needed),
+        and keep the Limited Use sentence word for word. Keep it true to the
+        privacy policy (docs/legal/privacy-policy.md).
+      -->
+      <section class="card card-pad stack about" aria-labelledby="about-title">
+        <h2 id="about-title" class="section-title">What Sarv Inbox does</h2>
+        <p>
+          Sarv Inbox is a desktop email client for macOS, Windows and Linux. Connect a Gmail or
+          Google Workspace account, Sarv Mail or any other IMAP mailbox, then read, search, write,
+          reply to, forward, organise and delete your mail in one app.
+        </p>
+        <ul>
+          <li>Conversations as threads or as a chat view, with fast search on your computer.</li>
+          <li>Labels and folders, drafts, attachments, follow-up reminders and snoozing.</li>
+          <li>Spam and phishing protection that checks sender authentication and blocklists.</li>
+          <li>
+            Optional AI help once you connect an AI provider (Sarv AI or your own): sorting mail
+            into categories, suggested reply drafts and AI search.
+          </li>
+        </ul>
+        <h2 class="section-title">How Sarv Inbox uses your Google data</h2>
+        <p>
+          When you connect a Gmail or Google Workspace account, Sarv Inbox asks Google for access to
+          your mail (<code>https://mail.google.com/</code>) and to your name and email address. It
+          uses that access only to provide the features above: downloading, showing, sending,
+          organising and deleting your mail over IMAP and SMTP, and managing the app's labels. Your
+          mail is stored on your computer in an encrypted database, and Sarv runs no server that
+          keeps a copy. Parts of messages go to an AI provider only after you connect one.
+        </p>
+        <p>
+          Sarv Inbox's use and transfer of information received from Google APIs to any other app
+          will adhere to the
+          <a href="https://developers.google.com/terms/api-services-user-data-policy"
+            >Google API Services User Data Policy</a
+          >, including the Limited Use requirements. The
+          <a href="./privacy-policy.html">privacy policy</a> has the details.
+        </p>
+      </section>
+      <!--
+        Google requires the homepage to link the privacy policy at the SAME URL as
+        Google Cloud Console → Branding (https://inbox.sarv.com/privacy-policy.html).
+      -->
       <footer class="row muted text-sm page-footer site-links">
         <a href="./privacy-policy.html">Privacy policy</a>
         <a href="./terms.html">Terms of service</a>

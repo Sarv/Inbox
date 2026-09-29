@@ -10,8 +10,10 @@
 
 A source-available, privacy-first email client with AI-powered features —
 semantic search, smart labeling, and a conversation view that turns long threads
-into a readable chat. Your mail stays on your device; nothing leaves it unless
-you configure an AI provider.
+into a readable chat. Your mail is stored on your device, encrypted, and Sarv
+runs no server that keeps a copy; the
+[privacy policy](https://inbox.sarv.com/privacy-policy.html) lists everything
+the app sends and where.
 
 <p align="center">
   <img src="docs/images/screenshot-inbox.png" alt="Sarv Inbox — the mail view with AI category filters and a section-based inbox" width="900">
@@ -37,8 +39,9 @@ product, or removing the Sarv branding needs our written permission — see
 - **Fast search** — full-text (SQLite FTS5) and AI-powered semantic search.
 - **Smart categorization** — AI labels (Important, Needs Response, Meetings,
   Invoices, …) with a customizable, section-based inbox.
-- **Privacy-first** — no data leaves your device unless you opt into an AI
-  provider; TLS verification is on by default.
+- **Privacy-first** — mail is stored encrypted on your device, message text
+  reaches an AI provider only once you connect one, and TLS verification is on
+  by default.
 - **Cross-platform** — macOS, Windows and Linux (Electron).
 
 ## Getting started
@@ -153,7 +156,8 @@ publishing a release, and running a registry of your own.
 
 ### Design principles
 
-1. **Privacy first** — data stays local unless you configure AI providers.
+1. **Privacy first** — mail stays on the device; message text reaches an AI
+   provider only after the user connects one.
 2. **AI suggests, doesn't act silently** — deterministic, explainable behavior.
 3. **Fail safe** — the email client works even if AI is unavailable.
 4. **Reuse over duplication** — shared logic lives in `packages/core`.

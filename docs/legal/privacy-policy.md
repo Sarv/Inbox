@@ -1,8 +1,8 @@
 <!--
 FOR THE WEB TEAM: publishing notes (this comment is never published).
 
-- It is published automatically at https://inbox.sarv.com/privacy-policy by the
-  site workflow (.github/workflows/pages.yml) whenever this file changes on
+- It is published automatically at https://inbox.sarv.com/privacy-policy.html by
+  the site workflow (.github/workflows/pages.yml) whenever this file changes on
   main — edit it here, not on the website. sarv.com must be verified for the
   Google Cloud project; that covers the inbox.sarv.com subdomain.
 - The Sarv Inbox homepage (https://inbox.sarv.com) already links it. Also link
@@ -13,12 +13,14 @@ FOR THE WEB TEAM: publishing notes (this comment is never published).
   website, says nothing about Gmail data, and its general sharing/marketing/
   caching terms conflict with Google's Limited Use rules. This page's
   precedence clause (Introduction) is what keeps those terms off Google data.
-- The exact same URL goes into Google Cloud Console → Branding → Privacy policy.
+- The exact same URL (with `.html`, as the homepage links it) is what Google
+  Cloud Console → Branding → Privacy policy holds; Google requires the two to
+  match.
 - Keep the "Limited Use" sentence in section 3 word for word; Google requires it.
-- Replace every [CONFIRM: …] with the real answer. Until then the page shows a
-  "Draft" banner and is kept out of search indexes; a placeholder fails
-  Google's review. Have counsel review before publishing (this is a draft, not
-  legal advice).
+- Never publish a [CONFIRM: …] placeholder. One puts a "Draft" banner on the
+  page and keeps it out of search indexes, which fails Google's review; the
+  site's tests refuse it. Have counsel review changes (this is not legal
+  advice).
 
 FOR DEVELOPERS: every statement below describes what the code does. If a
 behaviour changes, update this file in the same change; Google's reviewers
@@ -27,7 +29,7 @@ compare the policy against the app, and a mismatch fails verification.
 
 # Sarv Inbox Privacy Policy
 
-**Effective date:** [CONFIRM: publication date]
+**Effective date:** 29 September 2026
 
 Sarv Inbox ("the app") is a desktop email client for macOS, Windows and Linux,
 published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
@@ -62,10 +64,18 @@ password.
   256-bit key. That key, your OAuth tokens and any passwords are protected by
   your operating system's secure storage (Keychain on macOS, DPAPI on Windows,
   Secret Service on Linux). On Linux systems with no Secret Service available,
-  the key is stored unencrypted on disk, and the app tells you so.
+  the key is stored unencrypted on disk, and the app tells you so. Attachments
+  you open are copied, unencrypted, to a cache in the app's data folder (up to
+  500 MB) so that other programs can open them, and the app keeps a diagnostic
+  log file there that can include email addresses and subjects. Neither leaves
+  your device unless you send it to us.
 - **With your email provider.** Your mail stays on your provider's servers as
   usual. Changes you make in the app (reading, moving, deleting, sending,
-  drafts, labels) are made on the provider's servers.
+  drafts, labels) are made on the provider's servers. By default the app also
+  creates a "Sarv Inbox" label for each of its categories in your mailbox
+  (folders on providers without labels) and files categorised mail under them;
+  turn this off, or remove those labels, in Settings → General → Mirror AI
+  categories to my mailbox.
 - **Not with us.** Sarv does not receive, store or sync a copy of your mailbox
   or your settings, except for the features described in section 4 that you
   use.
@@ -76,7 +86,7 @@ When you sign in with Google, the app requests these permissions:
 
 | Permission | Why |
 | --- | --- |
-| `https://mail.google.com/` | To read, send, organise and delete your Gmail over IMAP and SMTP, the protocols the app uses. Gmail's IMAP/SMTP access accepts only this permission. |
+| `https://mail.google.com/` | To read, send, organise and delete your Gmail over IMAP and SMTP, the protocols the app uses, and to create, colour and remove the app's labels through the Gmail API. Gmail's IMAP/SMTP access accepts only this permission. |
 | `openid`, `email`, `profile` | To show which Google account is connected. |
 
 The app uses Gmail data **only to provide the email features you see in the
@@ -122,15 +132,18 @@ mail is sent to any AI provider until you connect one.**
 - **When:** sorting, conversation extraction, signature detection, contact
   details and reply drafts run automatically on new mail while AI is on. AI
   search runs when you search.
-- **Sarv AI:** requests are processed by Sarv's AI gateway and the model
-  provider behind it [CONFIRM: name the model host(s) and region]. Sarv does not
-  keep prompts or responses after answering them [CONFIRM: retention], and does
-  not use them to train models.
+- **Sarv AI:** requests are processed by Sarv's AI gateway and models that run
+  on servers Sarv operates in India. Sarv does not keep prompts or responses
+  after answering them, and does not use them to train models.
 - **Your own provider:** requests go directly from your device to that provider
   under your own agreement with them. Their privacy policy applies.
-- **Your choices:** turn AI off, or turn individual features off, in Settings →
-  AI. Suggested drafts are saved to your mailbox's Drafts folder and are never
-  sent without you.
+- **Your choices:** remove the AI provider in Settings → AI → Providers to stop
+  all AI processing. You can also turn features off one by one in Settings → AI:
+  sorting (AI Assist) and reply drafts (Draft replies automatically) under Email
+  Agent, conversation extraction under Conversation Mode, and signature
+  detection under Signatures. Contact details and AI search run whenever a
+  provider is connected. Suggested drafts are saved to your mailbox's Drafts
+  folder and are never sent without you.
 
 If you enable **web research** for drafts, the search query goes to Tavily
 (api.tavily.com) using your own Tavily key. It is off by default.
@@ -160,9 +173,11 @@ off, nothing is sent, including reports of crashes that happened earlier.
 To judge whether a new message is spam, the app checks the sending server's IP
 address and the sender's domain against public blocklists (Spamhaus, SpamCop,
 Barracuda, URIBL and SURBL) using DNS lookups from your device. It also looks up
-when the sender's domain was registered, using the public RDAP registry
-service. These lookups include the IP address and domain, never the message.
-They can be turned off in Settings → Security → Blocklists.
+when the sender's domain, and each domain the message links to, was registered,
+using the public RDAP registry service (IANA's directory and the registry of
+each domain's top-level domain). These lookups include IP addresses and domain
+names, never the message itself. They can be turned off in Settings → Security →
+Blocklists.
 
 If you choose the optional **Sarv reputation service**, those IP addresses and
 domains are sent to Sarv instead, with your Sarv sign-in. If you also turn on
@@ -187,7 +202,16 @@ your IP address and that you opened the message. By default the app only loads
 images automatically for senders and categories you are likely to trust; for
 the rest it asks first. You can change this in Settings.
 
-### 4.6 Updates, extensions and connectivity
+### 4.6 Translate and unsubscribe
+
+- **Translate:** when you choose Translate on a message, the app opens Google
+  Translate in your web browser with the message's text (up to its first 5,000
+  characters). Google's terms and privacy policy apply to that page.
+- **Unsubscribe:** when you choose Unsubscribe on a message that offers
+  one-click unsubscribe, the app sends the unsubscribe request to the web
+  address the sender put in that message.
+
+### 4.7 Updates, extensions and connectivity
 
 - The app checks GitHub for new versions about once an hour. That request
   carries your IP address, app version and platform, but no personal data.
@@ -196,7 +220,7 @@ the rest it asks first. You can change this in Settings.
   grant it that permission.
 - The app checks your internet connection by contacting `www.google.com`.
 
-### 4.7 Sarv accounts
+### 4.8 Sarv accounts
 
 If you sign in with a Sarv account, Sarv processes your mailbox (for Sarv Mail),
 the AI requests described above, and your account details under the
@@ -229,11 +253,12 @@ app.
   - `%APPDATA%\Sarv Inbox` on Windows
   - `~/.config/Sarv Inbox` on Linux
 
-We keep crash reports for up to 90 days [CONFIRM: your Sentry retention].
+We keep crash reports for up to 30 days.
 
 ## 7. Security
 
-Mail is encrypted at rest on your device. All connections to email providers,
+Your mail database is encrypted at rest on your device (section 2 describes the
+attachment cache and log file). All connections to email providers,
 AI providers and our services use TLS. Sign-in uses OAuth with PKCE, so no
 password is stored for OAuth accounts. To report a security issue, email
 support@sarv.com with the subject "[Sarv Inbox] Security".
@@ -250,8 +275,8 @@ Depending on where you live (for example under India's Digital Personal Data
 Protection Act, the GDPR or US state laws), you may have the right to access,
 correct or delete personal data we hold, or to object to its use. Most of your
 data never reaches us; for the data that does (AI requests to Sarv AI, Sarv
-reputation reports, crash reports), write to privacy@sarv.com [CONFIRM:
-mailbox exists] and we will answer within 30 days.
+reputation reports, crash reports), write to rc@sarv.com and we will answer
+within 30 days.
 
 ## 10. Changes
 
@@ -261,5 +286,5 @@ Material changes will also be announced in the app's release notes.
 ## 11. Contact
 
 Sarv Webs Private Limited, IT-10, EPIP RIICO Industrial Area, Sitapura, Jaipur,
-Rajasthan 302022, India. Email: privacy@sarv.com. Grievance officer (India):
-[CONFIRM: name, email].
+Rajasthan 302022, India. Email: rc@sarv.com. Grievance officer (India): Ramesh
+Choudhary, rc@sarv.com.

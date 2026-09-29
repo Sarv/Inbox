@@ -1,6 +1,6 @@
 <!--
 DRAFT: not legal advice. Have counsel review before publishing.
-Published automatically at https://inbox.sarv.com/terms by the site workflow
+Published automatically at https://inbox.sarv.com/terms.html by the site workflow
 whenever this file changes on main (the homepage links it). The same URL goes
 into Google Cloud Console → Branding → Terms of service. This comment is never
 published.
@@ -8,12 +8,13 @@ These terms cover USE of the app and the Sarv services it connects to. The
 LICENSE file (Sarv Community License) covers copying, modifying and
 distributing the software; the two are meant to agree. Where these terms repeat
 the licence (warranty, liability, law), keep them in sync.
-Items marked [CONFIRM] need a business answer before publishing.
+Never publish a [CONFIRM] placeholder: it puts a Draft banner on the page,
+and the site's tests refuse it.
 -->
 
 # Sarv Inbox Terms of Service
 
-**Effective date:** [CONFIRM: publication date]
+**Effective date:** 29 September 2026
 
 These terms are an agreement between you and Sarv Webs Private Limited ("Sarv",
 "we", "us"), IT-10, EPIP RIICO Industrial Area, Sitapura, Jaipur, Rajasthan
@@ -42,10 +43,9 @@ to.
 
 - **Sarv account.** Some features require a Sarv account. Keep your sign-in
   secure. You are responsible for activity under your account.
-- **Sarv AI.** AI features may use a paid Sarv wallet balance. [CONFIRM:
-  pricing/wallet terms URL.] AI output can be wrong. Check suggested replies,
-  categories and summaries before you rely on them. Nothing is sent on your
-  behalf without your action.
+- **Sarv AI.** AI features may use a paid Sarv wallet balance. AI output can be
+  wrong. Check suggested replies, categories and summaries before you rely on
+  them. Nothing is sent on your behalf without your action.
 - **Changes and availability.** We may change, suspend or stop a Sarv service.
   Where we reasonably can, we will give notice. The app keeps working with your
   email provider without Sarv services.
@@ -65,7 +65,7 @@ We may suspend access to Sarv services for breach of this section.
 
 ## 5. Privacy
 
-Our [Privacy Policy](https://inbox.sarv.com/privacy-policy) explains what data the app
+Our [Privacy Policy](https://inbox.sarv.com/privacy-policy.html) explains what data the app
 handles and where it goes. Your mail is stored on your device and with your
 email provider, not by us.
 

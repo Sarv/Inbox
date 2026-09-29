@@ -19,13 +19,16 @@ order; the detail for each step is in the provider sections further down.
 
 **Google (existing app, currently in Testing)**
 
-- [ ] Branding: app name, logo, support email, and these URLs
-      ([Branding](#google-branding)): homepage `https://inbox.sarv.com`,
-      privacy policy `https://inbox.sarv.com/privacy-policy`, terms
-      `https://inbox.sarv.com/terms`. They are served by GitHub Pages from
-      `apps/site`, rendered from `docs/legal/*.md`.
-- [ ] That domain is verified in Google Search Console and listed under
-      *Authorized domains*.
+- [x] Branding (saved 2026-09-29): app name **Sarv Inbox**, logo (the app
+      icon at 120×120), support email, and these URLs
+      ([Branding](#google-branding)): homepage `https://inbox.sarv.com/`,
+      privacy policy `https://inbox.sarv.com/privacy-policy.html`, terms
+      `https://inbox.sarv.com/terms.html`. They are served by GitHub Pages from
+      `apps/site`, rendered from `docs/legal/*.md`. Keep the `.html` form: the
+      homepage links exactly these URLs, and Google requires the two to match
+      (`apps/site/test/consent-screen.js` pins them).
+- [x] That domain is verified in Google Search Console (`sarv.com` Domain
+      property) and listed under *Authorized domains*.
 - [ ] Data access lists exactly `https://mail.google.com/`, `openid`,
       `userinfo.email`, `userinfo.profile`, each with a written justification.
 - [ ] Demo video (unlisted YouTube) showing sign-in and every use of the mail
@@ -155,8 +158,8 @@ consent screen*.
 <a id="google-branding"></a>
 1. **Branding** — app name, logo (120×120), user support email, and three URLs
    on a domain you control: application homepage, privacy policy, terms of
-   service. The privacy policy must say what mail data the app accesses and that
-   it stays on the user's device (Google's
+   service. The privacy policy must say what mail data the app accesses, where
+   it is stored and everywhere it is sent (Google's
    [Limited Use][g-limited-use] requirements apply to Gmail data).
 2. **Authorized domains** — add that domain, and verify ownership of it in
    [Google Search Console](https://search.google.com/search-console) with the
@@ -178,11 +181,76 @@ consent screen*.
    **restricted** scope, Google requires an independent assessment by an
    authorised lab after the brand/scope review. It is paid, takes weeks, and has
    to be renewed every year; Google emails the instructions when you reach this
-   stage.
+   stage. Expect it: the AI features send Gmail content to Sarv AI's servers and
+   to the provider a user connects.
 
 Once verified, the consent screen shows your app name and logo with no warning
 — that's the "one click" experience. Nothing in the app changes: the same client
 ID and secret keep working through the whole process.
+
+#### Verification submission kit
+
+Paste these into **Verification center → Prepare for verification**. Keep them
+true to [`docs/legal/privacy-policy.md`](docs/legal/privacy-policy.md): Google
+compares the submission, the policy and the app.
+
+**Justification for `https://mail.google.com/`**
+
+> Sarv Inbox is a desktop email client for macOS, Windows and Linux that
+> replaces the Gmail web interface: users read, search, compose, reply to,
+> forward, send, label, archive and delete their Gmail in the app. It connects
+> over IMAP (imap.gmail.com) and SMTP (smtp.gmail.com) with XOAUTH2, and Gmail's
+> IMAP and SMTP accept only https://mail.google.com/. No narrower scope
+> (gmail.readonly, gmail.modify, gmail.compose, gmail.send, gmail.labels)
+> authorizes IMAP or SMTP, and gmail.modify cannot permanently delete mail,
+> which the app does when the user chooses Delete forever in Trash. The same
+> token calls the Gmail API users.labels endpoint to create, colour and remove
+> the app's category labels. Mail is stored only on the user's device, in an
+> encrypted database; Sarv runs no server that stores it.
+
+**Justification for `openid`, `userinfo.email`, `userinfo.profile`**
+
+> Read once at sign-in: the email address is the XOAUTH2 login identity for IMAP
+> and SMTP, and the address and name label the connected account in the app's
+> account list.
+
+**Additional information for the reviewer**
+
+> Desktop app (Electron) with no web backend. Gmail data is stored only on the
+> user's device, in an encrypted SQLite database whose 256-bit key is protected
+> by the operating system's keychain. Optional AI features
+> (sorting, reply drafts, AI search) send parts of messages to the AI provider
+> the user connects: Sarv AI, which runs on Sarv's servers in India, keeps no
+> prompts or responses and trains no models, and is enabled only after an
+> explicit consent prompt; or the user's own OpenAI or Gemini account. Crash
+> reports go to Sentry with email addresses removed, and users can turn them
+> off. The app downloads from https://inbox.sarv.com.
+
+**Demo video** — unlisted YouTube, English UI, about 3–6 minutes. Record it on
+a release build (the dev build has no Gmail client ID) of a release that already
+does everything the privacy policy describes.
+
+1. https://inbox.sarv.com: scroll to "How Sarv Inbox uses your Google data",
+   then open the privacy policy link.
+2. In Sarv Inbox: Settings → Accounts → add a Google account.
+3. In the browser: click the address bar and scroll until
+   `client_id=1082625038064-…apps.googleusercontent.com` is readable; show the
+   app name **Sarv Inbox** and the permission list, then allow. Until
+   verification, Google's "hasn't verified this app" screen comes first; that
+   is expected.
+4. Back in the app: the account appears and the inbox syncs.
+5. Open a message and an attachment; run a search.
+6. Compose and send a message and show it in Sent; reply; forward.
+7. Label a message, move it, archive it, star it, mark it unread.
+8. Delete a message, then **Delete forever** from Trash.
+9. Show the "Sarv Inbox/…" labels in Gmail on the web (made through the Gmail
+   API) and the switch in Settings → General → Mirror AI categories to my
+   mailbox.
+10. Settings → AI → Providers: add Sarv AI, show the "Let Sarv AI read your new
+    mail?" prompt and agree; show a categorised message and a suggested draft;
+    show where each AI feature is turned off.
+11. Settings → Accounts → remove the account; show that
+    https://myaccount.google.com/permissions no longer lists Sarv Inbox.
 
 [g-limited-use]: https://developers.google.com/terms/api-services-user-data-policy#additional_requirements_for_specific_api_scopes
 
