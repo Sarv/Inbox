@@ -94,6 +94,27 @@ describe('SQLiteStorage round-trips the spam verdict', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // v96's queue, as the main-process repair reads it. If these break the
+  // repair either never starts (reads nothing) or re-processes the same
+  // messages on every launch (dequeue does nothing).
+  it('lists the spam repair queue oldest first, in batches, and dequeues', () => {
+    const db = (storage as unknown as { db: import('better-sqlite3').Database }).db;
+    const add = db.prepare('INSERT INTO spam_repair_queue (email_id, score_before, created_at) VALUES (?, ?, ?)');
+    add.run('b', 6, 2);
+    add.run('a', null, 1);
+    add.run('c', 2, 3);
+    expect(storage.getSpamRepairQueue(2)).toEqual([
+      { emailId: 'a', scoreBefore: null },
+      { emailId: 'b', scoreBefore: 6 },
+    ]);
+    storage.dequeueSpamRepair(['a', 'b']);
+    storage.dequeueSpamRepair([]);
+    expect(storage.getSpamRepairQueue(10)).toEqual([{ emailId: 'c', scoreBefore: 2 }]);
+    // A database without the queue reads as "nothing to repair", never a throw.
+    db.exec('DROP TABLE spam_repair_queue');
+    expect(storage.getSpamRepairQueue(10)).toEqual([]);
+  });
+
   // THE round trip: what the processor computed is what the shield reads.
   it('stores the score, the reasons JSON and the origin IP, and reads them back on the full row', async () => {
     const reasons = JSON.stringify([{ id: 'upstream-spam', points: 5, detail: 'Your mail server marked it as spam (X-Spam-Flag: YES)' }]);

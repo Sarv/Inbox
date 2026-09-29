@@ -38,6 +38,7 @@ import {
   REPUTATION_PENDING_INDEX,
   reputationPending,
   SPAM_PENDING_INDEX,
+  SPAM_REPAIR_QUEUE_TABLE,
   withServerUid,
 } from './migrations';
 import { ReadModelMaintainer } from './read-model-maintainer';
@@ -1898,6 +1899,31 @@ export class SQLiteStorage implements IEmailStorage {
   async setSpamUserVerdict(emailId: string, verdict: 'spam' | 'ham' | null): Promise<void> {
     this.ensureInitialized();
     this.db!.prepare('UPDATE emails SET spam_user_verdict = ? WHERE id = ?').run(verdict, emailId);
+  }
+
+  /**
+   * Messages whose stored spam verdict the main process has to re-derive
+   * (v96 — see `spam-verdict-repair.ts`), oldest first. Empty once drained,
+   * and on a database that predates the queue.
+   */
+  getSpamRepairQueue(limit: number): Array<{ emailId: string; scoreBefore: number | null }> {
+    this.ensureInitialized();
+    try {
+      return (this.db!.prepare(
+        `SELECT email_id, score_before FROM ${SPAM_REPAIR_QUEUE_TABLE} ORDER BY created_at, email_id LIMIT ?`,
+      ).all(Math.max(1, limit)) as { email_id: string; score_before: number | null }[])
+        .map((row) => ({ emailId: row.email_id, scoreBefore: row.score_before }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Take repaired (or vanished) messages off the queue. */
+  dequeueSpamRepair(emailIds: readonly string[]): void {
+    this.ensureInitialized();
+    if (emailIds.length === 0) return;
+    const remove = this.db!.prepare(`DELETE FROM ${SPAM_REPAIR_QUEUE_TABLE} WHERE email_id = ?`);
+    this.db!.transaction((ids: readonly string[]) => { for (const id of ids) remove.run(id); })(emailIds);
   }
 
   /**

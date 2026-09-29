@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offers Copy, and over a link it offers Open link and Copy link.
 
 ### Fixed
+- **Mail no longer marked "a reply to itself".** Some mail servers report
+  every message's own ID as the one it replies to, and the app believed them,
+  so almost every message picked up spam-filter points for "claims to be a reply to
+  itself". The app now reads the message's own header. Mail already in your
+  mailbox is corrected on the next launch, and anything that was moved to Spam
+  only because of it goes back to your Inbox.
+- **Prices in links are no longer mistaken for web addresses.** An invoice
+  whose amounts (₹3.2, 136.25) link to the biller was flagged as a message
+  with deceptive links. Links in Sarv email signatures, which go through a
+  click-tracking address, are no longer flagged as pretending to be your own
+  domain either. Existing mail is re-checked on the next launch.
 - **Menus close when you click into an email.** An open message menu used to
   stay open when you clicked inside a formatted email's body.
 - **Forward and reply boxes start fresh for each message.** Replying to or
@@ -89,6 +100,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped only the expiry and kept the card. It then had no countdown and
   never closed, so an old code could sit on screen until you closed it
   yourself. Cards that have already expired are now not shown at all.
+- **Each Gmail account's category labels stay in that account.** With more
+  than one Gmail account signed in with Google, the app made the second
+  account's label changes in the first account's Gmail: its labels were
+  created and coloured there, renaming a category renamed only the first
+  account's label, and Remove all labels (Settings → General) left the second
+  account's labels in place. A background Gmail account's new mail was also
+  labelled through the account you had selected. Each account now changes only
+  its own labels. When an account's Google sign-in can't be used at that
+  moment, its labels are still applied, without colours, and the colours
+  follow later.
+
+### Security
+- **Mail sign-in tokens no longer reach the app window.** The window that
+  shows your mail could ask for the access token of any Gmail, Outlook or
+  Yahoo account you signed in to. It can now get only the Sarv token that
+  Sarv AI needs. Those accounts' tokens are used only by the part of the app
+  that syncs and sends mail, which works as before.
 
 ## [1.2.5] - 2026-09-27
 

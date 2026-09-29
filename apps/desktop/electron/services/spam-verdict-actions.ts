@@ -68,6 +68,44 @@ export function senderDomainOf(address: string | null | undefined): string | nul
   return d.includes('.') ? d : null;
 }
 
+/** Where a message lands when it stops being spam, and whether it moved to get there. */
+export interface UnfiledPlacement {
+  tags: string;
+  folderId: string;
+  moved: boolean;
+  /** The folder it moves to; null when it stays where it is. */
+  destPath: string | null;
+}
+
+/**
+ * Take a message out of spam, locally: drop the `spam` tag and, if it sits in
+ * the spam folder, move it to INBOX. Pure — the caller writes the row and
+ * queues the server move. Shared by "Not spam" and the v96 verdict repair so
+ * the two cannot disagree about where un-filed mail goes.
+ */
+export function unfileFromSpam(
+  email: Pick<EmailRecord, 'tags' | 'folderId'>,
+  folders: FolderRecord[],
+): UnfiledPlacement {
+  let tags = removeTag(email.tags || '||', 'spam');
+  let folderId = email.folderId;
+  let moved = false;
+  let destPath: string | null = null;
+  // Out of the spam folder — but only if that is where it is: "not spam" on
+  // a message already in INBOX must not move it anywhere.
+  const source = folders.find((f) => f.id === email.folderId) ?? null;
+  const inSpam = source ? classifyFolder(source) === 'spam' : false;
+  const inbox = findFolderByType(folders, 'inbox') ?? folders.find((f) => f.path.toUpperCase() === 'INBOX') ?? null;
+  if (inSpam && inbox) {
+    const result = computeFilterActionResult({ tags, folderId }, [{ type: 'moveToFolder', value: inbox.path }], folders);
+    tags = result.tags;
+    folderId = result.folderId;
+    moved = result.changed && result.folderId !== email.folderId;
+    destPath = inbox.path;
+  }
+  return { tags, folderId, moved, destPath };
+}
+
 /**
  * Record the user's verdict and act on it. Local first, so the UI is right
  * immediately; the server op is queued regardless of connection state (the
@@ -93,18 +131,7 @@ export async function applyUserSpamVerdict(deps: VerdictDeps, emailId: string, v
     moved = result.changed && result.folderId !== email.folderId;
     if (moved) destPath = folders.find((f) => f.id === folderId)?.path ?? null;
   } else {
-    tags = removeTag(tags, 'spam');
-    // Out of the spam folder — but only if that is where it is: "not spam" on
-    // a message already in INBOX must not move it anywhere.
-    const inSpam = source ? classifyFolder(source) === 'spam' : false;
-    const inbox = findFolderByType(folders, 'inbox') ?? folders.find((f) => f.path.toUpperCase() === 'INBOX') ?? null;
-    if (inSpam && inbox) {
-      const result = computeFilterActionResult({ tags, folderId }, [{ type: 'moveToFolder', value: inbox.path }], folders);
-      tags = result.tags;
-      folderId = result.folderId;
-      moved = result.changed && result.folderId !== email.folderId;
-      destPath = inbox.path;
-    }
+    ({ tags, folderId, moved, destPath } = unfileFromSpam(email, folders));
   }
 
   if (tags !== (email.tags || '||') || folderId !== email.folderId) {

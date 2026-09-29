@@ -1019,7 +1019,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       ...(m.labels ? { labels: [...m.labels] } : {}),
       envelope: {
         messageId: env.messageId || this.headerValue(headers, 'message-id') || '',
-        inReplyTo: this.normalizeInReplyTo(env.inReplyTo ?? this.headerValue(headers, 'in-reply-to') ?? undefined),
+        inReplyTo: this.resolveInReplyTo(env.inReplyTo, headers),
         references: this.parseReferences(headers),
         subject: env.subject ?? this.headerValue(headers, 'subject'),
         from,
@@ -1046,6 +1046,22 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   private mapAddresses(addrs?: MessageAddressObject[]): EmailAddress[] {
     if (!addrs) return [];
     return addrs.map((a) => ({ name: a.name ?? null, address: a.address || '' }));
+  }
+
+  /**
+   * In-Reply-To from the header block the FETCH asked for, and from the
+   * ENVELOPE only when there is no block. The raw header is what the message
+   * says; the ENVELOPE is the server's reading of it, and a server that puts
+   * the Message-ID in the In-Reply-To slot turned every message into "a reply
+   * to itself" — a spam signal, charged to all mail from that server. When
+   * the block is there and has no In-Reply-To, the message is not a reply,
+   * whatever the ENVELOPE claims.
+   */
+  private resolveInReplyTo(envelopeValue: string | undefined, headers: Buffer | undefined): string | null {
+    if (headers && headers.length > 0) {
+      return this.normalizeInReplyTo(this.headerValue(headers, 'in-reply-to') ?? undefined);
+    }
+    return this.normalizeInReplyTo(envelopeValue);
   }
 
   private normalizeInReplyTo(value?: string): string | null {

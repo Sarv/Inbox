@@ -130,12 +130,33 @@ export function rescoreWithBody(
   stored: { spamScore?: number | null; spamReasons?: string | null },
   body: SpamAssessment,
 ): SpamAssessment | null {
+  return replaceStages(stored, ['content', 'attachment'], body);
+}
+
+/**
+ * {@link rescoreWithBody} for the content stage alone: the attachment reasons
+ * stay as they were charged. For re-judging a stored body with a newer
+ * library, where the attachments' bytes are not to hand — dropping their
+ * reasons would un-charge a malicious attachment nobody looked at again.
+ */
+export function rescoreContent(
+  stored: { spamScore?: number | null; spamReasons?: string | null },
+  content: SpamAssessment,
+): SpamAssessment | null {
+  return replaceStages(stored, ['content'], content);
+}
+
+function replaceStages(
+  stored: { spamScore?: number | null; spamReasons?: string | null },
+  stages: readonly string[],
+  fresh: SpamAssessment,
+): SpamAssessment | null {
   if (typeof stored.spamScore !== 'number') return null;
   const reasons = parseSpamReasons(stored.spamReasons);
   if (reasons.length === 0 && stored.spamScore !== 0) return null;
   const kept = reasons.filter((reason) => {
     const stage = stageOfReason(reason.id);
-    return stage !== 'content' && stage !== 'attachment';
+    return stage === null || !stages.includes(stage);
   });
-  return mergeAssessments(assessmentOf(kept), body);
+  return mergeAssessments(assessmentOf(kept), fresh);
 }

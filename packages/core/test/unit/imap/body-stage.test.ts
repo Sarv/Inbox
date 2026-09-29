@@ -1,7 +1,7 @@
 import { assessmentOf, type SpamReason } from '@sarv-in/mailguard';
 import { describe, it, expect } from 'vitest';
 
-import { bodyStage, recipientDomainsOf, rescoreWithBody } from '../../../src/imap/body-stage';
+import { bodyStage, recipientDomainsOf, rescoreContent, rescoreWithBody } from '../../../src/imap/body-stage';
 
 /**
  * The body stage is the half of the spam score that cannot run at sync,
@@ -190,5 +190,28 @@ describe('bodyStage — a link dressed as the reader’s own domain', () => {
     const own = bodyStage({ ...input, recipientDomains: recipientDomainsOf('rc@sarv.com') });
     expect(own.reasons.map((r) => [r.id, r.points])).toEqual([['link-display-mismatch', 4]]);
     expect(bodyStage(input).score).toBe(2);
+  });
+});
+
+describe('rescoreContent', () => {
+  // Regression: the v96 repair re-judges stored bodies with a newer library
+  // but has no attachment bytes. Dropping the attachment reasons would
+  // un-charge a macro nobody re-inspected.
+  it('replaces only the content reasons and keeps the attachment ones', () => {
+    const result = rescoreContent(
+      stored(7, [reason('auth-failed', 1), reason('link-display-mismatch', 4), reason('attachment-macro', 2)]),
+      assessmentOf([]),
+    );
+
+    expect(result!.reasons.map((r) => r.id)).toEqual(['auth-failed', 'attachment-macro']);
+    expect(result!.score).toBe(3);
+  });
+
+  // The same guards as rescoreWithBody: unscored stays unscored, unreadable
+  // stays as stored.
+  it('declines a row it cannot re-derive', () => {
+    const content = assessmentOf([]);
+    expect(rescoreContent({ spamScore: null, spamReasons: null }, content)).toBeNull();
+    expect(rescoreContent({ spamScore: 5, spamReasons: '{bad' }, content)).toBeNull();
   });
 });
