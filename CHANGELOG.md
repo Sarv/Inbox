@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-09-29
+
 ### Added
 - **Follow-up reminders: "remind me if nobody replies".** A bell button beside
   Send (in the composer, inline reply and forward) sets a reminder for 1 day,
@@ -559,7 +561,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.6...HEAD
+[1.2.6]: https://github.com/Sarv/Inbox/releases/tag/v1.2.6
 [1.2.5]: https://github.com/Sarv/Inbox/releases/tag/v1.2.5
 [1.2.4]: https://github.com/Sarv/Inbox/releases/tag/v1.2.4
 [1.2.3]: https://github.com/Sarv/Inbox/releases/tag/v1.2.3
