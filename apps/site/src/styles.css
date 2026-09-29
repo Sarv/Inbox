@@ -129,6 +129,22 @@ a.btn:hover {
   }
 }
 
+/* Homepage "what it does / your Google data" section: plain long-form text. */
+.about {
+  line-height: var(--lh-base);
+  color: var(--ink-2);
+}
+.about p,
+.about ul {
+  margin: 0;
+}
+.about ul {
+  padding-left: var(--space-5);
+}
+.about code {
+  font-size: 0.9em;
+}
+
 /* Legal pages (privacy policy, terms): long-form text rendered from Markdown. */
 .page-header-link {
   gap: var(--space-3);
@@ -178,6 +194,8 @@ a.btn:hover {
   font-size: 0.9em;
 }
 .page-body + .page-footer,
+.page-body + .about,
+.about + .page-footer,
 .legal + .page-footer {
   margin-top: var(--space-10);
 }
