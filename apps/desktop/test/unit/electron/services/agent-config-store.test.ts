@@ -77,6 +77,23 @@ describe('loadAgentConfig', () => {
     db.blobs.set(BLOB_KEY, Buffer.from('{not json', 'utf8'));
     expect(store.loadAgentConfig()).toEqual({});
   });
+
+  // Breaks: valid JSON that is not an object is returned AS the config. `null`
+  // then throws on `.enabled` in main.ts's boot path; an array or string slips
+  // through as a config with no switch in it.
+  it.each(['null', '[]', '"on"', '42', 'true'])('degrades a non-object blob (%s) to OFF', async (text) => {
+    const { store, db } = await setup();
+    db.blobs.set(BLOB_KEY, Buffer.from(text, 'utf8'));
+    expect(store.loadAgentConfig()).toEqual({});
+  });
+
+  // Breaks: a save after an unreadable read must still leave a readable config.
+  it('overwrites an unreadable blob with a readable one on the next save', async () => {
+    const { store, db } = await setup();
+    db.blobs.set(BLOB_KEY, Buffer.from('null', 'utf8'));
+    store.saveAgentConfig({ enabled: false });
+    expect(blobOf(db)).toEqual({ enabled: false });
+  });
 });
 
 describe('legacy agent-config.json migration', () => {
@@ -91,6 +108,15 @@ describe('legacy agent-config.json migration', () => {
 
   it('defaults to OFF for a malformed legacy file', async () => {
     writeFileSync(join(h.userData, LEGACY), 'not json');
+    const { store, db } = await setup();
+    expect(store.loadAgentConfig()).toEqual({});
+    expect(db.blobs.has(BLOB_KEY)).toBe(false);
+  });
+
+  // Breaks: a `null` legacy file is migrated into the blob, and every later
+  // launch then reads `null` as the config and throws at boot.
+  it('does not migrate a non-object legacy file', async () => {
+    writeFileSync(join(h.userData, LEGACY), 'null');
     const { store, db } = await setup();
     expect(store.loadAgentConfig()).toEqual({});
     expect(db.blobs.has(BLOB_KEY)).toBe(false);

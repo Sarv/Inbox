@@ -1,5 +1,8 @@
 /**
- * Config resolution for a DEFERRED unified-pipeline init.
+ * Config resolution for the unified pipeline's start: at app launch
+ * (bootPipelineConfig) and for a DEFERRED init (resolveDeferredPipelineConfig).
+ * Both decide the AI Assist master switch, which is what lets the pipeline send
+ * new mail to the AI provider for sorting, so both go through isAIAssistOn.
  *
  * On a first launch the pipeline is initialized before any account exists, so it
  * DEFERS (no storage yet) and captures the boot config — which carries the OFF
@@ -33,9 +36,39 @@ export function resolveDeferredPipelineConfig(
     // renderer's default-on boot push) has set one; otherwise fall back to the
     // boot value, then OFF. This is what flips a first-time Sarv login to enabled
     // without a manual toggle, while still honoring a deliberate persisted `false`.
-    enabled: p.enabled ?? boot.enabled ?? false,
+    // Only a real `true` counts: a stored value that is set but not a boolean is
+    // unreadable, and unreadable is OFF (see isAIAssistOn).
+    enabled: p.enabled !== undefined ? isAIAssistOn(p.enabled) : isAIAssistOn(boot.enabled),
     // The boot path resolves userEmail from the accounts registry / IMAP username;
     // keep it when the persisted copy doesn't carry one.
     userEmail: (p.userEmail as string) || (boot.userEmail as string) || undefined,
   };
+}
+
+/**
+ * Whether a stored AI Assist value means ON. AI Assist is the one switch that
+ * lets the pipeline send new mail to the AI provider for sorting, so only a
+ * real boolean `true` turns it on. Anything else (missing, `false`, or a value
+ * that did not survive storage, such as the string "false") is OFF: an
+ * unreadable switch must fail closed, never open.
+ */
+export function isAIAssistOn(value: unknown): boolean {
+  return value === true;
+}
+
+/**
+ * The config the pipeline starts with at app launch, built from the main-side
+ * mirror of the AI Assist settings (agent-config-store). The mirror is what
+ * keeps a deliberate "off" in force across a restart, before the renderer has
+ * re-sent anything. A fresh install has no mirror yet and starts OFF until the
+ * renderer pushes the user's real settings at boot.
+ *
+ * `userEmail` comes from the accounts registry and wins over any stale copy in
+ * the mirror.
+ */
+export function bootPipelineConfig(
+  persisted: DeferredInitConfig | undefined,
+  userEmail: string,
+): DeferredInitConfig {
+  return { ...(persisted ?? {}), enabled: isAIAssistOn(persisted?.enabled), userEmail };
 }

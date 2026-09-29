@@ -42,6 +42,20 @@ function legacyPath(): string {
   return join(app.getPath('userData'), LEGACY_FILE_NAME);
 }
 
+/**
+ * Parse a stored config, THROWING unless it is a JSON object. Valid JSON that is
+ * not an object (`null`, an array, a string) is as unreadable as broken JSON:
+ * `null` used to reach the boot path as the config itself and throw on
+ * `.enabled`. Callers turn the throw into the empty (AI Assist OFF) config.
+ */
+function parseConfig(text: string): PersistedAgentConfig {
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`agent config is not an object (${parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed})`);
+  }
+  return parsed as PersistedAgentConfig;
+}
+
 /** Read the persisted agent config (sync — small blob, read once at boot). */
 export function loadAgentConfig(): PersistedAgentConfig {
   if (cache) return cache;
@@ -49,7 +63,7 @@ export function loadAgentConfig(): PersistedAgentConfig {
   const blob = getBlob(BLOB_KEY);
   if (blob) {
     try {
-      cache = JSON.parse(blob.toString('utf8')) as PersistedAgentConfig;
+      cache = parseConfig(blob.toString('utf8'));
       return cache;
     } catch (e) {
       logger.error('[AgentConfigStore] blob decode failed:', e);
@@ -63,7 +77,7 @@ export function loadAgentConfig(): PersistedAgentConfig {
   // cleanup can remove it once it confirms the blob exists.
   try {
     const raw = readFileSync(legacyPath(), 'utf8');
-    cache = JSON.parse(raw) as PersistedAgentConfig;
+    cache = parseConfig(raw);
     setBlob(BLOB_KEY, Buffer.from(JSON.stringify(cache), 'utf8'));
     try { renameSync(legacyPath(), `${legacyPath()}.premigrated`); } catch { /* keep original */ }
     logger.info('[AgentConfigStore] migrated agent-config.json into the core DB');

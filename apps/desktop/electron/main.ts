@@ -79,6 +79,7 @@ import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-s
 import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
 import { startPipelineEventPersister, stopPipelineEventPersister } from './services/pipeline-event-persister';
+import { bootPipelineConfig } from './services/pipeline-init-config';
 import { attachReputation } from './services/reputation-service';
 import { migrateSecureCredsFromFile } from './services/secure-credential-store';
 import { startSenderIdentityScheduler, stopSenderIdentityScheduler } from './services/sender-identity-service';
@@ -1040,12 +1041,11 @@ app.whenReady().then(async () => {
     const userEmail = resolveAccountEmail(getStorage());
     logger.info(`[Main] Pipeline userEmail: "${userEmail || '(none)'}"`);
     // Restore the persisted AI Assist state so it survives a restart. Default
-    // is OFF (empty store) — an install that never turned AI Assist on stays
-    // off; but once the user enables it, new mail keeps auto-categorizing
-    // across restarts without having to re-open the settings tab. DB-derived
-    // userEmail wins over any stale persisted copy (spread order).
-    const persistedAgentConfig = loadAgentConfig();
-    initializeUnifiedPipeline({ ...persistedAgentConfig, enabled: persistedAgentConfig.enabled ?? false, userEmail });
+    // is OFF (empty or unreadable store) — an install that never turned AI
+    // Assist on stays off; but once the user enables it, new mail keeps
+    // auto-categorizing across restarts without having to re-open the settings
+    // tab. DB-derived userEmail wins over any stale persisted copy.
+    initializeUnifiedPipeline(bootPipelineConfig(loadAgentConfig(), userEmail));
 
     // Load OAuth client IDs from env (see OAUTH_SETUP.md).
     initializeOAuth();

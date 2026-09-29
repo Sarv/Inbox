@@ -51,32 +51,76 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   testMode: false,
 };
 
-/** Load agent settings from localStorage, applying the one-time v2 default-on migration. */
+/**
+ * What an UNREADABLE stored config loads as: the defaults with AI Assist OFF.
+ * AI Assist is the one switch for automatic sorting, so an "off" that can no
+ * longer be read must not come back as the default "on" and quietly resume
+ * sending new mail to the AI provider. Turning it on again rewrites the store.
+ */
+const UNREADABLE_AGENT_SETTINGS: AgentSettings = { ...DEFAULT_AGENT_SETTINGS, enabled: false };
+
+function unreadable(reason: string): AgentSettings {
+  console.warn(`[AgentSettings] stored AI Assist settings are unreadable (${reason}) — AI Assist stays OFF until it is turned on again`);
+  return UNREADABLE_AGENT_SETTINGS;
+}
+
+/**
+ * Load agent settings from localStorage, applying the one-time v2 default-on
+ * migration.
+ *
+ * Nothing stored (a fresh install) is NOT the same as something stored that
+ * cannot be read. Nothing stored loads the defaults, AI Assist on: connecting an
+ * AI provider is the user's opt-in to sorting. A value that is present but
+ * unreadable (corrupt JSON, not an object, a non-boolean `enabled`, storage that
+ * throws) loads with AI Assist OFF, and nothing is written back over it.
+ */
 export function loadAgentSettings(): AgentSettings {
+  let raw: string | null;
   try {
-    const raw = localStorage.getItem(AGENT_CONFIG_KEY);
-    if (!raw) return DEFAULT_AGENT_SETTINGS;
-    const parsed = JSON.parse(raw);
-    const merged: AgentSettings = { ...DEFAULT_AGENT_SETTINGS };
-    for (const key of Object.keys(DEFAULT_AGENT_SETTINGS) as (keyof AgentSettings)[]) {
-      if (parsed[key] !== undefined && typeof parsed[key] === typeof DEFAULT_AGENT_SETTINGS[key]) {
-        (merged as unknown as Record<string, unknown>)[key] = parsed[key];
-      }
+    raw = localStorage.getItem(AGENT_CONFIG_KEY);
+  } catch {
+    return unreadable('storage unavailable');
+  }
+  if (raw === null) return DEFAULT_AGENT_SETTINGS;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return unreadable('not JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return unreadable('not an object');
+  const stored = parsed as Record<string, unknown>;
+  if (stored.enabled !== undefined && typeof stored.enabled !== 'boolean') return unreadable('enabled is not true/false');
+
+  const merged: AgentSettings = { ...DEFAULT_AGENT_SETTINGS };
+  for (const key of Object.keys(DEFAULT_AGENT_SETTINGS) as (keyof AgentSettings)[]) {
+    if (stored[key] !== undefined && typeof stored[key] === typeof DEFAULT_AGENT_SETTINGS[key]) {
+      (merged as unknown as Record<string, unknown>)[key] = stored[key];
     }
-    // One-time default-enable migration for installs that predate v2. A config
-    // saved before v2 with enabled:false was the OLD default (the agent
-    // produced zero decisions, so it was never a deliberate choice) — flip it
-    // on once, then stamp the version so a later deliberate "off" is honored.
+  }
+  // One-time default-enable migration for installs that predate v2. A config
+  // saved before v2 with enabled:false was the OLD default (the agent
+  // produced zero decisions, so it was never a deliberate choice) — flip it
+  // on once, then stamp the version so a later deliberate "off" is honored.
+  try {
     const storedVersion = Number(localStorage.getItem(AGENT_CONFIG_VERSION_KEY) || '1');
     if (storedVersion < AGENT_CONFIG_VERSION) {
       if (merged.enabled === false) merged.enabled = true;
       localStorage.setItem(AGENT_CONFIG_VERSION_KEY, String(AGENT_CONFIG_VERSION));
       localStorage.setItem(AGENT_CONFIG_KEY, JSON.stringify(merged));
     }
-    return merged;
-  } catch {
-    return DEFAULT_AGENT_SETTINGS;
-  }
+  } catch { /* storage full / unavailable — the migration retries next load */ }
+  return merged;
+}
+
+/**
+ * Whether AI Assist is on — the ONE switch for automatic sorting (Settings → AI
+ * → Email Agent). Every renderer path that decides whether mail may be sent to
+ * the AI provider for sorting asks this, never a separate per-feature toggle.
+ */
+export function isAIAssistEnabled(): boolean {
+  return loadAgentSettings().enabled;
 }
 
 /** Persist agent settings to localStorage. */

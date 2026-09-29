@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with deceptive links. Links in Sarv email signatures, which go through a
   click-tracking address, are no longer flagged as pretending to be your own
   domain either. Existing mail is re-checked on the next launch.
+- **One switch for AI sorting, and it works.** Settings → AI → Categorization
+  had a "Smart Email Categorization" switch that stopped nothing: with it off,
+  new mail was still sent to your AI provider to be sorted. It is gone. The
+  Categorization tab now shows whether automatic sorting is on, with a link to
+  AI Assist (Settings → AI → Email Agent), the switch that really turns it
+  off. The AI dashboard's Start Processing button also waits for AI Assist.
+  If the app ever can't read your saved AI Assist setting, it now treats AI
+  Assist as off rather than on.
 - **Sarv AI asks before it reads your mail.** Signing in with Sarv used to
   switch Sarv AI on straight away, and new mail from every account was sent
   to it. The app now asks first, and nothing is sent unless you agree or pick

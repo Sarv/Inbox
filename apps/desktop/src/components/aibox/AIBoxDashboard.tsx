@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 
+import { isAIAssistEnabled } from '../../services/agent-settings';
 import { useEmailStore } from '../../store/email-store';
 import { useConfirm } from '../ConfirmDialog';
 
@@ -27,6 +28,9 @@ export function AIBoxDashboard() {
   } = useEmailStore();
 
   const { choose, confirmDialog } = useConfirm();
+  // AI Assist gates the manual run too (processEmailsForAICategorization checks
+  // it), so say so here rather than leave a button that silently does nothing.
+  const [aiAssistOn] = useState(isAIAssistEnabled);
   const [download, setDownload] = useState<{
     active: boolean; target: number; downloaded: number; remaining: number;
   } | null>(null);
@@ -195,12 +199,18 @@ export function AIBoxDashboard() {
             </div>
             <button
               onClick={() => processEmailsForAICategorization()}
-              className="flex items-center gap-2 px-3 py-1.5 bg-purple-500 text-white rounded-lg text-sm font-medium hover:bg-purple-600 transition-colors"
+              disabled={!aiAssistOn}
+              className="flex items-center gap-2 px-3 py-1.5 bg-purple-500 text-white rounded-lg text-sm font-medium hover:bg-purple-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-purple-500"
             >
               <Play className="h-3.5 w-3.5" />
               {totalCategorized > 0 ? 'Process More' : 'Start Processing'}
             </button>
           </div>
+          {!aiAssistOn && (
+            <p data-testid="ai-assist-off-note" className="text-xs text-muted-foreground mb-3">
+              AI Assist is off, so no mail is sent to your AI provider for sorting. Turn it on in Settings → AI → Email Agent.
+            </p>
+          )}
 
           {/* Progress bar */}
           <div className="h-2 bg-muted rounded-full overflow-hidden mb-2">

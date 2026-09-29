@@ -1,10 +1,10 @@
 import { Save, Loader2, X, Trash2, Plus, Pencil, Sparkles, AlertCircle, Lock } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 
+import { isAIAssistEnabled } from '../../../services/agent-settings';
 import { AIProvider } from '../../../services/ai-service';
 import { ICON_MAP, COLOR_MAP } from '../../aibox/types';
-import { DEFAULT_AI_FEATURES, AI_FEATURES_KEY } from '../types';
-import type { AIFeatureConfig , AppSettings } from '../types';
+import type { AppSettings } from '../types';
 
 // Types for dynamic category definitions
 interface CategoryDefinition {
@@ -37,13 +37,20 @@ interface CategorizationTabProps {
   aiProviders: AIProvider[];
   settings: AppSettings;
   updateSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
+  /** Switch AI Settings to the Email Agent tab, where the AI Assist switch lives. */
+  onOpenAgentTab?: () => void;
 }
 
-export function CategorizationTab({ aiProviders, settings, updateSetting }: CategorizationTabProps) {
-  // AI Features state (only email-categorization — signature-detection is in its own tab)
-  const [categorizationFeature, setCategorizationFeature] = useState<AIFeatureConfig>(
-    DEFAULT_AI_FEATURES.find(f => f.id === 'email-categorization')!
-  );
+export function CategorizationTab({ aiProviders, settings, updateSetting, onOpenAgentTab }: CategorizationTabProps) {
+  // There is deliberately NO on/off switch here. Automatic sorting is one LLM
+  // call per new email in the main-process pipeline, and AI Assist (Email Agent
+  // tab) is the only thing that gates it. This tab used to carry its own "Smart
+  // Email Categorization" switch that the pipeline never read, so switching it
+  // off stopped nothing while mail kept going to the AI provider. Show the real
+  // state instead, and send the user to the real switch.
+  const [aiAssistOn] = useState(isAIAssistEnabled);
+  const hasProvider = aiProviders.length > 0;
+  const sortingOn = hasProvider && aiAssistOn;
   // Dynamic category definitions state
   const [categoryDefs, setCategoryDefs] = useState<CategoryDefinition[]>([]);
   const [loadingCategoryDefs, setLoadingCategoryDefs] = useState(false);
@@ -71,44 +78,6 @@ export function CategorizationTab({ aiProviders, settings, updateSetting }: Cate
   useEffect(() => {
     loadCategoryDefs();
   }, [loadCategoryDefs]);
-
-  // Load categorization feature state on mount
-  useEffect(() => {
-    const stored = localStorage.getItem(AI_FEATURES_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        const saved = parsed.find((f: AIFeatureConfig) => f.id === 'email-categorization');
-        if (saved) {
-          const defaultFeature = DEFAULT_AI_FEATURES.find(f => f.id === 'email-categorization')!;
-          setCategorizationFeature({
-            ...defaultFeature,
-            enabled: saved.enabled,
-            userPrompt: saved.userPrompt || defaultFeature.userPrompt,
-          });
-        }
-      } catch (e) {
-        console.error('Failed to parse AI features:', e);
-      }
-    }
-  }, []);
-
-  const saveFeature = (updated: AIFeatureConfig) => {
-    setCategorizationFeature(updated);
-    const stored = localStorage.getItem(AI_FEATURES_KEY);
-    let features: AIFeatureConfig[] = DEFAULT_AI_FEATURES;
-    if (stored) {
-      try {
-        features = JSON.parse(stored);
-      } catch {}
-    }
-    const merged = features.map(f => f.id === 'email-categorization' ? updated : f);
-    localStorage.setItem(AI_FEATURES_KEY, JSON.stringify(merged));
-  };
-
-  const toggleFeature = () => {
-    saveFeature({ ...categorizationFeature, enabled: !categorizationFeature.enabled });
-  };
 
   // Category management handlers
   const handleToggleCategory = async (slug: string, enabled: boolean) => {
@@ -168,31 +137,41 @@ export function CategorizationTab({ aiProviders, settings, updateSetting }: Cate
 
   return (
     <div className="space-y-6">
-      {/* Email Categorization Feature Toggle */}
-      <div className={`rounded-lg border p-4 ${categorizationFeature.enabled ? 'border-primary/50 bg-primary/5' : 'border-border bg-muted/30'}`}>
-        <div className="flex items-center justify-between">
+      {/* Automatic sorting status — read-only; AI Assist is the switch */}
+      <div
+        data-testid="auto-sorting-status"
+        className={`rounded-lg border p-4 ${sortingOn ? 'border-primary/50 bg-primary/5' : 'border-border bg-muted/30'}`}
+      >
+        <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            <Sparkles className={`h-5 w-5 flex-shrink-0 ${categorizationFeature.enabled ? 'text-primary' : 'text-muted-foreground'}`} />
+            <Sparkles className={`h-5 w-5 flex-shrink-0 ${sortingOn ? 'text-primary' : 'text-muted-foreground'}`} />
             <div className="min-w-0">
               <div className="font-medium flex items-center gap-2">
-                {categorizationFeature.name}
-                {categorizationFeature.enabled && (
-                  <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-600 dark:text-green-400 rounded-full">Active</span>
+                Automatic sorting
+                {sortingOn ? (
+                  <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-600 dark:text-green-400 rounded-full">On</span>
+                ) : (
+                  <span className="text-xs px-2 py-0.5 bg-muted text-muted-foreground rounded-full">Off</span>
                 )}
               </div>
-              <div className="text-sm text-muted-foreground truncate">{categorizationFeature.description}</div>
+              <div className="text-sm text-muted-foreground">
+                {!hasProvider
+                  ? 'No AI provider is connected, so new mail is not sent anywhere for sorting.'
+                  : aiAssistOn
+                    ? 'New mail is sent to your AI provider and sorted into the categories below as it arrives. AI Assist controls this: turn it off in Email Agent to stop.'
+                    : 'AI Assist is off, so new mail is not sent to your AI provider for sorting. Turn it on in Email Agent.'}
+              </div>
             </div>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
-            <input
-              type="checkbox"
-              checked={categorizationFeature.enabled}
-              onChange={toggleFeature}
-              className="sr-only peer"
-              disabled={aiProviders.length === 0}
-            />
-            <div className="w-11 h-6 bg-muted peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
+          {hasProvider && onOpenAgentTab && (
+            <button
+              type="button"
+              onClick={onOpenAgentTab}
+              className="flex-shrink-0 text-sm px-3 py-1.5 border border-border rounded-md hover:bg-accent transition-colors"
+            >
+              Open Email Agent
+            </button>
+          )}
         </div>
       </div>
 

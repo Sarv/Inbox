@@ -62,7 +62,7 @@ import { notifyNewMail } from './notification-service';
 import { attachOAuthBearer, getValidAccessToken } from './oauth-service';
 import { getAccount as getOAuthAccount, listAccounts } from './oauth-token-store';
 import { savePipelineAIConfig, loadPipelineAIConfigSync, clearPipelineAIConfig } from './pipeline-ai-config-store';
-import { resolveDeferredPipelineConfig } from './pipeline-init-config';
+import { isAIAssistOn, resolveDeferredPipelineConfig } from './pipeline-init-config';
 import { SiblingCategoryCache } from './sibling-category-cache';
 
 // Live AI-pipeline diagnostics (why categorization is / isn't running). Stored in
@@ -1003,7 +1003,10 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // categorized the moment the provider becomes ready.
     let categorizationSkipped = false;
 
-    const aiEnabled = !!pipeline?.getConfig().enabled;
+    // AI Assist is the ONE switch for sending this mail to the AI provider. Only
+    // a real `true` opens it: a value that is not a boolean did not survive
+    // storage, and an unreadable switch fails closed (isAIAssistOn).
+    const aiEnabled = isAIAssistOn(pipeline?.getConfig().enabled);
     const aiPaused = Date.now() < aiPausedUntil;
     // AI is OFF *by the user* (pipeline exists but disabled) — distinct from
     // "AI on but not ready yet" (no config pushed / paused / no pipeline). When
