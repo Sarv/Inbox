@@ -1,4 +1,4 @@
-// Decision functions for the chat view. The first two are pure; the last one
+// Decision functions for the chat view. All but the last are pure; the last one
 // reads the reader's image settings, so this file installs a localStorage and
 // an electronAPI for it.
 import type { EmailRecord } from '@sarvinbox/core';
@@ -6,7 +6,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   blockRemoteImagesFor,
+  chatMountsComposer,
   chatSourceFor,
+  shouldShowEndReplyBar,
   shouldShowProcessPrompt,
 } from '../../../../../src/components/email-detail/chat-view-rules';
 import {
@@ -126,6 +128,59 @@ describe('shouldShowProcessPrompt', () => {
     expect(
       shouldShowProcessPrompt({ ...base, showAIView: false, conversationLoading: true }),
     ).toBe(false);
+  });
+});
+
+describe('shouldShowEndReplyBar', () => {
+  const base = { chatViewActive: true, renderedCount: 3, composerOpen: false };
+
+  // The feature: the chat ends with the same Reply / Reply All / Forward row
+  // the standard view puts under a message. Without it the only way to answer
+  // from the chat was the toolbar at the top of a long thread.
+  it('closes a rendered conversation with the reply row', () => {
+    expect(shouldShowEndReplyBar(base)).toBe(true);
+  });
+
+  // Regression guard: the chat can mount beside the standard card (a single
+  // designed mail with a quoted history, before the reader picks chat). That
+  // card has the row in its own footer, so a second one here is a duplicate.
+  it('stays away while the chat is not the reading surface', () => {
+    expect(shouldShowEndReplyBar({ ...base, chatViewActive: false })).toBe(false);
+  });
+
+  // With nothing rendered the view shows placeholders, the "Process now"
+  // invitation or its empty text — reply buttons under those answer nothing
+  // the reader can see.
+  it('stays away while no bubble is rendered', () => {
+    expect(shouldShowEndReplyBar({ ...base, renderedCount: 0 })).toBe(false);
+  });
+
+  // The composer opens in this very spot; the row would sit on top of the box
+  // its own button just opened.
+  it('stays away while a reply or forward is open', () => {
+    expect(shouldShowEndReplyBar({ ...base, composerOpen: true })).toBe(false);
+  });
+});
+
+describe('chatMountsComposer', () => {
+  // The chat is the reading surface: every reply and forward opens in it.
+  it('takes every box while the chat is the reading surface', () => {
+    expect(chatMountsComposer({ chatViewActive: true, targetId: 'anchor', anchorId: 'anchor' })).toBe(true);
+    expect(chatMountsComposer({ chatViewActive: true, targetId: 'reply', anchorId: 'anchor' })).toBe(true);
+  });
+
+  // Regression: with the chat beside the standard card, the card mounts the
+  // first message's box — and the chat mounted it too. Two composers on one
+  // reply, each autosaving a draft of its own.
+  it('leaves the first message\'s box to the standard card when the chat is beside it', () => {
+    expect(chatMountsComposer({ chatViewActive: false, targetId: 'anchor', anchorId: 'anchor' })).toBe(false);
+  });
+
+  // The card mounts nothing for any other message, so the chat must — or the
+  // box a Reply just opened is nowhere.
+  it('takes any other message\'s box even then', () => {
+    expect(chatMountsComposer({ chatViewActive: false, targetId: 'reply', anchorId: 'anchor' })).toBe(true);
+    expect(chatMountsComposer({ chatViewActive: false, targetId: 'reply', anchorId: undefined })).toBe(true);
   });
 });
 

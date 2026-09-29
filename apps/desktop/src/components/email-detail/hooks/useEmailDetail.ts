@@ -9,6 +9,7 @@ import { useEmailStore } from '../../../store/email-store';
 import { loadEmailAttachments } from '../../../utils/compose-attachments';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
 import { isDraftEmail, isDraftRow } from '../../../utils/thread-utils';
+import { composerDraftFor, type ComposerSeed } from '../composer-target';
 import type { EmailDetailContext } from '../types';
 import {
   getInitials,
@@ -121,12 +122,28 @@ export function useEmailDetail(): EmailDetailContext | null {
   const [showInlineReply, setShowInlineReply] = useState(false);
   const [inlineReplyMode, setInlineReplyMode] = useState<'reply' | 'replyAll'>('reply');
   const [replyingToEmail, setReplyingToEmail] = useState<any | null>(null);
-  const [inlineReplyDraft, setInlineReplyDraft] = useState<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string } | undefined>(undefined);
+  // The reply composer's seed — a draft reopened by Undo send, or the saved/AI
+  // draft auto-opened for the thread — recorded with the message it was
+  // written for. Composers get it only on that message (see inlineReplyDraft
+  // below); moving the composer elsewhere does NOT drop it, so coming back to
+  // that message brings the draft (and its stored Message-ID) back with it.
+  const [inlineReplySeed, setInlineReplySeed] = useState<ComposerSeed<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string }> | undefined>(undefined);
   const inlineReplyHandlerRef = useRef<(mode: 'reply' | 'replyAll') => void>(() => { });
   const [showInlineForward, setShowInlineForward] = useState(false);
   const [forwardingEmail, setForwardingEmail] = useState<any | null>(null);
-  const [inlineForwardDraft, setInlineForwardDraft] = useState<{ to: string; cc: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean } | undefined>(undefined);
+  // The forward's seed (what Undo send restored), on the same terms as the reply's.
+  const [inlineForwardSeed, setInlineForwardSeed] = useState<ComposerSeed<{ to: string; cc: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean }> | undefined>(undefined);
   const inlineForwardHandlerRef = useRef<() => void>(() => { });
+  // What each open composer is handed: its seed, only when the seed was written
+  // for the message that composer is open on — never another message's.
+  const inlineReplyDraft = composerDraftFor(inlineReplySeed, replyingToEmail);
+  const inlineForwardDraft = composerDraftFor(inlineForwardSeed, forwardingEmail);
+  type ReplySeedDraft = NonNullable<typeof inlineReplySeed>['draft'];
+  type ForwardSeedDraft = NonNullable<typeof inlineForwardSeed>['draft'];
+  const seedInlineReply = (email: { id: string }, draft: ReplySeedDraft) =>
+    setInlineReplySeed({ forEmailId: email.id, draft });
+  const seedInlineForward = (email: { id: string }, draft: ForwardSeedDraft) =>
+    setInlineForwardSeed({ forEmailId: email.id, draft });
   const [chatViewEnabled, setChatViewEnabled] = useState(() =>
     isAutoChatViewEnabled() && isConversationModeEnabled() && !!getDefaultProvider()
   );
@@ -633,7 +650,7 @@ export function useEmailDetail(): EmailDetailContext | null {
 
         setReplyingToEmail(latestThreadEmail);
         setInlineReplyMode('replyAll');
-        setInlineReplyDraft({
+        seedInlineReply(latestThreadEmail, {
           to: d.toAddress || latestThreadEmail.fromAddress || '',
           cc: d.ccAddress || '',
           // Preserve the draft's own subject; when it's blank (older drafts saved
@@ -698,7 +715,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       draftOpenedForRef.current = latestThreadEmail.id;
       setReplyingToEmail(latestThreadEmail);
       setInlineReplyMode('replyAll');
-      setInlineReplyDraft({
+      seedInlineReply(latestThreadEmail, {
         to: latestThreadEmail.fromAddress || draft.toAddress || '',
         cc: draft.ccAddress || '',
         subject: replySubjectFor(draft.subject, latestThreadEmail.subject),
@@ -749,7 +766,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       draftOpenedForRef.current = latestThreadEmail.id;
       setReplyingToEmail(latestThreadEmail);
       setInlineReplyMode('replyAll');
-      setInlineReplyDraft({
+      seedInlineReply(latestThreadEmail, {
         to: latestThreadEmail.fromAddress || '',
         cc: '',
         htmlContent: draftHtml,
@@ -798,8 +815,12 @@ export function useEmailDetail(): EmailDetailContext | null {
       setShowFullContent(new Set());
       setShowInlineReply(false);
       setReplyingToEmail(null);
+      // The composers close, so their seeds go with them: a draft restored for
+      // the previous conversation is not this one's.
+      setInlineReplySeed(undefined);
       setShowInlineForward(false);
       setForwardingEmail(null);
+      setInlineForwardSeed(undefined);
       draftOpenedForRef.current = null;
       setConversationMessages(null);
       setConversationError(null);
@@ -1544,7 +1565,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       // Re-open inline reply with the saved draft
       setReplyingToEmail(restoreDraft.replyToEmail);
       setInlineReplyMode(restoreDraft.mode);
-      setInlineReplyDraft({
+      seedInlineReply(restoreDraft.replyToEmail, {
         to: restoreDraft.to,
         cc: restoreDraft.cc,
         htmlContent: restoreDraft.htmlContent,
@@ -1558,7 +1579,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     } else if (restoreDraft.mode === 'forward') {
       // Re-open inline forward with the saved draft
       setForwardingEmail(restoreDraft.replyToEmail);
-      setInlineForwardDraft({
+      seedInlineForward(restoreDraft.replyToEmail, {
         to: restoreDraft.to,
         cc: restoreDraft.cc,
         htmlContent: restoreDraft.htmlContent,
@@ -1729,6 +1750,20 @@ export function useEmailDetail(): EmailDetailContext | null {
     setTimeout(() => tryFocus(0), 100);
   };
 
+  // Open (or re-point) the inline reply at `email`. The seed stays as it is:
+  // the composer is handed it only while it is open on the seed's own message
+  // (inlineReplyDraft), so pointing the reply elsewhere cannot carry one
+  // message's recipients and stored-draft id to another, and coming back to
+  // the seed's message picks its draft up again.
+  const openInlineReply = (email: NonNullable<typeof latestThreadEmail>, mode: 'reply' | 'replyAll') => {
+    setReplyingToEmail(email);
+    setInlineReplyMode(mode);
+    setShowInlineReply(true);
+    setShowInlineForward(false);
+    setForwardingEmail(null);
+    scrollToInlineReply();
+  };
+
   const handleReply = (email = latestThreadEmail, usePopup = false) => {
     if (!email) return;
     if (usePopup) {
@@ -1745,12 +1780,7 @@ export function useEmailDetail(): EmailDetailContext | null {
         rawBody: email.rawBody,
       });
     } else {
-      setReplyingToEmail(email);
-      setInlineReplyMode('reply');
-      setShowInlineReply(true);
-      setShowInlineForward(false);
-      setForwardingEmail(null);
-      scrollToInlineReply();
+      openInlineReply(email, 'reply');
     }
   };
 
@@ -1770,12 +1800,7 @@ export function useEmailDetail(): EmailDetailContext | null {
         rawBody: email.rawBody,
       });
     } else {
-      setReplyingToEmail(email);
-      setInlineReplyMode('replyAll');
-      setShowInlineReply(true);
-      setShowInlineForward(false);
-      setForwardingEmail(null);
-      scrollToInlineReply();
+      openInlineReply(email, 'replyAll');
     }
   };
 
@@ -1816,7 +1841,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     }
     setShowInlineReply(false);
     setReplyingToEmail(null);
-    setInlineReplyDraft(undefined);
+    setInlineReplySeed(undefined);
 
     // When the DRAFT itself was the open item (opened from the Drafts list, or the
     // AI draft that auto-opened), CLOSING it — whether by SENDING or discarding —
@@ -1856,6 +1881,8 @@ export function useEmailDetail(): EmailDetailContext | null {
 
   const handleInlineForward = (email = latestThreadEmail) => {
     if (!email) return;
+    // As with the reply, the seed is left alone: inlineForwardDraft hands a
+    // restored forward's draft only to a forward of the message it forwarded.
     setForwardingEmail(email);
     setShowInlineForward(true);
     setShowInlineReply(false);
@@ -1863,9 +1890,13 @@ export function useEmailDetail(): EmailDetailContext | null {
     scrollToInlineForward();
   };
 
+  // Drops the draft with the box, as handleCloseInlineReply does. It was never
+  // cleared: after one Undo send, every later forward from the anchor card
+  // opened on those stale recipients, and discarding it deleted THAT draft.
   const handleCloseInlineForward = () => {
     setShowInlineForward(false);
     setForwardingEmail(null);
+    setInlineForwardSeed(undefined);
   };
 
   const handlePrintEmail = (email: any) => {

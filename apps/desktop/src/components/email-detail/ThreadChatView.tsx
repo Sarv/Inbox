@@ -1,19 +1,24 @@
-import { MailChatView, type ChatMessage } from '@sarv-in/email-chat-view';
+import { MailChatView, type ChatMessage, type MessageMenuRequest } from '@sarv-in/email-chat-view';
 import type { EmailRecord } from '@sarvinbox/core';
+import { createLogger } from '@sarvinbox/core/logger';
 import { Loader2, RefreshCw, Sparkles, Star } from 'lucide-react';
-import { useCallback, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import { useAppearance, useResolvedTheme } from '../../appearance';
 import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import type { ConversationMessage } from '../../services/conversation-service';
 import { resolveRefsInHtml } from '../../services/image-cache';
 import { useEmailStore } from '../../store/email-store';
+import { writeClipboard } from '../../utils/clipboard';
 import { applyEmailDarkMode, DARK_PAPER } from '../../utils/email-dark-mode';
+import { toForwardSource } from '../../utils/forward-quote';
+import type { MenuAnchor } from '../../utils/menu-placement';
+import { openExternalLink } from '../../utils/open-external';
 import { hasTag } from '../../utils/tags';
 import { AttachmentPills } from '../attachment-viewer/AttachmentPills';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
-import { Tooltip } from '../Tooltip';
+import { IconButton } from '../Tooltip';
 
 import { frameCanvasFor, type RecoloredBody } from './chat-frame-canvas';
 import {
@@ -22,15 +27,55 @@ import {
   chatMessagesFromThread,
   ownerEmailOf,
 } from './chat-message-adapter';
-import { blockRemoteImagesFor, chatSourceFor, shouldShowProcessPrompt } from './chat-view-rules';
-import { EmailMenu } from './EmailMenu';
+import {
+  blockRemoteImagesFor,
+  chatMountsComposer,
+  chatSourceFor,
+  shouldShowEndReplyBar,
+  shouldShowProcessPrompt,
+} from './chat-view-rules';
+import { buildEmailMenuHandlers, buildReplyHandlers, type EmailMenuWiring } from './email-menu-handlers';
+import { EmailMenu, EmailMenuPopover, type EmailMenuHandlers } from './EmailMenu';
+import { messageMenuLeadingItems, type MessageMenuTarget } from './message-menu-items';
+import { ReplyActionsBar, ReplyQuickActions } from './ReplyActionsBar';
 import { SecurityIndicator } from './SecurityIndicator';
 import type { EmailDetailContext } from './types';
-import { hasLoadedBody, parseAttachments } from './utils';
+import { hasLoadedBody, messageAccessibleName, parseAttachments } from './utils';
 import { VerifiedBadge } from './VerifiedBadge';
 
 // getCurrentUserEmail used to live here; it moved to ai-service so
 // EmailDetail can share it (priority: IMAP username > profile email > fallback).
+
+const log = createLogger('ThreadChatView');
+
+/**
+ * The right-click menu's Copy, Copy link and Copy email address.
+ *
+ * Stateless, where the copy buttons use `useCopyToClipboard`: the menu has
+ * closed by the time the write settles, so there is no button left to say
+ * "Copied" on — and that hook's state would re-render the whole thread (every
+ * bubble) twice per copy to show nothing. A write the browser refuses is not
+ * swallowed, though: it lands in the log, where a "copy did nothing" report
+ * can be traced.
+ */
+function copyFromMenu(text: string): void {
+  void writeClipboard(text).then((copied) => {
+    if (!copied) log.warn('Copy from the message menu did not reach the clipboard');
+  });
+}
+
+/**
+ * The chat's message menu: Forward opens inline (the chat has its own composer,
+ * at the end of the conversation), and Delete / Archive act on the one message
+ * a bubble shows — never the conversation around it.
+ */
+const CHAT_MENU_WIRING: EmailMenuWiring = { forward: 'inline', removes: 'message' };
+
+/** An open right-click menu: whose message, where, and over what. */
+interface PointMenu extends MessageMenuTarget {
+  emailId: string;
+  anchor: Extract<MenuAnchor, { kind: 'point' }>;
+}
 
 /**
  * How many bubbles are allowed in the DOM at once.
@@ -61,14 +106,6 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     handleReply,
     handleReplyAll,
     handleInlineForward,
-    handleReportSpam,
-    handlePrintEmail,
-    handleDownloadEmail,
-    handleShowOriginal,
-    handleFilterLikeThis,
-    handleTranslate,
-    handleDetectSignature,
-    markAsRead,
     showInlineReply,
     inlineReplyMode,
     setInlineReplyMode,
@@ -77,7 +114,9 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     handleCloseInlineReply,
     showInlineForward,
     forwardingEmail,
+    inlineForwardDraft,
     handleCloseInlineForward,
+    chatViewActive,
   } = ctx;
 
   // A run is in flight when loading (cold open, pre-first-bubbles) OR
@@ -207,16 +246,59 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [emailsById],
   );
 
-  const openLink = useCallback((url: string) => {
-    // `#` is an in-document jump with nowhere to go once the body is framed,
-    // and mailto: is the compose window's job, not the browser's.
-    if (!url || url.startsWith('#') || url.startsWith('mailto:')) return;
-    if (window.electronAPI?.app?.openExternal) {
-      window.electronAPI.app.openExternal(url);
-    } else {
-      window.open(url, '_blank');
-    }
-  }, []);
+  /**
+   * How one bubble's message is answered — from the same builder as its menus,
+   * so the hover icons, the three-dot menu and the right-click menu answer it
+   * the same way. Copies would drift (the menu's Forward turned into the popup,
+   * say) and leave the icons doing the old thing.
+   */
+  const replyHandlersFor = useCallback(
+    (email: EmailRecord) => buildReplyHandlers(ctx, email, CHAT_MENU_WIRING.forward),
+    [ctx],
+  );
+
+  /** Everything one bubble's menu does — its three-dot menu and its right-click
+   *  menu alike, so the two can never disagree about a message. */
+  const menuHandlersFor = useCallback(
+    (email: EmailRecord): EmailMenuHandlers => buildEmailMenuHandlers(ctx, email, CHAT_MENU_WIRING),
+    [ctx],
+  );
+
+  // ─── The right-click menu ──────────────────────────────────────────────────
+  //
+  // ONE menu for the whole thread, opened at the pointer. It renders outside
+  // MailChatView, which remounts on a theme change (see its `key`): a menu
+  // inside it would vanish mid-use, and one per bubble would be forty menus.
+  const [pointMenu, setPointMenu] = useState<PointMenu | null>(null);
+  const closePointMenu = useCallback(() => setPointMenu(null), []);
+  const pointEmail = pointMenu ? emailsById.get(pointMenu.emailId) : undefined;
+
+  // Its message left the thread (deleted, moved, the thread switched): close it
+  // for good, rather than let it spring back if a reload returns the message.
+  useEffect(() => {
+    if (pointMenu && !pointEmail) setPointMenu(null);
+  }, [pointMenu, pointEmail]);
+
+  /**
+   * A right-click anywhere in a bubble opens the same menu as the bubble's
+   * three-dot button, for the same message — `emailFor`, so a bubble recovered
+   * from a quote (no mail of its own, and no three-dot button either) declines,
+   * and the library leaves the right-click alone.
+   */
+  const onMessageMenu = useCallback(
+    (message: ChatMessage, request: MessageMenuRequest) => {
+      const email = emailFor(message);
+      if (!email) return false;
+      setPointMenu({
+        emailId: email.id,
+        anchor: { kind: 'point', x: request.clientX, y: request.clientY },
+        href: request.href,
+        selectionText: request.selectionText,
+      });
+      return true;
+    },
+    [emailFor],
+  );
 
   const renderActions = useCallback(
     (message: ChatMessage) => {
@@ -233,32 +315,73 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
               ? () => handleReExtractMessage(message.id)
               : undefined
           }
-          onReply={() => handleReply(email, false)}
-          onReplyAll={() => handleReplyAll(email, false)}
-          onForward={() => handleInlineForward(email)}
-          onDelete={() => ctx.deleteEmail(email.id)}
-          onArchive={() => ctx.archiveEmail(email.id)}
-          onMarkUnread={async () => {
-            await markAsRead(email.id, false);
-            useEmailStore.getState().clearSelectedEmail();
-          }}
-          onReportSpam={() => handleReportSpam(email.id)}
-          onPrint={() => handlePrintEmail(email)}
-          onDownload={() => handleDownloadEmail(email)}
-          onShowOriginal={() => handleShowOriginal(email)}
-          onFilterLikeThis={() => handleFilterLikeThis(email)}
-          onTranslate={() => handleTranslate(email)}
-          onDetectSignature={() => handleDetectSignature(email)}
+          {...menuHandlersFor(email)}
         />
       );
     },
-    [
-      emailFor, conversationById, showAIView, handleReExtractMessage, handleReply,
-      handleReplyAll, handleInlineForward, ctx, markAsRead, handleReportSpam,
-      handlePrintEmail, handleDownloadEmail, handleShowOriginal, handleFilterLikeThis,
-      handleTranslate, handleDetectSignature,
-    ],
+    [emailFor, conversationById, showAIView, handleReExtractMessage, menuHandlersFor],
   );
+
+  /**
+   * Reply, Reply all and Forward on the bubble's bottom corner, on hover —
+   * answering THIS bubble's message, not the newest (the bar at the end and
+   * the keyboard shortcuts do that).
+   *
+   * `emailFor`, so a bubble recovered from a quote gets none: it has no mail of
+   * its own, and replying to the mail that quoted it would address someone
+   * else. The answer depends on the message alone, never on UI state such as an
+   * open composer: the library re-mounts a bubble whose answer flips between
+   * nothing and something, and a framed body reloads with it.
+   */
+  const renderQuickActions = useCallback(
+    (message: ChatMessage) => {
+      const email = emailFor(message);
+      if (!email) return null;
+      return <ReplyQuickActions message={email} {...replyHandlersFor(email)} />;
+    },
+    [emailFor, replyHandlersFor],
+  );
+
+  // The row that closes the conversation — see `shouldShowEndReplyBar`.
+  const showEndReplyBar = shouldShowEndReplyBar({
+    chatViewActive,
+    renderedCount: chatMessages.length,
+    composerOpen: (showInlineReply && !!replyingToEmail) || (showInlineForward && !!forwardingEmail),
+  });
+
+  // The library remounts on these two (see the `key` on MailChatView), and a
+  // remount scrolls it to its last bubble again.
+  const chatViewKey = `${resolvedTheme}:${darkenEmails}`;
+  const lastChatMessageId = chatMessages[chatMessages.length - 1]?.id;
+
+  /**
+   * Keep the end row in view when the library follows the conversation down.
+   *
+   * MailChatView scrolls its OWN bottom into view whenever the last message
+   * changes — and the row sits after it, below the view's padding, so every
+   * thread opened with the row the reader asked for just under the fold. This
+   * effect runs after the library's (a child's effects run first), so it lands
+   * last. Not while a composer is open: the row is not drawn then, and the
+   * composer's own open scrolls to it.
+   */
+  const endReplyBarRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showEndReplyBar) return;
+    // Optional call: not every DOM implements scrollIntoView (the library
+    // guards its own call the same way).
+    endReplyBarRef.current?.scrollIntoView?.({ block: 'end' });
+  }, [showEndReplyBar, lastChatMessageId, chatViewKey]);
+
+  // The open reply / forward box mounts here unless the standard card above
+  // already mounts it — see `chatMountsComposer`.
+  const mountsReplyHere =
+    showInlineReply &&
+    !!replyingToEmail &&
+    chatMountsComposer({ chatViewActive, targetId: replyingToEmail.id, anchorId: displayEmail?.id });
+  const mountsForwardHere =
+    showInlineForward &&
+    !!forwardingEmail &&
+    chatMountsComposer({ chatViewActive, targetId: forwardingEmail.id, anchorId: displayEmail?.id });
 
   /**
    * The attachment strip for each bubble, rendered by the app rather than by
@@ -348,7 +471,19 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
           rendered so the user can switch to Standard mid-extraction;
           the re-extract icon only appears once messages exist. */}
       <div className="absolute -top-3 left-0 right-0 flex items-center justify-center z-10">
-        <div className="relative flex items-center p-1 bg-muted/70 hover:bg-muted/90 backdrop-blur-md border border-border shadow-sm rounded-lg transition-colors">
+        {/* `isolate` keeps the frosted layer below inside the pill. */}
+        <div className="group relative isolate flex items-center p-1 border border-border shadow-sm rounded-lg">
+          {/* The frosted glass, on a layer of its own BEHIND the controls
+              rather than on the pill itself. A `backdrop-filter` makes its
+              element the containing block of every `position: fixed`
+              descendant — and the Tooltip is one, placed in viewport
+              coordinates. On the pill, the re-extract icon's tooltip landed
+              offset by the pill's own position, far from the icon. */}
+          <div
+            aria-hidden
+            data-pill-backdrop
+            className="absolute inset-0 -z-10 rounded-lg bg-muted/70 group-hover:bg-muted/90 backdrop-blur-md transition-colors"
+          />
           {/* Animated pill background — Standard sits LEFT (default), AI right. */}
           <div
             className={`absolute top-1 bottom-1 w-[82px] bg-background rounded-md shadow-[0_1px_3px_rgba(0,0,0,0.1)] border border-border/50 transition-all duration-300 ease-out z-0 ${showAIView ? 'left-[83px]' : 'left-1'
@@ -375,24 +510,26 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
           </button>
           {showAIView && conversationMessages && (
             <div className="relative z-10 flex items-center border-l border-border/50 ml-1 pl-1">
-              <Tooltip
-                content={
+              <IconButton
+                size="sm"
+                // Its tint IS its state (orange: some message needs AI), so
+                // it draws its own hover rather than the ghost one.
+                variant="bare"
+                tooltip={
                   conversationLoading
                     ? 'Extracting…'
                     : hasFailedMessage
                       ? 'Some messages need AI processing — click to extract again'
                       : 'Re-extract conversation'
                 }
-              >
-                <button
-                  onClick={handleRetryConversation}
-                  disabled={conversationLoading}
-                  className={`flex items-center justify-center p-1.5 rounded-md transition-all duration-200 ${
-                    hasFailedMessage && !conversationLoading
-                      ? 'text-orange-500 hover:text-orange-600 hover:bg-orange-500/10'
-                      : 'text-muted-foreground hover:bg-accent/80 hover:text-foreground'
-                  }`}
-                >
+                onClick={handleRetryConversation}
+                disabled={conversationLoading}
+                className={`flex items-center justify-center rounded-md transition-all duration-200 ${
+                  hasFailedMessage && !conversationLoading
+                    ? 'text-orange-500 hover:text-orange-600 hover:bg-orange-500/10'
+                    : 'text-muted-foreground hover:bg-accent/80 hover:text-foreground'
+                }`}
+                icon={
                   <RefreshCw
                     className={`h-3 w-3 ${
                       conversationLoading
@@ -402,8 +539,8 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
                           : ''
                     }`}
                   />
-                </button>
-              </Tooltip>
+                }
+              />
             </div>
           )}
         </div>
@@ -441,7 +578,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         // but a theme flip with dark bodies off changes neither the body nor
         // anything it watches in time: the canvas marker lands on the bubble,
         // possibly after its re-read. So the remount stays, scroll reset and all.
-        key={`${resolvedTheme}:${darkenEmails}`}
+        key={chatViewKey}
         messages={chatMessages}
         currentUserAddress={currentUserEmail}
         loading={showAIView && conversationLoading && chatMessages.length === 0}
@@ -455,7 +592,10 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         // whose message it is. A recovered quote's images live in the reply that
         // carried it, so the reader's choice about THAT sender is the one to honour.
         blockRemoteImages={(message) => blockRemoteImagesFor(carrierEmailOf(message, emailsById))}
-        onOpenLink={openLink}
+        // The shared rule (utils/open-external): a web link goes to the
+        // browser; `#` jumps and `mailto:` links, in any case, open nothing.
+        // A module function, so its identity never changes — see there.
+        onOpenLink={openExternalLink}
         onRetryBody={(message) => {
           const email = emailFor(message);
           if (email) retryBody(email.id);
@@ -463,7 +603,9 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         // No `onPreviewAttachment` / `onDownloadAttachment`: passing either is
         // what draws the library's own chips, which the app replaces with its
         // own buttons (see renderFooter).
+        onMessageMenu={onMessageMenu}
         renderActions={renderActions}
+        renderQuickActions={renderQuickActions}
         renderHeaderMeta={renderHeaderMeta}
         renderFooter={renderFooter}
         emptyState={
@@ -485,10 +627,48 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         }
       />
 
-      {/* Inline Reply */}
-      {showInlineReply && replyingToEmail && (
+      {/* The right-click menu — out here, not in the view, so the view's
+          remount leaves it be. Keyed by the request: a second right-click
+          opens a fresh menu (placed, and focused) at the new point. */}
+      {pointMenu && pointEmail && (
+        <EmailMenuPopover
+          key={`${pointMenu.emailId}:${pointMenu.anchor.x}:${pointMenu.anchor.y}`}
+          anchor={pointMenu.anchor}
+          onClose={closePointMenu}
+          label={`Message actions for ${messageAccessibleName(pointEmail)}`}
+          leadingItems={messageMenuLeadingItems(pointMenu, {
+            copy: copyFromMenu,
+            openLink: openExternalLink,
+          })}
+          {...menuHandlersFor(pointEmail)}
+        />
+      )}
+
+      {/* The same row the standard view puts under a message. No email is
+          passed, so it answers the NEWEST message — what the keyboard
+          shortcuts and the toolbar's Reply answer too. Forward opens inline,
+          here, like the reply. */}
+      {showEndReplyBar && (
+        <ReplyActionsBar
+          ref={endReplyBarRef}
+          // The standard footer's box, with the card's bottom corners: the
+          // card cannot clip it (its toggle hangs above the top edge).
+          className="px-4 py-3 border-t border-border bg-accent/10 rounded-b-lg flex items-center gap-2"
+          onReply={() => handleReply()}
+          onReplyAll={() => handleReplyAll()}
+          onForward={() => handleInlineForward()}
+        />
+      )}
+
+      {/* Inline Reply. ONE composer serves every bubble here (the standard
+          view mounts one per card), so it is keyed by the message it answers:
+          pointing it at another bubble mounts a fresh composer for that
+          message. Unkeyed, it kept the first message's body and draft, and
+          re-derived its recipients only when the sender changed. */}
+      {mountsReplyHere && (
         <div id="inline-reply-compose" className="border-t border-border">
           <InlineReply
+            key={replyingToEmail.id}
             replyToEmail={replyingToEmail}
             mode={inlineReplyMode}
             onClose={handleCloseInlineReply}
@@ -500,11 +680,15 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         </div>
       )}
 
-      {/* Inline Forward */}
-      {showInlineForward && forwardingEmail && (
+      {/* Inline Forward — keyed for the same reason. Unkeyed, forwarding a
+          second bubble APPENDED its attachments to the first one's. */}
+      {mountsForwardHere && (
         <div id="inline-forward-compose" className="border-t border-border">
           <InlineForward
-            forwardEmail={forwardingEmail}
+            key={forwardingEmail.id}
+            forwardEmail={toForwardSource(forwardingEmail)}
+            // What Undo send restored, so the forward reopens as it was sent.
+            draft={inlineForwardDraft}
             onClose={handleCloseInlineForward}
             embedded
           />
@@ -517,10 +701,12 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
 /**
  * The hover controls at a bubble's outer edge.
  *
- * The view reveals `.sec-actions` on row hover and hides it otherwise — but
- * the menu portals to `<body>`, so once it is open the cursor leaves the row
- * and the trigger would fade out from under its own open menu. Pinning the
- * opacity while it is open is the whole reason this needs state.
+ * The view reveals `.sec-actions` only on row hover or focus-within — and the
+ * menu portals to `<body>` and takes focus, so once it is open the row has
+ * neither, and the cluster would fade out from under its own open menu. The
+ * pin that stops that lives in chat-view-theme.css, at the level the library
+ * hides: an opacity set on a child of the hidden `.sec-actions` multiplies
+ * with its 0 and can never show it.
  */
 function BubbleActions({
   email,
@@ -539,21 +725,7 @@ function BubbleActions({
   /** This message's AI cleanup failed → tint the re-extract icon orange (like the
    *  thread-level reload) so an unprocessed message is visible at a glance. */
   extractionFailed?: boolean;
-  onReply: () => void;
-  onReplyAll: () => void;
-  onForward: () => void;
-  onDelete: () => void;
-  onArchive: () => void;
-  onMarkUnread: () => void;
-  onReportSpam: () => void;
-  onPrint: () => void;
-  onDownload: () => void;
-  onShowOriginal: () => void;
-  onFilterLikeThis: () => void;
-  onTranslate: () => void;
-  onDetectSignature: () => void;
-}) {
-  const [menuOpen, setMenuOpen] = useState(false);
+} & EmailMenuHandlers) {
   const [reExtracting, setReExtracting] = useState(false);
 
   const runReExtract = async () => {
@@ -567,23 +739,30 @@ function BubbleActions({
   };
 
   return (
-    <div className="flex items-center gap-0.5" style={menuOpen ? { opacity: 1 } : undefined}>
+    <div
+      // Named for its message, like the reply icons: every bubble has a
+      // "Star" and a menu, and nothing else says whose they are.
+      role="group"
+      aria-label={`Message actions for ${messageAccessibleName(email)}`}
+      className="flex items-center gap-0.5"
+    >
       {onReExtract && (
-        <Tooltip
-          content={
+        <IconButton
+          size="xs"
+          // 'bare': the ghost look dims a disabled button, and while it runs
+          // the spinning glyph IS the progress indicator.
+          variant="bare"
+          tooltip={
             reExtracting
               ? 'Re-extracting with AI…'
               : extractionFailed
                 ? 'Process this message with AI'
                 : 'Re-extract this message with AI'
           }
-          delayMs={40}
-        >
-          <button
-            onClick={(e) => { e.stopPropagation(); void runReExtract(); }}
-            disabled={reExtracting}
-            className="p-1 hover:bg-accent rounded transition-colors"
-          >
+          onClick={(e) => { e.stopPropagation(); void runReExtract(); }}
+          disabled={reExtracting}
+          className="hover:bg-accent rounded transition-colors"
+          icon={
             <RefreshCw
               className={`h-3.5 w-3.5 ${
                 reExtracting
@@ -593,25 +772,26 @@ function BubbleActions({
                     : 'text-muted-foreground'
               }`}
             />
-          </button>
-        </Tooltip>
+          }
+        />
       )}
-      <Tooltip content={isStarred ? 'Unstar' : 'Star'} delayMs={40}>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleStar(!isStarred);
-          }}
-          aria-label={isStarred ? 'Unstar this message' : 'Star this message'}
-          aria-pressed={isStarred}
-          className="p-1 hover:bg-accent rounded transition-colors"
-        >
+      {/* Named by what a click does ("Star" / "Unstar"), so no aria-pressed:
+          a name that flips AND a pressed state would announce the change
+          twice ("Unstar, pressed"). */}
+      <IconButton
+        size="xs"
+        tooltip={isStarred ? 'Unstar' : 'Star'}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleStar(!isStarred);
+        }}
+        icon={
           <Star
             className={`h-3.5 w-3.5 ${isStarred ? 'fill-yellow-400 text-yellow-400' : 'text-muted-foreground'}`}
           />
-        </button>
-      </Tooltip>
-      <EmailMenu email={email} {...menu} onOpenChange={setMenuOpen} />
+        }
+      />
+      <EmailMenu email={email} {...menu} />
     </div>
   );
 }

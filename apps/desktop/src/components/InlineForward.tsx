@@ -1,7 +1,6 @@
 import type { SendFollowUpRequest } from '@sarvinbox/core';
 import {
   MoreHorizontal,
-  Sparkles,
   X,
   Minimize2,
   Forward,
@@ -27,6 +26,7 @@ import { FromAccountBar } from './FromAccountBar';
 import { PolishModal } from './PolishModal';
 import { RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
+import { SelectionPolishMenu } from './SelectionPolishMenu';
 import { useCompose, AttachmentFile } from './useCompose';
 
 
@@ -50,10 +50,11 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     sending, setSending,
     showPolishModal, setShowPolishModal,
     polishMode, setPolishMode,
-    selectedText, setSelectedText,
-    showContextMenu, setShowContextMenu,
-    contextMenuPosition, setContextMenuPosition,
+    selectedText,
+    contextMenuPlacement,
     contextMenuRef,
+    handleSelectionContextMenu,
+    polishSelection,
     handleEditorChange,
     handleAttach,
     focusEditor,
@@ -131,17 +132,6 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   // Signature is kept OUT of the TipTap editor (its schema flattens tables/flex)
   // — captured once and appended verbatim on send + shown in the preview below.
   const signatureHtml = useMemo(() => getSignature('reply', forwardAccountId), [forwardAccountId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Close context menu on click outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
-        setShowContextMenu(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
 
   // Armed by the toolbar bell; recorded by the main process once the send succeeds.
   const [followUp, setFollowUp] = useState<SendFollowUpRequest | null>(null);
@@ -242,17 +232,6 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
-  const handleContextMenu = (e: React.MouseEvent) => {
-    if (!hasAIProvider) return;
-    const selection = window.getSelection();
-    const selected = selection?.toString().trim() || '';
-    if (!selected) return;
-    e.preventDefault();
-    setSelectedText(selected);
-    setContextMenuPosition({ x: e.clientX, y: e.clientY });
-    setShowContextMenu(true);
-  };
-
   const getPolishContext = (polishType: 'full' | 'selection'): PolishContext => ({
     mode: 'forward',
     polishMode: polishType,
@@ -346,7 +325,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
       </div>
 
       {/* Editor Area */}
-      <div className="min-h-[150px]" onContextMenu={handleContextMenu}>
+      <div className="min-h-[150px]" onContextMenu={(e) => handleSelectionContextMenu(e, hasAIProvider)}>
         <RichTextEditor
           content={htmlBody}
           onChange={handleEditorChange}
@@ -434,25 +413,13 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         />
       )}
 
-      {/* Context Menu */}
-      {showContextMenu && (
-        <div
-          ref={contextMenuRef}
-          className="fixed bg-card border border-border rounded-lg shadow-xl py-1 z-[200]"
-          style={{ left: contextMenuPosition.x, top: contextMenuPosition.y }}
-        >
-          <button
-            onClick={() => {
-              setShowContextMenu(false);
-              setPolishMode('selection');
-              setShowPolishModal(true);
-            }}
-            className="flex items-center gap-2 w-full px-4 py-2 text-sm hover:bg-accent transition-colors"
-          >
-            <Sparkles className="h-4 w-4 text-primary" />
-            Polish Selected Text
-          </button>
-        </div>
+      {/* The right-click menu over a selection */}
+      {contextMenuPlacement && (
+        <SelectionPolishMenu
+          menuRef={contextMenuRef}
+          placement={contextMenuPlacement}
+          onPolish={polishSelection}
+        />
       )}
     </div>
   );

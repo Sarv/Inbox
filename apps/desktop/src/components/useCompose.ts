@@ -1,8 +1,12 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 
+import { useClickAway } from '../hooks/useClickAway';
 import { useEmailStore } from '../store/email-store';
 import { editorHtmlToText } from '../utils/editor-text';
+import { currentViewport, placeMenu, type MenuPlacement } from '../utils/menu-placement';
 import { getSignatureHtml } from '../utils/signatures';
+
+import { SELECTION_MENU_WIDTH } from './SelectionPolishMenu';
 
 export interface AttachmentFile {
     name?: string;
@@ -65,10 +69,14 @@ export function useCompose({ initialDraft }: UseComposeProps) {
     const [polishMode, setPolishMode] = useState<'full' | 'selection'>('full');
     const [selectedText, setSelectedText] = useState('');
 
-    // Context Menu state
-    const [showContextMenu, setShowContextMenu] = useState(false);
-    const [contextMenuPosition, setContextMenuPosition] = useState({ x: 0, y: 0 });
+    // The right-click menu over a selection (SelectionPolishMenu): where it is
+    // drawn, or null while it is closed.
+    const [contextMenuPlacement, setContextMenuPlacement] = useState<MenuPlacement | null>(null);
     const contextMenuRef = useRef<HTMLDivElement>(null);
+    const closeContextMenu = useCallback(() => setContextMenuPlacement(null), []);
+    // Closes on a press anywhere else — including inside a framed body, which
+    // the host document never hears about (useClickAway's window blur).
+    useClickAway(contextMenuRef, contextMenuPlacement !== null, closeContextMenu);
 
     // Focus Editor utility
     const focusEditor = (selector: string) => {
@@ -76,16 +84,30 @@ export function useCompose({ initialDraft }: UseComposeProps) {
         if (editor) editor.focus();
     };
 
-    // Close menus on click outside
-    useEffect(() => {
-        const handleClickOutside = (e: MouseEvent) => {
-            if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
-                setShowContextMenu(false);
-            }
-        };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, []);
+    /**
+     * An editor's right-click. Over a selection, with an AI provider, it opens
+     * the polish menu at the pointer — placed by `placeMenu`, so a right-click
+     * near the window's right or bottom edge keeps the whole menu on-screen
+     * (the pointer's raw coordinates drew it partly off). Anything else is
+     * left to the browser: no `preventDefault`, no menu.
+     */
+    const handleSelectionContextMenu = (e: ReactMouseEvent, hasAIProvider: boolean) => {
+        if (!hasAIProvider) return;
+        const selected = window.getSelection()?.toString().trim() || '';
+        if (!selected) return;
+        e.preventDefault();
+        setSelectedText(selected);
+        setContextMenuPlacement(
+            placeMenu({ kind: 'point', x: e.clientX, y: e.clientY }, currentViewport(), SELECTION_MENU_WIDTH),
+        );
+    };
+
+    /** The menu's one item: polish the selection it was opened over. */
+    const polishSelection = () => {
+        setContextMenuPlacement(null);
+        setPolishMode('selection');
+        setShowPolishModal(true);
+    };
 
     /** Replace the body programmatically (draft restore, AI rewrite), keeping
      *  the plain-text copy that gates Send in step with the HTML. */
@@ -137,9 +159,10 @@ export function useCompose({ initialDraft }: UseComposeProps) {
         showPolishModal, setShowPolishModal,
         polishMode, setPolishMode,
         selectedText, setSelectedText,
-        showContextMenu, setShowContextMenu,
-        contextMenuPosition, setContextMenuPosition,
+        contextMenuPlacement,
         contextMenuRef,
+        handleSelectionContextMenu,
+        polishSelection,
 
         // Handlers
         handleEditorChange,

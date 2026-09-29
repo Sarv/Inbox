@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is what a forged copy of a trusted address looks like. Trusted senders
   are listed under Security → Spam, where they can be removed; reporting one
   of their messages as spam also removes them.
+- **Reply from the chat view without leaving it.** The chat view now ends
+  with the same Reply, Reply all and Forward buttons as the thread view, and
+  hovering over any message shows Reply, Reply all and Forward icons in its
+  bottom-right corner. Forward opens inline, like Reply.
+- **Right-click a message in the chat view for its menu.** Right-clicking
+  anywhere in a message, including inside a formatted email, opens the same
+  menu as its ⋯ button, right where you clicked. With text selected it also
+  offers Copy, and over a link it offers Open link and Copy link.
 
 ### Fixed
 - **Mail no longer marked "a reply to itself".** Some mail servers report
@@ -40,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with deceptive links. Links in Sarv email signatures, which go through a
   click-tracking address, are no longer flagged as pretending to be your own
   domain either. Existing mail is re-checked on the next launch.
+- **Menus close when you click into an email.** An open message menu used to
+  stay open when you clicked inside a formatted email's body.
+- **Forward and reply boxes start fresh for each message.** Replying to or
+  forwarding a different message in the chat view used to keep the first
+  message's text, draft or attachments, and a forward restored by Undo Send
+  could reappear in later forwards.
 - **Sarv AI asks before it reads your mail.** Signing in with Sarv used to
   switch Sarv AI on straight away, and new mail from every account was sent
   to it. The app now asks first, and nothing is sent unless you agree or pick

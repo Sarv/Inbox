@@ -30,6 +30,10 @@ const view = (names: string[], initialIndex = 0) =>
 
 let mounted: ReturnType<typeof render> | null = null;
 
+/** Everything the viewer shows. It is portalled to <body>, so it is read from
+ *  there rather than from the container it was mounted in. */
+const viewerText = () => document.querySelector('[role="dialog"]')?.textContent ?? '';
+
 beforeEach(() => {
   downloadAttachment.mockReset().mockResolvedValue({ success: true });
   previewAttachment.mockReset().mockResolvedValue({ success: true });
@@ -45,6 +49,21 @@ afterEach(() => {
   mounted = null;
   document.body.innerHTML = '';
   vi.restoreAllMocks();
+});
+
+describe('where it is drawn', () => {
+  // Breaks: drawn inline, the viewer sits inside whatever opened it. From a
+  // chat bubble's attachment pill that is INSIDE the message, so a right-click
+  // on the preview opened the message menu over it (see
+  // AttachmentPills.chat-bubble.test.tsx), and a hovered row's stacking
+  // context could put the "full-screen" overlay under its neighbours.
+  it('draws into <body>, outside the element that mounted it', () => {
+    mounted = view(['photo.png']);
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog!.parentElement).toBe(document.body);
+    expect(mounted.container.contains(dialog)).toBe(false);
+  });
 });
 
 describe('element per kind', () => {
@@ -122,8 +141,8 @@ describe('unsupported and failed', () => {
     mounted = view(['contract.docx']);
 
     expect(mounted.find('iframe')).toBeNull();
-    expect(mounted.container.textContent).toContain('cannot show');
-    expect(mounted.container.textContent).toContain('Save a copy');
+    expect(viewerText()).toContain('cannot show');
+    expect(viewerText()).toContain('Save a copy');
   });
 
   // SECURITY — the user's constraint. Breaks: an executable gets an "Open in
@@ -134,8 +153,8 @@ describe('unsupported and failed', () => {
       mounted?.unmount();
       mounted = view([name]);
 
-      expect(mounted.container.textContent, name).toContain('Save a copy');
-      expect(mounted.container.textContent, name).not.toContain('Open in system app');
+      expect(viewerText(), name).toContain('Save a copy');
+      expect(viewerText(), name).not.toContain('Open in system app');
       expect(mounted.byLabel('Open in system app'), name).toBeNull();
       expect(mounted.find('iframe'), name).toBeNull();
     }
@@ -149,7 +168,7 @@ describe('unsupported and failed', () => {
     fire(mounted.find('img'), 'error');
 
     expect(mounted.find('img')).toBeNull();
-    expect(mounted.container.textContent).toContain('could not be shown');
+    expect(viewerText()).toContain('could not be shown');
   });
 });
 
@@ -186,11 +205,11 @@ describe('text', () => {
     mounted = view(['notes.txt']);
     await settle();
 
-    expect(mounted.container.textContent).toContain('could not be read');
+    expect(viewerText()).toContain('could not be read');
     // And the reason, verbatim: text is the only kind fetched by script, so a
     // CORS refusal and a missing file both arrive here as the same dead-end
     // message unless the cause is shown. Breaks if it is swallowed again.
-    expect(mounted.container.textContent).toContain('HTTP 500');
+    expect(viewerText()).toContain('HTTP 500');
   });
 
   // Breaks: a network-level refusal (the fetch rejects rather than answering)
@@ -206,7 +225,7 @@ describe('text', () => {
     mounted = view(['notes.txt']);
     await settle();
 
-    expect(mounted.container.textContent).toContain('Failed to fetch');
+    expect(viewerText()).toContain('Failed to fetch');
   });
 });
 
@@ -269,14 +288,14 @@ describe('navigation and dismissal', () => {
   it('shows the position when there is more than one attachment', () => {
     mounted = view(['a.png', 'b.png', 'c.png'], 1);
 
-    expect(mounted.container.textContent).toContain('2 of 3');
+    expect(viewerText()).toContain('2 of 3');
     expect(mounted.byLabel('Next attachment')).not.toBeNull();
   });
 
   it('hides the navigation for a single attachment', () => {
     mounted = view(['a.png']);
 
-    expect(mounted.container.textContent).not.toContain(' of ');
+    expect(viewerText()).not.toContain(' of ');
     expect(mounted.byLabel('Next attachment')).toBeNull();
   });
 });
@@ -329,7 +348,7 @@ describe('presentation details', () => {
     mounted = view(['huge.log']);
     await settle();
 
-    expect(mounted.container.textContent).toContain('Showing the first 2 MB');
+    expect(viewerText()).toContain('Showing the first 2 MB');
     expect(mounted.find('pre')!.textContent!.length).toBe(MAX_INLINE_TEXT_BYTES);
   });
 
@@ -374,19 +393,19 @@ describe('presentation details', () => {
       );
 
     mounted = withSize(2048);
-    expect(mounted.container.textContent).toContain('2.0 KB');
+    expect(viewerText()).toContain('2.0 KB');
     mounted.unmount();
 
     mounted = withSize('1.2 MB');
-    expect(mounted.container.textContent).toContain('1.2 MB');
+    expect(viewerText()).toContain('1.2 MB');
     mounted.unmount();
 
     mounted = withSize('Unknown');
-    expect(mounted.container.textContent).not.toContain('Unknown');
+    expect(viewerText()).not.toContain('Unknown');
     mounted.unmount();
 
     mounted = withSize(undefined);
-    expect(mounted.container.textContent).toBe('a.pngImage');
+    expect(viewerText()).toBe('a.pngImage');
   });
 
   // Breaks: an out-of-range index (a stale click after the list changed) throws

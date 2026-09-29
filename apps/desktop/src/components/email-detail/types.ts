@@ -45,10 +45,32 @@ export interface EmailDetailContext {
   inlineReplyMode: 'reply' | 'replyAll';
   setInlineReplyMode: (mode: 'reply' | 'replyAll') => void;
   replyingToEmail: any | null;
-  inlineReplyDraft?: { to: string; cc: string; htmlContent: string; attachments: any[] };
+  /** The open reply's seed draft — only ever the one written for
+   *  `replyingToEmail` (see composer-target.ts). `draftMessageId` is the stored
+   *  draft the composer replaces on save and deletes on send or discard. */
+  inlineReplyDraft?: {
+    to: string;
+    cc: string;
+    subject?: string;
+    htmlContent: string;
+    attachments: any[];
+    draftMessageId?: string;
+    unsaved?: boolean;
+    isAIDraft?: boolean;
+    aiReasoning?: string;
+    agentDecisionId?: string;
+  };
   showInlineForward: boolean;
   forwardingEmail: any | null;
-  inlineForwardDraft?: { to: string; cc: string; htmlContent: string; attachments: any[] };
+  /** The open forward's seed draft, on the same terms, for `forwardingEmail`. */
+  inlineForwardDraft?: {
+    to: string;
+    cc: string;
+    htmlContent: string;
+    attachments: any[];
+    draftMessageId?: string;
+    unsaved?: boolean;
+  };
   chatViewEnabled: boolean;
   /**
    * True when the rendering tree should swap EmailCard for ThreadChatView —

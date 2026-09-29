@@ -57,6 +57,59 @@ export function shouldShowProcessPrompt({
 }
 
 /**
+ * Whether the Reply / Reply All / Forward row closes the conversation.
+ *
+ * - Only while the chat IS the reading surface (`chatViewActive`). The chat can
+ *   also mount beside the standard card (a single designed mail with a quoted
+ *   history, before the reader picks chat), and that card carries the same row
+ *   in its own footer — two identical rows, one under each copy of the mail.
+ * - Only under actual bubbles. With none, the view shows placeholders, the
+ *   "Process now" invitation or its empty text; a row of reply buttons under
+ *   "this thread hasn't been processed yet" answers a message nobody can see.
+ * - Never while a reply or forward is open. The composer opens in this same
+ *   spot, at the end of the conversation, so the row would sit on top of the
+ *   box its own buttons opened.
+ */
+export function shouldShowEndReplyBar({
+  chatViewActive,
+  renderedCount,
+  composerOpen,
+}: {
+  chatViewActive: boolean;
+  renderedCount: number;
+  composerOpen: boolean;
+}): boolean {
+  return chatViewActive && renderedCount > 0 && !composerOpen;
+}
+
+/**
+ * Whether the chat view mounts the open reply or forward box, rather than the
+ * standard card above it.
+ *
+ * EmailDetail mounts the box for the thread's first message under that card
+ * whenever the chat is NOT the reading surface — and the chat can still be on
+ * screen then (a single designed mail with a quoted history, before the reader
+ * picks chat). Both mounting it put two composers on one reply, each
+ * autosaving a draft of its own, under one element id the focus-and-scroll
+ * lookup then picks between. EmailDetail mounts the box exactly when this is
+ * false (it reads this same rule), so one of the two always takes it and never
+ * both.
+ */
+export function chatMountsComposer({
+  chatViewActive,
+  targetId,
+  anchorId,
+}: {
+  chatViewActive: boolean;
+  /** The message the box is open on. */
+  targetId: string;
+  /** The thread's first message — the one the standard card shows. */
+  anchorId: string | undefined;
+}): boolean {
+  return chatViewActive || targetId !== anchorId;
+}
+
+/**
  * Whether the chat view must withhold this message's remote images.
  *
  * The library blocks everything unless the host says otherwise, and it cannot

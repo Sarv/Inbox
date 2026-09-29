@@ -6,7 +6,6 @@ import {
   Minimize2,
   ChevronDown,
   ChevronUp,
-  Sparkles,
 } from 'lucide-react';
 import prettyBytes from 'pretty-bytes';
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -28,6 +27,7 @@ import { EmailInput } from './EmailInput';
 import { PolishModal } from './PolishModal';
 import { EMPTY_EDITOR_HTML, RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
+import { SelectionPolishMenu } from './SelectionPolishMenu';
 import { SmtpNotConfiguredBanner } from './SmtpNotConfiguredBanner';
 import { useCompose, AttachmentFile } from './useCompose';
 
@@ -115,10 +115,11 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     showBcc, setShowBcc,
     showPolishModal, setShowPolishModal,
     polishMode, setPolishMode,
-    selectedText, setSelectedText,
-    showContextMenu, setShowContextMenu,
-    contextMenuPosition, setContextMenuPosition,
+    selectedText,
+    contextMenuPlacement,
     contextMenuRef,
+    handleSelectionContextMenu,
+    polishSelection,
     handleEditorChange,
     mergeEmails,
     handleAttach,
@@ -204,22 +205,8 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     }
   };
 
-  // Handle right-click context menu
-  const handleContextMenu = (e: React.MouseEvent) => {
-    if (!hasAIProvider) return;
-
-    // Get selected text from window selection
-    const selection = window.getSelection();
-    const selected = selection?.toString().trim() || '';
-
-    // Only show context menu if text is selected
-    if (!selected) return;
-
-    e.preventDefault();
-    setSelectedText(selected);
-    setContextMenuPosition({ x: e.clientX, y: e.clientY });
-    setShowContextMenu(true);
-  };
+  // Right-click in the editor: the polish menu over a selection (useCompose).
+  const handleContextMenu = (e: React.MouseEvent) => handleSelectionContextMenu(e, hasAIProvider);
 
   // Pre-fill fields based on mode
   useEffect(() => {
@@ -768,25 +755,13 @@ ${createQuotedHeader(prefix, extraInfo)}
           />
         )}
 
-        {/* Context Menu */}
-        {showContextMenu && (
-          <div
-            ref={contextMenuRef}
-            className="fixed bg-card border border-border rounded-lg shadow-xl py-1 z-[200]"
-            style={{ left: contextMenuPosition.x, top: contextMenuPosition.y }}
-          >
-            <button
-              onClick={() => {
-                setShowContextMenu(false);
-                setPolishMode('selection');
-                setShowPolishModal(true);
-              }}
-              className="flex items-center gap-2 w-full px-4 py-2 text-sm hover:bg-accent transition-colors"
-            >
-              <Sparkles className="h-4 w-4 text-primary" />
-              Polish Selected Text
-            </button>
-          </div>
+        {/* The right-click menu over a selection */}
+        {contextMenuPlacement && (
+          <SelectionPolishMenu
+            menuRef={contextMenuRef}
+            placement={contextMenuPlacement}
+            onPolish={polishSelection}
+          />
         )}
       </div>
       </>
@@ -999,25 +974,13 @@ ${createQuotedHeader(prefix, extraInfo)}
         />
       )}
 
-      {/* Context Menu */}
-      {showContextMenu && (
-        <div
-          ref={contextMenuRef}
-          className="fixed bg-card border border-border rounded-lg shadow-xl py-1 z-[200]"
-          style={{ left: contextMenuPosition.x, top: contextMenuPosition.y }}
-        >
-          <button
-            onClick={() => {
-              setShowContextMenu(false);
-              setPolishMode('selection');
-              setShowPolishModal(true);
-            }}
-            className="flex items-center gap-2 w-full px-4 py-2 text-sm hover:bg-accent transition-colors"
-          >
-            <Sparkles className="h-4 w-4 text-primary" />
-            Polish Selected Text
-          </button>
-        </div>
+      {/* The right-click menu over a selection */}
+      {contextMenuPlacement && (
+        <SelectionPolishMenu
+          menuRef={contextMenuRef}
+          placement={contextMenuPlacement}
+          onPolish={polishSelection}
+        />
       )}
 
       {/* Discard confirmation */}
