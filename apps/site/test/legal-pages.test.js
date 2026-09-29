@@ -10,10 +10,12 @@ import {
   renderLegalMarkdown,
 } from '../scripts/legal-pages.mjs';
 
-// inbox.sarv.com/privacy-policy and /terms are built from docs/legal/*.md, and
-// the privacy policy URL is what Google's reviewers read. Breaks if: internal
-// notes (HTML comments) get published, an unfinished [CONFIRM] draft looks
-// final or gets indexed, or a page silently renders empty.
+import { CONSENT_SCREEN } from './consent-screen.js';
+
+// inbox.sarv.com/privacy-policy.html and /terms.html are built from
+// docs/legal/*.md, and the privacy policy URL is what Google's reviewers read.
+// Breaks if: internal notes (HTML comments) get published, an unfinished
+// [CONFIRM] draft looks final or gets indexed, or a page silently renders empty.
 
 const read = (file) => readFileSync(resolve(import.meta.dirname, '../../../docs/legal', file), 'utf8');
 const template = (name) => readFileSync(resolve(import.meta.dirname, '..', `${name}.html`), 'utf8');
@@ -104,5 +106,21 @@ describe('the real pages', () => {
   it('the privacy policy keeps the Limited Use statement', () => {
     const { html } = renderLegalMarkdown(read('privacy-policy.md'));
     expect(html).toContain('including the Limited Use requirements');
+  });
+
+  // The consent screen links these pages and Google's review reads them: a
+  // [CONFIRM] placeholder would publish them as a noindexed Draft, which fails it.
+  it.each(Object.entries(LEGAL_PAGES))('%s is published as final text, not a draft', (name, file) => {
+    const page = renderLegalMarkdown(read(file));
+    expect(page.draft).toBe(false);
+    const out = fillLegalTemplate(template(name), page);
+    expect(out).not.toContain('class="banner warning"');
+    expect(out).not.toContain('noindex');
+  });
+
+  // The terms send readers to the policy Google reviews, at the consent-screen URL.
+  it('the terms link the privacy policy at its consent-screen URL', () => {
+    const { html } = renderLegalMarkdown(read('terms-of-service.md'));
+    expect(html).toContain(`href="${CONSENT_SCREEN.privacyPolicy}"`);
   });
 });
