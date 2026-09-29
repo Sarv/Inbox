@@ -20,7 +20,7 @@ describe('settingsContentWidthClass', () => {
   // other tab is deliberately narrow, and widening them all is not the fix.
   it('keeps every other tab at the readable single-column width', () => {
     const others: SettingsTab[] = [
-      'general', 'inbox', 'accounts', 'folders', 'filters', 'advanced', 'keyboard-shortcuts',
+      'general', 'inbox', 'accounts', 'folders', 'filters', 'encryption', 'advanced', 'keyboard-shortcuts',
     ];
 
     for (const tab of others) {
