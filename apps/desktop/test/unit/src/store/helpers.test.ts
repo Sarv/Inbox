@@ -1839,6 +1839,29 @@ describe('setupAICategorizationListeners', () => {
     expect(state.loadFolders).toHaveBeenCalled();
   });
 
+  // Decision 6 — one draft predicate everywhere: a sent copy that kept a
+  // stale `|draft|` tag (`|Sent|draft|`, or the account's own `INBOX.Sent`
+  // path) is the reader's reply; a hand-rolled `|draft|` check dropped it from
+  // the open thread on every post-send cleanup. A provider-path draft
+  // (`|INBOX.Drafts|`, only the folder roles say it is one) IS dropped.
+  it('keeps a sent copy with a stale draft tag, and drops a provider-path draft', () => {
+    const { handlers, state } = setup();
+    state.folders = [
+      { id: 'f1', path: 'INBOX', name: 'INBOX', specialUse: null },
+      { id: 'f2', path: 'INBOX.Drafts', name: 'Drafts', specialUse: '\\Drafts' },
+      { id: 'f3', path: 'INBOX.Sent', name: 'Sent', specialUse: '\\Sent' },
+    ];
+    state.threadEmails = [
+      { id: 'sent-std', messageId: '<s1>', threadId: 't1', tags: '|Sent|draft|' },
+      { id: 'sent-gmail', messageId: '<s2>', threadId: 't1', tags: '|[Gmail]/Sent Mail|draft|' },
+      { id: 'sent-path', messageId: '<s3>', threadId: 't1', tags: '|INBOX.Sent|draft|' },
+      { id: 'synced-draft', messageId: '<d1>', threadId: 't1', tags: '|INBOX.Drafts|' },
+      { id: 'other-thread', messageId: '<d2>', threadId: 't2', tags: '|draft|' },
+    ];
+    handlers.draftsRemoved({ threadId: 't1', messageIds: [] });
+    expect(state.removeDraftFromViews.mock.calls.map((call: unknown[]) => call[0])).toEqual(['synced-draft']);
+  });
+
   it('handles a drafts-removed event with no message ids', () => {
     const { handlers, state } = setup();
     state.emails = [{ id: 'r1', messageId: '<m1>', threadId: 't1', tags: '|[Gmail]/Drafts|' }];

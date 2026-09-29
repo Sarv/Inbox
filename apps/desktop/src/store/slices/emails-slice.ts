@@ -1,4 +1,11 @@
 import type { EmailRecord } from '@sarvinbox/core';
+// Deep import, not the barrel (Node-only transports) — see vite/renderer-aliases.ts.
+import {
+  conversationFoldersOf,
+  isDraftRow,
+  isExcludedFolderCopy,
+} from '@sarvinbox/core/conversation-membership';
+import { createLogger } from '@sarvinbox/core/logger';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import type { InboxSection } from '../../config/inbox-types';
@@ -28,6 +35,10 @@ let sectionLoadSeq = 0;
 // (auto-read timers, body fetches, AI extraction), which is the freeze.
 // Each call captures the seq at entry and bails before writing if a newer one began.
 let threadLoadSeq = 0;
+
+// The shared logger (renderer alias), for the lines this module has moved off
+// raw console output — they reach app.log in main's `[ts] [LEVEL] [name]` shape.
+const log = createLogger('EmailsSlice');
 
 // Tier B overlap guard — module-level so a slow cycle can't be re-entered by the
 // interval (transient, not UI state).
@@ -231,6 +242,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   emailsTotal: 0,
 
   threadEmails: [],
+  threadAccountId: null,
   loadingThread: false,
   pendingThreadEmailIds: [],
 
@@ -932,28 +944,45 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       if (seq !== threadLoadSeq) return;
       if (result.success && result.data) {
         // Belt-and-suspenders (backend getByThread already excludes these):
-        // drop trashed/spam copies and empty unsent drafts so a message the
-        // user deleted can't reappear in the conversation.
+        // drop trashed/junked copies — by the SAME folder list the membership
+        // predicate uses (`isExcludedFolderCopy`: Gmail's `[Gmail]/Trash`,
+        // Outlook's `Deleted Items` and `Junk Email` included, which a
+        // hand-written `|Trash|`/`|Spam|`/`|Junk|` check missed) — and empty
+        // unsent drafts, so a message the user deleted can't reappear in the
+        // conversation. Drafts themselves are KEPT: they are not messages
+        // (useEmailDetail's `conversationMembers` leaves them out of every
+        // view), but the reply box is seeded from them.
         const raw = result.data as EmailRecord[];
-        const cleaned = raw.filter((e) => {
-          const tags = e.tags || '';
-          if (tags.includes('|Trash|') || tags.includes('|Spam|') || tags.includes('|Junk|')) return false;
-          const blankDraft = tags.includes('|draft|') && !(e.cleanBody || '').trim() && !(e.rawBody || '').trim();
-          return !blankDraft;
-        });
-        // If everything was filtered out, the whole thread is Trash/Spam/Junk
-        // (e.g. viewing the Junk folder) — show it unfiltered rather than
-        // collapsing the conversation to a single message.
+        // The ONE draft predicate: a Sent copy that kept a stale `|draft|` tag
+        // is the reader's reply, kept even before its body has downloaded.
+        const folders = conversationFoldersOf(get().folders);
+        const withoutBlankDrafts = raw.filter((e) =>
+          !(isDraftRow(e.tags, folders) && !(e.cleanBody || '').trim() && !(e.rawBody || '').trim()));
+        const cleaned = withoutBlankDrafts.filter((e) => !isExcludedFolderCopy(e.tags));
+        // If no MESSAGE survived, the whole conversation is Trash/Spam/Junk
+        // (e.g. viewing the Junk folder) — keep those copies rather than
+        // collapsing the conversation to nothing. "No message", not "no row":
+        // a draft reply alone is not a conversation, and counting it here hid
+        // the junked thread it answers. The same all-junk rule as
+        // `conversationMembers`.
+        const holdsMessage = cleaned.some((e) => !isDraftRow(e.tags, folders));
+        const threadEmails = holdsMessage
+          ? cleaned
+          : withoutBlankDrafts.length > 0 ? withoutBlankDrafts : raw;
         // A fresh thread load includes every message, so any queued "new
         // message" banner for this thread is now consumed — clear it.
         set({
-          threadEmails: cleaned.length > 0 ? cleaned : raw,
+          threadEmails,
+          // The account whose database these rows came from, stamped WITH
+          // them: the AI split cache is keyed by thread id, and the same id
+          // exists in every account, so its IPC must name this account.
+          threadAccountId: accountId ?? get().activeAccountId ?? null,
           ...(get().pendingThreadEmailIds.length > 0 ? { pendingThreadEmailIds: [] } : {}),
         });
       }
     } catch (error) {
       if (seq !== threadLoadSeq) return;
-      console.error('Failed to load thread:', error);
+      log.error(`Failed to load thread ${threadId}: ${(error as Error)?.message ?? error}`);
     } finally {
       // Only the latest load owns the spinner — a stale load resolving late
       // must not clear it while the current thread is still loading.
@@ -979,7 +1008,14 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     try {
       const result = await window.electronAPI.emails.get(emailId);
       if (!result.success || !result.data) return;
-      if ((result.data as EmailRecord).threadId !== openThreadId) return;
+      const arrived = result.data as EmailRecord;
+      if (arrived.threadId !== openThreadId) return;
+      // A draft is not a new message: saving a reply into the open thread (or
+      // the AI drafter doing it) must not raise "New message in this
+      // conversation" over the draft the reader is typing. Same predicate the
+      // thread view excludes drafts by, with this account's folders so an
+      // IMAP-synced `|INBOX.Drafts|` draft is recognised too.
+      if (isDraftRow(arrived.tags, conversationFoldersOf(get().folders))) return;
 
       // Re-check after the async gap: the user may have navigated to another
       // thread, or the message may have been folded in by a concurrent load.
@@ -989,7 +1025,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       if (s.pendingThreadEmailIds.includes(emailId)) return;
       set({ pendingThreadEmailIds: [...s.pendingThreadEmailIds, emailId] });
     } catch (error) {
-      console.error('[Store] noteNewEmailForOpenThread failed:', error);
+      log.warn(`noteNewEmailForOpenThread failed for ${emailId}: ${(error as Error)?.message ?? error}`);
     }
   },
 

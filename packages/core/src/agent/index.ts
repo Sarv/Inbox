@@ -11,6 +11,7 @@ export {
   DEFAULT_DRAFT_TEMPLATE,
   type ReplyDrafterDeps,
   type DraftResult,
+  type ThreadMessage,
 } from './reply-drafter';
 export * from './signals';
 export {

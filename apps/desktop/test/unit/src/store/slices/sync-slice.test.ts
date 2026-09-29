@@ -126,6 +126,8 @@ const loadFlushHarness = async (overrides: Record<string, any> = {}): Promise<Fl
     fetchBodiesForVisibleEmails: vi.fn(),
     noteNewEmailForOpenThread: vi.fn(),
     processRecentEmailsForSignatures: vi.fn(async () => {}),
+    // Removed from the store: kept here as a tripwire, so a flush that calls
+    // it again (a second background extraction path) fails the test below.
     autoExtractRecentConversations: vi.fn(async () => {}),
     ...overrides,
   };
@@ -285,6 +287,19 @@ describe('flushRealtimeBatch — external flag changes (webmail read / star)', (
     await runFlush();
     expect(h.state.mergeNewEmails).toHaveBeenCalledWith('f-inbox');
     expect(h.state.loadFolders).toHaveBeenCalledTimes(1);
+  });
+
+  // One background path for the chat view's AI split: main's first-split
+  // scheduler nominates threads per account. The flush used to start a second,
+  // renderer-side extraction pass on every active-account arrival (whole
+  // threads, active account only) — a new mail now runs the signature pass and
+  // nothing else AI.
+  it('starts no conversation extraction when new mail arrives', async () => {
+    const h = await loadFlushHarness();
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'A', emailId: 'n1', folderPath: 'INBOX' });
+    await runFlush();
+    expect(h.state.processRecentEmailsForSignatures).toHaveBeenCalledTimes(1);
+    expect(h.state.autoExtractRecentConversations).not.toHaveBeenCalled();
   });
 
   // The signal is also sent without a folder (pure count change from the

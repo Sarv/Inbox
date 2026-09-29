@@ -189,52 +189,6 @@ export class ThreadRepository extends BaseRepository {
     };
   }
 
-  // ========== Chat Extraction Tracking ==========
-
-  /**
-   * Get threads that need conversation extraction (multi-email threads
-   * where extraction hasn't been done or email count has changed).
-   */
-  async getPendingExtractionThreads(limit = 5): Promise<{ id: string; messageCount: number }[]> {
-    const rows = this.db
-      .prepare(`
-        SELECT id, message_count
-        FROM threads
-        WHERE message_count >= 2
-          AND (chat_extracted_at IS NULL OR chat_email_count < message_count)
-          -- Only AUTO-process real conversations (>= 2 distinct senders). A
-          -- thread where the same person emails repeatedly with no reply from
-          -- anyone else has no back-and-forth to extract — skip it to save AI
-          -- work; the user can still process it on demand from the thread view.
-          AND (
-            SELECT COUNT(DISTINCT LOWER(from_address))
-            FROM emails
-            WHERE emails.thread_id = threads.id
-          ) >= 2
-        ORDER BY last_message_date DESC
-        LIMIT ?
-      `)
-      .all(limit) as any[];
-
-    return rows.map(row => ({
-      id: row.id,
-      messageCount: row.message_count,
-    }));
-  }
-
-  /**
-   * Mark a thread as having been extracted for chat view.
-   */
-  async updateChatExtraction(threadId: string, emailCount: number): Promise<void> {
-    this.db
-      .prepare(`
-        UPDATE threads
-        SET chat_extracted_at = unixepoch(), chat_email_count = ?
-        WHERE id = ?
-      `)
-      .run(emailCount, threadId);
-  }
-
   // ========== Attachment Operations ==========
 
   /**

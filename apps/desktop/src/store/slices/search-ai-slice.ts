@@ -1,17 +1,12 @@
 import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearchableParsedQuery, needsFullQuerySearch } from '../../components/server-search';
 import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
 import { isSignatureDetectionEnabled, detectSignature, isCategorizationEnabled, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
-import { isAutoChatExtractEnabled, isConversationModeEnabled, extractConversation } from '../../services/conversation-service';
 import { getMaxAIProcessingEmails, getEmailsPerPage, getPageSizeForView, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
 import type { SearchAISlice, SliceCreator } from '../types';
 
-// Re-entry guard for autoExtractRecentConversations — every IDLE 'new' event
-// fires a pass, and overlapping passes would extract the same threads twice.
-let autoExtractRunning = false;
-
 // The parsed query + context of the ACTIVE search, kept so goToSearchPage can
 // re-fetch any page without re-parsing (and without threading them through the
-// UI). Module-scoped like autoExtractRunning — there is a single store instance.
+// UI). Module-scoped — there is a single store instance.
 let activeSearchParsed: any = null;
 let activeSearchContext: { folderId?: string; aiCategory?: string } | null = null;
 
@@ -590,59 +585,6 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     // Pass userEmail so pipeline can classify contacts and build memories
     if (userEmail) {
       window.electronAPI.agent.setConfig({ userEmail } as any).catch(() => {});
-    }
-  },
-
-  autoExtractRecentConversations: async () => {
-    if (autoExtractRunning) {
-      console.log('[AutoExtract] Previous pass still running, skipping');
-      return;
-    }
-    if (!isAutoChatExtractEnabled() || !isConversationModeEnabled()) {
-      return;
-    }
-    if (!getAIHealth().healthy) {
-      return; // AI inactive — pause background extraction until fixed
-    }
-    const provider = getDefaultProvider();
-    if (!provider) return;
-
-    autoExtractRunning = true;
-    try {
-      // Get recent emails (last 10 min) to find threads that need extraction
-      const result = await window.electronAPI.emails.getRecent({ minutes: 10, limit: 50 });
-      if (!result.success || !result.data || result.data.length === 0) return;
-
-      // Collect unique threadIds
-      const threadIds = [...new Set(result.data.map((e: any) => e.threadId).filter(Boolean))] as string[];
-      if (threadIds.length === 0) return;
-
-      console.log(`[AutoExtract] Processing ${threadIds.length} thread(s) from recent emails`);
-
-      for (const threadId of threadIds) {
-        try {
-          // Get all emails in this thread
-          const threadResult = await window.electronAPI.emails.getThread(threadId);
-          if (!threadResult.success || !threadResult.data || threadResult.data.length < 2) {
-            continue; // Skip single-email threads
-          }
-
-          const emails = threadResult.data;
-          const userEmail = emails[0]?.toAddress || '';
-
-          // extractConversation handles caching + incremental — only processes new emails
-          await extractConversation(threadId, emails, userEmail);
-          console.log(`[AutoExtract] Thread ${threadId} extracted (${emails.length} emails)`);
-        } catch (err) {
-          console.error(`[AutoExtract] Failed to extract thread ${threadId}:`, err);
-        }
-      }
-
-      console.log('[AutoExtract] Background extraction complete');
-    } catch (error) {
-      console.error('[AutoExtract] Failed:', error);
-    } finally {
-      autoExtractRunning = false;
     }
   },
 });

@@ -33,8 +33,12 @@ vi.mock('../../../../../src/components/email-detail/EmailMenu', () => ({
 vi.mock('../../../../../src/components/email-detail/EmailHeaderDetails', () => ({
   EmailHeaderDetails: () => <div data-testid="headers" />,
 }));
+const replyProps: { current?: Record<string, unknown> } = {};
 vi.mock('../../../../../src/components/InlineReply', () => ({
-  InlineReply: () => <div data-testid="inline-reply" />,
+  InlineReply: (props: Record<string, unknown>) => {
+    replyProps.current = props;
+    return <div data-testid="inline-reply" />;
+  },
 }));
 const forwardProps: { current?: Record<string, unknown> } = {};
 vi.mock('../../../../../src/components/InlineForward', () => ({
@@ -45,8 +49,6 @@ vi.mock('../../../../../src/components/InlineForward', () => ({
 }));
 vi.mock('../../../../../src/services/ai-service', () => ({
   isSignatureDetectionEnabled: () => false,
-  buildPolishThreadContext: () => '',
-  getCurrentUserEmail: () => 'me@acme.example',
 }));
 vi.mock('../../../../../src/utils/sender-identity', () => ({
   useSenderIdentity: () => null,
@@ -91,7 +93,7 @@ const context = (handlers: Handlers, overrides: Record<string, unknown> = {}) =>
       displayEmail: ANCHOR,
       threadEmails: [ANCHOR, REPLY],
       duplicatesByEmailId: new Map<string, unknown[]>(),
-      conversationMessages: null,
+      polishThreadContext: '',
       expandedThreads: new Set(['reply']),
       showFullContent: new Set<string>(),
       showSignatures: new Set<string>(),
@@ -114,6 +116,7 @@ afterEach(() => {
   mounted?.unmount();
   mounted = undefined;
   forwardProps.current = undefined;
+  replyProps.current = undefined;
   menuProps.clear();
 });
 
@@ -148,6 +151,25 @@ describe('ThreadList — the reply row under a reply', () => {
     mounted = render(<ThreadList ctx={context(newHandlers(), { showInlineReply: true, replyingToEmail: REPLY })} />);
     expect(mounted.find('[data-testid="inline-reply"]')).not.toBeNull();
     expect(row(mounted)).toBeNull();
+  });
+
+  // Reply polish reads ONE transcript, built once in useEmailDetail from the
+  // conversation's messages — the list's composer used to build its own from
+  // the raw rows (drafts' neighbours, quoted history and all).
+  it('hands its reply composer the thread transcript from the context', () => {
+    mounted = render(
+      <ThreadList
+        ctx={context(newHandlers(), { showInlineReply: true, replyingToEmail: REPLY, polishThreadContext: '[Bob Ray] Mar 3, 2026: Looks good.' })}
+      />,
+    );
+    expect(replyProps.current!.threadContext).toBe('[Bob Ray] Mar 3, 2026: Looks good.');
+  });
+
+  // No transcript (nothing usable): the composer gets none, and falls back to
+  // its own single-email trail.
+  it('hands no transcript when there is none', () => {
+    mounted = render(<ThreadList ctx={context(newHandlers(), { showInlineReply: true, replyingToEmail: REPLY })} />);
+    expect(replyProps.current!.threadContext).toBeUndefined();
   });
 
   // Regression: the forward box under a reply got no draft, so a forward

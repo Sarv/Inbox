@@ -1,14 +1,31 @@
+import { hasGlobalDomParser } from '@sarv-in/email-chat-view/transform';
+import {
+  compareConversationOrder,
+  conversationFoldersOf,
+  conversationMembers,
+  conversationSenders,
+  latestConversationMember,
+} from '@sarvinbox/core/conversation-membership';
+import { createLogger } from '@sarvinbox/core/logger';
 import prettyBytes from 'pretty-bytes';
 import { useState, useEffect, useRef, useMemo } from 'react';
 
-import { isDraftsFolder } from '../../../config/folder-mapping';
-import { detectSignature, type SignatureDetectionResult, getDefaultProvider } from '../../../services/ai-service';
-import { extractConversation, isConversationModeEnabled, isAutoChatViewEnabled, reExtractSingleMessage, hasQuotedHistory, hasEmbeddedConversation, aiSplitFirstEmail, saveConversationCache, EXTRACTION_VERSION, EXTRACTED_MATCH_TOLERANCE_S, type ConversationMessage, type ConversationProgress } from '../../../services/conversation-service';
+import { isAutoChatViewEnabled, isConversationModeEnabled } from '../../../services/ai-features';
+import {
+  buildPolishThreadContext,
+  detectSignature,
+  getCurrentUserEmail,
+  getDefaultProvider,
+  type SignatureDetectionResult,
+} from '../../../services/ai-service';
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
 import { loadEmailAttachments } from '../../../utils/compose-attachments';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
-import { isDraftEmail, isDraftRow } from '../../../utils/thread-utils';
+import { isDraftEmail } from '../../../utils/thread-utils';
+import { composeAiTurns, firstEmailFacts } from '../ai-view-compose';
+import { polishEntriesOf, threadTurns } from '../chat-message-adapter';
+import { chatViewRulesFor } from '../chat-view-rules';
 import { composerDraftFor, type ComposerSeed } from '../composer-target';
 import type { EmailDetailContext } from '../types';
 import {
@@ -19,6 +36,24 @@ import {
   shouldSuppressDraftAutoOpen,
   threadKeysOf,
 } from '../utils';
+
+import { useFirstEmailSplit } from './useFirstEmailSplit';
+
+const log = createLogger('EmailDetail');
+
+/** The AI view can work at all: conversation mode on and a provider configured. */
+function aiAvailableNow(): boolean {
+  return isConversationModeEnabled() && !!getDefaultProvider();
+}
+
+/**
+ * Chat view opens by itself when the reader chose it AND the AI view can work
+ * (conversation mode on, a provider configured) — the coupling to a provider
+ * stays as it was. Read per email (a fresh email starts from the setting).
+ */
+function autoChatViewOn(): boolean {
+  return isAutoChatViewEnabled() && aiAvailableNow();
+}
 
 /**
  * Subject to use when opening a draft into the reply composer. Keeps the draft's
@@ -67,29 +102,28 @@ export function useEmailDetail(): EmailDetailContext | null {
     setEmailLabel,
     restoreDraft,
     clearRestoreDraft,
+    threadAccountId,
   } = useEmailStore();
 
-  // The Drafts folder path(s) for this account — lets isDraftEmail catch
-  // provider-specific paths (e.g. `INBOX.Drafts`), not just the `|draft|`
-  // marker. Recomputed only when the folder list changes.
-  const draftFolderPaths = useMemo(
-    () => new Set((folders || []).filter((f: any) => isDraftsFolder(f)).map((f: any) => f.path)),
-    [folders]
-  );
+  // Where this account's drafts and sent copies live (provider paths such as
+  // `INBOX.Drafts` / `INBOX.Sent` included), by the folder classifier — the
+  // one value every draft question below is asked with. Recomputed only when
+  // the folder list changes. Known gap: in the unified view this is the ACTIVE
+  // account's folder list; the standard names are recognised for every account.
+  const conversationFolders = useMemo(() => conversationFoldersOf(folders), [folders]);
 
-  // Exclude drafts from the thread transcript — Gmail-style, a draft is never a
-  // static message; it's shown as an editable compose box at the bottom while
-  // the rest of the conversation stays fully visible above it. This catches BOTH
-  // our local mirror rows (tagged `|draft|`) AND drafts that came back from an
-  // IMAP re-sync tagged only with their Drafts folder path (which the old
-  // `|draft|`-only filter missed, so they leaked in as read-only messages
-  // showing the signature as "content").
+  // The conversation: the thread's MEMBERS, by the one predicate main counts,
+  // drafts and schedules by (`conversationMembers`). Gmail-style, a draft is
+  // never a static message — it is the editable compose box at the bottom —
+  // and a draft in ANY state is excluded: our local mirror rows (`|draft|`),
+  // drafts that came back from an IMAP re-sync tagged only with their Drafts
+  // folder path, and a DELETED draft (in Trash it is no longer editable, and a
+  // live-draft filter let it fall through as an ordinary message — reported
+  // from the field). Trash/Spam copies are excluded unless the whole thread is
+  // junk. Sorted oldest first, in the one total order main uses.
   const allThreadEmails = useMemo(
-    // `isDraftRow`, not `isDraftEmail`: the latter answers "may I edit this?"
-    // and says no once a draft is in Trash, so DELETING a draft made it appear
-    // here as an ordinary message. Reported from the field.
-    () => rawThreadEmails.filter(e => !isDraftRow(e, draftFolderPaths)),
-    [rawThreadEmails, draftFolderPaths]
+    () => conversationMembers(rawThreadEmails, conversationFolders),
+    [rawThreadEmails, conversationFolders]
   );
 
   // Fold copies of the SAME message (same Message-ID, e.g. one mail delivered to
@@ -144,25 +178,11 @@ export function useEmailDetail(): EmailDetailContext | null {
     setInlineReplySeed({ forEmailId: email.id, draft });
   const seedInlineForward = (email: { id: string }, draft: ForwardSeedDraft) =>
     setInlineForwardSeed({ forEmailId: email.id, draft });
-  const [chatViewEnabled, setChatViewEnabled] = useState(() =>
-    isAutoChatViewEnabled() && isConversationModeEnabled() && !!getDefaultProvider()
-  );
-  // True once the user EXPLICITLY toggled chat on for the current email. Lets a
-  // single designed/transactional email (forwarded newsletter, alert) default to
-  // Standard — chat-ifying its bespoke layout adds nothing — while still honoring
-  // a manual switch. Reset per email. (Genuine multi-message threads and text
-  // "loop-me-in" forwards still auto-open chat.)
+  const [chatViewEnabled, setChatViewEnabled] = useState(autoChatViewOn);
+  // True once the reader EXPLICITLY toggled chat on for the current email. A
+  // single email quoting ONE earlier message is offered the chat view but
+  // stays a card until this is set (see chatViewRulesFor). Reset per email.
   const [chatManuallyEnabled, setChatManuallyEnabled] = useState(false);
-  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[] | null>(null);
-  const [conversationLoading, setConversationLoading] = useState(false);
-  const [conversationUpdating, setConversationUpdating] = useState(false);
-  const [conversationError, setConversationError] = useState<string | null>(null);
-  const [conversationPartial, setConversationPartial] = useState(false);
-  // T6 — progressive-extraction counters for the UI (shape is frozen:
-  // { done, total, status? } | null). Non-null only while an extraction
-  // run is in flight; reset to null when it settles or the thread
-  // changes.
-  const [conversationProgress, setConversationProgress] = useState<{ done: number; total: number; status?: string } | null>(null);
   // Default to Standard (deterministic, no LLM) when a thread opens in chat
   // view; the user can switch to AI View on demand.
   const [showAIView, setShowAIView] = useState(false);
@@ -193,28 +213,35 @@ export function useEmailDetail(): EmailDetailContext | null {
   // box. Anchor the view on the real conversation instead so the full thread is
   // visible above the draft box (Gmail behavior). Only when there is no real
   // conversation (a standalone draft) do we fall back to the draft itself.
-  const selectedIsDraft = selectedEmail ? isDraftEmail(selectedEmail, draftFolderPaths) : false;
+  const selectedIsDraft = selectedEmail ? isDraftEmail(selectedEmail, conversationFolders) : false;
 
-  // For thread display, show OLDEST email as main card (chronological order)
+  // For thread display, show the FIRST member as main card — first in the one
+  // conversation order (an undated row never poses as the thread's first email,
+  // and equal timestamps tie-break by id), so the card, the chat view and
+  // main's "first email" are the same email.
   const displayEmail = (() => {
     if (!selectedEmail) return selectedEmail;
     if (selectedIsDraft) {
       if (threadEmails.length === 0) return selectedEmail; // standalone draft
-      return [...threadEmails].sort((a, b) => a.date - b.date)[0];
+      return [...threadEmails].sort(compareConversationOrder)[0];
     }
     if (threadEmails.length <= 1) return selectedEmail;
-    return [...threadEmails].sort((a, b) => a.date - b.date)[0];
+    return [...threadEmails].sort(compareConversationOrder)[0];
   })();
 
-  // Latest email in the thread — used as default reply target
+  // Latest email in the thread — the default reply target. The NEWEST member
+  // in the same one order as the card (`latestConversationMember`): the last
+  // one with a readable date, so a same-second pair never makes the reply
+  // target the card itself, and an undated row (sorted last) never poses as
+  // the newest message.
   const latestThreadEmail = (() => {
     if (!selectedEmail) return selectedEmail;
     if (selectedIsDraft) {
       if (threadEmails.length === 0) return selectedEmail; // standalone draft
-      return [...threadEmails].sort((a, b) => b.date - a.date)[0];
+      return latestConversationMember(threadEmails, conversationFolders) ?? selectedEmail;
     }
     if (threadEmails.length <= 1) return selectedEmail;
-    return [...threadEmails].sort((a, b) => b.date - a.date)[0];
+    return latestConversationMember(threadEmails, conversationFolders) ?? selectedEmail;
   })();
 
   // A draft with no surrounding conversation (opened from the Drafts folder or
@@ -283,7 +310,7 @@ export function useEmailDetail(): EmailDetailContext | null {
 
     if (newUnreadEmails.length === 0) return;
 
-    console.log('[EmailDetail] Scheduling immediate auto-read for NEW emails:', newUnreadEmails);
+    log.trace(`auto-read scheduled: ${newUnreadEmails.join(',')}`);
     newUnreadEmails.forEach(id => scheduledAutoReadRef.current.add(id));
 
     const timerEmailIds = [...newUnreadEmails];
@@ -299,15 +326,15 @@ export function useEmailDetail(): EmailDetailContext | null {
             || (currentState.searchResults || []).find(e => e.id === emailId);
           const alreadyRead = !!email && (email.tags || '').includes('|read|');
           if (!alreadyRead && currentState.manuallyMarkedUnreadId !== emailId) {
-            console.log('[EmailDetail] Auto-marking as read:', emailId);
+            log.trace(`auto-marking read: ${emailId}`);
             autoReadAttemptsRef.current.set(emailId, (autoReadAttemptsRef.current.get(emailId) ?? 0) + 1);
             await markAsRead(emailId, true);
           }
           scheduledAutoReadRef.current.delete(emailId);
         }
-        console.log('[EmailDetail] Auto-read completed for:', timerEmailIds);
+        log.trace(`auto-read done: ${timerEmailIds.join(',')}`);
       } catch (error) {
-        console.error('[EmailDetail] Failed to auto-mark as read:', error);
+        log.error(`auto-mark read failed: ${(error as Error)?.message ?? error}`);
         timerEmailIds.forEach(id => scheduledAutoReadRef.current.delete(id));
       }
     }, 0);
@@ -350,7 +377,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       !e.rawBody || (!!e.hasAttachments && !e.attachmentSizes);
 
     if (displayEmail && needsFetch(displayEmail) && !loadingBodies.has(displayEmail.id) && !failedBodies.has(displayEmail.id)) {
-      console.log('[EmailDetail] Auto-fetching body for opened email (priority):', displayEmail.id);
+      log.trace(`fetching body for the opened email (priority): ${displayEmail.id}`);
       fetchEmailBody(displayEmail.id);
     }
 
@@ -365,7 +392,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       // In accordion view, only fetch expanded emails.
       const wantBody = chatViewEnabled ? true : expandedThreads.has(email.id);
       if (wantBody && needsFetch(email) && !loadingBodies.has(email.id) && !failedBodies.has(email.id)) {
-        console.log('[EmailDetail] Auto-fetching body for thread sibling:', email.id);
+        log.trace(`fetching body for a thread sibling: ${email.id}`);
         fetchEmailBody(email.id);
       }
     }
@@ -374,7 +401,7 @@ export function useEmailDetail(): EmailDetailContext | null {
   // Populate the inline-image cache from thread email rawBodies as they
   // land. The cache is in-memory (lost on app restart), but each email's
   // rawBody in DB is durable, so re-populating from rawBody here makes
-  // `sarv-image:HASH` refs in cached AI extractions resolve correctly
+  // `sarv-image:HASH` refs in a cached first-email split resolve correctly
   // even after restart. Hashes are deterministic (FNV-1a of the data URL).
   useEffect(() => {
     if (!chatViewEnabled) return;
@@ -398,7 +425,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     if (bodyRetryTimerRef.current) clearTimeout(bodyRetryTimerRef.current);
     bodyRetryTimerRef.current = setTimeout(() => {
       bodyRetryCountRef.current++;
-      console.log(`[EmailDetail] Retrying ${failedInThread.length} failed body fetches (attempt ${bodyRetryCountRef.current}/3)`);
+      log.info(`retrying ${failedInThread.length} failed body fetch(es) (attempt ${bodyRetryCountRef.current}/3)`);
       // Clear failed IDs to allow retry
       const store = useEmailStore.getState();
       const newFailed = new Set(store.failedBodies);
@@ -465,9 +492,18 @@ export function useEmailDetail(): EmailDetailContext | null {
         // the thread we just navigated away from.
         if (markThreadReadTimerRef.current) clearTimeout(markThreadReadTimerRef.current);
 
-        const sortedByDate = [...threadEmails].sort((a, b) => a.date - b.date);
-        const oldestEmail = sortedByDate[0];
-        const latestEmail = sortedByDate[sortedByDate.length - 1];
+        // The anchor is the CARD (`displayEmail`, first in the one order) —
+        // not a separate date sort, which put an undated row first: it then
+        // decided `mainEmailExpanded` for a card it isn't, and an unread
+        // undated row (rendered LAST in ThreadList) was never expanded or
+        // scrolled to. The expand target when all is read is the newest
+        // member other than the card (the reply target), else the last card
+        // ThreadList renders.
+        const anchor = displayEmail;
+        const others = threadEmails.filter((e) => e.id !== anchor.id).sort(compareConversationOrder);
+        const latestEmail = latestThreadEmail && latestThreadEmail.id !== anchor.id
+          ? latestThreadEmail
+          : others[others.length - 1];
 
         // Mark ALL unread emails in the thread as read (Gmail behaviour).
         // Over `allThreadEmails`, NOT the collapsed list: a duplicate folded out
@@ -504,18 +540,17 @@ export function useEmailDetail(): EmailDetailContext | null {
           return;
         }
 
-        const unreadInThread = threadEmails
-          .filter((e) => e.id !== oldestEmail.id && !(e.tags || '').includes('|read|'));
+        const unreadInThread = others.filter((e) => !(e.tags || '').includes('|read|'));
 
         if (unreadInThread.length > 0) {
-          const oldestUnread = !(oldestEmail.tags || '').includes('|read|');
+          const oldestUnread = !(anchor.tags || '').includes('|read|');
           setMainEmailExpanded(oldestUnread);
           setExpandedThreads(new Set(unreadInThread.map((e) => e.id)));
           const scrollTarget = unreadInThread[0].id;
           setTimeout(() => {
             document.getElementById(`thread-${scrollTarget}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }, 100);
-        } else {
+        } else if (latestEmail) {
           setMainEmailExpanded(false);
           setExpandedThreads(new Set([latestEmail.id]));
           setTimeout(() => {
@@ -524,7 +559,7 @@ export function useEmailDetail(): EmailDetailContext | null {
         }
       }
     }
-  }, [loadingThread, threadEmails, allThreadEmails, selectedEmailId, displayEmail, markAsRead, manuallyMarkedUnreadId]);
+  }, [loadingThread, threadEmails, allThreadEmails, selectedEmailId, displayEmail, latestThreadEmail, markAsRead, manuallyMarkedUnreadId]);
 
   // Clear the pending mark-thread-read timer on unmount so it can't fire
   // markAsRead(...) against a torn-down detail pane (e.g. the user closes the
@@ -582,11 +617,6 @@ export function useEmailDetail(): EmailDetailContext | null {
   // even if the DB still has one (pipeline re-creation, IMAP re-sync lag,
   // stale agent proposal, etc.). Cleared on process restart.
   const dismissedThreadsRef = useRef<Set<string>>(new Set());
-  // Threads whose AI-extraction is currently in-flight. Prevents a
-  // second runAIExtraction from kicking off when the user closes
-  // mid-flight and reopens — the LLM requests from the first call
-  // are still in the network panel.
-  const extractionInFlightRef = useRef<Set<string>>(new Set());
 
   const openSavedDraftForThread = async () => {
     if (!latestThreadEmail) return false;
@@ -604,7 +634,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     const threadKeys = threadKeysOf([latestThreadEmail, selectedEmail, ...threadEmails]);
     const sendingKeys = pendingSendThreadKeys(useEmailStore.getState().pendingSend);
     if (shouldSuppressDraftAutoOpen(threadKeys, dismissedThreadsRef.current, sendingKeys)) {
-      console.log('[Draft] Auto-open suppressed — thread already handled or a send is in flight');
+      log.trace('draft auto-open suppressed — thread already handled or a send is in flight');
       return false;
     }
     try {
@@ -614,7 +644,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       // AND standalone drafts, and it hands us the draft's message-id so
       // editing replaces it in place and discard removes exactly it (Gmail 6→5).
       const threadDrafts = rawThreadEmails
-        .filter((e: any) => isDraftEmail(e, draftFolderPaths))
+        .filter((e: any) => isDraftEmail(e, conversationFolders))
         .sort((a: any, b: any) => (b.date || 0) - (a.date || 0));
 
       if (threadDrafts.length > 0) {
@@ -644,7 +674,7 @@ export function useEmailDetail(): EmailDetailContext | null {
           // The draft now lives in the full composer, not the reading pane —
           // drop the selection so closing the composer lands back on the list.
           clearSelectedEmail();
-          console.log('[Draft] Opened standalone draft in full composer', d.messageId);
+          log.info(`draft: opened a standalone draft in the full composer (${d.messageId})`);
           return true;
         }
 
@@ -662,7 +692,7 @@ export function useEmailDetail(): EmailDetailContext | null {
           draftMessageId: d.messageId,
         });
         setShowInlineReply(true);
-        console.log('[Draft] Opened thread draft inline', d.messageId);
+        log.info(`draft: opened the thread's draft inline (${d.messageId})`);
         return true;
       }
 
@@ -727,10 +757,10 @@ export function useEmailDetail(): EmailDetailContext | null {
         agentDecisionId,
       } as any);
       setShowInlineReply(true);
-      console.log('[Draft] Opened saved draft inline for thread', latestThreadEmail.id, { isAIDraft });
+      log.info(`draft: opened a saved draft inline for ${latestThreadEmail.id} (ai=${isAIDraft})`);
       return true;
     } catch (e) {
-      console.error('[Draft] Failed to open saved draft:', e);
+      log.error(`draft: failed to open the saved draft: ${(e as Error)?.message ?? e}`);
       return false;
     }
   };
@@ -754,7 +784,7 @@ export function useEmailDetail(): EmailDetailContext | null {
         !!d.draftBody
       );
       if (!match) {
-        console.log('[Draft] No saved draft or AI proposal for thread', latestThreadEmail.id);
+        log.trace(`draft: none saved and no AI proposal for ${latestThreadEmail.id}`);
         return false;
       }
 
@@ -776,10 +806,10 @@ export function useEmailDetail(): EmailDetailContext | null {
         agentDecisionId: match.id,
       } as any);
       setShowInlineReply(true);
-      console.log('[Draft] Opened AI proposal draft inline for', latestThreadEmail.id);
+      log.info(`draft: opened the AI proposal inline for ${latestThreadEmail.id}`);
       return true;
     } catch (e) {
-      console.error('[Draft] AI proposal fallback failed:', e);
+      log.error(`draft: the AI proposal fallback failed: ${(e as Error)?.message ?? e}`);
       return false;
     }
   };
@@ -822,686 +852,120 @@ export function useEmailDetail(): EmailDetailContext | null {
       setForwardingEmail(null);
       setInlineForwardSeed(undefined);
       draftOpenedForRef.current = null;
-      setConversationMessages(null);
-      setConversationError(null);
-      // Pre-set conversationLoading=true when chat view will auto-show.
-      // Otherwise the first render lands in ChatView with mode='ai',
-      // conversationMessages=null, conversationLoading=false → which
-      // displays "No AI Conversation Found" until the auto-trigger
-      // effect fires and flips loading on. That brief flash is the
-      // "Standard view appears then snaps to chat" flicker.
-      const autoOn = isAutoChatViewEnabled() && isConversationModeEnabled() && !!getDefaultProvider();
-      setConversationLoading(autoOn);
-      setConversationUpdating(false);
-      setConversationPartial(false);
-      setConversationProgress(null);
-      // Reset auto-enable ref so extraction re-fires for the new email
-      autoEnabledRef.current = null;
       // Keep chat view on if auto setting is enabled, otherwise reset. Always
       // start on Standard (deterministic); the user opts into AI View.
-      setChatViewEnabled(autoOn);
+      setChatViewEnabled(autoChatViewOn());
       setChatManuallyEnabled(false); // fresh email — no explicit chat choice yet
       setShowAIView(false);
     }
   }, [selectedEmailId]);
 
-  // Detect "loop me in" / forwarded-without-comment emails: a SINGLE email
-  // whose body contains a quoted/forwarded conversation. Without this, the
-  // multi-email gate below (`threadEmails.length > 1`) misses these and the
-  // user is stuck in Standard view with the entire history dumped inline.
-  const hasInlineConversation = useMemo(() => {
-    if (threadEmails.length !== 1) return false;
-    const e = threadEmails[0];
-    // STRICT detection: a single email opens as chat ONLY when it embeds a
-    // genuine multi-message thread (looped-in forward / ongoing chain), not
-    // for a plain reply or a transactional email that merely contains a
-    // quote marker. See hasEmbeddedConversation.
-    return hasEmbeddedConversation(e?.rawBody || e?.cleanBody);
-  }, [threadEmails]);
-
-  // Derived: should the rendering tree show Chat View layout?
-  // (EmailCard hides, ThreadChatView renders.) Used by EmailDetail.tsx
-  // and EmailCard.tsx so the loop-me-in case lights up correctly.
+  // ─── The chat view: one set of rules, the first email's AI split ─────────
   //
-  // While the thread is still loading we don't yet have threadEmails, so
-  // we pre-show chat view ONLY when the selected email's thread genuinely
-  // has multiple messages (threadMessageCount from the list subquery).
-  // A bare `|| loadingThread` here opened chat view for EVERY email during
-  // load — including single transactional mail (boarding passes, OTPs) —
-  // because auto-chat-view is on by default. Single-message threads now
-  // stay in the standard card unless their body turns out to embed a
-  // quoted conversation (hasInlineConversation, evaluated once loaded).
+  // Every site that decides "is this a conversation?" — the card, the thread
+  // section, the List/Chat toggle, the composers, the prewarm and the AI
+  // trigger — reads `chatRules` (chatViewRulesFor), so none can disagree.
+
+  // The thread's first member as the pane shows it (the card's email): the
+  // email whose quoted history the AI view splits.
+  const firstEmail = useMemo(
+    () => (threadEmails.length > 0 ? [...threadEmails].sort(compareConversationOrder)[0] : null),
+    [threadEmails],
+  );
+  // "One sender" for the as-sent rule — the same count main hands the
+  // background job (core `conversationSenders` over the members).
+  const distinctSenders = useMemo(() => conversationSenders(threadEmails).length, [threadEmails]);
+  const firstFacts = useMemo(
+    () => firstEmailFacts(firstEmail, distinctSenders),
+    [firstEmail, distinctSenders],
+  );
+  // While the thread is still loading there are no members yet: chat
+  // pre-shows only when the list row says the thread holds several messages.
   const selectedThreadCount = selectedEmail?.threadMessageCount ?? threadEmails.length;
-  // A single email that is a DESIGNED/transactional HTML message (marketing/alert
-  // built from layout tables + inline styles) shouldn't auto-open chat — its
-  // bespoke layout doesn't belong in a conversation bubble. It defaults to
-  // Standard and only shows chat if the user explicitly toggles it. Human
-  // "loop-me-in" text forwards (no such markup) still auto-open chat.
-  const isDesignedHtmlEmail = (html?: string | null): boolean => {
-    if (!html) return false;
-    return /<style[\s>]/i.test(html) ||
-      /role=["']presentation["']/i.test(html) ||
-      /\bbgcolor=/i.test(html) ||
-      (html.match(/<table/gi)?.length ?? 0) >= 2;
+  // Read once per opened email, like autoChatViewOn — not on every render: this
+  // hook re-renders on every store change during a sync, and each read parses
+  // the AI settings out of localStorage. The AI settings are edited on their
+  // own screen, which unmounts this pane, so it cannot go stale under a thread.
+  const aiAvailable = useMemo(aiAvailableNow, [selectedEmailId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rulesInput = {
+    memberCount: threadEmails.length,
+    facts: firstFacts,
+    loadingThread,
+    selectedThreadCount,
+    chatViewEnabled,
+    chatManuallyEnabled,
+    aiAvailable,
   };
-  const singleDesignedEmail =
-    threadEmails.length === 1 &&
-    isDesignedHtmlEmail(threadEmails[0]?.rawBody || threadEmails[0]?.cleanBody);
-  const chatViewActive = chatViewEnabled && (
-    threadEmails.length > 1 ||
-    (hasInlineConversation && !(singleDesignedEmail && !chatManuallyEnabled)) ||
-    (loadingThread && selectedThreadCount > 1)
+  const baseRules = chatViewRulesFor(rulesInput);
+  // The pane is actually showing this thread. Clearing the selection (a
+  // folder click, Follow-ups, an account switch) keeps `threadEmails` and
+  // `threadAccountId`, and in the split layouts this hook stays mounted — so
+  // without this the split below would keep reading, and re-running on a
+  // retry that fell due, for a thread nobody has on screen.
+  const paneShowsThread = !!selectedEmailId && !!selectedEmail && !!displayEmail;
+  // The first email's split. It runs by itself only while the chat view is
+  // SHOWING and the first email quotes two or more messages; the List view
+  // spends no AI. A thread not offered the chat (a single newsletter or OTP)
+  // does not even read the cache.
+  const firstSplit = useFirstEmailSplit({
+    enabled: baseRules.offerChat && paneShowsThread,
+    accountId: threadAccountId,
+    first: paneShowsThread ? firstEmail : null,
+    autoRunAI: baseRules.autoRunAI,
+    chatActive: baseRules.chatActive && paneShowsThread,
+  });
+  // A usable split keeps the AI half of the pill even if the facts changed.
+  const chatRules = firstSplit.usable ? chatViewRulesFor({ ...rulesInput, usableSplit: true }) : baseRules;
+  // The chat IS the reading surface: ThreadChatView renders, the card hides.
+  const chatViewActive = chatRules.chatActive;
+
+  // Standard's turns — what the chat view shows, what the AI view composes
+  // from and what reply polish reads. Split only where one of those needs it:
+  // a single email (its facts split it anyway — the same cached segments),
+  // the chat on screen, or a reply/forward open.
+  const currentUserEmail = useMemo(
+    () => getCurrentUserEmail(displayEmail?.toAddress || ''),
+    [displayEmail?.toAddress],
+  );
+  const composerOpen = (showInlineReply && !!replyingToEmail) || (showInlineForward && !!forwardingEmail);
+  const wantStandard = threadEmails.length > 0
+    && (threadEmails.length === 1 || chatViewActive || composerOpen)
+    && hasGlobalDomParser();
+  const standardTurns = useMemo(
+    () => (wantStandard
+      ? threadTurns(threadEmails, { currentUserEmail, failedBodies, folders: conversationFolders })
+      : null),
+    [wantStandard, threadEmails, currentUserEmail, failedBodies, conversationFolders],
+  );
+  // The AI view's turns: Standard's, the first email's slot replaced by its
+  // split. Null without a usable split.
+  const aiTurns = useMemo(
+    () => (standardTurns && firstEmail && firstSplit.parts
+      ? composeAiTurns({ standard: standardTurns, first: firstEmail, parts: firstSplit.parts, currentUserEmail })
+      : null),
+    [standardTurns, firstEmail, firstSplit.parts, currentUserEmail],
   );
 
-  // Content-compare two bubble lists so redundant snapshots (re-fired
-  // effects re-reading the cache, duplicate progress updates) don't
-  // re-render the chat view. Body strings compare with cheap reference/
-  // length-first equality semantics of `!==`, so this is O(n) for the
-  // common no-change case.
-  const messagesEqual = (a: ConversationMessage[] | null, b: ConversationMessage[]): boolean => {
-    if (!a || a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      const x = a[i];
-      const y = b[i];
-      if (x.id !== y.id || x.date !== y.date || x.body !== y.body || x.isExtracted !== y.isExtracted) return false;
-    }
-    return true;
-  };
-  // Only call setConversationMessages with NEW content — returning the
-  // previous array reference lets React bail out of the re-render when
-  // nothing changed (T1: cached bubbles must not re-render as bodies
-  // stream in and the auto-extract effect re-fires).
-  const applyMessagesIfChanged = (next: ConversationMessage[]) => {
-    setConversationMessages(prev => (prev && messagesEqual(prev, next) ? prev : next));
-  };
-  // T3 — progressive extraction: bubbles render as each email's
-  // extraction completes; done/total/status feed conversationProgress.
-  const handleExtractionProgress = (update: ConversationProgress) => {
-    if (update.messages.length > 0) {
-      applyMessagesIfChanged(update.messages);
-      // Bubbles are on screen — drop the full-pane spinner even though
-      // the run is still going; conversationProgress carries the rest.
-      setConversationLoading(false);
-    }
-    setConversationProgress({ done: update.done, total: update.total, status: update.status });
-  };
-
-  // AI extraction — cache-first to eliminate "Extracting..." flash.
-  // T1: the conversation-cache read happens BEFORE the bodies-loaded
-  // gate, so a previously-extracted thread renders instantly on open
-  // (warm open) while bodies keep downloading in the background for
-  // attachments/actions — cached bubbles don't need them. Only the
-  // extraction of UNCACHED emails still waits for bodies.
-  const runAIExtraction = async (forceRefresh = false) => {
-    if (!displayEmail?.threadId || !getDefaultProvider() || !isConversationModeEnabled()) return;
-
-    // Guard against duplicate concurrent extractions for the same
-    // thread. The pattern that hit the user: click re-extract → some
-    // LLM calls still in flight → close thread → re-open → autoExtract
-    // effect fires runAIExtraction again → a second round of LLM calls
-    // piles on top of the still-pending first round. Network panel
-    // fills with duplicate /completions requests. The guard sits ahead
-    // of the cache read too, so a re-fired effect can't overwrite a
-    // progressive run's bubbles with a stale cache snapshot.
-    //
-    // Defensive: optional-chain the ref so HMR partial reloads (where
-    // the closure executes against a stale scope) don't ReferenceError.
-    const threadId = displayEmail.threadId;
-    const inFlight = extractionInFlightRef?.current;
-    if (inFlight?.has(threadId)) {
-      console.log('[Conversation] Extraction already in flight for', threadId, '— skipping');
-      return;
-    }
-    inFlight?.add(threadId);
-    try {
-      const bodyReady = (e: { rawBody?: string | null; cleanBody?: string | null }) =>
-        (!!e.rawBody && e.rawBody.trim().length > 0) ||
-        (!!e.cleanBody && e.cleanBody.trim().length > 0);
-
-      // Signal loading immediately so UI shows spinner (not "No AI Conversation Found")
-      if (!conversationMessages) {
-        setConversationLoading(true);
-      }
-
-      // Cache-first: check if a previous run / background scheduler
-      // already extracted this thread. The raw row is kept around and
-      // handed to extractConversation as the T2 cachedHint so the
-      // service never repeats this IPC read.
-      let cachedRow: any | null = null;
-      if (!forceRefresh) {
-        try {
-          const cacheResult = await window.electronAPI.ai.getConversation(threadId);
-          if (cacheResult.success && cacheResult.data) cachedRow = cacheResult.data;
-        } catch {
-          // Cache check failed, proceed with extraction
-        }
-      }
-
-      // Decide whether the row is instantly renderable. Honor
-      // EXTRACTION_VERSION here too — extractConversation also does
-      // this check, but we'd render the cached bubbles BEFORE calling
-      // it. Without the version gate here, a cache built with stale
-      // extraction logic (e.g. pre-LLM-double-escape fix) would render
-      // forever until the user manually clicks refresh. The stale row
-      // still goes into cachedHint below — the service replays the
-      // same decision and runs the full re-extract.
-      let renderable: { messages: ConversationMessage[]; processedIds: string[]; wasPartial: boolean } | null = null;
-      if (cachedRow) {
-        const cachedVersion = cachedRow.modelUsed?.includes('|v')
-          ? parseInt(cachedRow.modelUsed.split('|v')[1])
-          : 0;
-        if (cachedVersion < EXTRACTION_VERSION) {
-          console.log(
-            `[Conversation] Renderer cache shortcut: stale version ${cachedVersion} < ${EXTRACTION_VERSION} — falling through to extractConversation for re-extract`,
-          );
-        } else {
-          try {
-            const messages = JSON.parse(cachedRow.messages || '[]');
-            const processedIds = JSON.parse(cachedRow.processedEmailIds || '[]');
-            if (Array.isArray(messages) && messages.length > 0 && Array.isArray(processedIds) && processedIds.length > 0) {
-              renderable = {
-                messages,
-                processedIds,
-                wasPartial: (cachedRow.modelUsed || '').includes('|partial'),
-              };
-            }
-          } catch {
-            // Malformed cache row — treat as miss, full extraction below.
-          }
-        }
-      }
-
-      if (renderable) {
-        // Warm open: cached bubbles render NOW — no waiting on body
-        // downloads or LLM calls.
-        applyMessagesIfChanged(renderable.messages);
-        setConversationPartial(renderable.wasPartial);
-        setConversationLoading(false);
-
-        const { processedIds } = renderable;
-        const currentEmailIds = threadEmails.map(e => e.id);
-        const newEmailIds = currentEmailIds.filter(id => !processedIds.includes(id));
-
-        if (newEmailIds.length === 0) {
-          // STRICT mode: cache hit just shows the cached bubbles.
-          // No auto-retry — even if the cache was marked partial
-          // last time, retrying on every open would burn LLM calls
-          // on the same emails that already failed. The amber
-          // refresh icon (driven by setConversationPartial above)
-          // tells the user something is missing; they click it to
-          // explicitly retry. We no longer test for "missing"
-          // sourceEmailIds because in strict mode an email with
-          // failed LLM extraction LEGITIMATELY has no bubble.
-          console.log(
-            renderable.wasPartial
-              ? '[Conversation] Cache hit (partial — click refresh to retry failed emails)'
-              : '[Conversation] Cache hit — loading instantly'
-          );
-          return;
-        }
-
-        // Cache exists but has unprocessed emails — cached bubbles are
-        // already on screen; only the NEW emails' extraction waits for
-        // their bodies (cached emails' bodies are irrelevant here).
-        const newEmails = threadEmails.filter(e => newEmailIds.includes(e.id));
-        if (!newEmails.every(bodyReady)) {
-          const loaded = newEmails.filter(bodyReady).length;
-          console.log(
-            `[Conversation] Cached bubbles shown — waiting for ${newEmails.length - loaded}/${newEmails.length} new-email bodies before incremental extraction`,
-          );
-          // The auto-extract effect re-fires when bodiesLoadedCount
-          // changes and we come back through here.
-          return;
-        }
-
-        console.log('[Conversation] Cache partial hit — showing cached, processing new emails');
-        // Run incremental update with bottom loader instead of full loading state
-        setConversationUpdating(true);
-        setConversationError(null);
-        try {
-          const result = await extractConversation(
-            threadId,
-            threadEmails,
-            displayEmail.toAddress || '',
-            { cachedHint: { row: cachedRow }, onProgress: handleExtractionProgress },
-          );
-          applyMessagesIfChanged(result.messages);
-          setConversationPartial(result.partial);
-        } catch (err) {
-          console.error('[Conversation] Incremental extraction failed:', err);
-        } finally {
-          setConversationUpdating(false);
-          setConversationProgress(null);
-        }
-        return;
-      }
-
-      // Cache miss / stale / unusable → full extraction. Guard: don't
-      // fire before every email body has been downloaded over IMAP.
-      // Bodies arrive asynchronously after a thread opens; if
-      // extraction beats the body fetch, every email's rawBody is
-      // empty and the entire conversation caches as "no new content"
-      // bubbles (the cache then claims those emails are "processed" so
-      // we're stuck with 17× empty forever). The body-fetch effect
-      // drives a re-render when bodies land, and the auto-extract
-      // effect (deps include the bodies-loaded count) re-fires then.
-      // Guard: don't fire before ANY email body is available. Bodies arrive
-      // asynchronously; if extraction beats every body fetch, all rawBodies
-      // are empty and the whole thread caches as "no new content" bubbles.
-      //
-      // We previously waited for EVERY body (`threadEmails.every`), but a
-      // single permanently-unfetchable body (it lands in failedBodies and
-      // never becomes ready) then wedged the chat view on a spinner forever
-      // and made the refresh button a no-op. Instead only wait while ZERO
-      // bodies are ready; once at least one is in hand we proceed and let
-      // extractConversation's own `bodiedEmails` filter extract the available
-      // subset and skip the missing ones (picked up on a later pass if their
-      // body ever lands). forceRefresh bypasses the wait entirely.
-      const readyCount = threadEmails.filter(bodyReady).length;
-      if (!forceRefresh && readyCount === 0) {
-        console.log(
-          `[Conversation] Skipping extraction — 0/${threadEmails.length} bodies loaded, waiting for at least one`,
-        );
-        if (!conversationMessages) setConversationLoading(true);
-        return;
-      }
-
-      setConversationLoading(true);
-      setConversationError(null);
-      // Distinguish "failed entirely" (no bubbles ever produced → show
-      // the error fallback) from "failed after progressive bubbles
-      // rendered" (keep what's on screen, mark partial).
-      let progressed = false;
-      try {
-        // Don't pre-clear the cache on forceRefresh. The previous version
-        // wrote an empty row to the DB before starting LLM calls — and if
-        // the user closed the thread mid-extraction, reopening saw the
-        // empty cache and triggered a SECOND full extraction. Now we let
-        // the new result overwrite the cache atomically when
-        // extractConversation finishes; if the user closes mid-flight,
-        // the old cache stays as-is and a re-open hits cache (no new
-        // LLM calls).
-        const result = await extractConversation(
-          threadId,
-          threadEmails,
-          displayEmail.toAddress || '',
-          {
-            forceRefresh,
-            // Hand over the (possibly null / stale / unusable) row we
-            // already read so the service skips its duplicate IPC read
-            // and replays its own decisions on identical data. On
-            // forceRefresh nothing was read — the service skips its
-            // cache check anyway.
-            ...(forceRefresh ? {} : { cachedHint: { row: cachedRow } }),
-            onProgress: (update: ConversationProgress) => {
-              if (update.messages.length > 0) progressed = true;
-              handleExtractionProgress(update);
-            },
-          },
-        );
-        applyMessagesIfChanged(result.messages);
-        setConversationPartial(result.partial);
-      } catch (err) {
-        console.error('[Conversation] Extraction failed:', err);
-        if (progressed) {
-          // Some bubbles already rendered progressively — keep them and
-          // surface the amber partial affordance instead of wiping the
-          // pane with an error.
-          setConversationPartial(true);
-        } else {
-          setConversationError('Failed to extract conversation');
-          setConversationMessages(null);
-        }
-      } finally {
-        setConversationLoading(false);
-        setConversationProgress(null);
-      }
-    } finally {
-      inFlight?.delete(threadId);
-    }
-  };
-
-  const handleRetryConversation = () => {
-    // Drop the entire chat bubble list immediately so the user gets
-    // visual confirmation the refresh is happening — otherwise old
-    // (potentially stale) bubbles linger for the whole LLM round-trip
-    // and it looks like the click did nothing. (The DB cache row is
-    // NOT pre-cleared — the fresh result overwrites it atomically when
-    // extraction finishes; progressive bubbles repopulate the pane as
-    // they complete.)
-    setConversationMessages(null);
-    setConversationPartial(false);
-    setConversationError(null);
-    runAIExtraction(true);
-  };
-
-  // Auto-enable chat view and/or pre-run extraction when:
-  //   • thread has multiple emails, OR
-  //   • a single email contains an embedded conversation
-  //     (forwarded chain / "loop me in" reply with full history quoted).
-  //
-  // The single-email branch is gated on body availability — the body is
-  // fetched asynchronously after the email opens, so we only know whether
-  // it has quoted history once `threadEmails[0].rawBody` lands. The effect
-  // re-fires on body change because `hasInlineConversation` is in the dep
-  // array via the useMemo it derives from.
-  const autoEnabledRef = useRef<string | null>(null);
-  // Count of thread emails whose bodies have been downloaded. Driving
-  // the auto-extract effect off this (not just threadEmails.length)
-  // makes the effect re-fire as bodies stream in over IMAP, so the
-  // deferred extraction kicks off the moment the last body lands.
-  const bodiesLoadedCount = threadEmails.filter(
-    e => (!!e.rawBody && e.rawBody.trim().length > 0) ||
-         (!!e.cleanBody && e.cleanBody.trim().length > 0),
-  ).length;
-  useEffect(() => {
-    if (loadingThread) return;
-    if (!displayEmail?.threadId) return;
-    if (!isConversationModeEnabled() || !getDefaultProvider()) return;
-    // Don't gate on autoEnabledRef yet — we may need to re-fire if a
-    // previous attempt deferred itself waiting for bodies. Only mark
-    // the thread auto-enabled AFTER bodies are ready (below).
-    const alreadyEnabledForReadyThread =
-      autoEnabledRef.current === displayEmail.threadId &&
-      bodiesLoadedCount === threadEmails.length;
-    if (alreadyEnabledForReadyThread) return;
-
-    const shouldExtract = threadEmails.length > 1 || hasInlineConversation;
-    if (!shouldExtract) return;
-
-    // Only mark this thread "auto-enabled" once every body is in
-    // hand — otherwise the deferred extraction has no chance to
-    // re-run when the last body lands.
-    if (bodiesLoadedCount === threadEmails.length) {
-      autoEnabledRef.current = displayEmail.threadId;
-    }
-
-    // Always pre-run extraction in background so chat view loads instantly.
-    // Don't gate on conversationMessages — the reset effect's setState hasn't
-    // flushed yet in this render cycle, so the closure sees stale values.
-    // runAIExtraction has its own bodies-ready precondition; if bodies
-    // are still loading it'll log and bail (we'll come back on the
-    // next render).
-    runAIExtraction();
-
-    // Only auto-switch UI to chat mode if auto-chat-view is on — but open the
-    // Standard view; AI is pre-extracted in the background and shown only when
-    // the user switches to AI View.
-    if (isAutoChatViewEnabled()) {
-      setChatViewEnabled(true);
-      setShowAIView(false);
-    }
-  }, [loadingThread, threadEmails.length, bodiesLoadedCount, hasInlineConversation, displayEmail?.threadId]);
-
-  // Auto-detect new emails in thread and trigger AI extraction for them.
-  // Strict mode: NO optimistic DOM-cleaned push. The bubble for the new
-  // email only appears once the LLM returns; until then the chat view
-  // shows the existing extracted bubbles plus a "Processing new
-  // messages…" footer (driven by setConversationUpdating).
-  const prevThreadCountRef = useRef(0);
-  useEffect(() => {
-    if (
-      chatViewEnabled &&
-      conversationMessages &&
-      !conversationLoading &&
-      threadEmails.length > prevThreadCountRef.current &&
-      prevThreadCountRef.current > 0 &&
-      displayEmail?.threadId
-    ) {
-      console.log(`[Conversation] New emails detected in thread (${prevThreadCountRef.current} → ${threadEmails.length}), running AI extraction...`);
-      const threadId = displayEmail.threadId;
-      const userEmail = displayEmail.toAddress || '';
-      (async () => {
-        setConversationUpdating(true);
-        try {
-          const result = await extractConversation(threadId, threadEmails, userEmail, {
-            onProgress: handleExtractionProgress,
-          });
-          applyMessagesIfChanged(result.messages);
-          setConversationPartial(result.partial);
-          console.log('[Conversation] AI re-extraction for new emails completed');
-        } catch (err) {
-          console.error('[Conversation] AI re-extraction failed:', err);
-        } finally {
-          setConversationUpdating(false);
-          setConversationProgress(null);
-        }
-      })();
-    } else if (
-      chatViewEnabled &&
-      conversationMessages &&
-      threadEmails.length < prevThreadCountRef.current
-    ) {
-      // A message left the thread (delete/archive/spam). The re-extract path
-      // above only handles ADDITIONS, so prune orphaned bubbles here — otherwise
-      // the removed email's bubble lingers as a ghost (with a broken source).
-      // Bubbles whose source email is still present (incl. embedded quotes) stay.
-      const liveIds = new Set(threadEmails.map(e => e.id));
-      const pruned = conversationMessages.filter(m => liveIds.has(m.sourceEmailId));
-      if (pruned.length !== conversationMessages.length) applyMessagesIfChanged(pruned);
-    }
-    prevThreadCountRef.current = threadEmails.length;
-  }, [threadEmails.length, chatViewEnabled, conversationMessages, conversationLoading]);
-
-  const handleReExtractMessage = async (messageId: string) => {
-    if (!conversationMessages || !displayEmail?.threadId) return;
-    const msg = conversationMessages.find(m => m.id === messageId);
-    if (!msg) return;
-    const sourceEmail = threadEmails.find(e => e.id === msg.sourceEmailId);
-    if (!sourceEmail) return;
-
-    // Decide which extraction path to use based on the SOURCE EMAIL'S
-    // structure, not on the current bubble count:
-    //
-    //   • Source has quoted history (any "On X wrote:", From:/Sent:,
-    //     forward/original banner, blockquote)  → Phase 1 SPLIT.
-    //     Re-runs the multi-message extraction. Even if the chat view
-    //     currently only has 1 bubble for this source, we want to try
-    //     again to recover the embedded messages.
-    //
-    //   • Source is a clean reply with no quoted history → Phase 2
-    //     CLEANUP. Just strip signature/footer and refresh the bubble.
-    //
-    // Counting sibling bubbles is unreliable because it depends on
-    // whether Phase 1 succeeded LAST time, not on whether it SHOULD
-    // succeed. The actual source structure is the right signal.
-    const sourceHasQuotedHistory = hasQuotedHistory(
-      sourceEmail.rawBody || sourceEmail.cleanBody,
-    );
-
-    // Optimistic clear FIRST so the user sees immediate feedback that
-    // their click did something. Bubbles tied to this source vanish;
-    // remaining bubbles (from other emails in the thread) stay put.
-    // For Phase 2 (single-bubble cleanup) we blank the body so the
-    // bubble shows the "Loading content…" spinner from ChatView while
-    // the LLM runs.
-    const sourceMsgIds = new Set(
-      conversationMessages
-        .filter(m => m.sourceEmailId === msg.sourceEmailId)
-        .map(m => m.id),
-    );
-    // Optimistic state: KEEP every bubble visible, just blank the
-    // bodies of any bubble tied to this source and set
-    // isExtracted=false so ChatView renders the "Loading content…"
-    // spinner in place. Previously the Phase 1 path FILTERED bubbles
-    // out, so the user saw the row disappear entirely until the LLM
-    // returned 2-30 seconds later — looked like the click did
-    // nothing.
-    //
-    // For Phase 1 (multi-bubble split), the count of returned bubbles
-    // may differ from the count we blanked. The reconciliation after
-    // the LLM completes replaces these placeholders with the new
-    // split — extras get dropped, new ones get appended.
-    const optimistic: ConversationMessage[] = conversationMessages.map(m =>
-      sourceMsgIds.has(m.id) ? { ...m, body: '', isExtracted: false } : m,
-    );
-    setConversationMessages(optimistic);
-
-    let updated: ConversationMessage[];
-    // True when the Phase 1 response had to be salvaged from a truncated
-    // LLM output — propagated into the cache's partial flag below.
-    let reExtractTruncated = false;
-
-    if (sourceHasQuotedHistory) {
-      const siblingCount = sourceMsgIds.size;
-      console.log(`[Conversation] Re-extract: source has quoted history — Phase 1 split (currently ${siblingCount} bubble(s) depend on this source)`);
-      const splitResult = await aiSplitFirstEmail(
-        sourceEmail,
-        undefined,
-        // Roster lets the splitter resolve attribution lines whose
-        // address got mangled (name → thread sender's address).
-        threadEmails.map(e => ({ address: e.fromAddress, name: e.fromName })),
-      );
-      const splitMessages = splitResult?.messages ?? [];
-      reExtractTruncated = splitResult?.truncated ?? false;
-      if (splitMessages.length === 0) {
-        console.warn('[Conversation] Re-extract: Phase 1 split returned no messages — restoring previous bubbles');
-        // Restore: we already optimistically cleared, so put the
-        // pre-click state back so the user doesn't lose content.
-        setConversationMessages(conversationMessages);
-        return;
-      }
-      // Drop the placeholder bubbles we just blanked (they belong to
-      // this source) and append the freshly-split bubbles in their
-      // place. Bubbles tied to OTHER source emails stay where they
-      // are.
-      const keptOthers = optimistic.filter(m => !sourceMsgIds.has(m.id));
-      // Cross-source dedup: if two emails in the thread both quote
-      // the same older message, Phase 1 on each produces a bubble
-      // for that older message — and we get duplicates. Skip a new
-      // bubble if an existing kept bubble already covers it by
-      // (from, date) within 60 seconds.
-      //
-      // X5: synthetic (dateApprox) dates are sorting-only. They are
-      // excluded on BOTH sides here — a kept bubble with a synthetic
-      // date never absorbs a new one, and a new part with a synthetic
-      // date is always kept (same rule as date-unknown).
-      const existingKeys = new Set(
-        keptOthers
-          .filter(m => m.date !== 0 && !m.dateApprox)
-          .map(m => `${m.fromAddress.toLowerCase()}|${m.date}`),
-      );
-      // Also dedupe near-date matches (split-extracted dates often
-      // round to the minute while real-email dates are second-precise).
-      const existingNearDate = keptOthers
-        .filter(m => m.date !== 0 && !m.dateApprox)
-        .map(m => ({ from: m.fromAddress.toLowerCase(), date: m.date }));
-      // Pass A — dedup + bind each part to a real thread email by
-      // (sender, near-date). Attribution dates lack timezone → wide
-      // extracted-vs-real tolerance, matching processThread. Unknown
-      // (0) and synthetic dates bind to nothing.
-      const candidates: { s: (typeof splitMessages)[number]; matched?: (typeof threadEmails)[number] }[] = [];
-      for (const s of splitMessages) {
-        const fromLc = (s.fromAddress || '').toLowerCase();
-        const reliableDate = s.date !== 0 && !s.dateApprox;
-        if (reliableDate) {
-          const exactKey = `${fromLc}|${s.date}`;
-          const nearMatch = existingNearDate.some(
-            e => e.from === fromLc && Math.abs(e.date - s.date) < 60,
-          );
-          if (existingKeys.has(exactKey) || nearMatch) continue;
-        }
-        const matched = !reliableDate ? undefined : threadEmails.find(e =>
-          e.fromAddress.toLowerCase() === fromLc &&
-          Math.abs(e.date - s.date) < EXTRACTED_MATCH_TOLERANCE_S
-        );
-        candidates.push({ s, matched });
-        if (reliableDate) {
-          existingKeys.add(`${fromLc}|${s.date}`);
-          existingNearDate.push({ from: fromLc, date: s.date });
-        }
-      }
-      // Pass B — X6: when several parts bind to the SAME real email,
-      // only the newest part (last in oldest-first order) keeps the
-      // real id; history parts get 'extracted-' ids. Duplicate ids
-      // broke React keys and this handler's own by-id lookup.
-      const lastPartForEmail = new Map<string, number>();
-      candidates.forEach((c, i) => {
-        if (c.matched) lastPartForEmail.set(c.matched.id, i);
-      });
-      let extractedIdx = 0;
-      const newGroup: ConversationMessage[] = [];
-      candidates.forEach((c, i) => {
-        const ownsRealId = !!c.matched && lastPartForEmail.get(c.matched.id) === i;
-        newGroup.push({
-          id: ownsRealId ? c.matched!.id : `extracted-${Date.now()}-${extractedIdx++}`,
-          fromAddress: c.s.fromAddress,
-          fromName: c.s.fromName,
-          toAddress: c.s.toAddress || c.matched?.toAddress || '',
-          date: ownsRealId ? c.matched!.date : (c.s.date || 0),
-          ...(c.s.dateApprox && !ownsRealId ? { dateApprox: true } : {}),
-          body: c.s.body,
-          isExtracted: true,
-          sourceEmailId: c.matched?.id || sourceEmail.id,
-        });
-      });
-      updated = [...keptOthers, ...newGroup].sort((a, b) => a.date - b.date);
-    } else {
-      // No quoted history — just strip signature/footer via Phase 2.
-      console.log(`[Conversation] Re-extract: no quoted history in source — Phase 2 cleanup`);
-      const { body: newBody, failed } = await reExtractSingleMessage(messageId, sourceEmail);
-      // Update from the optimistic state (body was blanked); now fill
-      // in the cleaned body and flip isExtracted=true. Clear the failed
-      // flag on success (or keep it set if the retry failed again) so the
-      // per-message error affordance reflects the latest attempt.
-      updated = optimistic.map(m =>
-        m.id === messageId ? { ...m, body: newBody, isExtracted: true, extractionFailed: failed } : m
-      );
-    }
-
-    setConversationMessages(updated);
-
-    // Update cache via saveConversationCache so the EXTRACTION_VERSION
-    // marker (`|v${N}`) gets written. A previous bug bypassed this and
-    // wrote raw `provider.name` — leaving cachedVersion=0 in the DB,
-    // which the cache check later treated as stale (0 < EXTRACTION_VERSION),
-    // triggering a full re-extraction on every subsequent thread open.
-    const provider = getDefaultProvider();
-    if (provider) {
-      try {
-        // Preserve the previously cached processedEmailIds + partial flag.
-        // Writing `threadEmails.map(e => e.id)` + partial=false here marked
-        // emails as processed that were never extracted (bodies missing,
-        // earlier failures) — killing the amber retry affordance and
-        // blocking incremental extraction forever. Only this re-extracted
-        // source email is newly guaranteed processed.
-        let processedIds: string[] = [];
-        let wasPartial = conversationPartial;
-        try {
-          const cacheResult = await window.electronAPI.ai.getConversation(displayEmail.threadId);
-          if (cacheResult.success && cacheResult.data) {
-            const parsed = JSON.parse(cacheResult.data.processedEmailIds || '[]');
-            if (Array.isArray(parsed)) processedIds = parsed;
-            wasPartial = cacheResult.data.modelUsed?.includes('|partial') || false;
-          }
-        } catch { /* no readable cache — fall back to state + source id */ }
-        if (!processedIds.includes(sourceEmail.id)) processedIds.push(sourceEmail.id);
-        await saveConversationCache(
-          displayEmail.threadId,
-          updated,
-          processedIds,
-          provider.name,
-          wasPartial || reExtractTruncated,
-        );
-      } catch (err) {
-        console.error('[Conversation] Failed to update cache after re-extract:', err);
-      }
-    }
-  };
+  // The whole-thread transcript reply polish grounds itself in — built ONCE
+  // here (the card, the list and the chat all hand it to their composer), and
+  // only while a reply or forward is open. From the conversation's MESSAGES:
+  // the AI composition when a usable split exists (a looped-in history is the
+  // messages it quotes, not one wall of quoted text), Standard's turns
+  // otherwise. Never a draft.
+  const polishThreadContext = useMemo(() => {
+    if (!composerOpen) return '';
+    const turns = aiTurns ?? standardTurns?.turns ?? [];
+    return buildPolishThreadContext({ entries: polishEntriesOf(turns), currentUserEmail });
+  }, [composerOpen, aiTurns, standardTurns, currentUserEmail]);
 
   const handleChatViewToggle = (enabled: boolean) => {
     setChatViewEnabled(enabled);
-    setChatManuallyEnabled(enabled); // an explicit choice — overrides the designed-email Standard default
-    if (enabled) {
-      // Open Standard first; pre-extract AI in the background so switching to
-      // AI View is instant, but don't force the AI view on.
-      setShowAIView(false);
-      if (!conversationMessages && !conversationLoading && isConversationModeEnabled() && getDefaultProvider() && displayEmail?.threadId) {
-        runAIExtraction();
-      }
-    } else {
-      setConversationError(null);
-    }
+    // An explicit choice: a single email quoting one message opens as chat
+    // only on this.
+    setChatManuallyEnabled(enabled);
+    // Chat opens on Standard; the reader opts into the AI view. No AI is
+    // started here — the split runs by itself only where the rules allow it.
+    if (enabled) setShowAIView(false);
   };
 
   // --- Navigation: build thread list from current view's emails ---
@@ -1704,10 +1168,10 @@ export function useEmailDetail(): EmailDetailContext | null {
             setEmails(emails.filter(e => e.id !== selectedEmail.id));
             clearSelectedEmail();
           }
-          console.log('[EmailDetail] Removed AI category for email:', selectedEmail.id);
+          log.info(`removed the AI category of ${selectedEmail.id}`);
         }
       } catch (error) {
-        console.error('[EmailDetail] Failed to remove AI category:', error);
+        log.error(`failed to remove the AI category: ${(error as Error)?.message ?? error}`);
       }
     }
   };
@@ -1837,7 +1301,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     ]);
     threadKeys.forEach((key) => dismissedThreadsRef.current.add(key));
     if (threadKeys.length > 0) {
-      console.log(`[Draft] Marked thread handled for this session (${opts?.dismissed ? 'dismissed' : 'sent'}):`, threadKeys);
+      log.info(`draft: thread handled for this session (${opts?.dismissed ? 'dismissed' : 'sent'}): ${threadKeys.join(',')}`);
     }
     setShowInlineReply(false);
     setReplyingToEmail(null);
@@ -1949,7 +1413,7 @@ export function useEmailDetail(): EmailDetailContext | null {
         win.focus();
         win.print();
       } catch (err) {
-        console.error('[Print] failed:', err);
+        log.error(`print failed: ${(err as Error)?.message ?? err}`);
         cleanup();
       }
       // Fallback cleanup in case afterprint never fires (dialog dismissed oddly).
@@ -2042,7 +1506,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       f.path === 'INBOX' || f.name?.toLowerCase() === 'inbox'
     );
     if (!inboxFolder) {
-      console.error('[EmailDetail] Cannot restore: INBOX folder not found');
+      log.error('cannot restore: INBOX folder not found');
       return;
     }
     setIsRestoring(true);
@@ -2096,7 +1560,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       const result = await detectSignature(emailBody, senderEmail, email.id);
       setSignatureDetectionResult(result);
     } catch (error) {
-      console.error('[Signature Detection] Error:', error);
+      log.error(`signature detection failed: ${(error as Error)?.message ?? error}`);
       setSignatureDetectionResult({
         hasSignature: false,
         htmlSelector: null,
@@ -2125,7 +1589,7 @@ export function useEmailDetail(): EmailDetailContext | null {
       setSignatureDetectionEmail(null);
       setSignatureDetectionResult(null);
     } catch (error) {
-      console.error('[Signature Detection] Failed to save:', error);
+      log.error(`saving the signature selector failed: ${(error as Error)?.message ?? error}`);
       alert('Failed to save signature selector.');
     }
   };
@@ -2168,13 +1632,13 @@ export function useEmailDetail(): EmailDetailContext | null {
     inlineForwardDraft,
     chatViewEnabled,
     chatViewActive,
-    hasInlineConversation,
-    conversationMessages,
-    conversationLoading,
-    conversationUpdating,
-    conversationError,
-    conversationPartial,
-    conversationProgress,
+    chatRules,
+    firstEmail,
+    firstSplit,
+    standardTurns,
+    aiTurns,
+    polishThreadContext,
+    currentUserEmail,
     showAIView,
     setShowAIView,
     showSignatures,
@@ -2212,8 +1676,6 @@ export function useEmailDetail(): EmailDetailContext | null {
     handleDetectSignature,
     handleSaveSignatureSelector,
     handleChatViewToggle,
-    handleRetryConversation,
-    handleReExtractMessage,
     toggleThread,
     toggleFullContent,
     toggleSignature,

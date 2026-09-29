@@ -1,8 +1,7 @@
 // HTML cleaner for LLM input — main-process-safe (no DOMParser).
 //
-// The renderer's `cleanHtmlForAI` (in conversation-service) uses
-// DOMParser, which isn't available in Node main. This module is its
-// equivalent, built on the `sanitize-html` library (a battle-tested
+// The renderer's DOM-based cleaners use DOMParser, which isn't available
+// in Node main. This module is the main-process equivalent, built on the `sanitize-html` library (a battle-tested
 // HTML tokenizer) instead of a hand-rolled regex chain. Output
 // preserves enough HTML structure for the LLM to understand the email
 // (paragraphs, lists, tables, links, emphasis) but strips all noise:
@@ -69,7 +68,7 @@ function decodeEntities(s: string): string {
  * images. Runs as a PRE-PASS before sanitize-html because the keep-vs-drop
  * decision needs the raw width/height/src attributes, which sanitize-html
  * would otherwise strip. The renderer pipeline
- * (compressHtmlToPlainTextForLLM in conversation-service) does the full
+ * (compressHtmlToPlainTextForLLM in services/llm-text) does the full
  * cache-ref dance with hashes; this main-process helper is used for
  * reply-draft context and summaries where the LLM doesn't echo an image
  * back, so a simple marker suffices.

@@ -21,9 +21,11 @@ import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
 
 // The pane's children stand in; this file is about what the pane mounts.
 const mountedComposers: string[] = [];
+const replyContexts: Array<string | undefined> = [];
 vi.mock('../../../../../src/components/InlineReply', () => ({
-  InlineReply: (props: { replyToEmail: { id: string } }) => {
+  InlineReply: (props: { replyToEmail: { id: string }; threadContext?: string }) => {
     mountedComposers.push(`reply:${props.replyToEmail.id}`);
+    replyContexts.push(props.threadContext);
     return <div data-testid="inline-reply" />;
   },
 }));
@@ -46,7 +48,6 @@ vi.mock('../../../../../src/components/email-detail/chat-prewarm', () => ({ useC
 vi.mock('../../../../../src/components/ThreadSummary', () => ({ ThreadSummary: () => null }));
 vi.mock('../../../../../src/components/LabelChips', () => ({ LabelChips: () => null }));
 vi.mock('../../../../../src/services/ai-service', () => ({
-  buildPolishThreadContext: () => '',
   getCurrentUserEmail: () => 'me@acme.example',
 }));
 vi.mock('../../../../../src/store/helpers', () => ({ accountDisplayLabel: () => '' }));
@@ -83,7 +84,9 @@ const threadContext = (overrides: Record<string, unknown> = {}) => ({
   loadingThread: false,
   chatViewEnabled: false,
   chatViewActive: false,
-  hasInlineConversation: false,
+  // A two-message thread: the chat view is offered.
+  chatRules: { eligibility: 'none', offerChat: true, chatActive: false, showAiToggle: false, autoRunAI: false, aiAvailable: false },
+  polishThreadContext: '',
   showInlineReply: false,
   replyingToEmail: null,
   inlineReplyMode: 'reply',
@@ -91,7 +94,6 @@ const threadContext = (overrides: Record<string, unknown> = {}) => ({
   showInlineForward: false,
   forwardingEmail: null,
   inlineForwardDraft: undefined,
-  conversationMessages: null,
   showOriginalEmail: null,
   signatureDetectionEmail: null,
   signatureDetectionResult: null,
@@ -105,6 +107,7 @@ afterEach(() => {
   mounted?.unmount();
   mounted = undefined;
   mountedComposers.length = 0;
+  replyContexts.length = 0;
 });
 
 const mountWith = (overrides: Record<string, unknown>) => {
@@ -122,6 +125,15 @@ describe('EmailDetail — the List/Chat switch', () => {
     expect(view.byLabel('Chat view')!.getAttribute('aria-pressed')).toBe('false');
     toggle(view.byLabel('Chat view'));
     expect((ctx.handleChatViewToggle as ReturnType<typeof vi.fn>).mock.calls).toEqual([[true]]);
+  });
+
+  // The switch shows what is ON SCREEN, not the setting: a single email that
+  // quotes one message stays a card with chat enabled until the reader picks
+  // Chat — the switch must say List there, or its Chat click looks like a no-op.
+  it('marks the list as on while the chat is enabled but not the reading surface', () => {
+    const view = mountWith({ chatViewEnabled: true, chatViewActive: false });
+    expect(view.byLabel('List view')!.getAttribute('aria-pressed')).toBe('true');
+    expect(view.byLabel('Chat view')!.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('marks the chat as on in the chat view, and switches to the list', () => {
@@ -166,6 +178,12 @@ describe('EmailDetail — the first message\'s reply and forward boxes', () => {
   it('mounts the first message\'s reply under the standard card', () => {
     mountWith({ showInlineReply: true, replyingToEmail: ANCHOR });
     expect(mountedComposers).toContain('reply:anchor');
+  });
+
+  // Reply polish reads the ONE transcript useEmailDetail built.
+  it('hands the card\'s reply the thread transcript from the context', () => {
+    mountWith({ showInlineReply: true, replyingToEmail: ANCHOR, polishThreadContext: '[Alice Chen] Mar 3, 2026: Q3' });
+    expect(replyContexts.at(-1)).toBe('[Alice Chen] Mar 3, 2026: Q3');
   });
 
   it('leaves every box to the chat while the chat is the reading surface', () => {

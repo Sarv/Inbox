@@ -312,6 +312,53 @@ describe('SQLiteStorage thread resolution on insert', () => {
   });
 });
 
+// The facade's conversation-membership reads — what main's AI split, drafter and
+// auto-draft gates call. Breaks: a draft (here one known only from the synced
+// folder list, `INBOX.Drafts`) reaches main as a conversation message, or the
+// first email / "is there a newer reply?" is answered over the wrong rows.
+describe('SQLiteStorage conversation members', () => {
+  const ctx = withStorage(async (storage) => {
+    await storage.syncFolders([
+      ...STANDARD_FOLDERS,
+      makeFolder('f-pdrafts', 'INBOX.Drafts', { specialUse: '\\Drafts' }),
+    ]);
+    await storage.insertEmail(makeEmail({
+      id: 'm-root', messageId: '<m-root@example.test>', threadId: 'th-m', subject: 'Membership check', date: T0,
+    }));
+    await storage.insertEmail(makeEmail({
+      id: 'm-draft', messageId: '<m-draft@example.test>', threadId: 'th-m', folderId: 'f-pdrafts',
+      tags: '|INBOX.Drafts|', inReplyTo: '<m-root@example.test>', subject: 'Re: Membership check', date: T0 + 30,
+    }));
+    await storage.insertEmail(makeEmail({
+      id: 'm-sent', messageId: '<m-sent@example.test>', threadId: 'th-m', folderId: 'f-sent',
+      tags: '|Sent|draft|', inReplyTo: '<m-root@example.test>', subject: 'Re: Membership check', date: T0 + 60,
+    }));
+  });
+
+  const threadOf = async (): Promise<string> => (await ctx.get().getEmail('m-root'))!.threadId;
+
+  it('reads every row, but only members as the conversation', async () => {
+    const storage = ctx.get();
+    const threadId = await threadOf();
+    expect(storage.getThreadLightRowsSync(threadId).map((r) => r.id).sort()).toEqual(['m-draft', 'm-root', 'm-sent']);
+    expect(storage.getConversationMemberRowsSync(threadId).map((r) => r.id)).toEqual(['m-root', 'm-sent']);
+    const members = storage.getConversationMembers(threadId);
+    expect(members.map((e) => e.id)).toEqual(['m-root', 'm-sent']);
+    expect(members[0].rawBody).toBe('<p>raw body</p>');
+  });
+
+  it('keys the first member and answers "is there a newer member?"', async () => {
+    const storage = ctx.get();
+    const threadId = await threadOf();
+    expect(storage.firstMemberKeySync(threadId)).toMatchObject({
+      threadId, firstEmailId: 'm-root', firstKey: 'm-root@example.test',
+    });
+    expect(storage.hasNewerMember(threadId, 'm-root')).toBe(true);
+    expect(storage.hasNewerMember(threadId, 'm-sent')).toBe(false);
+    expect(storage.firstMemberKeySync('no-such-thread')).toBeNull();
+  });
+});
+
 // insertEmailBatch is the initial-sync path: thousands of messages, commits in
 // chunks so the main-process event loop keeps breathing. It must sort
 // chronologically (a reply resolved before its parent is inserted cannot find
@@ -1074,7 +1121,7 @@ describe('SQLiteStorage AI categorization', () => {
     expect(await storage.isSpammer('bad@spam.test')).toBe(false);
   });
 
-  it('thread summaries and conversation extractions round-trip and clear', async () => {
+  it('thread summaries round-trip and clear', async () => {
     const storage = ctx.get();
     await storage.upsertThreadSummary({
       threadId: 'th-ai1', summary: 'Two people agreeing', keyPoints: ['ship friday'],
@@ -1085,44 +1132,8 @@ describe('SQLiteStorage AI categorization', () => {
     });
     expect(await storage.getThreadSummary('th-nope')).toBeNull();
 
-    const messages = JSON.stringify([{ sourceEmailId: 'ai1', isExtracted: false, body: '<p>my own words</p>' }]);
-    await storage.upsertConversation({
-      threadId: 'th-ai1', messages, emailCount: 2, processedEmailIds: JSON.stringify(['ai1']), processedAt: T0 + 30,
-    });
-    expect(await storage.getConversation('th-ai1')).toMatchObject({ threadId: 'th-ai1', emailCount: 2 });
-    expect(await storage.getConversation('th-nope')).toBeNull();
-
-    // The chat-view cache is the cheap source of "just this sender's new words".
-    expect(storage.getChatViewBodyForEmail('th-ai1', 'ai1')).toBe('<p>my own words</p>');
-    expect(storage.getChatViewBodyForEmail('th-ai1', 'ai2')).toBeNull();
-    expect(storage.getChatViewBodyForEmail('th-nope', 'ai1')).toBeNull();
-
     await storage.deleteThreadSummary('th-ai1');
     expect(await storage.getThreadSummary('th-ai1')).toBeNull();
-    await storage.deleteConversation('th-ai1');
-    expect(await storage.getConversation('th-ai1')).toBeNull();
-
-    await storage.upsertConversation({
-      threadId: 'th-ai2', messages: '[]', emailCount: 1, processedEmailIds: '[]', processedAt: T0 + 40,
-    });
-    expect(await storage.clearAllConversations()).toBe(1);
-    expect(await storage.clearAllConversations()).toBe(0);
-  });
-
-  it('a malformed conversation cache degrades to null instead of throwing', async () => {
-    const storage = ctx.get();
-    await storage.upsertConversation({
-      threadId: 'th-ai1', messages: 'not json at all', emailCount: 1, processedEmailIds: '[]', processedAt: T0,
-    });
-    expect(storage.getChatViewBodyForEmail('th-ai1', 'ai1')).toBeNull();
-
-    // An entry whose body is only markup has no words to show.
-    await storage.upsertConversation({
-      threadId: 'th-ai1',
-      messages: JSON.stringify([{ sourceEmailId: 'ai1', isExtracted: false, body: '<br>' }]),
-      emailCount: 1, processedEmailIds: '[]', processedAt: T0,
-    });
-    expect(storage.getChatViewBodyForEmail('th-ai1', 'ai1')).toBeNull();
   });
 });
 

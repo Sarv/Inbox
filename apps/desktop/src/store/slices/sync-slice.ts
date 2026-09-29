@@ -450,9 +450,11 @@ async function flushRealtimeBatch(set: StoreSet, get: StoreGet): Promise<void> {
     // 7. Sidebar counts — at most one reload per window.
     if (pending.needFolders) await get().loadFolders();
 
+    // (No conversation extraction here any more: the chat view's AI split is
+    // nominated by main's first-split scheduler, per account — one background
+    // path, not a second one on every arrival.)
     if (pending.sawActiveNew) {
       get().processRecentEmailsForSignatures().catch(() => {});
-      get().autoExtractRecentConversations().catch(() => {});
     }
 
     // One aggregate line per window replaces the old per-event logging

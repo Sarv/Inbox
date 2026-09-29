@@ -1,8 +1,8 @@
 /**
  * sarvinbox's stored mail, in the shape `@sarv-in/email-chat-view` renders.
  *
- * The library knows nothing about EmailRecord, ConversationMessage, the AI
- * pipeline or the image cache — it renders `ChatMessage[]` and leaves where
+ * The library knows nothing about EmailRecord, the AI split cache or the
+ * image cache — it renders `ChatMessage[]` and leaves where
  * they came from entirely to the host. This module IS that boundary, and it is
  * deliberately pure: no React, no store, no I/O, so every rule below (drafts,
  * seconds-vs-milliseconds, attribution, the pending/failed states) is directly
@@ -17,11 +17,16 @@ import {
   type SegmentCache,
 } from '@sarv-in/email-chat-view/transform';
 import type { EmailRecord } from '@sarvinbox/core';
-// Deep import, not the barrel: the core barrel pulls in imapflow/mailparser and
+// Deep imports, not the barrel: the core barrel pulls in imapflow/mailparser and
 // crashes the renderer on startup. See `vite/renderer-aliases.ts`.
 import { isBulkMail } from '@sarvinbox/core/bulk-mail';
+import {
+  conversationSenders,
+  isDraftRow,
+  type ConversationFolders,
+} from '@sarvinbox/core/conversation-membership';
 
-import type { ConversationMessage } from '../../services/conversation-service';
+import type { PolishEntry } from '../../services/ai-service';
 
 import { inlineDocumentStyles } from './chat-body-styles';
 import { withCanvasMarker, type RecoloredBody } from './chat-frame-canvas';
@@ -102,14 +107,21 @@ export function ownerEmailOf(
 }
 
 /**
- * Ids of unsent drafts in this thread.
+ * Ids of the draft rows in this thread — live or discarded.
  *
  * A Gmail draft shares its thread's id, so it is pulled into the thread and
- * would otherwise render as a bubble that looks like you already replied.
+ * would otherwise render as a bubble that looks like you already replied. By
+ * the ONE membership predicate (core `isDraftRow`), not a `|draft|` tag test:
+ * a draft synced back from IMAP carries only its folder (`|Drafts|`,
+ * `|INBOX.Drafts|` with `folders`), and the tag-only rule let it into the
+ * Standard view as a sent message.
  */
-export function draftIdsIn(emails: readonly EmailRecord[]): Set<string> {
+export function draftIdsIn(
+  emails: readonly EmailRecord[],
+  folders?: ConversationFolders | null,
+): Set<string> {
   return new Set(
-    emails.filter((email) => (email.tags || '').includes('|draft|')).map((email) => email.id),
+    emails.filter((email) => isDraftRow(email.tags, folders)).map((email) => email.id),
   );
 }
 
@@ -137,6 +149,22 @@ export function toEpochMs(seconds: number | null | undefined): number {
  */
 export function toEpochSeconds(millis: number): number {
   return Number.isFinite(millis) && millis > 0 ? Math.round(millis / 1000) : 0;
+}
+
+/**
+ * Chat turns as the reply-polish transcript's entries (`buildPolishThreadContext`):
+ * who wrote each, when — back in stored SECONDS ({@link toEpochSeconds}) — and
+ * its body. The turns are the conversation's messages as the chat view has
+ * them (Standard's split, or the AI view's composition), so quoted history
+ * is not repeated under every reply and drafts are never among them.
+ */
+export function polishEntriesOf(turns: readonly ChatMessage[]): PolishEntry[] {
+  return turns.map((turn) => ({
+    sender: turn.fromName || turn.fromAddress || '',
+    address: turn.fromAddress || '',
+    date: toEpochSeconds(turn.date),
+    body: turn.body || '',
+  }));
 }
 
 /** The stored attachment columns, as the library's attachment shape. */
@@ -168,11 +196,14 @@ export interface ThreadOptions {
    * as a `data-sec-applied` marker — see `chat-frame-canvas.ts`.
    */
   recolorBody?: (html: string) => RecoloredBody;
-}
-
-export interface AdapterOptions extends ThreadOptions {
-  /** Every email in the thread, for attachments and body state. */
-  emailsById: ReadonlyMap<string, EmailRecord>;
+  /**
+   * The account's folder roles (`conversationFoldersOf(folders)`), so a draft
+   * that lives only in a provider Drafts path (`INBOX.Drafts`) is recognised.
+   * The standard names are recognised without it. The thread view already
+   * hands the transform MEMBERS (drafts removed); this keeps a draft out of
+   * the bubbles even for a caller that does not.
+   */
+  folders?: ConversationFolders | null;
 }
 
 /**
@@ -201,8 +232,9 @@ export function bodyOf(email: EmailRecord): string {
 export function mailsFromEmails(
   emails: readonly EmailRecord[],
   failedBodies?: ReadonlySet<string>,
+  folders?: ConversationFolders | null,
 ): Mail[] {
-  const drafts = draftIdsIn(emails);
+  const drafts = draftIdsIn(emails, folders);
   return emails.map((email) => {
     const body = bodyOf(email);
     return {
@@ -248,11 +280,11 @@ export const threadSegmentCache: SegmentCache = createSegmentCache();
  * result.
  *
  * The single description of sarvinbox's thread to the transform, so the render
- * path and the background warm below cannot ask for different work and miss
- * each other's cache entries.
+ * path, the background warm below and the AI view's first-email facts cannot
+ * ask for different work and miss each other's cache entries.
  */
-function splitThread(emails: readonly EmailRecord[], options: ThreadOptions): ChatMessage[] {
-  return threadToMessages(mailsFromEmails(emails, options.failedBodies), {
+export function splitThread(emails: readonly EmailRecord[], options: ThreadOptions): ChatMessage[] {
+  return threadToMessages(mailsFromEmails(emails, options.failedBodies, options.folders), {
     currentUserAddress: options.currentUserEmail,
     dateUnit: 's',
     cache: threadSegmentCache,
@@ -269,15 +301,39 @@ function splitThread(emails: readonly EmailRecord[], options: ThreadOptions): Ch
  */
 export const AS_SENT_MARKER = 'as-sent';
 
-/** Distinct sender addresses in a thread, unsent drafts excluded. */
-function distinctSenderCount(emails: readonly EmailRecord[]): number {
-  const drafts = draftIdsIn(emails);
-  const senders = new Set<string>();
-  for (const email of emails) {
-    if (drafts.has(email.id)) continue;
-    senders.add((email.fromAddress || '').trim().toLowerCase());
-  }
-  return senders.size;
+/**
+ * Distinct senders of a thread, drafts excluded — core's `conversationSenders`,
+ * the same count main hands the renderer as `distinctSenders`, so the as-sent
+ * rule below and the first-email facts can never disagree about "one sender".
+ * (A row with no From address is nobody and is not counted.)
+ */
+function distinctSenderCount(
+  emails: readonly EmailRecord[],
+  folders?: ConversationFolders | null,
+): number {
+  const drafts = draftIdsIn(emails, folders);
+  return conversationSenders(emails.filter((email) => !drafts.has(email.id))).length;
+}
+
+/**
+ * Must this ONE mail reach the reader exactly as it was sent? The per-mail half
+ * of {@link asSentEmailIds}, shared with the first-email facts (an as-sent
+ * first email is never offered the AI split).
+ *
+ * `distinctSenders` is the thread's count ({@link distinctSenderCount}, or
+ * main's `FirstSplitCurrent.distinctSenders`): more than one and nothing is
+ * as-sent — see the third rule below.
+ */
+export function isAsSentMail(email: EmailRecord, distinctSenders: number): boolean {
+  if (distinctSenders > 1) return false;
+  const body = bodyOf(email);
+  if (!looksDesigned(body)) return false;
+  return isBulkMail({
+    tags: email.tags,
+    fromAddress: email.fromAddress,
+    messageId: email.messageId,
+    rawBody: body,
+  });
 }
 
 /**
@@ -310,19 +366,16 @@ function distinctSenderCount(emails: readonly EmailRecord[]): number {
  *    moment anybody has replied, it is a conversation and gets the chat
  *    treatment, all of it.
  */
-export function asSentEmailIds(emails: readonly EmailRecord[]): Set<string> {
+export function asSentEmailIds(
+  emails: readonly EmailRecord[],
+  folders?: ConversationFolders | null,
+): Set<string> {
   const ids = new Set<string>();
-  if (emails.length === 0 || distinctSenderCount(emails) > 1) return ids;
+  if (emails.length === 0) return ids;
+  const senders = distinctSenderCount(emails, folders);
+  if (senders > 1) return ids;
   for (const email of emails) {
-    const body = bodyOf(email);
-    if (!looksDesigned(body)) continue;
-    const bulk = isBulkMail({
-      tags: email.tags,
-      fromAddress: email.fromAddress,
-      messageId: email.messageId,
-      rawBody: body,
-    });
-    if (bulk) ids.add(email.id);
+    if (isAsSentMail(email, senders)) ids.add(email.id);
   }
   return ids;
 }
@@ -366,9 +419,10 @@ function ownTurnIds(
  */
 function restoreAsSentBodies(
   messages: readonly ChatMessage[],
-  emails: readonly EmailRecord[]
+  emails: readonly EmailRecord[],
+  folders?: ConversationFolders | null,
 ): ChatMessage[] {
-  const asSent = asSentEmailIds(emails);
+  const asSent = asSentEmailIds(emails, folders);
   if (asSent.size === 0) return [...messages];
 
   const bodyById = new Map(emails.map((email) => [email.id, bodyOf(email)]));
@@ -446,13 +500,38 @@ export function normalizedContent(html: string): string {
     .replace(/[^a-z0-9]+/g, '');
 }
 
-/** Whether two normalized bodies are the same message, one of them quoted. */
-function isSameMessage(left: string, right: string): boolean {
+/**
+ * Whether two normalized bodies ({@link normalizedContent}) are the same
+ * message, one of them quoted. Exported for the AI view, which decides with
+ * the SAME rule which of Standard's bubbles an AI-recovered message replaces —
+ * a second rule there would show a message twice, or drop one.
+ */
+export function isSameMessage(left: string, right: string): boolean {
   if (left.length < MIN_DEDUPE_CHARS || right.length < MIN_DEDUPE_CHARS) return false;
   return (
     right.includes(left.slice(0, DEDUPE_KEY_CHARS)) ||
     left.includes(right.slice(0, DEDUPE_KEY_CHARS))
   );
+}
+
+/** How many normalized characters the library's exact-key rule compares (its `contentKey`). */
+const CONTENT_KEY_CHARS = 150;
+
+/**
+ * Are two normalized bodies ({@link normalizedContent}) the same message?
+ *
+ * {@link isSameMessage}'s unanchored rule for bodies long enough to act on,
+ * plus the library's own exact-key rule (the first 150 characters equal) for
+ * the short ones that rule deliberately will not touch. For the AI view, which
+ * must decide both "does this split part replace that bubble?" and "does this
+ * AI output cover that Standard segment?" — a two-word reply ("Approved.")
+ * compared only by the unanchored rule would never match, and would be shown
+ * twice. Empty bodies match nothing.
+ */
+export function isSameContent(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  if (left.slice(0, CONTENT_KEY_CHARS) === right.slice(0, CONTENT_KEY_CHARS)) return true;
+  return isSameMessage(left, right);
 }
 
 /**
@@ -482,16 +561,48 @@ export function dropDuplicateQuotes(messages: readonly ChatMessage[]): ChatMessa
   });
 }
 
-export function chatMessagesFromThread(
-  emails: readonly EmailRecord[],
-  options: ThreadOptions,
-): ChatMessage[] {
-  const { resolveImages } = options;
+/** Standard's turns for a thread, before presentation (see {@link threadTurns}). */
+export interface StandardTurns {
+  /**
+   * The library's split exactly as it returned it — every turn each mail
+   * carries (the library's own exact-key dedupe applied, the host's
+   * {@link dropDuplicateQuotes} NOT). The AI view reads the first email's
+   * turns from here: `dropDuplicateQuotes` keeps whichever copy of a quoted
+   * message sorts first, and an approximately-dated copy carried by a LATER
+   * mail can displace the first email's own, so counting or replacing the
+   * first email's quotes after the dedupe undercounts them.
+   */
+  raw: ChatMessage[];
+  /** What Standard shows, before presentation: deduped, as-sent bodies restored. */
+  turns: ChatMessage[];
+}
+
+/**
+ * The thread's mails, as Standard's turns — the split, the host's duplicate
+ * pass and the as-sent restore, with nothing presentational done yet.
+ *
+ * Split from {@link presentTurns} so the AI view can compose ITS list out of
+ * the very same turn objects (every bubble it does not replace is Standard's,
+ * by reference) and then present it the same way.
+ */
+export function threadTurns(emails: readonly EmailRecord[], options: ThreadOptions): StandardTurns {
+  const raw = splitThread(emails, options);
   // Deduped BEFORE the as-sent restore, never after: the restore puts a bulk
   // mail's RAW html back on its bubble, quoted history included, and a
   // haystack carrying quoted history would swallow every genuine recovered
   // message in it.
-  const messages = restoreAsSentBodies(dropDuplicateQuotes(splitThread(emails, options)), emails);
+  return { raw, turns: restoreAsSentBodies(dropDuplicateQuotes(raw), emails, options.folders) };
+}
+
+/**
+ * Turns, as the view renders them: each body's stylesheet inlined, re-coloured
+ * for the page and its image refs resolved.
+ */
+export function presentTurns(
+  messages: readonly ChatMessage[],
+  options: Pick<ThreadOptions, 'resolveImages' | 'recolorBody'>,
+): ChatMessage[] {
+  const { resolveImages } = options;
   // Image refs are resolved AFTER the split, not before: the raw body carries
   // the whole quoted history, most of which is about to be thrown away, and
   // inlining every image in it first is work nobody sees.
@@ -520,6 +631,14 @@ export function chatMessagesFromThread(
       ? message
       : { ...message, body, applied };
   });
+}
+
+/** The Standard view: {@link threadTurns}, presented ({@link presentTurns}). */
+export function chatMessagesFromThread(
+  emails: readonly EmailRecord[],
+  options: ThreadOptions,
+): ChatMessage[] {
+  return presentTurns(threadTurns(emails, options).turns, options);
 }
 
 /** Whether this email's body has already been split and is still cached. */
@@ -552,55 +671,6 @@ export function warmThreadSegments(
 ): void {
   if (emails.length === 0) return;
   splitThread(emails, { currentUserEmail: options.currentUserEmail });
-}
-
-/** Chronological, drafts dropped. Progressive extraction appends out of order. */
-function chronological<T extends { date: number }>(messages: readonly T[]): T[] {
-  return [...messages].sort((left, right) => (left.date || 0) - (right.date || 0));
-}
-
-/**
- * The LLM-extracted conversation, as chat messages.
- *
- * The AI path only. The Standard view no longer passes through
- * `ConversationMessage` at all — {@link chatMessagesFromThread} hands the
- * library stored rows and gets bubbles back — so this is the one remaining
- * adapter for turns a model produced.
- */
-export function chatMessagesFromConversation(
-  messages: readonly ConversationMessage[],
-  options: AdapterOptions,
-): ChatMessage[] {
-  const { currentUserEmail, emailsById, failedBodies, resolveImages, recolorBody } = options;
-  const drafts = draftIdsIn([...emailsById.values()]);
-
-  return chronological(messages.filter((message) => !drafts.has(message.sourceEmailId))).map(
-    (message) => {
-      const source = emailsById.get(message.sourceEmailId);
-      const raw = message.body || '';
-      const recolored = recolorBody?.(raw);
-      const body = recolored?.html ?? raw;
-      const applied = withCanvasMarker(undefined, recolored?.canvas);
-      return {
-        id: message.id,
-        sourceId: message.sourceEmailId,
-        fromAddress: message.fromAddress,
-        fromName: message.fromName,
-        toAddress: message.toAddress,
-        ccAddress: source?.ccAddress ?? null,
-        ccNames: source?.ccNames ?? null,
-        date: toEpochMs(message.date),
-        body: resolveImages ? resolveImages(body) : body,
-        attachments: attachmentsOf(source),
-        isFromMe: isFromMe(message.fromAddress, currentUserEmail),
-        // An extracted turn has no body of its own to download: it was carved
-        // out of a source email that is already here. Only a message backed by
-        // an email whose body never arrived can be pending or failed.
-        ...bodyStateOf(raw, source, failedBodies),
-        ...(applied ? { applied } : {}),
-      };
-    },
-  );
 }
 
 /**

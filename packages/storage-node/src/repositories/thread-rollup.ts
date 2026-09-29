@@ -21,7 +21,11 @@
 //   - `last_message_date` is Unix SECONDS, copied verbatim from emails.date (the
 //     source column) — no unit conversion, so no drift against the legacy path.
 
-import { createLogger } from '@sarvinbox/core';
+// `fnv1a32` is core's shared hash (also the first-email split's source
+// fingerprint). The stored `state_version` values depend on it,
+// so it must stay ONE implementation — a copy that drifted would read every
+// thread as changed and rebuild the mailbox.
+import { createLogger, fnv1a32 } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
 
@@ -141,16 +145,6 @@ const emptyFolderAcc = (): FolderAcc => ({
 /** True when this copy is a genuine UNSENT draft (draft tag + a Drafts folder). */
 function isUnsentDraft(tokens: Set<string>): boolean {
   return tokens.has(TAG_DRAFT) && DRAFTS_FOLDER_PATHS.some((p) => tokens.has(p));
-}
-
-/** 32-bit FNV-1a hash of a string (no allocations beyond the input). */
-function fnv1a32(str: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
 }
 
 /**

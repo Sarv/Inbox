@@ -594,6 +594,10 @@ describe('upgrading a v24-era database to the current version', () => {
       'agent_prompt_templates',
       'user_categorization_rules',
       'image_allowed_senders',
+      // v97: the first-email split cache (schema.sql AND the migration declare
+      // it) and the agent's draft Message-ID column (the migration only).
+      'first_email_splits',
+      'agent_decisions',
     ]) {
       expect(columnsOf(db, table), `column drift on ${table}`).toEqual(columnsOf(fresh, table));
     }
@@ -647,6 +651,45 @@ describe('upgrading a v24-era database to the current version', () => {
     expect(scalar(db, "SELECT COUNT(*) AS c FROM emails WHERE label_status = 'pending'")).toBe(1);
     expect(scalar(db, "SELECT label_status FROM emails WHERE id = 'e-read'")).toBe('pending');
     expect(scalar(db, "SELECT label_status FROM emails WHERE id = 'e-fresh'")).toBe(null);
+  });
+
+  // v97 on the upgrade path. An upgraded mailbox never re-runs schema.sql, so
+  // the cache table and the decision column exist only if v97 creates them —
+  // missing, the chat view's AI mode and the auto-drafter's live-draft gate
+  // fail on every call for exactly the users who upgraded.
+  it('adds first_email_splits and agent_decisions.draft_message_id, empty', () => {
+    migrateRange(db, 24, CURRENT_VERSION);
+
+    expect(columnsOf(db, 'first_email_splits')).toContain('source_fingerprint');
+    expect(indexesOf(db)).toContain('idx_first_email_splits_retry');
+    expect(columnsOf(db, 'agent_decisions')).toContain('draft_message_id');
+    expect(scalar(db, 'SELECT COUNT(*) AS c FROM first_email_splits')).toBe(0);
+    // Nothing else moved: the mail is all there.
+    expect(scalar(db, 'SELECT COUNT(*) AS c FROM emails')).toBe(7);
+  });
+
+  // v98 on the upgrade path. The legacy mailbox's whole-thread cache holds a
+  // row that shows an unsent draft as a sent bubble (and, in the field, other
+  // accounts' messages and ±26 h mis-bindings). Breaks: that row surviving the
+  // upgrade — a later build reading the table again would show it — or the
+  // retirement taking the new cache with it. v31 still read the table on the
+  // way up: its one-time backfill is intact.
+  it('drops the whole-thread conversation cache, draft bubble and all, keeping first_email_splits', () => {
+    db.prepare("UPDATE conversation_extractions SET messages = ? WHERE thread_id = 't-3'").run(
+      JSON.stringify([
+        { sourceEmailId: 'e-read', isExtracted: false, body: 'Glad to have you' },
+        { sourceEmailId: 'draft-1', isExtracted: false, body: 'my unsent reply' },
+      ]),
+    );
+    migrateRange(db, 24, CURRENT_VERSION);
+
+    expect(scalar(db, "SELECT COUNT(*) AS c FROM sqlite_master WHERE name = 'conversation_extractions'")).toBe(0);
+    expect(indexesOf(db)).not.toContain('idx_conversation_extractions_thread');
+    expect(indexesOf(db)).not.toContain('idx_threads_chat_extraction');
+    expect(columnsOf(db, 'first_email_splits')).toContain('parts');
+    expect(indexesOf(db)).toContain('idx_first_email_splits_retry');
+    expect(scalar(db, "SELECT extraction_status FROM emails WHERE id = 'e-read'")).toBe('done');
+    expect(scalar(db, 'SELECT COUNT(*) AS c FROM emails')).toBe(7);
   });
 
   // v76 adds the AI's own category verdict. The NOT-backfilling is the point of

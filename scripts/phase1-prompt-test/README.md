@@ -61,15 +61,21 @@ node scripts/phase1-prompt-test/run.mjs --fixture nested-outlook-thread --models
    - `truncated`: did `finish_reason` say "length"?
 4. Tweak prompt, repeat.
 
-When happy, copy the prompt body back into
-`apps/desktop/src/services/conversation-service.ts` (the
-`aiSplitFirstEmail` function's `systemPrompt`).
+**`prompt.mjs` holds the retired V1 prompt — do not paste it back into the
+app.** It asks for ISO-8601 dates, so the model guesses the day/month order
+(a 7 Aug mail can come back as Jul 8), and it has no `[[REGION k]]` protocol.
+The prompts the app actually sends are `OWN_CHUNK_PROMPT` /
+`HISTORY_CHUNK_PROMPT`, returned by `systemPromptFor()` in
+`apps/desktop/src/services/first-split/prompt.ts`; they ask for each date
+verbatim so `parseHumanDate` reads it day-first. A result from this harness
+says nothing about those prompts — port the harness to them before using it
+to evaluate the live split.
 
 ## What lives where
 
 | File | Purpose |
 |---|---|
 | `run.mjs` | The runner. Loads fixture/email, builds prompt, hits LLM, scores. |
-| `prompt.mjs` | The system + user prompt under iteration. Edit this to try variants. |
+| `prompt.mjs` | The retired V1 system + user prompt (not the app's live prompt — see above). |
 | `fixtures/*.json` | Pre-saved test cases — body + expected message count + expected senders. Fully synthetic (pseudonymous cast, `partner.example` customer, ticket 400123) — never commit a real mailbox body here. |
 | `scorer.mjs` | Quality checks (grounding, parse, truncation). |

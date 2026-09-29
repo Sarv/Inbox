@@ -50,12 +50,6 @@ vi.mock('@sarvinbox/core', async () => {
   };
 });
 
-// Only two body-SQL helpers are imported; the real package would load SQLite.
-vi.mock('@sarvinbox/storage-node', () => ({
-  cleanBodyExpression: () => 'clean_body',
-  rawBodyExpression: () => 'raw_body',
-}));
-
 // The runtime registry, as main keeps it: the pre-account default slot holds
 // storage and an engine but maps to NO account id.
 vi.mock('../../../../electron/shared', () => {
@@ -111,7 +105,6 @@ vi.mock('../../../../electron/ipc/smtp-handlers', () => ({
   appendSentCopy: async () => undefined,
 }));
 vi.mock('../../../../electron/services/agent-config-store', () => ({ loadAgentConfig: () => ({}) }));
-vi.mock('../../../../electron/services/conversation-extraction-scheduler', () => ({ isAIProviderConfigured: () => false }));
 vi.mock('../../../../electron/services/net-fetch', () => ({
   chromiumFetch: async () => { throw new Error('no network in tests'); },
 }));

@@ -9,9 +9,10 @@
 // swap refs back for the original data URLs at render time.
 //
 // Durability: the cache lives only in renderer memory. On app restart the
-// `conversation_extractions` rows still hold refs, but the cache is empty —
-// we re-populate by walking each thread email's rawBody on chat-view open.
-// rawBody is durable in DB so this is deterministic and lossless.
+// saved first-email splits (`first_email_splits` parts) still hold refs, but
+// the cache is empty — we re-populate by walking each thread email's rawBody
+// on chat-view open. rawBody is durable in DB so this is deterministic and
+// lossless.
 
 const REF_PREFIX = 'sarv-image:';
 const cache = new Map<string, string>();
@@ -71,7 +72,23 @@ export function resolveRef(ref: string): string | null {
   return cache.get(ref.slice(REF_PREFIX.length)) ?? null;
 }
 
-const DATA_URL_RE = /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
+/** A base64 image data URL — the ONLY shape {@link populateCacheFromHtml} re-registers. */
+const DATA_URL_PATTERN = 'data:image\\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+';
+const DATA_URL_RE = new RegExp(DATA_URL_PATTERN, 'gi');
+const WHOLE_DATA_URL_RE = new RegExp(`^${DATA_URL_PATTERN}$`, 'i');
+
+/**
+ * Is `src` (an `<img>` src, trimmed) exactly one data URL that
+ * {@link populateCacheFromHtml} registers again from the durable rawBody
+ * after a restart? Only such a URL may be swapped for a ref that is
+ * PERSISTED: any other `data:` src (base64 with line breaks, `svg+xml;utf8`,
+ * a `charset` parameter) would become a ref nothing ever resolves again — a
+ * broken image — so it has to stay inline. Same pattern as the populate walk,
+ * by construction.
+ */
+export function isRestorableDataUrl(src: string): boolean {
+  return WHOLE_DATA_URL_RE.test(src);
+}
 
 /**
  * Walk an HTML string, register every base64 data URL in the cache.

@@ -61,6 +61,20 @@
       // Same: pure blocklist-preference reader, shared so the Blocklists tab
       // shows exactly what main queries.
       "@sarvinbox/core/blocklist-prefs": ["../../packages/core/src/utils/blocklist-prefs.ts"],
+      // Same: the one conversation-membership predicate (drafts, Trash copies,
+      // order), shared so the thread view and main's counts/drafter agree.
+      "@sarvinbox/core/conversation-membership": ["../../packages/core/src/utils/conversation-membership.ts"],
+      // Same: the first-email split cache's key/validity/retry rules, shared
+      // with main, which writes the cache.
+      "@sarvinbox/core/first-split": ["../../packages/core/src/utils/first-split.ts"],
+      // Same: the quote-marker corpus and the marker count.
+      "@sarvinbox/core/quoted-text": ["../../packages/core/src/utils/quoted-text.ts"],
+      // Same: the one HTML-to-plain-text conversion (the AI split's no-loss check).
+      "@sarvinbox/core/html-text": ["../../packages/core/src/utils/html-text.ts"],
+      // Same: the one FNV-1a (read-model stateVersion, duplicate buckets, split fingerprint).
+      "@sarvinbox/core/fnv1a": ["../../packages/core/src/utils/fnv1a.ts"],
+      // Same: the AI failure classifier (transient vs permanent), shared with main.
+      "@sarvinbox/core/ai-error": ["../../packages/core/src/utils/ai-error.ts"],
       // Same: the structured logger, so renderer lines reach app.log in main's shape.
       "@sarvinbox/core/logger": ["../../packages/core/src/utils/logger.ts"]
     }

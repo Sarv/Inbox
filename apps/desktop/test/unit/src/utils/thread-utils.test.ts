@@ -66,15 +66,29 @@ describe('isDraftEmail', () => {
   it('matches a provider-specific drafts path supplied by the store', () => {
     // e.g. Dovecot's `INBOX.Drafts` — synced drafts come back tagged only with
     // their folder, never `|draft|`, so without the folder list they'd be missed.
-    const paths = new Set(['INBOX.Drafts']);
-    expect(isDraftEmail(email({ tags: '|INBOX.Drafts|' }), paths)).toBe(true);
+    const folders = { draftPaths: ['INBOX.Drafts'], sentPaths: [] };
+    expect(isDraftEmail(email({ tags: '|INBOX.Drafts|' }), folders)).toBe(true);
     expect(isDraftEmail(email({ tags: '|INBOX.Drafts|' }))).toBe(false); // no list ⇒ not detected
   });
 
-  it('ignores a blank entry in the drafts-path set', () => {
+  it('ignores a blank entry in the drafts-path list', () => {
     // A folder list with an empty path must not make EVERY message a draft
     // (`tags.includes('||')` would otherwise match).
-    expect(isDraftEmail(email({ tags: '|INBOX|' }), new Set(['']))).toBe(false);
+    expect(isDraftEmail(email({ tags: '|INBOX|' }), { draftPaths: [''], sentPaths: [] })).toBe(false);
+  });
+
+  // DELIBERATE CHANGE (stated in the commit): this wrapper used to know only
+  // `|Sent|`, so a Gmail or Outlook sent copy that kept a stale `|draft|` tag
+  // read as an editable draft here while the thread view (and main) called it
+  // a sent message. Every Sent folder now counts as sent, the account's own
+  // Sent paths included.
+  it('treats every Sent folder as sent, not only |Sent|', () => {
+    expect(isDraftEmail(email({ tags: '|[Gmail]/Sent Mail|draft|' }))).toBe(false);
+    expect(isDraftEmail(email({ tags: '|Sent Items|draft|' }))).toBe(false);
+    expect(isDraftEmail(email({ tags: '|INBOX.Sent|draft|' }))).toBe(true); // no folder list
+    expect(
+      isDraftEmail(email({ tags: '|INBOX.Sent|draft|' }), { draftPaths: [], sentPaths: ['INBOX.Sent'] }),
+    ).toBe(false);
   });
 
   it('is NOT a draft once the message has been sent/trashed/junked, stale |draft| tag or not', () => {
@@ -837,7 +851,7 @@ describe('adjustTotalForFilteredOut', () => {
  */
 describe('isDraftRow', () => {
   const row = (tags: string) => ({ tags }) as never;
-  const DRAFT_PATHS = new Set(['INBOX.Drafts']);
+  const DRAFT_PATHS = { draftPaths: ['INBOX.Drafts'], sentPaths: [] };
 
   it('is true for a live draft', () => {
     expect(isDraftRow(row('|Drafts|draft|'))).toBe(true);
@@ -867,5 +881,49 @@ describe('isDraftRow', () => {
   it('is false for ordinary received mail', () => {
     expect(isDraftRow(row('|INBOX|read|'))).toBe(false);
     expect(isDraftRow(row(''))).toBe(false);
+  });
+});
+
+/**
+ * The wrappers ARE the core predicate. The thread view, the list, the bulk
+ * actions and main's counts/drafter all ask "is this a draft?" — if the
+ * renderer's answer drifted from core's, a draft would render as a sent
+ * message in one view and not another, or a deleted draft would reappear as a
+ * message (the field-reported bug `isDraftRow` exists for).
+ */
+describe('isDraftEmail / isDraftRow — the core membership predicate', () => {
+  const FOLDERS = { draftPaths: ['INBOX.Drafts'], sentPaths: ['INBOX.Sent'] };
+  const TRUTH_TABLE = [
+    '|draft|',
+    '|Drafts|',
+    '|[Gmail]/Drafts|',
+    '|INBOX.Drafts|',
+    '|Drafting|',
+    '|Sent|draft|',
+    '|[Gmail]/Sent Mail|draft|',
+    '|Sent Items|draft|',
+    '|INBOX.Sent|draft|',
+    '|Trash|draft|',
+    '|[Gmail]/Trash|draft|',
+    '|Drafts|deleted|',
+    '|Spam|draft|',
+    '|INBOX|read|',
+    '',
+  ];
+
+  it.each(TRUTH_TABLE)('answers exactly as core for %j', async (tags) => {
+    const core = await import('@sarvinbox/core/conversation-membership');
+    const row = email({ tags });
+    for (const folders of [undefined, FOLDERS]) {
+      expect(isDraftRow(row, folders)).toBe(core.isDraftRow(tags, folders));
+      expect(isDraftEmail(row, folders)).toBe(core.isLiveDraft(tags, folders));
+    }
+  });
+
+  // The substring-rule regression: a user's own "Drafting" folder is not a
+  // Drafts folder, and mail filed there must stay in its conversation.
+  it('never takes a user folder that merely contains "draft" for Drafts', () => {
+    expect(isDraftRow(email({ tags: '|Drafting|' }), FOLDERS)).toBe(false);
+    expect(isDraftEmail(email({ tags: '|Drafting|' }), FOLDERS)).toBe(false);
   });
 });

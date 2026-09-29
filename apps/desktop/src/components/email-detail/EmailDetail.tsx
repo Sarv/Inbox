@@ -1,7 +1,5 @@
 import { Mail, Loader2, ArrowDown, X } from 'lucide-react';
-import { useMemo } from 'react';
 
-import { buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
 import { accountDisplayLabel } from '../../store/helpers';
 import { toForwardSource } from '../../utils/forward-quote';
@@ -43,36 +41,15 @@ export function EmailDetail() {
   const showPendingThreadMessages = useEmailStore((s) => s.showPendingThreadMessages);
   const dismissPendingThreadMessages = useEmailStore((s) => s.dismissPendingThreadMessages);
 
-  // Whole-thread transcript for AI polish of the inline reply. These hooks
-  // must run BEFORE the `!ctx` early return (rules of hooks), and are
-  // memoized on the thread data so the transcript is not rebuilt on every
-  // keystroke while the user types their reply.
-  const currentUserEmail = useMemo(
-    () => getCurrentUserEmail(ctx?.displayEmail?.toAddress || ''),
-    [ctx?.displayEmail?.toAddress],
-  );
-  const polishThreadContext = useMemo(
-    () =>
-      ctx
-        ? buildPolishThreadContext({
-            conversationMessages: ctx.conversationMessages,
-            threadEmails: ctx.threadEmails,
-            currentUserEmail,
-          })
-        : '',
-    [ctx?.conversationMessages, ctx?.threadEmails, currentUserEmail],
-  );
-
   // Get the chat view's split done in the background while the reader is still
   // in the standard view, so switching to it is instant rather than a freeze on
-  // a long thread. Gated on the same condition that decides whether the toggle
-  // is offered at all — warming a thread the reader cannot switch is work that
-  // only evicts another thread's from a shared cache.
+  // a long thread. Gated on the chat rules: only where the toggle is offered
+  // (warming a thread the reader cannot switch is work that only evicts
+  // another thread's from a shared cache) and chat is not already showing.
   useChatPrewarm({
     emails: ctx?.threadEmails ?? NO_EMAILS,
-    currentUserEmail,
-    enabled:
-      !!ctx && !ctx.chatViewEnabled && (ctx.threadEmails.length > 1 || ctx.hasInlineConversation),
+    currentUserEmail: ctx?.currentUserEmail ?? '',
+    enabled: !!ctx && ctx.chatRules.offerChat && !ctx.chatViewActive,
   });
 
   if (!ctx) {
@@ -95,9 +72,9 @@ export function EmailDetail() {
     threadEmails,
     threadMessageTotal,
     loadingThread,
-    chatViewEnabled,
     chatViewActive,
-    hasInlineConversation,
+    chatRules,
+    polishThreadContext,
     showInlineReply,
     replyingToEmail,
     inlineReplyMode,
@@ -162,11 +139,11 @@ export function EmailDetail() {
             onFollowUp={(email) => handleReplyAll(email)}
           />
 
-          {/* Thread info: message count + view toggle + summary.
-              Shown for real threads AND single emails with embedded
-              conversations (loop-me-in / forwarded chain) so the user
-              can switch between Chat and Standard view. */}
-          {(threadEmails.length > 1 || hasInlineConversation) && (
+          {/* Thread info: message count + view toggle + summary. Shown
+              wherever the chat view is OFFERED (chatRules.offerChat): real
+              threads, and a single email that quotes earlier messages (a
+              looped-in chain) — never designed bulk mail. */}
+          {chatRules.offerChat && (
             <div className="mb-6 space-y-3">
               <div className="flex items-center gap-2">
                 <div className="h-px flex-1 bg-border" />
@@ -176,7 +153,10 @@ export function EmailDetail() {
                       copy headed "(2)" under a list row that said "(3)". */}
                   {threadHeaderLabel(threadEmails, threadMessageTotal)}
                 </span>
-                <ViewModeToggle chatViewEnabled={chatViewEnabled} onToggle={handleChatViewToggle} />
+                {/* Selected = what is ON SCREEN: a single email quoting one
+                    message stays a card (List) until the reader picks Chat,
+                    even with the chat setting on. */}
+                <ViewModeToggle chatViewEnabled={chatViewActive} onToggle={handleChatViewToggle} />
                 <div className="h-px flex-1 bg-border" />
               </div>
 
@@ -237,12 +217,14 @@ export function EmailDetail() {
             </div>
           )}
 
-          {/* Thread Section — also renders for single emails with embedded
-              conversation (loop-me-in / forwarded chain) so chat view shows. */}
-          {(threadEmails.length > 1 || hasInlineConversation || (chatViewEnabled && loadingThread)) && (
+          {/* Thread Section — the chat view whenever it IS the reading surface
+              (chatRules.chatActive: the card above is hidden then, so the two
+              never render together), the list for a multi-email thread read
+              as a list. */}
+          {(threadEmails.length > 1 || chatViewActive) && (
             <div className="mt-6">
               {/* Chat View Mode */}
-              {chatViewEnabled ? (
+              {chatViewActive ? (
                 loadingThread ? (
                   <div className="flex items-center justify-center p-8">
                     <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />

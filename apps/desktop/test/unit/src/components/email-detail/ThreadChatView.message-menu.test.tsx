@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { act, render, settle, toggle, type Mounted } from '../../../../helpers/render';
 
+import { chatFieldsFor } from './chat-context-fixture';
 import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
 
 /**
@@ -84,7 +85,6 @@ vi.mock('../../../../../src/components/attachment-viewer/useAttachmentActions', 
   useAttachmentActions: () => ({ saveCopy: vi.fn() }),
 }));
 vi.mock('../../../../../src/services/ai-service', () => ({
-  buildPolishThreadContext: () => '',
   getCurrentUserEmail: () => 'me@acme.example',
 }));
 vi.mock('../../../../../src/services/image-cache', () => ({
@@ -159,10 +159,8 @@ const context = (threadEmails: EmailRecord[], handlers: Handlers = newHandlers()
     {
       displayEmail: threadEmails[0],
       threadEmails,
-      conversationMessages: null,
-      conversationLoading: false,
-      conversationError: null,
-      conversationProgress: null,
+      // Standard's turns, split the way useEmailDetail splits them.
+      ...chatFieldsFor(threadEmails),
       showAIView: false,
       chatViewActive: true,
       showInlineReply: false,
@@ -172,7 +170,6 @@ const context = (threadEmails: EmailRecord[], handlers: Handlers = newHandlers()
       inlineReplyDraft: undefined,
       inlineForwardDraft: undefined,
       inlineReplyMode: 'reply',
-      handleReExtractMessage: undefined,
       ...handlers,
     } as Record<string, unknown>,
     { get: (target, key) => (key in target ? target[key as string] : vi.fn()) },

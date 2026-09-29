@@ -1,3 +1,4 @@
+import { compareConversationOrder } from '@sarvinbox/core/conversation-membership';
 import {
   Loader2,
   ChevronDown,
@@ -10,7 +11,7 @@ import {
 import prettyBytes from 'pretty-bytes';
 import { useMemo, useState } from 'react';
 
-import { isSignatureDetectionEnabled, buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
+import { isSignatureDetectionEnabled } from '../../services/ai-service';
 import { qualifiesForSafeAutoLoad } from '../../store/helpers';
 import { firstFlaggedEmailId } from '../../utils/email-security';
 import { toForwardSource } from '../../utils/forward-quote';
@@ -43,7 +44,6 @@ export function ThreadList({ ctx }: ThreadListProps) {
     displayEmail,
     threadEmails,
     duplicatesByEmailId,
-    conversationMessages,
     expandedThreads,
     showFullContent,
     showSignatures,
@@ -63,18 +63,10 @@ export function ThreadList({ ctx }: ThreadListProps) {
     markAsStarred,
     fetchEmailBody,
     setInlineReplyMode,
+    // The thread transcript for reply polish — built once in useEmailDetail,
+    // the same one the card and the chat hand their composers.
+    polishThreadContext,
   } = ctx;
-
-  // Thread transcript for the reply polish feature — same wiring as
-  // ThreadChatView/EmailDetail so list-view replies get context too.
-  const currentUserEmail = useMemo(
-    () => getCurrentUserEmail(displayEmail?.toAddress || ''),
-    [displayEmail?.toAddress]
-  );
-  const polishThreadContext = useMemo(
-    () => buildPolishThreadContext({ conversationMessages, threadEmails, currentUserEmail }),
-    [conversationMessages, threadEmails, currentUserEmail]
-  );
 
   // Per-reply "Show details" toggle (full From/To/Cc/Date/Subject header).
   const [detailsOpen, setDetailsOpen] = useState<Set<string>>(new Set());
@@ -102,11 +94,15 @@ export function ThreadList({ ctx }: ThreadListProps) {
   return (
     <div className="space-y-2">
       {threadEmails
+        // `threadEmails` is already the conversation's MEMBERS (drafts and
+        // Trash copies out, by the one predicate the chat view and main's
+        // counts use — see useEmailDetail). A second, narrower filter here
+        // (`|draft|` only) was how this list and the chat view came to
+        // disagree about a draft synced back tagged only with its folder.
         .filter((e) => e.id !== displayEmail.id)
-        // Unsent drafts share the thread id but aren't messages — don't
-        // render them as sent cards in the conversation (List view).
-        .filter((e) => !(e.tags || '').includes('|draft|'))
-        .sort((a, b) => a.date - b.date)
+        // The one conversation order: an undated message goes last instead of
+        // posing as the first reply, and equal timestamps tie-break by id.
+        .sort(compareConversationOrder)
         .map((email) => {
           const isExpanded = expandedThreads.has(email.id);
           const threadAttachments = parseAttachments(email.attachmentNames, email.attachmentSizes)

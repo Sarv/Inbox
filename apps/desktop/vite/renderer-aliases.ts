@@ -113,6 +113,52 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/blocklist-prefs.ts',
     ),
+    // Pure (folder-mapping + message-id, both zero-import) — which rows of a
+    // thread ARE the conversation, and in what order. The thread view, the
+    // message list and the AI view must answer with the SAME predicate main
+    // counts, drafts and schedules by, or a draft renders as a sent message in
+    // one place and a list row's "(N)" disagrees with the thread it opens.
+    '@sarvinbox/core/conversation-membership': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/conversation-membership.ts',
+    ),
+    // Pure (fnv1a + message-id) — the first-email split cache's key, validity
+    // and retry rules. Main writes the cache and the renderer reads and runs
+    // it; two copies of "is this split still current?" would show a stale
+    // split or re-run the AI on every open.
+    '@sarvinbox/core/first-split': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/first-split.ts',
+    ),
+    // Pure (mailguard/quote + html-to-text, both browser-safe, and already in
+    // the renderer graph through bulk-mail) — the quote-marker corpus and the
+    // marker count the chat view falls back to, shared with contact mining and
+    // bulk classification so the corpus never has a second copy.
+    '@sarvinbox/core/quoted-text': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/quoted-text.ts',
+    ),
+    // Pure (html-to-text, browser-safe, and already in the renderer graph
+    // through quoted-text) — the one HTML-to-plain-text conversion. The AI
+    // split's no-loss check reads Standard's segments line by line with it.
+    '@sarvinbox/core/html-text': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/html-text.ts',
+    ),
+    // Pure (zero imports) — the one FNV-1a. The duplicate-message bucket key
+    // and the split fingerprint must hash exactly like the read model's.
+    '@sarvinbox/core/fnv1a': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/fnv1a.ts',
+    ),
+    // Pure (imap-errors -> oauth-errors -> oauth/types; no transports) — the AI
+    // failure classifier. A renderer-side AI run must classify transient vs
+    // permanent failures exactly as main's categorizer does, or one retries
+    // what the other gave up on.
+    '@sarvinbox/core/ai-error': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/ai-error.ts',
+    ),
     // Pure (zero imports; guards `process`) — the structured logger, so
     // renderer lines reach app.log with the same `[ts] [LEVEL] [name]` shape as
     // main's instead of raw console output.

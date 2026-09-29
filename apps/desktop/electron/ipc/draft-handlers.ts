@@ -5,7 +5,7 @@
  */
 
 import { emailContentHash, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
-import { UPSERT_BODY_SQL, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
+import { UPSERT_BODY_SQL, accountDraftRowSql, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import pLimit from 'p-limit';
@@ -143,6 +143,17 @@ export async function findDraftsFolderPath(storage = requireStorage()): Promise<
 }
 
 /**
+ * A fresh Message-ID for a draft, on the account address's domain. Unique per
+ * call; the IMAP copy (after sync) is deduped against the local mirror row by
+ * it. Exported so a caller that must KNOW the id before the save (the
+ * auto-drafter records it on its decision first) mints it the same way.
+ */
+export function newDraftMessageId(accountEmail?: string | null): string {
+  const domain = (accountEmail || '').split('@')[1] || 'sarvinbox.local';
+  return `<draft-${Date.now()}-${Math.random().toString(36).slice(2, 10)}@${domain}>`;
+}
+
+/**
  * Save a draft to the IMAP Drafts folder AND write an immediate mirror row
  * to the local emails table so the draft is visible instantly (without
  * waiting for the next IMAP sync round-trip). When sync later pulls the
@@ -150,6 +161,12 @@ export async function findDraftsFolderPath(storage = requireStorage()): Promise<
  *
  * Shared by the user's inline reply autosave (via IPC) and the AI agent's
  * auto-draft pipeline step.
+ *
+ * `options.messageId` — a main-process caller's own id from
+ * {@link newDraftMessageId}. Deliberately NOT a field of `draft`: the IPC
+ * handler passes the renderer's payload through as `draft`, and a
+ * renderer-chosen Message-ID could name an existing row, which the local
+ * mirror write would then overwrite.
  */
 export async function saveDraftToIMAP(draft: {
   to?: string;
@@ -174,7 +191,7 @@ export async function saveDraftToIMAP(draft: {
   accountId?: string;
   /** Files attached in the composer — kept in the draft so reopening it brings them back. */
   attachments?: DraftAttachment[];
-}): Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }> {
+}, options: { messageId?: string } = {}): Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }> {
   // Resolve the TARGET account's storage + sync engine (falls back to the active
   // account when no accountId is given).
   const { storage, syncEngine } = await resolveAccountTarget(draft.accountId);
@@ -186,10 +203,9 @@ export async function saveDraftToIMAP(draft: {
     return { success: false, error: 'Drafts folder not found' };
   }
 
-  // Generate a stable Message-ID so the IMAP copy (after sync) can be deduped
-  // against the local row we insert below.
-  const domain = (draft.accountEmail || '').split('@')[1] || 'sarvinbox.local';
-  const messageId = `<draft-${Date.now()}-${Math.random().toString(36).slice(2, 10)}@${domain}>`;
+  // A stable Message-ID so the IMAP copy (after sync) can be deduped against
+  // the local row we insert below — the caller's own, when it minted one.
+  const messageId = options.messageId || newDraftMessageId(draft.accountEmail);
 
   const mailOptions: any = {
     from: draft.accountName
@@ -552,8 +568,10 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
 
   let draftRows: Array<{ message_id: string; uid: number }> = [];
   try {
+    // The ONE draft predicate: a Sent copy with a stale `|draft|` tag is the
+    // reply just sent, not a draft to clean up.
     draftRows = db.prepare(
-      `SELECT message_id, COALESCE(uid,0) as uid FROM emails WHERE thread_id = ? AND (instr(tags,'|draft|')>0 OR instr(tags,'|Drafts|')>0 OR instr(tags,'|[Gmail]/Drafts|')>0)`,
+      `SELECT message_id, COALESCE(uid,0) as uid FROM emails WHERE thread_id = ? AND ${accountDraftRowSql(db, 'emails')}`,
     ).all(threadId) as Array<{ message_id: string; uid: number }>;
   } catch (e) {
     draftLog('sendCleanup:collect:error', { err: String(e) });
@@ -658,6 +676,9 @@ export function registerDraftHandlers(): void {
                attachment_names as attachmentNames, attachment_sizes as attachmentSizes
           FROM emails
          WHERE instr(tags, '|draft|') > 0
+           -- Our local draft only, and never a Sent copy that kept a stale
+           -- |draft| tag: reopening that would load the SENT reply as a draft.
+           AND ${accountDraftRowSql(db, 'emails')}
            AND in_reply_to IN (${placeholders})
          ORDER BY date DESC
          LIMIT 1
@@ -704,8 +725,10 @@ export function registerDraftHandlers(): void {
     try {
       if (db?.prepare) {
         if (options.threadId) {
+          // The ONE draft predicate: a Sent copy with a stale `|draft|` tag
+          // is the reader's reply and must survive a discard.
           draftRows = db.prepare(
-            `SELECT message_id, COALESCE(uid,0) as uid FROM emails WHERE thread_id = ? AND (instr(tags,'|draft|')>0 OR instr(tags,'|Drafts|')>0 OR instr(tags,'|[Gmail]/Drafts|')>0)`,
+            `SELECT message_id, COALESCE(uid,0) as uid FROM emails WHERE thread_id = ? AND ${accountDraftRowSql(db, 'emails')}`,
           ).all(options.threadId) as Array<{ message_id: string; uid: number }>;
           if (options.messageId && !draftRows.some((r) => r.message_id === options.messageId)) {
             const one = db.prepare('SELECT message_id, COALESCE(uid,0) as uid FROM emails WHERE message_id = ?').get(options.messageId) as any;
@@ -731,7 +754,9 @@ export function registerDraftHandlers(): void {
           draftLog('delete:local', { count: messageIds.length, changes: result.changes });
         } else if (options.subject && options.to) {
           const result = db
-            .prepare(`DELETE FROM emails WHERE subject = ? AND to_address = ? AND instr(tags, '|draft|') > 0`)
+            // A Sent copy of the same subject and recipient can keep a stale
+            // |draft| tag; the ONE draft predicate keeps the sent reply.
+            .prepare(`DELETE FROM emails WHERE subject = ? AND to_address = ? AND instr(tags, '|draft|') > 0 AND ${accountDraftRowSql(db, 'emails')}`)
             .run(options.subject, options.to);
           draftLog('delete:local', { by: 'subject', changes: result.changes });
         }
@@ -872,7 +897,10 @@ export function registerDraftHandlers(): void {
         const db = (storage as any).db;
         if (!db?.prepare) continue;
 
-        const draftTag = "(instr(tags,'|draft|')>0 OR instr(tags,'|Drafts|')>0 OR instr(tags,'|[Gmail]/Drafts|')>0)";
+        // The ONE draft predicate — the sweep must never take a Sent copy
+        // that kept a stale `|draft|` tag. Throws on an unreadable folders
+        // table, which fails this account's sweep rather than guessing.
+        const draftTag = accountDraftRowSql(db, 'emails');
         const clauses = [draftTag];
         const params: any[] = [];
         if (opts.sinceMs) { clauses.push('date >= ?'); params.push(Math.floor(opts.sinceMs / 1000)); }

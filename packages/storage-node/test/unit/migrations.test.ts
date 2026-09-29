@@ -11,7 +11,7 @@ import {
   type Migration,
 } from '../../src/migrations';
 import { attachSharedContacts, SHARED_SCHEMA } from '../../src/shared-contacts';
-import { openTestDb } from '../../src/test-support/test-db';
+import { newMigratedDb, openTestDb } from '../../src/test-support/test-db';
 
 // The migration chain is the ONLY thing standing between an existing user's
 // mailbox and a corrupt/half-upgraded database: every release runs it against
@@ -117,10 +117,13 @@ describe('fresh install reaches the current production schema', () => {
     // CHANGED: 91 -> 93 with pending_sends.scheduled_at (v92) and the
     // List-Unsubscribe columns on emails (v93); 93 -> 94 with the follow_ups
     // table (v94); 94 -> 95 with the trusted_senders table (v95); 95 -> 96
-    // with the In-Reply-To self-reference repair and its spam_repair_queue (v96).
-    expect(CURRENT_VERSION).toBe(96);
+    // with the In-Reply-To self-reference repair and its spam_repair_queue (v96);
+    // 96 -> 97 with the first_email_splits cache and
+    // agent_decisions.draft_message_id (v97); 97 -> 98 with the retirement of
+    // the whole-thread conversation_extractions cache (v98).
+    expect(CURRENT_VERSION).toBe(98);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..96 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..98 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -149,8 +152,10 @@ describe('fresh install reaches the current production schema', () => {
       'trusted_senders',
       // v96: drained by the main-process spam repair at startup.
       'spam_repair_queue',
+      // v97: read on every thread open in the chat view's AI mode and by the
+      // background split scheduler. Missing, every open fails its lookup.
+      'first_email_splits',
       'thread_summaries',
-      'conversation_extractions',
       'ai_category_definitions',
       'agent_prompt_templates',
       'user_categorization_rules',
@@ -308,6 +313,10 @@ describe('fresh install reaches the current production schema', () => {
 
     expect(columnsOf(db, 'labels')).toContain('synced_to_server');
     expect(columnsOf(db, 'agent_decisions')).toContain('draft_body');
+    // v97: the auto-drafter records its own draft's Message-ID here. Missing,
+    // every save of it throws and the live-draft gate cannot tell the agent's
+    // draft from the user's.
+    expect(columnsOf(db, 'agent_decisions')).toContain('draft_message_id');
   });
 
   // Without these the app still "works" but every list query degrades to a full
@@ -320,7 +329,6 @@ describe('fresh install reaches the current production schema', () => {
       'idx_tf_list',
       'idx_tf_unread',
       'idx_tc_slug',
-      'idx_threads_chat_extraction',
       // Every sender lookup in the app is case-folded, so the plain
       // `from_address` index cannot serve any of them. Without this expression
       // index the contact-enrichment join scans all of `emails` per contact —
@@ -890,5 +898,196 @@ describe('data-mutating migrations', () => {
     expect(scalar(db, `SELECT attachment_sizes FROM emails WHERE id = 'placeholder'`)).toBe(null);
     expect(scalar(db, `SELECT attachment_sizes FROM emails WHERE id = 'named'`)).toBe('[456]');
     db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('v97 first_email_splits', () => {
+  const splitColumns = [
+    'thread_id', 'first_key', 'first_email_id', 'source_fingerprint', 'split_version', 'status',
+    'quote_count', 'parts', 'error_kind', 'attempts', 'next_retry_at', 'model_used', 'updated_at',
+  ];
+
+  // Breaks: schema.sql (fresh installs) and the v97 DDL (upgrades) drift apart,
+  // so one of the two populations queries a column the other never got.
+  it('declares the same table in schema.sql and in the migration', () => {
+    const fresh = newMigratedDb();
+    expect([...columnsOf(fresh, 'first_email_splits')].sort()).toEqual([...splitColumns].sort());
+    expect(objectExists(fresh, 'index', 'idx_first_email_splits_retry')).toBe(true);
+    fresh.close();
+
+    // An upgraded database never re-runs schema.sql (v24): at v96 it has no
+    // cache table (dropped here to model that) and no column; v97 alone adds both.
+    const upgraded = openTestDb();
+    attachSharedContacts(upgraded, '');
+    managerUpTo(upgraded, 96).migrate();
+    upgraded.exec('DROP INDEX IF EXISTS idx_first_email_splits_retry; DROP TABLE IF EXISTS first_email_splits;');
+    expect(columnsOf(upgraded, 'agent_decisions')).not.toContain('draft_message_id');
+    byVersion(97).up(upgraded, {});
+    expect([...columnsOf(upgraded, 'first_email_splits')].sort()).toEqual([...splitColumns].sort());
+    expect(objectExists(upgraded, 'index', 'idx_first_email_splits_retry')).toBe(true);
+    expect(columnsOf(upgraded, 'agent_decisions')).toContain('draft_message_id');
+    upgraded.close();
+  });
+
+  // Breaks: a duplicate-column throw on the second application strands every
+  // later migration (the v34/v46 failure mode).
+  it('is idempotent: up twice, and up over the fresh schema, both succeed', () => {
+    const db = newMigratedDb();
+    expect(() => byVersion(97).up(db, {})).not.toThrow();
+    expect(() => byVersion(97).up(db, {})).not.toThrow();
+    expect(columnsOf(db, 'agent_decisions')).toContain('draft_message_id');
+    db.close();
+  });
+
+  // Breaks: a partial fixture without agent_decisions (created by v28) aborts
+  // the chain instead of skipping the column.
+  it('skips the column when agent_decisions does not exist', () => {
+    const db = openTestDb();
+    db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY)');
+    expect(() => byVersion(97).up(db, {})).not.toThrow();
+    expect(tableNames(db)).toContain('first_email_splits');
+    expect(tableNames(db)).not.toContain('agent_decisions');
+    db.close();
+  });
+
+  // Breaks: rollback leaves the cache (or the column) behind, so a downgraded
+  // build reads a table it does not know and a re-upgrade sees stale rows.
+  it('down() drops the table, its index and the column; up() restores them', () => {
+    const db = newMigratedDb();
+    const manager = createMigrationManager(db);
+    manager.rollback(96);
+    expect(tableNames(db)).not.toContain('first_email_splits');
+    expect(objectExists(db, 'index', 'idx_first_email_splits_retry')).toBe(false);
+    expect(columnsOf(db, 'agent_decisions')).not.toContain('draft_message_id');
+    // The rest of the schema is untouched.
+    expect(columnsOf(db, 'agent_decisions')).toContain('draft_body');
+
+    createMigrationManager(db).migrate();
+    expect(tableNames(db)).toContain('first_email_splits');
+    expect(columnsOf(db, 'agent_decisions')).toContain('draft_message_id');
+    db.close();
+  });
+
+  // Breaks: the table accepts a success without parts (or a failure WITH
+  // parts), so a row that can never be shown blocks every retry.
+  it('refuses a success without parts and a failure with parts', () => {
+    const db = newMigratedDb();
+    db.prepare("INSERT INTO threads (id, subject, first_message_id, last_message_id, last_message_date) VALUES ('t1', 's', 'a', 'a', 1)").run();
+    const insert = db.prepare(`INSERT INTO first_email_splits
+      (thread_id, first_key, first_email_id, source_fingerprint, split_version, status, parts)
+      VALUES ('t1', 'k', 'e1', '1:0', 1, ?, ?)`);
+    expect(() => insert.run('ok', null)).toThrow(/CHECK/);
+    expect(() => insert.run('failed', '[]')).toThrow(/CHECK/);
+    expect(() => insert.run('bogus', null)).toThrow(/CHECK/);
+    expect(() => insert.run('transient', null)).not.toThrow();
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('v98 retires conversation_extractions', () => {
+  /** The retired cache as an upgraded mailbox still has it at v97: table, index, one row. */
+  const withRetiredCache = (db: Database.Database): void => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS conversation_extractions (
+        id TEXT PRIMARY KEY, thread_id TEXT NOT NULL UNIQUE, messages TEXT NOT NULL,
+        email_count INTEGER, processed_email_ids TEXT, processed_at INTEGER NOT NULL,
+        model_used TEXT, created_at INTEGER DEFAULT (unixepoch()), updated_at INTEGER DEFAULT (unixepoch())
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversation_extractions_thread ON conversation_extractions(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_threads_chat_extraction ON threads(chat_extracted_at, chat_email_count, message_count);
+      INSERT INTO conversation_extractions (id, thread_id, messages, processed_at)
+      VALUES ('conv-t1', 't1', '[{"sourceEmailId":"draft-1","isExtracted":false,"body":"unsent words"}]', 1);
+    `);
+  };
+  const atV97 = (): Database.Database => {
+    const db = openTestDb();
+    attachSharedContacts(db, '');
+    managerUpTo(db, 97).migrate();
+    db.prepare("INSERT INTO threads (id, subject, first_message_id, last_message_id, last_message_date) VALUES ('t1', 's', 'a', 'a', 1)").run();
+    db.prepare(`INSERT INTO first_email_splits (thread_id, first_key, first_email_id, source_fingerprint, split_version, status, parts)
+      VALUES ('t1', 'k', 'e1', '1:0', 1, 'ok', '[]')`).run();
+    return db;
+  };
+
+  // Breaks: the pre-upgrade cache surviving — its rows hold drafts shown as
+  // sent messages, other accounts' bubbles and ±26 h mis-bindings, and a
+  // later build that reads it again would show them. The new cache must not
+  // go with it.
+  it('drops the table, its index and the threads index, keeping first_email_splits', () => {
+    const db = atV97();
+    withRetiredCache(db);
+    byVersion(98).up(db, {});
+    expect(tableNames(db)).not.toContain('conversation_extractions');
+    expect(objectExists(db, 'index', 'idx_conversation_extractions_thread')).toBe(false);
+    expect(objectExists(db, 'index', 'idx_threads_chat_extraction')).toBe(false);
+    expect(scalar(db, 'SELECT COUNT(*) FROM first_email_splits')).toBe(1);
+    // The inert columns stay: dropping them would rewrite the threads table.
+    expect(columnsOf(db, 'threads')).toContain('chat_email_count');
+    db.close();
+  });
+
+  // Breaks: a re-run (a crash after the DROP, a restored backup) throwing,
+  // which strands every later migration.
+  it('is idempotent: up twice, and up over a fresh schema that never had the table', () => {
+    const db = atV97();
+    withRetiredCache(db);
+    expect(() => byVersion(98).up(db, {})).not.toThrow();
+    expect(() => byVersion(98).up(db, {})).not.toThrow();
+    db.close();
+
+    const fresh = newMigratedDb();
+    expect(tableNames(fresh)).not.toContain('conversation_extractions');
+    expect(objectExists(fresh, 'index', 'idx_threads_chat_extraction')).toBe(false);
+    expect(() => byVersion(98).up(fresh, {})).not.toThrow();
+    fresh.close();
+  });
+
+  // Breaks: a downgrade to a build that still reads the old cache finding no
+  // table — every chat-view open in that build fails its lookup.
+  it('down() restores the old shape, empty; up() removes it again', () => {
+    const db = newMigratedDb();
+    createMigrationManager(db).rollback(97);
+    expect([...columnsOf(db, 'conversation_extractions')]).toEqual(expect.arrayContaining(['thread_id', 'messages', 'processed_email_ids']));
+    expect(objectExists(db, 'index', 'idx_conversation_extractions_thread')).toBe(true);
+    expect(objectExists(db, 'index', 'idx_threads_chat_extraction')).toBe(true);
+    expect(scalar(db, 'SELECT COUNT(*) FROM conversation_extractions')).toBe(0);
+
+    createMigrationManager(db).migrate();
+    expect(tableNames(db)).not.toContain('conversation_extractions');
+    db.close();
+  });
+
+  // Breaks: a fresh install failing at v31, whose one-time backfill read the
+  // table schema.sql no longer declares — the chain aborts and the app starts
+  // on a v30 schema with every later feature missing.
+  it('v31 skips its backfill when the table is absent, and still runs it when present', () => {
+    // Minimal v30-era tables: only what v31 reads and widens.
+    const v30 = (): Database.Database => {
+      const db = openTestDb();
+      db.exec(`
+        CREATE TABLE emails (id TEXT PRIMARY KEY, thread_id TEXT, ai_processed_at INTEGER);
+        INSERT INTO emails (id, thread_id) VALUES ('in-t1', 't1'), ('in-t2', 't2');
+      `);
+      return db;
+    };
+
+    const fresh = v30();
+    expect(() => byVersion(31).up(fresh, {})).not.toThrow();
+    expect(scalar(fresh, "SELECT extraction_status FROM emails WHERE id = 'in-t1'")).toBe('pending');
+    fresh.close();
+
+    const legacy = v30();
+    legacy.exec(`
+      CREATE TABLE conversation_extractions (thread_id TEXT NOT NULL UNIQUE);
+      INSERT INTO conversation_extractions (thread_id) VALUES ('t1');
+    `);
+    byVersion(31).up(legacy, {});
+    expect(scalar(legacy, "SELECT extraction_status FROM emails WHERE id = 'in-t1'")).toBe('done');
+    expect(scalar(legacy, "SELECT extraction_status FROM emails WHERE id = 'in-t2'")).toBe('pending');
+    legacy.close();
   });
 });

@@ -1,15 +1,54 @@
+import type { FirstSplitClearAllResult } from '@sarvinbox/core/first-split';
+import { createLogger } from '@sarvinbox/core/logger';
 import { Loader2, Trash2, MessageSquare } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
+import { syncBackgroundSplitToMain } from '../../../services/ai-features';
 import type { AIProvider } from '../../../services/ai-service';
+import { useEmailStore } from '../../../store/email-store';
 import type { AIFeatureConfig } from '../types';
 import { DEFAULT_AI_FEATURES, AI_FEATURES_KEY } from '../types';
+
+const log = createLogger('ConversationTab');
+
+/** How long a successful Clear Cache result stays on screen. A failure stays until the next click. */
+const CLEAR_RESULT_MS = 3000;
 
 interface ConversationTabProps {
   aiProviders: AIProvider[];
 }
 
+/** The outcome of Clear Cache, as shown beside the button. */
+interface ClearOutcome {
+  text: string;
+  failed: boolean;
+}
+
+/**
+ * What Clear Cache reports, from main's all-accounts answer. An account main
+ * could not clear is NAMED (its address when this window knows it, else its
+ * id) — never folded into the count, which would read as "that account had
+ * nothing saved" while its splits are still there.
+ */
+export function clearCacheOutcome(
+  response: { success: boolean; data?: FirstSplitClearAllResult; error?: string } | undefined,
+  addressOf: (accountId: string) => string,
+): ClearOutcome {
+  if (!response?.success || !response.data) {
+    return { text: `Could not clear the cache${response?.error ? `: ${response.error}` : '.'}`, failed: true };
+  }
+  // `splits`, not `cleared`: the table also holds the scheduler's bookkeeping
+  // rows (`skipped` for every thread without quoted history, retries,
+  // failures), which are gone too but were never splits.
+  const { splits, failedAccounts } = response.data;
+  const clearedText = `Cleared ${splits} saved split${splits === 1 ? '' : 's'}.`;
+  if (failedAccounts.length === 0) return { text: clearedText, failed: false };
+  const names = failedAccounts.map(addressOf).join(', ');
+  return { text: `${clearedText} Could not clear ${names} — try again.`, failed: true };
+}
+
 export function ConversationTab({ aiProviders }: ConversationTabProps) {
+  const accounts = useEmailStore((s) => s.accounts);
   const [feature, setFeature] = useState<AIFeatureConfig>(
     DEFAULT_AI_FEATURES.find(f => f.id === 'conversation-mode')!
   );
@@ -20,7 +59,13 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
     DEFAULT_AI_FEATURES.find(f => f.id === 'auto-chat-extract')!
   );
   const [clearing, setClearing] = useState(false);
-  const [clearResult, setClearResult] = useState<string | null>(null);
+  const [clearResult, setClearResult] = useState<ClearOutcome | null>(null);
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // A pending "hide the result" timer must not fire into an unmounted tab.
+  useEffect(() => () => {
+    if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+  }, []);
 
   // Load feature state on mount
   useEffect(() => {
@@ -53,7 +98,8 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
           });
         }
       } catch (e) {
-        console.error('Failed to parse AI features:', e);
+        // The toggles fall back to their defaults; say why, once.
+        log.warn(`Could not read the stored AI features: ${String(e)}`);
       }
     }
   }, []);
@@ -75,6 +121,9 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
       ? features.map(f => f.id === id ? updated : f)
       : [...features, updated];
     localStorage.setItem(AI_FEATURES_KEY, JSON.stringify(merged));
+    // Main's first-split scheduler scans and nominates only while the
+    // background split is on (conversation mode AND 'Auto Chat Extract').
+    void syncBackgroundSplitToMain();
   };
 
   const toggleFeature = () => {
@@ -95,25 +144,33 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
     saveFeatureById('auto-chat-extract', { ...extractFeature, enabled: !extractFeature.enabled });
   };
 
+  const addressOf = (accountId: string): string =>
+    accounts.find((account) => account.id === accountId)?.email || accountId;
+
   const handleClearCache = async () => {
-    if (!confirm('Clear all cached conversation extractions? This cannot be undone.')) {
+    if (!confirm('Clear the saved AI splits in every account? Each looped-in conversation is split again the next time it needs it. This cannot be undone.')) {
       return;
     }
+    if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = null;
     setClearing(true);
     setClearResult(null);
+    let response: Parameters<typeof clearCacheOutcome>[0];
     try {
-      const result = await window.electronAPI.ai.clearAllConversations();
-      if (result.success) {
-        setClearResult(`Cleared ${result.data || 0} cached conversation(s).`);
-      } else {
-        setClearResult('Failed to clear cache.');
-      }
+      response = await window.electronAPI.ai.clearAllFirstSplits();
     } catch (error) {
-      console.error('Failed to clear conversation cache:', error);
-      setClearResult('Failed to clear cache.');
-    } finally {
-      setClearing(false);
-      setTimeout(() => setClearResult(null), 3000);
+      response = { success: false, error: (error as Error)?.message };
+    }
+    const outcome = clearCacheOutcome(response, addressOf);
+    // Main logs each account it could not clear; this line ties it to the click.
+    if (outcome.failed) {
+      log.warn(`Clear Cache incomplete: ${response?.data ? `${response.data.failedAccounts.length} account(s) not cleared` : response?.error ?? 'no answer'}`);
+    }
+    setClearResult(outcome);
+    setClearing(false);
+    // A failure stays on screen until the next click: it names what is still saved.
+    if (!outcome.failed) {
+      clearTimerRef.current = setTimeout(() => setClearResult(null), CLEAR_RESULT_MS);
     }
   };
 
@@ -212,14 +269,21 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
         <h3 className="text-sm font-medium mb-2">How it works</h3>
         <div className="text-sm text-muted-foreground space-y-2">
           <p>
-            When you switch to Chat View on a multi-message thread, AI analyzes the email HTML to extract
-            individual messages from quoted/forwarded content. This is especially useful when you're looped
-            into a conversation mid-thread — the first email often contains the entire prior conversation
-            as nested quotes.
+            Chat View shows a thread as a conversation, one bubble per email. When you are looped in
+            partway through, the first email you received carries the earlier conversation as quoted
+            text. The AI view splits that quoted history into separate messages, each with its sender
+            and date. Every later email is shown exactly as in the standard view.
           </p>
           <p>
-            Extracted messages are cached per thread. When new emails arrive, only the new message is processed
-            (incremental update), saving tokens and time.
+            AI reads only that first email. It runs by itself when the first email quotes two or more
+            earlier messages and the thread is open in Chat View; one that quotes a single message gets a
+            Process now button instead. The List view never uses AI, and drafts are never part of the
+            conversation.
+          </p>
+          <p>
+            The result is saved for each thread, in its own account, and reused until that first email
+            changes. If the AI fails, or misses part of the history, that part is shown as in the standard
+            view, so nothing is dropped.
           </p>
         </div>
       </div>
@@ -240,11 +304,18 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
             Clear Cache
           </button>
           {clearResult && (
-            <span className="text-sm text-muted-foreground">{clearResult}</span>
+            <span
+              role="status"
+              className={`text-sm ${clearResult.failed ? 'text-destructive' : 'text-muted-foreground'}`}
+            >
+              {clearResult.text}
+            </span>
           )}
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          Clear all cached conversation extractions. Threads will be re-processed on next Chat View toggle.
+          Remove the saved AI splits in every account. A conversation is split again the next time it
+          is needed: in the background, or when you open it in Chat View. An email that quotes a single
+          message waits for Process now.
         </p>
       </div>
 

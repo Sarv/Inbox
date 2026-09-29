@@ -206,7 +206,10 @@ CRITICAL: The "htmlSelector" field must be a CSS selector string (like "div.gmai
   {
     id: 'conversation-mode',
     name: 'AI Conversation Mode',
-    description: 'Extract individual messages from quoted/forwarded email content for a unified conversation view.',
+    // The chat view's AI half: Standard's bubbles, with ONLY the thread's first
+    // email split by AI (its quoted history is where a looped-in reader's
+    // earlier conversation lives). Off also stops auto-open and the background split.
+    description: 'Add an AI view to Chat View. When you were looped in partway through, AI splits the earlier conversation quoted in the first email into separate messages. Every other email is shown as in the standard view.',
     enabled: true,
     systemPrompt: '',
     userPrompt: '',
@@ -217,7 +220,7 @@ CRITICAL: The "htmlSelector" field must be a CSS selector string (like "div.gmai
     // switches to Chat View with the List/Chat toggle. Enable this to have
     // threads auto-open in Chat View instead.
     name: 'Auto Chat View',
-    description: 'Automatically open threads in Chat View and extract conversations. Off by default — open normally, then switch to Chat View when you want it.',
+    description: 'Open conversations in Chat View by themselves, including a single looped-in email that quotes two or more earlier messages. Off by default: threads open in the normal reading view, and the List/Chat toggle switches them.',
     enabled: false,
     systemPrompt: '',
     userPrompt: '',
@@ -225,7 +228,9 @@ CRITICAL: The "htmlSelector" field must be a CSS selector string (like "div.gmai
   {
     id: 'auto-chat-extract',
     name: 'Auto Chat Extract',
-    description: 'Automatically extract conversations in the background when new emails arrive. Threads will be pre-processed so chat view loads instantly.',
+    // Background pre-split of FIRST emails that quote two or more earlier
+    // messages, across every account; never a whole thread, never later mail.
+    description: 'Prepare the AI view in the background: when a thread\'s first email quotes two or more earlier messages, split it before you open it, in every account.',
     enabled: true,
     systemPrompt: '',
     userPrompt: '',

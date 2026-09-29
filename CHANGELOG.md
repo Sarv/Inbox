@@ -35,8 +35,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anywhere in a message, including inside a formatted email, opens the same
   menu as its ⋯ button, right where you clicked. With text selected it also
   offers Copy, and over a link it offers Open link and Copy link.
+- **Looped-in emails can be read as a conversation.** When someone forwards
+  you a thread or copies you in partway through, the earlier messages arrive
+  only as quoted text inside that one email. Chat View is now offered for such
+  an email. One that quotes two or more earlier messages opens in Chat View on
+  its own when Auto Chat View is on; one that quotes a single message stays as
+  it is until you switch with the List/Chat toggle. Newsletters and other
+  designed bulk mail are left as they are.
+
+### Changed
+- **The AI view in Chat View is the standard conversation, with AI for the
+  first email only.** Every message is shown exactly as the standard Chat View
+  shows it, except the thread's first email: AI splits the earlier
+  conversation quoted inside it into separate messages, each with its sender
+  and date. AI reads only that first email, and only while the thread is open
+  in Chat View; the List view never uses it. A first email that quotes two or
+  more messages is split by itself (and, with Auto Chat Extract on, ahead of
+  time in the background, in every account); one that quotes a single message
+  shows a Process now button instead. If the AI fails or misses part of the
+  history, that part is shown as the standard view shows it, so no message
+  disappears, and you can try again. Previously the AI view retold the whole
+  thread, and a failure could leave it blank.
+- **Saved AI splits are kept per account.** Each account keeps its own, and
+  Settings → AI Settings → Conversation Mode → Clear Cache now clears every
+  account and names any it could not clear. Results saved by the old AI view
+  are discarded on upgrade, so a looped-in conversation is split again once.
 
 ### Fixed
+- **Drafts no longer appear as sent messages.** An unsent draft in a thread —
+  including one another mail app saved in your Drafts folder — could show up
+  in Chat View, in the AI view or in the thread's message count as if it had
+  been sent. Every view now uses one rule for what belongs in a conversation,
+  so drafts and trashed copies are left out and the count in the message list
+  matches the thread. The AI no longer drafts a reply for a thread where you
+  already have a draft of your own.
+- **Discarding a draft no longer deletes a reply you sent.** A sent reply can
+  keep the "draft" mark from when it was being written. Discarding a draft in
+  that conversation, or sending another reply, then deleted the sent reply
+  from the app along with the draft, and could remove an unrelated draft from
+  your Drafts folder on the server. Only real drafts are deleted now.
 - **Mail no longer marked "a reply to itself".** Some mail servers report
   every message's own ID as the one it replies to, and the app believed them,
   so almost every message picked up spam-filter points for "claims to be a reply to

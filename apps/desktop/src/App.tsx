@@ -38,7 +38,7 @@ import { useNotificationBridge } from './hooks/useNotificationBridge';
 import { pushAgentSettingsToBackend, pushCategoryLabelSetting } from './services/agent-settings';
 import { makeAICompletion, getDefaultProvider, hydrateAiSecrets, syncAIProviderToMain, pruneOrphanedOAuthProviders } from './services/ai-service';
 import { installEnrichmentBatchListener } from './services/contact-enrichment-service';
-import { initializeBackgroundExtractionListener, removeBackgroundExtractionListener } from './services/conversation-service';
+import { removeFirstSplitJob, startFirstSplitJob } from './services/first-split/job';
 import { ensureSarvAiProvider } from './services/sarv-ai-auto-register';
 import { requestConfirm } from './store/confirm-service';
 import { useEmailStore } from './store/email-store';
@@ -489,8 +489,9 @@ function App() {
       });
     }
 
-    // Initialize background conversation extraction listener
-    initializeBackgroundExtractionListener();
+    // The background first-email split: main's scheduler nominates threads
+    // (per account); the job re-checks and splits the ones that qualify.
+    startFirstSplitJob();
     // Handle contact enrichment batches pushed from the main-process
     // scheduler — runs LLM calls serially in the renderer.
     installEnrichmentBatchListener();
@@ -576,7 +577,7 @@ function App() {
       if (window.electronAPI?.extensions?.removeAICompleteListener) {
         window.electronAPI.extensions.removeAICompleteListener();
       }
-      removeBackgroundExtractionListener();
+      removeFirstSplitJob();
     };
   }, []); // Run only once on mount
 

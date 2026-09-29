@@ -19,7 +19,6 @@ import {
   UnifiedPipeline,
   callAIWithRetry,
   classifyCategorizationPass,
-  cleanEmailHtmlForLLM,
   decideCategorizationAction,
   encodeAiCategories,
   folderPathForCategory,
@@ -36,7 +35,6 @@ import {
   type UnifiedPipelineConfig,
   type UserActionType,
 } from '@sarvinbox/core';
-import { cleanBodyExpression, rawBodyExpression } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import pLimit from 'p-limit';
 // One import for the whole barrel. It used to be five separate statements from
@@ -46,7 +44,7 @@ import pLimit from 'p-limit';
 // nothing left to do here.
 
 import { logUserAction } from '../ipc/agent-handlers';
-import { saveDraftToIMAP } from '../ipc/draft-handlers';
+import { newDraftMessageId, saveDraftToIMAP } from '../ipc/draft-handlers';
 import { sendEmailFromMain, appendSentCopy } from '../ipc/smtp-handlers';
 import { getStorage, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, getSyncEngineForStorage, getAccountIdForStorage, getMainWindow, getSmtpClient, findStorageForEmail } from '../shared';
 
@@ -54,7 +52,6 @@ import { registryAccountEmail, resolveAccountEmail, resolveAccountIdentity } fro
 import { loadAgentConfig } from './agent-config-store';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
-import { isAIProviderConfigured } from './conversation-extraction-scheduler';
 import { getMeta, setMeta } from './core-db';
 import { ensureGmailLabelColor, renameGmailLabel, deleteGmailLabelsUnder } from './gmail-label-api';
 import { chromiumFetch } from './net-fetch';
@@ -64,6 +61,7 @@ import { getAccount as getOAuthAccount, listAccounts } from './oauth-token-store
 import { savePipelineAIConfig, loadPipelineAIConfigSync, clearPipelineAIConfig } from './pipeline-ai-config-store';
 import { resolveDeferredPipelineConfig } from './pipeline-init-config';
 import { SiblingCategoryCache } from './sibling-category-cache';
+import { buildThreadMessages } from './thread-context';
 
 // Live AI-pipeline diagnostics (why categorization is / isn't running). Stored in
 // the core DB's registry_meta as a JSON snapshot instead of a plaintext file, so
@@ -850,13 +848,14 @@ export function stopUnifiedPipeline(): void {
 
 // ========== Sequential Flow: P1 (extraction) → P2 (agent) ==========
 
-async function processEmail(emailId: string, threadId: string, storage: any = getStorage()): Promise<void> {
+// `_threadId` is kept for the callers' signature; Pipeline 1 no longer needs it.
+async function processEmail(emailId: string, _threadId: string, storage: any = getStorage()): Promise<void> {
   if (processingLock.has(emailId)) return;
   processingLock.add(emailId);
 
   try {
-    // Pipeline 1: Conversation extraction — on the email's OWN account storage.
-    await runPipeline1(emailId, threadId, storage);
+    // Pipeline 1: the extraction gate — on the email's OWN account storage.
+    await runPipeline1(emailId, storage);
 
     // Pipeline 2: Agent intelligence (only after P1) — same account storage.
     await runPipeline2(emailId, storage);
@@ -867,65 +866,27 @@ async function processEmail(emailId: string, threadId: string, storage: any = ge
 
 // ========== Pipeline 1: Conversation Extraction ==========
 
-async function runPipeline1(emailId: string, threadId: string, storage: any = getStorage()): Promise<void> {
+/**
+ * Pipeline 1 is now only the gate Pipeline 2 waits on: mark the email's
+ * extraction done at once, on its OWN account's storage.
+ *
+ * It used to send the renderer a whole-thread extraction request (a channel
+ * since removed) and then poll for the result once a second for up to five
+ * seconds — per email, so every multi-email thread stalled the
+ * pipeline for 5 s, for a result no drafter needs any more: the reply
+ * drafter's context comes from `buildThreadMessages` (thread-context.ts),
+ * which uses the first-email split cache when it holds a split and the raw
+ * first email otherwise. The split itself is computed by the chat view on open
+ * and by the background job, never on this path.
+ *
+ * `extraction_status` keeps gating Pipeline 2 exactly as before.
+ */
+export async function runPipeline1(emailId: string, storage: any = getStorage()): Promise<void> {
   if (!storage) return;
-  const repos = (storage as any).getRepositories();
-  if (!repos?.agent || !repos?.ai) return;
-
   try {
-    const threadEmails = await storage.getEmailsByThread(threadId);
-
-    // Single-email threads: no extraction needed
-    if (threadEmails.length <= 1) {
-      repos.agent.markExtractionDone(emailId);
-      return;
-    }
-
-    // Check if already extracted
-    const existing = await repos.ai.getConversation(threadId);
-    if (existing) {
-      const extractedIds = existing.processedEmailIds ? JSON.parse(existing.processedEmailIds) : [];
-      if (extractedIds.includes(emailId)) {
-        repos.agent.markExtractionDone(emailId);
-        return;
-      }
-    }
-
-    // The renderer does the actual extraction — if it has no AI provider
-    // configured (same flag the conversation scheduler gates on), the send
-    // goes nowhere and we'd stall 5s per multi-email thread. Skip straight
-    // to the raw-thread fallback.
-    if (!isAIProviderConfigured()) {
-      repos.agent.markExtractionDone(emailId);
-      return;
-    }
-
-    // Trigger extraction via renderer
-    const mainWindow = getMainWindow();
-    if (mainWindow) {
-      mainWindow.webContents.send('conversation:extract-batch', {
-        threads: [{ id: threadId, messageCount: threadEmails.length }],
-      });
-    }
-
-    // Wait up to 5s for extraction to complete
-    for (let i = 0; i < 5; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      const conv = await repos.ai.getConversation(threadId);
-      if (conv) {
-        const ids = conv.processedEmailIds ? JSON.parse(conv.processedEmailIds) : [];
-        if (ids.includes(emailId) || ids.length >= threadEmails.length) {
-          repos.agent.markExtractionDoneByThread(threadId);
-          return;
-        }
-      }
-    }
-
-    // Timeout — proceed anyway (P2 works with raw thread emails as fallback)
-    repos.agent.markExtractionDone(emailId);
+    storage.getRepositories()?.agent?.markExtractionDone(emailId);
   } catch (error) {
     logger.error(`[Pipeline] P1 error for ${emailId}:`, error);
-    repos.agent.markExtractionDone(emailId); // Don't block P2
   }
 }
 
@@ -1170,7 +1131,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
 
     // 4. Auto-draft reply when pipeline proposes "reply" action
     if (proposed && (recommendedAction === 'reply' || recommendedAction === 'reply_all') && aiConfig) {
-      autoDraftReply(emailId).catch(err =>
+      autoDraftReply(emailId, storage).catch(err =>
         logger.error(`[Pipeline] Auto-draft failed for ${emailId}:`, err)
       );
     }
@@ -1200,6 +1161,113 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
 // ========== Auto-Draft Reply ==========
 
 /**
+ * user_feedback marker: the auto-draft was skipped because the user already
+ * has a live draft in the thread. A SYSTEM resolution — listed in
+ * {@link SYSTEM_DISMISSAL_FEEDBACK}, so the "user recently dismissed a draft
+ * here" gate never mistakes it for the user's own dismissal.
+ */
+export const USER_HAS_DRAFT_FEEDBACK = 'user-has-draft';
+
+/**
+ * Feedback markers this file writes when IT resolves a decision. Only a
+ * dismissal WITHOUT one of these (the user's own, via agent:resolveProposal)
+ * blocks the thread's later auto-drafts; counting a system marker would stop
+ * every thread at its second reply-worthy email.
+ */
+export const SYSTEM_DISMISSAL_FEEDBACK: readonly string[] = [
+  'superseded-by-newer-email', 'user-not-addressed',
+  'body-mention-weak', 'malformed-sender',
+  'empty-draft-output', 'no-recipient',
+  USER_HAS_DRAFT_FEEDBACK,
+];
+
+/**
+ * Why the auto-drafter must not draft for this email:
+ *
+ *   * `not-active-account` — KNOWN GAP, deliberately explicit: auto-draft
+ *     runs for the ACTIVE account only. Its identity (`serviceConfig`) and
+ *     auto-send's SMTP client (`getSmtpClient()`) resolve the active account,
+ *     so drafting for a background account would write the reply from the
+ *     wrong identity or send it from the wrong address. (It never ran for one
+ *     before either: it read the email from the active storage, where another
+ *     account's id does not exist.) Per-account auto-draft is a follow-up.
+ *     Because the drafter takes seconds, the gates run again right before the
+ *     reply leaves ({@link lateAutoDraftStop}), and the Drafts save names the
+ *     account captured here rather than "whichever is active by then".
+ *   * `newer-member` — the conversation already holds a message after this
+ *     one (core `hasNewerMember`: a newer draft or Trash copy does not count).
+ *     One draft per thread, for its latest message.
+ *   * `user-has-draft` — the thread holds a LIVE draft the user is writing,
+ *     however old (the agent's own recorded drafts excluded).
+ *
+ * Null when those pass; the relationship and addressing gates follow in
+ * autoDraftReply. Throws when a gate cannot be answered — the caller skips.
+ */
+export type AutoDraftSkipReason = 'not-active-account' | 'newer-member' | 'user-has-draft';
+
+export function autoDraftSkipReason(
+  storage: any,
+  email: { id: string; threadId?: string | null },
+): AutoDraftSkipReason | null {
+  if (!storage || storage !== getStorage()) return 'not-active-account';
+  if (!email.threadId) return null;
+  if (storage.hasNewerMember(email.threadId, email.id)) return 'newer-member';
+  if (storage.hasLiveUserDraft(email.threadId)) return 'user-has-draft';
+  return null;
+}
+
+/**
+ * The thread gates AGAIN, just before the reply leaves the drafter (the
+ * auto-send, then the Drafts save). The LLM calls since the entry gates take
+ * seconds to tens of seconds, plus any web searches, and meanwhile:
+ *
+ *   * the user may have switched account — the identity, auto-send's SMTP
+ *     client and the Drafts save's fallback all follow the ACTIVE account, so
+ *     this account's reply would be written into the other one's Drafts (with
+ *     this thread id) or sent from the other one's address;
+ *   * the user may have started a draft in the thread;
+ *   * a newer message may have arrived.
+ *
+ * Synchronous on purpose: the caller acts on a null answer in the SAME tick,
+ * before anything can switch the account. Returns why to stop (logged here),
+ * `gates-unreadable` when a gate throws — doubt means "do not write a reply".
+ */
+function lateAutoDraftStop(
+  storage: any,
+  email: { id: string; threadId?: string | null },
+  stage: 'send' | 'save',
+): AutoDraftSkipReason | 'gates-unreadable' | null {
+  let reason: AutoDraftSkipReason | 'gates-unreadable' | null;
+  try {
+    reason = autoDraftSkipReason(storage, email);
+  } catch (err) {
+    logger.warn(`[Pipeline] Drop auto-draft for ${email.id} before ${stage} — thread gates could not be checked:`, err);
+    return 'gates-unreadable';
+  }
+  if (reason) logger.info(`[Pipeline] Drop auto-draft for ${email.id} before ${stage} — ${reason} (changed while drafting)`);
+  return reason;
+}
+
+/**
+ * Settle a decision whose draft was dropped by {@link lateAutoDraftStop}. A
+ * user draft resolves it exactly as the entry gate does; every other reason
+ * leaves it pending (with its draft body attached): a newer email's own run
+ * supersedes it, and an account switch is not the user rejecting anything.
+ */
+async function settleLateAutoDraftStop(
+  reason: AutoDraftSkipReason | 'gates-unreadable',
+  decision: { id: string },
+  agentRepo: any,
+): Promise<void> {
+  if (reason !== 'user-has-draft') return;
+  try {
+    await agentRepo.updateDecisionStatus(decision.id, 'rejected', 'dismissed', USER_HAS_DRAFT_FEEDBACK);
+  } catch (err) {
+    logger.warn(`[Pipeline] Could not resolve decision ${decision.id} as '${USER_HAS_DRAFT_FEEDBACK}':`, err);
+  }
+}
+
+/**
  * Auto-draft a reply for an email that the pipeline identified as needing response.
  * Runs in background after decision is saved. Finds the pending decision and
  * updates it with the drafted reply body.
@@ -1215,14 +1283,41 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
  *     the Drafts append.
  *   - A decision stays 'pending' only when draft generation itself failed
  *     (LLM error, or the IMAP append failed — draft body stays attached so
- *     "Needs your review" can still surface it).
+ *     "Needs your review" can still surface it), or when the gates, run again
+ *     after the LLM calls ({@link lateAutoDraftStop}), found the account
+ *     switched or a newer message arrived meanwhile.
  */
-async function autoDraftReply(emailId: string): Promise<void> {
-  const storage = getStorage();
+export async function autoDraftReply(emailId: string, storage: any = getStorage()): Promise<void> {
   if (!storage || !aiConfig) return;
 
   const email = await storage.getEmail(emailId);
   if (!email) return;
+
+  // The thread gates (see autoDraftSkipReason), in order. A gate that cannot
+  // be answered (an unreadable folder list, say) skips the draft: doubt must
+  // resolve to "do not write a reply".
+  let skip: AutoDraftSkipReason | null;
+  try {
+    skip = autoDraftSkipReason(storage, email);
+  } catch (err) {
+    logger.warn(`[Pipeline] Skip auto-draft for ${emailId} — thread gates could not be checked:`, err);
+    return;
+  }
+  if (skip === 'not-active-account') {
+    // Per email, for every reply-worthy email of every background account
+    // (backlog included): trace, which is level-gated — debug is not.
+    logger.trace(`[Pipeline] Skip auto-draft for ${emailId} — not the active account (auto-draft is active-account only)`);
+    return;
+  }
+  if (skip === 'newer-member') {
+    logger.info(`[Pipeline] Skip auto-draft for ${emailId} — not the latest message in thread ${email.threadId}`);
+    return;
+  }
+  // The account this draft belongs to, captured while it is known to be the
+  // active one: the Drafts save names it explicitly instead of resolving
+  // "whichever account is active" after the LLM calls. Null on the
+  // pre-account default slot, which the late gate keeps active until the save.
+  const draftAccountId = getAccountIdForStorage(storage) ?? undefined;
 
   const repos = (storage as any).getRepositories();
   const agentRepo = repos?.agent;
@@ -1233,22 +1328,15 @@ async function autoDraftReply(emailId: string): Promise<void> {
   const decision = decisions.find((d: any) => d.emailId === emailId && (d.proposedAction === 'reply' || d.proposedAction === 'reply_all'));
   if (!decision) return;
 
-  // One draft per THREAD, not per email. If this isn't the latest email in
-  // the thread, skip — a reply to the latest supersedes any earlier draft,
-  // and drafting for every mid-thread message inflates the Drafts folder
-  // without adding value (user only sends one reply). When a newer email
-  // arrives later, that email's own run will supersede this one.
-  try {
-    if (email.threadId) {
-      const latest = (storage as any).db?.prepare?.(`
-        SELECT id FROM emails WHERE thread_id = ? ORDER BY date DESC LIMIT 1
-      `)?.get(email.threadId) as any;
-      if (latest?.id && latest.id !== emailId) {
-        logger.info(`[Pipeline] Skip auto-draft for ${emailId} — not latest in thread ${email.threadId} (latest=${latest.id})`);
-        return;
-      }
-    }
-  } catch { /* non-fatal — fall through to draft */ }
+  // The user is already writing a reply in this thread: never draft over it.
+  // Resolved as a SYSTEM dismissal (USER_HAS_DRAFT_FEEDBACK is in the
+  // exclusion list below), so it never reads as the user dismissing a draft
+  // and never blocks the thread's later emails.
+  if (skip === 'user-has-draft') {
+    logger.info(`[Pipeline] Skip auto-draft for ${emailId} — the user has a draft in thread ${email.threadId}`);
+    await agentRepo.updateDecisionStatus(decision.id, 'rejected', 'dismissed', USER_HAS_DRAFT_FEEDBACK);
+    return;
+  }
 
   // User-intent gate: if the user explicitly dismissed a draft on this
   // thread recently, respect that and skip. MUST run BEFORE the supersede
@@ -1266,13 +1354,11 @@ async function autoDraftReply(emailId: string): Promise<void> {
          WHERE e.thread_id = ?
            AND d.status IN ('rejected', 'dismissed')
            AND (d.user_feedback IS NULL OR d.user_feedback NOT IN (
-             'superseded-by-newer-email', 'user-not-addressed',
-             'body-mention-weak', 'malformed-sender',
-             'empty-draft-output', 'no-recipient'
+             ${SYSTEM_DISMISSAL_FEEDBACK.map(() => '?').join(', ')}
            ))
            AND d.resolved_at >= unixepoch() - 14 * 86400
          LIMIT 1
-      `)?.get(email.threadId) as any;
+      `)?.get(email.threadId, ...SYSTEM_DISMISSAL_FEEDBACK) as any;
       if (rejected) {
         logger.info(`[Pipeline] Skip auto-draft for ${emailId} — user recently dismissed a draft in thread ${email.threadId}`);
         return;
@@ -1478,125 +1564,11 @@ async function autoDraftReply(emailId: string): Promise<void> {
         } catch { return null; }
       },
       getNotes: (e: string) => agentRepo.getNotesForPrompt(e),
-      getThreadMessages: (threadId: string) => {
-        // Preferred source: the "chat view" conversation extraction
-        // (conversation_extractions row). This is the SAME data the user
-        // sees in ThreadChatView — individual messages already split out
-        // from quoted/forwarded content, so if the user was looped in
-        // mid-thread we still get every earlier message as its own entry.
-        //
-        // Fallback: raw thread emails from storage, merged with subject/
-        // recipient info which the chat-view payload doesn't carry.
-        try {
-          const aliasSet = new Set(userAliases);
-          const splitList = (s: string | null) =>
-            (s || '').split(',').map(x => x.trim()).filter(Boolean);
-          const labelRecipients = (addrs: string[], names: string[]): string[] =>
-            addrs.map((a, i) => {
-              const n = (names[i] || '').replace(/^["']|["']$/g, '').trim();
-              return n ? `${n} <${a}>` : a;
-            });
-
-          // Load raw emails once — we need them either way (as fallback or
-          // to enrich chat-view messages with subject/to/cc). NOTE:
-          // storage.getEmailsByThread is async, but this callback must stay
-          // synchronous for AgentReplyDrafter — read via better-sqlite3
-          // directly, like the other raw queries in this file.
-          const rawEmails = ((storage as any).db?.prepare?.(`
-            SELECT id, message_id AS messageId, subject,
-                   from_address AS fromAddress, from_name AS fromName,
-                   to_address AS toAddress, to_names AS toNames,
-                   cc_address AS ccAddress, cc_names AS ccNames,
-                   date,
-                   -- Both bodies through email_bodies: migration 73 empties the
-                   -- inline columns, and chat-view extraction fed an empty body
-                   -- produces a confidently wrong summary rather than an error.
-                   ${rawBodyExpression()} AS rawBody,
-                   ${cleanBodyExpression()} AS cleanBody
-              FROM emails
-             WHERE thread_id = ?
-          `)?.all(threadId) || []) as any[];
-          const rawById = new Map<string, any>();
-          for (const e of rawEmails) rawById.set(e.id, e);
-
-          // Try the chat-view extraction
-          const repos = (storage as any).getRepositories?.();
-          const convRow: any = repos?.ai?.getConversation
-            ? // getConversation is async in the repo but synchronous at the
-              // SQLite layer; call via better-sqlite3 prepare directly
-              (storage as any).db?.prepare?.(
-                'SELECT messages FROM conversation_extractions WHERE thread_id = ?'
-              )?.get(threadId)
-            : null;
-
-          if (convRow?.messages) {
-            try {
-              const chatMessages = JSON.parse(convRow.messages) as Array<{
-                fromAddress: string;
-                fromName: string | null;
-                toAddress: string;
-                date: number;
-                body: string;
-                sourceEmailId: string;
-              }>;
-              const sorted = [...chatMessages].sort((a, b) => (a.date || 0) - (b.date || 0));
-              return sorted.map(m => {
-                // Enrich with subject + full recipient list from the source email
-                const src = rawById.get(m.sourceEmailId);
-                const fromAddr = (m.fromAddress || '').toLowerCase();
-                const fromLabel = m.fromName
-                  ? `${m.fromName} <${m.fromAddress}>`
-                  : (m.fromAddress || '');
-                // Compress body — chat-view bodies may still carry HTML
-                // chrome that bloats the drafter prompt. cleanEmailHtmlForLLM
-                // strips CSS/images/MSO/wrapping while preserving text +
-                // basic structure. 2KB cap per message keeps long threads
-                // within budget.
-                const compressedBody = cleanEmailHtmlForLLM(m.body || '', { maxLength: 2000 });
-                return {
-                  messageId: src?.messageId || null,
-                  subject: src?.subject || null,
-                  from: fromLabel,
-                  to: src
-                    ? labelRecipients(splitList(src.toAddress), splitList(src.toNames))
-                    : splitList(m.toAddress),
-                  cc: src
-                    ? labelRecipients(splitList(src.ccAddress), splitList(src.ccNames))
-                    : [],
-                  date: new Date((m.date || 0) * 1000).toISOString(),
-                  body: compressedBody,
-                  isFromUser: aliasSet.has(fromAddr),
-                };
-              });
-            } catch (err) {
-              logger.warn('[Pipeline] chat-view JSON parse failed, falling back to raw:', err);
-            }
-          }
-
-          // Fallback: no extraction yet — use raw thread emails. Apply
-          // the same cleanEmailHtmlForLLM compression so the drafter
-          // doesn't see raw HTML chrome / inline base64 images.
-          const sorted = [...rawEmails].sort((a, b) => (a.date || 0) - (b.date || 0));
-          return sorted.map((e: any) => {
-            const fromAddr = (e.fromAddress || '').toLowerCase();
-            const fromLabel = e.fromName
-              ? `${e.fromName} <${e.fromAddress}>`
-              : (e.fromAddress || '');
-            const rawBody = e.rawBody || e.cleanBody || '';
-            const compressedBody = cleanEmailHtmlForLLM(rawBody, { maxLength: 2000 });
-            return {
-              messageId: e.messageId || null,
-              subject: e.subject || null,
-              from: fromLabel,
-              to: labelRecipients(splitList(e.toAddress), splitList(e.toNames)),
-              cc: labelRecipients(splitList(e.ccAddress), splitList(e.ccNames)),
-              date: new Date((e.date || 0) * 1000).toISOString(),
-              body: compressedBody,
-              isFromUser: aliasSet.has(fromAddr),
-            };
-          });
-        } catch { return []; }
-      },
+      // The ONE thread builder (thread-context.ts): conversation members only
+      // (no drafts, no Trash copies), the first email replaced by its AI split
+      // when the cache holds a usable one, later messages quote-stripped.
+      // Read from THIS email's account storage.
+      getThreadMessages: (threadId: string) => buildThreadMessages(storage, threadId, { userAliases }),
       getSenderMemory: (e: string) => {
         try {
           const row = (storage as any).db?.prepare?.(
@@ -1721,6 +1693,15 @@ async function autoDraftReply(emailId: string): Promise<void> {
       .join(' ')
       .trim();
 
+    // The thread gates again: the account, a user draft or a newer message may
+    // have changed during the LLM calls. Checked in the same tick as the
+    // identity read above and the SMTP client pick inside tryAutoSendReply.
+    const stopBeforeSend = lateAutoDraftStop(storage, email, 'send');
+    if (stopBeforeSend) {
+      await settleLateAutoDraftStop(stopBeforeSend, decision, agentRepo);
+      return;
+    }
+
     // ── True auto-send (autoReply ON) ───────────────────────────────────
     // When every gate passes, the reply is SENT via SMTP instead of saved
     // as a draft. Any failure (or any gate not met) falls through to the
@@ -1738,6 +1719,36 @@ async function autoDraftReply(emailId: string): Promise<void> {
     });
     if (sentViaSmtp) return;
 
+    // A failed auto-send awaited the SMTP round trip: check again.
+    const stopBeforeSave = lateAutoDraftStop(storage, email, 'save');
+    if (stopBeforeSave) {
+      await settleLateAutoDraftStop(stopBeforeSave, decision, agentRepo);
+      return;
+    }
+
+    // The draft's Message-ID is chosen HERE and recorded on the decision
+    // BEFORE the save: saveDraftToIMAP writes the local draft row before its
+    // IMAP append, and an auto-draft for a newer email in this thread that
+    // runs its gates inside that window would otherwise count the agent's own
+    // draft as the user's — and resolve that email's decision as
+    // 'user-has-draft' for good. A recorded key whose save never lands
+    // matches no row; it is still cleared below.
+    const draftMessageId = newDraftMessageId(accountEmail);
+    let draftKeyRecorded = false;
+    try {
+      draftKeyRecorded = agentRepo.recordDecisionDraftMessageId(decision.id, draftMessageId);
+    } catch (err) {
+      logger.warn(`[Pipeline] Could not record the draft Message-ID for decision ${decision.id}:`, err);
+    }
+    const forgetDraftKey = (): void => {
+      if (!draftKeyRecorded) return;
+      try {
+        agentRepo.clearDecisionDraftMessageId(decision.id, draftMessageId);
+      } catch (err) {
+        logger.warn(`[Pipeline] Could not clear the draft Message-ID for decision ${decision.id}:`, err);
+      }
+    };
+
     // Also save the draft to the IMAP Drafts folder so it appears alongside
     // the user's own saved drafts and auto-surfaces when the thread is re-opened.
     try {
@@ -1753,8 +1764,11 @@ async function autoDraftReply(emailId: string): Promise<void> {
         accountEmail,
         accountName,
         threadId: email.threadId,
-        accountId: (email as any).accountId,
-      } as any);
+        // Named explicitly: EmailRecord rows carry no accountId, so the old
+        // `email.accountId` was always undefined and the save resolved
+        // whichever account was active at SAVE time.
+        accountId: draftAccountId,
+      }, { messageId: draftMessageId });
       if (result.success) {
         logger.info(`[Pipeline] ✓ AI draft saved to IMAP Drafts for ${emailId}`);
         // Mark the decision as a completed agent action (not pending) so it
@@ -1780,9 +1794,11 @@ async function autoDraftReply(emailId: string): Promise<void> {
           source: 'agent_auto',
         });
       } else {
+        forgetDraftKey();
         logger.warn(`[Pipeline] IMAP draft save failed for ${emailId}: ${result.error}`);
       }
     } catch (err) {
+      forgetDraftKey();
       logger.error(`[Pipeline] IMAP draft save error for ${emailId}:`, err);
     }
 
