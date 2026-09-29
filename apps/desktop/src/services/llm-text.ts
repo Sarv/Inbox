@@ -91,23 +91,16 @@ export function compressHtmlToPlainTextForLLM(rawBody: string): string {
     el.parentNode?.insertBefore(close, el.nextSibling);
   });
 
-  // Replace <br>/end-of-block tags with newlines so the text reads
-  // sensibly when flattened. Cell separator → tab so a flattened
-  // table is at least readable as columns.
-  let text = doc2.body.innerHTML
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
-    .replace(/<\/td>/gi, '\t')
-    .replace(/<[^>]+>/g, '');
-
-  // Decode entities.
-  text = text
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'");
+  // A newline for each <br> and after each block, a tab after each cell, so
+  // the text reads sensibly when flattened and a table keeps its columns.
+  // Then read the text through the DOM rather than regex-stripping tags off
+  // innerHTML and decoding entities by hand: the parser decodes every entity
+  // exactly once (the hand decoding turned a literal "&lt;" into "<") and
+  // no tag can survive.
+  doc2.body.querySelectorAll('br').forEach(el => el.replaceWith(doc2.createTextNode('\n')));
+  doc2.body.querySelectorAll('p, div, tr, li, h1, h2, h3, h4, h5, h6').forEach(el => el.append(doc2.createTextNode('\n')));
+  doc2.body.querySelectorAll('td').forEach(el => el.append(doc2.createTextNode('\t')));
+  let text = (doc2.body.textContent ?? '').replace(/\u00a0/g, ' ');
 
   // Collapse runs of spaces. Trim every line. Collapse 3+ blank lines.
   text = text.replace(/[ \t]+/g, ' ');

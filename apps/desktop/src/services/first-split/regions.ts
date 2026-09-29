@@ -183,7 +183,8 @@ export function splitRegions(rawBody: string | null | undefined, options: Region
 
   const regions: SplitRegion[] = [];
   for (let index = 0; index <= markers.length; index++) {
-    const endBefore = markers[index] ?? null;
+    // One region more than markers: the last runs to the end of the body.
+    const endBefore = index < markers.length ? markers[index] : null;
     const html = sliceBetween(body, { startAfter: index === 0 ? null : markers[index - 1], endBefore }).innerHTML.trim();
     const text = normalizedContent(html);
     const boundary = index === 0 ? null : boundaries[index - 1];

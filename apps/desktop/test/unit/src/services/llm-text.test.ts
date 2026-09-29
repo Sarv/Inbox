@@ -98,6 +98,22 @@ describe('compressHtmlToPlainTextForLLM — structure and chrome', () => {
     expect(out).not.toContain('Get Outlook');
     expect(out).not.toMatch(/p\{\}/);
   });
+
+  // Breaks: entities were decoded by hand with &amp; first, so a body that
+  // literally says "&lt;" reached the model as "<" (decoded twice).
+  it('decodes each entity exactly once', () => {
+    const out = compressHtmlToPlainTextForLLM('<p>Write &amp;lt; for a less-than sign, &amp;amp; for an ampersand</p>');
+    expect(out).toContain('Write &lt; for a less-than sign, &amp; for an ampersand');
+  });
+
+  // Breaks: tags were stripped from innerHTML with a regex; text that looks
+  // like markup is the sender's words and must reach the model as text, and
+  // comments must not leak into it.
+  it('keeps escaped markup as text and drops comments', () => {
+    const out = compressHtmlToPlainTextForLLM('<p>Paste &lt;b&gt;bold&lt;/b&gt; here<!-- hidden note --></p>');
+    expect(out).toContain('Paste <b>bold</b> here');
+    expect(out).not.toContain('hidden note');
+  });
 });
 
 describe('compressHtmlToPlainTextForLLM — edge shapes', () => {
