@@ -120,10 +120,11 @@ describe('fresh install reaches the current production schema', () => {
     // with the In-Reply-To self-reference repair and its spam_repair_queue (v96);
     // 96 -> 97 with the first_email_splits cache and
     // agent_decisions.draft_message_id (v97); 97 -> 98 with the retirement of
-    // the whole-thread conversation_extractions cache (v98).
-    expect(CURRENT_VERSION).toBe(98);
+    // the whole-thread conversation_extractions cache (v98); 98 -> 99 with
+    // emails.pgp_status (v99).
+    expect(CURRENT_VERSION).toBe(99);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..98 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..99 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -228,6 +229,7 @@ describe('fresh install reaches the current production schema', () => {
       'calendar_ics',
       'calendar_added',
       'label_status',
+      'pgp_status',
     ]) {
       expect(emails, `emails.${col}`).toContain(col);
     }
