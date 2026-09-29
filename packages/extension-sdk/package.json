@@ -47,7 +47,7 @@
   },
   "dependencies": {
     "@sarv-in/mailguard": "^0.4.2",
-    "html-to-text": "^10.0.0"
+    "html-to-text": "^10.0.1"
   },
   "devDependencies": {
     "@sarvinbox/core": "workspace:*",
