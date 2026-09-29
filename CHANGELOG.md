@@ -76,6 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never closed, so an old code could sit on screen until you closed it
   yourself. Cards that have already expired are now not shown at all.
 
+### Security
+- **Mail sign-in tokens no longer reach the app window.** The window that
+  shows your mail could ask for the access token of any Gmail, Outlook or
+  Yahoo account you signed in to. It can now get only the Sarv token that
+  Sarv AI needs. Those accounts' tokens are used only by the part of the app
+  that syncs and sends mail, which works as before.
+
 ## [1.2.5] - 2026-09-27
 
 ### Fixed

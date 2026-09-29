@@ -962,7 +962,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listReauthRequired: () => ipcRenderer.invoke('oauth:listReauthRequired'),
     signOut: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
       ipcRenderer.invoke('oauth:signOut', providerId, email),
-    getAccessToken: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
+    // Sarv only: main refuses every other provider, so a mail provider's token
+    // never reaches the renderer (RENDERER_TOKEN_PROVIDERS in oauth-handlers.ts).
+    getAccessToken: (providerId: 'sarv', email: string) =>
       ipcRenderer.invoke('oauth:getAccessToken', providerId, email),
   },
 
@@ -1722,7 +1724,8 @@ export interface ElectronAPI {
     }>;
     signOut: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
       Promise<{ success: boolean; error?: string }>;
-    getAccessToken: (providerId: 'gmail' | 'microsoft' | 'yahoo' | 'sarv', email: string) =>
+    // Sarv only — main refuses every other provider (see the bridge above).
+    getAccessToken: (providerId: 'sarv', email: string) =>
       Promise<{ success: boolean; data?: { accessToken: string }; error?: string }>;
   };
   extensions: {
