@@ -22,6 +22,11 @@
       "types": "./dist/extension-sdk-text.d.ts",
       "import": "./dist/extension-sdk-text.mjs",
       "require": "./dist/extension-sdk-text.js"
+    },
+    "./pgp": {
+      "types": "./dist/pgp.d.ts",
+      "import": "./dist/pgp.mjs",
+      "require": "./dist/pgp.js"
     }
   },
   "scripts": {
@@ -50,9 +55,11 @@
     "ipaddr.js": "^2.2.0",
     "libmime": "^5.3.7",
     "libphonenumber-js": "^1.13.8",
+    "libqp": "^2.1.1",
     "lru-cache": "^7.18.3",
     "mailparser": "^3.9.28",
     "nodemailer": "^9.1.0",
+    "openpgp": "^6.3.2",
     "p-retry": "^4.6.2",
     "sanitize-filename": "^1.6.4",
     "sanitize-html": "^2.17.7",
