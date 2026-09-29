@@ -1,10 +1,12 @@
 import type { SendFollowUpRequest } from '@sarvinbox/core';
-import { Bell, BellDot, ChevronDown, Loader2, Paperclip, Send, Trash2, Wand2, BellRing } from 'lucide-react';
+import { Bell, BellDot, ChevronDown, Loader2, Lock, Paperclip, PenLine, Send, Trash2, Wand2, BellRing } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
 import { useClickAway } from '../hooks/useClickAway';
+import type { PgpComposeControls } from '../hooks/usePgpCompose';
 import { useSendLaterDraft } from '../hooks/useSendLaterDrafts';
 import { describeFollowUp } from '../utils/follow-up-presets';
+import { encryptToggleText, signToggleText } from '../utils/pgp-compose';
 
 import { FollowUpDropdown } from './FollowUpDropdown';
 import { SendLaterDropdown } from './SendLaterDropdown';
@@ -32,6 +34,8 @@ export interface ComposeToolbarProps {
     /** "Remind me if nobody replies". Only rendered when a handler is provided. */
     followUp?: SendFollowUpRequest | null;
     onFollowUpChange?: (value: SendFollowUpRequest | null) => void;
+    /** OpenPGP encrypt/sign toggles. Rendered only when the sender has a key of their own. */
+    pgp?: PgpComposeControls;
 }
 
 // OS specific modifier key for tooltips
@@ -54,6 +58,7 @@ export function ComposeToolbar({
     onToggleReadReceipt,
     followUp = null,
     onFollowUpChange,
+    pgp,
 }: ComposeToolbarProps) {
     const [showSendLater, setShowSendLater] = useState(false);
     // Held HERE, not in the menu: the menu unmounts on a click outside, and a
@@ -143,6 +148,8 @@ export function ComposeToolbar({
                     </div>
                 )}
 
+                {pgp?.state.available && <PgpToggles pgp={pgp} />}
+
                 {hasAIProvider && (
                     <Tooltip content="Polish with AI" position="top">
                         <button
@@ -192,5 +199,46 @@ export function ComposeToolbar({
                 </Tooltip>
             </div>
         </div>
+    );
+}
+
+const toggleClass = (on: boolean, warn = false) =>
+    `p-1.5 rounded-md transition-colors ${
+        warn ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : on ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground'
+    }`;
+
+/** The lock and the signature pen. Amber when encryption is on but someone has no key — that send will be refused. */
+function PgpToggles({ pgp }: { pgp: PgpComposeControls }) {
+    const { state, toggleEncrypt, toggleSign } = pgp;
+    const encryptText = encryptToggleText(state);
+    const signText = signToggleText(state);
+    return (
+        <>
+            {/* Icon-only controls: tooltip + aria-label, 40ms so it reads as instant. */}
+            <Tooltip content={encryptText} position="top" delayMs={40}>
+                <button
+                    type="button"
+                    onClick={toggleEncrypt}
+                    aria-label={encryptText}
+                    aria-pressed={state.encrypt}
+                    data-pgp-toggle="encrypt"
+                    className={toggleClass(state.encrypt, state.encrypt && state.missing.length > 0)}
+                >
+                    <Lock className="h-4 w-4" />
+                </button>
+            </Tooltip>
+            <Tooltip content={signText} position="top" delayMs={40}>
+                <button
+                    type="button"
+                    onClick={toggleSign}
+                    aria-label={signText}
+                    aria-pressed={state.sign}
+                    data-pgp-toggle="sign"
+                    className={toggleClass(state.sign)}
+                >
+                    <PenLine className="h-4 w-4" />
+                </button>
+            </Tooltip>
+        </>
     );
 }

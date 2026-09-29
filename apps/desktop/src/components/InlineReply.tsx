@@ -16,11 +16,14 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
 import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
+import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
+import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { replyRecipients } from '../utils/reply-recipients';
+import type { ReplySource } from '../utils/reply-source';
 import { reportSendFailure } from '../utils/send-failure';
 
 import { ComposeToolbar } from './ComposeToolbar';
@@ -54,20 +57,7 @@ interface InlineReplyDraft extends ComposeDraft {
 }
 
 interface InlineReplyProps {
-  replyToEmail: {
-    id: string;
-    messageId?: string; // real RFC Message-ID — used as In-Reply-To so the appended draft threads natively (Gmail/Outlook) and isn't orphaned on re-sync
-    threadId?: string; // groups the saved draft into this thread (avoids orphaned drafts)
-    accountId?: string; // send-as / From-bar account when opened from All Inboxes
-    subject: string;
-    fromAddress: string;
-    fromName: string | null;
-    toAddress: string;
-    ccAddress: string | null;
-    date: number;
-    cleanBody: string | null;
-    rawBody: string | null; // Original HTML body for preserving email trail structure
-  };
+  replyToEmail: ReplySource;
   mode: 'reply' | 'replyAll';
   /**
    * Called when the inline reply closes. `dismissed=true` means the user
@@ -98,7 +88,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
   // account than the active one (replying to your own active-account mail needs
   // no bar). Send-as still uses replyAccountId regardless, so sends stay correct.
   const {
-    accountId: replyAccountId, fromAccount, accounts, activeAccountId, viewAccountId, isUnifiedView,
+    accountId: replyAccountId, fromAccount, accounts, activeAccountId, viewAccountId, isUnifiedView, sendingEmail,
   } = useInlineSendingAccount(replyToEmail as { accountId?: string });
 
   const {
@@ -125,6 +115,14 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     initialDraft: draft
   });
 
+  // OpenPGP over the same recipient list the send uses, so the lock speaks for who actually gets the mail.
+  // A draft saved encrypted reopens encrypted, as a reply to encrypted mail does.
+  const pgp = usePgpCompose(
+    sendingEmail,
+    [...mergeRecipientEmails(to, pendingTo), ...mergeRecipientEmails(cc, pendingCc)],
+    replyToEmail.pgpStatus === 'encrypted' || draft?.pgpEncrypted === true,
+  );
+
   // Auto-save draft to IMAP
   const { markDiscarded, closeAction } = useDraftAutosave({
     to,
@@ -143,6 +141,8 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     // Owning account — routes save/delete to the correct per-account DB + engine.
     accountId: replyAccountId,
     attachments,
+    encrypt: pgp.state.encrypt,
+    initialDraftEncrypted: draft?.pgpEncrypted,
   });
 
   const [showDropdown, setShowDropdown] = useState(false);
@@ -217,15 +217,8 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
 
   // Override handleSend for inline specifically
   const handleSend = async () => {
-    // Merge committed emails with any pending typed text that looks like an email
-    const mergeEmails = (committed: string, pending: string) => {
-      const rawCommitted = committed.split(',').map(e => e.trim()).filter(Boolean);
-      const rawPending = pending.split(',').map(e => e.trim()).filter(e => e.includes('@'));
-      return [...new Set([...rawCommitted, ...rawPending])];
-    };
-
-    const finalTo = mergeEmails(to, pendingTo);
-    const finalCc = mergeEmails(cc, pendingCc);
+    const finalTo = mergeRecipientEmails(to, pendingTo);
+    const finalCc = mergeRecipientEmails(cc, pendingCc);
 
     if (!plainBody.trim() || finalTo.length === 0) return;
 
@@ -294,6 +287,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
         // Send AS the account that owns this mail (unified "All Inboxes" replies).
         accountId: replyAccountId,
         followUp: followUp ?? undefined,
+        pgp: pgp.state.request,
         attachments: attachments.map((a: AttachmentFile) => ({ ...a, filename: a.filename || 'attachment' })) as any,
         draftCleanup: {
           threadId: (replyToEmail as any).threadId,
@@ -648,6 +642,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
         isInline={true}
         followUp={followUp}
         onFollowUpChange={setFollowUp}
+        pgp={pgp}
       />
 
       {/* Attachment list */}

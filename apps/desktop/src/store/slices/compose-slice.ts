@@ -327,6 +327,7 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
       from: sendOptions.from, // chosen identity/alias header From (undefined = default)
       requestReadReceipt: sendOptions.requestReadReceipt,
       followUp: sendOptions.followUp, // "remind me if nobody replies" — recorded by main after the send succeeds
+      pgp: sendOptions.pgp, // OpenPGP encrypt/sign — applied by main as the MIME is built
     };
 
     // Send later: the same persist-first outbox, held until the time the user
