@@ -26,7 +26,7 @@ const h = vi.hoisted(() => ({
     folderCountsListener: ((folderPaths: string[]) => void) | null;
   }>,
   /** Every SyncEngine the runtime built, oldest first. */
-  engines: [] as Array<{ reputationLookup: unknown }>,
+  engines: [] as Array<{ reputationLookup: unknown; autocryptSink: unknown }>,
   /** Every sendToWindow(channel, payload) the runtime made. */
   sent: [] as Array<[string, unknown]>,
   runtimes: new Map<string, { storage: unknown; syncEngine: unknown; smtpClient: unknown }>(),
@@ -58,6 +58,9 @@ vi.mock('@sarvinbox/core', async () => ({
     reputationLookup: unknown = null;
     constructor(storage: unknown) { this.storage = storage; h.engines.push(this as never); }
     setReputationLookup(fn: unknown): void { this.reputationLookup = fn; }
+    // Same for the Autocrypt sink: an engine without it never learns the keys its mail carries.
+    autocryptSink: unknown = null;
+    setAutocryptSink(fn: unknown): void { this.autocryptSink = fn; }
   },
   // The blocklist stage itself. Blocklists are on by default (2026-09-23), so
   // every test here builds one over this computer's DNS; it answers "no
@@ -390,6 +393,16 @@ describe('ensureAccountRuntime', () => {
     expect(h.engines).toHaveLength(2);
     expect(h.engines.every((engine) => typeof engine.reputationLookup === 'function')).toBe(true);
     expect(h.engines[0].reputationLookup).toBe(h.engines[1].reputationLookup);
+  });
+
+  // Regression: an account whose engine has no Autocrypt sink never picks up
+  // the keys its correspondents send, so replies to them can never auto-encrypt.
+  it('hands every account engine the Autocrypt sink', async () => {
+    await ensureAccountRuntime('acct-first');
+    await ensureAccountRuntime('acct-second');
+
+    expect(h.engines).toHaveLength(2);
+    expect(h.engines.every((engine) => typeof engine.autocryptSink === 'function')).toBe(true);
   });
 
   it('gives a NON-primary account its own hashed DB even when the legacy file exists', async () => {
