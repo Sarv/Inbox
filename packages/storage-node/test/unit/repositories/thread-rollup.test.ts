@@ -161,6 +161,25 @@ describe('deriveRollup', () => {
     expect(base.stateVersion).toBe(same.stateVersion);
     expect(base.stateVersion).not.toBe(read.stateVersion);
   });
+
+  // Breaks: every stored `threads.state_version` stops matching what a rebuild
+  // derives, so each thread reads as changed and the read model rebuilds the
+  // whole mailbox. The value was captured from the hash BEFORE it was folded
+  // into core's shared `fnv1a32`; the fold must not move it.
+  it('pins the stateVersion value across the fnv1a fold into core', () => {
+    // Every field spelled out: `email()` otherwise derives dates and ids from a
+    // file-wide counter, which would make the pin depend on test order.
+    const fixed = (id: string, date: number, updated: number): Partial<RollupEmailRow> => ({
+      id, message_id: `<${id}@x>`, date, updated_at: updated,
+      from_name: `N ${id}`, from_address: `${id}@x.com`, subject: 'Pinned',
+    });
+    const rows = [
+      email('INBOX', fixed('pin1', 100, 500)),
+      email('INBOX|read|starred', fixed('pin2', 200, 600)),
+      email('Sent|read', fixed('pin3', 300, 700)),
+    ];
+    expect(deriveRollup('t-pin', rows, CTX).stateVersion).toBe(3916267743);
+  });
 });
 
 // ---------------------------------------------------------------------------

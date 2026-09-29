@@ -1,4 +1,4 @@
-import { createDeferredFetchError } from '@sarvinbox/core';
+import { createDeferredFetchError, FIRST_SPLIT_VERSION } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -33,6 +33,8 @@ interface Row {
 
 const h = vi.hoisted(() => ({
   runtimes: [] as Array<[string, unknown]>,
+  /** Every logger.info line — the per-account tick summary carries the repaired/failed counts. */
+  logs: [] as string[],
 }));
 
 vi.mock('../../../../electron/shared', () => ({ getAllAccountRuntimes: () => h.runtimes }));
@@ -45,7 +47,8 @@ vi.mock('../../../../electron/shared', () => ({ getAllAccountRuntimes: () => h.r
 vi.mock('@sarvinbox/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@sarvinbox/core')>()),
   createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
+    info: (...args: unknown[]) => { h.logs.push(args.map(String).join(' ')); },
+    warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
   }),
   // Real yielder semantics minus the clock. The real one yields once ~8ms of work
   // has accumulated, so cheap iterations mostly DON'T hit the event loop; this
@@ -92,10 +95,54 @@ interface FakeAccount {
   probed: string[];
   /** ids whose full bodies were actually read (the expensive step). */
   read: string[];
-  deletedConversations: string[];
+  deletedSplits: string[];
+  /**
+   * The first-email split cache, one row per thread (FirstSplitRepository). By
+   * default every thread starts with a successful split computed from its first
+   * member's GARBLED body — current until that body is healed.
+   */
+  splits: Map<string, SplitRow>;
+  /** Ids whose re-fetch succeeded — their stored body (and fingerprint) is now the repaired one. */
+  healed: Set<string>;
+  /** False: a re-fetch that stores the very same body (fingerprint unchanged). */
+  refetchChangesBody: boolean;
+  splitReadThrows: boolean;
   fetchBody: (id: string, path: string, uid: number) => Promise<void>;
   runtime: { storage: unknown; syncEngine: unknown; smtpClient: null };
 }
+
+interface SplitRow {
+  threadId: string;
+  firstKey: string;
+  sourceFingerprint: string;
+  splitVersion: number;
+  status: 'ok';
+}
+
+const bodyFingerprint = (acct: FakeAccount, id: string): string => (acct.healed.has(id) ? `fp-clean-${id}` : `fp-garbled-${id}`);
+
+/** Main's key for a thread: its FIRST member (first row in `rows` order) and that email's stored-body fingerprint. */
+const firstMemberKey = (acct: FakeAccount, threadId: string) => {
+  const first = acct.rows.find((r) => r.threadId === threadId);
+  if (!first) return null;
+  return { threadId, firstKey: `<${first.id}@mail>`, firstEmailId: first.id, fingerprint: bodyFingerprint(acct, first.id) };
+};
+
+const initialSplits = (acct: FakeAccount): Map<string, SplitRow> => {
+  const splits = new Map<string, SplitRow>();
+  for (const r of acct.rows) {
+    if (!r.threadId || splits.has(r.threadId)) continue;
+    const key = firstMemberKey(acct, r.threadId)!;
+    splits.set(r.threadId, {
+      threadId: r.threadId,
+      firstKey: key.firstKey,
+      sourceFingerprint: key.fingerprint,
+      splitVersion: FIRST_SPLIT_VERSION,
+      status: 'ok',
+    });
+  }
+  return splits;
+};
 
 const makeAccount = (rows: Row[], over: Partial<FakeAccount> = {}): FakeAccount => {
   const acct: FakeAccount = {
@@ -110,10 +157,14 @@ const makeAccount = (rows: Row[], over: Partial<FakeAccount> = {}): FakeAccount 
     updated: [],
     probed: [],
     read: [],
-    deletedConversations: [],
+    deletedSplits: [],
+    healed: new Set<string>(),
+    refetchChangesBody: true,
+    splitReadThrows: false,
     fetchBody: async () => {},
     ...over,
   } as FakeAccount;
+  if (!over.splits) acct.splits = initialSplits(acct);
 
   const storage = {
     db: {
@@ -162,7 +213,16 @@ const makeAccount = (rows: Row[], over: Partial<FakeAccount> = {}): FakeAccount 
       },
     },
     getFolder: async (id: string) => acct.folders.get(id) ?? null,
-    deleteConversation: async (threadId: string) => { acct.deletedConversations.push(threadId); },
+    // The first-email split cache: sync, one row per thread (FirstSplitRepository).
+    getFirstSplitSync: (threadId: string) => {
+      if (acct.splitReadThrows) throw new Error('database is locked');
+      return acct.splits.get(threadId) ?? null;
+    },
+    firstMemberKeySync: (threadId: string) => firstMemberKey(acct, threadId),
+    deleteFirstSplit: (threadId: string) => {
+      acct.deletedSplits.push(threadId);
+      return acct.splits.delete(threadId);
+    },
     updateEmail: async (id: string, patch: { cleanBody?: string }) => {
       if (acct.updateThrows) throw new Error('write failed');
       acct.updated.push([id, patch.cleanBody ?? '']);
@@ -176,6 +236,7 @@ const makeAccount = (rows: Row[], over: Partial<FakeAccount> = {}): FakeAccount 
     fetchBody: async (id: string, path: string, uid: number) => {
       acct.fetched.push(id);
       await acct.fetchBody(id, path, uid);
+      if (acct.refetchChangesBody) acct.healed.add(id);
     },
   };
 
@@ -201,6 +262,7 @@ beforeEach(() => {
     toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
   });
   h.runtimes = [];
+  h.logs = [];
 });
 
 afterEach(() => { vi.useRealTimers(); });
@@ -359,7 +421,7 @@ describe('the drain', () => {
     svc.startBodyRehealScheduler();
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e0', 'e1', 'e2', 'e3', 'e4']);
-    expect(acct.deletedConversations).toEqual(['thread-e0', 'thread-e1', 'thread-e2', 'thread-e3', 'thread-e4']);
+    expect(acct.deletedSplits).toEqual(['thread-e0', 'thread-e1', 'thread-e2', 'thread-e3', 'thread-e4']);
 
     await advance(TICK_MS);
     expect(acct.fetched).toHaveLength(7);
@@ -390,7 +452,7 @@ describe('the drain', () => {
     svc.startBodyRehealScheduler();
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e1']);
-    expect(acct.deletedConversations).toEqual([]); // never reached the cache bust
+    expect(acct.deletedSplits).toEqual([]); // never reached the cache bust
 
     await advance(5 * TICK_MS);
     expect(acct.fetched).toEqual(['e1']);
@@ -415,12 +477,12 @@ describe('the drain', () => {
 
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e1']);
-    expect(acct.deletedConversations).toEqual([]); // deferred — nothing repaired yet
+    expect(acct.deletedSplits).toEqual([]); // deferred — nothing repaired yet
 
     // Re-queued, not retired: the next tick picks it up and it heals.
     await advance(TICK_MS);
     expect(acct.fetched).toEqual(['e1', 'e1']);
-    expect(acct.deletedConversations).toEqual(['thread-e1']);
+    expect(acct.deletedSplits).toEqual(['thread-e1']);
     svc.stopBodyRehealScheduler();
   });
 
@@ -435,26 +497,132 @@ describe('the drain', () => {
     svc.stopBodyRehealScheduler();
   });
 
-  it('does not bust the conversation cache for a thread-less email', async () => {
+  it('does not drop a first-email split for a thread-less email', async () => {
     const acct = makeAccount([row('e1', { threadId: null })]);
     h.runtimes = [['acct-a', acct.runtime]];
     const svc = await load();
     svc.startBodyRehealScheduler();
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e1']);
-    expect(acct.deletedConversations).toEqual([]);
+    expect(acct.deletedSplits).toEqual([]);
     svc.stopBodyRehealScheduler();
   });
 
-  it('tolerates a failing conversation-cache bust', async () => {
-    const acct = makeAccount([row('e1')]);
-    (acct.runtime.storage as { deleteConversation: (t: string) => Promise<void> }).deleteConversation =
-      async () => { throw new Error('no such row'); };
+  // Breaks: the split kept after its FIRST email was healed. The row is keyed
+  // by the garbled body's fingerprint, so it is stale and never shown — and a
+  // stale row is not re-nominated, so the repaired thread would get no split
+  // until the reader opened it.
+  it('drops the split when the healed email is the thread’s FIRST member', async () => {
+    const acct = makeAccount([row('e1', { threadId: 't' }), row('e2', { threadId: 't', body: 'fine' })]);
     h.runtimes = [['acct-a', acct.runtime]];
     const svc = await load();
     svc.startBodyRehealScheduler();
     await advance(FIRST_TICK_MS);
     expect(acct.fetched).toEqual(['e1']);
+    expect(acct.deletedSplits).toEqual(['t']);
+    expect(acct.splits.has('t')).toBe(false);
+    svc.stopBodyRehealScheduler();
+  });
+
+  // Breaks: a valid split thrown away because a LATER email of the thread was
+  // healed. Its key (first email + that email's stored-body fingerprint) did
+  // not change, so the reader of a single-quote thread would be sent back to
+  // "Process now", and an auto thread would pay for another AI run — with no
+  // split at all if that run fails.
+  it('KEEPS the split when a later (non-first) email of the thread is healed', async () => {
+    const acct = makeAccount([row('e1', { threadId: 't', body: 'fine' }), row('e2', { threadId: 't' })]);
+    const before = acct.splits.get('t');
+    h.runtimes = [['acct-a', acct.runtime]];
+    const svc = await load();
+    svc.startBodyRehealScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(acct.fetched).toEqual(['e2']);
+    expect(acct.deletedSplits).toEqual([]);
+    expect(acct.splits.get('t')).toBe(before);
+    svc.stopBodyRehealScheduler();
+  });
+
+  // Breaks: a split dropped although the first email's re-fetch stored the
+  // very same body — the split was made from exactly that body, so it is still
+  // the right one and re-running it is a wasted AI call.
+  it('KEEPS the split when the first email’s re-fetch leaves its stored body unchanged', async () => {
+    const acct = makeAccount([row('e1', { threadId: 't' })], { refetchChangesBody: false });
+    h.runtimes = [['acct-a', acct.runtime]];
+    const svc = await load();
+    svc.startBodyRehealScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(acct.fetched).toEqual(['e1']);
+    expect(acct.deletedSplits).toEqual([]);
+    expect(acct.splits.has('t')).toBe(true);
+    svc.stopBodyRehealScheduler();
+  });
+
+  // Breaks: an idempotent re-run issuing deletes for a thread with no split
+  // (never split, or already dropped) — nothing to drop, so nothing is called.
+  it('does nothing to the cache when the healed thread has no split row', async () => {
+    const acct = makeAccount([row('e1', { threadId: 't' })], { splits: new Map() });
+    h.runtimes = [['acct-a', acct.runtime]];
+    const svc = await load();
+    svc.startBodyRehealScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(acct.fetched).toEqual(['e1']);
+    expect(acct.deletedSplits).toEqual([]);
+    svc.stopBodyRehealScheduler();
+  });
+
+  // Breaks: a split-cache failure (database busy) aborting the rest of the
+  // drain — the repaired body counted as failed and the next email skipped.
+  // The tick summary is the observable: without the best-effort guard it reads
+  // "repaired 1, failed 1" and e2 is still fetched, so `fetched` alone can't tell.
+  it('tolerates a failing split-cache delete', async () => {
+    const acct = makeAccount([row('e1'), row('e2')]);
+    (acct.runtime.storage as { deleteFirstSplit: (t: string) => boolean }).deleteFirstSplit =
+      () => { throw new Error('database is locked'); };
+    h.runtimes = [['acct-a', acct.runtime]];
+    const svc = await load();
+    svc.startBodyRehealScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(acct.fetched).toEqual(['e1', 'e2']);
+    expect(h.logs.filter((line) => line.startsWith('Body re-heal acct-a:'))).toEqual([
+      expect.stringContaining('repaired 2, failed 0'),
+    ]);
+    svc.stopBodyRehealScheduler();
+  });
+
+  // Breaks: an unreadable split cache (the staleness check's own read) turning
+  // a repaired body into a failed one.
+  it('tolerates a failing split-cache read', async () => {
+    const acct = makeAccount([row('e1'), row('e2')], { splitReadThrows: true });
+    h.runtimes = [['acct-a', acct.runtime]];
+    const svc = await load();
+    svc.startBodyRehealScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(acct.fetched).toEqual(['e1', 'e2']);
+    expect(acct.deletedSplits).toEqual([]);
+    expect(h.logs.filter((line) => line.startsWith('Body re-heal acct-a:'))).toEqual([
+      expect.stringContaining('repaired 2, failed 0'),
+    ]);
+    svc.stopBodyRehealScheduler();
+  });
+
+  // Breaks: the split dropped in the wrong account. The SAME thread id exists
+  // in both accounts' databases; only acct-a's first email is healed, so a
+  // delete routed to another account (the active one, say) would throw away
+  // acct-b's good split and leave acct-a's stale one — which the background
+  // split then never re-nominates.
+  it('drops the split in the healed email’s OWN account only (same thread id in two accounts)', async () => {
+    const a = makeAccount([row('e1', { threadId: 'shared-thread' })]);
+    const b = makeAccount([row('e7', { threadId: 'shared-thread', body: 'fine' })]);
+    const bSplit = b.splits.get('shared-thread');
+    h.runtimes = [['acct-a', a.runtime], ['acct-b', b.runtime]];
+    const svc = await load();
+    svc.startBodyRehealScheduler();
+    await advance(FIRST_TICK_MS);
+    expect(a.fetched).toEqual(['e1']);
+    expect(b.fetched).toEqual([]);
+    expect(a.deletedSplits).toEqual(['shared-thread']);
+    expect(b.deletedSplits).toEqual([]);
+    expect(b.splits.get('shared-thread')).toBe(bSplit);
     svc.stopBodyRehealScheduler();
   });
 });

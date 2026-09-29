@@ -21,6 +21,7 @@ import {
 import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
 import { DARK_PAPER, applyEmailDarkMode } from '../utils/email-dark-mode';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
+import { openExternalLink, opensExternally } from '../utils/open-external';
 // Shared with Chat View rather than kept in a second copy here: the two
 // renderers had the same two-step fit written twice, and the measurement is the
 // part that is easy to get subtly wrong. The library owns it and its tests.
@@ -658,6 +659,33 @@ function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRe
 }
 
 /**
+ * The link a click inside the framed body landed on, when the app opens it —
+ * or null, to leave the click to the frame's own default action.
+ *
+ * The link rule is the shared one (utils/open-external), the same the chat
+ * view's link clicks and its "Open link" follow. This listener used to carry a
+ * copy of it that checked `mailto:` in lower case only, so a sender's
+ * `MAILTO:` link was taken for a web link and sent down the browser path that
+ * `mailto:` never takes. Both spellings now go the same way: left to the
+ * frame's default action, which the main process's navigation policy routes
+ * to the system mail handler.
+ *
+ * An anchor with no `href` whose text is a URL counts as that URL —
+ * plaintext-converted mail often wraps a bare address that way.
+ */
+export function frameLinkToOpen(target: EventTarget | null): string | null {
+  let el = target as Element | null;
+  while (el && el.tagName !== 'A') el = el.parentElement;
+  if (!el) return null;
+  let href = el.getAttribute('href');
+  if (!href) {
+    const text = (el.textContent || '').trim();
+    if (/^https?:\/\//.test(text)) href = text;
+  }
+  return href && opensExternally(href) ? href : null;
+}
+
+/**
  * Add href to <a> tags that wrap a URL in their text but have no href —
  * common in plaintext-converted-to-HTML output. Done on the source
  * string before srcdoc so the iframe sees correct anchors.
@@ -972,22 +1000,11 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
       // usually discarded on srcdoc change/unmount, but remove it explicitly
       // for correctness and consistency with the other listeners).
       onBodyClick = (e) => {
-        let el: Element | null = e.target as Element;
-        while (el && el.tagName !== 'A') el = el.parentElement;
-        if (!el) return;
-        let href = el.getAttribute('href');
-        if (!href) {
-          const text = (el.textContent || '').trim();
-          if (/^https?:\/\//.test(text)) href = text;
-        }
-        if (!href || href.startsWith('#') || href.startsWith('mailto:')) return;
+        const href = frameLinkToOpen(e.target);
+        if (!href) return;
         e.preventDefault();
         e.stopPropagation();
-        if (window.electronAPI?.app?.openExternal) {
-          window.electronAPI.app.openExternal(href);
-        } else {
-          window.open(href, '_blank');
-        }
+        openExternalLink(href);
       };
       clickHost = idoc.body;
       clickHost.addEventListener('click', onBodyClick);

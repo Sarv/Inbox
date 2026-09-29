@@ -13,7 +13,7 @@ import type {
   ContactTypeSource,
   ClassifiedContact,
 } from '@sarvinbox/core';
-import { parseAddresses } from '@sarvinbox/core';
+import { messageIdKey, parseAddresses } from '@sarvinbox/core';
 
 import { SHARED } from '../shared-contacts';
 
@@ -301,6 +301,51 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     this.db.prepare(`
       UPDATE agent_decisions SET draft_body = ?, draft_subject = ?, draft_reasoning = ? WHERE id = ?
     `).run(draft.body, draft.subject || null, draft.reasoning || null, decisionId);
+  }
+
+  /**
+   * Record the Message-ID of the draft the auto-drafter saved for a decision,
+   * in lookup form ({@link messageIdKey}), so the live-draft gate can tell the
+   * agent's own draft from one the user is writing. Without it, one auto-draft
+   * would block every later auto-draft in the thread. Returns false when
+   * there is nothing to record (no Message-ID) or no such decision.
+   */
+  recordDecisionDraftMessageId(decisionId: string, messageId: string | null | undefined): boolean {
+    const key = messageIdKey(messageId);
+    if (!key) return false;
+    return this.db
+      .prepare('UPDATE agent_decisions SET draft_message_id = ? WHERE id = ?')
+      .run(key, decisionId).changes > 0;
+  }
+
+  /**
+   * Forget a draft Message-ID recorded ahead of a save that then failed (the
+   * auto-drafter records the id BEFORE saving, so the draft is known to be the
+   * agent's from the moment its local row exists). Only clears that exact key:
+   * a different id recorded since is left alone. True when a key was cleared.
+   */
+  clearDecisionDraftMessageId(decisionId: string, messageId: string | null | undefined): boolean {
+    const key = messageIdKey(messageId);
+    if (!key) return false;
+    return this.db
+      .prepare('UPDATE agent_decisions SET draft_message_id = NULL WHERE id = ? AND draft_message_id = ?')
+      .run(decisionId, key).changes > 0;
+  }
+
+  /**
+   * The Message-ID keys of every draft the agent saved in this thread. A
+   * decision belongs to the thread through its own `thread_id` OR through the
+   * email it answered (a repair that re-threads the email does not rewrite the
+   * decision row).
+   */
+  agentDraftKeysForThread(threadId: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT d.draft_message_id AS k
+        FROM agent_decisions d
+       WHERE d.draft_message_id IS NOT NULL
+         AND (d.thread_id = ? OR d.email_id IN (SELECT id FROM emails WHERE thread_id = ?))
+    `).all(threadId, threadId) as Array<{ k: string }>;
+    return rows.map((row) => row.k);
   }
 
   async updateDecisionStatus(
@@ -631,15 +676,6 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     this.db.prepare(
       "UPDATE emails SET extraction_status = 'done', extraction_at = ? WHERE id = ?"
     ).run(Math.floor(Date.now() / 1000), emailId);
-  }
-
-  /**
-   * Mark batch of emails extraction done (by thread).
-   */
-  markExtractionDoneByThread(threadId: string): void {
-    this.db.prepare(
-      "UPDATE emails SET extraction_status = 'done', extraction_at = ? WHERE thread_id = ?"
-    ).run(Math.floor(Date.now() / 1000), threadId);
   }
 
   /**

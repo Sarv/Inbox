@@ -1,7 +1,11 @@
-import type { SignatureDetectionResult } from '../../services/ai-service';
-import type { ConversationMessage } from '../../services/conversation-service';
+import type { ChatMessage } from '@sarv-in/email-chat-view';
+import type { EmailRecord } from '@sarvinbox/core';
 
-export type { ConversationMessage };
+import type { SignatureDetectionResult } from '../../services/ai-service';
+
+import type { StandardTurns } from './chat-message-adapter';
+import type { ChatViewRules } from './chat-view-rules';
+import type { FirstEmailSplit } from './hooks/useFirstEmailSplit';
 
 export interface EmailDetailContext {
   // Store values
@@ -45,32 +49,63 @@ export interface EmailDetailContext {
   inlineReplyMode: 'reply' | 'replyAll';
   setInlineReplyMode: (mode: 'reply' | 'replyAll') => void;
   replyingToEmail: any | null;
-  inlineReplyDraft?: { to: string; cc: string; htmlContent: string; attachments: any[] };
+  /** The open reply's seed draft — only ever the one written for
+   *  `replyingToEmail` (see composer-target.ts). `draftMessageId` is the stored
+   *  draft the composer replaces on save and deletes on send or discard. */
+  inlineReplyDraft?: {
+    to: string;
+    cc: string;
+    subject?: string;
+    htmlContent: string;
+    attachments: any[];
+    draftMessageId?: string;
+    unsaved?: boolean;
+    isAIDraft?: boolean;
+    aiReasoning?: string;
+    agentDecisionId?: string;
+  };
   showInlineForward: boolean;
   forwardingEmail: any | null;
-  inlineForwardDraft?: { to: string; cc: string; htmlContent: string; attachments: any[] };
+  /** The open forward's seed draft, on the same terms, for `forwardingEmail`. */
+  inlineForwardDraft?: {
+    to: string;
+    cc: string;
+    htmlContent: string;
+    attachments: any[];
+    draftMessageId?: string;
+    unsaved?: boolean;
+  };
+  /** The reader's chat-view setting for this email (auto setting, or the toggle). */
   chatViewEnabled: boolean;
   /**
-   * True when the rendering tree should swap EmailCard for ThreadChatView —
-   * either a real multi-email thread, a single email with an embedded
-   * conversation (loop-me-in / forward), or a still-loading thread.
+   * The chat IS the reading surface — `chatRules.chatActive`: the thread
+   * section renders ThreadChatView and EmailCard hides, never both.
    */
   chatViewActive: boolean;
-  /** True for a single-email view whose body contains a quoted/forwarded conversation. */
-  hasInlineConversation: boolean;
-  conversationMessages: ConversationMessage[] | null;
-  conversationLoading: boolean;
-  conversationUpdating: boolean;
-  conversationError: string | null;
-  /** True if AI extraction fell back to DOM cleaning for at least one email. */
-  conversationPartial: boolean;
+  /** The chat view's decisions for this thread (chatViewRulesFor) — every consumer reads these. */
+  chatRules: ChatViewRules;
+  /** The thread's first member as the pane shows it — the email the AI view splits. */
+  firstEmail: EmailRecord | null;
+  /** The first email's split: the cache's state, its parts, runs, and the reader's run. */
+  firstSplit: FirstEmailSplit;
   /**
-   * Progressive-extraction counters — non-null only while an
-   * extraction run is in flight (done/total = extracted-email counts;
-   * status = optional human-readable note like "AI provider busy —
-   * retrying in 8s"). Shape and name are frozen for the UI layer.
+   * Standard's turns for the thread (threadTurns), or null where nothing
+   * needs them (a multi-email thread read as a list with no composer open).
    */
-  conversationProgress: { done: number; total: number; status?: string } | null;
+  standardTurns: StandardTurns | null;
+  /** The AI view's turns — Standard's with the first email's slot replaced; null without a usable split. */
+  aiTurns: ChatMessage[] | null;
+  /**
+   * The whole-thread transcript for reply polish, built once for every
+   * composer; '' while no reply or forward is open.
+   */
+  polishThreadContext: string;
+  /**
+   * The reader's own address for this thread (getCurrentUserEmail on the
+   * card's recipient) — resolved once here, so the chat's "me" side, the
+   * prewarm and Standard's turns can never disagree about who the reader is.
+   */
+  currentUserEmail: string;
   showAIView: boolean;
   setShowAIView: (v: boolean) => void;
   showSignatures: Set<string>;
@@ -114,8 +149,6 @@ export interface EmailDetailContext {
   handleDetectSignature: (email: any) => Promise<void>;
   handleSaveSignatureSelector: () => Promise<void>;
   handleChatViewToggle: (enabled: boolean) => void;
-  handleRetryConversation: () => void;
-  handleReExtractMessage: (messageId: string) => Promise<void>;
   toggleThread: (threadId: string) => void;
   toggleFullContent: (emailId: string) => void;
   toggleSignature: (emailId: string) => void;

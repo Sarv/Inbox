@@ -2,16 +2,11 @@
 
 // Canonical AI feature defaults live in settings/types (a types+consts
 // leaf module — safe to import here, no component code, no cycle).
-import type { EmailRecord } from '@sarvinbox/core';
-
 import { DEFAULT_AI_FEATURES } from '../components/settings/types';
 import { parseLLMJson, truncate } from '../utils/llm-json';
 
-// Type-only imports — erased at compile time, so neither creates a runtime
-// edge: '@sarvinbox/core' can't be runtime-imported in the renderer (the
-// barrel pulls in node-only modules), and conversation-service value-imports
-// from this file (a value import back would be a cycle).
-import type { ConversationMessage } from './conversation-service';
+// A leaf module (it imports nothing back), so a plain value import is no cycle.
+import { compressHtmlToPlainTextForLLM } from './llm-text';
 
 export type AIProviderType = 'openai' | 'gemini' | 'sarv' | 'custom';
 
@@ -70,10 +65,12 @@ const POLISH_THREAD_ALWAYS_KEEP_NEWEST = 2;
 
 const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** Unix seconds → "Jun 12, 2026". Manual format keeps it locale-stable. */
+/** Unix seconds → "Jun 12, 2026". Manual format keeps it locale-stable. 0 (or
+ *  less) is an unreadable date, never the epoch: "Jan 1, 1970" in a prompt is a
+ *  confident wrong fact. */
 function formatShortDate(unixSeconds: number): string {
   const d = new Date(unixSeconds * 1000);
-  if (!Number.isFinite(unixSeconds) || isNaN(d.getTime())) return 'unknown date';
+  if (!Number.isFinite(unixSeconds) || unixSeconds <= 0 || isNaN(d.getTime())) return 'unknown date';
   return `${SHORT_MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
@@ -157,11 +154,25 @@ export function getCurrentUserEmail(fallback: string): string {
   return fallback;
 }
 
+/** One message of the transcript {@link buildPolishThreadContext} builds. */
+export interface PolishEntry {
+  /** Display name, or the address when there is none. */
+  sender: string;
+  address: string;
+  /** Unix SECONDS; 0 when unknown (sorted first, printed as "unknown date"). */
+  date: number;
+  /** The message body — HTML or plain text; reduced to plain text here. */
+  body: string;
+}
+
 /**
  * Build the conversation transcript used as polish context for replies.
  *
- * - Prefers AI-extracted per-message conversation (clean, deduplicated);
- *   falls back to raw thread emails (cleanBody) when extraction hasn't run.
+ * - The caller hands the conversation's MESSAGES (`entries`): the chat view's
+ *   turns — Standard's split, or, with a usable first-email split, the AI
+ *   view's composition — so quoted history is not repeated under every reply
+ *   and a looped-in email's history counts as the messages it quotes. Drafts
+ *   are never among them.
  * - CHRONOLOGICAL order (oldest → newest) — the transcript ends with the
  *   most recent message, i.e. the one the draft answers.
  * - Each message: `[Sender Name (you)] Jun 12, 2026: plain-text body`,
@@ -174,28 +185,11 @@ export function getCurrentUserEmail(fallback: string): string {
  * legacy single-email trail).
  */
 export function buildPolishThreadContext(args: {
-  conversationMessages?: ConversationMessage[] | null;
-  threadEmails: EmailRecord[];
+  entries: readonly PolishEntry[];
   currentUserEmail: string;
 }): string {
-  const { conversationMessages, threadEmails, currentUserEmail } = args;
+  const { entries, currentUserEmail } = args;
   const me = (currentUserEmail || '').trim().toLowerCase();
-
-  type Entry = { sender: string; address: string; date: number; body: string };
-  const entries: Entry[] =
-    conversationMessages && conversationMessages.length > 0
-      ? conversationMessages.map(m => ({
-          sender: m.fromName || m.fromAddress,
-          address: m.fromAddress,
-          date: m.date,
-          body: m.body,
-        }))
-      : (threadEmails || []).map(e => ({
-          sender: e.fromName || e.fromAddress,
-          address: e.fromAddress,
-          date: e.date,
-          body: e.cleanBody || '',
-        }));
 
   // Oldest → newest (stable sort keeps original order for equal dates).
   const formatted = entries
@@ -1290,7 +1284,11 @@ async function callGeminiAPI(
 
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`API request failed: ${response.status} - ${error}`);
+    // Carry the HTTP status, as main's client does: `classifyAIError` reads
+    // it, and without it a 401/403 (bad key) or another 4xx classified as
+    // `unknown` — retried as transient instead of reported as the provider's
+    // (auth) or the request's (client) problem.
+    throw Object.assign(new Error(`API request failed: ${response.status} - ${error}`), { status: response.status });
   }
 
   const data = await response.json();
@@ -1480,8 +1478,7 @@ const COMMON_SIGNATURE_SELECTORS = [
  * Selector shapes that MAY be signatures but Outlook sometimes uses as a
  * wrapper around the ENTIRE reply body (<div id="Signature">…whole
  * email…</div>). Only treat a match as a removable signature when the
- * element's text is short — real signatures are small. Mirrors
- * SIGNATURE_MAYBE_SELECTORS (<500 chars) in conversation-service.ts.
+ * element's text is short — real signatures are small (<500 chars).
  */
 const MAYBE_SIGNATURE_MAX_TEXT_CHARS = 500;
 
@@ -2257,8 +2254,7 @@ export function stripSignaturesSimple(htmlBody: string): string {
     // Remove elements matching common signature selectors. Maybe-signature
     // selectors (id/class*="signature") are size-guarded: Outlook wraps
     // ENTIRE reply bodies in <div id="Signature"> — removing those would
-    // blank the whole email. Explicit small selectors stay unguarded,
-    // same split as conversation-service.ts.
+    // blank the whole email. Explicit small selectors stay unguarded.
     for (const selector of COMMON_SIGNATURE_SELECTORS) {
       try {
         doc.querySelectorAll(selector).forEach(el => {
@@ -2304,12 +2300,11 @@ export async function generateThreadSummary(
   const sortedEmails = [...emails].sort((a, b) => a.date - b.date);
 
   // Format emails for the prompt. Use plaintext compression
-  // (compressHtmlToPlainTextForLLM, lazily imported to avoid a circular
-  // dep) — same approach as the chat-view extractor. Strips images,
-  // CSS, MSO chrome, signatures; keeps text + quote-prefix structure.
-  // Typically 5-10× smaller than HTML, which lets longer threads fit
-  // in the same token budget AND gives the summarizer cleaner signal.
-  const { compressHtmlToPlainTextForLLM } = await import('./conversation-service');
+  // (compressHtmlToPlainTextForLLM, from llm-text — a leaf module, so a
+  // plain import with no cycle). Strips images, CSS, MSO chrome,
+  // signatures; keeps text + quote-prefix structure. Typically 5-10×
+  // smaller than HTML, which lets longer threads fit in the same token
+  // budget AND gives the summarizer cleaner signal.
   const emailsText = sortedEmails.map((email, index) => {
     const cleanedBody = compressHtmlToPlainTextForLLM(email.body) || stripSignaturesSimple(email.body);
     const maxBodyLength = 800;

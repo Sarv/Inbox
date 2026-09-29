@@ -9,7 +9,6 @@ import type {
   AICategoryCounts,
   SpammerRecord,
   ThreadSummaryRecord,
-  ConversationExtractionRecord,
   CategoryDefinition,
   DynamicCategoryCounts,
 } from '../sqlite-storage';
@@ -701,110 +700,6 @@ export class AIRepository extends BaseRepository {
    */
   async deleteSummary(threadId: string): Promise<void> {
     this.db.prepare('DELETE FROM thread_summaries WHERE thread_id = ?').run(threadId);
-  }
-
-  // ========== Conversation Extractions ==========
-
-  /**
-   * Upsert conversation extraction
-   */
-  async upsertConversation(record: ConversationExtractionRecord): Promise<void> {
-    const id = record.id || `conv-${record.threadId}`;
-    this.db
-      .prepare(`
-        INSERT OR REPLACE INTO conversation_extractions (
-          id, thread_id, messages, email_count,
-          processed_email_ids, processed_at, model_used
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
-        id,
-        record.threadId,
-        record.messages,
-        record.emailCount,
-        record.processedEmailIds,
-        record.processedAt || this.now(),
-        record.modelUsed || null
-      );
-  }
-
-  /**
-   * Get conversation extraction by thread ID
-   */
-  async getConversation(threadId: string): Promise<ConversationExtractionRecord | null> {
-    const row = this.db
-      .prepare('SELECT * FROM conversation_extractions WHERE thread_id = ?')
-      .get(threadId) as any;
-
-    if (!row) return null;
-
-    return {
-      id: row.id,
-      threadId: row.thread_id,
-      messages: row.messages,
-      emailCount: row.email_count,
-      processedEmailIds: row.processed_email_ids,
-      processedAt: row.processed_at,
-      modelUsed: row.model_used,
-    };
-  }
-
-  /**
-   * Read the chat-view-parsed body for a single email.
-   *
-   * The chat-view extractor (renderer-side) already separated each
-   * email's own content from the quoted/forwarded history it pasted
-   * in. That parsed content is cached in `conversation_extractions`
-   * keyed by thread_id, with each ConversationMessage carrying its
-   * `sourceEmailId` and an `isExtracted` flag (false = the email's
-   * own body, true = a message extracted from quoted content).
-   *
-   * For consumers that want JUST the sender's new content (no quoted
-   * history) — like AI categorization — this is the cheap way to get
-   * it without re-running quote stripping on every request.
-   *
-   * Returns the body string if the chat-view has parsed this email
-   * AND its body is non-empty; otherwise null. Caller falls back to
-   * email.cleanBody / rawBody on null.
-   */
-  getChatViewBodyForEmail(threadId: string, emailId: string): string | null {
-    const row = this.db
-      .prepare('SELECT messages FROM conversation_extractions WHERE thread_id = ?')
-      .get(threadId) as { messages: string } | undefined;
-    if (!row?.messages) return null;
-    let messages: any[];
-    try {
-      messages = JSON.parse(row.messages);
-      if (!Array.isArray(messages)) return null;
-    } catch {
-      return null;
-    }
-    // The email's OWN content — the message where sourceEmailId
-    // matches and isExtracted is false (i.e. not pulled out of a
-    // quoted block). Multiple messages may share sourceEmailId when
-    // a single email contained nested forwards; we want the one
-    // attributed to the actual email, not the historical voices.
-    const own = messages.find(m => m && m.sourceEmailId === emailId && m.isExtracted === false);
-    const body = own?.body;
-    if (typeof body !== 'string') return null;
-    const stripped = body.replace(/<[^>]*>/g, '').trim();
-    if (stripped.length === 0) return null;
-    return body;
-  }
-
-  /**
-   * Delete conversation extraction by thread ID
-   */
-  async deleteConversation(threadId: string): Promise<void> {
-    this.db.prepare('DELETE FROM conversation_extractions WHERE thread_id = ?').run(threadId);
-  }
-
-  /**
-   * Clear all conversation extractions
-   */
-  async clearAllConversations(): Promise<number> {
-    const result = this.db.prepare('DELETE FROM conversation_extractions').run();
-    return result.changes;
   }
 
   // ========== Bulk Processing Methods ==========

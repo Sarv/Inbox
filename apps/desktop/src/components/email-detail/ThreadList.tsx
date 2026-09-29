@@ -1,10 +1,8 @@
+import { compareConversationOrder } from '@sarvinbox/core/conversation-membership';
 import {
   Loader2,
   ChevronDown,
   ChevronUp,
-  Reply,
-  ReplyAll,
-  Forward,
   Paperclip,
   MoreHorizontal,
   FileSignature,
@@ -13,8 +11,7 @@ import {
 import prettyBytes from 'pretty-bytes';
 import { useMemo, useState } from 'react';
 
-import { isSignatureDetectionEnabled, buildPolishThreadContext, getCurrentUserEmail } from '../../services/ai-service';
-import { useEmailStore } from '../../store/email-store';
+import { isSignatureDetectionEnabled } from '../../services/ai-service';
 import { qualifiesForSafeAutoLoad } from '../../store/helpers';
 import { firstFlaggedEmailId } from '../../utils/email-security';
 import { toForwardSource } from '../../utils/forward-quote';
@@ -26,9 +23,11 @@ import { InlineReply } from '../InlineReply';
 import { SandboxedEmailBody } from '../SandboxedEmailBody';
 
 import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
+import { buildEmailMenuHandlers, buildReplyHandlers } from './email-menu-handlers';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
 import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
+import { ReplyActionsBar } from './ReplyActionsBar';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
@@ -45,7 +44,6 @@ export function ThreadList({ ctx }: ThreadListProps) {
     displayEmail,
     threadEmails,
     duplicatesByEmailId,
-    conversationMessages,
     expandedThreads,
     showFullContent,
     showSignatures,
@@ -54,42 +52,21 @@ export function ThreadList({ ctx }: ThreadListProps) {
     replyingToEmail,
     inlineReplyDraft,
     loadingBodies,
-    handleReply,
-    handleReplyAll,
-    handleForward,
-    handleReportSpam,
-    handlePrintEmail,
-    handleDownloadEmail,
-    handleShowOriginal,
-    handleFilterLikeThis,
-    handleTranslate,
-    handleDetectSignature,
     handleCloseInlineReply,
     showInlineForward,
     forwardingEmail,
-    handleInlineForward,
+    inlineForwardDraft,
     handleCloseInlineForward,
     toggleThread,
     toggleFullContent,
     toggleSignature,
-    deleteEmail,
-    archiveEmail,
-    markAsRead,
     markAsStarred,
     fetchEmailBody,
     setInlineReplyMode,
+    // The thread transcript for reply polish — built once in useEmailDetail,
+    // the same one the card and the chat hand their composers.
+    polishThreadContext,
   } = ctx;
-
-  // Thread transcript for the reply polish feature — same wiring as
-  // ThreadChatView/EmailDetail so list-view replies get context too.
-  const currentUserEmail = useMemo(
-    () => getCurrentUserEmail(displayEmail?.toAddress || ''),
-    [displayEmail?.toAddress]
-  );
-  const polishThreadContext = useMemo(
-    () => buildPolishThreadContext({ conversationMessages, threadEmails, currentUserEmail }),
-    [conversationMessages, threadEmails, currentUserEmail]
-  );
 
   // Per-reply "Show details" toggle (full From/To/Cc/Date/Subject header).
   const [detailsOpen, setDetailsOpen] = useState<Set<string>>(new Set());
@@ -117,11 +94,15 @@ export function ThreadList({ ctx }: ThreadListProps) {
   return (
     <div className="space-y-2">
       {threadEmails
+        // `threadEmails` is already the conversation's MEMBERS (drafts and
+        // Trash copies out, by the one predicate the chat view and main's
+        // counts use — see useEmailDetail). A second, narrower filter here
+        // (`|draft|` only) was how this list and the chat view came to
+        // disagree about a draft synced back tagged only with its folder.
         .filter((e) => e.id !== displayEmail.id)
-        // Unsent drafts share the thread id but aren't messages — don't
-        // render them as sent cards in the conversation (List view).
-        .filter((e) => !(e.tags || '').includes('|draft|'))
-        .sort((a, b) => a.date - b.date)
+        // The one conversation order: an undated message goes last instead of
+        // posing as the first reply, and equal timestamps tie-break by id.
+        .sort(compareConversationOrder)
         .map((email) => {
           const isExpanded = expandedThreads.has(email.id);
           const threadAttachments = parseAttachments(email.attachmentNames, email.attachmentSizes)
@@ -230,19 +211,9 @@ export function ThreadList({ ctx }: ThreadListProps) {
                 </div>
                 <EmailMenu
                   email={email}
-                  onReply={() => { handleReply(email); }}
-                  onReplyAll={() => { handleReplyAll(email); }}
-                  onForward={() => { handleForward(email); }}
-                  onDelete={() => deleteEmail(email.id)}
-                  onArchive={() => archiveEmail(email.id)}
-                  onMarkUnread={async () => { await markAsRead(email.id, false); useEmailStore.getState().clearSelectedEmail(); }}
-                  onReportSpam={() => handleReportSpam(email.id)}
-                  onPrint={() => handlePrintEmail(email)}
-                  onDownload={() => handleDownloadEmail(email)}
-                  onShowOriginal={() => handleShowOriginal(email)}
-                  onFilterLikeThis={() => handleFilterLikeThis(email)}
-                  onTranslate={() => handleTranslate(email)}
-                  onDetectSignature={() => handleDetectSignature(email)}
+                  // A reply's menu: Forward in the popup, as it always has been
+                  // here; Delete and Archive act on this reply alone.
+                  {...buildEmailMenuHandlers(ctx, email, { forward: 'popup', removes: 'message' })}
                 />
               </div>
 
@@ -359,29 +330,12 @@ export function ThreadList({ ctx }: ThreadListProps) {
                     )}
                     {/* Reply/Forward buttons - hide if inline reply is active for this email */}
                     {!(showInlineReply && replyingToEmail?.id === email.id) && (
-                      <div className="mt-4 pt-3 border-t border-border flex items-center gap-2">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleReply(email); }}
-                          className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-                        >
-                          <Reply className="h-4 w-4" />
-                          Reply
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleReplyAll(email); }}
-                          className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-                        >
-                          <ReplyAll className="h-4 w-4" />
-                          Reply All
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleInlineForward(email); }}
-                          className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-                        >
-                          <Forward className="h-4 w-4" />
-                          Forward
-                        </button>
-                      </div>
+                      <ReplyActionsBar
+                        className="mt-4 pt-3 border-t border-border flex items-center gap-2"
+                        // Forward inline, under this reply — unlike the
+                        // anchor card's, which opens the popup composer.
+                        {...buildReplyHandlers(ctx, email, 'inline')}
+                      />
                     )}
                   </div>
                 );
@@ -420,6 +374,10 @@ export function ThreadList({ ctx }: ThreadListProps) {
                 <div id="inline-forward-compose">
                   <InlineForward
                     forwardEmail={toForwardSource(email)}
+                    // A forward restored by Undo send reopens with what was
+                    // written, not empty. The hook only ever holds the draft
+                    // of the forward that is open, so it belongs to this card.
+                    draft={inlineForwardDraft}
                     onClose={handleCloseInlineForward}
                     embedded={true}
                   />

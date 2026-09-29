@@ -8,7 +8,7 @@ import { applyFtsSchema, FTS_REBUILD_SQL } from '../fts-schema';
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
 import { rawBodyLengthExpression } from './body-metrics';
 import { cleanBodyExpression } from './body-storage';
-import { THREAD_META_SHARED } from './thread-sql';
+import { conversationFoldersIn, threadMetaSharedSql } from './thread-sql';
 
 const logger = createLogger('search-repository');
 
@@ -17,9 +17,6 @@ const SEARCH_SORT_COLUMNS = new Set([
   'date', 'received_date', 'subject', 'from_address',
   'importance_score', 'priority_score', 'created_at', 'updated_at',
 ]);
-
-/** Thread metadata subqueries — shared with email-repository via thread-sql. */
-const THREAD_META = THREAD_META_SHARED;
 
 /**
  * Repository for FTS5-powered search
@@ -30,6 +27,15 @@ export class SearchRepository extends BaseRepository {
   constructor(getDb: DatabaseAccessor, rowToRecord: (row: any) => EmailRecord) {
     super(getDb);
     this.rowToRecord = rowToRecord;
+  }
+
+  /**
+   * Thread metadata subqueries — shared with email-repository via thread-sql,
+   * built for THIS database's Drafts and Sent folders so a search row's "(N)"
+   * is the same conversation-member count the list row shows.
+   */
+  private threadMeta(): string {
+    return threadMetaSharedSql(conversationFoldersIn(this.db));
   }
 
   /**
@@ -154,7 +160,7 @@ export class SearchRepository extends BaseRepository {
 
       // bm25 weights: email_id(0) > subject(10) > from_address(5) > from_name(3) > to(3) > cc(2) > attachments(2) > body(1)
       sql = `
-        SELECT ${this.emailSelect()}, ${THREAD_META},
+        SELECT ${this.emailSelect()}, ${this.threadMeta()},
                bm25(emails_fts, 0, 10, 5, 3, 3, 2, 2, 1) as relevance_score
         FROM emails_fts
         JOIN emails ON emails.id = emails_fts.email_id
@@ -162,7 +168,7 @@ export class SearchRepository extends BaseRepository {
       `;
       params.push(ftsQuery);
     } else {
-      sql = `SELECT ${this.emailSelect()}, ${THREAD_META} FROM emails WHERE 1=1`;
+      sql = `SELECT ${this.emailSelect()}, ${this.threadMeta()} FROM emails WHERE 1=1`;
     }
 
     // All folder/category/field/date/size filters (shared with count()).
@@ -437,7 +443,7 @@ export class SearchRepository extends BaseRepository {
    * only the free-text match differs: LIKE across the same fields FTS indexes.
    */
   private searchWithLike(query: SearchQuery): EmailRecord[] {
-    let sql = `SELECT ${this.emailSelect()}, ${THREAD_META} FROM emails WHERE 1=1`;
+    let sql = `SELECT ${this.emailSelect()}, ${this.threadMeta()} FROM emails WHERE 1=1`;
     const params: any[] = [];
 
     sql += this.appendFilters(query, params, { likeOnly: true });

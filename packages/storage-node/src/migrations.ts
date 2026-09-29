@@ -637,11 +637,16 @@ export const pipelineStatusTracking: Migration = {
     // Mark existing AI-processed emails as done for both pipelines
     db.exec(`UPDATE emails SET agent_status = 'done', agent_at = ai_processed_at WHERE ai_processed_at IS NOT NULL;`);
 
-    // Mark emails with existing thread extractions as extraction done
-    db.exec(`
-      UPDATE emails SET extraction_status = 'done'
-      WHERE thread_id IN (SELECT thread_id FROM conversation_extractions)
-    `);
+    // Mark emails with existing thread extractions as extraction done.
+    // Guarded: schema.sql no longer declares conversation_extractions (v98
+    // retired it), so on a fresh install the table does not exist here — and
+    // an unguarded read would throw, aborting the chain at v31.
+    if (hasLocalTable(db, 'conversation_extractions')) {
+      db.exec(`
+        UPDATE emails SET extraction_status = 'done'
+        WHERE thread_id IN (SELECT thread_id FROM conversation_extractions)
+      `);
+    }
 
     logger.info('Pipeline status tracking (v31) applied');
   },
@@ -3753,6 +3758,141 @@ export const inReplyToSelfRepair: Migration = {
   },
 };
 
+/** The first-email AI split cache (v97). One row per thread. */
+export const FIRST_EMAIL_SPLITS_TABLE = 'first_email_splits';
+
+/**
+ * The cache's DDL — the same statement `schema.sql` declares for a fresh
+ * install; `migrations.test.ts` holds the two to one column set.
+ *
+ *   * ONE row per thread (the primary key), and every write replaces the whole
+ *     row: the cache cannot grow past the number of threads.
+ *   * `ON DELETE CASCADE` from `threads`: every path that deletes a thread
+ *     (the husk drop after a re-thread, the rebuild's orphan sweep, a plain
+ *     delete) takes its split with it, so no orphan rows accumulate.
+ *   * The CHECK ties `parts` to success: a failure can never carry parts, and
+ *     a success can never be stored without them.
+ *   * The partial index serves the scheduler's "transient and due" scan.
+ */
+const FIRST_EMAIL_SPLITS_DDL = `
+  CREATE TABLE IF NOT EXISTS ${FIRST_EMAIL_SPLITS_TABLE} (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    first_key TEXT NOT NULL,
+    first_email_id TEXT NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    split_version INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ok', 'partial', 'skipped', 'transient', 'failed')),
+    quote_count INTEGER,
+    parts TEXT,
+    error_kind TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at INTEGER,
+    model_used TEXT,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    CHECK ((status IN ('ok', 'partial')) = (parts IS NOT NULL))
+  );
+  CREATE INDEX IF NOT EXISTS idx_first_email_splits_retry
+    ON ${FIRST_EMAIL_SPLITS_TABLE}(next_retry_at) WHERE status = 'transient';
+`;
+
+/**
+ * v97 — the first-email split cache, and the agent's own draft Message-IDs.
+ *
+ * `first_email_splits` replaces the whole-thread `conversation_extractions`
+ * cache for the chat view's AI mode: only the thread's FIRST email is split
+ * (that is where a looped-in recipient's earlier conversation lives), keyed by
+ * that email and the fingerprint of its stored body. The old table is dropped
+ * by v98.
+ *
+ * `agent_decisions.draft_message_id` records the Message-ID key of each draft
+ * the auto-drafter saved, so the "the user already has a draft in this thread"
+ * gate can tell the agent's own draft from the user's. Rows written before
+ * this migration have none, so an agent draft from before it counts as the
+ * user's — the conservative direction (one skipped auto-draft).
+ *
+ * Idempotent: the table and index are IF NOT EXISTS, the column goes through
+ * addColumnIfMissing. `agent_decisions` is created by v28; a database missing
+ * it (a partial fixture) is left alone rather than failing the whole chain.
+ */
+export const firstEmailSplits: Migration = {
+  version: 97,
+  name: 'first_email_splits',
+  up: (db) => {
+    db.exec(FIRST_EMAIL_SPLITS_DDL);
+    if (hasLocalTable(db, 'agent_decisions')) addColumnIfMissing(db, 'agent_decisions', 'draft_message_id', 'TEXT');
+    logger.info('First-email splits (v97): first_email_splits table and agent_decisions.draft_message_id added');
+  },
+  down: (db) => {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_first_email_splits_retry;
+      DROP TABLE IF EXISTS ${FIRST_EMAIL_SPLITS_TABLE};
+    `);
+    // agent_decisions is small (one row per proposal), so unlike the body-
+    // bearing tables it can take a real DROP COLUMN; nothing indexes it.
+    const cols = db.prepare('PRAGMA main.table_info(agent_decisions)').all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'draft_message_id')) {
+      db.exec('ALTER TABLE main.agent_decisions DROP COLUMN draft_message_id');
+    }
+  },
+};
+
+/** The retired whole-thread conversation cache — v98 drops it; its `down` restores this shape. */
+const CONVERSATION_EXTRACTIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS main.conversation_extractions (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL UNIQUE,
+    messages TEXT NOT NULL,
+    email_count INTEGER,
+    processed_email_ids TEXT,
+    processed_at INTEGER NOT NULL,
+    model_used TEXT,
+    created_at INTEGER DEFAULT (unixepoch()),
+    updated_at INTEGER DEFAULT (unixepoch())
+  );
+  CREATE INDEX IF NOT EXISTS main.idx_conversation_extractions_thread ON conversation_extractions(thread_id);
+`;
+
+/**
+ * v98 — retire the whole-thread conversation cache.
+ *
+ * `conversation_extractions` held the old chat-view AI mode's output: one row
+ * per thread, the WHOLE thread re-told by the model. Its rows are dropped, not
+ * converted — they carry exactly what the redesign exists to stop showing:
+ * draft bubbles, other accounts' messages (the old IPC wrote to the active
+ * account), bubbles bound to the wrong email by a ±26 h date match, and bodies
+ * the heuristic slicer had cut. The cost is one re-split per looped-in thread,
+ * into `first_email_splits` (v97).
+ *
+ * Also dropped: `idx_threads_chat_extraction`, which served only the old
+ * scheduler's "chat_email_count < message_count" scan. The `threads.chat_*`
+ * columns it indexed stay (a column drop rewrites the table) and are inert —
+ * nothing reads or writes them any more.
+ *
+ * `main.`-qualified: the shared contact directory is ATTACHed to the same
+ * connection, and an unqualified DROP resolves through it once `main` has no
+ * such object. Idempotent (IF EXISTS), and a no-op on a fresh install, whose
+ * schema.sql no longer declares the table.
+ */
+export const retireConversationExtractions: Migration = {
+  version: 98,
+  name: 'retire_conversation_extractions',
+  up: (db) => {
+    const hadCache = hasLocalTable(db, 'conversation_extractions');
+    db.exec(`
+      DROP INDEX IF EXISTS main.idx_conversation_extractions_thread;
+      DROP TABLE IF EXISTS main.conversation_extractions;
+      DROP INDEX IF EXISTS main.idx_threads_chat_extraction;
+    `);
+    if (hadCache) logger.info('Conversation cache retired (v98): conversation_extractions dropped');
+  },
+  down: (db) => {
+    // The old shape, empty: the rows are not recoverable, and an older build
+    // simply re-extracts on open.
+    db.exec(CONVERSATION_EXTRACTIONS_DDL);
+    db.exec('CREATE INDEX IF NOT EXISTS main.idx_threads_chat_extraction ON threads(chat_extracted_at, chat_email_count, message_count);');
+  },
+};
+
 /**
  * Create migration manager with the fresh schema
  */
@@ -3834,5 +3974,7 @@ export function createMigrationManager(
   manager.register(followUps);
   manager.register(trustedSenders);
   manager.register(inReplyToSelfRepair);
+  manager.register(firstEmailSplits);
+  manager.register(retireConversationExtractions);
   return manager;
 }

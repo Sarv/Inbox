@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { writeClipboard } from '../utils/clipboard';
+
 export type CopyStatus = 'idle' | 'copied' | 'error';
 
 /** How long the "Copied" / "Copy failed" acknowledgement stays up (ms). */
@@ -34,14 +36,7 @@ export function useCopyToClipboard(resetAfterMs: number = COPY_FEEDBACK_MS) {
   const copy = useCallback(
     async (text: string): Promise<boolean> => {
       clearResetTimer();
-      let copied = false;
-      try {
-        if (!navigator.clipboard) throw new Error('clipboard unavailable');
-        await navigator.clipboard.writeText(text);
-        copied = true;
-      } catch {
-        copied = false;
-      }
+      const copied = await writeClipboard(text);
       setStatus(copied ? 'copied' : 'error');
       resetTimer.current = setTimeout(() => setStatus('idle'), resetAfterMs);
       return copied;

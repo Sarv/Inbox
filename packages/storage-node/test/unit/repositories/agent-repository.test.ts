@@ -1030,3 +1030,70 @@ describe('AgentRepository — contact notes (knowledge base)', () => {
     expect(repo.searchNotes('invoice[42')).toHaveLength(0); // ordinary chars stay literal
   });
 });
+
+describe("AgentRepository — the agent's own draft Message-IDs (v97)", () => {
+  let db: Database.Database;
+  let repo: AgentRepository;
+
+  beforeEach(() => {
+    ({ db, repo } = newRepo());
+    db.prepare("INSERT INTO folders (id, name, path) VALUES ('f-inbox', 'INBOX', 'INBOX')").run();
+    for (const [thread, email] of [['t1', 'e1'], ['t1', 'e2'], ['t2', 'e3']]) {
+      db.prepare(`INSERT OR IGNORE INTO threads (id, subject, first_message_id, last_message_id, last_message_date)
+                  VALUES (?, 's', ?, ?, 1)`).run(thread, email, email);
+      db.prepare(`INSERT INTO emails (id, message_id, thread_id, folder_id, tags, subject, from_address, date,
+                    clean_body, raw_body, content_type, content_hash)
+                  VALUES (?, ?, ?, 'f-inbox', '|INBOX|', 's', 'a@x.test', 1, 'b', 'b', 'text', ?)`)
+        .run(email, `<${email}@x.test>`, thread, `h-${email}`);
+    }
+  });
+  afterEach(() => db.close());
+
+  // Breaks: the live-draft gate. Stored raw, the recorded id would not match
+  // the synced draft's `<Draft-…@Host>` form and the agent's own draft would
+  // read as the user's — every later auto-draft in the thread blocked.
+  it('records the Message-ID in lookup form and reads it back per thread', async () => {
+    await repo.saveDecision(decision({ id: 'd1', emailId: 'e1', threadId: 't1', proposedAction: 'reply' }));
+    expect(repo.recordDecisionDraftMessageId('d1', ' <Draft-1@Host.Test> ')).toBe(true);
+    expect(repo.agentDraftKeysForThread('t1')).toEqual(['draft-1@host.test']);
+    expect(repo.agentDraftKeysForThread('t2')).toEqual([]);
+  });
+
+  // Breaks: a decision whose email was re-threaded by a repair keeps its old
+  // thread_id, and its draft then counts as the user's in the email's new thread.
+  it('finds a decision through the email it answered when its thread_id is stale or missing', async () => {
+    await repo.saveDecision(decision({ id: 'd1', emailId: 'e2', threadId: 'old-thread', proposedAction: 'reply' }));
+    await repo.saveDecision(decision({ id: 'd2', emailId: 'e3', threadId: null, proposedAction: 'reply' }));
+    repo.recordDecisionDraftMessageId('d1', '<a@x>');
+    repo.recordDecisionDraftMessageId('d2', '<b@x>');
+    expect(repo.agentDraftKeysForThread('t1')).toEqual(['a@x']);
+    expect(repo.agentDraftKeysForThread('t2')).toEqual(['b@x']);
+  });
+
+  // Breaks: a meaningless "record" that cannot be looked up — a blank key, or
+  // a key on a decision that does not exist.
+  it('records nothing without a Message-ID or for an unknown decision', async () => {
+    await repo.saveDecision(decision({ id: 'd1', emailId: 'e1', threadId: 't1' }));
+    expect(repo.recordDecisionDraftMessageId('d1', '')).toBe(false);
+    expect(repo.recordDecisionDraftMessageId('d1', null)).toBe(false);
+    expect(repo.recordDecisionDraftMessageId('nope', '<a@x>')).toBe(false);
+    expect(repo.agentDraftKeysForThread('t1')).toEqual([]);
+  });
+
+  // Breaks: the auto-drafter records the id BEFORE saving; a save that then
+  // fails must not leave a key naming a draft that never existed — and the
+  // clear must not wipe a DIFFERENT key recorded since (a later, real draft).
+  it('clears exactly the recorded key, in any spelling, and nothing else', async () => {
+    await repo.saveDecision(decision({ id: 'd1', emailId: 'e1', threadId: 't1', proposedAction: 'reply' }));
+    repo.recordDecisionDraftMessageId('d1', '<Draft-1@Host>');
+    expect(repo.clearDecisionDraftMessageId('d1', '<draft-OTHER@host>')).toBe(false);
+    expect(repo.agentDraftKeysForThread('t1')).toEqual(['draft-1@host']);
+
+    expect(repo.clearDecisionDraftMessageId('d1', ' draft-1@HOST ')).toBe(true);
+    expect(repo.agentDraftKeysForThread('t1')).toEqual([]);
+    // Idempotent, and a blank id or an unknown decision is a no-op.
+    expect(repo.clearDecisionDraftMessageId('d1', '<Draft-1@Host>')).toBe(false);
+    expect(repo.clearDecisionDraftMessageId('d1', null)).toBe(false);
+    expect(repo.clearDecisionDraftMessageId('nope', '<Draft-1@Host>')).toBe(false);
+  });
+});

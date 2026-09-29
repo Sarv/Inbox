@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../../../helpers/render';
 
+import { chatFieldsFor, type ChatFieldsOptions } from './chat-context-fixture';
 import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
 
 /**
@@ -28,27 +29,36 @@ vi.mock('@sarv-in/email-chat-view', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   MailChatView: ({
     messages,
+    currentUserAddress,
     renderHeaderMeta,
     renderFooter,
+    renderQuickActions,
   }: {
     messages: readonly { id: string; body: string }[];
+    currentUserAddress?: string;
     renderHeaderMeta?: (message: { id: string }) => unknown;
     renderFooter?: (message: { id: string }) => unknown;
+    renderQuickActions?: (message: { id: string }) => unknown;
   }) => (
-    <div data-testid="chat-view">
-      {messages.map((message) => (
-        <div key={message.id} data-testid="bubble" data-message-id={message.id}>
-          {/* The real header is sender, recipients, then the time — the mock
-              keeps only the time, because the time is what the meta slot has
-              to land after. */}
-          <div data-testid="bubble-head">
-            <time data-testid="bubble-time">10:00</time>
-            {renderHeaderMeta?.(message) as never}
+    <div data-testid="chat-view" data-current-user={currentUserAddress}>
+      {messages.map((message) => {
+        // Like the library: a falsy answer renders no element at all.
+        const quick = renderQuickActions?.(message);
+        return (
+          <div key={message.id} data-testid="bubble" data-message-id={message.id}>
+            {/* The real header is sender, recipients, then the time — the mock
+                keeps only the time, because the time is what the meta slot has
+                to land after. */}
+            <div data-testid="bubble-head">
+              <time data-testid="bubble-time">10:00</time>
+              {renderHeaderMeta?.(message) as never}
+            </div>
+            <div data-testid="bubble-body" dangerouslySetInnerHTML={{ __html: message.body }} />
+            <div data-testid="bubble-footer">{renderFooter?.(message) as never}</div>
+            {quick ? <div data-testid="bubble-quick">{quick as never}</div> : null}
           </div>
-          <div data-testid="bubble-body" dangerouslySetInnerHTML={{ __html: message.body }} />
-          <div data-testid="bubble-footer">{renderFooter?.(message) as never}</div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   ),
 }));
@@ -65,7 +75,6 @@ vi.mock('../../../../../src/components/attachment-viewer/useAttachmentActions', 
   useAttachmentActions: () => ({ saveCopy: vi.fn() }),
 }));
 vi.mock('../../../../../src/services/ai-service', () => ({
-  buildPolishThreadContext: () => '',
   getCurrentUserEmail: () => 'me@acme.example',
 }));
 vi.mock('../../../../../src/services/image-cache', () => ({
@@ -125,28 +134,40 @@ const HUMAN = email({
 /** A ThreadChatView context: the fields it reads, stubs for every handler.
  *  The booleans are spelled out because a Proxy fallback returns a function,
  *  and a function is truthy. */
-const context = (threadEmails: EmailRecord[]) =>
+const context = (threadEmails: EmailRecord[], chat: ChatFieldsOptions = {}) =>
   new Proxy(
     {
       displayEmail: threadEmails[0],
       threadEmails,
-      conversationMessages: null,
-      conversationLoading: false,
-      conversationError: null,
-      conversationProgress: null,
+      // Standard's turns, split the way useEmailDetail splits them.
+      ...chatFieldsFor(threadEmails, chat),
       showAIView: false,
+      // The chat is the reading surface, which is what gates its closing reply
+      // row. Spelled out: the fallback's function would read as true anyway,
+      // and a test must not depend on that by accident.
+      chatViewActive: true,
       showInlineReply: false,
       showInlineForward: false,
       replyingToEmail: null,
       forwardingEmail: null,
       inlineReplyDraft: null,
+      inlineForwardDraft: undefined,
       inlineReplyMode: 'reply',
-      handleReExtractMessage: undefined,
     } as Record<string, unknown>,
     { get: (target, key) => (key in target ? target[key as string] : vi.fn()) },
   ) as never;
 
 describe('ThreadChatView', () => {
+  // The chat's "me" is the pane's one resolved address (ctx.currentUserEmail),
+  // never a lookup of its own. A second lookup is how the chat, the prewarm and
+  // Standard's turns came to disagree about who the reader is — the reader's
+  // own messages then land on the other side of the conversation.
+  it('hands the library the pane\'s current-user address', () => {
+    const view = render(<ThreadChatView ctx={context([HUMAN], { currentUserEmail: 'alias@acme.example' })} />);
+    expect(view.find('[data-testid="chat-view"]')?.getAttribute('data-current-user')).toBe('alias@acme.example');
+    view.unmount();
+  });
+
   /** A spoof: a display name naming a domain the mail did not come from. */
   const SPOOF = email({
     id: 'spoof-1',

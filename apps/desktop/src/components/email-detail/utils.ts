@@ -326,6 +326,26 @@ export function formatRelativeDate(timestamp: number): string {
   }
 }
 
+/**
+ * A message as a listener hears it named: who sent it, and when.
+ *
+ * For the accessible name of a control cluster repeated on every message (a
+ * chat bubble's reply icons, its star and menu). Each carries identically named
+ * buttons, so without this, tabbing through a chat is a run of "Reply", "Reply
+ * all", "Forward" with nothing to say which message each one answers. An
+ * absolute time, unlike formatRelativeDate: a name must not change while it is
+ * being read.
+ */
+export function messageAccessibleName(message: {
+  fromName?: string | null;
+  fromAddress?: string | null;
+  /** Epoch seconds, as stored. */
+  date: number;
+}): string {
+  const sender = message.fromName?.trim() || message.fromAddress || 'unknown sender';
+  return `${sender}, ${format(new Date(message.date * 1000), 'MMM d, h:mm a')}`;
+}
+
 export interface ParsedAttachment {
   name: string;
   /** Byte size, or null when unknown (legacy rows without size metadata). */

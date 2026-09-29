@@ -21,8 +21,19 @@ import type {
   FollowUpStatus,
   LabelInput,
   DatabasePageStats,
+  FirstSplitClearCounts,
+  FirstSplitKey,
+  FirstSplitRow,
+  FirstSplitSaveRequest,
+  FirstSplitSaveResult,
 } from '@sarvinbox/core';
-import { bareSenderAddress, parseAddresses , createLogger } from '@sarvinbox/core';
+import {
+  bareSenderAddress,
+  parseAddresses,
+  createLogger,
+  firstMemberKeyOf,
+  isSameFirstSplitKey,
+} from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 
 import { BodyStorageBackfill } from './body-storage-backfill';
@@ -58,6 +69,13 @@ import {
 import { missingBodyClause } from './repositories/agent-eligibility';
 import { areBodyLengthsReady } from './repositories/body-metrics';
 import { rawBodyExpression } from './repositories/body-storage';
+import type { ConversationLightRow } from './repositories/email-repository';
+import {
+  FirstSplitRepository,
+  validateFirstSplitSave,
+  type FirstSplitCandidate,
+  type FirstSplitCandidateOptions,
+} from './repositories/first-split-repository';
 import { attachSharedContacts, SHARED_CONTACTS_FILE } from './shared-contacts';
 import { resolveThreadId, reattachOrphans, repairThreading as repairThreadingImpl } from './thread-resolver';
 
@@ -145,6 +163,7 @@ export class SQLiteStorage implements IEmailStorage {
   private _filterRepo: FilterRepository | null = null;
   private _followUpRepo: FollowUpRepository | null = null;
   private _labelRepo: LabelRepository | null = null;
+  private _firstSplitRepo: FirstSplitRepository | null = null;
 
   constructor(private config: SQLiteStorageConfig) {}
 
@@ -224,6 +243,13 @@ export class SQLiteStorage implements IEmailStorage {
       this._labelRepo = new LabelRepository(() => this.db!);
     }
     return this._labelRepo;
+  }
+
+  private get firstSplitRepo(): FirstSplitRepository {
+    if (!this._firstSplitRepo) {
+      this._firstSplitRepo = new FirstSplitRepository(() => this.db!);
+    }
+    return this._firstSplitRepo;
   }
 
   // ========== Connection & Lifecycle ==========
@@ -417,6 +443,7 @@ export class SQLiteStorage implements IEmailStorage {
       this._filterRepo = null;
       this._followUpRepo = null;
       this._labelRepo = null;
+      this._firstSplitRepo = null;
     }
   }
 
@@ -992,6 +1019,145 @@ export class SQLiteStorage implements IEmailStorage {
   async getEmailsByThread(threadId: string): Promise<EmailRecord[]> {
     this.ensureInitialized();
     return this.emailRepo.getByThread(threadId);
+  }
+
+  // ---- Conversation membership (core predicate; see EmailRepository) ----
+
+  /** Every row of a thread, drafts and Trash copies included — light columns, no bodies. */
+  getThreadLightRowsSync(threadId: string): ConversationLightRow[] {
+    this.ensureInitialized();
+    return this.emailRepo.getThreadLightRowsSync(threadId);
+  }
+
+  /** The conversation's members (never a draft) as light rows, in conversation order. */
+  getConversationMemberRowsSync(threadId: string): ConversationLightRow[] {
+    this.ensureInitialized();
+    return this.emailRepo.getConversationMemberRowsSync(threadId);
+  }
+
+  /** The conversation's members as full records, in conversation order. */
+  getConversationMembers(threadId: string): EmailRecord[] {
+    this.ensureInitialized();
+    return this.emailRepo.getConversationMembers(threadId);
+  }
+
+  /** The first-email split key: the first member and its STORED raw body's fingerprint. */
+  firstMemberKeySync(threadId: string): FirstSplitKey | null {
+    this.ensureInitialized();
+    return this.emailRepo.firstMemberKeySync(threadId);
+  }
+
+  /** Does the email's conversation hold a (non-draft, non-Trash) member after it? Undated email: any other member. */
+  hasNewerMember(threadId: string, emailId: string): boolean {
+    this.ensureInitialized();
+    return this.emailRepo.hasNewerMember(threadId, emailId);
+  }
+
+  /**
+   * Does the thread hold a live draft the USER is writing? The agent's own
+   * saved drafts (their Message-IDs recorded on the decision) do not count;
+   * nor do drafts in Trash, `\Deleted` ones or Sent copies. The auto-drafter's
+   * gate: it must not write a reply over one the user already started.
+   */
+  hasLiveUserDraft(threadId: string): boolean {
+    this.ensureInitialized();
+    return this.emailRepo.hasLiveUserDraftSync(threadId, this.agentRepo.agentDraftKeysForThread(threadId));
+  }
+
+  // ---- First-email split cache (v97; rules in core utils/first-split) ----
+
+  /** The stored split row for a thread, whatever key it was computed for, or null. */
+  getFirstSplitSync(threadId: string): FirstSplitRow | null {
+    this.ensureInitialized();
+    return this.firstSplitRepo.getSync(threadId);
+  }
+
+  /**
+   * Store a run's result — in ONE immediate transaction that first recomputes
+   * the thread's current key from the live rows:
+   *
+   *   * the first email, or its stored body, changed since the run read it →
+   *     `{ applied: false, reason: 'stale' }`, nothing written (a raced or
+   *     interrupted run must never cache a split of an email that is no longer
+   *     first, nor one of a body since re-healed);
+   *   * a malformed payload → `invalid`;
+   *   * a failure or skip over a usable split for the same key → `kept`;
+   *   * otherwise the whole row is replaced (see `FirstSplitRepository.saveSync`).
+   *
+   * The write uses the RECOMPUTED key, so the stored row id is the current one.
+   */
+  saveFirstSplit(request: FirstSplitSaveRequest, now: number = Math.floor(Date.now() / 1000)): FirstSplitSaveResult {
+    this.ensureInitialized();
+    const input = validateFirstSplitSave(request);
+    if (!input || !request.key || typeof request.key.threadId !== 'string') {
+      return { applied: false, reason: 'invalid' };
+    }
+    const save = this.db!.transaction((): FirstSplitSaveResult => {
+      const current = this.emailRepo.firstMemberKeySync(request.key.threadId);
+      if (!current || !isSameFirstSplitKey(current, request.key)) return { applied: false, reason: 'stale' };
+      return this.firstSplitRepo.saveSync(current, input, now);
+    });
+    return save.immediate();
+  }
+
+  /** Drop one thread's split (e.g. its first email's body was re-healed). */
+  deleteFirstSplit(threadId: string): boolean {
+    this.ensureInitialized();
+    return this.firstSplitRepo.deleteSync(threadId);
+  }
+
+  /**
+   * Drop every row of this account's split cache. Returns how many rows went
+   * and how many of them were saved splits (bookkeeping rows are not).
+   */
+  clearAllFirstSplits(): FirstSplitClearCounts {
+    this.ensureInitialized();
+    return this.firstSplitRepo.clearAll();
+  }
+
+  /**
+   * Threads the background first-split job should look at (see
+   * `FirstSplitRepository.listCandidates`): every pre-selected thread is
+   * confirmed against the membership predicate, and only confirmed ones the
+   * caller's `options.accept` takes count against `scanLimit`.
+   */
+  listFirstSplitCandidates(options: FirstSplitCandidateOptions): FirstSplitCandidate[] {
+    this.ensureInitialized();
+    return this.firstSplitRepo.listCandidates(options, (threadId) => {
+      const first = this.emailRepo.getConversationMemberRowsSync(threadId)[0];
+      return first ? { id: first.id, key: firstMemberKeyOf(first) } : null;
+    });
+  }
+
+  /**
+   * Record `skipped` (quote count unknown) for each thread under its CURRENT
+   * key, in one immediate transaction, and return how many rows were written.
+   * The scheduler's way to retire a candidate it will never nominate (no
+   * reply/forward evidence): with a current row the thread leaves the
+   * candidate scan for good, until its first email changes or the split
+   * version moves on. An on-open run is unaffected (`skipped` may still run
+   * when the chat rules say the email is eligible).
+   *
+   * The same guards as {@link saveFirstSplit}: a thread with no member (only
+   * drafts, or gone) is left alone, and a usable split for the current key is
+   * kept (core `shouldReplace`) — so a raced renderer split always wins.
+   */
+  skipFirstSplits(threadIds: readonly string[], now: number = Math.floor(Date.now() / 1000)): number {
+    this.ensureInitialized();
+    if (threadIds.length === 0) return 0;
+    const skip = this.db!.transaction((): number => {
+      let written = 0;
+      for (const threadId of threadIds) {
+        const current = this.emailRepo.firstMemberKeySync(threadId);
+        if (!current) continue;
+        const result = this.firstSplitRepo.saveSync(current, {
+          status: 'skipped', parts: null, errorKind: null, quoteCount: null, modelUsed: null,
+        }, now);
+        if (result.applied) written += 1;
+      }
+      return written;
+    });
+    return skip.immediate();
   }
 
   async fullTextSearch(query: string, options?: SearchQuery): Promise<EmailRecord[]> {
@@ -2609,28 +2775,6 @@ export class SQLiteStorage implements IEmailStorage {
     return this.aiRepo.deleteSummary(threadId);
   }
 
-  // ========== Conversation Extractions ==========
-
-  async upsertConversation(record: ConversationExtractionRecord): Promise<void> {
-    this.ensureInitialized();
-    return this.aiRepo.upsertConversation(record);
-  }
-
-  async getConversation(threadId: string): Promise<ConversationExtractionRecord | null> {
-    this.ensureInitialized();
-    return this.aiRepo.getConversation(threadId);
-  }
-
-  async deleteConversation(threadId: string): Promise<void> {
-    this.ensureInitialized();
-    return this.aiRepo.deleteConversation(threadId);
-  }
-
-  async clearAllConversations(): Promise<number> {
-    this.ensureInitialized();
-    return this.aiRepo.clearAllConversations();
-  }
-
   async getUnprocessedEmailCount(limit: number = 10000, skipRead: boolean = false): Promise<number> {
     this.ensureInitialized();
     return this.aiRepo.getUnprocessedEmailCount(limit, skipRead);
@@ -2671,11 +2815,6 @@ export class SQLiteStorage implements IEmailStorage {
   getParseFailureCounts(maxRetries: number): { pendingRetry: number; givenUp: number } {
     this.ensureInitialized();
     return this.aiRepo.getParseFailureCounts(maxRetries);
-  }
-
-  getChatViewBodyForEmail(threadId: string, emailId: string): string | null {
-    this.ensureInitialized();
-    return this.aiRepo.getChatViewBodyForEmail(threadId, emailId);
   }
 
   // ========== Pending Operations ==========
@@ -3237,16 +3376,6 @@ export interface ThreadSummaryRecord {
   modelUsed?: string | null;
   createdAt?: number;
   updatedAt?: number;
-}
-
-export interface ConversationExtractionRecord {
-  id?: string;
-  threadId: string;
-  messages: string;              // JSON stringified ConversationMessage[]
-  emailCount: number;
-  processedEmailIds: string;     // JSON stringified string[] — tracks which emails have been processed
-  processedAt: number;
-  modelUsed?: string | null;
 }
 
 export interface AICategoryCounts {

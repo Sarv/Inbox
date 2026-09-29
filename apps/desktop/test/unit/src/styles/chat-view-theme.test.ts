@@ -242,3 +242,37 @@ describe('paper tokens', () => {
     expect(darkBlock).not.toContain('--paper');
   });
 });
+
+/**
+ * A bubble's action cluster while its menu is open, as the cascade resolves it.
+ *
+ * The library shows `.sec-actions` only on row hover or focus-within. The menu
+ * is portalled to <body> and takes focus, so an open menu leaves the row with
+ * neither.
+ */
+describe('the action cluster under an open menu', () => {
+  /** A row with the three-dot trigger in its actions, expanded or not. */
+  function actions(expanded: boolean) {
+    document.head.innerHTML = `<style>${APP_TOKENS}</style><style>${LIBRARY}</style><style>${THEME}</style>`;
+    document.body.innerHTML = [
+      '<div class="sec-row sec-row--theirs"><div class="sec-col">',
+      '<div class="sec-bubble sec-bubble--theirs"></div>',
+      `<div id="actions" class="sec-actions"><div role="group"><button aria-expanded="${expanded}"></button></div></div>`,
+      '</div></div>',
+    ].join('');
+    return getComputedStyle(document.getElementById('actions')!);
+  }
+
+  // Regression: the cluster faded out from under its own open menu — the
+  // trigger vanished while the reader was choosing from what it opened. The
+  // old pin was an inline opacity on a CHILD of `.sec-actions`, which
+  // multiplies with the library's 0 and never showed anything.
+  it('stays shown while its menu is open, with no hover or focus in the row', () => {
+    expect(actions(true).opacity).toBe('1');
+  });
+
+  // The control: closed, the library's hover-only rule is left alone.
+  it('stays hidden while closed and not hovered', () => {
+    expect(actions(false).opacity).toBe('0');
+  });
+});

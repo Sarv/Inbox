@@ -1,6 +1,6 @@
 {
   "name": "@sarvinbox/desktop",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "productName": "Sarv Inbox",
   "description": "Sarv Inbox — AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
@@ -30,7 +30,7 @@
     "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"
   },
   "dependencies": {
-    "@sarv-in/email-chat-view": "^0.2.5",
+    "@sarv-in/email-chat-view": "^0.2.6",
     "@sarv-in/mailguard": "^0.4.2",
     "@sarvinbox/core": "workspace:*",
     "@sarvinbox/storage-node": "workspace:*",

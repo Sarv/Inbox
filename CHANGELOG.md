@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **One switch for AI sorting, and it works.** Settings → AI → Categorization
+  had a "Smart Email Categorization" switch that stopped nothing: with it off,
+  new mail was still sent to your AI provider to be sorted. It is gone. The
+  Categorization tab now shows whether automatic sorting is on, with a link to
+  AI Assist (Settings → AI → Email Agent), the switch that really turns it
+  off. The AI dashboard's Start Processing button also waits for AI Assist.
+  If the app ever can't read your saved AI Assist setting, it now treats AI
+  Assist as off rather than on.
+
+## [1.2.6] - 2026-09-29
+
 ### Added
 - **Follow-up reminders: "remind me if nobody replies".** A bell button beside
   Send (in the composer, inline reply and forward) sets a reminder for 1 day,
@@ -27,8 +39,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is what a forged copy of a trusted address looks like. Trusted senders
   are listed under Security → Spam, where they can be removed; reporting one
   of their messages as spam also removes them.
+- **Reply from the chat view without leaving it.** The chat view now ends
+  with the same Reply, Reply all and Forward buttons as the thread view, and
+  hovering over any message shows Reply, Reply all and Forward icons in its
+  bottom-right corner. Forward opens inline, like Reply.
+- **Right-click a message in the chat view for its menu.** Right-clicking
+  anywhere in a message, including inside a formatted email, opens the same
+  menu as its ⋯ button, right where you clicked. With text selected it also
+  offers Copy, and over a link it offers Open link and Copy link.
+- **Looped-in emails can be read as a conversation.** When someone forwards
+  you a thread or copies you in partway through, the earlier messages arrive
+  only as quoted text inside that one email. Chat View is now offered for such
+  an email. One that quotes two or more earlier messages opens in Chat View on
+  its own when Auto Chat View is on; one that quotes a single message stays as
+  it is until you switch with the List/Chat toggle. Newsletters and other
+  designed bulk mail are left as they are.
+
+### Changed
+- **The AI view in Chat View is the standard conversation, with AI for the
+  first email only.** Every message is shown exactly as the standard Chat View
+  shows it, except the thread's first email: AI splits the earlier
+  conversation quoted inside it into separate messages, each with its sender
+  and date. AI reads only that first email, and only while the thread is open
+  in Chat View; the List view never uses it. A first email that quotes two or
+  more messages is split by itself (and, with Auto Chat Extract on, ahead of
+  time in the background, in every account); one that quotes a single message
+  shows a Process now button instead. If the AI fails or misses part of the
+  history, that part is shown as the standard view shows it, so no message
+  disappears, and you can try again. Previously the AI view retold the whole
+  thread, and a failure could leave it blank.
+- **Saved AI splits are kept per account.** Each account keeps its own, and
+  Settings → AI Settings → Conversation Mode → Clear Cache now clears every
+  account and names any it could not clear. Results saved by the old AI view
+  are discarded on upgrade, so a looped-in conversation is split again once.
 
 ### Fixed
+- **Drafts no longer appear as sent messages.** An unsent draft in a thread —
+  including one another mail app saved in your Drafts folder — could show up
+  in Chat View, in the AI view or in the thread's message count as if it had
+  been sent. Every view now uses one rule for what belongs in a conversation,
+  so drafts and trashed copies are left out and the count in the message list
+  matches the thread. The AI no longer drafts a reply for a thread where you
+  already have a draft of your own.
+- **Discarding a draft no longer deletes a reply you sent.** A sent reply can
+  keep the "draft" mark from when it was being written. Discarding a draft in
+  that conversation, or sending another reply, then deleted the sent reply
+  from the app along with the draft, and could remove an unrelated draft from
+  your Drafts folder on the server. Only real drafts are deleted now.
 - **Mail no longer marked "a reply to itself".** Some mail servers report
   every message's own ID as the one it replies to, and the app believed them,
   so almost every message picked up spam-filter points for "claims to be a reply to
@@ -40,14 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with deceptive links. Links in Sarv email signatures, which go through a
   click-tracking address, are no longer flagged as pretending to be your own
   domain either. Existing mail is re-checked on the next launch.
-- **One switch for AI sorting, and it works.** Settings → AI → Categorization
-  had a "Smart Email Categorization" switch that stopped nothing: with it off,
-  new mail was still sent to your AI provider to be sorted. It is gone. The
-  Categorization tab now shows whether automatic sorting is on, with a link to
-  AI Assist (Settings → AI → Email Agent), the switch that really turns it
-  off. The AI dashboard's Start Processing button also waits for AI Assist.
-  If the app ever can't read your saved AI Assist setting, it now treats AI
-  Assist as off rather than on.
+- **Menus close when you click into an email.** An open message menu used to
+  stay open when you clicked inside a formatted email's body.
+- **Forward and reply boxes start fresh for each message.** Replying to or
+  forwarding a different message in the chat view used to keep the first
+  message's text, draft or attachments, and a forward restored by Undo Send
+  could reappear in later forwards.
 - **Sarv AI asks before it reads your mail.** Signing in with Sarv used to
   switch Sarv AI on straight away, and new mail from every account was sent
   to it. The app now asks first, and nothing is sent unless you agree or pick
@@ -516,7 +571,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.6...HEAD
+[1.2.6]: https://github.com/Sarv/Inbox/releases/tag/v1.2.6
 [1.2.5]: https://github.com/Sarv/Inbox/releases/tag/v1.2.5
 [1.2.4]: https://github.com/Sarv/Inbox/releases/tag/v1.2.4
 [1.2.3]: https://github.com/Sarv/Inbox/releases/tag/v1.2.3

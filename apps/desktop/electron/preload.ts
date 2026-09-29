@@ -6,7 +6,7 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp } from '@sarvinbox/core';
+import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DomainIdentityRow } from './services/domain-identity-store';
@@ -553,12 +553,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('ai:getThreadSummary', threadId),
     saveThreadSummary: (summary: any) =>
       ipcRenderer.invoke('ai:saveThreadSummary', summary),
-    getConversation: (threadId: string) =>
-      ipcRenderer.invoke('ai:getConversation', threadId),
-    saveConversation: (conversation: any) =>
-      ipcRenderer.invoke('ai:saveConversation', conversation),
-    clearAllConversations: () =>
-      ipcRenderer.invoke('ai:clearAllConversations'),
+    // First-email split cache — every call names its account (never the active one by default).
+    getFirstSplit: (accountId: string, threadId: string, options?: { withSource?: boolean }) =>
+      ipcRenderer.invoke('ai:firstSplit:get', accountId, threadId, options),
+    saveFirstSplit: (accountId: string, request: FirstSplitSaveRequest) =>
+      ipcRenderer.invoke('ai:firstSplit:save', accountId, request),
+    clearAllFirstSplits: () =>
+      ipcRenderer.invoke('ai:firstSplit:clearAll'),
     saveCategory: (category: any) =>
       ipcRenderer.invoke('ai:saveCategory', category),
     removeCategory: (emailId: string) =>
@@ -578,20 +579,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('ai:searchCount', searchQuery),
     searchSuggest: (partial: string) =>
       ipcRenderer.invoke('search:suggest', partial),
-    updateThreadExtraction: (threadId: string, emailCount: number) =>
-      ipcRenderer.invoke('ai:updateThreadExtraction', threadId, emailCount),
     setProviderConfigured: (configured: boolean) =>
       ipcRenderer.invoke('ai:setProviderConfigured', configured),
+    setBackgroundSplitEnabled: (enabled: boolean) =>
+      ipcRenderer.invoke('ai:setBackgroundSplitEnabled', enabled),
     listPromptTemplates: () => ipcRenderer.invoke('ai:listPromptTemplates'),
     updatePromptTemplate: (id: string, content: string) =>
       ipcRenderer.invoke('ai:updatePromptTemplate', id, content),
     resetPromptTemplate: (id: string) =>
       ipcRenderer.invoke('ai:resetPromptTemplate', id),
-    onExtractionBatch: (callback: (data: { threads: { id: string; messageCount: number }[] }) => void) => {
-      ipcRenderer.on('conversation:extract-batch', (_event, data) => callback(data));
+    // Main's first-split scheduler nominating threads (per account) for the
+    // renderer's background split job.
+    onFirstSplitCandidates: (callback: (data: { refs: { accountId: string; threadId: string }[] }) => void) => {
+      ipcRenderer.on('conversation:first-split-candidates', (_event, data) => callback(data));
     },
-    removeExtractionBatchListener: () => {
-      ipcRenderer.removeAllListeners('conversation:extract-batch');
+    removeFirstSplitCandidatesListener: () => {
+      ipcRenderer.removeAllListeners('conversation:first-split-candidates');
     },
   },
 
@@ -878,8 +881,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getNotesCount: (email: string) =>
       ipcRenderer.invoke('agent:getNotesCount', email),
     // Agentic reply drafting
-    draftReply: (emailId: string) =>
-      ipcRenderer.invoke('agent:draftReply', emailId),
+    draftReply: (emailId: string, accountId?: string) =>
+      ipcRenderer.invoke('agent:draftReply', emailId, accountId),
     // Pipeline control
     setAIConfig: (config: { type: string; apiKey: string; model: string; baseUrl?: string; authMethod?: 'apiKey' | 'oauth'; oauthProvider?: 'sarv'; oauthEmail?: string }) =>
       ipcRenderer.invoke('pipeline:setAIConfig', config),
@@ -1443,12 +1446,21 @@ export interface ElectronAPI {
       Promise<{ success: boolean; data?: ThreadSummaryRecord | null; error?: string }>;
     saveThreadSummary: (summary: any) =>
       Promise<{ success: boolean; error?: string }>;
-    getConversation: (threadId: string) =>
-      Promise<{ success: boolean; data?: any; error?: string }>;
-    saveConversation: (conversation: any) =>
-      Promise<{ success: boolean; error?: string }>;
-    clearAllConversations: () =>
-      Promise<{ success: boolean; data?: number; error?: string }>;
+    /**
+     * The first-email split cache row plus main's CURRENT key for the thread
+     * (its first conversation member and that email's stored-body
+     * fingerprint). `withSource` adds the first member's record — exactly
+     * what a run splits — and the members' distinct senders. Fails (never
+     * falls back to the active account) when `accountId` cannot be resolved.
+     */
+    getFirstSplit: (accountId: string, threadId: string, options?: { withSource?: boolean }) =>
+      Promise<{ success: boolean; data?: FirstSplitGetResult; error?: string }>;
+    /** Store a run's result; `data.applied` is false with reason stale / kept / invalid. */
+    saveFirstSplit: (accountId: string, request: FirstSplitSaveRequest) =>
+      Promise<{ success: boolean; data?: FirstSplitSaveResult; error?: string }>;
+    /** Clear the cache in every account; accounts that could not be cleared are listed. */
+    clearAllFirstSplits: () =>
+      Promise<{ success: boolean; data?: FirstSplitClearAllResult; error?: string }>;
     saveCategory: (category: any) =>
       Promise<{ success: boolean; error?: string }>;
     removeCategory: (emailId: string) =>
@@ -1473,9 +1485,14 @@ export interface ElectronAPI {
       Promise<{ success: boolean; data?: number; error?: string }>;
     searchSuggest: (partial: string) =>
       Promise<{ success: boolean; data?: string[]; error?: string }>;
-    updateThreadExtraction: (threadId: string, emailCount: number) =>
-      Promise<{ success: boolean; error?: string }>;
     setProviderConfigured: (configured: boolean) =>
+      Promise<{ success: boolean; error?: string }>;
+    /**
+     * Tell main's first-split scheduler whether the background split is on
+     * (conversation mode AND 'Auto Chat Extract'); it neither scans nor
+     * nominates while it is off.
+     */
+    setBackgroundSplitEnabled: (enabled: boolean) =>
       Promise<{ success: boolean; error?: string }>;
     listPromptTemplates: () =>
       Promise<{ success: boolean; data?: Array<{ id: string; label: string; description: string | null; content: string; defaultContent: string; updatedAt: number; createdAt: number }>; error?: string }>;
@@ -1483,8 +1500,13 @@ export interface ElectronAPI {
       Promise<{ success: boolean; error?: string }>;
     resetPromptTemplate: (id: string) =>
       Promise<{ success: boolean; error?: string }>;
-    onExtractionBatch: (callback: (data: { threads: { id: string; messageCount: number }[] }) => void) => void;
-    removeExtractionBatchListener: () => void;
+    /**
+     * Threads main's scheduler nominates for the background first-email split,
+     * each naming its account (`conversation:first-split-candidates`). One
+     * listener at a time: the renderer's job registers it once.
+     */
+    onFirstSplitCandidates: (callback: (data: { refs: { accountId: string; threadId: string }[] }) => void) => void;
+    removeFirstSplitCandidatesListener: () => void;
   };
   spammers: {
     add: (spammer: { email: string; name?: string; reason?: string }) =>
@@ -1667,6 +1689,12 @@ export interface ElectronAPI {
     getBehaviorProfile: () => Promise<{ success: boolean; data?: any; error?: string }>;
     getReplyStyleProfile: () => Promise<{ success: boolean; data?: any; error?: string }>;
     generateReply: (emailId: string) => Promise<{ success: boolean; data?: { subject: string; body: string; confidence: number } | null; error?: string }>;
+    /**
+     * Agentic reply draft for one email. With `accountId`, the email is read
+     * from THAT account (and fails if it cannot be resolved); without it, the
+     * active account.
+     */
+    draftReply: (emailId: string, accountId?: string) => Promise<{ success: boolean; data?: DraftResult; error?: string }>;
     getProposals: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
     resolveProposal: (proposalId: string, approved: boolean, actualAction?: string, feedback?: string) =>
       Promise<{ success: boolean; error?: string }>;

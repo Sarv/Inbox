@@ -1,6 +1,7 @@
 import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
 import type { SMTPConfig } from '@sarvinbox/core';
 import { readBlocklistPrefs, type BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
+import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
 import {
   bareSenderAddress,
   isImageAllowedFor,
@@ -1536,14 +1537,13 @@ export function setupAICategorizationListeners(useEmailStore: { setState: (state
   window.electronAPI.drafts?.onRemoved?.(({ threadId, messageIds }) => {
     const s = useEmailStore.getState();
     const ids = new Set(messageIds || []);
-    const isDraftRow = (e: any) => {
-      const t = e?.tags || '';
-      return t.includes('|draft|') || t.includes('|Drafts|') || t.includes('|[Gmail]/Drafts|');
-    };
+    // The ONE draft predicate (core `isDraftRow`) — a sent copy with a stale
+    // `|draft|` tag is the reader's reply and stays in the thread.
+    const folders = conversationFoldersOf(s.folders);
     const rowIds = new Set<string>();
     for (const e of [...s.emails, ...s.threadEmails, ...s.searchResults] as any[]) {
       if (e?.messageId && ids.has(e.messageId)) rowIds.add(e.id);
-      else if (threadId && e?.threadId === threadId && isDraftRow(e)) rowIds.add(e.id);
+      else if (threadId && e?.threadId === threadId && isDraftRow(e?.tags, folders)) rowIds.add(e.id);
     }
     rowIds.forEach((id) => s.removeDraftFromViews?.(id));
     s.loadFolders?.();

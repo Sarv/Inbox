@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-
+import { createPortal } from 'react-dom';
 
 import { useGalleryNavigation } from '../../hooks/useGalleryNavigation';
 import { getFileIcon, getFileType } from '../email-detail/utils';
@@ -104,7 +104,15 @@ export function AttachmentViewer({
   const busy = isBusy(emailId, filename);
   const canOpenExternally = isPreviewableAttachment(filename);
 
-  return (
+  // Portalled to <body>, out of whatever opened it. Drawn inline, a viewer
+  // opened from a chat bubble's attachment pill sat INSIDE the bubble in the
+  // DOM: a right-click on the previewed image counted as a right-click on the
+  // message, and opened the message menu over the preview (taking focus, and
+  // the Escape meant for the viewer). Out here the chat's "is this inside the
+  // bubble?" check turns it away. It also frees the fixed overlay from any
+  // ancestor's stacking context or containing block — a hovered chat row's
+  // `z-index`, a card's transform.
+  return createPortal(
     <div
       className="fixed inset-0 z-[200] flex flex-col bg-black/70 p-4"
       onClick={onClose}
@@ -209,7 +217,8 @@ export function AttachmentViewer({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

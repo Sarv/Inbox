@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../../../helpers/render';
 
+import { chatFieldsFor } from './chat-context-fixture';
 import { email, ELEVEN_AM, TEN_AM } from './email-fixture';
 
 /**
@@ -107,7 +108,6 @@ vi.mock('../../../../../src/components/attachment-viewer/useAttachmentActions', 
   useAttachmentActions: () => ({ saveCopy, isBusy: () => false }),
 }));
 vi.mock('../../../../../src/services/ai-service', () => ({
-  buildPolishThreadContext: () => '',
   getCurrentUserEmail: () => 'me@acme.example',
 }));
 vi.mock('../../../../../src/services/image-cache', () => ({
@@ -153,18 +153,19 @@ const context = (threadEmails: EmailRecord[]) =>
     {
       displayEmail: threadEmails[0],
       threadEmails,
-      conversationMessages: null,
-      conversationLoading: false,
-      conversationError: null,
-      conversationProgress: null,
+      // Standard's turns, split the way useEmailDetail splits them.
+      ...chatFieldsFor(threadEmails),
       showAIView: false,
+      // Spelled out, like every flag here: the Proxy's fallback is a function,
+      // and a function is truthy.
+      chatViewActive: true,
       showInlineReply: false,
       showInlineForward: false,
       replyingToEmail: null,
       forwardingEmail: null,
       inlineReplyDraft: null,
+      inlineForwardDraft: undefined,
       inlineReplyMode: 'reply',
-      handleReExtractMessage: undefined,
     } as Record<string, unknown>,
     { get: (target, key) => (key in target ? target[key as string] : vi.fn()) },
   ) as never;

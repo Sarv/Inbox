@@ -283,7 +283,10 @@ describe('AgentRepository — pipeline work queues', () => {
     expect(repo.getEmailsPendingExtraction(10, 0)).toHaveLength(5); // window disabled
   });
 
-  it('marks extraction done per email and per whole thread', () => {
+  // CHANGED (AI-view redesign): the per-THREAD variant, markExtractionDoneByThread,
+  // was deleted with its only caller (Pipeline 1's 5-second poll for a renderer
+  // extraction). Pipeline 1 now marks each email done on its own storage.
+  it('marks extraction done per email, leaving the thread siblings pending', () => {
     seedEmail(db, { id: 'm1', threadId: 't-shared' });
     seedEmail(db, { id: 'm2', threadId: 't-shared' });
     seedEmail(db, { id: 'm3', threadId: 't-other' });
@@ -291,8 +294,8 @@ describe('AgentRepository — pipeline work queues', () => {
     repo.markExtractionDone('m3');
     expect(repo.getEmailsPendingExtraction().map((e) => e.id).sort()).toEqual(['m1', 'm2']);
 
-    repo.markExtractionDoneByThread('t-shared');
-    expect(repo.getEmailsPendingExtraction()).toEqual([]);
+    repo.markExtractionDone('m1');
+    expect(repo.getEmailsPendingExtraction().map((e) => e.id)).toEqual(['m2']);
     const stamped = db
       .prepare('SELECT extraction_at AS at FROM emails WHERE id = ?')
       .get('m1') as { at: number };

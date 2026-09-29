@@ -2,9 +2,6 @@ import {
   Loader2,
   ChevronDown,
   ChevronUp,
-  Reply,
-  ReplyAll,
-  Forward,
   Paperclip,
   Star,
   FileSignature,
@@ -19,9 +16,11 @@ import { SandboxedEmailBody } from '../SandboxedEmailBody';
 
 import { CalendarInviteBanner } from './CalendarInviteBanner';
 import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
+import { buildEmailMenuHandlers, buildReplyHandlers } from './email-menu-handlers';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
 import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
+import { ReplyActionsBar } from './ReplyActionsBar';
 import { SecurityIndicator } from './SecurityIndicator';
 import { SenderAvatar } from './SenderAvatar';
 import type { EmailDetailContext } from './types';
@@ -51,20 +50,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
     chatViewActive,
     loadingBodies,
     failedBodies,
-    handleReply,
-    handleReplyAll,
-    handleForward,
-    handleDelete,
-    handleArchive,
-    handleReportSpam,
-    handlePrintEmail,
-    handleDownloadEmail,
-    handleShowOriginal,
-    handleFilterLikeThis,
-    handleTranslate,
-    handleDetectSignature,
     toggleSignature,
-    markAsRead,
     markAsStarred,
   } = ctx;
 
@@ -169,19 +155,9 @@ export function EmailCard({ ctx }: EmailCardProps) {
                 </span>
                 <EmailMenu
                   email={displayEmail}
-                  onReply={() => handleReply(displayEmail)}
-                  onReplyAll={() => handleReplyAll(displayEmail)}
-                  onForward={() => handleForward(displayEmail)}
-                  onDelete={handleDelete}
-                  onArchive={handleArchive}
-                  onMarkUnread={async () => { await markAsRead(displayEmail.id, false); useEmailStore.getState().clearSelectedEmail(); }}
-                  onReportSpam={() => handleReportSpam(displayEmail.id)}
-                  onPrint={() => handlePrintEmail(displayEmail)}
-                  onDownload={() => handleDownloadEmail(displayEmail)}
-                  onShowOriginal={() => handleShowOriginal(displayEmail)}
-                  onFilterLikeThis={() => handleFilterLikeThis(displayEmail)}
-                  onTranslate={() => handleTranslate(displayEmail)}
-                  onDetectSignature={() => handleDetectSignature(displayEmail)}
+                  // The anchor card stands for the conversation: Forward in the
+                  // popup, and Delete / Archive take the whole thread.
+                  {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', removes: 'thread' })}
                 />
               </div>
             </div>
@@ -330,29 +306,13 @@ export function EmailCard({ ctx }: EmailCardProps) {
 
           {/* Quick Actions Footer - hide when inline reply is active for this email */}
           {!(showInlineReply && replyingToEmail?.id === displayEmail.id) && (
-            <div className="px-4 py-3 border-t border-border bg-accent/10 flex items-center gap-2">
-              <button
-                onClick={() => handleReply(displayEmail)}
-                className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-              >
-                <Reply className="h-4 w-4" />
-                Reply
-              </button>
-              <button
-                onClick={() => handleReplyAll(displayEmail)}
-                className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-              >
-                <ReplyAll className="h-4 w-4" />
-                Reply All
-              </button>
-              <button
-                onClick={() => handleForward(displayEmail)}
-                className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent rounded-md transition-colors text-sm font-medium"
-              >
-                <Forward className="h-4 w-4" />
-                Forward
-              </button>
-            </div>
+            <ReplyActionsBar
+              className="px-4 py-3 border-t border-border bg-accent/10 flex items-center gap-2"
+              // Forward in the popup composer, unlike Forward under a reply
+              // (inline). As it always was here — the shared row does not
+              // decide this.
+              {...buildReplyHandlers(ctx, displayEmail, 'popup')}
+            />
           )}
         </>
       )}

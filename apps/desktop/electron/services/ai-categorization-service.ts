@@ -129,6 +129,24 @@ interface LoadedCategoryDef {
 const BATCH_SIZE = 1;
 const CONCURRENCY = 5;
 const MAX_BODY_LENGTH = 1000;
+
+/**
+ * The body the categorizer's prompt sees for one email: the raw body cleaned
+ * for the LLM (CSS, inline images, MSO/Outlook chrome and every attribute but
+ * `<a href>` stripped; text and basic structure kept), or `cleanBody` when
+ * there is no raw body.
+ *
+ * The same for a threaded email as for a single one. There used to be a
+ * first branch that read the chat view's conversation cache for a threaded
+ * email ("only what THIS sender wrote"); it looked for a cached shape no
+ * writer ever stored, so it always came back empty and every email already
+ * took the raw-body path below. It was removed with the cache (AI-view
+ * redesign) — the categorizer's effective input did not change.
+ */
+export function categorizationBodyOf(email: Pick<EmailRecord, 'rawBody' | 'cleanBody'>): string {
+  if (email.rawBody) return cleanEmailHtmlForLLM(email.rawBody, { maxLength: MAX_BODY_LENGTH });
+  return email.cleanBody || '';
+}
 const INTER_BATCH_DELAY_MS = 1500;
 const MAX_API_RETRIES = 3;
 const CIRCUIT_BREAKER_THRESHOLD = 3;
@@ -759,32 +777,8 @@ Return JSON array:
       if ((email.tags || '').includes('|read|')) {
         continue;
       }
-      // Body strategy for the LLM prompt:
-      //
-      //   1. Threads — use the chat-view's already-parsed body for this
-      //      specific message. The chat-view extractor separated the
-      //      sender's own content from the quoted/forwarded history
-      //      below, so the LLM sees only what THIS sender wrote.
-      //
-      //   2. Single emails (or threads not yet chat-view-parsed) —
-      //      fall back to email.rawBody and run cleanEmailHtmlForLLM
-      //      to strip CSS, inline images, MSO/Outlook chrome, and
-      //      every attribute except <a href>. The LLM keeps text +
-      //      basic structure (paragraphs, lists, tables, links) for
-      //      categorization context.
-      //
-      //   3. Last-resort — cleanBody if rawBody is missing.
-      const chatViewBody = email.threadId
-        ? (storage as any).getChatViewBodyForEmail(email.threadId, email.id)
-        : null;
-      let body: string;
-      if (chatViewBody) {
-        body = chatViewBody;
-      } else if (email.rawBody) {
-        body = cleanEmailHtmlForLLM(email.rawBody, { maxLength: MAX_BODY_LENGTH });
-      } else {
-        body = email.cleanBody || '';
-      }
+      // Body for the LLM prompt — see categorizationBodyOf.
+      const body = categorizationBodyOf(email);
       const fromAddr = (email.fromAddress || '').toLowerCase();
       const senderDomain = fromAddr.split('@')[1] || '';
 

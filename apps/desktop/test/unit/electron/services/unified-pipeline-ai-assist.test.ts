@@ -69,8 +69,10 @@ vi.mock('../../../../electron/shared', () => {
     requireStorage: () => h.accounts[0]?.storage,
     getAllAccountRuntimes: () => new Map(h.accounts.map((a) => [a.id, { storage: a.storage }])),
     getAccountRuntime: (id: string) => (byId(id) ? { storage: byId(id) } : undefined),
+    getStorageFor: (id: string) => byId(id),
     getCurrentAccountId: () => h.accounts[0]?.id ?? null,
     getSyncEngine: () => null,
+    getSyncEngineFor: () => null,
     getSyncEngineForStorage: () => null,
     getAccountIdForStorage: (s: any) => h.accounts.find((a) => a.storage === s)?.id ?? null,
     getMainWindow: () => null,
@@ -98,13 +100,21 @@ vi.mock('../../../../electron/services/pipeline-ai-config-store', () => ({
   clearPipelineAIConfig: vi.fn(async () => {}),
 }));
 
-vi.mock('../../../../electron/ipc/draft-handlers', () => ({ saveDraftToIMAP: vi.fn() }));
+vi.mock('../../../../electron/ipc/draft-handlers', () => ({
+  newDraftMessageId: vi.fn(() => '<draft@example.test>'),
+  saveDraftToIMAP: vi.fn(),
+}));
 vi.mock('../../../../electron/ipc/smtp-handlers', () => ({ sendEmailFromMain: vi.fn(), appendSentCopy: vi.fn() }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({
+  readRegistryAccounts: () => [],
   registryAccountEmail: () => 'me@example.test',
   resolveAccountEmail: () => 'me@example.test',
   resolveAccountIdentity: () => ({ email: 'me@example.test', name: 'Me' }),
 }));
+// account-target loads for real (the agent handlers' per-account backfill goes
+// through openAccountStorages, which reads the faked shared runtimes); only its
+// runtime-opening dependency is stubbed.
+vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
 vi.mock('../../../../electron/services/ai-backlog-cap', () => ({ getAutoBacklogCap: () => 500 }));
 vi.mock('../../../../electron/services/conversation-extraction-scheduler', () => ({ isAIProviderConfigured: () => false }));
 vi.mock('../../../../electron/services/gmail-label-api', () => ({

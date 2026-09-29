@@ -19,6 +19,7 @@
  */
 
 import type { EmailRecord } from '@sarvinbox/core';
+import type { ConversationFolders } from '@sarvinbox/core/conversation-membership';
 
 import type { EmailThread } from '../../utils/thread-utils';
 import { isDraftEmail } from '../../utils/thread-utils';
@@ -29,8 +30,12 @@ export type BulkSelectionInput = {
   selectedThreadIds: ReadonlySet<string>;
   /** True when the list is showing a Drafts folder. */
   viewIsDrafts: boolean;
-  /** Every Drafts path across the account(s) — provider paths included. */
-  draftFolderPaths?: Set<string>;
+  /**
+   * Where the account's drafts and sent copies live — provider paths included
+   * (`conversationFoldersOf(folders)`), so a sent copy with a stale `|draft|`
+   * tag in `INBOX.Sent` is never taken for a draft.
+   */
+  conversationFolders?: ConversationFolders | null;
 };
 
 /**
@@ -44,12 +49,12 @@ export type BulkSelectionInput = {
 export function actionableEmailIds(
   emails: readonly EmailRecord[],
   viewIsDrafts: boolean,
-  draftFolderPaths?: Set<string>,
+  conversationFolders?: ConversationFolders | null,
 ): string[] {
   // `isDraftEmail` is the shared definition — it also rejects a sent copy or a
   // trashed draft still carrying a stale `|draft|` tag — so this cannot drift
   // from what the rest of the app treats as a draft.
-  const rows = viewIsDrafts ? emails.filter((e) => isDraftEmail(e, draftFolderPaths)) : emails;
+  const rows = viewIsDrafts ? emails.filter((e) => isDraftEmail(e, conversationFolders)) : emails;
   return rows.map((e) => e.id);
 }
 
@@ -62,9 +67,9 @@ export function selectedEmailIdsFor({
   visibleThreads,
   selectedThreadIds,
   viewIsDrafts,
-  draftFolderPaths,
+  conversationFolders,
 }: BulkSelectionInput): string[] {
   return visibleThreads
     .filter((t) => selectedThreadIds.has(t.threadId))
-    .flatMap((t) => actionableEmailIds(t.emails as EmailRecord[], viewIsDrafts, draftFolderPaths));
+    .flatMap((t) => actionableEmailIds(t.emails as EmailRecord[], viewIsDrafts, conversationFolders));
 }

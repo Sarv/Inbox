@@ -278,3 +278,19 @@
   --sec-frame-wash: color-mix(in srgb, var(--sarv-dark-paper) 62%, transparent);
   background: var(--sarv-dark-paper);
 }
+
+/*
+ * A bubble's action cluster (re-extract, star, three-dot) stays shown while its
+ * menu is open.
+ *
+ * The library shows `.sec-actions` only on `.sec-row:hover` or `:focus-within`
+ * and hides it with `opacity: 0`. The menu is portalled to <body> and takes
+ * focus when it opens, so the row then has neither — and the trigger faded out
+ * under its own open menu. The pin has to sit HERE, on `.sec-actions` itself:
+ * an opacity on anything inside it multiplies with its 0 and can never show
+ * it. Keyed on the trigger's `aria-expanded`, which is true exactly while its
+ * menu is open.
+ */
+.sec-actions:has([aria-expanded='true']) {
+  opacity: 1;
+}

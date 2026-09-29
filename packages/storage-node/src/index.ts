@@ -22,6 +22,9 @@ export { SHARED_CONTACTS_FILE, SHARED_SCHEMA } from './shared-contacts';
 // key — including the sent-mail append and the draft save in the Electron main
 // process, which insert rows directly rather than through EmailRepository.
 export { writeThreadKey } from './thread-keys';
+// Main's raw draft deletes select their rows with the ONE draft predicate
+// (core isDraftRow's SQL twin), never with bare tag markers of their own.
+export { accountDraftRowSql } from './repositories/thread-sql';
 export { setSlowQueryReporter, type SlowQueryEvent } from './slow-query-reporter';
 
 // Is the native addon loadable by this process? better-sqlite3 dlopens lazily,
@@ -122,7 +125,12 @@ export {
   AIRepository,
   SearchRepository,
   AgentRepository,
+  FirstSplitRepository,
+  type ConversationLightRow,
   type DatabaseAccessor,
+  type FirstSplitCandidate,
+  type FirstSplitCandidateOptions,
+  type FirstSplitCandidateReason,
   type SenderContext,
 } from './repositories';
 
