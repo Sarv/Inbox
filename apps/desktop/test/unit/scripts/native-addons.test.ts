@@ -1,7 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { finished } from 'node:stream/promises';
 
 import { createPackageWithOptions } from '@electron/asar';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -61,8 +60,8 @@ const packApp = async (): Promise<void> => {
   touch('app', ...ADDON);
   mkdirSync(join(root, 'resources'));
   const archive = join(root, 'resources', 'app.asar');
-  // createPackageWithOptions resolves once its stream is ended, not once it is flushed.
-  await finished(await createPackageWithOptions(join(root, 'app'), archive, { unpack: '*.node' }));
+  // ASAR 4 resolves after the archive is written; it no longer returns a stream.
+  await createPackageWithOptions(join(root, 'app'), archive, { unpack: '*.node' });
   rmSync(join(root, 'app'), { recursive: true });
 };
 

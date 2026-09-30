@@ -25,17 +25,17 @@
   },
   "dependencies": {
     "@sarvinbox/core": "workspace:*",
-    "zustand": "^4.5.0"
+    "zustand": "^5.0.15"
   },
   "peerDependencies": {
     "react": "^18.2.0 || ^19.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "react": "^19.2.0",
     "tsup": "^8.0.1",
-    "typescript": "^5.3.3",
-    "vitest": "^4.1.11"
+    "typescript": "^6.0.0",
+    "vitest": "^5.0.2"
   }
 }

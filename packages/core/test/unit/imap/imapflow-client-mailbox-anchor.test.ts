@@ -115,6 +115,39 @@ describe('ImapFlowClient — mailbox anchoring', () => {
     return expect(client.fetchAllUIDs('Interview')).resolves.toEqual([1, 2, 3]);
   });
 
+  it('rejects an absent whole-mailbox SEARCH reply before deletion reconcile', async () => {
+    // ImapFlow 2 can return undefined; treating it as [] would delete live mail.
+    const { client } = makeClient({ path: 'Interview' }, {
+      search: vi.fn(async () => undefined),
+    });
+    await expect(client.fetchAllUIDs('Interview')).rejects.toThrow(/returned no result/);
+  });
+
+  it('rejects an absent windowed SEARCH reply before deletion reconcile', async () => {
+    // An absent window reply must leave local mail intact for the next cycle.
+    const { client } = makeClient({ path: 'Interview' }, {
+      search: vi.fn(async () => undefined),
+    });
+    await expect(client.fetchUidsSince(new Date('2026-09-01'), 'Interview')).rejects.toThrow(/returned no result/);
+  });
+
+  it('keeps false SEARCH replies as legitimate empty results', async () => {
+    // ImapFlow uses false for a completed empty search, unlike undefined.
+    const { client } = makeClient({ path: 'Interview' }, {
+      search: vi.fn(async () => false),
+    });
+    await expect(client.fetchAllUIDs('Interview')).resolves.toEqual([]);
+    await expect(client.fetchUidsSince(new Date('2026-09-01'), 'Interview')).resolves.toEqual([]);
+  });
+
+  it('rejects a STATUS command without mailbox data', async () => {
+    // A missing STATUS response is not proof of an empty folder.
+    const { client } = makeClient({ path: 'Interview' }, {
+      status: vi.fn(async () => false),
+    });
+    await expect(client.getFolderStatus('Interview')).rejects.toThrow(/returned no mailbox data/);
+  });
+
   it('reports uidNext in the live mailbox state', () => {
     // The downstream provenance guard needs it: nothing in a folder can carry a
     // UID at or above its own UIDNEXT.

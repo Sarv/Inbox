@@ -742,7 +742,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
           this.client!.status(folderPath, { unseen: true }),
           ImapFlowClient.META_OP_TIMEOUT_MS,
         );
-        unseen = st.unseen ?? 0;
+        // ImapFlow 2 returns false when STATUS has no response. This count is
+        // best-effort here, so leave the fallback at zero.
+        if (st) unseen = st.unseen ?? 0;
       } catch {
         // some servers reject STATUS on the selected mailbox — leave at 0
       }
@@ -783,6 +785,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // whole STATUS.
       highestModseq: true,
     }), ImapFlowClient.META_OP_TIMEOUT_MS);
+    if (!st) {
+      throw new IMAPError('STATUS returned no mailbox data', 'STATUS_ERROR');
+    }
     return {
       uidNext: st.uidNext ?? 0,
       messages: st.messages ?? 0,
@@ -1377,7 +1382,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     // whole (possibly 20k+) mailbox. Some servers (observed on Sarv's INBOX)
     // reject the large sequence `FETCH 1:*` with "Command failed" while happily
     // answering SEARCH. Fall back to the FETCH form if SEARCH is unavailable.
-    let uids: number[] | false;
+    let uids: number[] | false | undefined;
     try {
       uids = await this.op('UID SEARCH ALL', this.client!.search({ all: true }, { uid: true }));
     } catch (searchErr) {
@@ -1405,6 +1410,11 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     // inside the try it would read as "SEARCH failed" and escalate to the chunked
     // FETCH fallback, re-asking the same wrong mailbox.
     this.ensureCurrentFolder(selected);
+    if (uids === undefined) {
+      // An absent reply is not an empty mailbox. Reconcile callers delete rows
+      // missing from this set, so abort and retry on the next cycle.
+      throw new IMAPError('UID SEARCH ALL returned no result', 'FETCH_UIDS_ERROR');
+    }
     if (Array.isArray(uids)) return uids.filter((u) => u > 0);
     // search() returns false when nothing matches an open-but-empty mailbox.
     return [];
@@ -1444,7 +1454,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    */
   async fetchUidsSince(since: Date, expectedPath?: string): Promise<number[]> {
     const selected = this.ensureCurrentFolder(expectedPath);
-    let uids: number[] | false;
+    let uids: number[] | false | undefined;
     try {
       uids = await this.op('UID SEARCH SINCE', this.client!.search({ since }, { uid: true }));
     } catch (err) {
@@ -1453,6 +1463,11 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     // The windowed reconcile deletes local rows missing from this set, so it must
     // be re-attributed to the mailbox it actually came from.
     this.ensureCurrentFolder(selected);
+    if (uids === undefined) {
+      // An absent reply cannot be treated as an empty window during deletion
+      // reconciliation; leave local mail intact and retry later.
+      throw new IMAPError('UID SEARCH SINCE returned no result', 'FETCH_UIDS_SINCE_ERROR');
+    }
     if (Array.isArray(uids)) return uids.filter((u) => u > 0);
     // search() returns false when nothing matches (empty window).
     return [];

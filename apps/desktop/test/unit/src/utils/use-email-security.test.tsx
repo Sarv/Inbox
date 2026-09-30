@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
+import { act } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { LEVEL_RANK, type SecurityLevel } from '../../../../src/utils/email-security';
+import { reloadLinkRules } from '../../../../src/utils/security-rules';
 import { useEmailSecurity } from '../../../../src/utils/use-email-security';
 import { render, settle } from '../../../helpers/render';
 
@@ -33,21 +35,27 @@ const levelOf = (view: ReturnType<typeof render>) => view.find('[data-level]')?.
 
 describe('useEmailSecurity', () => {
   // Failed authentication is danger no matter what else the message says.
-  it('reports danger for mail whose authentication failed', () => {
+  it('reports danger for mail whose authentication failed', async () => {
     const view = render(<Probe fromAddress="billing@bank.example" authStatus={auth('fail')} html="<p>hi</p>" bodyLoaded />);
     expect(levelOf(view)).toBe('danger');
+    await settle();
     view.unmount();
   });
 
   // The reader's "I trust this link" must clear the flag once the rules load,
   // not only on the next message opened.
   it('re-assesses when the reader’s link rules arrive', async () => {
+    // The rules cache survives between tests and sessions. Start with no trust,
+    // then deliver the trusted rule while the same message stays mounted.
+    listLinkRules.mockResolvedValueOnce({ success: true, data: [] });
+    await reloadLinkRules();
     const view = render(
       <Probe fromAddress="hello@producthunt.com" authStatus={auth('pass')} html={DECEPTIVE} bodyLoaded />,
     );
-    await settle();
+    expect(LEVEL_RANK[levelOf(view)]).toBeGreaterThanOrEqual(LEVEL_RANK.caution);
 
-    expect(listLinkRules).toHaveBeenCalled();
+    await act(async () => { await reloadLinkRules(); });
+    expect(listLinkRules).toHaveBeenCalledTimes(2);
     expect(LEVEL_RANK[levelOf(view)]).toBeLessThan(LEVEL_RANK.caution);
     view.unmount();
   });
