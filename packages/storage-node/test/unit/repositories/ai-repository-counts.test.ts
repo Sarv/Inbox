@@ -270,7 +270,8 @@ describe('AIRepository read side (listings + counts)', () => {
       const counts = repo.getDynamicCategoryCounts();
       expect(counts.uncategorized).toBe(0);
       expect(Object.values(counts).every((n) => n === 0)).toBe(true);
-      expect(Object.keys(counts)).toHaveLength(8); // 7 seeded categories + uncategorized
+      // CHANGED: 8 -> 9 when v99 seeded Social.
+      expect(Object.keys(counts)).toHaveLength(9); // 8 seeded categories + uncategorized
     });
   });
 
