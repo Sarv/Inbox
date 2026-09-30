@@ -12,6 +12,8 @@ import { applyEmailDarkMode, DARK_PAPER } from '../../utils/email-dark-mode';
 import { toForwardSource } from '../../utils/forward-quote';
 import type { MenuAnchor } from '../../utils/menu-placement';
 import { openExternalLink } from '../../utils/open-external';
+import { messageAccountOf, paneAccountOf } from '../../utils/pane-account';
+import { rememberSenderImagesAllowed, remoteImageFactsOf, useImageTrustSelector } from '../../utils/remote-images';
 import { hasTag } from '../../utils/tags';
 import { AttachmentPills } from '../attachment-viewer/AttachmentPills';
 import { InlineForward } from '../InlineForward';
@@ -216,6 +218,61 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
     [emailsById],
   );
 
+  // Which bubbles withhold their remote images — the ONE rule the classic card
+  // uses (blockRemoteImagesFor → shouldAutoLoadRemoteImages), answered against
+  // the reader's trust lists, which load and change after the thread renders
+  // (the allowlist warming after launch, a sender allowed on another message,
+  // a verified-brand lookup landing). Subscribed as one string of per-bubble
+  // answers, so only a CHANGED answer re-renders the view — a lookup that
+  // decides nothing here does not repaint forty bubbles.
+  //
+  // `carrierEmailOf`, not `emailFor`: this asks whose bytes these are, not
+  // whose message it is. A recovered quote's images live in the reply that
+  // carried it, so the reader's choice about THAT sender is the one to honour.
+  // `paneAccountOf`: thread rows carry no account of their own; the thread was
+  // read from that one (`threadAccountId`, stamped with the rows — not the
+  // live `viewAccountId`, which moves before a newly selected thread lands),
+  // and its lists are the ones that count.
+  const paneAccountId = useEmailStore(paneAccountOf);
+  const blockFor = useCallback(
+    (message: ChatMessage) => blockRemoteImagesFor(carrierEmailOf(message, emailsById), paneAccountId),
+    [emailsById, paneAccountId],
+  );
+  const imageBlockKey = useImageTrustSelector(
+    useCallback(() => chatMessages.map((m) => (blockFor(m) ? '1' : '0')).join(''), [chatMessages, blockFor]),
+  );
+  const blockRemoteImages = useMemo(() => {
+    const blocked = new Map(chatMessages.map((m, index) => [m.id, imageBlockKey[index] === '1']));
+    // A message the view renders but the list above did not hold (none today)
+    // is asked directly rather than guessed.
+    return (message: ChatMessage) => blocked.get(message.id) ?? blockFor(message);
+  }, [chatMessages, imageBlockKey, blockFor]);
+
+  // "Load images" on a bubble's own banner (the library's). The library has
+  // already let that bubble's images through; this remembers the sender the
+  // SAME way the classic card's button does — `rememberSenderImagesAllowed`
+  // with the facts the decision above reads (`remoteImageFactsOf`, so the
+  // row's own account, or the one the thread was read from). The sender's
+  // other bubbles here then flip at once (the trust selector above re-decides)
+  // and their future mail auto-loads. Before this the click was reported to
+  // nobody: only that one bubble loaded, and nothing was ever saved.
+  //
+  // Only on a bubble that IS its carrier's own turn (`emailFor`, which hands
+  // back the carrier or nothing). A bubble recovered from a quote shows one
+  // author but its bytes arrived in another's mail: remembering the carrier
+  // would trust a sender the reader never clicked on, and remembering the
+  // quoted author would trust one whose mail was never looked at. It loads
+  // for this once and remembers nothing — as does a message in Spam or one
+  // that failed its sender check (`rememberSenderImagesAllowed` refuses it).
+  const onLoadRemoteImages = useCallback(
+    (message: ChatMessage) => {
+      const carrier = carrierEmailOf(message, emailsById);
+      if (!carrier || emailFor(message) !== carrier) return;
+      rememberSenderImagesAllowed(remoteImageFactsOf(carrier, paneAccountId));
+    },
+    [emailsById, emailFor, paneAccountId],
+  );
+
   /**
    * How one bubble's message is answered — from the same builder as its menus,
    * so the hover icons, the three-dot menu and the right-click menu answer it
@@ -410,8 +467,8 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
    *
    * The shield renders for every message, green through red, with the evidence
    * on hover — the same icon that sits beside the sender in the standard view.
-   * A follow-up in a sender run has no header of its own and still gets it:
-   * the library gives it a meta-only row, because the sender and the time are
+   * A follow-up in a sender run still gets it: the library (0.2.7+) gives it
+   * a slim header — its own time, then these marks — because the sender is
    * inherited from the bubble above but a per-message verdict is not.
    */
   const renderHeaderMeta = useCallback(
@@ -421,6 +478,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
       return (
         <>
           <SecurityIndicator
+            accountId={messageAccountOf(email as { accountId?: string | null }, paneAccountId)}
             fromName={email.fromName}
             fromAddress={email.fromAddress}
             html={email.rawBody}
@@ -433,7 +491,7 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         </>
       );
     },
-    [emailFor],
+    [emailFor, paneAccountId],
   );
 
   return (
@@ -543,12 +601,13 @@ export function ThreadChatView({ ctx }: ThreadChatViewProps) {
         className="px-3 py-4"
         // The library blocks every remote image unless told otherwise, and it
         // has no way to know the reader's setting — so the app answers, per
-        // message, with the same rule the classic card uses. Without this a
-        // reader who chose "always load" still saw the banner here.
-        // `carrierEmailOf`, not `emailFor`: this asks whose bytes these are, not
-        // whose message it is. A recovered quote's images live in the reply that
-        // carried it, so the reader's choice about THAT sender is the one to honour.
-        blockRemoteImages={(message) => blockRemoteImagesFor(carrierEmailOf(message, emailsById))}
+        // message, with the same rule the classic card uses (see
+        // `blockRemoteImages` above). Without this a reader who chose "always
+        // load" still saw the banner here.
+        blockRemoteImages={blockRemoteImages}
+        // A bubble's "Load images" click, so it is remembered like the card's
+        // (see `onLoadRemoteImages` above).
+        onLoadRemoteImages={onLoadRemoteImages}
         // The shared rule (utils/open-external): a web link goes to the
         // browser; `#` jumps and `mailto:` links, in any case, open nothing.
         // A module function, so its identity never changes — see there.

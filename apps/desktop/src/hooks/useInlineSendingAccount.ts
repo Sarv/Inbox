@@ -21,16 +21,21 @@ interface SendingAccountInput {
  *  - `fromAccount` — set only in All Inboxes when that owner is NOT the active
  *    account: the one case the user could send from the wrong mailbox without
  *    noticing, so the composer shows a From bar.
+ *  - `sendingEmail` — that account's address (the active one's when
+ *    `accountId` is undefined); what OpenPGP looks the sender's key up by.
  */
 export function resolveInlineSendingAccount(input: SendingAccountInput): {
   accountId: string | undefined;
   fromAccount: StoredAccount | null;
+  sendingEmail: string | undefined;
 } {
   const accountId = input.emailAccountId ?? input.viewAccountId ?? undefined;
   const fromAccount = input.isUnifiedView && accountId && accountId !== input.activeAccountId
     ? input.accounts.find((a) => a.id === accountId) ?? null
     : null;
-  return { accountId, fromAccount };
+  const sendingId = accountId ?? input.activeAccountId;
+  const sendingEmail = input.accounts.find((a) => a.id === sendingId)?.email;
+  return { accountId, fromAccount, sendingEmail };
 }
 
 /** {@link resolveInlineSendingAccount} over the live store. */

@@ -53,9 +53,6 @@ vi.mock('../../../../../src/services/ai-service', () => ({
 vi.mock('../../../../../src/utils/sender-identity', () => ({
   useSenderIdentity: () => null,
 }));
-vi.mock('../../../../../src/store/helpers', () => ({
-  qualifiesForSafeAutoLoad: () => false,
-}));
 vi.mock('../../../../../src/store/email-store', () => ({
   useEmailStore: Object.assign(() => undefined, { getState: () => ({ clearSelectedEmail: vi.fn() }) }),
 }));

@@ -13,6 +13,14 @@ const home = { id: 'home', email: 'me@home.com' } as any;
 const base = { viewAccountId: null, activeAccountId: 'home', isUnifiedView: false, accounts: [work, home] };
 
 describe('resolveInlineSendingAccount', () => {
+  // Breaks: an inline reply looks up the OpenPGP key of the wrong mailbox (or none),
+  // so it cannot encrypt or sign as the account it actually sends from.
+  it("names the sending account's address, the active one's when no owner is known", () => {
+    expect(resolveInlineSendingAccount({ ...base, emailAccountId: 'work' }).sendingEmail).toBe('me@work.com');
+    expect(resolveInlineSendingAccount(base).sendingEmail).toBe('me@home.com');
+    expect(resolveInlineSendingAccount({ ...base, activeAccountId: null }).sendingEmail).toBeUndefined();
+  });
+
   // Breaks: THE forward bug — a merged All Inboxes row's own account was ignored.
   it("sends from the mail's own account", () => {
     expect(resolveInlineSendingAccount({ ...base, emailAccountId: 'work' }).accountId).toBe('work');

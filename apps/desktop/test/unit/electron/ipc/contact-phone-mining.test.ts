@@ -262,3 +262,31 @@ describe('scanning every account', () => {
     expect(extracted(storage)).toEqual(['one@acme.in']);
   });
 });
+
+describe('which folders count as Sent', () => {
+  /** The absolute sender-stat rows one mailbox's scan wrote, by address. */
+  const statRows = (s: ReturnType<typeof fakeStorage>) =>
+    Object.fromEntries((s.setSenderStatsCounts.mock.calls[0]?.[0] ?? []).map((r: any) => [r.email, r]));
+
+  // Breaks: a substring test ("sent" in the path) made "Presentations" a Sent
+  // folder, so the To recipients of mail the user RECEIVED there were recorded
+  // as people they had emailed — and 'trusted' remote images loaded their
+  // tracking pixels.
+  it('counts recipients only in real Sent folders, never in a folder whose name merely contains "sent"', async () => {
+    const received = { id: 'm-pres', fromAddress: 'deck@vendor.co.in', toAddress: 'team@acme.in', tags: '|read|', subject: 'Deck' };
+    const sent = { id: 'm-sent', fromAddress: 'me@acme.in', toAddress: 'Client <client@buyer.in>', tags: '|read|', subject: 'Quote' };
+    const storage = fakeStorage({}, [
+      { id: 'f-pres', name: 'Presentations', path: 'Presentations', emails: [received] },
+      { id: 'f-sent', name: 'Sent', path: 'INBOX.Sent', emails: [sent] },
+    ]);
+    h.primary = storage;
+    h.runtimes = [['acct-a', { storage }]];
+
+    await scan();
+
+    const rows = statRows(storage);
+    expect(rows['client@buyer.in']).toMatchObject({ sentToCount: 1 });
+    expect(rows['team@acme.in']).toBeUndefined();
+    expect(rows['deck@vendor.co.in']).toMatchObject({ receivedCount: 1, sentToCount: 0 });
+  });
+});

@@ -275,3 +275,63 @@ describe('useDraftAutosave — attachments', () => {
     expect(save).not.toHaveBeenCalled();
   });
 });
+
+describe('useDraftAutosave — encrypted drafts', () => {
+  const opened: Opts = { ...base, body: 'secret', htmlBody: '<p>secret</p>', initialDraftMessageId: '<old@x>', accountId: 'acct-1' };
+
+  // Breaks: the composer's encrypt flag never reaches the save, so the draft of an encrypted message is stored in the clear.
+  it('asks main to encrypt the draft when the message will go encrypted', async () => {
+    const view = render(<Probe opts={{ ...base, body: 'secret', htmlBody: '<p>secret</p>', encrypt: true }} />);
+    view.unmount();
+    await flush();
+    expect(save.mock.calls[0][0]).toMatchObject({ pgp: { encrypt: true } });
+  });
+
+  // Breaks: every ordinary draft is sent to the encrypter too.
+  it('asks for nothing when the message is not encrypted', async () => {
+    const view = render(<Probe opts={{ ...base, body: 'hello', htmlBody: '<p>hello</p>' }} />);
+    view.unmount();
+    await flush();
+    expect(save.mock.calls[0][0].pgp).toBeUndefined();
+  });
+
+  // Breaks: turning encryption on leaves the plaintext copy saved before it on the server until the next edit — forever, if there is none.
+  it('replaces a plaintext draft once encryption is turned on, even unedited', async () => {
+    const view = render(<Probe opts={opened} />);
+    view.rerender(<Probe opts={{ ...opened, encrypt: true }} />);
+    view.unmount();
+    await flush();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(save.mock.calls[0][0]).toMatchObject({ pgp: { encrypt: true } });
+    expect(del).toHaveBeenCalledWith({ messageId: '<old@x>', accountId: 'acct-1' });
+  });
+
+  // Breaks: reopening an encrypted draft re-saves it on every close (the immortal-draft churn) —
+  // the lock turns on a moment after the draft opens, while the composer's defaults load.
+  it('does not re-save an encrypted draft reopened unedited', async () => {
+    const encryptedOpen: Opts = { ...opened, initialDraftEncrypted: true };
+    const view = render(<Probe opts={encryptedOpen} />);
+    view.rerender(<Probe opts={{ ...encryptedOpen, encrypt: true }} />);
+    view.unmount();
+    await flush();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a refused save (the draft could not be encrypted) counts as saved, so the content is never saved at all.
+  it('does not count a refused save as saved', async () => {
+    save.mockResolvedValueOnce({ success: false, error: 'The draft could not be encrypted, so it was not saved' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const view = render(<Probe opts={{ ...base, body: 'secret', htmlBody: '<p>secret</p>', encrypt: true }} />);
+    act(() => { vi.advanceTimersByTime(10_000); });
+    vi.useRealTimers();
+    await flush();
+    expect(warn).toHaveBeenCalledWith('[DraftAutosave] Draft not saved:', expect.stringContaining('could not be encrypted'));
+    expect(del).not.toHaveBeenCalled();
+
+    // Closing tries again rather than treating the content as already stored.
+    view.unmount();
+    await flush();
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+});

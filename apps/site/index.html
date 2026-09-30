@@ -3,78 +3,345 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Download Sarv Inbox</title>
+    <meta name="theme-color" content="#f6f8fc" />
+    <title>Sarv Inbox — Email that reads like a conversation</title>
     <meta
       name="description"
-      content="Download Sarv Inbox, the privacy-first IMAP email client, for macOS, Windows and Linux."
+      content="Turn email threads into clear conversations. Sarv Inbox brings your accounts together with optional AI for summaries, drafts and categories. Download for macOS, Windows or Linux."
     />
   </head>
   <body>
-    <main class="page">
-      <header class="row page-header">
-        <img class="app-icon" data-app-icon alt="" width="48" height="48" />
-        <div class="stack-2">
-          <span class="app-name">Sarv Inbox</span>
-          <span class="muted text-sm">Privacy-first email for your desktop</span>
-        </div>
+    <div class="landing-shell">
+      <header class="landing-header">
+        <a class="brand-lockup" href="#top" aria-label="Sarv Inbox home">
+          <img class="app-icon" data-app-icon alt="" width="40" height="40" />
+          <span>Sarv<span class="brand-accent">Inbox</span></span>
+        </a>
+        <nav class="landing-nav" aria-label="Main navigation">
+          <a href="#conversations">Conversations</a>
+          <a href="#ai">AI</a>
+          <a href="#features">Features</a>
+          <a class="nav-download" href="#download">Download <span aria-hidden="true">↗</span></a>
+        </nav>
       </header>
-      <div id="app" class="stack page-body" aria-live="polite">
-        <p class="muted">Finding the right download for your device…</p>
-        <noscript>
-          <a class="btn btn-primary btn-lg" href="https://github.com/Sarv/Inbox/releases/latest"
-            >Open the latest release</a
+
+      <main id="top">
+        <section class="landing-hero" aria-labelledby="hero-title">
+          <div class="hero-copy">
+            <span class="eyebrow"
+              ><span class="eyebrow-dot" aria-hidden="true"></span> THE DESKTOP INBOX,
+              REIMAGINED</span
+            >
+            <h1 id="hero-title">Email, without the <em>email clutter.</em></h1>
+            <p class="hero-description">
+              Turn long threads into chat-style conversations. Let optional AI summarize what
+              matters, help draft replies and sort your inbox. All your accounts, in one calm
+              desktop app.
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-primary btn-lg hero-primary" href="#download"
+                >Get Sarv Inbox <span aria-hidden="true">↓</span></a
+              >
+              <a class="hero-secondary" href="#conversations"
+                >See how it works <span aria-hidden="true">↗</span></a
+              >
+            </div>
+            <p class="hero-platforms">Available for macOS, Windows and Linux</p>
+          </div>
+          <figure class="product-visual conversation-visual">
+            <div class="visual-glow" aria-hidden="true"></div>
+            <div class="conversation-window">
+              <picture>
+                <source
+                  media="(prefers-reduced-motion: reduce)"
+                  srcset="./media/before-after.png"
+                />
+                <img
+                  src="./media/thread-to-chat.gif"
+                  alt="An email thread sheds repeated quotes, signatures and legal footers, then becomes four clean chat bubbles"
+                  width="960"
+                  height="620"
+                />
+              </picture>
+            </div>
+            <figcaption>
+              A real transformation from our
+              <a href="https://www.npmjs.com/package/@sarv-in/email-chat-view">email-chat-view</a>
+              library.
+            </figcaption>
+          </figure>
+        </section>
+
+        <div class="value-strip" aria-label="Sarv Inbox highlights">
+          <span><i aria-hidden="true"></i> Email as conversations</span>
+          <span><i aria-hidden="true"></i> All your accounts together</span>
+          <span><i aria-hidden="true"></i> Optional AI, under your control</span>
+        </div>
+
+        <section
+          id="conversations"
+          class="landing-section conversation-section"
+          aria-labelledby="conversation-title"
+        >
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">OUR HERO FEATURE</span>
+              <h2 id="conversation-title">Follow the conversation.<br />Forget the quote chain.</h2>
+            </div>
+            <p>
+              A long email thread should feel like a discussion, not a stack of copies. Sarv Inbox
+              makes every reply easy to follow.
+            </p>
+          </div>
+          <div class="conversation-steps">
+            <article>
+              <span>01</span>
+              <h3>Bring the thread together</h3>
+              <p>See replies from everyone in the right order, across the whole exchange.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <h3>Clear the repeated text</h3>
+              <p>Quoted history, signatures and legal footers step out of the way.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <h3>Read it like a chat</h3>
+              <p>
+                Each turn becomes a clean bubble, with the people and attachments still in context.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="ai" class="landing-section ai-section" aria-labelledby="ai-title">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">AI OVER EMAIL</span>
+              <h2 id="ai-title">Less reading and sorting.<br />More moving forward.</h2>
+            </div>
+            <p>
+              Connect an AI provider when you want help. Sarv Inbox keeps you in charge of what to
+              read, write and send.
+            </p>
+          </div>
+          <div class="ai-grid">
+            <article class="ai-card">
+              <span class="ai-number">01 / READ</span>
+              <div class="ai-art ai-art-read" aria-hidden="true">
+                <span></span><span></span><span></span><strong>✦&nbsp; Key points</strong>
+              </div>
+              <h3>Catch up in seconds</h3>
+              <p>Summarize a thread and see its key points before you dive into every message.</p>
+            </article>
+            <article class="ai-card">
+              <span class="ai-number">02 / DRAFT</span>
+              <div class="ai-art ai-art-draft" aria-hidden="true">
+                <span>Reply to Alice</span><i></i><i></i><strong>✦&nbsp; Suggested reply</strong>
+              </div>
+              <h3>Start with a useful draft</h3>
+              <p>
+                Get a suggested response, edit it in your voice and decide when it is ready to send.
+              </p>
+            </article>
+            <article class="ai-card">
+              <span class="ai-number">03 / CATEGORIZE</span>
+              <div class="ai-art ai-art-category" aria-hidden="true">
+                <span>Invoice received</span><strong>Invoices</strong><span>Can we meet?</span
+                ><strong>Meetings</strong>
+              </div>
+              <h3>Let the inbox organize itself</h3>
+              <p>AI categories and priority cues surface messages that need your attention.</p>
+            </article>
+          </div>
+          <p class="ai-note">
+            AI is optional. Message content reaches your chosen provider only after you connect one.
+          </p>
+        </section>
+
+        <section id="features" class="landing-section" aria-labelledby="features-title">
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">A BETTER DAILY WORKSPACE</span>
+              <h2 id="features-title">One place for everything<br />your inbox needs.</h2>
+            </div>
+            <p>
+              Stay connected across accounts, keep useful contact details close and find your way
+              back to important mail.
+            </p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card feature-card-featured">
+              <span class="feature-index">01 / MULTIPLE ACCOUNTS</span>
+              <div class="feature-art feature-art-accounts" aria-hidden="true">
+                <span class="account-pill"><b>G</b> Personal Gmail <i>✓</i></span>
+                <span class="account-pill"><b>S</b> Work mailbox <i>✓</i></span>
+                <span class="account-pill"><b>@</b> Other IMAP <i>✓</i></span>
+              </div>
+              <h3>All your accounts, one workspace</h3>
+              <p>
+                Bring Gmail, Sarv Mail and other IMAP mailboxes into one desktop app. Move between
+                accounts without losing your flow.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">02 / CONTACTS</span>
+              <div class="feature-art feature-art-contact" aria-hidden="true">
+                <span class="contact-avatar">AC</span
+                ><span class="contact-lines"
+                  ><b>Alice Chen</b><i>Acme · VP Sales</i><small>Found in recent email</small></span
+                >
+              </div>
+              <h3>Contacts that fill in the details</h3>
+              <p>
+                Contacts are gathered as mail syncs. With AI enabled, details from incoming messages
+                and signatures can enrich their profiles automatically.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">03 / FOLLOW-UPS</span>
+              <div class="feature-art feature-art-reminder" aria-hidden="true">
+                <span>↗</span><i></i><i></i>
+              </div>
+              <h3>Stay on top of follow-ups</h3>
+              <p>Snooze mail and set reminders for messages that still need a reply.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">04 / FIND</span>
+              <div class="feature-art feature-art-search" aria-hidden="true">
+                <span>⌕</span><i>invoice from Alex</i>
+              </div>
+              <h3>Find it when you need it</h3>
+              <p>
+                Search mail stored on your computer, with optional semantic search when AI is
+                connected.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-index">05 / SECURITY</span>
+              <div class="feature-art feature-art-safety" aria-hidden="true">
+                <span>✓</span><i>Protected inbox</i>
+              </div>
+              <h3>Know before you trust</h3>
+              <p>
+                Sender authentication, impersonation checks and spam signals help flag suspicious
+                mail.
+              </p>
+            </article>
+          </div>
+          <figure class="product-visual product-preview">
+            <div class="product-window">
+              <div class="window-topbar" aria-hidden="true">
+                <span></span><span></span><span></span><strong>Sarv Inbox</strong>
+              </div>
+              <img
+                data-product-image
+                alt="Sarv Inbox desktop app with important mail, reminders and category filters"
+                width="2000"
+                height="1250"
+              />
+            </div>
+            <figcaption>The desktop inbox, with sample data.</figcaption>
+          </figure>
+        </section>
+
+        <section id="privacy" class="privacy-panel" aria-labelledby="privacy-title">
+          <div class="privacy-mark" aria-hidden="true">✦</div>
+          <div>
+            <span class="section-kicker">SECURITY BY DESIGN</span>
+            <h2 id="privacy-title">Your inbox stays in your hands.</h2>
+            <p>
+              Mail is encrypted in a local database, with its key in your operating system keychain.
+              Messages render in an isolated frame, links open in your browser, and sender and spam
+              checks help you spot risks. Sarv does not keep a copy of your mail on its servers.
+            </p>
+          </div>
+          <a href="./privacy-policy.html"
+            >How we handle your data <span aria-hidden="true">↗</span></a
           >
-        </noscript>
-      </div>
-      <!--
-        Google's OAuth verification reads this page: it must describe what the
-        app does and how it uses Google data, in static HTML (no script needed),
-        and keep the Limited Use sentence word for word. Keep it true to the
-        privacy policy (docs/legal/privacy-policy.md).
-      -->
-      <section class="card card-pad stack about" aria-labelledby="about-title">
-        <h2 id="about-title" class="section-title">What Sarv Inbox does</h2>
-        <p>
-          Sarv Inbox is a desktop email client for macOS, Windows and Linux. Connect a Gmail or
-          Google Workspace account, Sarv Mail or any other IMAP mailbox, then read, search, write,
-          reply to, forward, organise and delete your mail in one app.
-        </p>
-        <ul>
-          <li>Conversations as threads or as a chat view, with fast search on your computer.</li>
-          <li>Labels and folders, drafts, attachments, follow-up reminders and snoozing.</li>
-          <li>Spam and phishing protection that checks sender authentication and blocklists.</li>
-          <li>
-            Optional AI help once you connect an AI provider (Sarv AI or your own): sorting mail
-            into categories, suggested reply drafts and AI search.
-          </li>
-        </ul>
-        <h2 class="section-title">How Sarv Inbox uses your Google data</h2>
-        <p>
-          When you connect a Gmail or Google Workspace account, Sarv Inbox asks Google for access to
-          your mail (<code>https://mail.google.com/</code>) and to your name and email address. It
-          uses that access only to provide the features above: downloading, showing, sending,
-          organising and deleting your mail over IMAP and SMTP, and managing the app's labels. Your
-          mail is stored on your computer in an encrypted database, and Sarv runs no server that
-          keeps a copy. Parts of messages go to an AI provider only after you connect one.
-        </p>
-        <p>
-          Sarv Inbox's use and transfer of information received from Google APIs to any other app
-          will adhere to the
-          <a href="https://developers.google.com/terms/api-services-user-data-policy"
-            >Google API Services User Data Policy</a
-          >, including the Limited Use requirements. The
-          <a href="./privacy-policy.html">privacy policy</a> has the details.
-        </p>
-      </section>
-      <!--
-        Google requires the homepage to link the privacy policy at the SAME URL as
-        Google Cloud Console → Branding (https://inbox.sarv.com/privacy-policy.html).
-      -->
-      <footer class="row muted text-sm page-footer site-links">
-        <a href="./privacy-policy.html">Privacy policy</a>
-        <a href="./terms.html">Terms of service</a>
+        </section>
+
+        <section
+          id="download"
+          class="landing-section download-section"
+          aria-labelledby="download-title"
+        >
+          <div class="section-heading download-heading">
+            <div>
+              <span class="section-kicker">READY WHEN YOU ARE</span>
+              <h2 id="download-title">Download Sarv Inbox</h2>
+            </div>
+            <p>
+              Choose your operating system. Get the matching installer directly from the latest
+              GitHub Release.
+            </p>
+          </div>
+          <div id="app" class="download-app" aria-live="polite">
+            <p>Finding the latest download for your device…</p>
+            <a href="https://github.com/Sarv/Inbox/releases/latest">View the latest release</a>
+          </div>
+          <p class="download-footnote">
+            Free to use ·
+            <a href="https://github.com/Sarv/Inbox">Source available on GitHub</a> under the
+            <a href="https://github.com/Sarv/Inbox/blob/main/LICENSE">Sarv Community License</a> ·
+            <a href="https://github.com/Sarv/Inbox/releases">All releases</a>
+          </p>
+        </section>
+
+        <!-- Google OAuth verification requires this description and Limited Use text in static HTML. -->
+        <section class="about landing-compliance" aria-labelledby="about-title">
+          <div>
+            <span class="section-kicker">MORE DETAILS</span>
+            <h2 id="about-title" class="section-title">What Sarv Inbox does</h2>
+          </div>
+          <p>
+            Sarv Inbox is a desktop email client for macOS, Windows and Linux. Connect a Gmail or
+            Google Workspace account, Sarv Mail or any other IMAP mailbox, then read, search, write,
+            reply to, forward, organise and delete your mail in one app.
+          </p>
+          <ul>
+            <li>Conversations as threads or as a chat view, with fast search on your computer.</li>
+            <li>Labels and folders, drafts, attachments, follow-up reminders and snoozing.</li>
+            <li>Spam and phishing protection that checks sender authentication and blocklists.</li>
+            <li>
+              Optional AI help once you connect an AI provider (Sarv AI or your own): sorting mail
+              into categories, suggested reply drafts and AI search.
+            </li>
+          </ul>
+          <h2 class="section-title">How Sarv Inbox uses your Google data</h2>
+          <p>
+            When you connect a Gmail or Google Workspace account, Sarv Inbox asks Google for access
+            to your mail (<code>https://mail.google.com/</code>) and to your name and email address.
+            It uses that access only to provide the features above: downloading, showing, sending,
+            organising and deleting your mail over IMAP and SMTP, and managing the app's labels.
+            Your mail is stored on your computer in an encrypted database, and Sarv runs no server
+            that keeps a copy. Parts of messages go to an AI provider only after you connect one.
+          </p>
+          <p>
+            Sarv Inbox's use and transfer of information received from Google APIs to any other app
+            will adhere to the
+            <a href="https://developers.google.com/terms/api-services-user-data-policy"
+              >Google API Services User Data Policy</a
+            >, including the Limited Use requirements. The
+            <a href="./privacy-policy.html">privacy policy</a> has the details.
+          </p>
+        </section>
+      </main>
+
+      <footer class="landing-footer">
+        <a class="brand-lockup" href="#top"
+          ><img class="app-icon" data-app-icon alt="" width="32" height="32" /><span
+            >Sarv<span class="brand-accent">Inbox</span></span
+          ></a
+        >
+        <p>Email on your terms.</p>
+        <nav aria-label="Footer navigation">
+          <a href="https://github.com/Sarv/Inbox">GitHub</a>
+          <a href="./privacy-policy.html">Privacy policy</a>
+          <a href="./terms.html">Terms of service</a>
+        </nav>
       </footer>
-    </main>
+    </div>
     <script type="module" src="./src/main.js"></script>
   </body>
 </html>

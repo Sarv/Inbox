@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createStore } from 'zustand/vanilla';
 
 // CategoryBadges is imported by the slice for its cache-clear helper; the two
 // pure functions under test never touch it, so a stub keeps the module graph
@@ -997,5 +998,34 @@ describe('Starred/Important/All Email page in CONVERSATIONS, not messages', () =
     for (const e of h.state.emails) byThread.set(e.threadId, (byThread.get(e.threadId) ?? 0) + 1);
     expect(byThread.size).toBe(starredSize);
     expect([...byThread.values()].every((n) => n === 3)).toBe(true);
+  });
+});
+
+describe('loadFolders — Spam folders for the remote-image guard', () => {
+  afterEach(() => { delete (globalThis as any).window; });
+
+  // Breaks: a Junk folder the server marks only by SPECIAL-USE (a localized
+  // name, "Junk Mail") is never learned, so a trusted-looking sender's mail
+  // sitting in it counts as ordinary mail and fetches its tracking pixels.
+  it("tells the image guard which of the active account's folders are Spam/Junk", async () => {
+    (globalThis as any).window = {
+      electronAPI: {
+        folders: {
+          list: async () => ({
+            success: true,
+            data: [{ id: 'f1', name: 'INBOX', path: 'INBOX' }, { id: 'f2', name: 'Indésirables', path: 'Indésirables', specialUse: '\\Junk' }],
+          }),
+        },
+      },
+    };
+    const store = createStore<any>()(createEmailsSlice as any);
+    store.setState({ activeAccountId: 'acct-a', selectedFolderId: 'f1' });
+    const { isSpamFolderMail } = await import('../../../../../src/utils/remote-images');
+    expect(isSpamFolderMail('|Indésirables|', 'acct-a')).toBe(false);
+
+    await store.getState().loadFolders();
+
+    expect(isSpamFolderMail('|Indésirables|', 'acct-a')).toBe(true);
+    expect(isSpamFolderMail('|Indésirables|', 'acct-b')).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer';
 
-import type { SMTPConfig, SendEmailOptions, SendResult } from '../types/smtp';
+import type { OutgoingMimeTransform, SMTPConfig, SendEmailOptions, SendResult } from '../types/smtp';
 import { createLogger } from '../utils/logger';
 import { resolveTlsOptions } from '../utils/tls';
 import { isValidEmail, extractEmailAddress } from '../utils/validators';
@@ -19,8 +19,18 @@ import { isTransientSendError } from './smtp-errors';
  * MAIL FROM — the human-readable From header is preserved verbatim in the MIME.
  */
 function bareAddress(from: string): string {
-  const m = from.match(/<([^>]+)>/);
-  return (m ? m[1] : from).trim();
+  let openingBracket = -1;
+  for (let i = 0; i < from.length; i++) {
+    if (from[i] === '<' && openingBracket < 0) {
+      openingBracket = i;
+    } else if (from[i] === '>') {
+      if (openingBracket >= 0 && i > openingBracket + 1) {
+        return from.slice(openingBracket + 1, i).trim();
+      }
+      openingBracket = -1;
+    }
+  }
+  return from.trim();
 }
 
 /**
@@ -131,9 +141,10 @@ export class SMTPClient {
   }
 
   /**
-   * Send an email
+   * Send an email. `transformMime`, when given, rewrites the built MIME before
+   * it is submitted (PGP lives in the main process, so core never loads it).
    */
-  async sendEmail(options: SendEmailOptions): Promise<SendResult> {
+  async sendEmail(options: SendEmailOptions, transformMime?: OutgoingMimeTransform): Promise<SendResult> {
     if (!this.transporter || !this.config) {
       // Not connected is transient: the outbox should hold this and retry once
       // the renderer re-establishes the SMTP connection.
@@ -211,12 +222,16 @@ export class SMTPClient {
         }));
       }
 
-      const rawMessage = await new Promise<Buffer>((resolve, reject) => {
+      const builtMessage = await new Promise<Buffer>((resolve, reject) => {
         new MailComposer(composerOptions as any).compile().build((err: Error | null, message: Buffer) => {
           if (err) reject(err);
           else resolve(message);
         });
       });
+      const envelopeRecipients = [...options.to, ...(options.cc ?? []), ...(options.bcc ?? [])];
+      const rawMessage = transformMime
+        ? await transformMime(builtMessage, { fromHeader, recipients: envelopeRecipients })
+        : builtMessage;
 
       // Deliver the prebuilt MIME. The explicit envelope carries every recipient
       // (to + cc + bcc) so Bcc still gets the mail even though its header isn't
@@ -226,7 +241,7 @@ export class SMTPClient {
           // Envelope sender = the AUTHENTICATED account (not the alias header
           // From) so alias sends pass SPF / server MAIL-FROM checks.
           from: bareAddress(this.config.username || fromHeader),
-          to: [...options.to, ...(options.cc ?? []), ...(options.bcc ?? [])],
+          to: envelopeRecipients,
         },
         raw: rawMessage,
       });

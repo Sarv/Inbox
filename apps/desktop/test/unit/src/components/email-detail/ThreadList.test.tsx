@@ -42,9 +42,6 @@ vi.mock('../../../../../src/utils/sender-identity', () => ({
       ? { bimi: { status: 'logo', logo: 'data:image/svg+xml;base64,PHN2Zy8+' } }
       : null,
 }));
-vi.mock('../../../../../src/store/helpers', () => ({
-  qualifiesForSafeAutoLoad: () => false,
-}));
 vi.mock('../../../../../src/store/email-store', () => ({
   useEmailStore: Object.assign(() => undefined, { getState: () => ({ clearSelectedEmail: vi.fn() }) }),
 }));

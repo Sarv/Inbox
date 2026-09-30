@@ -18,10 +18,10 @@ import {
   useResolvedTheme,
   type ReadingTypography,
 } from '../appearance';
-import { rememberSenderImagesAllowed, shouldAutoLoadRemoteImages } from '../store/helpers';
 import { DARK_PAPER, applyEmailDarkMode } from '../utils/email-dark-mode';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
 import { openExternalLink, opensExternally } from '../utils/open-external';
+import { rememberSenderImagesAllowed, useRemoteImageAutoLoad, type RemoteImageMessage } from '../utils/remote-images';
 // Shared with Chat View rather than kept in a second copy here: the two
 // renderers had the same two-step fit written twice, and the measurement is the
 // part that is easy to get subtly wrong. The library owns it and its tests.
@@ -80,18 +80,14 @@ interface SandboxedEmailBodyProps {
    */
   blockRemoteImages?: boolean;
   /**
-   * Whether this mail is eligible for auto-load under the 'safe' remote-image
-   * mode (the default) — i.e. the AI gave it a real category other than
-   * Promotional/Spam. Uncategorized, Promotional and Spam mail are NOT eligible
-   * and stay behind the banner. Ignored in 'block'/'always' modes.
+   * The received message these bytes belong to — its sender, tags, stored
+   * authentication and account (`remoteImageFactsOf`). Decides whether remote
+   * images auto-load (the ONE rule, `shouldAutoLoadRemoteImages`, kept current
+   * as the reader's trust lists load or change), and "Load images" remembers
+   * its sender in its own account so their future mail auto-loads too (not
+   * for mail in Spam or mail that failed its sender check).
    */
-  safeAutoLoad?: boolean;
-  /**
-   * The message's sender address. When the user manually loads images on this
-   * message, the sender is remembered so their FUTURE mail auto-loads images —
-   * and if they're already on that allowlist, this message auto-loads too.
-   */
-  senderAddress?: string;
+  remoteImagesFrom?: RemoteImageMessage | null;
 }
 
 /**
@@ -825,7 +821,7 @@ function estimateInitialHeight(html: string): number {
  *    own <style> blocks all work natively without rewrites.
  *  - height auto-fits via ResizeObserver on iframe.contentDocument.body.
  */
-export function SandboxedEmailBody({ html, className = '', styledTables = false, normalize = false, transparentCanvas = false, heightPadding = 0, blockRemoteImages = true, safeAutoLoad = false, senderAddress }: SandboxedEmailBodyProps) {
+export function SandboxedEmailBody({ html, className = '', styledTables = false, normalize = false, transparentCanvas = false, heightPadding = 0, blockRemoteImages = true, remoteImagesFrom }: SandboxedEmailBodyProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   // Dark message bodies are opt-in (Appearance -> "Dark email bodies"). They
   // only apply to the Standard reading pane: a chat bubble already renders on a
@@ -864,16 +860,12 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
   // <img src> or a CSS url(http…) counts.
   const [imagesLoaded, setImagesLoaded] = useState(false);
   // The remote-image setting can opt OUT of blocking so users aren't clicking
-  // "Load images" on every mail: 'always' auto-loads everywhere, 'safe'
-  // auto-loads only AI-categorized mail that isn't Promotional/Spam (the caller
-  // computes eligibility via safeAutoLoad), 'block' keeps the banner. Re-read
-  // per message so navigating to a new email picks up a changed setting/category.
-  // `html` is in the deps on purpose, though the decision does not read it: a
-  // new message must re-ask, because the allowlist cache may have warmed since.
-  const autoLoadImages = useMemo(
-    () => shouldAutoLoadRemoteImages(senderAddress, safeAutoLoad),
-    [html, safeAutoLoad, senderAddress],
-  );
+  // "Load images" on every mail (see utils/remote-images for the modes). The
+  // answer is SUBSCRIBED, not computed once: it flips the moment a trust list
+  // finishes loading or changes — the reader allows this sender on another
+  // message, a verified-brand lookup lands — so the first message opened after
+  // launch no longer keeps its banner for a sender the reader already allowed.
+  const autoLoadImages = useRemoteImageAutoLoad(remoteImagesFrom, blockRemoteImages);
   const effectiveBlock = blockRemoteImages && !autoLoadImages;
   const hasRemoteImages = useMemo(
     () => /<img\b[^>]*\ssrc\s*=\s*["']?\s*https?:/i.test(html) || /url\(\s*["']?\s*https?:/i.test(html),
@@ -1091,7 +1083,13 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
           </span>
           <button
             type="button"
-            onClick={() => { rememberSenderImagesAllowed(senderAddress); setImagesLoaded(true); }}
+            onClick={() => {
+              // Remembered in the message's own account — unless it sits in
+              // Spam or failed its sender check, where the From is what a
+              // forger copies: those load this once and are not remembered.
+              rememberSenderImagesAllowed(remoteImagesFrom);
+              setImagesLoaded(true);
+            }}
             className="font-medium text-primary hover:underline whitespace-nowrap flex-shrink-0"
           >
             Load images

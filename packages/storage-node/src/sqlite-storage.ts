@@ -52,6 +52,7 @@ import {
   SPAM_REPAIR_QUEUE_TABLE,
   withServerUid,
 } from './migrations';
+import { enqueueThreadsTaggedWith } from './read-model-dirty';
 import { ReadModelMaintainer } from './read-model-maintainer';
 import {
   EmailRepository,
@@ -2573,9 +2574,7 @@ export class SQLiteStorage implements IEmailStorage {
   private dirtyThreadsForCategorySlug(slug: string): void {
     if (!this.db || !slug) return;
     try {
-      this.db.prepare(
-        "INSERT OR IGNORE INTO read_model_dirty(thread_id) SELECT DISTINCT thread_id FROM emails WHERE instr(tags, '|' || ? || '|') > 0",
-      ).run(slug);
+      enqueueThreadsTaggedWith(this.db, slug);
       this.readModel?.schedule();
     } catch (error) {
       log.warn(`[Storage] Failed to enqueue threads for category '${slug}':`, error);
@@ -2741,6 +2740,28 @@ export class SQLiteStorage implements IEmailStorage {
     this.ensureInitialized();
     const rows = this.db!.prepare('SELECT email FROM image_allowed_senders').all() as Array<{ email: string }>;
     return rows.map((r) => r.email);
+  }
+
+  /**
+   * Everyone the user has written to from this account — the "people you've
+   * emailed" source for the remote-image 'trusted' mode.
+   *
+   * Read off `sender_stats`, which lives in THIS mailbox's database (unlike the
+   * contact directory, which is shared by every account), so one account's
+   * correspondents never vouch for mail arriving at another. Only
+   * `sent_to_count`, which counts mail that actually went out (the ingest of
+   * Sent-folder mail and the contact scan write it). NOT `replied_count`
+   * alone: the ingest and the scan raise it together with `sent_to_count`, so a
+   * row carrying only a reply count comes from a logged "reply" action — which
+   * the AI agent logs when it merely SAVES a draft reply, never sent.
+   */
+  async getEmailedAddresses(): Promise<string[]> {
+    this.ensureInitialized();
+    const rows = this.db!.prepare(
+      `SELECT DISTINCT LOWER(TRIM(email)) AS email FROM sender_stats
+        WHERE COALESCE(sent_to_count, 0) > 0`,
+    ).all() as Array<{ email: string | null }>;
+    return rows.map((r) => r.email ?? '').filter((email) => email.includes('@'));
   }
 
   async isSpammerDomain(domain: string): Promise<boolean> {

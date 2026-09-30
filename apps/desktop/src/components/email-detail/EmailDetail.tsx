@@ -3,6 +3,7 @@ import { Mail, Loader2, ArrowDown, X } from 'lucide-react';
 import { useEmailStore } from '../../store/email-store';
 import { accountDisplayLabel } from '../../store/helpers';
 import { toForwardSource } from '../../utils/forward-quote';
+import { toReplySource } from '../../utils/reply-source';
 import { InlineForward } from '../InlineForward';
 import { InlineReply } from '../InlineReply';
 import { LabelChips } from '../LabelChips';
@@ -182,20 +183,7 @@ export function EmailDetail() {
             !chatMountsComposer({ chatViewActive, targetId: replyingToEmail.id, anchorId: displayEmail.id }) && (
             <div id="inline-reply-compose">
               <InlineReply
-                replyToEmail={{
-                  id: replyingToEmail.id,
-                  messageId: replyingToEmail.messageId,
-                  threadId: replyingToEmail.threadId,
-                  accountId: replyingToEmail.accountId,
-                  subject: replyingToEmail.subject || '',
-                  fromAddress: replyingToEmail.fromAddress,
-                  fromName: replyingToEmail.fromName,
-                  toAddress: replyingToEmail.toAddress || '',
-                  ccAddress: replyingToEmail.ccAddress,
-                  date: replyingToEmail.date,
-                  cleanBody: replyingToEmail.cleanBody,
-                  rawBody: replyingToEmail.rawBody,
-                }}
+                replyToEmail={toReplySource(replyingToEmail)}
                 mode={inlineReplyMode}
                 onClose={handleCloseInlineReply}
                 onModeChange={setInlineReplyMode}

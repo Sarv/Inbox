@@ -120,10 +120,11 @@ describe('fresh install reaches the current production schema', () => {
     // with the In-Reply-To self-reference repair and its spam_repair_queue (v96);
     // 96 -> 97 with the first_email_splits cache and
     // agent_decisions.draft_message_id (v97); 97 -> 98 with the retirement of
-    // the whole-thread conversation_extractions cache (v98).
-    expect(CURRENT_VERSION).toBe(98);
+    // the whole-thread conversation_extractions cache (v98); 98 -> 99 with the
+    // Social category (v99); 99 -> 100 adds emails.pgp_status (v100).
+    expect(CURRENT_VERSION).toBe(100);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..98 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..100 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -228,6 +229,7 @@ describe('fresh install reaches the current production schema', () => {
       'calendar_ics',
       'calendar_added',
       'label_status',
+      'pgp_status',
     ]) {
       expect(emails, `emails.${col}`).toContain(col);
     }
@@ -370,7 +372,7 @@ describe('fresh install reaches the current production schema', () => {
 
   // The category rows ARE the AI classifier's taxonomy: a missing/duplicated
   // slug silently changes how every incoming mail is categorized.
-  it('seeds the AI category taxonomy exactly once, with the v33/v35/v36 edits applied', () => {
+  it('seeds the AI category taxonomy exactly once, with the v33/v35/v36/v99 edits applied', () => {
     const slugs = (
       db.prepare('SELECT slug FROM ai_category_definitions ORDER BY slug').all() as Array<{
         slug: string;
@@ -384,6 +386,8 @@ describe('fresh install reaches the current production schema', () => {
       'needs_response',
       'promotions',
       'reminders',
+      // CHANGED: v99 adds Social (social networks, forums, communities).
+      'social',
     ]);
     // v35 removed waiting_reply (it overlapped needs_response).
     expect(slugs).not.toContain('waiting_reply');
@@ -1089,5 +1093,120 @@ describe('v98 retires conversation_extractions', () => {
     expect(scalar(legacy, "SELECT extraction_status FROM emails WHERE id = 'in-t1'")).toBe('done');
     expect(scalar(legacy, "SELECT extraction_status FROM emails WHERE id = 'in-t2'")).toBe('pending');
     legacy.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('v99 adds the social category', () => {
+  type CategoryRow = {
+    name: string; description: string; prompt: string; icon: string; color: string;
+    sort_order: number; is_system: number; is_enabled: number;
+  };
+  const socialRow = (db: Database.Database): CategoryRow =>
+    db.prepare("SELECT * FROM ai_category_definitions WHERE slug = 'social'").get() as CategoryRow;
+  const count = (db: Database.Database, where: string): unknown =>
+    scalar(db, `SELECT COUNT(*) FROM ai_category_definitions WHERE ${where}`);
+
+  /** A mailbox as the previous build left it (v98): one thread already tagged |social|, one not. */
+  const atV98 = (): Database.Database => {
+    const db = openTestDb();
+    attachSharedContacts(db, '');
+    managerUpTo(db, 98).migrate();
+    insertEmail(db, { id: 'social-1', tags: '|INBOX|social|' });
+    insertEmail(db, { id: 'plain-1' });
+    db.exec('DELETE FROM read_model_dirty');
+    return db;
+  };
+
+  // Breaks: social mail is never sorted as Social. The AI is only given the
+  // enabled rows, and a non-system row is one the app lets the user delete.
+  it('seeds Social as an enabled system category, after Promotions', () => {
+    const db = newMigratedDb();
+    expect(socialRow(db)).toMatchObject({
+      name: 'Social',
+      description: 'Social networks, forums and online communities',
+      icon: 'Users',
+      color: 'purple',
+      sort_order: 9,
+      is_system: 1,
+      is_enabled: 1,
+    });
+    expect(socialRow(db).sort_order).toBeGreaterThan(
+      scalar(db, "SELECT sort_order FROM ai_category_definitions WHERE slug = 'promotions'") as number,
+    );
+    db.close();
+  });
+
+  // Breaks: the model files LinkedIn / Instagram / forum mail as promotions, or
+  // a platform's upsell as social. The prompt is the only definition it has.
+  it('tells the model what is social, and where the line with promotions is', () => {
+    const db = newMigratedDb();
+    const { prompt } = socialRow(db);
+    for (const needle of ['LinkedIn', 'Instagram', 'forum', 'communit', 'InMail']) {
+      expect(prompt).toContain(needle);
+    }
+    expect(prompt).toMatch(/NOT social:[\s\S]*"promotions"/);
+    db.close();
+  });
+
+  // Breaks: an upgraded mailbox never getting Social, or its threads already
+  // tagged |social| keeping a stale has_category until something else touches
+  // them (a definition change writes no emails row, so no trigger fires).
+  it('upgrading a v98 mailbox adds it and queues only the threads already tagged social', () => {
+    const db = atV98();
+    byVersion(99).up(db, {});
+    expect(count(db, "slug = 'social'")).toBe(1);
+    expect(db.prepare('SELECT thread_id FROM read_model_dirty').all()).toEqual([{ thread_id: 't-social-1' }]);
+    db.close();
+  });
+
+  // Breaks: a re-run (a crash after the insert, a restored backup) throwing or
+  // adding a second row.
+  it('is idempotent', () => {
+    const db = atV98();
+    byVersion(99).up(db, {});
+    expect(() => byVersion(99).up(db, {})).not.toThrow();
+    expect(count(db, "slug = 'social'")).toBe(1);
+    db.close();
+  });
+
+  // Breaks: the upgrade overwriting a Social category the user made in the
+  // Categorization tab (that tab gives "Social" exactly this slug): their
+  // prompt, their colour, and is_system 0, which is what lets them delete it.
+  it("keeps the user's own Social category untouched", () => {
+    const db = atV98();
+    db.prepare(`INSERT INTO ai_category_definitions (slug, name, prompt, icon, color, is_system)
+      VALUES ('social', 'Social', 'MY RULES', 'Heart', 'red', 0)`).run();
+    byVersion(99).up(db, {});
+    expect(socialRow(db)).toMatchObject({ name: 'Social', prompt: 'MY RULES', icon: 'Heart', color: 'red', is_system: 0 });
+    expect(scalar(db, 'SELECT COUNT(*) FROM read_model_dirty')).toBe(0);
+    db.close();
+  });
+
+  // Breaks: two categories named Social, mirrored onto the same
+  // "Sarv Inbox/Social" label in the user's mailbox.
+  it("adds no second Social beside the user's own under another slug", () => {
+    const db = atV98();
+    db.prepare(`INSERT INTO ai_category_definitions (slug, name, prompt, is_system)
+      VALUES ('my_social', ' social ', 'MY RULES', 0)`).run();
+    byVersion(99).up(db, {});
+    expect(count(db, "slug = 'social'")).toBe(0);
+    expect(count(db, "lower(trim(name)) = 'social'")).toBe(1);
+    db.close();
+  });
+
+  // Breaks: a rollback deleting a category the user made, or leaving ours behind.
+  it("down removes the seeded row but never the user's own", () => {
+    const db = atV98();
+    byVersion(99).up(db, {});
+    byVersion(99).down?.(db, {});
+    expect(count(db, "slug = 'social'")).toBe(0);
+
+    db.prepare(`INSERT INTO ai_category_definitions (slug, name, prompt, is_system)
+      VALUES ('social', 'Social', 'MY RULES', 0)`).run();
+    byVersion(99).down?.(db, {});
+    expect(count(db, "slug = 'social'")).toBe(1);
+    db.close();
   });
 });

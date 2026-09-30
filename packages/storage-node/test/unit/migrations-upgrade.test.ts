@@ -553,7 +553,8 @@ describe('upgrading a v24-era database to the current version', () => {
       db,
       'SELECT slug FROM ai_category_definitions ORDER BY slug',
     ).map((r) => r.slug);
-    expect(slugs).toEqual(['finance', 'invoice', 'needs_response', 'promotions']);
+    // CHANGED: v99 adds Social on the upgrade path too.
+    expect(slugs).toEqual(['finance', 'invoice', 'needs_response', 'promotions', 'social']);
     expect(scalar(db, "SELECT prompt FROM ai_category_definitions WHERE slug = 'needs_response'")).toContain(
       'COLD SALES / PROMOTIONAL OUTREACH',
     );

@@ -395,21 +395,7 @@ function reportVerdictsOnce(emails: Array<{ fromAddress?: string | null; originI
 }
 
 export function registerEmailHandlers(): void {
-  // Remote-image sender allowlist (per active account). The renderer caches the
-  // full set for its synchronous block-vs-load decision, so this only needs an
-  // "add" and a "list".
-  ipcMain.handle('images:allowSender', async (_event, address: string) => {
-    try { await requireStorage().allowSenderImages(address); return { success: true }; }
-    catch (error) { return { success: false, error: (error as Error).message }; }
-  });
-  ipcMain.handle('images:getAllowedSenders', async () => {
-    try { return { success: true, data: await requireStorage().getImageAllowedSenders() }; }
-    catch (error) { return { success: false, error: (error as Error).message }; }
-  });
-  ipcMain.handle('images:disallowSender', async (_event, address: string) => {
-    try { await requireStorage().disallowSenderImages(address); return { success: true }; }
-    catch (error) { return { success: false, error: (error as Error).message }; }
-  });
+  // The remote-image allowlist lives in image-trust-handlers.ts (per account).
 
   // Link trust/block rules (per active account) — the security indicator and
   // the phishing banner consult these; the Security page lists and revokes them.

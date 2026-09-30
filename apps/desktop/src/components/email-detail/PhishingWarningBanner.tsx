@@ -11,6 +11,8 @@ import { useEmailSecurity } from '../../utils/use-email-security';
 interface PhishingWarningBannerProps {
   /** The message, for "Trust this sender". Without it the button is not offered. */
   emailId?: string;
+  /** The message's account (pane-account.ts `messageAccountOf`): whose trusted
+   *  senders the warning checks, and where "Trust this sender" is saved. */
   accountId?: string;
   /**
    * Clear THIS message once its sender is trusted, the way the view it is in
@@ -68,7 +70,7 @@ export function PhishingWarningBanner({
   spamScore,
   spamReasons,
 }: PhishingWarningBannerProps) {
-  const assessment = useEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons });
+  const assessment = useEmailSecurity({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, accountId });
   const [busy, setBusy] = useState<string | null>(null);
   const [trustError, setTrustError] = useState<string | null>(null);
 

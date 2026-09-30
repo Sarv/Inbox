@@ -102,8 +102,8 @@ export { withFolderSelected } from './with-folder';
 // The header stage — the one derivation of `auth_status`, the spam score and
 // the origin IP from a fetched message. Shared by ingest (`convertMessage`)
 // and the header backfill, so mail scored at either moment gets one answer.
-export { headerStage } from './header-stage';
-export type { HeaderStageOptions, HeaderStageResult } from './header-stage';
+export { autocryptSighting, headerStage } from './header-stage';
+export type { AutocryptSighting, AutocryptSink, HeaderStageOptions, HeaderStageResult } from './header-stage';
 export { bodyStage, recipientDomainsOf, rescoreContent, rescoreWithBody } from './body-stage';
 export type { BodyStageInput } from './body-stage';
 

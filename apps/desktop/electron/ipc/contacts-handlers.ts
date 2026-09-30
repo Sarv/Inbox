@@ -4,7 +4,7 @@
  * Handles contact management operations.
  */
 
-import { classifyDomainPhones, classifyDomainUrls, htmlMiningWindow, htmlToPlainText, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
+import { classifyDomainPhones, classifyDomainUrls, htmlMiningWindow, htmlToPlainText, isSentMailFolder, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { requireStorage, getStorageFor, getAllAccountRuntimes } from '../shared';
@@ -382,7 +382,10 @@ async function scanMailbox(
 
   for (const folder of folders) {
     const folderPath = folder.path?.toLowerCase() || '';
-    const isSentFolder = folderPath.includes('sent') || folderPath.includes('[gmail]/sent');
+    // The shared rule (special-use Sent, or "sent" as a WORD of the path) —
+    // not a substring, which counted "Presentations" and "Consent" as Sent and
+    // made the recipients of received mail into people the user had emailed.
+    const isSentFolder = isSentMailFolder(folder);
     const isTrashFolder = folderPath.includes('trash') || folderPath.includes('deleted');
     const direction = isSentFolder ? 'sent' : 'received';
 

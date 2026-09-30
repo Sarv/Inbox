@@ -1,13 +1,14 @@
 import { Save } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
-import { SETTINGS_KEY } from '../../config/inbox-types';
 import { useEmailStore } from '../../store/email-store';
+import { readAppSettings, saveSettingsFromScreen } from '../../utils/app-settings';
 import { migrateSignatures } from '../../utils/signatures';
 
 import { AccountsTab } from './AccountsTab';
 import { AdvancedTab } from './AdvancedTab';
 import { AppearanceTab } from './AppearanceTab';
+import { EncryptionTab } from './EncryptionTab';
 import { FiltersTab } from './FiltersTab';
 import { FoldersTab } from './FoldersTab';
 import { GeneralTab } from './GeneralTab';
@@ -23,6 +24,7 @@ const tabs: { id: SettingsTab; label: string }[] = [
   { id: 'accounts', label: 'Accounts and Import' },
   { id: 'folders', label: 'Folders' },
   { id: 'filters', label: 'Filters and Blocked' },
+  { id: 'encryption', label: 'Encryption' },
   { id: 'advanced', label: 'Advanced' },
   { id: 'keyboard-shortcuts', label: 'Keyboard Shortcuts' },
 ];
@@ -40,31 +42,13 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
   }, [hasChanges, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
-  // Load settings from localStorage
+  // Load settings from localStorage. The remote-image mode is not this
+  // screen's (Security → Remote images owns it, and reads legacy values
+  // itself); Save leaves it as stored — see saveSettingsFromScreen.
   useEffect(() => {
-    const stored = localStorage.getItem(SETTINGS_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        // Legacy → new: the old boolean `autoLoadRemoteImages` becomes the
-        // 3-way `remoteImageMode`, so an existing user KEEPS their choice
-        // (always/block) instead of being flipped to the new 'safe' default that
-        // a fresh install gets. Kept in sync with getRemoteImageMode.
-        if (parsed.remoteImageMode === undefined && typeof parsed.autoLoadRemoteImages === 'boolean') {
-          parsed.remoteImageMode = parsed.autoLoadRemoteImages ? 'always' : 'block';
-        }
-        // The old 'important' (auto-load only AI-Important mail) is superseded by
-        // 'safe' (auto-load all except Promotional/Spam).
-        if (parsed.remoteImageMode === 'important') {
-          parsed.remoteImageMode = 'safe';
-        }
-        const merged = { ...defaultSettings, ...parsed };
-        // Migrate a legacy single `signature` string into the multi-signature list.
-        setSettings({ ...merged, ...migrateSignatures(merged) });
-      } catch (e) {
-        console.error('Failed to parse settings:', e);
-      }
-    }
+    const merged = readAppSettings();
+    // Migrate a legacy single `signature` string into the multi-signature list.
+    setSettings({ ...merged, ...migrateSignatures(merged) });
   }, []);
 
   const updateSetting = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
@@ -74,7 +58,7 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
   };
 
   const saveSettings = () => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    saveSettingsFromScreen(settings);
     setHasChanges(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -153,6 +137,7 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
             {activeTab === 'accounts' && <AccountsTab settings={settings} updateSetting={updateSetting} openAddAccount={openAddAccount} onAddAccountConsumed={onAddAccountConsumed} />}
             {activeTab === 'folders' && <FoldersTab />}
             {activeTab === 'filters' && <FiltersTab />}
+            {activeTab === 'encryption' && <EncryptionTab settings={settings} updateSetting={updateSetting} />}
             {activeTab === 'advanced' && <AdvancedTab />}
             {activeTab === 'keyboard-shortcuts' && <KeyboardShortcutsTab settings={settings} updateSetting={updateSetting} />}
           </div>

@@ -9,6 +9,7 @@ import {
   isTrashFolder,
   isSpamFolder,
   isOwnMailFolder,
+  isSentMailFolder,
 } from '../../../src/config/folder-mapping';
 
 // Regression for the data-loss/mis-routing class where destructive paths matched
@@ -445,5 +446,26 @@ describe('isOwnMailFolder', () => {
     expect(isOwnMailFolder({ path: 'Archive' })).toBe(false);
     expect(isOwnMailFolder({ path: 'Spam' })).toBe(false);
     expect(isOwnMailFolder({ path: 'Consent Forms' })).toBe(false);
+  });
+});
+
+/**
+ * Breaks: the contact scan counts the To recipients of every message in a
+ * "Sent" folder as people the user emailed (the remote-image 'trusted' mode
+ * loads their pixels). A substring test put "Presentations" and "Consent" in
+ * that set, so the recipients of mail the user merely RECEIVED were trusted.
+ */
+describe('isSentMailFolder', () => {
+  it('recognises the Sent role under any spelling, special-use included', () => {
+    for (const path of ['Sent', 'Sent Items', 'INBOX.Sent', '[Gmail]/Sent Mail', 'Sent 2019']) {
+      expect([path, isSentMailFolder({ path })]).toEqual([path, true]);
+    }
+    expect(isSentMailFolder({ path: 'Gesendet', specialUse: '\\Sent' })).toBe(true);
+  });
+
+  it('never matches a word that merely contains "sent", nor Drafts', () => {
+    for (const path of ['Presentations', 'Consent Forms', 'INBOX.Unsent', 'Drafts', 'INBOX']) {
+      expect([path, isSentMailFolder({ path })]).toEqual([path, false]);
+    }
   });
 });

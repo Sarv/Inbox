@@ -75,13 +75,20 @@ describe('buildDownloadView', () => {
 
   // Breaks if GitHub being down leaves a blank page instead of a link to the latest release.
   it('no release fetched: unavailable, pointing at the latest release page', () => {
-    expect(buildDownloadView({ platform: { os: OS.MAC, arch: ARCH.X64 }, release: null })).toEqual({
+    expect(
+      buildDownloadView({ platform: { os: OS.MAC, arch: ARCH.X64 }, release: null })
+    ).toMatchObject({
       kind: VIEW.UNAVAILABLE,
       os: OS.MAC,
       osName: 'macOS',
       releasesUrl: LATEST_RELEASE_URL,
       reachedGitHub: false,
     });
+    expect(view(OS.MAC, ARCH.X64, null).platforms.map((item) => item.osName)).toEqual([
+      'macOS',
+      'Windows',
+      'Linux',
+    ]);
   });
 
   // Breaks if a release that skipped one OS (a failed runner) shows an empty button for it.

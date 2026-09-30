@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS emails (
   list_unsubscribe TEXT,
   list_unsubscribe_post TEXT,
 
+  -- OpenPGP shape ('encrypted' | 'signed'), see migration v100. An encrypted
+  -- row's body is a placeholder; plaintext exists only in the reader.
+  pgp_status TEXT,
+
   -- Snooze (replaces snoozed_emails table)
   snooze_until INTEGER,
   snooze_original_tags TEXT,
@@ -700,6 +704,8 @@ END;
 -- ============================================================
 -- Seed Data: Default AI Category Definitions
 -- ============================================================
+-- Categories added after this baseline are seeded by their own migration in
+-- migrations.ts, which also runs on a fresh install: social (v99).
 
 INSERT OR IGNORE INTO ai_category_definitions (slug, name, description, prompt, icon, color, sort_order, is_system, is_enabled) VALUES
 ('important', 'Important', 'Urgent emails needing immediate attention',

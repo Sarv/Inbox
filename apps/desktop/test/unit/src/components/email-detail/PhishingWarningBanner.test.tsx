@@ -130,6 +130,49 @@ describe('PhishingWarningBanner — I trust this sender', () => {
   });
 });
 
+describe('PhishingWarningBanner — another account\'s message', () => {
+  afterEach(async () => {
+    const { setActiveCacheAccount } = await import('../../../../../src/utils/account-scoped-cache');
+    setActiveCacheAccount(null);
+  });
+
+  // Multi-account (All Inboxes): the banner checked the ACTIVE account's
+  // trusted senders while "Trust this sender" wrote to the message's own
+  // account — so after the click the banner never cleared, and a sender
+  // trusted only in the active account lifted the warning off another
+  // account's mail. It reads and writes the message's account.
+  it("checks and trusts in the message's own account, not the active one", async () => {
+    const { setActiveCacheAccount } = await import('../../../../../src/utils/account-scoped-cache');
+    setActiveCacheAccount('acct-a');
+    const byAccount: Record<string, Array<{ email: string; createdAt: number }>> = {
+      'acct-a': [{ email: 'alerts@unlisted-bank.example', createdAt: 1 }],
+      'acct-b': [],
+    };
+    listTrustedSenders.mockImplementation((async (accountId?: string) => ({ success: true, data: byAccount[accountId ?? 'acct-a'] })) as never);
+    trustSender.mockImplementation((async (address: string, accountId?: string) => {
+      byAccount[accountId ?? 'acct-a'] = [{ email: address, createdAt: 2 }, ...byAccount[accountId ?? 'acct-a']];
+      return { success: true };
+    }) as never);
+
+    const m = render(banner({ accountId: 'acct-b' }));
+    await flush();
+    // Trusted in A says nothing about B's mail: the warning stays.
+    expect(m.container.textContent).toContain('may not be from who it claims');
+
+    await act(async () => { trustButton(m)!.click(); });
+    await flush();
+    expect(trustSender).toHaveBeenCalledWith('alerts@unlisted-bank.example', 'acct-b');
+    expect(m.container.textContent).not.toContain('may not be from who it claims');
+    listTrustedSenders.mockReset();
+    listTrustedSenders.mockImplementation(async () => ({ success: true, data: stored }));
+    trustSender.mockReset();
+    trustSender.mockImplementation(async (address: string) => {
+      stored = [{ email: address, createdAt: 1 }, ...stored];
+      return { success: true };
+    });
+  });
+});
+
 describe('clearAfterTrust', () => {
   // In the Spam folder the message must leave it through the view's own Not
   // spam (which updates the list); anywhere else it stays put and only loses

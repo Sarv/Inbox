@@ -1,8 +1,11 @@
 import type { BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
+import { DEFAULT_PGP_PREFS } from '@sarvinbox/core/pgp-prefs';
+import { DEFAULT_SENDER_IDENTITY_POLICY } from '@sarvinbox/core/sender-identity-policy';
 
 import type { InboxType, InboxSection } from '../../config/inbox-types';
+import type { RemoteImageMode } from '../../utils/remote-images';
 
-export type SettingsTab = 'general' | 'appearance' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'advanced' | 'keyboard-shortcuts';
+export type SettingsTab = 'general' | 'appearance' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'encryption' | 'advanced' | 'keyboard-shortcuts';
 
 /** A named email signature. `html` is stored verbatim (never round-tripped
  *  through a rich-text schema) so pasted table/flex layouts stay pixel-faithful. */
@@ -22,13 +25,24 @@ export interface AppSettings {
   emailsPerPage: number;
   markAsReadDelay: number;
   /** How received-mail remote images are loaded (privacy vs. convenience —
-   *  remote images are the tracking-pixel vector):
-   *   - 'block'  : always block behind the "Load images" banner
-   *   - 'safe'   : auto-load ONLY for AI-categorized mail that isn't Promotional
-   *                or Spam; uncategorized/Promo/Spam stay behind the banner
-   *   - 'always' : auto-load everywhere
-   *  New installs default to 'safe'. Legacy 'important' migrates to 'safe'. */
-  remoteImageMode: 'block' | 'safe' | 'always';
+   *  remote images are the tracking-pixel vector). Two independent sources —
+   *  trusted senders ("Trust this sender", people you've emailed, verified
+   *  brands; never in Spam or when the message failed authentication) and
+   *  AI-categorized mail that isn't Promotional, Social or Spam — held in one
+   *  value:
+   *   - 'block'       : neither; everything waits for "Load images"
+   *   - 'trusted'     : trusted senders only
+   *   - 'categorized' : categorized mail only
+   *   - 'safe'        : both (the default)
+   *   - 'always'      : auto-load everywhere
+   *  The reader's explicit allowlist applies in every mode. Legacy 'important'
+   *  migrates to 'safe'. Translated to and from the two switches only by
+   *  utils/remote-images.ts `remoteImageSourcesOf` / `remoteImageModeFor`; the
+   *  one decision is `shouldAutoLoadRemoteImages` there.
+   *  Chosen ONLY under Security → Remote images (`saveRemoteImageMode`); a
+   *  settings screen's Save never writes its copy back (utils/app-settings.ts
+   *  `SETTINGS_OWNED_ELSEWHERE`). */
+  remoteImageMode: RemoteImageMode;
   /** Show the sender domain's BIMI brand logo as the avatar (DMARC-passing
    *  mail only), and the blue verified tick when its Verified Mark
    *  Certificate checks out. One DNS lookup plus one fetch from the brand's
@@ -37,8 +51,11 @@ export interface AppSettings {
   /** When a sender has no photo or logo, use the domain's favicon. One fetch
    *  per domain, which tells that domain a client here looked, once. */
   senderFavicons: boolean;
-  /** Ask Gravatar for contacts' photos (sends a hash of each contact's address
-   *  to Gravatar). Opt-in: off unless the user turns it on. */
+  /** Ask Gravatar for contacts' photos (sends Gravatar an MD5 hash of each
+   *  contact's address — which Gravatar, and anyone with a list of addresses,
+   *  can match back to it). Off unless the user turns it on: only an
+   *  explicit `true` enables it; a missing value is off
+   *  (core `senderIdentityPolicyFromSettings`). */
   contactGravatar: boolean;
   /** Send crash and error reports (addresses removed) so bugs can be fixed.
    *  On unless the user turns it off. */
@@ -105,6 +122,14 @@ export interface AppSettings {
   profileCompany: string;
   profileEmail: string;
   profilePhone: string;
+
+  // OpenPGP — read by main through readPgpPrefs (@sarvinbox/core/pgp-prefs), which owns the semantics.
+  /** Ask a recipient's own mail domain for their key (WKD). */
+  pgpWkdLookup: boolean;
+  /** Ask keys.openpgp.org — a third party, which learns who you write to. */
+  pgpKeyserverLookup: boolean;
+  /** Encrypt without being asked when every recipient has a key. */
+  pgpAutoEncrypt: boolean;
 }
 
 export const defaultSettings: AppSettings = {
@@ -114,9 +139,10 @@ export const defaultSettings: AppSettings = {
   emailsPerPage: 25,
   markAsReadDelay: 3,
   remoteImageMode: 'safe',
-  senderLogos: true,
-  senderFavicons: true,
-  contactGravatar: false,
+  // The picture lookups' defaults are core's, shared with main's fallback.
+  senderLogos: DEFAULT_SENDER_IDENTITY_POLICY.logos,
+  senderFavicons: DEFAULT_SENDER_IDENTITY_POLICY.favicons,
+  contactGravatar: DEFAULT_SENDER_IDENTITY_POLICY.gravatar,
   crashReports: true,
   categoryLabels: { enabled: true, folderMode: 'copy' },
   inboxType: 'priority_first',
@@ -140,6 +166,9 @@ export const defaultSettings: AppSettings = {
   profileCompany: '',
   profileEmail: '',
   profilePhone: '',
+  pgpWkdLookup: DEFAULT_PGP_PREFS.wkdLookup,
+  pgpKeyserverLookup: DEFAULT_PGP_PREFS.keyserverLookup,
+  pgpAutoEncrypt: DEFAULT_PGP_PREFS.autoEncrypt,
 };
 
 // Signature pattern type (from preload)

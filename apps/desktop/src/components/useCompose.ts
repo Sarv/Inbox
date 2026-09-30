@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, type MouseEvent as ReactMouseEvent } fro
 
 import { useClickAway } from '../hooks/useClickAway';
 import { useEmailStore } from '../store/email-store';
+import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { editorHtmlToText } from '../utils/editor-text';
 import { currentViewport, placeMenu, type MenuPlacement } from '../utils/menu-placement';
 import { getSignatureHtml } from '../utils/signatures';
@@ -35,6 +36,8 @@ export interface ComposeDraft {
     aiReasoning?: string;
     /** Agent decision row id — resolved when user sends or discards. */
     agentDecisionId?: string;
+    /** The draft was saved encrypted, so it reopens with encryption on. */
+    pgpEncrypted?: boolean;
 }
 
 export interface UseComposeProps {
@@ -121,11 +124,7 @@ export function useCompose({ initialDraft }: UseComposeProps) {
         setPlainBody(text);
     };
 
-    const mergeEmails = (committed: string, pending: string) => {
-        const rawCommitted = committed.split(',').map(e => e.trim()).filter(Boolean);
-        const rawPending = pending.split(',').map(e => e.trim()).filter(e => e.includes('@'));
-        return [...new Set([...rawCommitted, ...rawPending])];
-    };
+    const mergeEmails = mergeRecipientEmails;
 
     const handleAttach = async () => {
         const result = await window.electronAPI.dialog.pickFiles();

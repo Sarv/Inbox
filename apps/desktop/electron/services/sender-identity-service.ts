@@ -25,14 +25,15 @@
 
 import {
   createLogger,
+  DEFAULT_SENDER_IDENTITY_POLICY,
   discoverFavicon,
   lookupBimi,
-  withTimeout,
+  normalizeSenderIdentityPolicy,
   type BimiLookup,
   type BimiStatus,
   type FaviconResult,
   type FaviconStatus,
-  type FetchLike,
+  type SenderIdentityPolicy,
 } from '@sarvinbox/core';
 
 import { getAllAccountRuntimes, getMainWindow } from '../shared';
@@ -46,39 +47,22 @@ import {
   type DomainIdentityRow,
   type DomainIdentityStore,
 } from './domain-identity-store';
-import { chromiumFetch } from './net-fetch';
+import { timedChromiumFetch } from './timed-fetch';
 
 const logger = createLogger('sender-identity');
 
 // --------------------------------------------------------------------- policy
+// The policy's shape, defaults and normalisation live in core
+// (utils/sender-identity-policy.ts), shared with the renderer that reads the
+// switches out of the settings blob and pushes them here. BIMI logos and
+// favicons default on, while Gravatar requires an explicit opt-in. Until the
+// renderer's first push arrives, the persisted policy (or else those defaults)
+// governs.
 
-export interface SenderIdentityPolicy {
-  /** Look up and show BIMI logos / verified marks. */
-  logos: boolean;
-  /** Look up and show domain favicons. */
-  favicons: boolean;
-  /**
-   * Ask Gravatar for contacts' photos. OFF by default: it sends a hash of
-   * every contact's address to a third party, with the contact list coming
-   * from the user's mail — that is mailbox-derived data leaving the device, so
-   * it needs the user's say-so (Google Limited Use; see the privacy policy).
-   */
-  gravatar: boolean;
-}
+export { DEFAULT_SENDER_IDENTITY_POLICY, normalizeSenderIdentityPolicy, type SenderIdentityPolicy };
 
-export const DEFAULT_SENDER_IDENTITY_POLICY: SenderIdentityPolicy = { logos: true, favicons: true, gravatar: false };
 const POLICY_BLOB_KEY = 'sender-identity-policy';
 let cachedPolicy: SenderIdentityPolicy | null = null;
-
-/** Coerce whatever the renderer pushed into a policy; anything odd means the default. */
-export function normalizeSenderIdentityPolicy(raw: unknown): SenderIdentityPolicy {
-  const r = (raw ?? {}) as Record<string, unknown>;
-  return {
-    logos: typeof r.logos === 'boolean' ? r.logos : DEFAULT_SENDER_IDENTITY_POLICY.logos,
-    favicons: typeof r.favicons === 'boolean' ? r.favicons : DEFAULT_SENDER_IDENTITY_POLICY.favicons,
-    gravatar: typeof r.gravatar === 'boolean' ? r.gravatar : DEFAULT_SENDER_IDENTITY_POLICY.gravatar,
-  };
-}
 
 export function getSenderIdentityPolicy(): SenderIdentityPolicy {
   if (cachedPolicy) return cachedPolicy;
@@ -86,7 +70,11 @@ export function getSenderIdentityPolicy(): SenderIdentityPolicy {
     const blob = getBlob(POLICY_BLOB_KEY);
     cachedPolicy = normalizeSenderIdentityPolicy(blob ? JSON.parse(blob.toString('utf8')) : null);
   } catch {
-    cachedPolicy = { ...DEFAULT_SENDER_IDENTITY_POLICY };
+    // Unreadable is not the same as never set. Logos and favicons keep their
+    // defaults, but contact hashes are not sent to Gravatar on a guess: the
+    // renderer pushes the reader's actual choice at every boot, long before
+    // the first avatar-discovery tick.
+    cachedPolicy = { ...DEFAULT_SENDER_IDENTITY_POLICY, gravatar: false };
   }
   return cachedPolicy;
 }
@@ -312,17 +300,7 @@ export class SenderIdentityService {
 /** Per-request ceiling. A brand's logo server that hangs must not hold a slot for long. */
 const FETCH_TIMEOUT_MS = 15_000;
 
-/** Chromium's fetch, with a deadline on the connection and on the body read. */
-const timedFetch: FetchLike = async (url) => {
-  const res = await withTimeout(chromiumFetch(url), FETCH_TIMEOUT_MS, `Timed out fetching ${url}`);
-  return {
-    ok: res.ok,
-    status: res.status,
-    url: res.url,
-    headers: { get: (name: string) => res.headers.get(name) },
-    arrayBuffer: () => withTimeout(res.arrayBuffer(), FETCH_TIMEOUT_MS, `Timed out reading ${url}`),
-  };
-};
+const timedFetch = timedChromiumFetch(FETCH_TIMEOUT_MS);
 
 let service: SenderIdentityService | null = null;
 

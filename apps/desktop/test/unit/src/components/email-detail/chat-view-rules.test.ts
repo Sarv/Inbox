@@ -1,6 +1,6 @@
 // Decision functions for the chat view. All but the last are pure; the last one
-// reads the reader's image settings, so this file installs a localStorage and
-// an electronAPI for it.
+// reads the reader's image settings and trust caches, so this file installs a
+// localStorage and an electronAPI for it.
 import type { EmailRecord } from '@sarvinbox/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,25 +19,22 @@ import {
 } from '../../../../../src/components/email-detail/chat-view-rules';
 import type { SplitOutcome } from '../../../../../src/services/first-split/split-first-email';
 import type { FirstSplitRunResult } from '../../../../../src/services/first-split/store';
+import { setActiveCacheAccount } from '../../../../../src/utils/account-scoped-cache';
 import {
   clearImageAllowedCache,
+  emailedAddresses,
+  notifyRemoteImageModeChanged,
   warmImageAllowedSenders,
-} from '../../../../../src/store/helpers';
+} from '../../../../../src/utils/remote-images';
+import { resetTrustedSenders } from '../../../../../src/utils/trusted-senders';
 
-// helpers.ts pulls in the badge cache and ai-service on import; neither is what
-// these tests are about, and ai-service reaches for providers/HTTP at import
-// time. (vi.mock is hoisted above the imports above.)
+// The remote-image rule reads the badge cache's enabled slugs; that cache is
+// not what these tests are about. (vi.mock is hoisted above the imports above.)
 vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
-  clearCategoryBadgeCache: vi.fn(),
-  applyEmailCategories: vi.fn(),
   getCachedCategorySlugs: vi.fn(() => ['newsletters'] as string[]),
   warmCategoryDefs: vi.fn(),
-}));
-vi.mock('../../../../../src/services/ai-service', () => ({
-  reportAIHealthy: vi.fn(),
-  reportAIUnhealthy: vi.fn(),
-  getDefaultProvider: vi.fn(() => null as unknown),
-  syncAIProviderToMain: vi.fn(),
+  subscribeCategoryDefs: vi.fn(() => () => {}),
+  getCategoryDefsVersion: vi.fn(() => 0),
 }));
 
 const SETTINGS_KEY = 'sarvinbox-settings';
@@ -53,17 +50,24 @@ const installLocalStorage = () => {
   };
 };
 
-const writeRemoteImageMode = (mode: string) =>
+/** Choose a mode as another writer would, and say so — the parsed mode is kept
+ *  in memory and re-read only when told the settings changed. */
+const writeRemoteImageMode = (mode: string) => {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ remoteImageMode: mode }));
+  notifyRemoteImageModeChanged();
+};
 
-/** Load the allowlist the way the app does, from a stubbed IPC bridge. */
-const withAllowedSenders = async (addresses: string[]) => {
+/** Load the allowlist the way the app does, from a stubbed IPC bridge —
+ *  per account: `byAccount[id]` answers for that account, `''` for the active one. */
+const withAllowedSenders = async (byAccount: Record<string, string[]>) => {
   (globalThis as any).window = {
     electronAPI: {
-      emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: addresses }) },
+      emails: {
+        getImageAllowedSenders: vi.fn(async (accountId?: string) => ({ success: true, data: byAccount[accountId ?? ''] ?? [] })),
+      },
     },
   };
-  await warmImageAllowedSenders();
+  for (const id of Object.keys(byAccount)) await warmImageAllowedSenders(id || undefined);
 };
 
 const mail = (over: Partial<EmailRecord> = {}): EmailRecord =>
@@ -219,7 +223,12 @@ describe('blockRemoteImagesFor', () => {
   beforeEach(() => {
     installLocalStorage();
     (globalThis as any).window = { electronAPI: {} };
+    // Every trust cache starts cold: a list left failing (and backing off) by
+    // an earlier test must not decide this one.
     clearImageAllowedCache();
+    emailedAddresses.clear();
+    resetTrustedSenders();
+    setActiveCacheAccount(null);
     vi.clearAllMocks();
   });
 
@@ -254,10 +263,70 @@ describe('blockRemoteImagesFor', () => {
   // undo every "always load from this sender" the reader has ever clicked.
   it('honours the per-sender allowlist over the global mode', async () => {
     writeRemoteImageMode('block');
-    await withAllowedSenders(['Boss@Acme.com']);
+    await withAllowedSenders({ '': ['Boss@Acme.com'] });
     // Matched case-insensitively — the allowlist stores whatever the server sent.
     expect(blockRemoteImagesFor(mail({ fromAddress: 'boss@acme.com' }))).toBe(false);
     expect(blockRemoteImagesFor(mail({ fromAddress: 'other@acme.com' }))).toBe(true);
+  });
+
+  // Multi-account: a unified-view thread's rows carry no account; the account
+  // the thread was read from (`viewAccountId`) decides — never the active
+  // account's allowlist. The same sender allowed in A stays blocked in B.
+  it('decides a bubble against its own account\'s allowlist', async () => {
+    writeRemoteImageMode('block');
+    await withAllowedSenders({ 'acct-a': ['boss@acme.com'], 'acct-b': [] });
+    expect(blockRemoteImagesFor(mail({ fromAddress: 'boss@acme.com' }), 'acct-a')).toBe(false);
+    expect(blockRemoteImagesFor(mail({ fromAddress: 'boss@acme.com' }), 'acct-b')).toBe(true);
+    // A row that names its own account wins over the thread's.
+    expect(blockRemoteImagesFor(mail({ fromAddress: 'boss@acme.com', accountId: 'acct-a' }), 'acct-b')).toBe(false);
+  });
+
+  // Regression: the chat view must apply the 'trusted' mode's spoofing guard
+  // too — the same rule as the card, not a second copy that forgot it.
+  it('blocks a spoofed trusted sender under "trusted"', async () => {
+    writeRemoteImageMode('trusted');
+    (globalThis as any).window = {
+      electronAPI: {
+        emails: {
+          getImageAllowedSenders: vi.fn(async () => ({ success: true, data: [] })),
+          getEmailedAddresses: vi.fn(async () => ({ success: true, data: ['pal@acme.com'] })),
+        },
+        spam: { listTrustedSenders: vi.fn(async () => ({ success: true, data: [] })) },
+      },
+    };
+    const pal = mail({ fromAddress: 'pal@acme.com', authStatus: JSON.stringify({ dmarc: 'pass', overall: 'pass' }) });
+    expect(blockRemoteImagesFor(pal)).toBe(true); // cold: conservative
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(blockRemoteImagesFor(pal)).toBe(false);
+    expect(blockRemoteImagesFor({ ...pal, authStatus: JSON.stringify({ dmarc: 'fail', overall: 'fail' }) })).toBe(true);
+  });
+
+  // Regression: the two switches are independent in the chat view too —
+  // categorized-only must not load a trusted sender's uncategorized bubble,
+  // and trusted-only must not load a stranger's categorized one.
+  it('keeps trusted senders and categorized mail apart, per bubble', async () => {
+    (globalThis as any).window = {
+      electronAPI: {
+        emails: {
+          getImageAllowedSenders: vi.fn(async () => ({ success: true, data: [] })),
+          getEmailedAddresses: vi.fn(async () => ({ success: true, data: ['pal@acme.com'] })),
+        },
+        spam: { listTrustedSenders: vi.fn(async () => ({ success: true, data: [] })) },
+      },
+    };
+    const pass = JSON.stringify({ dmarc: 'pass', overall: 'pass' });
+    const palUncategorized = mail({ fromAddress: 'pal@acme.com', authStatus: pass });
+    const strangerNewsletter = mail({ fromAddress: 'robot@vendor.test', tags: '|INBOX|newsletters|' });
+    await emailedAddresses.reload();
+    await warmImageAllowedSenders();
+
+    writeRemoteImageMode('categorized');
+    expect(blockRemoteImagesFor(palUncategorized)).toBe(true);
+    expect(blockRemoteImagesFor(strangerNewsletter)).toBe(false);
+
+    writeRemoteImageMode('trusted');
+    expect(blockRemoteImagesFor(palUncategorized)).toBe(false);
+    expect(blockRemoteImagesFor(strangerNewsletter)).toBe(true);
   });
 
   // Regression: bubbles whose source mail is missing from the thread map (an

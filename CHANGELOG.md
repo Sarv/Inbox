@@ -7,7 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Choose trusted senders and categorized mail separately for remote
+  images.** Under Security → Remote images, two switches decide which
+  pictures load on their own, and you can turn on either, both or neither.
+  "From trusted senders" covers senders you marked "I trust this sender",
+  people you have sent mail to from the account the message arrived in, and
+  brands showing the blue verified tick, but never mail in Spam or a message
+  that failed its sender check. "From categorized mail" covers mail the AI sorted into one of your
+  categories, except Social, Promotional and Spam. Both are on by default, so
+  if you had "Categorized only" (the default), pictures from trusted senders
+  now load too; turn "From trusted senders" off to keep it as it was. A
+  separate "Always load all remote images" switch loads everything. Senders
+  on your allowed list keep loading whatever you choose.
+
+- **Social category.** New mail from social networks, forums and online
+  communities (LinkedIn, Instagram, Facebook, X, Reddit, Discourse or Google
+  Groups digests, Meetup groups and the like) is now sorted into its own
+  Social category. A platform's own marketing, such as Premium offers or free
+  trials, still goes to Promotions. Mail that was already sorted keeps its
+  categories, and if you had made your own "Social" category, yours is kept
+  as it is. With "Mirror AI categories to my mailbox" on, a Social label is
+  added to your mailbox too.
+
+- **OpenPGP encryption.** Make a key or import the one you already use in
+  Settings → Encryption. Your key is kept in the system keychain; on Linux
+  without a keyring it gets a passphrase instead, asked for once per session.
+  Encrypted mail opens in the reader with an "Encrypted" / "Signed" badge
+  and its attachments. It is decrypted only while you view it. The plaintext
+  is never stored, indexed, searched, summarised or passed to AI or
+  extensions, and the message list shows "Encrypted message". When writing,
+  a lock and a pen beside Send switch encryption and signing on or off.
+  Encryption turns on by itself when every recipient has a key, and replies
+  to encrypted mail stay encrypted. A message that can't be encrypted to
+  someone is never sent unencrypted without you choosing that. Recipients'
+  keys come from the mail they send you (Autocrypt), from their mail domain
+  (WKD) or from a file you import. Searching keys.openpgp.org is off unless
+  you turn it on, because that service learns who you write to. A draft of
+  an encrypted message is encrypted too, to your own key, both here and in
+  your server's Drafts folder, and it reopens with encryption still on. If a
+  draft can't be encrypted, it is not saved rather than saved unencrypted.
+  Known limit: the subject line is not encrypted, in messages or in drafts.
+
+### Changed
+- **"From categorized mail" skips your Social category.** If you created an
+  AI category for social mail (named "Social", "Social Media" or similar),
+  its images no longer load just because of that category, like Promotions
+  and Spam.
+- **Remote images are chosen under Security.** The choice of when pictures in
+  messages load has moved from Settings → General to Security → Remote
+  images, next to your list of senders whose images always load. Each switch
+  says what it loads, and your choice applies as soon as you make it, with no
+  Save button. "Block" and "Always load" carry over as they were; for
+  "Categorized only", see above.
+- **Gravatar contact photos remain opt-in.** The app asks Gravatar
+  whether each contact has a photo only after you turn on Settings → General →
+  Contact photos from Gravatar. That request sends a hash of the contact’s
+  address, which Gravatar can match to the address. Existing on or off choices
+  remain in effect.
+
 ### Fixed
+- **Allowed senders' images load straight away.** Right after starting the
+  app or switching accounts, the first message you opened could keep the
+  "Remote images blocked" bar even for a sender you had already chosen to
+  load images from. It now loads as soon as your list is ready. Choosing
+  "Load images" now applies at once to every open message from that sender,
+  in the standard view and the chat view alike. In All Inboxes, the choice is
+  saved to the account the message belongs to, and a list that fails to load
+  is tried again rather than treated as empty. "Load images" on a message in
+  Spam, or on one that failed its sender check, now shows that message's
+  images without remembering the sender, since that address may be forged.
+- **Replying no longer loads the original's images.** The quoted original in
+  the reply and forward window loaded its remote images whatever your
+  setting, even "Block". It now follows your Remote images choice.
+- **Chat view: follow-up messages keep their time.** When one person sent
+  several messages in a row, the later bubbles showed the security shield
+  alone on a line of its own, with no time.
 - **One switch for AI sorting, and it works.** Settings → AI → Categorization
   had a "Smart Email Categorization" switch that stopped nothing: with it off,
   new mail was still sent to your AI provider to be sorted. It is gone. The

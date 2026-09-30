@@ -1,9 +1,9 @@
 import { Save } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
-import { SETTINGS_KEY } from '../../../config/inbox-types';
 import { AIProvider, loadAISettings } from '../../../services/ai-service';
 import { useEmailStore } from '../../../store/email-store';
+import { readAppSettings, saveSettingsFromScreen } from '../../../utils/app-settings';
 import { AIBoxDashboard } from '../../aibox/AIBoxDashboard';
 import { type AppSettings, defaultSettings } from '../types';
 
@@ -39,15 +39,7 @@ export function AISettings({ initialTab, onDirtyChange }: { initialTab?: AISetti
 
   // Load settings from localStorage
   useEffect(() => {
-    const stored = localStorage.getItem(SETTINGS_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        setSettings({ ...defaultSettings, ...parsed });
-      } catch (e) {
-        console.error('Failed to parse settings:', e);
-      }
-    }
+    setSettings(readAppSettings());
   }, []);
 
   // Load AI providers on mount
@@ -63,7 +55,9 @@ export function AISettings({ initialTab, onDirtyChange }: { initialTab?: AISetti
   };
 
   const saveSettings = () => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    // Never writes back a stale copy of a setting another screen owns (the
+    // remote-image mode, the blocklists).
+    saveSettingsFromScreen(settings);
     setHasChanges(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);

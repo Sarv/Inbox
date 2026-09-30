@@ -19,6 +19,9 @@ interface SecurityIndicatorProps {
    * "still checking" rather than a level it would have to take back.
    */
   bodyLoaded?: boolean;
+  /** The message's account (pane-account.ts `messageAccountOf`); whose trusted
+   *  senders count for it. None = the active account. */
+  accountId?: string | null;
   className?: string;
 }
 
@@ -69,10 +72,10 @@ const STATUS_TONE: Record<SecurityCheck['status'], string> = {
  * already been believed. A `caution` or `danger` is shown straight away even
  * so: those come from the headers, which arrived with the message.
  */
-export function SecurityIndicator({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, bodyLoaded, className = '' }: SecurityIndicatorProps) {
+export function SecurityIndicator({ fromName, fromAddress, html, authStatus, spamScore, spamReasons, bodyLoaded, accountId, className = '' }: SecurityIndicatorProps) {
   const identity = useSenderIdentity(fromAddress);
   const bimi = identity ? identity.bimi : null;
-  const assessment = useEmailSecurity({ fromName, fromAddress, html, bodyLoaded, authStatus, spamScore, spamReasons, bimi });
+  const assessment = useEmailSecurity({ fromName, fromAddress, html, bodyLoaded, authStatus, spamScore, spamReasons, bimi, accountId });
   const checking = assessment.pending && LEVEL_RANK[assessment.level] < LEVEL_RANK.caution;
   const Icon = checking ? Loader2 : ICON[assessment.level];
   const copy = checking ? PENDING_COPY : LEVEL_COPY[assessment.level];

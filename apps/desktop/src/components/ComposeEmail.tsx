@@ -13,6 +13,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 
 import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
+import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { accountDisplayLabel } from '../store/helpers';
@@ -25,6 +26,7 @@ import { reportSendFailure } from '../utils/send-failure';
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
 import { PolishModal } from './PolishModal';
+import { QuotedOriginalPreview } from './QuotedOriginalPreview';
 import { EMPTY_EDITOR_HTML, RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
 import { SelectionPolishMenu } from './SelectionPolishMenu';
@@ -50,6 +52,8 @@ interface ComposeEmailProps {
     date: number;
     cleanBody: string | null;
     rawBody: string | null; // Original HTML body for preserving email trail structure
+    /** 'encrypted' keeps the reply encrypted by default. */
+    pgpStatus?: 'encrypted' | 'signed' | null;
   };
   draft?: any; // To restore draft on Undo
   /** AI-drafted reply body (plain text) — prefilled when agent suggests reply */
@@ -131,6 +135,14 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     initialDraft: draft
   });
 
+  // OpenPGP over the same recipient list the send uses, so the lock speaks for who actually gets the mail.
+  // A draft saved encrypted reopens encrypted, as a reply to encrypted mail does.
+  const pgp = usePgpCompose(
+    resolvedFrom ?? sendingAccount?.email,
+    [...mergeEmails(to, pendingTo), ...mergeEmails(cc, pendingCc), ...mergeEmails(bcc, pendingBcc)],
+    (mode !== 'new' && replyToEmail?.pgpStatus === 'encrypted') || draft?.pgpEncrypted === true,
+  );
+
   // Auto-save draft to IMAP. When EDITING an existing standalone draft (opened
   // from the Drafts list), thread the draft's own thread/message-id/account so it
   // replaces + deletes the right row instead of spawning a new one.
@@ -147,6 +159,8 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     initialDraftUnsaved: (draft as any)?.unsaved,
     accountId: (draft as any)?.accountId ?? replyAccountId,
     attachments,
+    encrypt: pgp.state.encrypt,
+    initialDraftEncrypted: draft?.pgpEncrypted,
   });
 
   const [quotedHtml, setQuotedHtml] = useState('');
@@ -386,6 +400,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         from: resolvedFrom,
         requestReadReceipt: readReceipt,
         followUp: followUp ?? undefined,
+        pgp: pgp.state.request,
         attachments: attachments.map(a => ({ ...a, filename: a.filename || a.name || 'attachment' })) as any,
         draftCleanup: {
           threadId: (draft as any)?.threadId,
@@ -695,14 +710,7 @@ ${createQuotedHeader(prefix, extraInfo)}
             )}
 
             {/* Quoted Content Preview (not editable, shows original email) */}
-            {quotedHtml && (
-              <div className="flex-shrink-0 border-t border-border bg-muted/20 max-h-[200px] overflow-y-auto">
-                <div className="px-4 py-2 text-xs text-muted-foreground font-medium border-b border-border bg-muted/30">
-                  Original Message
-                </div>
-                <SandboxedEmailBody html={quotedHtml} className="px-4 py-2 text-sm" blockRemoteImages={false} />
-              </div>
-            )}
+            {quotedHtml && <QuotedOriginalPreview html={quotedHtml} original={replyToEmail} />}
           </div>
 
           {/* Footer UI replaced by ComposeToolbar */}
@@ -716,6 +724,7 @@ ${createQuotedHeader(prefix, extraInfo)}
             onToggleReadReceipt={() => setReadReceipt((v) => !v)}
             followUp={followUp}
             onFollowUpChange={setFollowUp}
+            pgp={pgp}
             // One send path, not two: the toolbar calls the same handler the
             // Cmd+Enter shortcut does, so a change to either can't skip one.
             onSend={() => { void handleSend(); }}
@@ -914,14 +923,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         )}
 
         {/* Quoted Content Preview (not editable, shows original email) */}
-        {quotedHtml && (
-          <div className="flex-shrink-0 border-t border-border bg-muted/20 max-h-[150px] overflow-y-auto">
-            <div className="px-3 py-1.5 text-xs text-muted-foreground font-medium border-b border-border bg-muted/30">
-              Original Message
-            </div>
-            <SandboxedEmailBody html={quotedHtml} className="px-3 py-2 text-xs" blockRemoteImages={false} />
-          </div>
-        )}
+        {quotedHtml && <QuotedOriginalPreview html={quotedHtml} original={replyToEmail} compact />}
       </div>
 
       {/* Footer — the SAME toolbar the fullscreen composer uses, so an action
@@ -937,6 +939,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         onToggleReadReceipt={() => setReadReceipt((v) => !v)}
         followUp={followUp}
         onFollowUpChange={setFollowUp}
+            pgp={pgp}
         onSend={() => { void handleSend(); }}
         onSendLater={(sendAt) => { void handleSend(sendAt); }}
         onAttach={handleAttach}

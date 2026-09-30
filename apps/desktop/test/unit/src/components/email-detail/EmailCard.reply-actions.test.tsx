@@ -44,9 +44,6 @@ vi.mock('../../../../../src/services/ai-service', () => ({
 vi.mock('../../../../../src/utils/sender-identity', () => ({
   useSenderIdentity: () => null,
 }));
-vi.mock('../../../../../src/store/helpers', () => ({
-  qualifiesForSafeAutoLoad: () => false,
-}));
 const storeState = { fetchEmailBody: vi.fn(), clearSelectedEmail: vi.fn() };
 vi.mock('../../../../../src/store/email-store', () => ({
   // The card reads the store both ways: whole (`useEmailStore()`) and via getState.

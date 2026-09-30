@@ -1,8 +1,11 @@
 import type { RealtimeEvent } from '@sarvinbox/core';
+import { sentFolderPathsOf } from '@sarvinbox/core/conversation-membership';
+import { isSentMailFolder } from '@sarvinbox/core/folder-mapping';
 import pLimit from 'p-limit';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import { findFolderByType } from '../../config/folder-mapping';
+import { refreshEmailedAddresses } from '../../utils/remote-images';
 import { buildThreads, threadRowKey } from '../../utils/thread-utils';
 import {
   getMaxEmailsPerFolder,
@@ -60,6 +63,32 @@ const SYNC_TROUBLE_STREAK = 2;
  */
 const BODY_BATCH_THRESHOLD = 4;
 
+/**
+ * A Sent copy was stored: the account wrote to someone, possibly someone new,
+ * and remote images "From trusted senders" should know before that person's
+ * reply is opened. Re-read that account's correspondents — only then: an Inbox arrival
+ * adds nobody, and each re-read is a scan of the account's sender stats.
+ * (`refreshEmailedAddresses` also skips lists nobody has read, puts off the
+ * re-read until trusted senders are switched on, and gathers a burst into one.)
+ *
+ * The active account's Sent folders come from its folder list (special-use,
+ * any name) as well as by name; a background account's, whose list the
+ * renderer does not hold, by name alone (core `isSentMailFolder`: the Sent
+ * role or "sent" as a word of the path, either delimiter). Arrivals and
+ * background-download folders (`staleFolders`, which a backfill of Sent also
+ * reports) both count.
+ */
+function refreshEmailedAfterSent(get: StoreGet, pending: RealtimeBatch): void {
+  const isSentPath = (path: string, own: readonly string[]) => own.includes(path) || isSentMailFolder({ path });
+  const activeSent = sentFolderPathsOf(get().folders);
+  if ([...pending.newByFolder.keys(), ...pending.staleFolders].some((path) => isSentPath(path, activeSent))) {
+    refreshEmailedAddresses();
+  }
+  for (const [accountId, paths] of pending.backgroundNewFolders) {
+    if ([...paths].some((path) => isSentPath(path, []))) refreshEmailedAddresses(accountId);
+  }
+}
+
 /** Everything one coalescing window accumulated, in the order flush needs it. */
 interface RealtimeBatch {
   /** true once anything at all was queued — flush is a no-op otherwise. */
@@ -88,6 +117,9 @@ interface RealtimeBatch {
   staleFolders: Set<string>;
   /** A non-active account event was seen (badges + unified only). */
   sawBackground: boolean;
+  /** Folders NON-active accounts received new mail in, by account — only to
+   *  notice a Sent copy (see `refreshEmailedAfterSent`). */
+  backgroundNewFolders: Map<string, Set<string>>;
   /** Deletions apply to every account: ids to drop, folders to re-check. */
   deletedIds: Set<string>;
   deletedFolders: Set<string>;
@@ -107,6 +139,7 @@ const createRealtimeBatch = (): RealtimeBatch => ({
   flaggedFolders: new Set(),
   staleFolders: new Set(),
   sawBackground: false,
+  backgroundNewFolders: new Map(),
   deletedIds: new Set(),
   deletedFolders: new Set(),
   deletedWithoutFolder: false,
@@ -375,6 +408,7 @@ async function flushRealtimeBatch(set: StoreSet, get: StoreGet): Promise<void> {
     }
 
     if (pending.sawNew || pending.sawDeleted) clearCategoryBadgeCache();
+    refreshEmailedAfterSent(get, pending);
 
     // 1. Deleted rows disappear immediately — one store write for the lot.
     if (pending.deletedIds.size > 0) applyDeletions(set, get, pending.deletedIds);
@@ -850,6 +884,11 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
           batch.newByFolder.set(key, ids);
         } else {
           batch.sawBackground = true;
+          if (event.accountId && event.folderPath) {
+            const folders = batch.backgroundNewFolders.get(event.accountId) ?? new Set<string>();
+            folders.add(event.folderPath);
+            batch.backgroundNewFolders.set(event.accountId, folders);
+          }
         }
         break;
       }

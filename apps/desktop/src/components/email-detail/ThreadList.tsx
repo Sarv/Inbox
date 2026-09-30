@@ -12,9 +12,12 @@ import prettyBytes from 'pretty-bytes';
 import { useMemo, useState } from 'react';
 
 import { isSignatureDetectionEnabled } from '../../services/ai-service';
-import { qualifiesForSafeAutoLoad } from '../../store/helpers';
+import { useEmailStore } from '../../store/email-store';
 import { firstFlaggedEmailId } from '../../utils/email-security';
 import { toForwardSource } from '../../utils/forward-quote';
+import { messageAccountOf, paneAccountOf } from '../../utils/pane-account';
+import { remoteImageFactsOf } from '../../utils/remote-images';
+import { toReplySource } from '../../utils/reply-source';
 import { useLinkRules } from '../../utils/security-rules';
 import { useTrustedSenders } from '../../utils/trusted-senders';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
@@ -26,6 +29,7 @@ import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { buildEmailMenuHandlers, buildReplyHandlers } from './email-menu-handlers';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
+import { PgpMessageView } from './PgpMessageView';
 import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
 import { ReplyActionsBar } from './ReplyActionsBar';
 import { SecurityIndicator } from './SecurityIndicator';
@@ -67,6 +71,10 @@ export function ThreadList({ ctx }: ThreadListProps) {
     // the same one the card and the chat hand their composers.
     polishThreadContext,
   } = ctx;
+  // The account the open thread was read from (`threadAccountId`, stamped with
+  // the rows): whose trust lists decide each message's shield, warning and
+  // remote images, and where "Trust this sender" / "Load images" are saved.
+  const paneAccountId = useEmailStore(paneAccountOf);
 
   // Per-reply "Show details" toggle (full From/To/Cc/Date/Subject header).
   const [detailsOpen, setDetailsOpen] = useState<Set<string>>(new Set());
@@ -85,7 +93,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
   const { sets: linkRuleSets } = useLinkRules();
   // The list itself, not the stable lookup, is the memo key: it is a new array
   // whenever a sender is trusted or removed, so the banner moves with it.
-  const { senders: trustedSenders, isTrusted } = useTrustedSenders();
+  const { senders: trustedSenders, isTrusted } = useTrustedSenders(paneAccountId);
   const firstFlaggedId = useMemo(
     () => firstFlaggedEmailId(threadEmails, linkRuleSets, isTrusted),
     [threadEmails, linkRuleSets, trustedSenders, isTrusted],
@@ -152,6 +160,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
                         <span className="truncate">{email.fromName || email.fromAddress}</span>
                         <VerifiedBadge email={email.fromAddress} authStatus={email.authStatus} />
                         <SecurityIndicator
+                          accountId={messageAccountOf(email, paneAccountId)}
                           fromName={email.fromName}
                           fromAddress={email.fromAddress}
                           authStatus={email.authStatus}
@@ -276,8 +285,8 @@ export function ThreadList({ ctx }: ThreadListProps) {
                     {email.id === firstFlaggedId && (
                       <PhishingWarningBanner
                         emailId={email.id}
-                        accountId={(email as any).accountId}
-                        onTrusted={() => clearAfterTrust(ctx, email.id, (email as any).accountId)}
+                        accountId={messageAccountOf(email, paneAccountId) ?? undefined}
+                        onTrusted={() => clearAfterTrust(ctx, email.id, messageAccountOf(email, paneAccountId) ?? undefined)}
                         fromName={email.fromName}
                         fromAddress={email.fromAddress}
                         authStatus={email.authStatus}
@@ -286,15 +295,17 @@ export function ThreadList({ ctx }: ThreadListProps) {
                         html={email.rawBody}
                       />
                     )}
+                    <PgpMessageView email={email} paneAccountId={paneAccountId}>
                     <div className="max-w-none">
                       {isHtml ? (
-                        <SandboxedEmailBody key={`${(displayContent || '').length}:${(displayContent || '').slice(0, 32)}`} html={displayContent || '(no content)'} safeAutoLoad={qualifiesForSafeAutoLoad(email.tags)} senderAddress={email.fromAddress} />
+                        <SandboxedEmailBody key={`${(displayContent || '').length}:${(displayContent || '').slice(0, 32)}`} html={displayContent || '(no content)'} remoteImagesFrom={remoteImageFactsOf(email, paneAccountId)} />
                       ) : (
                         <div className="whitespace-pre-wrap font-sans text-foreground leading-relaxed">
                           {displayContent || '(no content)'}
                         </div>
                       )}
                     </div>
+                    </PgpMessageView>
                     {/* Toggle buttons for quoted content and signature */}
                     <div className="flex items-center gap-2 flex-wrap">
                       {hasQuoted && (
@@ -345,20 +356,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
               {showInlineReply && replyingToEmail?.id === email.id && (
                 <div id="inline-reply-compose">
                 <InlineReply
-                  replyToEmail={{
-                    id: email.id,
-                    messageId: (email as any).messageId,
-                    threadId: (email as any).threadId,
-                    accountId: (email as any).accountId,
-                    subject: email.subject || '',
-                    fromAddress: email.fromAddress,
-                    fromName: email.fromName,
-                    toAddress: email.toAddress || '',
-                    ccAddress: email.ccAddress,
-                    date: email.date,
-                    cleanBody: email.cleanBody,
-                    rawBody: email.rawBody,
-                  }}
+                  replyToEmail={toReplySource(email)}
                   mode={inlineReplyMode}
                   onClose={handleCloseInlineReply}
                   onModeChange={setInlineReplyMode}

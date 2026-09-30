@@ -123,3 +123,36 @@ export function headerStage(message: IMAPMessage, opts?: HeaderStageOptions): He
     unsubscribe: unsubscribeHeaders(message.rawHeaders),
   };
 }
+
+/** An Autocrypt header seen on incoming mail, for the keyring to weigh. */
+export interface AutocryptSighting {
+  /** The message's From address — the only address the header may speak for. */
+  fromAddress: string;
+  /** The raw header value, unparsed. */
+  header: string;
+  /** UTC ISO-8601: when the message was sent, never later than it arrived. */
+  sentAt: string;
+}
+
+/** Receives sightings. Fire-and-forget: ingest never waits on the keyring. */
+export type AutocryptSink = (sighting: AutocryptSighting) => void;
+
+/**
+ * The Autocrypt header on a fetched message, or null. Exactly ONE header is
+ * required — the spec treats several as none, since at most one of them can
+ * be the sender's. The date is the Date header clamped to the arrival time,
+ * the spec's "effective date": a message dated in the future must not win
+ * "most recently seen" over every real one.
+ */
+export function autocryptSighting(message: IMAPMessage): AutocryptSighting | null {
+  if (!message.rawHeaders) return null;
+  const headers = headerValuesFromText(message.rawHeaders, 'autocrypt');
+  if (headers.length !== 1) return null;
+  const fromAddress = mapEnvelopeFields(message.envelope).fromAddress;
+  if (!fromAddress) return null;
+  const sent = toUnixSeconds(message.envelope.date);
+  const arrived = toUnixSeconds(message.date);
+  const effective = [sent, arrived].filter((value): value is number => value !== null);
+  if (effective.length === 0) return null;
+  return { fromAddress, header: headers[0], sentAt: new Date(Math.min(...effective) * 1000).toISOString() };
+}
