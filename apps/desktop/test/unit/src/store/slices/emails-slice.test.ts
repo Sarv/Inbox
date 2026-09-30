@@ -1019,7 +1019,7 @@ describe('loadFolders — Spam folders for the remote-image guard', () => {
     };
     const state: Record<string, any> = { activeAccountId: 'acct-a', selectedFolderId: 'f1' };
     const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
-    const slice = createEmailsSlice(set as any, (() => ({ ...slice, ...state })) as any);
+    const slice = createEmailsSlice(set as any, (() => ({ ...slice, ...state })) as any, undefined as any);
     const { isSpamFolderMail } = await import('../../../../../src/utils/remote-images');
     expect(isSpamFolderMail('|Indésirables|', 'acct-a')).toBe(false);
 
