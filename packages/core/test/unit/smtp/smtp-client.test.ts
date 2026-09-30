@@ -43,6 +43,7 @@ vi.mock('nodemailer', () => ({
 
 // Imported AFTER the mock so the client picks up the stubbed transport.
 const { SMTPClient, smtpClient } = await import('../../../src/smtp/smtp-client');
+const { OutgoingMimeError } = await import('../../../src/smtp/smtp-errors');
 
 const baseConfig = (over: Partial<SMTPConfig> = {}): SMTPConfig => ({
   host: 'smtp.sarv.com',
@@ -450,6 +451,51 @@ describe('SMTPClient.sendEmail — read receipt + identity', () => {
     const parsed = await parseLastSent();
     expect(addressText(parsed.from)).toContain('sales@sarv.com'); // header From = alias
     expect(lastSentMail().envelope.from).toBe('me@sarv.com');     // envelope = authenticated
+  });
+});
+
+describe('SMTPClient.sendEmail — outgoing MIME transform', () => {
+  const OUTGOING = Buffer.from('From: me@sarv.com\r\nSubject: rewritten\r\n\r\nopaque\r\n');
+
+  // Breaks: an encrypted send would transmit the plaintext, or the Sent copy
+  // would differ from what the recipient got.
+  it('submits the transformed bytes and returns them as the Sent copy', async () => {
+    const client = new SMTPClient();
+    await client.connect(baseConfig());
+    const seen: { raw: string; context: unknown }[] = [];
+    const result = await client.sendEmail(
+      send({ cc: ['cc@example.com'], bcc: ['hidden@example.com'], from: 'Sales <sales@sarv.com>' }),
+      async (raw, context) => {
+        seen.push({ raw: raw.toString(), context });
+        return OUTGOING;
+      },
+    );
+    expect(result).toMatchObject({ success: true, rawMessage: OUTGOING.toString() });
+    expect(lastSentMail().raw).toBe(OUTGOING);
+    expect(seen[0].raw).toContain('plain text body');
+    // Bcc must reach the transform (an encrypted Bcc needs its key) but never the MIME.
+    expect(seen[0].raw).not.toContain('hidden@example.com');
+    expect(seen[0].context).toEqual({
+      fromHeader: 'Sales <sales@sarv.com>',
+      recipients: ['to@example.com', 'cc@example.com', 'hidden@example.com'],
+    });
+    expect(lastSentMail().envelope.to).toEqual(['to@example.com', 'cc@example.com', 'hidden@example.com']);
+  });
+
+  // Breaks: "recipient has no key" retried forever in the outbox, or a key
+  // lookup timeout dead-lettered a message that would have gone through later.
+  it('fails the send with the retry class the transform chose, transmitting nothing', async () => {
+    const client = new SMTPClient();
+    await client.connect(baseConfig());
+    const permanent = await client.sendEmail(send(), async () => {
+      throw new OutgoingMimeError('No key for to@example.com', false);
+    });
+    expect(permanent).toEqual({ success: false, error: 'No key for to@example.com', transient: false });
+    const transient = await client.sendEmail(send(), async () => {
+      throw new OutgoingMimeError('Key lookup timed out', true);
+    });
+    expect(transient).toMatchObject({ success: false, transient: true });
+    expect(h.state.sent).toHaveLength(0);
   });
 });
 

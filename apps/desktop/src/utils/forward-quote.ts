@@ -1,3 +1,5 @@
+import { textToParagraphsHtml } from './saved-draft-content';
+
 /** The parts of the original message a forward quotes. */
 export interface ForwardedMessage {
   subject: string;
@@ -23,7 +25,7 @@ const sentAtOf = (original: ForwardedMessage) => new Date(original.date * 1000).
 export function buildForwardQuoteHtml(original: ForwardedMessage): string {
   const quotedBodyHtml = original.rawBody
     ? original.rawBody
-    : (original.cleanBody || '').split('\n').map((line) => `<p>${line || '&nbsp;'}</p>`).join('');
+    : textToParagraphsHtml(original.cleanBody || '');
 
   return `
 <blockquote style="margin: 0 0 0 0.8ex; border-left: 1px solid #ccc; padding-left: 1ex;">
@@ -74,6 +76,8 @@ export interface ForwardSource extends ForwardedMessage {
   attachmentNames?: string | null;
   /** Owning account — the forward goes out from (and drafts into) it. */
   accountId?: string;
+  /** 'encrypted' keeps the forward encrypted by default. */
+  pgpStatus?: 'encrypted' | 'signed' | null;
 }
 
 interface ForwardableEmail {
@@ -89,6 +93,7 @@ interface ForwardableEmail {
   hasAttachments?: boolean;
   attachmentNames?: string | null;
   accountId?: string;
+  pgpStatus?: 'encrypted' | 'signed' | null;
 }
 
 /**
@@ -110,5 +115,6 @@ export function toForwardSource(email: ForwardableEmail): ForwardSource {
     hasAttachments: email.hasAttachments,
     attachmentNames: email.attachmentNames,
     accountId: email.accountId,
+    pgpStatus: email.pgpStatus,
   };
 }

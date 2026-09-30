@@ -52,7 +52,34 @@ export interface SendEmailOptions {
   requestReadReceipt?: boolean;
   /** Remind the sender if nobody replies. Recorded only once the send succeeds. */
   followUp?: SendFollowUpRequest;
+  /** OpenPGP choice made in compose. Applied by the main process's outgoing
+   *  MIME transform; undefined = the account's defaults. */
+  pgp?: SendPgpRequest;
 }
+
+/**
+ * Per-message OpenPGP choice. `encrypt` fails the send (permanently) when a
+ * recipient has no usable key — it is never silently downgraded to plaintext.
+ */
+export interface SendPgpRequest {
+  encrypt: boolean;
+  sign: boolean;
+}
+
+/** What an outgoing MIME transform knows about the message it rewrites. */
+export interface OutgoingMimeContext {
+  /** The header From actually used (identity/alias or the account default). */
+  fromHeader: string;
+  /** Every envelope recipient — to, cc AND bcc — each exactly as given. */
+  recipients: string[];
+}
+
+/**
+ * Rewrites the fully built MIME just before submission (e.g. PGP encryption).
+ * The returned bytes are what is transmitted AND what is appended to Sent.
+ * Throw an `OutgoingMimeError` to fail the send with an explicit retry class.
+ */
+export type OutgoingMimeTransform = (raw: Buffer, context: OutgoingMimeContext) => Promise<Buffer>;
 
 /**
  * "Remind me if nobody replies". Unix epoch seconds (UTC). `afterSeconds`

@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS emails (
   list_unsubscribe TEXT,
   list_unsubscribe_post TEXT,
 
+  -- OpenPGP shape ('encrypted' | 'signed'), see migration v100. An encrypted
+  -- row's body is a placeholder; plaintext exists only in the reader.
+  pgp_status TEXT,
+
   -- Snooze (replaces snoozed_emails table)
   snooze_until INTEGER,
   snooze_original_tags TEXT,

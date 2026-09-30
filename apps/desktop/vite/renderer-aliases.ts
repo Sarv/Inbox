@@ -166,6 +166,9 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/logger.ts',
     ),
+    // Pure (zero imports) — the OpenPGP lookup / auto-encrypt preferences, read
+    // by the Encryption tab with the same function main decides lookups with.
+    '@sarvinbox/core/pgp-prefs': resolve(desktopDir, '../../packages/core/src/pgp/prefs.ts'),
   };
 }
 

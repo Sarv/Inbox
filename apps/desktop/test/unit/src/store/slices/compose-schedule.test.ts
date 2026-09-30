@@ -154,3 +154,16 @@ describe('sendEmail without a delivery time', () => {
     clearTimeout(getState().pendingSend.timeoutId);
   });
 });
+
+describe('sendEmail with an OpenPGP request', () => {
+  // Breaks: the lock in the composer is on, but the payload whitelist drops the
+  // request and the mail goes out in the clear — with nothing on screen to say so.
+  it('carries the encrypt/sign request to main on both the scheduled and the immediate path', async () => {
+    const { slice } = makeSlice();
+    await slice.sendEmail({ ...OPTIONS, sendAt: SEND_AT, pgp: { encrypt: true, sign: false } });
+    expect(smtp.scheduleSend.mock.calls[0][0]).toMatchObject({ pgp: { encrypt: true, sign: false } });
+
+    await slice.sendEmail({ ...OPTIONS, pgp: { encrypt: false, sign: true } });
+    expect(smtp.sendWithUndo.mock.calls[0][0]).toMatchObject({ pgp: { encrypt: false, sign: true } });
+  });
+});

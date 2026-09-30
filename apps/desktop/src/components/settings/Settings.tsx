@@ -8,6 +8,7 @@ import { migrateSignatures } from '../../utils/signatures';
 import { AccountsTab } from './AccountsTab';
 import { AdvancedTab } from './AdvancedTab';
 import { AppearanceTab } from './AppearanceTab';
+import { EncryptionTab } from './EncryptionTab';
 import { FiltersTab } from './FiltersTab';
 import { FoldersTab } from './FoldersTab';
 import { GeneralTab } from './GeneralTab';
@@ -23,6 +24,7 @@ const tabs: { id: SettingsTab; label: string }[] = [
   { id: 'accounts', label: 'Accounts and Import' },
   { id: 'folders', label: 'Folders' },
   { id: 'filters', label: 'Filters and Blocked' },
+  { id: 'encryption', label: 'Encryption' },
   { id: 'advanced', label: 'Advanced' },
   { id: 'keyboard-shortcuts', label: 'Keyboard Shortcuts' },
 ];
@@ -153,6 +155,7 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
             {activeTab === 'accounts' && <AccountsTab settings={settings} updateSetting={updateSetting} openAddAccount={openAddAccount} onAddAccountConsumed={onAddAccountConsumed} />}
             {activeTab === 'folders' && <FoldersTab />}
             {activeTab === 'filters' && <FiltersTab />}
+            {activeTab === 'encryption' && <EncryptionTab settings={settings} updateSetting={updateSetting} />}
             {activeTab === 'advanced' && <AdvancedTab />}
             {activeTab === 'keyboard-shortcuts' && <KeyboardShortcutsTab settings={settings} updateSetting={updateSetting} />}
           </div>

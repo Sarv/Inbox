@@ -10,5 +10,9 @@
 *.icns binary
 *.db   binary
 
+# OpenPGP test fixtures: signatures cover exact bytes, CRLF included, so git
+# must never rewrite their line endings.
+packages/core/test/unit/pgp/fixtures/** -text
+
 # Generated — collapse in diffs / exclude from language stats
 pnpm-lock.yaml linguist-generated=true

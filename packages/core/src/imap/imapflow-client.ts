@@ -944,6 +944,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
             // SPF headers above do not name it — see spam-signals / origin-ip.
             ...SPAM_HEADER_NAMES,
             'received',
+            // The sender's OpenPGP key (Autocrypt Level 1). Only messages that
+            // carry one pay for it; the keyring learns the key from here.
+            'autocrypt',
           ],
         },
         { uid: useUid },

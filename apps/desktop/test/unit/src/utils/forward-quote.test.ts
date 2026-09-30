@@ -96,6 +96,11 @@ describe('toForwardSource', () => {
     expect(toForwardSource(row).accountId).toBe('acc-2');
   });
 
+  // Breaks: forwarding an encrypted message defaults to sending it on in the clear.
+  it('carries the OpenPGP status through', () => {
+    expect(toForwardSource({ ...row, pgpStatus: 'encrypted' }).pgpStatus).toBe('encrypted');
+  });
+
   // Regression: a null subject / To rendered as "Fwd: null" and "To: null" in the quote.
   it('turns a missing subject and To into empty strings', () => {
     const source = toForwardSource({ ...row, subject: null, toAddress: null });

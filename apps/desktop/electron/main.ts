@@ -77,6 +77,7 @@ import { startNotificationService, stopNotificationService } from './services/no
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
 import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
 import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
+import { attachAutocrypt } from './services/pgp-service';
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
 import { startPipelineEventPersister, stopPipelineEventPersister } from './services/pipeline-event-persister';
 import { bootPipelineConfig } from './services/pipeline-init-config';
@@ -753,6 +754,7 @@ async function initializeSyncEngine(): Promise<void> {
 
   const syncEngine = new SyncEngine(storage);
   attachReputation(syncEngine);
+  attachAutocrypt(syncEngine);
   setSyncEngine(syncEngine);
   logger.info('[Main] Sync engine initialized');
 }

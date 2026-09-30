@@ -1,0 +1,28 @@
+From: Gee Pee <gee@example.org>
+To: rita@example.com
+Subject: Signed by GnuPG
+Message-ID: <gpg-signed@example.org>
+Date: Mon, 28 Sep 2026 07:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/signed; micalg=pgp-sha256;
+ protocol="application/pgp-signature"; boundary="SIG-BOUNDARY"
+
+This is an OpenPGP/MIME signed message (RFC 4880 and 3156)
+--SIG-BOUNDARY
+Content-Type: text/plain; charset=utf-8
+
+Signed by GnuPG.
+Second line.
+
+--SIG-BOUNDARY
+Content-Type: application/pgp-signature; name="signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+
+iIYEABYIAC4WIQTwiN/jydlfF5LuJopkNbLaloajDAUCaroTchAcZ2VlQGV4YW1w
+bGUub3JnAAoJEGQ1stqWhqMMSKwBAN/0tgVhHek2pbhU0i6qX893AAAkoIwUWoRD
+/0wxvUpUAP92UVu8Kj56UcOlcSFvJKK0JvDMXornXooQu9ZIC++NAg==
+=+s9B
+-----END PGP SIGNATURE-----
+
+--SIG-BOUNDARY--

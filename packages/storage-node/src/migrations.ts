@@ -3970,6 +3970,31 @@ NOT social:
 };
 
 /**
+ * v100 — `emails.pgp_status`: which rows are OpenPGP mail.
+ *
+ * Set when the body is parsed. For 'encrypted' it is also the only sign the
+ * row's body is a placeholder: the ciphertext is never parsed into the body
+ * columns (so nothing — FTS, snippets, AI — ever sees it or the plaintext),
+ * and the reader decrypts from the message source on view. 'signed' mail
+ * keeps its body; the reader verifies the signature from the source.
+ *
+ * Not backfilled: mail whose body was stored before v100 reads NULL until its
+ * body is re-downloaded, and shows as ordinary mail — what it did before.
+ */
+export const emailPgpStatus: Migration = {
+  version: 100,
+  name: 'email_pgp_status',
+  up: (db) => {
+    addColumnIfMissing(db, 'emails', 'pgp_status', 'TEXT DEFAULT NULL');
+    logger.info('OpenPGP (v100): emails.pgp_status added');
+  },
+  down: (db) => {
+    // As v93: clear rather than DROP COLUMN (a rewrite of the bodies' table).
+    db.exec('UPDATE emails SET pgp_status = NULL WHERE pgp_status IS NOT NULL;');
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -4053,5 +4078,6 @@ export function createMigrationManager(
   manager.register(firstEmailSplits);
   manager.register(retireConversationExtractions);
   manager.register(socialCategory);
+  manager.register(emailPgpStatus);
   return manager;
 }

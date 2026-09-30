@@ -8,12 +8,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, messageIdKey, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
 
 import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { getValidAccessToken } from '../services/oauth-service';
 import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
+import { sendTransformFor } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
 import { getPipelineUserName } from '../services/unified-pipeline-service';
 import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
@@ -381,6 +383,16 @@ async function markThreadRepliesAnswered(storage: any, inReplyToMessageId?: stri
   return threadId;
 }
 
+/**
+ * The body the local Sent mirror row stores. An encrypted send's plaintext
+ * never reaches the DB — and so never search, snippets or AI; the Sent copy on
+ * the server is encrypted to the sender too and is decrypted on view.
+ */
+export function sentMirrorBody(options: Pick<SendEmailOptions, 'body' | 'htmlBody' | 'pgp'>): { bodyText: string; bodyHtml: string } {
+  if (options.pgp?.encrypt) return { bodyText: PGP_ENCRYPTED_PLACEHOLDER, bodyHtml: '' };
+  return { bodyText: options.body || '', bodyHtml: options.htmlBody || '' };
+}
+
 export async function sendEmailFromMain(
   options: SendEmailOptions,
 ): Promise<{ success: boolean; messageId?: string; error?: string; transient?: boolean; rawMessage?: string; needsSentAppend?: boolean }> {
@@ -401,7 +413,10 @@ export async function sendEmailFromMain(
     return { success: false, error: 'Not connected to SMTP server. Please check connection settings.', transient: true };
   }
 
-  let result = await smtpClient.sendEmail(options);
+  // OpenPGP: Autocrypt header always, encrypt/sign when the send asked. Built
+  // once so the OAuth retry below wraps the message the same way.
+  const transformMime = sendTransformFor(options.pgp);
+  let result = await smtpClient.sendEmail(options, transformMime);
 
   // OAuth access tokens expire (~hourly) while the SMTP transporter keeps caching
   // the one it connected with — a later send then fails "invalid or expired token"
@@ -415,7 +430,7 @@ export async function sendEmailFromMain(
     try {
       const accessToken = await getValidAccessToken(cfg.oauthProvider, cfg.username, true /* forceRefresh */);
       await smtpClient.connect({ ...cfg, accessToken });
-      result = await smtpClient.sendEmail(options);
+      result = await smtpClient.sendEmail(options, transformMime);
     } catch (refreshErr) {
       logger.error(`[SMTP] Token refresh/reconnect failed for ${cfg.username}:`, refreshErr);
     }
@@ -449,8 +464,7 @@ export async function sendEmailFromMain(
         bcc: options.bcc?.join(', ') || '',
         fromAddress,
         fromName,
-        bodyText: options.body || '',
-        bodyHtml: options.htmlBody || '',
+        ...sentMirrorBody(options),
         inReplyTo: options.inReplyTo || '',
         references: options.references?.join(' ') || options.inReplyTo || '',
       }, scopedStorage);

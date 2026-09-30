@@ -13,6 +13,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 
 import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
+import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { accountDisplayLabel } from '../store/helpers';
@@ -50,6 +51,8 @@ interface ComposeEmailProps {
     date: number;
     cleanBody: string | null;
     rawBody: string | null; // Original HTML body for preserving email trail structure
+    /** 'encrypted' keeps the reply encrypted by default. */
+    pgpStatus?: 'encrypted' | 'signed' | null;
   };
   draft?: any; // To restore draft on Undo
   /** AI-drafted reply body (plain text) — prefilled when agent suggests reply */
@@ -131,6 +134,14 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     initialDraft: draft
   });
 
+  // OpenPGP over the same recipient list the send uses, so the lock speaks for who actually gets the mail.
+  // A draft saved encrypted reopens encrypted, as a reply to encrypted mail does.
+  const pgp = usePgpCompose(
+    resolvedFrom ?? sendingAccount?.email,
+    [...mergeEmails(to, pendingTo), ...mergeEmails(cc, pendingCc), ...mergeEmails(bcc, pendingBcc)],
+    (mode !== 'new' && replyToEmail?.pgpStatus === 'encrypted') || draft?.pgpEncrypted === true,
+  );
+
   // Auto-save draft to IMAP. When EDITING an existing standalone draft (opened
   // from the Drafts list), thread the draft's own thread/message-id/account so it
   // replaces + deletes the right row instead of spawning a new one.
@@ -147,6 +158,8 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     initialDraftUnsaved: (draft as any)?.unsaved,
     accountId: (draft as any)?.accountId ?? replyAccountId,
     attachments,
+    encrypt: pgp.state.encrypt,
+    initialDraftEncrypted: draft?.pgpEncrypted,
   });
 
   const [quotedHtml, setQuotedHtml] = useState('');
@@ -386,6 +399,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         from: resolvedFrom,
         requestReadReceipt: readReceipt,
         followUp: followUp ?? undefined,
+        pgp: pgp.state.request,
         attachments: attachments.map(a => ({ ...a, filename: a.filename || a.name || 'attachment' })) as any,
         draftCleanup: {
           threadId: (draft as any)?.threadId,
@@ -716,6 +730,7 @@ ${createQuotedHeader(prefix, extraInfo)}
             onToggleReadReceipt={() => setReadReceipt((v) => !v)}
             followUp={followUp}
             onFollowUpChange={setFollowUp}
+            pgp={pgp}
             // One send path, not two: the toolbar calls the same handler the
             // Cmd+Enter shortcut does, so a change to either can't skip one.
             onSend={() => { void handleSend(); }}
@@ -937,6 +952,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         onToggleReadReceipt={() => setReadReceipt((v) => !v)}
         followUp={followUp}
         onFollowUpChange={setFollowUp}
+            pgp={pgp}
         onSend={() => { void handleSend(); }}
         onSendLater={(sendAt) => { void handleSend(sendAt); }}
         onAttach={handleAttach}
