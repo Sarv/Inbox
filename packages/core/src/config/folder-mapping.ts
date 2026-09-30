@@ -254,9 +254,20 @@ const OWN_MAIL_WORD_RE = /(^|[^a-z])sent([^a-z]|$)/i;
  * forever, with nothing on screen to say why.
  */
 export function isOwnMailFolder(folder: ClassifiableFolder): boolean {
-  if (OWN_MAIL_WORD_RE.test(folder.path)) return true;
-  const type = classifyFolder(folder);
-  return type === 'sent' || type === 'drafts';
+  return isSentMailFolder(folder) || classifyFolder(folder) === 'drafts';
+}
+
+/**
+ * Is this folder where the user's SENT mail lives — the Sent half of
+ * {@link isOwnMailFolder}, by the same rule: the Sent role (special-use, a
+ * known path, the name) or any path segment whose WORDS include "sent"
+ * ("INBOX.Sent", "Sent 2019"), never a longer word that merely contains it
+ * ("Presentations", "Consent Forms"). What the contact scan counts as mail the
+ * user sent: a bare `.includes('sent')` there made the To recipients of mail
+ * the user RECEIVED in "Presentations" into people they had emailed.
+ */
+export function isSentMailFolder(folder: ClassifiableFolder): boolean {
+  return OWN_MAIL_WORD_RE.test(folder.path) || classifyFolder(folder) === 'sent';
 }
 
 

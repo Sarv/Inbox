@@ -105,6 +105,21 @@ export async function requireAccountStorage(accountId: string): Promise<AccountS
 }
 
 /**
+ * The storage a renderer request names: exactly `accountId` when it gives one
+ * ({@link requireAccountStorage} — strict, never another account's), or the
+ * active account's when it gives none (the single-account path, and callers
+ * that predate per-account routing).
+ *
+ * The one spelling of "strict when named", so a handler cannot quietly pick the
+ * lenient resolver for data keyed by something every account shares — a sender
+ * address is in every mailbox, and a fallback would write account B's choice
+ * into account A's database.
+ */
+export async function requireNamedOrActiveStorage(accountId?: string | null): Promise<AccountStorage> {
+  return accountId ? requireAccountStorage(accountId) : requireStorage();
+}
+
+/**
  * Every OPEN account's storage — the active one first, each storage once (the
  * pre-account default slot and the primary's runtime can share one).
  * `accountId` is null for the default slot, which has no id yet; each caller

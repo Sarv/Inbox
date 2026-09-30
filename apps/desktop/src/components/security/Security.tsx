@@ -1,11 +1,22 @@
 import { parseSpamReasons, spamVerdict } from '@sarv-in/mailguard/verdict';
 import { describeImageAllowEntry, type ImageAllowEntry } from '@sarvinbox/core/image-allowlist';
-import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, Image as ImageIcon, AtSign, Globe, Plus, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, AtSign, Globe, Plus, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 
-import { forgetImagesAllowed, getRemoteImageMode, rememberImagesAllowed } from '../../store/helpers';
+import { useEmailStore } from '../../store/email-store';
+import { accountDisplayLabel } from '../../store/helpers';
 import { LEVEL_COPY, type SecurityLevel } from '../../utils/email-security';
+import {
+  forgetImagesAllowed,
+  rememberImagesAllowed,
+  remoteImageModeFor,
+  remoteImageSourcesOf,
+  saveRemoteImageMode,
+  useRemoteImageMode,
+  type RemoteImageSources,
+} from '../../utils/remote-images';
 import { removeLinkRule, useLinkRules, type LinkRule } from '../../utils/security-rules';
+import { reloadTrustedSenders } from '../../utils/trusted-senders';
 import { useConfirm } from '../ConfirmDialog';
 import { BlockedSendersPanel } from '../settings/BlockedSendersPanel';
 import { Tooltip } from '../Tooltip';
@@ -346,37 +357,188 @@ function RuleList({ title, empty, rules, tone, onRevoke, revokeLabel }: {
 
 /* ------------------------------------------------------------------ Images */
 
-const MODE_COPY: Record<'block' | 'safe' | 'always', { title: string; detail: string }> = {
-  block: { title: 'Block remote images', detail: 'Nothing is fetched until you click “Load images”. Senders cannot tell when you open their mail.' },
-  safe: { title: 'Load except promotions and spam', detail: 'Images load automatically unless the AI has filed the message as promotional or spam.' },
-  always: { title: 'Always load', detail: 'Every remote image loads on open. Senders with tracking pixels learn when and where you read.' },
-};
+type ImageSourceKey = keyof RemoteImageSources;
 
 /**
- * Remote images: the global policy (read-only here — it lives in Settings) and
- * every standing allowance, which the reader can add by hand as well as by
- * clicking "Load images" on a message. An allowance is one sender
- * (`boss@x.com`) or a whole domain (`@x.com`, which also covers `news.x.com`),
- * because a newsletter's actual envelope sender is usually some per-campaign
- * address nobody would think to type.
+ * What each switch loads — worded to match what `shouldAutoLoadRemoteImages`
+ * (utils/remote-images.ts) actually does. The two sources are independent:
+ * either, both or neither. The allowed list below loads whatever is on and is
+ * checked first, so it is not held back by Spam or a failed sender check; the
+ * category source trusts the AI's filing and does not look at the sender.
+ */
+const SOURCE_COPY: Record<ImageSourceKey, { title: string; detail: string }> = {
+  trusted: {
+    title: 'From trusted senders',
+    detail: 'Senders you marked “I trust this sender”, people you’ve emailed from the account the message arrived in, and verified brands (blue tick) — unless the message is in Spam or failed its sender check. Your allowed list below is separate.',
+  },
+  categorized: {
+    title: 'From categorized mail',
+    detail: 'Mail the AI filed into one of your categories, except Social, Promotional and Spam. This goes by the category, not the sender.',
+  },
+  always: {
+    title: 'Always load all remote images',
+    detail: 'Every remote image loads when you open a message, whoever sent it. Senders with tracking pixels learn when and where you read.',
+  },
+};
+
+/** One checkbox row: named by its title, described by its detail (and, when
+ *  "Always" covers it, by a note saying so). The whole row is the label. */
+function ImageSourceOption({ source, checked, disabled = false, coveredNoteId, onChange }: {
+  source: ImageSourceKey;
+  checked: boolean;
+  disabled?: boolean;
+  /** Set while "Always" is on and covers this source: the id of the note saying so. */
+  coveredNoteId?: string;
+  onChange: (checked: boolean) => void;
+}) {
+  const baseId = useId();
+  const copy = SOURCE_COPY[source];
+  const inputId = `${baseId}-input`;
+  const titleId = `${baseId}-title`;
+  const detailId = `${baseId}-detail`;
+  return (
+    <label
+      htmlFor={inputId}
+      className={`flex items-start gap-3 px-3 py-3 text-sm transition-colors ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-accent/40'}`}
+    >
+      <input
+        id={inputId}
+        type="checkbox"
+        value={source}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        aria-labelledby={titleId}
+        aria-describedby={coveredNoteId ? `${detailId} ${coveredNoteId}` : detailId}
+        className="h-4 w-4 mt-0.5 flex-shrink-0 accent-primary disabled:opacity-60"
+      />
+      <span className={`flex-1 min-w-0 ${disabled ? 'opacity-70' : ''}`}>
+        <span id={titleId} className="font-medium">{copy.title}</span>
+        <span id={detailId} className="block text-xs text-muted-foreground">{copy.detail}</span>
+      </span>
+    </label>
+  );
+}
+
+/**
+ * When remote images load on their own, chosen here and nowhere else: trusted
+ * senders and categorized mail, each on or off independently, or everything.
+ * A change is saved the moment it is made, into the same settings the whole
+ * app reads (`saveRemoteImageMode`, one stored value — see
+ * `remoteImageModeFor`), and every open message re-decides at once — no Save
+ * button, no reload. The Settings screen's own Save never writes its (possibly
+ * stale) copy of it back.
+ *
+ * "Always" includes both sources, so while it is on they show ticked and
+ * cannot be changed. Turning it off gives back the two choices the reader had
+ * before turning it on, as long as this page has stayed open; otherwise (the
+ * page opened with "Always" already on, or was left since) both come back on —
+ * what the ticked boxes showed, and the default.
+ */
+function RemoteImageSwitches() {
+  const sources = remoteImageSourcesOf(useRemoteImageMode());
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [beforeAlways, setBeforeAlways] = useState<Pick<RemoteImageSources, 'trusted' | 'categorized'> | null>(null);
+  const baseId = useId();
+  const headingId = `${baseId}-heading`;
+  const introId = `${baseId}-intro`;
+  const coveredId = `${baseId}-covered`;
+
+  const save = (next: RemoteImageSources): boolean => {
+    const saved = saveRemoteImageMode(remoteImageModeFor(next));
+    setSaveError(saved ? null : 'Your choice was not saved: the app could not read or write your settings. Nothing was changed.');
+    return saved;
+  };
+
+  const setSource = (source: 'trusted' | 'categorized', on: boolean) => {
+    save({ ...sources, [source]: on });
+  };
+
+  const setAlways = (on: boolean) => {
+    if (on) {
+      const { trusted, categorized } = sources;
+      if (save({ trusted: true, categorized: true, always: true })) setBeforeAlways({ trusted, categorized });
+      return;
+    }
+    if (save({ ...(beforeAlways ?? { trusted: true, categorized: true }), always: false })) setBeforeAlways(null);
+  };
+
+  const nothingOn = !sources.always && !sources.trusted && !sources.categorized;
+
+  return (
+    <section aria-labelledby={headingId}>
+      <h2 id={headingId} className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+        When to load remote images
+      </h2>
+      <p id={introId} className="text-sm text-muted-foreground mb-4">
+        A remote image tells its sender when you opened the message, and from where. Choose which mail loads them on
+        its own — trusted senders, categorized mail, both (the default) or neither. The choice applies to every
+        account; the trusted senders, the people you’ve emailed and the allowed list are each account’s own.
+      </p>
+      <fieldset aria-describedby={introId}>
+        <legend className="text-sm font-medium mb-2">Load images automatically</legend>
+        <div className="rounded-lg border border-border divide-y divide-border overflow-hidden">
+          {(['trusted', 'categorized'] as const).map((source) => (
+            <ImageSourceOption
+              key={source}
+              source={source}
+              checked={sources[source]}
+              disabled={sources.always}
+              coveredNoteId={sources.always ? coveredId : undefined}
+              onChange={(on) => setSource(source, on)}
+            />
+          ))}
+        </div>
+        {sources.always && (
+          <p id={coveredId} className="mt-2 text-xs text-muted-foreground">
+            Both are included while “Always load all remote images” is on.
+          </p>
+        )}
+      </fieldset>
+      <div className="mt-4 rounded-lg border border-border overflow-hidden">
+        <ImageSourceOption source="always" checked={sources.always} onChange={setAlways} />
+      </div>
+      <div aria-live="polite">
+        {nothingOn && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Images load only after you choose “Load images” on a message, except from senders on your allowed list below.
+          </p>
+        )}
+      </div>
+      {saveError && <p role="alert" className="mt-2 text-xs text-destructive">{saveError}</p>}
+    </section>
+  );
+}
+
+/**
+ * Remote images: when they load on their own (the switches, above), and every
+ * standing allowance, which the reader can add by hand as well as by clicking
+ * "Load images" on a message. An allowance is one sender (`boss@x.com`) or a
+ * whole domain (`@x.com`, which also covers `news.x.com`), because a
+ * newsletter's actual envelope sender is usually some per-campaign address
+ * nobody would think to type.
  */
 function ImagesTab() {
-  const [mode, setMode] = useState<'block' | 'safe' | 'always'>('safe');
   const [allowed, setAllowed] = useState<string[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const { confirm, confirmDialog } = useConfirm();
+  // The allowed list is per account: this section shows, adds to and revokes
+  // from the ACTIVE account's, named explicitly in every call (and in the
+  // heading) — a "Load images" click on another account's mail in All Inboxes
+  // is saved to that account and appears under it.
+  const accountId = useEmailStore((s) => s.activeAccountId) ?? undefined;
+  const accountLabel = useEmailStore((s) => accountDisplayLabel(s.accounts, s.activeAccountId ?? undefined));
 
   const load = async () => {
-    setMode(getRemoteImageMode());
     try {
-      const res = await window.electronAPI.emails.getImageAllowedSenders();
+      const res = await window.electronAPI.emails.getImageAllowedSenders(accountId);
       // Unsorted on purpose — `entries` below is the one place that orders this
       // list, and sorting the raw keys first would only hide what it does.
       if (res?.success && Array.isArray(res.data)) setAllowed([...res.data]);
     } catch { /* best-effort */ }
   };
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [accountId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Domains first, then senders — the broad rules are the ones worth reviewing.
   const entries: ImageAllowEntry[] = useMemo(
@@ -387,7 +549,7 @@ function ImagesTab() {
   );
 
   const add = async () => {
-    const entry = rememberImagesAllowed(draft);
+    const entry = rememberImagesAllowed(draft, accountId);
     if (!entry) {
       setError('Enter a sender address (boss@example.com) or a domain (example.com).');
       return;
@@ -407,29 +569,21 @@ function ImagesTab() {
       confirmLabel: 'Stop auto-loading',
     });
     if (!ok) return;
-    forgetImagesAllowed(entry.key);
+    forgetImagesAllowed(entry.key, accountId);
     await load();
   };
 
-  const m = MODE_COPY[mode];
   return (
     <div className="p-6 max-w-4xl space-y-8">
       {confirmDialog}
-      <section>
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Current policy</h2>
-        <div className="rounded-lg border border-border bg-card p-4 flex items-start gap-3">
-          <ImageIcon className="h-5 w-5 mt-0.5 text-primary flex-shrink-0" />
-          <div>
-            <div className="font-medium">{m.title}</div>
-            <div className="text-sm text-muted-foreground">{m.detail}</div>
-            <div className="mt-2 text-xs text-muted-foreground">Change this under Settings → Inbox → Remote images.</div>
-          </div>
-        </div>
-      </section>
+      <RemoteImageSwitches />
 
       <section>
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
           Allowed to load images <span className="text-muted-foreground/70 font-normal">({entries.length})</span>
+          {accountLabel && (
+            <span className="ml-2 normal-case tracking-normal font-normal text-muted-foreground/70">— {accountLabel}</span>
+          )}
         </h2>
 
         <div className="bg-muted/30 rounded-lg p-4 mb-4">
@@ -742,7 +896,12 @@ function SpamTab() {
 
   const decide = async (id: string, verdict: 'spam' | 'ham') => {
     setBusy(id);
-    try { await window.electronAPI.spam?.setUserVerdict?.(id, verdict); } finally { setBusy(null); await load(); }
+    try {
+      const res = await window.electronAPI.spam?.setUserVerdict?.(id, verdict);
+      // Reporting a sender withdraws their trust in main: re-read the list so
+      // their other mail stops counting as trusted (shield, remote images).
+      if (verdict === 'spam' && res?.success) void reloadTrustedSenders();
+    } finally { setBusy(null); await load(); }
   };
 
   const filed = rows.filter((r) => r.tags.includes('|spam|') && r.spamUserVerdict !== 'ham').length;

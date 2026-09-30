@@ -44,6 +44,7 @@ import { requestConfirm } from './store/confirm-service';
 import { useEmailStore } from './store/email-store';
 import { migrateCredentialsToVault, canonicalizeAccountIds } from './store/helpers';
 import { shouldShowOnboarding, shouldShowNoAccountEmptyState } from './utils/app-gates';
+import { setImageTrustAccount } from './utils/remote-images';
 
 function App() {
   // An extension asking for a message to be opened can arrive in any view.
@@ -328,6 +329,12 @@ function App() {
       } catch (e) {
         console.warn('[App] DB registry hydrate failed (continuing):', (e as Error)?.message ?? e);
       }
+
+      // The active account is settled: load its remote-image trust sources
+      // (allowlist, trusted senders, people emailed) NOW, so the first message
+      // opened is decided on real lists rather than a cold cache. A store that
+      // is not ready yet is retried on a backoff, never read as empty.
+      setImageTrustAccount(useEmailStore.getState().activeAccountId);
 
       // Self-heal OAuth mail accounts: re-add any Gmail/Outlook/Yahoo account the
       // main process still knows about but the local registry lost (e.g. after a

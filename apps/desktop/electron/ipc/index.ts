@@ -20,6 +20,7 @@ import { registerFilterHandlers } from './filter-handlers';
 import { registerFolderHandlers } from './folder-handlers';
 import { registerFollowUpHandlers } from './follow-up-handlers';
 import { registerIdentityHandlers } from './identity-handlers';
+import { registerImageTrustHandlers } from './image-trust-handlers';
 import { registerLabelHandlers } from './label-handlers';
 import { registerMiscHandlers } from './misc-handlers';
 import { registerNotificationHandlers } from './notification-handlers';
@@ -48,6 +49,7 @@ export function registerAllHandlers(): void {
   registerSyncHandlers();
   registerFolderHandlers();
   registerEmailHandlers();
+  registerImageTrustHandlers();
   registerSmtpHandlers();
   registerContactsHandlers();
   registerAIHandlers();

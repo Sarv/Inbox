@@ -8,6 +8,7 @@ import { classifyFolder } from '@sarvinbox/core/folder-mapping';
 
 import { addTag, removeTag, hasTag } from '../../utils/tags';
 import { buildThreads } from '../../utils/thread-utils';
+import { reloadTrustedSenders } from '../../utils/trusted-senders';
 import { requestConfirm } from '../confirm-service';
 import type { EmailActionsSlice, SliceCreator } from '../types';
 
@@ -1183,12 +1184,18 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
         }
       }
 
-      const result = await window.electronAPI.emails.moveToSpam(emailId, get()._accountIdFor(emailId));
+      const accountId = get()._accountIdFor(emailId);
+      const result = await window.electronAPI.emails.moveToSpam(emailId, accountId);
       if (!result.success) {
         console.error('[Store] moveToSpam failed, reverting:', result.error);
         set(toSpamSnapshot);
         return;
       }
+      // Reporting a sender also withdraws their trust in main
+      // (spam-verdict-actions). Re-read that account's trusted senders, so
+      // their other messages stop counting as trusted — the shield's pass and
+      // 'trusted' remote images — now, not after a restart.
+      void reloadTrustedSenders(accountId);
 
       get().loadFolders();
       // Email left the inbox (now spam) → refresh unread-per-category badges.

@@ -9,7 +9,8 @@ import {
 
 import { isSignatureDetectionEnabled } from '../../services/ai-service';
 import { useEmailStore } from '../../store/email-store';
-import { qualifiesForSafeAutoLoad } from '../../store/helpers';
+import { messageAccountOf, paneAccountOf } from '../../utils/pane-account';
+import { remoteImageFactsOf } from '../../utils/remote-images';
 import { useEmailSecurity } from '../../utils/use-email-security';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
 import { SandboxedEmailBody } from '../SandboxedEmailBody';
@@ -55,9 +56,15 @@ export function EmailCard({ ctx }: EmailCardProps) {
   } = ctx;
 
   const { fetchEmailBody } = useEmailStore();
+  // The account this message belongs to (its own in All Inboxes, else the one
+  // the open thread was read from): whose trusted senders, allowlist and
+  // "Trust this sender" / "Load images" choices count for it.
+  const paneAccountId = useEmailStore(paneAccountOf);
+  const accountId = messageAccountOf(displayEmail, paneAccountId);
   // Same level the shield and the warning banner show. On dangerous mail an
   // unsubscribe click only tells a phisher this address is read, so it goes.
   const security = useEmailSecurity({
+    accountId,
     fromName: displayEmail.fromName,
     fromAddress: displayEmail.fromAddress,
     authStatus: displayEmail.authStatus,
@@ -104,6 +111,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
                   <span className="truncate">{displayEmail.fromName || displayEmail.fromAddress}</span>
                   <VerifiedBadge email={displayEmail.fromAddress} authStatus={displayEmail.authStatus} />
                   <SecurityIndicator
+                    accountId={accountId}
                     fromName={displayEmail.fromName}
                     fromAddress={displayEmail.fromAddress}
                     authStatus={displayEmail.authStatus}
@@ -193,8 +201,8 @@ export function EmailCard({ ctx }: EmailCardProps) {
                 above everything so the user sees it before reading the body. */}
             <PhishingWarningBanner
               emailId={displayEmail.id}
-              accountId={(displayEmail as any).accountId}
-              onTrusted={() => clearAfterTrust(ctx, displayEmail.id, (displayEmail as any).accountId)}
+              accountId={accountId ?? undefined}
+              onTrusted={() => clearAfterTrust(ctx, displayEmail.id, accountId ?? undefined)}
               fromName={displayEmail.fromName}
               fromAddress={displayEmail.fromAddress}
               authStatus={displayEmail.authStatus}
@@ -272,7 +280,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
                 <>
                   <div className="max-w-none">
                     {isHtml ? (
-                      <SandboxedEmailBody key={`${bodyToShow.length}:${bodyToShow.slice(0, 32)}`} html={bodyToShow} safeAutoLoad={qualifiesForSafeAutoLoad(displayEmail.tags)} senderAddress={displayEmail.fromAddress} />
+                      <SandboxedEmailBody key={`${bodyToShow.length}:${bodyToShow.slice(0, 32)}`} html={bodyToShow} remoteImagesFrom={remoteImageFactsOf(displayEmail, paneAccountId)} />
                     ) : (
                       <div className="whitespace-pre-wrap font-sans text-foreground leading-relaxed">
                         {bodyToShow}

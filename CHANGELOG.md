@@ -7,7 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Choose trusted senders and categorized mail separately for remote
+  images.** Under Security → Remote images, two switches decide which
+  pictures load on their own, and you can turn on either, both or neither.
+  "From trusted senders" covers senders you marked "I trust this sender",
+  people you have sent mail to from the account the message arrived in, and
+  brands showing the blue verified tick, but never mail in Spam or a message
+  that failed its sender check. "From categorized mail" covers mail the AI sorted into one of your
+  categories, except Social, Promotional and Spam. Both are on by default, so
+  if you had "Categorized only" (the default), pictures from trusted senders
+  now load too; turn "From trusted senders" off to keep it as it was. A
+  separate "Always load all remote images" switch loads everything. Senders
+  on your allowed list keep loading whatever you choose.
+
+### Changed
+- **"From categorized mail" skips your Social category.** If you created an
+  AI category for social mail (named "Social", "Social Media" or similar),
+  its images no longer load just because of that category, like Promotions
+  and Spam.
+- **Remote images are chosen under Security.** The choice of when pictures in
+  messages load has moved from Settings → General to Security → Remote
+  images, next to your list of senders whose images always load. Each switch
+  says what it loads, and your choice applies as soon as you make it, with no
+  Save button. "Block" and "Always load" carry over as they were; for
+  "Categorized only", see above.
+- **Gravatar contact photos are on by default.** The app asks Gravatar
+  whether each contact has a photo, sending a hash of their address, which
+  Gravatar can match to the address. You can turn this off in Settings →
+  General → Contact photos from Gravatar. If your settings already have it
+  switched off, it stays off; that includes settings saved by version 1.2.6,
+  where it was off by default.
+
 ### Fixed
+- **Allowed senders' images load straight away.** Right after starting the
+  app or switching accounts, the first message you opened could keep the
+  "Remote images blocked" bar even for a sender you had already chosen to
+  load images from. It now loads as soon as your list is ready. Choosing
+  "Load images" now applies at once to every open message from that sender,
+  in the standard view and the chat view alike. In All Inboxes, the choice is
+  saved to the account the message belongs to, and a list that fails to load
+  is tried again rather than treated as empty. "Load images" on a message in
+  Spam, or on one that failed its sender check, now shows that message's
+  images without remembering the sender, since that address may be forged.
+- **Replying no longer loads the original's images.** The quoted original in
+  the reply and forward window loaded its remote images whatever your
+  setting, even "Block". It now follows your Remote images choice.
+- **Chat view: follow-up messages keep their time.** When one person sent
+  several messages in a row, the later bubbles showed the security shield
+  alone on a line of its own, with no time.
 - **One switch for AI sorting, and it works.** Settings → AI → Categorization
   had a "Smart Email Categorization" switch that stopped nothing: with it off,
   new mail was still sent to your AI provider to be sorted. It is gone. The

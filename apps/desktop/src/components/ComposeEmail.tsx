@@ -25,6 +25,7 @@ import { reportSendFailure } from '../utils/send-failure';
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
 import { PolishModal } from './PolishModal';
+import { QuotedOriginalPreview } from './QuotedOriginalPreview';
 import { EMPTY_EDITOR_HTML, RichTextEditor } from './RichTextEditor';
 import { SandboxedEmailBody } from './SandboxedEmailBody';
 import { SelectionPolishMenu } from './SelectionPolishMenu';
@@ -695,14 +696,7 @@ ${createQuotedHeader(prefix, extraInfo)}
             )}
 
             {/* Quoted Content Preview (not editable, shows original email) */}
-            {quotedHtml && (
-              <div className="flex-shrink-0 border-t border-border bg-muted/20 max-h-[200px] overflow-y-auto">
-                <div className="px-4 py-2 text-xs text-muted-foreground font-medium border-b border-border bg-muted/30">
-                  Original Message
-                </div>
-                <SandboxedEmailBody html={quotedHtml} className="px-4 py-2 text-sm" blockRemoteImages={false} />
-              </div>
-            )}
+            {quotedHtml && <QuotedOriginalPreview html={quotedHtml} original={replyToEmail} />}
           </div>
 
           {/* Footer UI replaced by ComposeToolbar */}
@@ -914,14 +908,7 @@ ${createQuotedHeader(prefix, extraInfo)}
         )}
 
         {/* Quoted Content Preview (not editable, shows original email) */}
-        {quotedHtml && (
-          <div className="flex-shrink-0 border-t border-border bg-muted/20 max-h-[150px] overflow-y-auto">
-            <div className="px-3 py-1.5 text-xs text-muted-foreground font-medium border-b border-border bg-muted/30">
-              Original Message
-            </div>
-            <SandboxedEmailBody html={quotedHtml} className="px-3 py-2 text-xs" blockRemoteImages={false} />
-          </div>
-        )}
+        {quotedHtml && <QuotedOriginalPreview html={quotedHtml} original={replyToEmail} compact />}
       </div>
 
       {/* Footer — the SAME toolbar the fullscreen composer uses, so an action

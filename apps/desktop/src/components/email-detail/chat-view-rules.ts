@@ -12,7 +12,7 @@ import type { EmailRecord } from '@sarvinbox/core';
 import type { FirstSplitState } from '@sarvinbox/core/first-split';
 
 import type { FirstSplitRunResult } from '../../services/first-split/store';
-import { qualifiesForSafeAutoLoad, shouldAutoLoadRemoteImages } from '../../store/helpers';
+import { remoteImageFactsOf, shouldAutoLoadRemoteImages } from '../../utils/remote-images';
 
 import { aiEligibilityFor, type AiEligibility, type FirstEmailFacts } from './ai-view-compose';
 
@@ -315,16 +315,20 @@ export function chatMountsComposer({
  *
  * The library blocks everything unless the host says otherwise, and it cannot
  * see the reader's setting — so the app answers for it, per message, using the
- * SAME rule the classic card uses ({@link shouldAutoLoadRemoteImages}). Two
- * renderers disagreeing about one mail is the bug this exists to prevent.
+ * SAME rule the classic card uses ({@link shouldAutoLoadRemoteImages}), with
+ * the same facts (`remoteImageFactsOf`: sender, tags, authentication, and the
+ * message's own account — `viewAccountId` for thread rows that carry none).
+ * Two renderers disagreeing about one mail is the bug this exists to prevent.
  *
  * A bubble whose source mail is not in the thread map gets blocked: no sender
  * means no allowlist check and no category, so the safe answer is to ask.
  *
- * Unlike its neighbours this reads settings rather than being pure, which is
- * exactly why it is a named function and not an inline arrow at the call site.
+ * Unlike its neighbours this reads settings and the trust caches rather than
+ * being pure, which is exactly why it is a named function and not an inline
+ * arrow at the call site — and why the caller subscribes to those caches
+ * (ThreadChatView) so a bubble re-decides when one of them changes.
  */
-export function blockRemoteImagesFor(email: EmailRecord | undefined): boolean {
+export function blockRemoteImagesFor(email: EmailRecord | undefined, viewAccountId?: string | null): boolean {
   if (!email) return true;
-  return !shouldAutoLoadRemoteImages(email.fromAddress, qualifiesForSafeAutoLoad(email.tags));
+  return !shouldAutoLoadRemoteImages(remoteImageFactsOf(email, viewAccountId));
 }

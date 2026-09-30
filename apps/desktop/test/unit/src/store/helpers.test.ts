@@ -1,7 +1,7 @@
 import type { SMTPConfig } from '@sarvinbox/core';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { applyEmailCategories, clearCategoryBadgeCache, getCachedCategorySlugs, warmCategoryDefs } from '../../../../src/components/email-list/CategoryBadges';
+import { applyEmailCategories, clearCategoryBadgeCache } from '../../../../src/components/email-list/CategoryBadges';
 import { DEFAULT_SECTIONS } from '../../../../src/config/inbox-types';
 import { getDefaultProvider, reportAIHealthy, reportAIUnhealthy, syncAIProviderToMain } from '../../../../src/services/ai-service';
 import {
@@ -17,7 +17,6 @@ import {
   accountIdFor,
   canonicalizeAccountIds,
   clearCredentials,
-  clearImageAllowedCache,
   clearSmtpCredentials,
   computeSectionFetchLimit,
   deriveSmtpFromImap,
@@ -35,15 +34,12 @@ import {
   isThreadPagedView,
   getPageSizeForState,
   mergePageWindow,
-  getRemoteImageMode,
   isAccountEmailDuplicated,
   isFolderInView,
   findFolderPathById,
   decideSyncProgressRefresh,
   shouldAdoptSyncFolders,
   SYNC_PROGRESS_REFRESH_MS,
-  isPromoOrSpam,
-  isSenderImagesAllowed,
   loadAccounts,
   loadActiveAccountId,
   loadInboxSettings,
@@ -56,10 +52,6 @@ import {
   migrateCredentialsToVault,
   normalizeAccount,
   pickAccountColor,
-  qualifiesForSafeAutoLoad,
-  rememberImagesAllowed,
-  forgetImagesAllowed,
-  rememberSenderImagesAllowed,
   removeAccount,
   resolveFolderTotal,
   SECTION_RELOAD_MAX_ITEMS,
@@ -73,21 +65,17 @@ import {
   saveSmtpCredentials,
   saveViewMode,
   setupAICategorizationListeners,
-  shouldAutoLoadRemoteImages,
   stripSecrets,
   upsertAccount,
-  warmImageAllowedSenders,
 } from '../../../../src/store/helpers';
 import type { StoredAccount } from '../../../../src/store/types';
 
-// CategoryBadges owns the AI-category slug cache that `qualifiesForSafeAutoLoad`
-// gates on; stubbing it keeps that decision under test control instead of
+// CategoryBadges owns the per-email category cache the categorization
+// listeners clear and patch; stubbing it keeps those calls observable instead of
 // depending on an IPC round trip. (vi.mock is hoisted above the imports above.)
 vi.mock('../../../../src/components/email-list/CategoryBadges', () => ({
   clearCategoryBadgeCache: vi.fn(),
   applyEmailCategories: vi.fn(),
-  getCachedCategorySlugs: vi.fn(() => [] as string[]),
-  warmCategoryDefs: vi.fn(),
 }));
 
 // ai-service reaches for providers/HTTP on import; the listener tests only care
@@ -140,9 +128,7 @@ const consoleSpies = {} as Record<ConsoleLevel, ReturnType<typeof spyOnConsole>>
 beforeEach(() => {
   installLocalStorage();
   installElectronAPI();
-  clearImageAllowedCache();
   vi.clearAllMocks();
-  vi.mocked(getCachedCategorySlugs).mockReturnValue([]);
   vi.mocked(getDefaultProvider).mockReturnValue(null as unknown as never);
   // helpers.ts logs through raw console.* — silence it so the reporter stays
   // readable, and keep the handles so the log-mirroring test can assert on them.
@@ -539,273 +525,6 @@ describe('fetchVirtualFolderTotal', () => {
 
     installElectronAPI({ emails: { getVirtualFolderCounts: vi.fn().mockRejectedValue(new Error('no channel')) } });
     await expect(fetchVirtualFolderTotal('virtual-all')).resolves.toBe(0);
-  });
-});
-
-// ─────────────────────── remote images / auto-load ─────────────────────────
-
-describe('getRemoteImageMode', () => {
-  // Privacy-relevant: 'block' must never be silently upgraded, and a legacy
-  // setting must map to the choice the user actually made.
-  it('defaults new installs to safe', () => {
-    expect(getRemoteImageMode()).toBe('safe');
-    writeSettings({});
-    expect(getRemoteImageMode()).toBe('safe');
-  });
-
-  it('returns each explicit mode verbatim', () => {
-    for (const mode of ['block', 'safe', 'always'] as const) {
-      writeSettings({ remoteImageMode: mode });
-      expect(getRemoteImageMode()).toBe(mode);
-    }
-  });
-
-  it('migrates the legacy "important" mode to safe', () => {
-    writeSettings({ remoteImageMode: 'important' });
-    expect(getRemoteImageMode()).toBe('safe');
-  });
-
-  it('maps the legacy autoLoadRemoteImages boolean to always/block', () => {
-    writeSettings({ autoLoadRemoteImages: true });
-    expect(getRemoteImageMode()).toBe('always');
-    writeSettings({ autoLoadRemoteImages: false });
-    expect(getRemoteImageMode()).toBe('block');
-  });
-
-  it('prefers the new mode field over the legacy boolean', () => {
-    writeSettings({ remoteImageMode: 'block', autoLoadRemoteImages: true });
-    expect(getRemoteImageMode()).toBe('block');
-  });
-
-  it('falls back to safe on an unknown mode or corrupt settings', () => {
-    writeSettings({ remoteImageMode: 'sometimes' });
-    expect(getRemoteImageMode()).toBe('safe');
-    writeSettings('{not json');
-    expect(getRemoteImageMode()).toBe('safe');
-  });
-});
-
-describe('isPromoOrSpam', () => {
-  it('matches the AI promotions category and every spam/junk folder tag', () => {
-    expect(isPromoOrSpam('|INBOX|promotions|')).toBe(true);
-    expect(isPromoOrSpam('|Junk|')).toBe(true);
-    expect(isPromoOrSpam('|Spam|')).toBe(true);
-    expect(isPromoOrSpam('|[Gmail]/Spam|')).toBe(true);
-  });
-
-  it('is false for ordinary mail and for missing tags', () => {
-    expect(isPromoOrSpam('|INBOX|read|')).toBe(false);
-    expect(isPromoOrSpam(null)).toBe(false);
-    expect(isPromoOrSpam(undefined)).toBe(false);
-  });
-});
-
-describe('qualifiesForSafeAutoLoad', () => {
-  // 'safe' mode auto-loads images ONLY for mail the AI positively recognised.
-  // Every uncertain case must stay behind the banner — that's the privacy
-  // guarantee of the mode.
-  it('refuses promotional / spam mail outright', () => {
-    vi.mocked(getCachedCategorySlugs).mockReturnValue(['promotions', 'work']);
-    expect(qualifiesForSafeAutoLoad('|INBOX|promotions|')).toBe(false);
-    expect(qualifiesForSafeAutoLoad('|Spam|work|')).toBe(false);
-  });
-
-  it('stays conservative on a cold slug cache AND warms it for next time', () => {
-    vi.mocked(getCachedCategorySlugs).mockReturnValue([]);
-    expect(qualifiesForSafeAutoLoad('|INBOX|work|')).toBe(false);
-    expect(warmCategoryDefs).toHaveBeenCalled();
-  });
-
-  it('auto-loads mail carrying a real enabled category slug', () => {
-    vi.mocked(getCachedCategorySlugs).mockReturnValue(['work', 'finance']);
-    expect(qualifiesForSafeAutoLoad('|INBOX|finance|read|')).toBe(true);
-  });
-
-  it('keeps UNcategorized mail behind the banner even with a warm cache', () => {
-    vi.mocked(getCachedCategorySlugs).mockReturnValue(['work']);
-    expect(qualifiesForSafeAutoLoad('|INBOX|read|')).toBe(false);
-    expect(qualifiesForSafeAutoLoad(null)).toBe(false);
-  });
-});
-
-describe('per-sender image allowlist', () => {
-  // Kept synchronous because the block-vs-load decision happens inside the
-  // sandboxed iframe render; a cold cache must answer "no" and warm in the
-  // background rather than block the paint.
-  it('answers false and warms in the background while the cache is cold', async () => {
-    const getImageAllowedSenders = vi.fn().mockResolvedValue({ success: true, data: ['boss@x.com'] });
-    installElectronAPI({ emails: { getImageAllowedSenders } });
-
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(false); // cold → conservative
-    expect(getImageAllowedSenders).toHaveBeenCalled(); // …but the warm was kicked off
-    // The re-render after warming picks up the real answer.
-    await vi.waitFor(() => expect(isSenderImagesAllowed('boss@x.com')).toBe(true));
-  });
-
-  it('normalises "Name <addr>" and casing so both forms match one entry', async () => {
-    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['Boss@X.com'] }) } });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(true);
-    expect(isSenderImagesAllowed('The Boss <BOSS@X.com>')).toBe(true);
-    expect(isSenderImagesAllowed('  boss@x.com  ')).toBe(true);
-    expect(isSenderImagesAllowed('other@x.com')).toBe(false);
-  });
-
-  it('treats a missing/blank address as not allowed', async () => {
-    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: [] }) } });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed(undefined)).toBe(false);
-    expect(isSenderImagesAllowed('')).toBe(false);
-    expect(isSenderImagesAllowed('   ')).toBe(false);
-  });
-
-  it('warms to an EMPTY set when the IPC fails or returns nothing', async () => {
-    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockRejectedValue(new Error('no channel')) } });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(false);
-
-    clearImageAllowedCache();
-    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: false }) } });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(false);
-  });
-
-  it('remembers a sender write-through: cache first, persistence in the background', () => {
-    const allowImagesForSender = vi.fn().mockResolvedValue(undefined);
-    installElectronAPI({ emails: { allowImagesForSender } });
-    rememberSenderImagesAllowed('The Boss <BOSS@X.com>');
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(true); // immediate, no await
-    expect(allowImagesForSender).toHaveBeenCalledWith('boss@x.com'); // bare address only
-  });
-
-  it('ignores a remember call with no address, and survives a failing persist', () => {
-    const allowImagesForSender = vi.fn().mockRejectedValue(new Error('nope'));
-    installElectronAPI({ emails: { allowImagesForSender } });
-    rememberSenderImagesAllowed('');
-    expect(allowImagesForSender).not.toHaveBeenCalled();
-    expect(() => rememberSenderImagesAllowed('a@x.com')).not.toThrow();
-  });
-
-  it('lets one DOMAIN entry cover every sender on it, subdomains included', async () => {
-    // The reason domains exist here: a newsletter's envelope sender is a
-    // per-campaign address, so a per-sender allowance never sticks.
-    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['@Example.com'] }) } });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed('bounce-987@example.com')).toBe(true);
-    expect(isSenderImagesAllowed('News <news@mail.example.com>')).toBe(true);
-    expect(isSenderImagesAllowed('news@notexample.com')).toBe(false);
-    expect(isSenderImagesAllowed('news@example.com.evil.net')).toBe(false);
-  });
-
-  it('stores a typed domain as an "@domain" key and applies it immediately', () => {
-    // Write-through: the body renderer reads the CACHE, so an entry that only
-    // reached the DB would be listed in Security but honoured by nothing.
-    const allowImagesForSender = vi.fn().mockResolvedValue(undefined);
-    installElectronAPI({ emails: { allowImagesForSender } });
-    expect(rememberImagesAllowed('Example.COM')).toEqual({ kind: 'domain', key: '@example.com', label: 'example.com' });
-    expect(allowImagesForSender).toHaveBeenCalledWith('@example.com');
-    expect(isSenderImagesAllowed('anyone@example.com')).toBe(true);
-  });
-
-  it('refuses input that is neither an address nor a domain, and persists nothing', () => {
-    const allowImagesForSender = vi.fn().mockResolvedValue(undefined);
-    installElectronAPI({ emails: { allowImagesForSender } });
-    for (const junk of ['', '   ', 'com', '@co.uk', 'not a domain']) {
-      expect(rememberImagesAllowed(junk)).toBeNull();
-    }
-    expect(allowImagesForSender).not.toHaveBeenCalled();
-  });
-
-  it('revoking drops the entry from the cache, not just the DB', async () => {
-    // Otherwise a revoked allowance keeps loading images on every message
-    // already open, until the next account switch.
-    const disallowImagesForSender = vi.fn().mockResolvedValue(undefined);
-    installElectronAPI({
-      emails: {
-        disallowImagesForSender,
-        getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['@example.com'] }),
-      },
-    });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed('a@example.com')).toBe(true);
-
-    forgetImagesAllowed('@example.com');
-    expect(isSenderImagesAllowed('a@example.com')).toBe(false);
-    expect(disallowImagesForSender).toHaveBeenCalledWith('@example.com');
-  });
-
-  it('ignores a blank revoke and survives a failing persist / missing channel', () => {
-    installElectronAPI({ emails: { disallowImagesForSender: vi.fn().mockRejectedValue(new Error('nope')) } });
-    forgetImagesAllowed('   ');
-    forgetImagesAllowed(undefined);
-    expect((window as any).electronAPI.emails.disallowImagesForSender).not.toHaveBeenCalled();
-    expect(() => forgetImagesAllowed('@x.com')).not.toThrow();
-
-    installElectronAPI({ emails: {} }); // older preload with no channel
-    expect(() => forgetImagesAllowed('@x.com')).not.toThrow();
-  });
-
-  it('clears the cache on account switch so the next read reloads', async () => {
-    // The allowlist is PER ACCOUNT — leaking it across a switch would auto-load
-    // images the other account never approved.
-    const getImageAllowedSenders = vi.fn().mockResolvedValue({ success: true, data: ['boss@x.com'] });
-    installElectronAPI({ emails: { getImageAllowedSenders } });
-    await warmImageAllowedSenders();
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(true);
-
-    clearImageAllowedCache();
-    getImageAllowedSenders.mockResolvedValue({ success: true, data: [] });
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(false);
-    await vi.waitFor(() => expect(getImageAllowedSenders).toHaveBeenCalledTimes(2));
-    expect(isSenderImagesAllowed('boss@x.com')).toBe(false);
-  });
-});
-
-describe('shouldAutoLoadRemoteImages', () => {
-  // This is the ONE answer both renderers use — the classic card and the chat
-  // view. It lived inside SandboxedEmailBody, so the chat view never asked and
-  // kept the library's block-everything default: a reader on 'always' still got
-  // the banner on half the app. Any drift here brings that split back.
-  it('auto-loads everywhere on always, and nowhere on block', () => {
-    writeSettings({ remoteImageMode: 'always' });
-    expect(shouldAutoLoadRemoteImages('anyone@x.com')).toBe(true);
-    // Even a message the AI never categorised: 'always' means always.
-    expect(shouldAutoLoadRemoteImages('anyone@x.com', false)).toBe(true);
-
-    writeSettings({ remoteImageMode: 'block' });
-    expect(shouldAutoLoadRemoteImages('anyone@x.com', true)).toBe(false);
-  });
-
-  // 'safe' is the default mode, so getting this backwards would auto-load
-  // tracking pixels for every new install.
-  it('defers to the category in safe mode', () => {
-    writeSettings({ remoteImageMode: 'safe' });
-    expect(shouldAutoLoadRemoteImages('anyone@x.com', true)).toBe(true);
-    expect(shouldAutoLoadRemoteImages('anyone@x.com', false)).toBe(false);
-  });
-
-  // An allowlisted sender is an explicit per-sender decision by the reader, so
-  // it outranks the global mode — including 'block', which is the whole point
-  // of the "load images from this sender" affordance.
-  it('lets an allowlisted sender beat every mode', async () => {
-    installElectronAPI({ emails: { getImageAllowedSenders: vi.fn().mockResolvedValue({ success: true, data: ['boss@x.com'] }) } });
-    await warmImageAllowedSenders();
-
-    for (const mode of ['block', 'safe', 'always'] as const) {
-      writeSettings({ remoteImageMode: mode });
-      expect(shouldAutoLoadRemoteImages('The Boss <BOSS@X.com>')).toBe(true);
-    }
-
-    writeSettings({ remoteImageMode: 'block' });
-    expect(shouldAutoLoadRemoteImages('stranger@x.com')).toBe(false);
-  });
-
-  // A missing sender must not throw or accidentally match the allowlist — a
-  // chat bubble can carry a message whose From never parsed.
-  it('treats a missing sender as not allowlisted', () => {
-    writeSettings({ remoteImageMode: 'block' });
-    expect(shouldAutoLoadRemoteImages(undefined)).toBe(false);
-    expect(shouldAutoLoadRemoteImages(null, true)).toBe(false);
   });
 });
 

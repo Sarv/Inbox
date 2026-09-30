@@ -114,9 +114,13 @@ vi.mock('../../../../../src/services/ai-service', () => ({
 vi.mock('../../../../../src/services/image-cache', () => ({
   resolveRefsInHtml: (html: string) => html,
 }));
-vi.mock('../../../../../src/store/helpers', () => ({
-  qualifiesForSafeAutoLoad: () => false,
+// The remote-image decision (and its trust caches) is its own suite's
+// business (remote-images.test.ts, ThreadChatView.remote-images.test.tsx):
+// here every bubble simply blocks, with no IPC behind it.
+vi.mock('../../../../../src/utils/remote-images', () => ({
+  remoteImageFactsOf: (email: unknown) => email,
   shouldAutoLoadRemoteImages: () => false,
+  useImageTrustSelector: <T,>(select: () => T) => select(),
 }));
 
 const storeState = {

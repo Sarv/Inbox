@@ -50,7 +50,12 @@ vi.mock('../../../../electron/services/accounts-registry', () => ({
   }),
 }));
 
-import { openAccountStorages, requireAccountStorage, resolveAccountTarget } from '../../../../electron/services/account-target';
+import {
+  openAccountStorages,
+  requireAccountStorage,
+  requireNamedOrActiveStorage,
+  resolveAccountTarget,
+} from '../../../../electron/services/account-target';
 import { readRegistryAccounts } from '../../../../electron/services/accounts-registry';
 import { ensureAccountRuntime } from '../../../../electron/services/accounts-runtime';
 
@@ -127,6 +132,25 @@ describe('requireAccountStorage — strict, per account', () => {
     h.current = null;
     await expect(requireAccountStorage('acct-b')).resolves.toBe(B);
     await expect(requireAccountStorage('acct-gone')).rejects.toThrow(/not available/);
+    expect(h.created).toEqual([]);
+  });
+});
+
+describe('requireNamedOrActiveStorage — strict when named, active when not', () => {
+  // Breaks: the single-account path (a renderer call that names no account)
+  // stops reaching the active account's database.
+  it("returns the active account's storage when no id is given", async () => {
+    await expect(requireNamedOrActiveStorage()).resolves.toBe(h.active);
+    await expect(requireNamedOrActiveStorage(null)).resolves.toBe(h.active);
+    await expect(requireNamedOrActiveStorage('')).resolves.toBe(h.active);
+  });
+
+  // Breaks: a per-account write keyed by something every mailbox shares (a
+  // sender address in the image allowlist) lands in the ACTIVE account when
+  // the named one cannot be resolved — the lenient resolver's fallback.
+  it('resolves a named account strictly and throws rather than falling back', async () => {
+    await expect(requireNamedOrActiveStorage('acct-b')).resolves.toBe(B);
+    await expect(requireNamedOrActiveStorage('acct-gone')).rejects.toThrow(/acct-gone is not available/);
     expect(h.created).toEqual([]);
   });
 });

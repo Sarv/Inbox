@@ -90,8 +90,8 @@ importers:
   apps/desktop:
     dependencies:
       '@sarv-in/email-chat-view':
-        specifier: ^0.2.6
-        version: 0.2.6(react-dom@19.3.0)(react@19.3.0)
+        specifier: ^0.2.7
+        version: 0.2.7(react-dom@19.3.0)(react@19.3.0)
       '@sarv-in/mailguard':
         specifier: ^0.4.2
         version: 0.4.2
@@ -2910,8 +2910,8 @@ packages:
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
     dev: true
 
-  /@sarv-in/email-chat-view@0.2.6(react-dom@19.3.0)(react@19.3.0):
-    resolution: {integrity: sha512-7rD9BDyUhixy4a4nAeP6MymFH+93FPjPiiL7dKdPXgYnsG7YsVgzXchALlAeMsDeCnXw/kS9wsFOcU6j8wx/hQ==}
+  /@sarv-in/email-chat-view@0.2.7(react-dom@19.3.0)(react@19.3.0):
+    resolution: {integrity: sha512-QgvueTaEvA7CRFoF4aJfbhf9bNbxvXJSbV2PI1JDxApeHkcIXcKKu74hIk97TvLBBg57nrnjm+18B+OffOVTmw==}
     engines: {node: '>=18'}
     peerDependencies:
       react: ^18.2.0 || ^19.0.0

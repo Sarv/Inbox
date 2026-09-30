@@ -7,6 +7,11 @@ import { SYNC_PROGRESS_REFRESH_MS } from '../../../../../src/store/helpers';
 vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
   clearCategoryBadgeCache: vi.fn(),
 }));
+// The remote-image trust caches: only the "new mail → refresh the people you
+// emailed" hook is the slice's business (asserted below).
+vi.mock('../../../../../src/utils/remote-images', () => ({
+  refreshEmailedAddresses: vi.fn(),
+}));
 
 // handleFoldersUpdated is the renderer half of the live-counter feature: a
 // main-process "folder counts changed" signal (from the backfill/gap-drain
@@ -890,5 +895,69 @@ describe('mergeNewEmailsVirtualStarred — the window is CONVERSATIONS', () => {
     const byThread = new Set(state.emails.map((e: any) => e.threadId));
     expect(byThread.size).toBe(60);            // all 60 fit inside the 100-thread window
     expect(state.emails).toHaveLength(180);    // with all of their messages
+  });
+});
+
+describe('flushRealtimeBatch — people you emailed', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  // Breaks: a reader writes to someone new, and under 'trusted' remote images
+  // that person's reply keeps its banner until the app restarts — the list of
+  // people this account has emailed was read once and never again.
+  it("re-reads the active account's correspondents when a Sent copy lands, once per window", async () => {
+    const h = await loadFlushHarness({ folders: [{ id: 'f-inbox', path: 'INBOX' }, { id: 'f-sent', path: 'Sent' }] });
+    const { refreshEmailedAddresses } = await import('../../../../../src/utils/remote-images');
+    vi.mocked(refreshEmailedAddresses).mockClear();
+
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'A', emailId: 's1', folderPath: 'Sent' });
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'A', emailId: 's2', folderPath: 'Sent' });
+    await runFlush();
+    expect(vi.mocked(refreshEmailedAddresses).mock.calls).toEqual([[]]); // once per window, not per message
+  });
+
+  // Breaks (performance): every Inbox arrival re-read the WHOLE list — a scan
+  // of the account's sender stats in main and every address over IPC — though
+  // an arrival adds nobody the user wrote to.
+  it('does not re-read the correspondents for Inbox mail', async () => {
+    const h = await loadFlushHarness();
+    const { refreshEmailedAddresses } = await import('../../../../../src/utils/remote-images');
+    vi.mocked(refreshEmailedAddresses).mockClear();
+
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'A', emailId: 'x1', folderPath: 'INBOX' });
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'B', emailId: 'x2', folderPath: 'INBOX' });
+    await runFlush();
+    expect(refreshEmailedAddresses).not.toHaveBeenCalled();
+  });
+
+  // The active account's Sent folder by its SPECIAL-USE (any name), and a
+  // background download of it (foldersUpdated, no per-email event) counts.
+  it("knows the active account's special-use Sent folder, arrivals and downloads alike", async () => {
+    const h = await loadFlushHarness({ folders: [{ id: 'f-inbox', path: 'INBOX' }, { id: 'f-sent', path: 'Gesendet', specialUse: '\\Sent' }] });
+    const { refreshEmailedAddresses } = await import('../../../../../src/utils/remote-images');
+    vi.mocked(refreshEmailedAddresses).mockClear();
+
+    h.slice.handleFoldersUpdated('A', 'Gesendet');
+    await runFlush();
+    expect(refreshEmailedAddresses).toHaveBeenCalledTimes(1);
+  });
+
+  // Multi-account: a Sent copy stored in a BACKGROUND account re-reads that
+  // account's list (by id), never the active one's — and its Inbox mail none.
+  it("re-reads a background account's correspondents when ITS Sent copy lands", async () => {
+    const h = await loadFlushHarness();
+    const { refreshEmailedAddresses } = await import('../../../../../src/utils/remote-images');
+    vi.mocked(refreshEmailedAddresses).mockClear();
+
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'B', emailId: 'b1', folderPath: '[Gmail]/Sent Mail' });
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'C', emailId: 'c1', folderPath: 'INBOX' });
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'D', emailId: 'd1', folderPath: 'INBOX.Sent' });
+    h.slice.handleRealtimeEvent({ type: 'new', accountId: 'E', emailId: 'e1', folderPath: 'Presentations' });
+    await runFlush();
+    expect(vi.mocked(refreshEmailedAddresses).mock.calls).toEqual([['B'], ['D']]);
   });
 });

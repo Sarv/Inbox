@@ -328,9 +328,10 @@ describe('robustness', () => {
   });
 });
 
-describe('opt-in', () => {
-  // Breaks if: Gravatar receives contact-address hashes while the user left
-  // "Contact photos from Gravatar" off (the default) — a privacy-policy breach.
+describe('the Gravatar switch', () => {
+  // Breaks if: Gravatar receives contact-address hashes after the user turned
+  // "Contact photos from Gravatar" off — a privacy-policy breach. (The switch is
+  // on by default since 2026-09-30; off must still mean nothing is sent.)
   it('sends nothing and touches no contact while Gravatar is off', async () => {
     h.gravatar = false;
     const { state, storage } = makeStorage([{ id: 'c1', email: 'a@example.com' }]);

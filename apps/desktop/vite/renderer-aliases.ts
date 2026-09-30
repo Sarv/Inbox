@@ -113,6 +113,14 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
       desktopDir,
       '../../packages/core/src/utils/blocklist-prefs.ts',
     ),
+    // Pure (zero imports) — the sender-identity policy (BIMI logos, favicons,
+    // Gravatar). The General tab's checkboxes and the policy pushed to main
+    // are read with the SAME function main normalises with, so "on by
+    // default" means on in the checkbox AND in the process doing the lookup.
+    '@sarvinbox/core/sender-identity-policy': resolve(
+      desktopDir,
+      '../../packages/core/src/utils/sender-identity-policy.ts',
+    ),
     // Pure (folder-mapping + message-id, both zero-import) — which rows of a
     // thread ARE the conversation, and in what order. The thread view, the
     // message list and the AI view must answer with the SAME predicate main

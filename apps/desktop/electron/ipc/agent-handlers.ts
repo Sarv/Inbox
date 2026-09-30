@@ -9,7 +9,7 @@ import type { UserActionType, ActionSource } from '@sarvinbox/core';
 import { createLogger, setEmailReadFlag } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import { openAccountStorages, requireAccountStorage } from '../services/account-target';
+import { openAccountStorages, requireNamedOrActiveStorage } from '../services/account-target';
 import { resolveAccountIdentity } from '../services/accounts-registry';
 import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
 import { buildThreadMessages } from '../services/thread-context';
@@ -667,7 +667,7 @@ export function registerAgentHandlers(): void {
   // does not exist (or, worse, the same thread id holds another conversation).
   ipcMain.handle('agent:draftReply', async (_event, emailId: string, accountId?: string) => {
     try {
-      const storage = accountId ? await requireAccountStorage(accountId) : requireStorage();
+      const storage = await requireNamedOrActiveStorage(accountId);
       const email = await storage.getEmail(emailId);
       if (!email) return { success: false, error: 'Email not found' };
 

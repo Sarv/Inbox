@@ -410,6 +410,12 @@ export interface IEmailStorage {
    *  into an in-memory set for its synchronous block-vs-load decision. */
   getImageAllowedSenders(): Promise<string[]>;
 
+  /** Every address the user has written to from THIS account (bare,
+   *  lowercased) — the "people you've emailed" part of remote images "From
+   *  trusted senders". Per account: it reads the mailbox's own sender stats,
+   *  never the shared contact directory. */
+  getEmailedAddresses(): Promise<string[]>;
+
   // ========== Statistics & Maintenance ==========
 
   /**

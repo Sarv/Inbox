@@ -2743,6 +2743,28 @@ export class SQLiteStorage implements IEmailStorage {
     return rows.map((r) => r.email);
   }
 
+  /**
+   * Everyone the user has written to from this account — the "people you've
+   * emailed" source for the remote-image 'trusted' mode.
+   *
+   * Read off `sender_stats`, which lives in THIS mailbox's database (unlike the
+   * contact directory, which is shared by every account), so one account's
+   * correspondents never vouch for mail arriving at another. Only
+   * `sent_to_count`, which counts mail that actually went out (the ingest of
+   * Sent-folder mail and the contact scan write it). NOT `replied_count`
+   * alone: the ingest and the scan raise it together with `sent_to_count`, so a
+   * row carrying only a reply count comes from a logged "reply" action — which
+   * the AI agent logs when it merely SAVES a draft reply, never sent.
+   */
+  async getEmailedAddresses(): Promise<string[]> {
+    this.ensureInitialized();
+    const rows = this.db!.prepare(
+      `SELECT DISTINCT LOWER(TRIM(email)) AS email FROM sender_stats
+        WHERE COALESCE(sent_to_count, 0) > 0`,
+    ).all() as Array<{ email: string | null }>;
+    return rows.map((r) => r.email ?? '').filter((email) => email.includes('@'));
+  }
+
   async isSpammerDomain(domain: string): Promise<boolean> {
     this.ensureInitialized();
     return this.aiRepo.isSpammerDomain(domain);

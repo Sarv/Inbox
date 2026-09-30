@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 
+import { setActiveCacheAccount } from '../../../../src/utils/account-scoped-cache';
 import { LEVEL_RANK, type SecurityLevel } from '../../../../src/utils/email-security';
+import { resetTrustedSenders } from '../../../../src/utils/trusted-senders';
 import { useEmailSecurity } from '../../../../src/utils/use-email-security';
 import { render, settle } from '../../../helpers/render';
 
@@ -22,7 +24,12 @@ const listLinkRules = vi.fn(async () => ({
   success: true,
   data: [{ id: 1, senderDomain: 'producthunt.com', shownDomain: 'swat.io', actualDomain: 'producthunt.com', verdict: 'trust', createdAt: 0 }],
 }));
-vi.stubGlobal('window', Object.assign(globalThis.window, { electronAPI: { security: { listLinkRules } } }));
+// Account B trusts the bank's alerts address; account A (the active one) does not.
+const listTrustedSenders = vi.fn(async (accountId?: string) => ({
+  success: true,
+  data: accountId === 'acct-b' ? [{ email: 'alerts@unlisted-bank.example', createdAt: 1 }] : [],
+}));
+vi.stubGlobal('window', Object.assign(globalThis.window, { electronAPI: { security: { listLinkRules }, spam: { listTrustedSenders } } }));
 
 const Probe = (props: Parameters<typeof useEmailSecurity>[0]) => {
   const { level } = useEmailSecurity(props);
@@ -50,5 +57,31 @@ describe('useEmailSecurity', () => {
     expect(listLinkRules).toHaveBeenCalled();
     expect(LEVEL_RANK[levelOf(view)]).toBeLessThan(LEVEL_RANK.caution);
     view.unmount();
+  });
+
+  // Multi-account (All Inboxes): the shield took "trusted" from the ACTIVE
+  // account's list, while the remote-image decision and "Trust this sender"
+  // use the message's own account — so the same message was trusted in one
+  // place and flagged in the other, and a banner never cleared after a trust.
+  it("takes the sender's trust from the message's own account", async () => {
+    setActiveCacheAccount('acct-a');
+    const reasons = JSON.stringify([{ id: 'brand-impersonation', points: 3, detail: 'borrows the Axis Bank name' }]);
+    const message = {
+      fromName: 'Axis Bank Alerts', fromAddress: 'alerts@unlisted-bank.example', authStatus: auth('pass'),
+      spamScore: 5, spamReasons: reasons, html: '<p>AutoPay activated</p>', bodyLoaded: true,
+    };
+    const inB = render(<Probe {...message} accountId="acct-b" />);
+    const inActive = render(<Probe {...message} />);
+    await settle();
+
+    expect(listTrustedSenders).toHaveBeenCalledWith('acct-b');
+    const levelIn = (view: ReturnType<typeof render>) =>
+      (view.container.querySelector('[data-level]') as HTMLElement | null)?.dataset.level as SecurityLevel;
+    expect(levelIn(inActive)).toBe('danger'); // A never trusted them
+    expect(LEVEL_RANK[levelIn(inB)]).toBeLessThan(LEVEL_RANK.caution); // B did
+    inB.unmount();
+    inActive.unmount();
+    resetTrustedSenders();
+    setActiveCacheAccount(null);
   });
 });

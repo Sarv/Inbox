@@ -186,7 +186,7 @@ shared with Sarv to improve protection for all users. Both are off by default.
 
 ### 4.4 Sender pictures and logos
 
-Only if you turn on **Contact photos from Gravatar** (Settings → General; off by
+Unless you turn off **Contact photos from Gravatar** (Settings → General; on by
 default), the app asks Gravatar (Automattic Inc.) whether a picture exists for
 each contact. It sends a one-way MD5 hash of the email address, never the
 address itself.
@@ -200,7 +200,7 @@ off in Settings.
 Images in a message are loaded from the sender's servers. That tells the sender
 your IP address and that you opened the message. By default the app only loads
 images automatically for senders and categories you are likely to trust; for
-the rest it asks first. You can change this in Settings.
+the rest it asks first. You can change this under Security → Remote images.
 
 ### 4.6 Translate and unsubscribe
 
