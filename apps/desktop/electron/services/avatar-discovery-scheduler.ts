@@ -1,9 +1,9 @@
 /**
  * Avatar discovery — the (only) network part of confirm-gated contact avatars.
  *
- * On by default: it runs while "Contact photos from Gravatar" (the `gravatar`
- * sender-identity policy) is on, and nothing is sent once the user turns it
- * off (Settings → General).
+ * Opt-in: it runs only while "Contact photos from Gravatar" (the `gravatar`
+ * sender-identity policy) is on, and sends nothing when it is off
+ * (Settings → General).
  *
  * Runs in the MAIN process, in the background, throttled. For contacts that have
  * never been checked (avatar_status IS NULL), it asks Gravatar ONCE whether a
@@ -46,7 +46,7 @@ function gravatarPhotoUrl(email: string): string {
 
 async function tick(): Promise<void> {
   if (running) return;
-  // Settings → General → Contact photos from Gravatar (on by default). Checked
+  // Settings → General → Contact photos from Gravatar (opt-in). Checked
   // every tick, so turning it off stops the very next batch.
   if (!getSenderIdentityPolicy().gravatar) return;
   running = true;

@@ -14,9 +14,8 @@ vi.mock('../../../../../src/components/settings/SignatureSettings', () => ({ Sig
  * What breaks if this file goes red: two privacy-relevant switches. The
  * remote-image mode moved to Security → Remote images; a second copy left here
  * would be written back by this screen's Save over the reader's choice there.
- * And "Contact photos from Gravatar" — on by default since 2026-09-30 — must
- * show what main actually does: on when nothing is stored, off only when the
- * reader turned it off.
+ * And "Contact photos from Gravatar" must show what main actually does:
+ * off when nothing is stored, on only after the reader opted in.
  */
 
 let mounted: Mounted;
@@ -48,22 +47,21 @@ describe('GeneralTab', () => {
 });
 
 describe('GeneralTab → Contact photos from Gravatar', () => {
-  // Deliberate change (2026-09-30): on by default — it was opt-in in 1.2.6.
-  it('is ticked on a fresh install', () => {
+  // Breaks if a fresh install sends contact-address hashes without opt-in.
+  it('is unticked on a fresh install', () => {
     mount(defaultSettings);
-    expect(gravatar()?.checked).toBe(true);
+    expect(gravatar()?.checked).toBe(false);
   });
 
-  // Breaks if a blob with no Gravatar value (every install from before 1.2.6)
-  // shows the box unticked while main, reading the same rule, asks Gravatar.
-  it('is ticked when the stored settings carry no value, or a non-boolean one', () => {
+  // Breaks if a missing or malformed Gravatar choice is treated as consent.
+  it('is unticked when the stored settings carry no value, or a non-boolean one', () => {
     const { contactGravatar: _omitted, ...withoutGravatar } = defaultSettings;
     mount(withoutGravatar);
-    expect(gravatar()?.checked).toBe(true);
+    expect(gravatar()?.checked).toBe(false);
     cleanup();
 
     mount({ ...defaultSettings, contactGravatar: 'yes' as unknown as boolean });
-    expect(gravatar()?.checked).toBe(true);
+    expect(gravatar()?.checked).toBe(false);
   });
 
   // Breaks if a reader's explicit "off" is shown as on (or turned on).
@@ -76,8 +74,7 @@ describe('GeneralTab → Contact photos from Gravatar', () => {
     expect(gravatar()?.checked).toBe(true);
   });
 
-  // Breaks if unticking it does not record an explicit false — the only value
-  // that turns the lookup off.
+  // Breaks if a deliberate opt-in or opt-out is not saved as a boolean.
   it('records an explicit choice either way', () => {
     const on = mount({ ...defaultSettings, contactGravatar: true });
     toggle(gravatar());
@@ -89,15 +86,14 @@ describe('GeneralTab → Contact photos from Gravatar', () => {
     expect(off).toHaveBeenCalledWith('contactGravatar', true);
   });
 
-  // Breaks if the explanation still says Gravatar is off unless turned on, or
-  // oversells the hash: an address's hash is matched back to it by Gravatar
-  // (that is how the lookup works), so "never the address itself" misleads.
-  it('explains that it is on unless turned off, and what it sends', () => {
+  // Breaks if the explanation suggests probing occurs without consent, or
+  // oversells the hash: Gravatar can match it back to the address.
+  it('explains that it is opt-in, and what it sends', () => {
     mount(defaultSettings);
     const text = mounted.container.textContent ?? '';
-    expect(text).toContain('Contact photos from Gravatar are on unless you turn them off');
+    expect(text).toContain('Contact photos from Gravatar are off until you turn them on');
     expect(text).toContain('a hash of each contact’s address, which Gravatar can match to the address');
-    expect(text).not.toContain('off unless you turn them on');
+    expect(text).not.toContain('on unless you turn them off');
     expect(text).not.toContain('never the address itself');
   });
 

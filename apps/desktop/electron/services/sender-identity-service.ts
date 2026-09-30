@@ -56,9 +56,9 @@ const logger = createLogger('sender-identity');
 // --------------------------------------------------------------------- policy
 // The policy's shape, defaults and normalisation live in core
 // (utils/sender-identity-policy.ts), shared with the renderer that reads the
-// switches out of the settings blob and pushes them here. Every lookup —
-// Gravatar included — is ON unless the reader turned it off; until the
-// renderer's first push arrives, the persisted policy (or else that default)
+// switches out of the settings blob and pushes them here. BIMI logos and
+// favicons default on, while Gravatar requires an explicit opt-in. Until the
+// renderer's first push arrives, the persisted policy (or else those defaults)
 // governs.
 
 export { DEFAULT_SENDER_IDENTITY_POLICY, normalizeSenderIdentityPolicy, type SenderIdentityPolicy };

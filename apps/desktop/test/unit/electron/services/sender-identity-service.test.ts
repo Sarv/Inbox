@@ -82,28 +82,25 @@ describe('policy', () => {
   // Breaks if a pushed policy is not what the next launch reads back, or a
   // garbage push switches a lookup off instead of falling back to the default.
   it('normalises, persists and reloads; garbage means the defaults', () => {
-    expect(normalizeSenderIdentityPolicy({ logos: false })).toEqual({ logos: false, favicons: true, gravatar: true });
-    expect(normalizeSenderIdentityPolicy('junk')).toEqual({ logos: true, favicons: true, gravatar: true });
+    expect(normalizeSenderIdentityPolicy({ logos: false })).toEqual({ logos: false, favicons: true, gravatar: false });
+    expect(normalizeSenderIdentityPolicy('junk')).toEqual({ logos: true, favicons: true, gravatar: false });
     setSenderIdentityPolicy({ logos: false, favicons: false, gravatar: true });
     resetSenderIdentityPolicyCache();
     expect(getSenderIdentityPolicy()).toEqual({ logos: false, favicons: false, gravatar: true });
   });
 
-  // Deliberate change (2026-09-30): Gravatar is ON by default — it was opt-in
-  // in 1.2.6. A missing, malformed or pre-existing (no `gravatar` key) policy
-  // reads as on; only an explicit false turns it off. Breaks if the default
-  // drifts from the renderer's (the checkbox says on, main never asks).
-  it('turns Gravatar on unless it is explicitly false', () => {
-    expect(normalizeSenderIdentityPolicy(null).gravatar).toBe(true);
-    expect(normalizeSenderIdentityPolicy({ logos: true, favicons: true }).gravatar).toBe(true);
-    expect(normalizeSenderIdentityPolicy({ gravatar: 'no' }).gravatar).toBe(true);
-    expect(normalizeSenderIdentityPolicy({ gravatar: false }).gravatar).toBe(false);
+  // Breaks if main sends contact-address hashes without an explicit opt-in.
+  // Missing and malformed values must match the renderer's unticked box.
+  it('keeps Gravatar off unless it is explicitly true', () => {
+    expect(normalizeSenderIdentityPolicy(null).gravatar).toBe(false);
+    expect(normalizeSenderIdentityPolicy({ logos: true, favicons: true }).gravatar).toBe(false);
+    expect(normalizeSenderIdentityPolicy({ gravatar: 'yes' }).gravatar).toBe(false);
+    expect(normalizeSenderIdentityPolicy({ gravatar: true }).gravatar).toBe(true);
   });
 
-  // Breaks if a fresh profile (nothing pushed or persisted yet) starts with
-  // Gravatar off, contrary to the default the General tab shows.
-  it('reads the default, Gravatar on, when nothing was ever persisted', () => {
-    expect(getSenderIdentityPolicy()).toEqual({ logos: true, favicons: true, gravatar: true });
+  // Breaks if main probes Gravatar before the first renderer push.
+  it('reads the default, Gravatar off, when nothing was ever persisted', () => {
+    expect(getSenderIdentityPolicy()).toEqual({ logos: true, favicons: true, gravatar: false });
   });
 
   // Breaks if a reader's saved "off" is lost across a restart and main asks

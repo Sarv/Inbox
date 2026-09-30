@@ -148,9 +148,9 @@ function pushBacklogCap(rawSettings: string | null): void {
  * nothing cached shown — so main has to know, and the renderer's own identity
  * cache is cleared once main has acknowledged the change.
  *
- * Every toggle is ON unless explicitly false — Gravatar included, since
- * 2026-09-30 — read by the same core function the General tab's checkboxes
- * and main's own fallback use. An unreadable blob pushes nothing: main keeps
+ * BIMI logos and favicons default on, while Gravatar contact photos
+ * require an explicit opt-in. The same core function supplies the General
+ * tab's checkboxes and main's own fallback. An unreadable blob pushes nothing: main keeps
  * the reader's last pushed choice rather than a guess.
  */
 function pushSenderIdentityPolicy(rawSettings: string | null): void {

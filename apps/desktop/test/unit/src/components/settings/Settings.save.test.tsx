@@ -115,15 +115,14 @@ describe('Settings → Save', () => {
     expect(stored().reputation).toEqual({ enabled: false, provider: 'local', chosen: true });
   });
 
-  // Breaks the Gravatar default for a profile with no stored value: the
-  // screen's Save must record it as on (the default), never off.
-  it('saves Gravatar as on when the stored settings had no value for it', () => {
+  // Breaks if an unrelated Save opts the reader into Gravatar.
+  it('saves Gravatar as off when the stored settings had no value for it', () => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ signatures: [] }));
     mountSettings();
 
     editAndSave();
 
-    expect(stored().contactGravatar).toBe(true);
+    expect(stored().contactGravatar).toBe(false);
   });
 
   // Breaks if a reader's explicit Gravatar "off" is turned on by an unrelated Save.

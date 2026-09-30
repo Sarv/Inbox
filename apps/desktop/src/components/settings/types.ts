@@ -52,9 +52,9 @@ export interface AppSettings {
   senderFavicons: boolean;
   /** Ask Gravatar for contacts' photos (sends Gravatar an MD5 hash of each
    *  contact's address — which Gravatar, and anyone with a list of addresses,
-   *  can match back to it). On unless the user turns it off: only an explicit
-   *  `false` is off, a missing value is on (core `senderIdentityPolicyFromSettings`).
-   *  Opt-in in 1.2.6; on by default since 2026-09-30. */
+   *  can match back to it). Off unless the user turns it on: only an
+   *  explicit `true` enables it; a missing value is off
+   *  (core `senderIdentityPolicyFromSettings`). */
   contactGravatar: boolean;
   /** Send crash and error reports (addresses removed) so bugs can be fixed.
    *  On unless the user turns it off. */

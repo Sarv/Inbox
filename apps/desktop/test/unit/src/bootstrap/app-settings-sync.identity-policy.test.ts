@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * lookups and does whatever the renderer last pushed. Push the wrong value and
  * the General tab shows one thing while main does another — Gravatar asked
  * about every contact after the reader turned it off, or never asked on a
- * profile where the tab shows it on. Since 2026-09-30 Gravatar is on unless
- * explicitly off (it was opt-in in 1.2.6); this pins the push to that rule.
+ * profile where the tab shows it on. Gravatar stays off until the reader
+ * explicitly opts in; this pins the push to that rule.
  */
 
 const SETTINGS_KEY = 'sarvinbox-settings';
@@ -64,14 +64,13 @@ beforeEach(() => { vi.resetModules(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('sender-identity policy push', () => {
-  // Breaks if a profile with no stored Gravatar value (every install from
-  // before 1.2.6) keeps main's lookup off while the checkbox shows it on.
-  it('pushes Gravatar on at boot when the settings carry no value for it', async () => {
+  // Breaks if a profile with no stored Gravatar choice starts probing contacts.
+  it('pushes Gravatar off at boot when the settings carry no value for it', async () => {
     const { setPolicy } = await boot(JSON.stringify({ signatures: [] }));
-    expect(setPolicy).toHaveBeenCalledWith({ logos: true, favicons: true, gravatar: true });
+    expect(setPolicy).toHaveBeenCalledWith({ logos: true, favicons: true, gravatar: false });
   });
 
-  // Breaks if a reader's explicit "off" is overridden by the new default.
+  // Breaks if a reader's explicit "off" is overridden during boot.
   it('pushes an explicit Gravatar "off" as off', async () => {
     const { setPolicy } = await boot(JSON.stringify({ contactGravatar: false, senderLogos: false }));
     expect(setPolicy).toHaveBeenCalledWith({ logos: false, favicons: true, gravatar: false });
@@ -90,13 +89,12 @@ describe('sender-identity policy push', () => {
     expect(setPolicy).not.toHaveBeenCalled();
   });
 
-  // Breaks the default on a brand-new profile: the seeded settings must carry
-  // Gravatar on, and main must be told so.
-  it('seeds a fresh profile with Gravatar on and pushes it', async () => {
+  // Breaks if a brand-new profile probes Gravatar before consent.
+  it('seeds a fresh profile with Gravatar off and pushes it', async () => {
     const { setPolicy, storage, dbSet } = await boot(null, { db: {} });
-    expect(JSON.parse(storage.get(SETTINGS_KEY) ?? '{}').contactGravatar).toBe(true);
+    expect(JSON.parse(storage.get(SETTINGS_KEY) ?? '{}').contactGravatar).toBe(false);
     expect(dbSet).toHaveBeenCalledWith(SETTINGS_KEY, expect.any(String));
-    expect(setPolicy).toHaveBeenCalledWith({ logos: true, favicons: true, gravatar: true });
+    expect(setPolicy).toHaveBeenCalledWith({ logos: true, favicons: true, gravatar: false });
   });
 
   // Breaks if turning Gravatar off in Settings (any later write of the blob)

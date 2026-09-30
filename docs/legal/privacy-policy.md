@@ -186,10 +186,10 @@ shared with Sarv to improve protection for all users. Both are off by default.
 
 ### 4.4 Sender pictures and logos
 
-Unless you turn off **Contact photos from Gravatar** (Settings → General; on by
+If you turn on **Contact photos from Gravatar** (Settings → General; off by
 default), the app asks Gravatar (Automattic Inc.) whether a picture exists for
-each contact. It sends a one-way MD5 hash of the email address, never the
-address itself.
+each contact. It sends an MD5 hash of the email address, which Gravatar can
+match to the address.
 
 To show a company logo, the app looks up the sender domain's published brand
 logo (BIMI) and website icon, directly from that domain. You can turn these

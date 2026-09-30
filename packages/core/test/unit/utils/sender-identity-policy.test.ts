@@ -11,14 +11,13 @@ import {
  * and main normalises what the renderer pushed.
  *
  * What breaks if this file goes red: a picture lookup the reader switched off
- * runs anyway (Gravatar receives contact-address hashes, a brand's server is
- * asked about every sender), or one left at its default silently never runs.
+ * runs anyway (Gravatar receives contact-address hashes without opt-in,
+ * or a brand's server is asked after being switched off).
  */
 describe('DEFAULT_SENDER_IDENTITY_POLICY', () => {
-  // Deliberate change (2026-09-30): Gravatar is ON by default, like the logos
-  // and favicons. It was opt-in in 1.2.6.
-  it('turns every lookup on, Gravatar included', () => {
-    expect(DEFAULT_SENDER_IDENTITY_POLICY).toEqual({ logos: true, favicons: true, gravatar: true });
+  // Breaks if a fresh profile sends contact-address hashes before opt-in.
+  it('keeps Gravatar off while logo and favicon lookups default on', () => {
+    expect(DEFAULT_SENDER_IDENTITY_POLICY).toEqual({ logos: true, favicons: true, gravatar: false });
   });
 
   // Breaks if a caller mutates the shared default and every later "missing
@@ -38,18 +37,18 @@ describe('normalizeSenderIdentityPolicy', () => {
       .toEqual({ logos: true, favicons: false, gravatar: true });
   });
 
-  // Breaks if a missing or malformed field reads as off (or a string "false"
-  // reads as on): only a real boolean is a choice; anything else is the default.
+  // Breaks if a missing or malformed field changes the default (for
+  // example, a string "true" enabling Gravatar): only a boolean is a choice.
   it('reads anything that is not a boolean as the default', () => {
     expect(normalizeSenderIdentityPolicy(null)).toEqual(DEFAULT_SENDER_IDENTITY_POLICY);
     expect(normalizeSenderIdentityPolicy(undefined)).toEqual(DEFAULT_SENDER_IDENTITY_POLICY);
     expect(normalizeSenderIdentityPolicy('junk')).toEqual(DEFAULT_SENDER_IDENTITY_POLICY);
     expect(normalizeSenderIdentityPolicy([false, false, false])).toEqual(DEFAULT_SENDER_IDENTITY_POLICY);
-    expect(normalizeSenderIdentityPolicy({ logos: 'no', favicons: 0, gravatar: 'false' }))
+    expect(normalizeSenderIdentityPolicy({ logos: 'no', favicons: 0, gravatar: 'true' }))
       .toEqual(DEFAULT_SENDER_IDENTITY_POLICY);
     // A policy persisted before Gravatar had a switch has no `gravatar` key.
     expect(normalizeSenderIdentityPolicy({ logos: false, favicons: true }))
-      .toEqual({ logos: false, favicons: true, gravatar: true });
+      .toEqual({ logos: false, favicons: true, gravatar: false });
   });
 
   // Breaks if the result aliases the frozen default, so the caller's copy
@@ -71,11 +70,10 @@ describe('senderIdentityPolicyFromSettings', () => {
       .toEqual({ logos: true, favicons: false, gravatar: true });
   });
 
-  // Breaks if a settings blob with no Gravatar value (every install from
-  // before 1.2.6, and any blob that lost the key) keeps Gravatar off.
-  it('turns Gravatar on when the blob has no value for it', () => {
-    expect(senderIdentityPolicyFromSettings({ signatures: [] }).gravatar).toBe(true);
-    expect(senderIdentityPolicyFromSettings({ contactGravatar: null }).gravatar).toBe(true);
+  // Breaks if a settings blob with no Gravatar choice sends hashes.
+  it('keeps Gravatar off when the blob has no value for it', () => {
+    expect(senderIdentityPolicyFromSettings({ signatures: [] }).gravatar).toBe(false);
+    expect(senderIdentityPolicyFromSettings({ contactGravatar: null }).gravatar).toBe(false);
   });
 
   // Breaks if a reader's saved "off" is read as a missing value and turned on.

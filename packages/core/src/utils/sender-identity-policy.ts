@@ -12,10 +12,9 @@
  * main's service — "on by default" could mean on in the checkbox and off in
  * the process that actually does the lookup.
  *
- * ALL ON BY DEFAULT. Gravatar joined the others on 2026-09-30 (it was opt-in
- * in 1.2.6): only an explicit `false` turns a lookup off, and a missing or
- * malformed value reads as the default. An explicit `true`/`false` is always
- * kept as it is.
+ * BIMI logos and domain favicons are on by default; Gravatar contact
+ * photos are opt-in. Missing or malformed values read as those defaults.
+ * An explicit `true`/`false` is always kept as it is.
  *
  * Pure (zero imports), so the renderer can deep-import it
  * (`@sarvinbox/core/sender-identity-policy`) without the core barrel.
@@ -38,7 +37,7 @@ export interface SenderIdentityPolicy {
 export const DEFAULT_SENDER_IDENTITY_POLICY: Readonly<SenderIdentityPolicy> = Object.freeze({
   logos: true,
   favicons: true,
-  gravatar: true,
+  gravatar: false,
 });
 
 const asRecord = (raw: unknown): Record<string, unknown> =>

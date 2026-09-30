@@ -32,12 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says what it loads, and your choice applies as soon as you make it, with no
   Save button. "Block" and "Always load" carry over as they were; for
   "Categorized only", see above.
-- **Gravatar contact photos are on by default.** The app asks Gravatar
-  whether each contact has a photo, sending a hash of their address, which
-  Gravatar can match to the address. You can turn this off in Settings →
-  General → Contact photos from Gravatar. If your settings already have it
-  switched off, it stays off; that includes settings saved by version 1.2.6,
-  where it was off by default.
+- **Gravatar contact photos remain opt-in.** The app asks Gravatar
+  whether each contact has a photo only after you turn on Settings → General →
+  Contact photos from Gravatar. That request sends a hash of the contact’s
+  address, which Gravatar can match to the address. Existing on or off choices
+  remain in effect.
 
 ### Fixed
 - **Allowed senders' images load straight away.** Right after starting the

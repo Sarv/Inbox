@@ -249,8 +249,8 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
               Brand logos come from the sender domain’s BIMI record and appear only on mail that passed DMARC; a domain whose
               Verified Mark Certificate checks out also gets the blue verified tick beside the sender. When a sender has no
               photo or logo, the domain’s favicon is used instead. Each is looked up once per domain in the background —
-              never per message, and never from inside a message. Contact photos from Gravatar are on unless you
-              turn them off: to ask whether a photo exists, the app sends Gravatar a hash of each contact’s
+              never per message, and never from inside a message. Contact photos from Gravatar are off until you
+              turn them on: to ask whether a photo exists, the app sends Gravatar a hash of each contact’s
               address, which Gravatar can match to the address.
             </div>
           </div>
