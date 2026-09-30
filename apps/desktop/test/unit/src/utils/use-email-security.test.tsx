@@ -52,6 +52,7 @@ describe('useEmailSecurity', () => {
   // The reader's "I trust this link" must clear the flag once the rules load,
   // not only on the next message opened.
   it('re-assesses when the reader’s link rules arrive', async () => {
+    listLinkRules.mockClear();
     // The rules cache survives between tests and sessions. Start with no trust,
     // then deliver the trusted rule while the same message stays mounted.
     listLinkRules.mockResolvedValueOnce({ success: true, data: [] });

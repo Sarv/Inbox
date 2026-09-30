@@ -7,6 +7,7 @@ import { useEmailStore } from '../../store/email-store';
 import { accountHost, isAccountEmailDuplicated, effectiveSmtpConfig } from '../../store/helpers';
 import { findReauthSession } from '../../utils/reauth-sessions';
 import { AddAccountModal } from '../AddAccountModal';
+import { GmailPrivacyNotice, openInboxPrivacyPolicy } from '../GmailPrivacyNotice';
 import { SmtpConfigForm } from '../SmtpConfigForm';
 import { Tooltip } from '../Tooltip';
 import { VaultPasswordField } from '../VaultPasswordField';
@@ -313,12 +314,17 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
       {/* Top action: add another mailbox via the 3-step wizard */}
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">Accounts</h2>
-        <button
-          onClick={() => setShowAddAccount(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-        >
-          <Plus className="h-4 w-4" /> Add account
-        </button>
+        <div className="flex items-center gap-4">
+          <button type="button" onClick={openInboxPrivacyPolicy} className="text-sm text-primary underline underline-offset-2 hover:text-primary/80">
+            Privacy policy
+          </button>
+          <button
+            onClick={() => setShowAddAccount(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+          >
+            <Plus className="h-4 w-4" /> Add account
+          </button>
+        </div>
       </div>
       {showAddAccount && <AddAccountModal onClose={() => setShowAddAccount(false)} />}
 
@@ -380,22 +386,24 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
           </div>
           <div className="space-y-2 max-w-md">
             {oauthProviders.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => handleOAuthSignIn(p.id)}
-                // Deliberately NOT disabled while a flow is pending: closing the
-                // browser tab never settles the flow, so a button that waits for
-                // it would sit on "Opening…" for the full five-minute timeout.
-                disabled={!p.configured}
-                title={p.configured ? '' : 'Not configured — see OAUTH_SETUP.md'}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-background border border-input rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {oauthLoading === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
-                <span className="text-sm font-medium">
-                  {oauthLoading === p.id ? `Opening ${p.label}…` : `Sign in with ${p.label}`}
-                </span>
-                {!p.configured && <span className="text-xs text-muted-foreground">(not configured)</span>}
-              </button>
+              <div key={p.id} className="space-y-2">
+                <button
+                  onClick={() => handleOAuthSignIn(p.id)}
+                  // Deliberately NOT disabled while a flow is pending: closing the
+                  // browser tab never settles the flow, so a button that waits for
+                  // it would sit on "Opening…" for the full five-minute timeout.
+                  disabled={!p.configured}
+                  title={p.configured ? '' : 'Not configured — see OAUTH_SETUP.md'}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-background border border-input rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {oauthLoading === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                  <span className="text-sm font-medium">
+                    {oauthLoading === p.id ? `Opening ${p.label}…` : `Sign in with ${p.label}`}
+                  </span>
+                  {!p.configured && <span className="text-xs text-muted-foreground">(not configured)</span>}
+                </button>
+                {p.id === 'gmail' && <GmailPrivacyNotice />}
+              </div>
             ))}
             {oauthLoading !== null && (
               <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
