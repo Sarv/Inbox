@@ -47,12 +47,12 @@
   },
   "dependencies": {
     "@sarv-in/mailguard": "^0.4.2",
-    "html-to-text": "^10.0.0"
+    "html-to-text": "^10.0.1"
   },
   "devDependencies": {
     "@sarvinbox/core": "workspace:*",
     "tsup": "^8.0.1",
-    "typescript": "^5.3.3"
+    "typescript": "^6.0.0"
   },
   "engines": {
     "node": ">=18"

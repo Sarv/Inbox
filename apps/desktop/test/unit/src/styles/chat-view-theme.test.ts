@@ -86,7 +86,9 @@ const APP_TOKENS = `:root{
 
 /** One bubble of each kind, in the class names the library emits. */
 function bubbles() {
-  document.head.innerHTML = `<style>${APP_TOKENS}</style><style>${LIBRARY}</style><style>${THEME}</style>`;
+  // Happy DOM 20 cannot resolve the production hsl(... / 0.05) tint. Give
+  // both bubbles an opaque test token so this still catches a cascade regression.
+  document.head.innerHTML = `<style>${APP_TOKENS}</style><style>${LIBRARY}</style><style>${THEME}</style><style>:root{--sec-bubble-mine-bg:hsl(var(--card));--sec-bubble-mine-border:hsl(var(--border))}</style>`;
   document.body.innerHTML = [
     '<div id="plain-mine" class="sec-bubble sec-bubble--mine"></div>',
     '<div id="plain-theirs" class="sec-bubble sec-bubble--theirs"></div>',
