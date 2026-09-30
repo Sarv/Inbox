@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.3.0] - 2026-09-30
 
 ### Added
+- **Clear Gmail data use before sign-in.** Gmail connection screens explain how
+  the app uses and stores mail, and account settings link to the privacy policy.
 - **A clearer download page at inbox.sarv.com.** See how conversations,
   optional AI, multiple accounts, contacts and security work before you
   install. The page detects macOS, Windows or Linux and links to the matching

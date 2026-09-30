@@ -6,6 +6,7 @@ import { requestConfirm } from '../store/confirm-service';
 import { useEmailStore } from '../store/email-store';
 import { findAccountByEmailHost } from '../store/helpers';
 
+import { GmailPrivacyNotice } from './GmailPrivacyNotice';
 import { SmtpConfigForm } from './SmtpConfigForm';
 import { Tooltip } from './Tooltip';
 
@@ -295,6 +296,7 @@ export function AddAccountModal({ onClose }: { onClose: () => void }) {
                     ? `Sign in with ${selectedPreset?.name} — coming soon.`
                     : `We'll use the email from your ${selectedPreset?.name} sign-in — no password needed.`}
                 </p>
+                {oauthProviderId === 'gmail' && <GmailPrivacyNotice />}
                 {error && <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-md text-sm text-destructive">{error}</div>}
                 <div className="flex items-center justify-end pt-1">
                   <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm rounded-md border border-border hover:bg-muted/50">Cancel</button>

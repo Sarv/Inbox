@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 
 import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { useEmailStore } from '../../store/email-store';
+import { GmailPrivacyNotice } from '../GmailPrivacyNotice';
 import { Tooltip } from '../Tooltip';
 
 interface IMAPStepProps {
@@ -131,30 +132,32 @@ export function IMAPStep({ onNext, onBack, onSyncStarted }: IMAPStepProps) {
       {anyOAuthConfigured && (
         <div className="space-y-2 mb-4">
           {oauthProviders.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => handleOAuthSignIn(p.id)}
-              disabled={!p.configured || oauthLoading !== null || loading}
-              title={p.configured ? '' : 'Not configured — see OAUTH_SETUP.md'}
-              className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-md border text-sm font-medium transition-all ${
-                p.configured
-                  ? 'border-input bg-background text-foreground shadow-sm hover:bg-primary/5 hover:border-primary/50 hover:shadow active:scale-[0.99] disabled:opacity-60 disabled:cursor-wait'
-                  : 'border-dashed border-border bg-muted/40 text-muted-foreground cursor-not-allowed'
-              }`}
-            >
-              {oauthLoading === p.id ? (
-                <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              ) : (
-                <Mail className={`h-4 w-4 ${p.configured ? 'text-primary' : 'text-muted-foreground/50'}`} />
-              )}
-              <span>Sign in with {p.label}</span>
-              {!p.configured && (
-                <span className="ml-1 rounded-full border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
-                  not configured
-                </span>
-              )}
-            </button>
+            <div key={p.id} className="space-y-2">
+              <button
+                type="button"
+                onClick={() => handleOAuthSignIn(p.id)}
+                disabled={!p.configured || oauthLoading !== null || loading}
+                title={p.configured ? '' : 'Not configured — see OAUTH_SETUP.md'}
+                className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-md border text-sm font-medium transition-all ${
+                  p.configured
+                    ? 'border-input bg-background text-foreground shadow-sm hover:bg-primary/5 hover:border-primary/50 hover:shadow active:scale-[0.99] disabled:opacity-60 disabled:cursor-wait'
+                    : 'border-dashed border-border bg-muted/40 text-muted-foreground cursor-not-allowed'
+                }`}
+              >
+                {oauthLoading === p.id ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                ) : (
+                  <Mail className={`h-4 w-4 ${p.configured ? 'text-primary' : 'text-muted-foreground/50'}`} />
+                )}
+                <span>Sign in with {p.label}</span>
+                {!p.configured && (
+                  <span className="ml-1 rounded-full border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                    not configured
+                  </span>
+                )}
+              </button>
+              {p.id === 'gmail' && <GmailPrivacyNotice />}
+            </div>
           ))}
 
           <button
