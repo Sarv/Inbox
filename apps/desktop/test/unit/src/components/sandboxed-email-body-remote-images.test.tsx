@@ -193,7 +193,11 @@ describe('SandboxedEmailBody — remote images', () => {
 
     // Written by another window: only the storage event says so.
     localStorage.setItem('sarvinbox-settings', JSON.stringify({ remoteImageMode: 'block' }));
-    await act(async () => { window.dispatchEvent(new StorageEvent('storage', { key: 'sarvinbox-settings' })); });
+    await act(async () => {
+      const storageEvent = new StorageEvent('storage');
+      Object.defineProperty(storageEvent, 'key', { value: 'sarvinbox-settings' });
+      window.dispatchEvent(storageEvent);
+    });
     expect(loadsRemote(frames(view)[0])).toBe(false);
   });
 

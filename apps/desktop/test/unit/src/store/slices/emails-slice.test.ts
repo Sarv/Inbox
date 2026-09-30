@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createStore } from 'zustand/vanilla';
 
 // CategoryBadges is imported by the slice for its cache-clear helper; the two
 // pure functions under test never touch it, so a stub keeps the module graph
@@ -1017,13 +1018,12 @@ describe('loadFolders — Spam folders for the remote-image guard', () => {
         },
       },
     };
-    const state: Record<string, any> = { activeAccountId: 'acct-a', selectedFolderId: 'f1' };
-    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
-    const slice = createEmailsSlice(set as any, (() => ({ ...slice, ...state })) as any, undefined as any);
+    const store = createStore<any>()(createEmailsSlice as any);
+    store.setState({ activeAccountId: 'acct-a', selectedFolderId: 'f1' });
     const { isSpamFolderMail } = await import('../../../../../src/utils/remote-images');
     expect(isSpamFolderMail('|Indésirables|', 'acct-a')).toBe(false);
 
-    await slice.loadFolders();
+    await store.getState().loadFolders();
 
     expect(isSpamFolderMail('|Indésirables|', 'acct-a')).toBe(true);
     expect(isSpamFolderMail('|Indésirables|', 'acct-b')).toBe(false);

@@ -496,7 +496,11 @@ describe('Security → Remote images: what loads automatically', () => {
     expect(switches()).toEqual({ trusted: 'off', categorized: 'off', always: 'off' });
 
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ remoteImageMode: 'categorized' }));
-    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: SETTINGS_KEY })); });
+    act(() => {
+      const storageEvent = new StorageEvent('storage');
+      Object.defineProperty(storageEvent, 'key', { value: SETTINGS_KEY });
+      window.dispatchEvent(storageEvent);
+    });
     expect(switches()).toEqual({ trusted: 'off', categorized: 'on', always: 'off' });
   });
 

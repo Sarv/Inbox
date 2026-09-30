@@ -19,8 +19,18 @@ import { isTransientSendError } from './smtp-errors';
  * MAIL FROM — the human-readable From header is preserved verbatim in the MIME.
  */
 function bareAddress(from: string): string {
-  const m = from.match(/<([^>]+)>/);
-  return (m ? m[1] : from).trim();
+  let openingBracket = -1;
+  for (let i = 0; i < from.length; i++) {
+    if (from[i] === '<' && openingBracket < 0) {
+      openingBracket = i;
+    } else if (from[i] === '>') {
+      if (openingBracket >= 0 && i > openingBracket + 1) {
+        return from.slice(openingBracket + 1, i).trim();
+      }
+      openingBracket = -1;
+    }
+  }
+  return from.trim();
 }
 
 /**
