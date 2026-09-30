@@ -132,7 +132,12 @@ export function AISettings({ initialTab, onDirtyChange }: { initialTab?: AISetti
               <ProvidersTab aiProviders={aiProviders} setAiProviders={setAiProviders} />
             )}
             {activeTab === 'categorization' && (
-              <CategorizationTab aiProviders={aiProviders} settings={settings} updateSetting={updateSetting} />
+              <CategorizationTab
+                aiProviders={aiProviders}
+                settings={settings}
+                updateSetting={updateSetting}
+                onOpenAgentTab={() => setActiveTab('agent')}
+              />
             )}
             {activeTab === 'signatures' && (
               <SignatureTab aiProviders={aiProviders} />

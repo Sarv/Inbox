@@ -1,6 +1,7 @@
 import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearchableParsedQuery, needsFullQuerySearch } from '../../components/server-search';
 import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
-import { isSignatureDetectionEnabled, detectSignature, isCategorizationEnabled, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
+import { isAIAssistEnabled } from '../../services/agent-settings';
+import { isSignatureDetectionEnabled, detectSignature, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
 import { getMaxAIProcessingEmails, getEmailsPerPage, getPageSizeForView, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
 import type { SearchAISlice, SliceCreator } from '../types';
 
@@ -474,8 +475,11 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       return;
     }
 
-    if (!isCategorizationEnabled()) {
-      console.log('[Store] AI categorization feature is disabled in settings');
+    // AI Assist is the one switch for sending mail to the AI provider for
+    // sorting — this manual run included, as its description promises ("when
+    // off, no LLM calls are made").
+    if (!isAIAssistEnabled()) {
+      console.log('[Store] AI Assist is off — not sending mail for categorization');
       return;
     }
 
@@ -526,9 +530,8 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   },
 
   startAutoAICategorization: () => {
-    if (!isCategorizationEnabled()) {
-      return;
-    }
+    // No on/off gate here: this only hands the provider config and userEmail to
+    // the main-process pipeline, which sends nothing unless AI Assist is on.
     // Pause while AI is marked inactive (provider failing) — avoids
     // hammering a broken provider. Resumes once a passing Test (or a
     // recovered call) flips health back to healthy.

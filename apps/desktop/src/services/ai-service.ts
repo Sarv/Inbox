@@ -1790,16 +1790,6 @@ export function getDefaultCategorizationPrompt(): string {
   return 'Default categorization prompt (see main process ai-categorization-service.ts)';
 }
 
-/**
- * Check if AI categorization feature is enabled
- */
-export function isCategorizationEnabled(): boolean {
-  const features = loadAIFeatures();
-  const feature = features.find(f => f.id === 'email-categorization');
-  // Default to enabled if no feature config exists (new feature)
-  return feature?.enabled !== false;
-}
-
 // ========== AI Search ==========
 
 export interface SearchQuery {

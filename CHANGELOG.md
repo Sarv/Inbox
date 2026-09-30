@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **One switch for AI sorting, and it works.** Settings → AI → Categorization
+  had a "Smart Email Categorization" switch that stopped nothing: with it off,
+  new mail was still sent to your AI provider to be sorted. It is gone. The
+  Categorization tab now shows whether automatic sorting is on, with a link to
+  AI Assist (Settings → AI → Email Agent), the switch that really turns it
+  off. The AI dashboard's Start Processing button also waits for AI Assist.
+  If the app ever can't read your saved AI Assist setting, it now treats AI
+  Assist as off rather than on.
+
 ## [1.2.6] - 2026-09-29
 
 ### Added

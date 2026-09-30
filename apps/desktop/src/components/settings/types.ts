@@ -196,14 +196,6 @@ CRITICAL: The "htmlSelector" field must be a CSS selector string (like "div.gmai
     userPrompt: 'Find the signature in this email HTML. Return a JSON with "htmlSelector" containing a CSS selector (like "div.gmail_signature" or "#Signature") that matches the signature element. Do NOT return an index.',
   },
   {
-    id: 'email-categorization',
-    name: 'Smart Email Categorization',
-    description: 'Automatically categorize emails into Reminders, Needs Response, Meetings, Invoices, and Promotions based on content and context.',
-    enabled: true,
-    systemPrompt: '',
-    userPrompt: '',
-  },
-  {
     id: 'conversation-mode',
     name: 'AI Conversation Mode',
     // The chat view's AI half: Standard's bubbles, with ONLY the thread's first

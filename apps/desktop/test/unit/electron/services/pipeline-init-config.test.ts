@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveDeferredPipelineConfig } from '../../../../electron/services/pipeline-init-config';
+import {
+  bootPipelineConfig,
+  isAIAssistOn,
+  resolveDeferredPipelineConfig,
+} from '../../../../electron/services/pipeline-init-config';
 
 // Regression: on a first "login with Sarv", the pipeline init is DEFERRED (no
 // account/storage yet). The renderer's agent:setConfig push can only persist the
@@ -44,5 +48,66 @@ describe('resolveDeferredPipelineConfig', () => {
     const persisted = { enabled: true, maxAutoActionsPerHour: 10 };
     const merged = resolveDeferredPipelineConfig(boot, persisted);
     expect(merged).toMatchObject({ enabled: true, autoRead: true, maxAutoActionsPerHour: 10 });
+  });
+});
+
+// AI Assist is the one switch that lets the pipeline send new mail to the AI
+// provider for sorting. A stored value that is set but is not a real boolean did
+// not survive storage; reading it as "on" would resume sending mail the user
+// switched off. Each of these fails OPEN if the strict check is loosened.
+const UNREADABLE_SWITCH_VALUES: unknown[] = ['true', 'false', 1, 0, null, {}, []];
+
+describe('isAIAssistOn', () => {
+  // Breaks: the pipeline's send gate reads an unreadable switch as ON.
+  it('is on only for a real true', () => {
+    expect(isAIAssistOn(true)).toBe(true);
+    expect(isAIAssistOn(false)).toBe(false);
+    expect(isAIAssistOn(undefined)).toBe(false);
+    for (const v of UNREADABLE_SWITCH_VALUES) expect(isAIAssistOn(v)).toBe(false);
+  });
+});
+
+describe('resolveDeferredPipelineConfig — unreadable AI Assist fails closed', () => {
+  // Breaks: a garbage persisted switch (e.g. the string "false") turns sorting
+  // ON at the deferred first-launch init, even over a boot value of OFF.
+  it('treats a persisted non-boolean enabled as OFF, not as the boot value', () => {
+    for (const v of UNREADABLE_SWITCH_VALUES) {
+      expect(resolveDeferredPipelineConfig({ enabled: true }, { enabled: v as boolean }).enabled).toBe(false);
+    }
+  });
+
+  // Breaks: a garbage boot value opens the switch when nothing is persisted.
+  it('treats a non-boolean boot enabled as OFF when nothing is persisted', () => {
+    expect(resolveDeferredPipelineConfig({ enabled: 'true' as unknown as boolean }, {}).enabled).toBe(false);
+  });
+});
+
+// main.ts builds the launch config with this, so it is what keeps a deliberate
+// "AI Assist off" in force across a restart before the renderer re-sends it.
+describe('bootPipelineConfig', () => {
+  // Breaks: AI Assist off is forgotten on restart and mail is sent at launch.
+  it('keeps a persisted enabled:false OFF, and enabled:true ON', () => {
+    expect(bootPipelineConfig({ enabled: false }, 'me@sarv.com').enabled).toBe(false);
+    expect(bootPipelineConfig({ enabled: true }, 'me@sarv.com').enabled).toBe(true);
+  });
+
+  // Breaks: a fresh install (or an unreadable mirror, which loads as {}) starts ON.
+  it('starts OFF with no mirror', () => {
+    expect(bootPipelineConfig({}, 'me@sarv.com').enabled).toBe(false);
+    expect(bootPipelineConfig(undefined, 'me@sarv.com').enabled).toBe(false);
+  });
+
+  // Breaks: a mirror that survived as a non-boolean (e.g. "false") starts sorting.
+  it('starts OFF for a non-boolean persisted enabled', () => {
+    for (const v of UNREADABLE_SWITCH_VALUES) {
+      expect(bootPipelineConfig({ enabled: v as boolean }, 'me@sarv.com').enabled).toBe(false);
+    }
+  });
+
+  // Breaks: the pipeline drafts as a stale persisted address instead of the
+  // account the registry resolved at launch.
+  it('uses the registry userEmail over a persisted copy, and keeps the other settings', () => {
+    const merged = bootPipelineConfig({ enabled: true, userEmail: 'old@sarv.com', draftReplies: false }, 'me@sarv.com');
+    expect(merged).toMatchObject({ enabled: true, userEmail: 'me@sarv.com', draftReplies: false });
   });
 });
