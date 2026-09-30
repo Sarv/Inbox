@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-30
+
 ### Added
 - **A clearer download page at inbox.sarv.com.** See how conversations,
   optional AI, multiple accounts, contacts and security work before you
@@ -654,7 +656,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.2.6...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Sarv/Inbox/releases/tag/v1.3.0
 [1.2.6]: https://github.com/Sarv/Inbox/releases/tag/v1.2.6
 [1.2.5]: https://github.com/Sarv/Inbox/releases/tag/v1.2.5
 [1.2.4]: https://github.com/Sarv/Inbox/releases/tag/v1.2.4
