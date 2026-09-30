@@ -5,6 +5,7 @@
  */
 
 import { emailContentHash, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
+import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, accountDraftRowSql, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
@@ -12,6 +13,8 @@ import pLimit from 'p-limit';
 
 import { resolveAccountTarget } from '../services/account-target';
 import { seedAttachmentCache } from '../services/attachment-cache';
+import { encryptDraftMime } from '../services/pgp-outgoing';
+import { getPgpKeyring } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
 import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
 
@@ -191,6 +194,11 @@ export async function saveDraftToIMAP(draft: {
   accountId?: string;
   /** Files attached in the composer — kept in the draft so reopening it brings them back. */
   attachments?: DraftAttachment[];
+  /**
+   * A draft of an encrypted message is encrypted too — to the sender's own key,
+   * before it reaches the local DB or the server's Drafts folder.
+   */
+  pgp?: { encrypt?: boolean };
 }, options: { messageId?: string } = {}): Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }> {
   // Resolve the TARGET account's storage + sync engine (falls back to the active
   // account when no accountId is given).
@@ -249,12 +257,25 @@ export async function saveDraftToIMAP(draft: {
   if (attachments.length > 0) mailOptions.attachments = draftMimeAttachments(attachments);
 
   const composer = new MailComposer(mailOptions);
-  const rawMessage = await new Promise<Buffer>((resolve, reject) => {
+  const builtMessage = await new Promise<Buffer>((resolve, reject) => {
     composer.compile().build((err: Error | null, message: Buffer) => {
       if (err) reject(err);
       else resolve(message);
     });
   });
+
+  // An encrypted draft that cannot be encrypted is not saved at all: the only
+  // other thing to save is the plaintext, which is what the user turned off.
+  const encrypted = draft.pgp?.encrypt === true;
+  let rawMessage = builtMessage;
+  if (encrypted) {
+    try {
+      rawMessage = await encryptDraftMime(builtMessage, draft.accountEmail || '', getPgpKeyring());
+    } catch (err) {
+      logger.warn('[Drafts] Encrypted draft not saved:', (err as Error)?.message ?? String(err));
+      return { success: false, error: `The draft could not be encrypted, so it was not saved: ${(err as Error)?.message ?? String(err)}` };
+    }
+  }
 
   // 1. Write to local DB first — instant visibility in the Drafts folder.
   try {
@@ -265,18 +286,23 @@ export async function saveDraftToIMAP(draft: {
       cc: draft.cc || '',
       bcc: draft.bcc || '',
       subject: draft.subject || '',
-      bodyText: draft.body || '',
-      bodyHtml: draft.htmlBody || '',
+      // Encrypted: the row's text is the placeholder and its raw body the
+      // ciphertext (the source it reopens from offline). No file names either —
+      // they are indexed for search, and they are part of what was encrypted.
+      bodyText: encrypted ? PGP_ENCRYPTED_PLACEHOLDER : draft.body || '',
+      bodyHtml: encrypted ? '' : draft.htmlBody || '',
       inReplyTo: draft.inReplyTo || '',
       fromAddress: draft.accountEmail || '',
       fromName: draft.accountName || '',
       threadId: draft.threadId,
       rawMessage: rawMessage.toString('utf-8'),
-      attachments,
+      attachments: encrypted ? [] : attachments,
+      pgpStatus: encrypted ? 'encrypted' : null,
     });
     // The row has no UID until the append below lands (never, if offline), so
-    // its files are seeded where the attachment path looks first.
-    if (localRowId && attachments.length > 0) {
+    // its files are seeded where the attachment path looks first. Not for an
+    // encrypted draft: its files come back from the ciphertext, never from disk.
+    if (localRowId && attachments.length > 0 && !encrypted) {
       try {
         await seedAttachmentCache(localRowId, attachments);
       } catch (err) {
@@ -351,6 +377,8 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
   threadId?: string;
   rawMessage: string;
   attachments?: DecodedDraftAttachment[];
+  /** 'encrypted' for a draft stored as ciphertext — the reader opens it on view. */
+  pgpStatus?: 'encrypted' | null;
 }): Promise<string | undefined> {
   const db = (storage as any).db;
   if (!db?.prepare) return undefined;
@@ -388,6 +416,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
       ccAddress: row.cc,
       date: Math.floor(Date.now() / 1000),
       tags: draftTags,
+      pgpStatus: row.pgpStatus ?? null,
       ...attachmentColumns,
     };
     // Body row first, header second — the same ordering EmailRepository.update
@@ -412,7 +441,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
           raw_body_len = ${bodyLengthFromParam('@rawBody')},
           content_hash = @contentHash,
           subject = @subject, to_address = @toAddress, cc_address = @ccAddress,
-          date = @date, tags = @tags,
+          date = @date, tags = @tags, pgp_status = @pgpStatus,
           has_attachments = @hasAttachments, attachment_count = @attachmentCount,
           attachment_names = @attachmentNames, attachment_sizes = @attachmentSizes
          WHERE id = @id
@@ -456,7 +485,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
       in_reply_to, "references",
       priority,
       has_attachments, attachment_count, attachment_names, attachment_sizes,
-      importance_score, importance_source,
+      importance_score, importance_source, pgp_status,
       extraction_status, agent_status
     ) VALUES (
       @id, @messageId, @threadId, @folderId, @uid, @tags,
@@ -477,7 +506,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
       @inReplyTo, @refs,
       @priority,
       @hasAttachments, @attachmentCount, @attachmentNames, @attachmentSizes,
-      @importanceScore, @importanceSource,
+      @importanceScore, @importanceSource, @pgpStatus,
       'done', 'done'
     )
   `);
@@ -517,6 +546,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
     ...attachmentColumns,
     importanceScore: 0,
     importanceSource: 'none',
+    pgpStatus: row.pgpStatus ?? null,
   };
 
   // Header row, body row and thread key in ONE transaction: a torn write here
@@ -642,6 +672,7 @@ export function registerDraftHandlers(): void {
     accountEmail?: string;
     accountId?: string;
     attachments?: DraftAttachment[];
+    pgp?: { encrypt?: boolean };
   }) => {
     try {
       return await saveDraftToIMAP(draft);
@@ -673,7 +704,9 @@ export function registerDraftHandlers(): void {
                ${cleanBodyExpression()} as cleanBody,
                ${rawBodyExpression()} as rawBody, in_reply_to as inReplyTo, tags,
                -- So the reopened draft can load its own files back.
-               attachment_names as attachmentNames, attachment_sizes as attachmentSizes
+               attachment_names as attachmentNames, attachment_sizes as attachmentSizes,
+               -- An encrypted draft reopens through the OpenPGP reader.
+               pgp_status as pgpStatus
           FROM emails
          WHERE instr(tags, '|draft|') > 0
            -- Our local draft only, and never a Sent copy that kept a stale

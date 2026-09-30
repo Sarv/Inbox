@@ -33,6 +33,8 @@ export interface ComposeState {
     to?: string; cc?: string; bcc?: string; subject?: string;
     htmlContent?: string; attachments?: any[];
     draftMessageId?: string; threadId?: string; accountId?: string;
+    /** Saved encrypted — reopens with encryption on. */
+    pgpEncrypted?: boolean;
   };
 }
 

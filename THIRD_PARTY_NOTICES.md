@@ -21,6 +21,10 @@ pnpm licenses list --prod
   that file stays MPL-2.0 and you must publish your changes to it.
 - **`dompurify`** is offered under MPL-2.0 **or** Apache-2.0. Sarv Inbox takes it
   under **Apache-2.0**, so no copyleft obligation attaches.
+- **LGPL-3.0 components** (`openpgp`) may be used by software under any
+  licence. Sarv Inbox ships it unmodified and as JavaScript source, so you can
+  read it, and replace it with another build, in any copy you receive. If you
+  *modify* openpgp.js itself, those changes stay LGPL-3.0 and must be published.
 - **Apache-2.0 components** require their NOTICE text to travel with binary
   distributions.
 - **Electron and Chromium** carry their own extensive notices, generated into the
@@ -53,6 +57,11 @@ under `node_modules/` after `pnpm install`.
   https://github.com/isaacs/node-lru-cache
 - **lucide-react** 0.309.0 — A Lucide icon library package for React applications  
   https://github.com/lucide-icons/lucide
+
+### LGPL-3.0-or-later
+
+- **openpgp** 6.3.2 — OpenPGP.js is a Javascript implementation of the OpenPGP protocol  
+  https://github.com/openpgpjs/openpgpjs
 
 ### MIT
 

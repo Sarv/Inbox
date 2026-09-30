@@ -20,8 +20,8 @@ import {
 } from '../../../services/ai-service';
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
-import { loadEmailAttachments } from '../../../utils/compose-attachments';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
+import { savedDraftContent } from '../../../utils/saved-draft-content';
 import { isDraftEmail } from '../../../utils/thread-utils';
 import { composeAiTurns, firstEmailFacts } from '../ai-view-compose';
 import { polishEntriesOf, threadTurns } from '../chat-message-adapter';
@@ -161,7 +161,7 @@ export function useEmailDetail(): EmailDetailContext | null {
   // written for. Composers get it only on that message (see inlineReplyDraft
   // below); moving the composer elsewhere does NOT drop it, so coming back to
   // that message brings the draft (and its stored Message-ID) back with it.
-  const [inlineReplySeed, setInlineReplySeed] = useState<ComposerSeed<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string }> | undefined>(undefined);
+  const [inlineReplySeed, setInlineReplySeed] = useState<ComposerSeed<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string; pgpEncrypted?: boolean }> | undefined>(undefined);
   const inlineReplyHandlerRef = useRef<(mode: 'reply' | 'replyAll') => void>(() => { });
   const [showInlineForward, setShowInlineForward] = useState(false);
   const [forwardingEmail, setForwardingEmail] = useState<any | null>(null);
@@ -650,11 +650,11 @@ export function useEmailDetail(): EmailDetailContext | null {
       if (threadDrafts.length > 0) {
         const d: any = threadDrafts[0];
         const draftAccountId = d.accountId ?? useEmailStore.getState().viewAccountId ?? undefined;
-        // The draft's own files, so the mail sent from it still carries them.
-        const draftAttachments = await loadEmailAttachments({ ...d, accountId: draftAccountId });
-        const draftHtml = d.cleanBody
-          ? d.cleanBody.split('\n').map((line: string) => `<p>${line || '&nbsp;'}</p>`).join('')
-          : (d.rawBody || d.htmlBody || '');
+        // The draft's body and own files, so the mail sent from it still carries
+        // them — decrypted by main when the draft was saved encrypted.
+        const content = await savedDraftContent({ ...d, accountId: draftAccountId });
+        if (!content) return false;
+        const { htmlContent: draftHtml, attachments: draftAttachments, pgpEncrypted } = content;
         draftOpenedForRef.current = latestThreadEmail.id;
 
         // Standalone draft (no surrounding conversation) → open the FULL compose
@@ -670,6 +670,7 @@ export function useEmailDetail(): EmailDetailContext | null {
             draftMessageId: d.messageId,
             threadId: d.threadId,
             accountId: draftAccountId,
+            pgpEncrypted,
           });
           // The draft now lives in the full composer, not the reading pane —
           // drop the selection so closing the composer lands back on the list.
@@ -690,6 +691,7 @@ export function useEmailDetail(): EmailDetailContext | null {
           htmlContent: draftHtml,
           attachments: draftAttachments,
           draftMessageId: d.messageId,
+          pgpEncrypted,
         });
         setShowInlineReply(true);
         log.info(`draft: opened the thread's draft inline (${d.messageId})`);
@@ -715,13 +717,8 @@ export function useEmailDetail(): EmailDetailContext | null {
       }
 
       const draft = res.data;
-      // Prefer the raw/clean body as HTML for the editor
-      const draftHtml = draft.cleanBody
-        ? draft.cleanBody
-            .split('\n')
-            .map((line: string) => `<p>${line || '&nbsp;'}</p>`)
-            .join('')
-        : (draft.rawBody || '');
+      const content = await savedDraftContent({ ...draft, accountId: threadAccountId });
+      if (!content) return false;
 
       // Detect AI origin by checking agent_decisions (best-effort)
       let isAIDraft = false;
@@ -749,9 +746,10 @@ export function useEmailDetail(): EmailDetailContext | null {
         to: latestThreadEmail.fromAddress || draft.toAddress || '',
         cc: draft.ccAddress || '',
         subject: replySubjectFor(draft.subject, latestThreadEmail.subject),
-        htmlContent: draftHtml,
-        attachments: await loadEmailAttachments({ ...draft, accountId: threadAccountId }),
+        htmlContent: content.htmlContent,
+        attachments: content.attachments,
         draftMessageId: draft.messageId,
+        pgpEncrypted: content.pgpEncrypted,
         isAIDraft,
         aiReasoning,
         agentDecisionId,

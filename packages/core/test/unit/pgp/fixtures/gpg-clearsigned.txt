@@ -1,0 +1,13 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Inline signed body.
+With two lines.
+-----BEGIN PGP SIGNATURE-----
+
+iKIEARYKAEoWIQS9VFDcKsVt74tSrNn6iarqozV3wAUCarz8dhsUgAAAAAAEAA5t
+YW51MiwyLjUrMS4xMiwwLDMQHGdlZUBleGFtcGxlLm9yZwAKCRD6iarqozV3wNoH
+AQDOHl9TtFcxZDo/5DEaRa2OLab0Av+PzeBz1NfVHBL5YAD9EfIuxrll99hTB0tp
+pRNoVYbuzLDpxoM2zO2ZQ2iYnQM=
+=drIP
+-----END PGP SIGNATURE-----

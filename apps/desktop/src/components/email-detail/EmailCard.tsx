@@ -20,6 +20,7 @@ import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { buildEmailMenuHandlers, buildReplyHandlers } from './email-menu-handlers';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
+import { PgpMessageView } from './PgpMessageView';
 import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
 import { ReplyActionsBar } from './ReplyActionsBar';
 import { SecurityIndicator } from './SecurityIndicator';
@@ -276,8 +277,10 @@ export function EmailCard({ ctx }: EmailCardProps) {
 
               const bodyToShow = (hasSignature && !showingSig) ? newContent : fullBody;
 
+              // OpenPGP mail: encrypted bodies are opened on view (the stored one is a
+              // placeholder); signed ones keep this body and gain a badge.
               return (
-                <>
+                <PgpMessageView email={displayEmail} paneAccountId={paneAccountId}>
                   <div className="max-w-none">
                     {isHtml ? (
                       <SandboxedEmailBody key={`${bodyToShow.length}:${bodyToShow.slice(0, 32)}`} html={bodyToShow} remoteImagesFrom={remoteImageFactsOf(displayEmail, paneAccountId)} />
@@ -296,7 +299,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
                       {showingSig ? 'Hide signature' : 'Show signature'}
                     </button>
                   )}
-                </>
+                </PgpMessageView>
               );
             })()}
           </div>

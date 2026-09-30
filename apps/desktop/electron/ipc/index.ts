@@ -25,6 +25,7 @@ import { registerLabelHandlers } from './label-handlers';
 import { registerMiscHandlers } from './misc-handlers';
 import { registerNotificationHandlers } from './notification-handlers';
 import { registerOAuthHandlers } from './oauth-handlers';
+import { registerPgpHandlers } from './pgp-handlers';
 import { registerQueueHandlers } from './queue-handlers';
 import { registerSecureCredentialsHandlers } from './secure-credentials-handlers';
 import { registerSmtpHandlers } from './smtp-handlers';
@@ -71,6 +72,7 @@ export function registerAllHandlers(): void {
   registerIdentityHandlers();
   registerSpamHandlers();
   registerUnsubscribeHandlers();
+  registerPgpHandlers();
 
   logger.info('[IPC] All handlers registered');
 }

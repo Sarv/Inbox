@@ -21,6 +21,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separate "Always load all remote images" switch loads everything. Senders
   on your allowed list keep loading whatever you choose.
 
+- **Social category.** New mail from social networks, forums and online
+  communities (LinkedIn, Instagram, Facebook, X, Reddit, Discourse or Google
+  Groups digests, Meetup groups and the like) is now sorted into its own
+  Social category. A platform's own marketing, such as Premium offers or free
+  trials, still goes to Promotions. Mail that was already sorted keeps its
+  categories, and if you had made your own "Social" category, yours is kept
+  as it is. With "Mirror AI categories to my mailbox" on, a Social label is
+  added to your mailbox too.
+
+- **OpenPGP encryption.** Make a key or import the one you already use in
+  Settings → Encryption. Your key is kept in the system keychain; on Linux
+  without a keyring it gets a passphrase instead, asked for once per session.
+  Encrypted mail opens in the reader with an "Encrypted" / "Signed" badge
+  and its attachments. It is decrypted only while you view it. The plaintext
+  is never stored, indexed, searched, summarised or passed to AI or
+  extensions, and the message list shows "Encrypted message". When writing,
+  a lock and a pen beside Send switch encryption and signing on or off.
+  Encryption turns on by itself when every recipient has a key, and replies
+  to encrypted mail stay encrypted. A message that can't be encrypted to
+  someone is never sent unencrypted without you choosing that. Recipients'
+  keys come from the mail they send you (Autocrypt), from their mail domain
+  (WKD) or from a file you import. Searching keys.openpgp.org is off unless
+  you turn it on, because that service learns who you write to. A draft of
+  an encrypted message is encrypted too, to your own key, both here and in
+  your server's Drafts folder, and it reopens with encryption still on. If a
+  draft can't be encrypted, it is not saved rather than saved unencrypted.
+  Known limit: the subject line is not encrypted, in messages or in drafts.
+
 ### Changed
 - **"From categorized mail" skips your Social category.** If you created an
   AI category for social mail (named "Social", "Social Media" or similar),

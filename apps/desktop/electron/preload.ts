@@ -9,7 +9,10 @@ import '@sentry/electron/preload';
 import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
+import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
 import type { DomainIdentityRow } from './services/domain-identity-store';
+import type { ContactKeySummary, OwnKeySummary, RecipientKeyStatus } from './services/pgp-keyring';
+import type { PgpDraftResult, PgpViewResult } from './services/pgp-reader';
 import type { SenderIdentity, SenderIdentityPolicy } from './services/sender-identity-service';
 import type { SpamReputationState } from './services/spam-reputation-service';
 import type { UpdateState } from './services/update-policy';
@@ -474,6 +477,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('unsubscribe:run', emailId, route, accountId),
   },
 
+  // OpenPGP. Private keys never cross this bridge: a backup is written from
+  // main straight into a file the user picked. A decrypted message crosses as
+  // its body and attachment METADATA; saving one writes it from main too.
+  pgp: {
+    status: () => ipcRenderer.invoke('pgp:status'),
+    listOwnKeys: () => ipcRenderer.invoke('pgp:listOwnKeys'),
+    generateKey: (input: { name: string; email: string; passphrase?: string }) => ipcRenderer.invoke('pgp:generateKey', input),
+    importOwnKey: (armored: string, passphrase?: string) => ipcRenderer.invoke('pgp:importOwnKey', armored, passphrase),
+    unlock: (fingerprint: string, passphrase: string) => ipcRenderer.invoke('pgp:unlock', fingerprint, passphrase),
+    exportOwnKey: (fingerprint: string, passphrase: string) => ipcRenderer.invoke('pgp:exportOwnKey', fingerprint, passphrase),
+    exportPublicKey: (fingerprint: string) => ipcRenderer.invoke('pgp:exportPublicKey', fingerprint),
+    deleteOwnKey: (fingerprint: string) => ipcRenderer.invoke('pgp:deleteOwnKey', fingerprint),
+    setSignByDefault: (fingerprint: string, on: boolean) => ipcRenderer.invoke('pgp:setSignByDefault', fingerprint, on),
+    listContactKeys: () => ipcRenderer.invoke('pgp:listContactKeys'),
+    importContactKeys: (armored: string) => ipcRenderer.invoke('pgp:importContactKeys', armored),
+    deleteContactKey: (email: string, fingerprint: string) => ipcRenderer.invoke('pgp:deleteContactKey', email, fingerprint),
+    resolveRecipients: (emails: string[]) => ipcRenderer.invoke('pgp:resolveRecipients', emails),
+    composeDefaults: (fromEmail: string) => ipcRenderer.invoke('pgp:composeDefaults', fromEmail),
+    open: (emailId: string, accountId?: string) => ipcRenderer.invoke('pgp:open', emailId, accountId),
+    openDraft: (emailId: string, accountId?: string) => ipcRenderer.invoke('pgp:openDraft', emailId, accountId),
+    saveAttachment: (emailId: string, accountId: string | undefined, index: number) =>
+      ipcRenderer.invoke('pgp:saveAttachment', emailId, accountId, index),
+  },
+
   // Dialog operations
   dialog: {
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles'),
@@ -791,7 +818,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Draft operations (auto-save to IMAP Drafts)
   drafts: {
-    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[] }) =>
+    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[]; pgp?: { encrypt?: boolean } }) =>
       ipcRenderer.invoke('drafts:save', draft),
     delete: (options: { messageId?: string; subject?: string; to?: string; threadId?: string; accountId?: string; savedAt?: number }) =>
       ipcRenderer.invoke('drafts:delete', options),
@@ -1385,6 +1412,25 @@ export interface ElectronAPI {
       accountId?: string,
     ) => Promise<{ success: boolean; route?: 'one-click' | 'page' | 'mailto'; needsBrowser?: boolean; error?: string }>;
   };
+  pgp: {
+    status: () => Promise<PgpIpcResult<{ keychainAvailable: boolean }>>;
+    listOwnKeys: () => Promise<PgpIpcResult<OwnKeySummary[]>>;
+    generateKey: (input: { name: string; email: string; passphrase?: string }) => Promise<PgpIpcResult<OwnKeySummary>>;
+    importOwnKey: (armored: string, passphrase?: string) => Promise<PgpIpcResult<OwnKeySummary[]>>;
+    unlock: (fingerprint: string, passphrase: string) => Promise<PgpIpcResult<void>>;
+    exportOwnKey: (fingerprint: string, passphrase: string) => Promise<PgpIpcResult<{ saved: boolean; filePath?: string }>>;
+    exportPublicKey: (fingerprint: string) => Promise<PgpIpcResult<{ saved: boolean; filePath?: string }>>;
+    deleteOwnKey: (fingerprint: string) => Promise<PgpIpcResult<boolean>>;
+    setSignByDefault: (fingerprint: string, on: boolean) => Promise<PgpIpcResult<boolean>>;
+    listContactKeys: () => Promise<PgpIpcResult<ContactKeySummary[]>>;
+    importContactKeys: (armored: string) => Promise<PgpIpcResult<ContactKeySummary[]>>;
+    deleteContactKey: (email: string, fingerprint: string) => Promise<PgpIpcResult<boolean>>;
+    resolveRecipients: (emails: string[]) => Promise<PgpIpcResult<RecipientKeyStatus[]>>;
+    composeDefaults: (fromEmail: string) => Promise<PgpIpcResult<PgpComposeDefaults>>;
+    open: (emailId: string, accountId?: string) => Promise<PgpViewResult>;
+    openDraft: (emailId: string, accountId?: string) => Promise<PgpDraftResult>;
+    saveAttachment: (emailId: string, accountId: string | undefined, index: number) => Promise<PgpIpcResult<{ saved: boolean; filePath?: string }>>;
+  };
   dialog: {
     pickFiles: () => Promise<{ success: boolean; data?: Array<{ filename: string; content: string; contentType: string; encoding: 'base64'; size: number }>; error?: string }>;
   };
@@ -1614,7 +1660,7 @@ export interface ElectronAPI {
     removeListeners: () => void;
   };
   drafts: {
-    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[] }) =>
+    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[]; pgp?: { encrypt?: boolean } }) =>
       Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }>;
     delete: (options: { messageId?: string; subject?: string; to?: string; threadId?: string; accountId?: string; savedAt?: number }) =>
       Promise<{ success: boolean; error?: string }>;
@@ -1630,6 +1676,8 @@ export interface ElectronAPI {
         fromAddress: string; toAddress: string; ccAddress: string;
         date: number; cleanBody: string; rawBody: string;
         inReplyTo: string; tags: string;
+        attachmentNames?: string | null; attachmentSizes?: string | null;
+        pgpStatus?: 'encrypted' | 'signed' | null;
       } | null;
       error?: string;
     }>;

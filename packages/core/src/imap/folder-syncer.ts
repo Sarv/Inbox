@@ -8,6 +8,7 @@ import { generateFolderId } from '../utils/id';
 import { logger } from '../utils/logger';
 import { isWatermarkImpossible } from '../utils/sync-watermark';
 
+import type { AutocryptSink } from './header-stage';
 import { fetchNewestMessagesWindowed } from './incremental-fetch';
 import { MessageProcessor, type IngestServerActions } from './message-processor';
 import type { ReputationLookup } from './reputation-stage';
@@ -136,6 +137,11 @@ export class FolderSyncer {
    * would be spam or not depending on which path happened to see it first. */
   setReputationLookup(fn: ReputationLookup): void {
     this.messageProcessor.setReputationLookup(fn);
+  }
+
+  /** Forward the Autocrypt sink (see SyncEngine.setAutocryptSink). */
+  setAutocryptSink(fn: AutocryptSink): void {
+    this.messageProcessor.setAutocryptSink(fn);
   }
 
   /**

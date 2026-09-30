@@ -1,0 +1,36 @@
+From: Gee Pee <gee@example.org>
+To: rita@example.com
+Subject: Encrypted from GnuPG
+Message-ID: <gpg-enc@example.org>
+Date: Mon, 28 Sep 2026 07:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/encrypted; protocol="application/pgp-encrypted";
+ boundary="ENC-BOUNDARY"
+
+This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156)
+--ENC-BOUNDARY
+Content-Type: application/pgp-encrypted
+Content-Description: PGP/MIME version identification
+
+Version: 1
+
+--ENC-BOUNDARY
+Content-Type: application/octet-stream; name="encrypted.asc"
+Content-Disposition: inline; filename="encrypted.asc"
+
+-----BEGIN PGP MESSAGE-----
+
+hF4Di68p+daS4skSAQdAKIyxO5ZlLJAlzXb3zVl/YtxRyDjyvxXYrpsZy+2GqVIw
+c3Gfb76HakGJY8/Tpw0LKNv39CkOadTIcyo0+XCTJxQMSpKFm3bCE76wYNkn+laF
+1MCbAQkCEM/hCxaxZbx0ponc/0jj3pZdyqn/tHJfl3YEQI7o4o3fadm6EJBY0j1S
+qc+NU/iXhNw07fy5ad8reOrN+MrewDnxAruKHBXlcj6uQu/0IliQR7BEgFoHk1jK
+oGU6oExx1w6DpkneKfsmpwJfjSzSdJyAaK2XbxfMckojw0vPJR/gCOvrwzgcOBSn
+CYchyw5CGsj8kohcME/cEfJFssW2F2qx2nL6WoBM4cFj52tOFBMQ5PbK/o9/cm3V
+wPeanOXQjWtk0odF837UBpcMvJHh0TUawBlzNSX8lEEBzuMno7mVCJZL/7kGnFzc
+TVstDt6pbharcSj/Zcf0OvL0Zh/kwC9LPY9FmJluJ3FmJ5LPDvlu3iW/NuXbM3MC
+GCiixbxsNjPIGiP3/6n3qGhGUlluxPLh/syPDdG0V9RLZQoT6YGx8mQe8MpQ4PRi
+h3M8qwEd5wH1vuUUkps=
+=emV8
+-----END PGP MESSAGE-----
+
+--ENC-BOUNDARY--

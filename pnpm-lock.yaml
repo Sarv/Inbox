@@ -364,6 +364,9 @@ importers:
       libphonenumber-js:
         specifier: ^1.13.8
         version: 1.13.8
+      libqp:
+        specifier: ^2.1.1
+        version: 2.1.1
       lru-cache:
         specifier: ^7.18.3
         version: 7.18.3
@@ -373,6 +376,9 @@ importers:
       nodemailer:
         specifier: ^9.1.0
         version: 9.1.1
+      openpgp:
+        specifier: ^6.3.2
+        version: 6.3.2
       p-retry:
         specifier: ^4.6.2
         version: 4.6.2
@@ -9178,6 +9184,16 @@ packages:
     dependencies:
       is-docker: 2.2.1
       is-wsl: 2.2.0
+    dev: false
+
+  /openpgp@6.3.2:
+    resolution: {integrity: sha512-wcZTzHz41LV8Y48zH/JlD1JT8YdNmpWOuMAjQ/podvvCwsjBEU37K3znJh4UQcj3hksE5z9TzvhbUbwzsGvlLQ==}
+    engines: {node: '>= 18.0.0', typescript: '>= 5.0.0'}
+    peerDependencies:
+      '@openpgp/web-stream-tools': ~0.3.0
+    peerDependenciesMeta:
+      '@openpgp/web-stream-tools':
+        optional: true
     dev: false
 
   /optionator@0.9.4:

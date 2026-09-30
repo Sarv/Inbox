@@ -1,10 +1,11 @@
 import type { BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
+import { DEFAULT_PGP_PREFS } from '@sarvinbox/core/pgp-prefs';
 import { DEFAULT_SENDER_IDENTITY_POLICY } from '@sarvinbox/core/sender-identity-policy';
 
 import type { InboxType, InboxSection } from '../../config/inbox-types';
 import type { RemoteImageMode } from '../../utils/remote-images';
 
-export type SettingsTab = 'general' | 'appearance' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'advanced' | 'keyboard-shortcuts';
+export type SettingsTab = 'general' | 'appearance' | 'inbox' | 'accounts' | 'folders' | 'filters' | 'encryption' | 'advanced' | 'keyboard-shortcuts';
 
 /** A named email signature. `html` is stored verbatim (never round-tripped
  *  through a rich-text schema) so pasted table/flex layouts stay pixel-faithful. */
@@ -121,6 +122,14 @@ export interface AppSettings {
   profileCompany: string;
   profileEmail: string;
   profilePhone: string;
+
+  // OpenPGP — read by main through readPgpPrefs (@sarvinbox/core/pgp-prefs), which owns the semantics.
+  /** Ask a recipient's own mail domain for their key (WKD). */
+  pgpWkdLookup: boolean;
+  /** Ask keys.openpgp.org — a third party, which learns who you write to. */
+  pgpKeyserverLookup: boolean;
+  /** Encrypt without being asked when every recipient has a key. */
+  pgpAutoEncrypt: boolean;
 }
 
 export const defaultSettings: AppSettings = {
@@ -157,6 +166,9 @@ export const defaultSettings: AppSettings = {
   profileCompany: '',
   profileEmail: '',
   profilePhone: '',
+  pgpWkdLookup: DEFAULT_PGP_PREFS.wkdLookup,
+  pgpKeyserverLookup: DEFAULT_PGP_PREFS.keyserverLookup,
+  pgpAutoEncrypt: DEFAULT_PGP_PREFS.autoEncrypt,
 };
 
 // Signature pattern type (from preload)

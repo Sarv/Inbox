@@ -489,7 +489,8 @@ export class EmailRepository extends BaseRepository {
         auth_status,
         spam_score, spam_reasons, origin_ip,
         list_unsubscribe, list_unsubscribe_post,
-        spam_user_verdict
+        spam_user_verdict,
+        pgp_status
       ) VALUES (
         @id, @messageId, @threadId, @folderId, @uid, @tags,
         @subject, @fromAddress, @fromName, @toAddress, @toNames,
@@ -521,7 +522,8 @@ export class EmailRepository extends BaseRepository {
         @authStatus,
         @spamScore, @spamReasons, @originIp,
         @listUnsubscribe, @listUnsubscribePost,
-        @spamUserVerdict
+        @spamUserVerdict,
+        @pgpStatus
       )
     `);
 
@@ -576,6 +578,7 @@ export class EmailRepository extends BaseRepository {
       // Set at ingest only for a trusted sender's authenticated mail — the
       // standing form of the user's "Not spam". Null otherwise.
       spamUserVerdict: email.spamUserVerdict ?? null,
+      pgpStatus: email.pgpStatus ?? null,
     });
 
     // The body itself, in the side table. Must follow the `emails` insert: the
@@ -2322,6 +2325,7 @@ export class EmailRepository extends BaseRepository {
       // Unsubscribe headers, verbatim; parsed at display time.
       listUnsubscribe: row.list_unsubscribe ?? null,
       listUnsubscribePost: row.list_unsubscribe_post ?? null,
+      pgpStatus: row.pgp_status ?? null,
 
       // AI metadata
       aiProcessedAt: row.ai_processed_at,

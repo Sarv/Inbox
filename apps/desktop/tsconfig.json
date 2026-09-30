@@ -79,7 +79,10 @@
       // Same: the AI failure classifier (transient vs permanent), shared with main.
       "@sarvinbox/core/ai-error": ["../../packages/core/src/utils/ai-error.ts"],
       // Same: the structured logger, so renderer lines reach app.log in main's shape.
-      "@sarvinbox/core/logger": ["../../packages/core/src/utils/logger.ts"]
+      "@sarvinbox/core/logger": ["../../packages/core/src/utils/logger.ts"],
+      // Same: pure OpenPGP preference reader, shared so the Encryption tab
+      // shows exactly which lookups main makes.
+      "@sarvinbox/core/pgp-prefs": ["../../packages/core/src/pgp/prefs.ts"]
     }
   },
   "include": ["src", "electron", "test", "../../packages/core/src/contact-enrichment"],

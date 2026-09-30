@@ -3,6 +3,9 @@
 /**
  * Email record stored in database
  */
+/** See EmailRecord.pgpStatus. */
+export type PgpStatus = 'encrypted' | 'signed';
+
 export interface EmailRecord {
   id: string; // Unique identifier (generated)
   messageId: string; // IMAP Message-ID header
@@ -96,6 +99,12 @@ export interface EmailRecord {
   // on anything that is not bulk mail (and on bulk mail synced before v93).
   listUnsubscribe?: string | null;
   listUnsubscribePost?: string | null;
+  // OpenPGP shape of the message, read from its source when the body lands:
+  // 'encrypted' (PGP/MIME or inline) or 'signed'. An encrypted row's stored
+  // body is only a placeholder — the plaintext is produced on view, in memory,
+  // and never written anywhere. NULL for everything else (and for mail whose
+  // body has not been downloaded yet).
+  pgpStatus?: PgpStatus | null;
   // The user's own verdict, which outranks every score: 'ham' = never file it
   // again, 'spam' = spam whatever the score. NULL when they have not said.
   spamUserVerdict?: 'spam' | 'ham' | null;

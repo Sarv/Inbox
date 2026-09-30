@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { headerStage } from '../../../src/imap/header-stage';
+import { autocryptSighting, headerStage } from '../../../src/imap/header-stage';
 import type { IMAPMessage } from '../../../src/types/imap';
 
 /**
@@ -184,5 +184,48 @@ describe('headerStage unsubscribe headers', () => {
       listUnsubscribe: null,
       listUnsubscribePost: 'List-Unsubscribe=One-Click',
     });
+  });
+});
+
+describe('autocryptSighting', () => {
+  const header = 'addr=sender@test.local; keydata=AAAA';
+
+  // Breaks: the keyring never sees the sender's key, or sees it under the
+  // wrong address or date.
+  it('reads the one Autocrypt header with the envelope From and a UTC date', () => {
+    expect(autocryptSighting(message({ rawHeaders: `Autocrypt: ${header}\r\n` }))).toEqual({
+      fromAddress: 'sender@test.local',
+      header,
+      sentAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  // Breaks: a message dated in the future would stand as the "most recent"
+  // sighting and pin a stale key over every real one after it (the spec's
+  // effective date is min(Date, arrival)).
+  it('clamps a future Date header to the arrival time', () => {
+    const future = message({
+      rawHeaders: `Autocrypt: ${header}\r\n`,
+      envelope: { ...message().envelope, date: new Date('2030-01-01T00:00:00Z') },
+    });
+    expect(autocryptSighting(future)?.sentAt).toBe('2026-01-01T00:00:05.000Z');
+  });
+
+  // Breaks: with two headers, one of which cannot be the sender's, the
+  // keyring would learn whichever came first. The spec says: treat as none.
+  it('ignores a message with more than one Autocrypt header, or none', () => {
+    expect(autocryptSighting(message({ rawHeaders: `Autocrypt: ${header}\r\nAutocrypt: ${header}\r\n` }))).toBeNull();
+    expect(autocryptSighting(message({ rawHeaders: 'Subject: hi\r\n' }))).toBeNull();
+    expect(autocryptSighting(message())).toBeNull();
+  });
+
+  // Breaks: a header with nothing to check its addr against would be accepted
+  // for any address it names.
+  it('ignores a message with no From address or no usable date', () => {
+    const base = message({ rawHeaders: `Autocrypt: ${header}\r\n` });
+    expect(autocryptSighting({ ...base, envelope: { ...base.envelope, from: [] } })).toBeNull();
+    expect(
+      autocryptSighting({ ...base, date: new Date('nope'), envelope: { ...base.envelope, date: null } }),
+    ).toBeNull();
   });
 });

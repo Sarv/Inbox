@@ -29,12 +29,10 @@ import {
   discoverFavicon,
   lookupBimi,
   normalizeSenderIdentityPolicy,
-  withTimeout,
   type BimiLookup,
   type BimiStatus,
   type FaviconResult,
   type FaviconStatus,
-  type FetchLike,
   type SenderIdentityPolicy,
 } from '@sarvinbox/core';
 
@@ -49,7 +47,7 @@ import {
   type DomainIdentityRow,
   type DomainIdentityStore,
 } from './domain-identity-store';
-import { chromiumFetch } from './net-fetch';
+import { timedChromiumFetch } from './timed-fetch';
 
 const logger = createLogger('sender-identity');
 
@@ -302,17 +300,7 @@ export class SenderIdentityService {
 /** Per-request ceiling. A brand's logo server that hangs must not hold a slot for long. */
 const FETCH_TIMEOUT_MS = 15_000;
 
-/** Chromium's fetch, with a deadline on the connection and on the body read. */
-const timedFetch: FetchLike = async (url) => {
-  const res = await withTimeout(chromiumFetch(url), FETCH_TIMEOUT_MS, `Timed out fetching ${url}`);
-  return {
-    ok: res.ok,
-    status: res.status,
-    url: res.url,
-    headers: { get: (name: string) => res.headers.get(name) },
-    arrayBuffer: () => withTimeout(res.arrayBuffer(), FETCH_TIMEOUT_MS, `Timed out reading ${url}`),
-  };
-};
+const timedFetch = timedChromiumFetch(FETCH_TIMEOUT_MS);
 
 let service: SenderIdentityService | null = null;
 

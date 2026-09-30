@@ -12,10 +12,12 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
 import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
+import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
 import { loadEmailAttachments } from '../utils/compose-attachments';
+import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { buildForwardQuoteHtml, composeForwardDraft, forwardSubject, type ForwardSource } from '../utils/forward-quote';
 import { reportSendFailure } from '../utils/send-failure';
@@ -67,7 +69,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   // Send (and draft) from the account the mail was received in, not whichever
   // account happens to be active — the All Inboxes forward went out from the
   // wrong mailbox. The From bar says so when that isn't the active account.
-  const { accountId: forwardAccountId, fromAccount, accounts } = useInlineSendingAccount(forwardEmail);
+  const { accountId: forwardAccountId, fromAccount, accounts, sendingEmail } = useInlineSendingAccount(forwardEmail);
 
   const [showQuoted, setShowQuoted] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -84,6 +86,9 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   }, [forwardEmail.id, forwardEmail.hasAttachments, forwardEmail.attachmentNames]);
 
   const subject = forwardSubject(forwardEmail.subject);
+
+  // OpenPGP over the same recipient list the send uses. Forwarding encrypted mail stays encrypted by default.
+  const pgp = usePgpCompose(sendingEmail, mergeRecipientEmails(to, pendingTo), forwardEmail.pgpStatus === 'encrypted');
 
   // Auto-save the forward as a draft. It is a STANDALONE draft (no threadId /
   // inReplyTo): kept in the original's thread, the thread view would reopen it
@@ -103,6 +108,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     initialDraftMessageId: draft?.draftMessageId,
     initialDraftUnsaved: draft?.unsaved,
     accountId: forwardAccountId,
+    encrypt: pgp.state.encrypt,
   });
 
   // Throw the forward away: stop the autosave, drop any draft it wrote from
@@ -137,14 +143,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   const [followUp, setFollowUp] = useState<SendFollowUpRequest | null>(null);
 
   const handleSend = async () => {
-    // Merge committed emails with any pending typed text that looks like an email
-    const mergeEmails = (committed: string, pending: string) => {
-      const rawCommitted = committed.split(',').map(e => e.trim()).filter(Boolean);
-      const rawPending = pending.split(',').map(e => e.trim()).filter(e => e.includes('@'));
-      return [...new Set([...rawCommitted, ...rawPending])];
-    };
-
-    const finalTo = mergeEmails(to, pendingTo);
+    const finalTo = mergeRecipientEmails(to, pendingTo);
 
     if (finalTo.length === 0) return;
 
@@ -177,6 +176,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         htmlBody: fullHtml,
         inReplyTo: forwardEmail.id,
         followUp: followUp ?? undefined,
+        pgp: pgp.state.request,
         attachments: attachments.map((a: AttachmentFile) => ({ ...a, filename: a.filename || 'attachment' })) as any,
         accountId: forwardAccountId,
         ...(ownedDraftId ? { draftCleanup: { messageId: ownedDraftId, accountId: forwardAccountId } } : {}),
@@ -384,6 +384,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         isInline={true}
         followUp={followUp}
         onFollowUpChange={setFollowUp}
+        pgp={pgp}
       />
 
       {/* Attachment list */}

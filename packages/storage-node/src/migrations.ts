@@ -15,6 +15,7 @@ import {
 import type Database from 'better-sqlite3';
 
 import { applyFtsSchema, FTS_REBUILD_SQL, FTS_TRIGGERS } from './fts-schema';
+import { enqueueThreadsTaggedWith } from './read-model-dirty';
 import { rawBodyExpression } from './repositories/body-storage';
 import { clearInlineImageCache, inflateInlineImages } from './repositories/inline-image-store';
 import { EMAIL_TAGS_TABLE, EMAIL_TAGS_TAG_INDEX, tagSplitRowsSql } from './repositories/tag-membership';
@@ -3894,6 +3895,106 @@ export const retireConversationExtractions: Migration = {
 };
 
 /**
+ * v99: Add the "social" category: notifications and digests from social
+ * networks, forums and online communities.
+ *
+ * Seeded here only, not also in schema.sql: that file is the v24 baseline and
+ * the migration chain runs on a fresh install too, so this is the one copy of
+ * the prompt (a second copy would drift, as the two promotions texts can).
+ *
+ * It never replaces the user's own category. If they already have one with the
+ * slug `social` (a "Social" made in the Categorization tab gets exactly that
+ * slug) or one NAMED "Social" under another slug, nothing is added: theirs
+ * stays, is_system 0 and all, and a second "Social" would mirror onto the same
+ * `Sarv Inbox/Social` mailbox label as theirs.
+ *
+ * Adding a definition changes what `has_category` derives to for any thread
+ * already carrying `|social|` without writing an `emails` row, so those threads
+ * are queued for the read model, as a category edit in the app does.
+ */
+export const socialCategory: Migration = {
+  version: 99,
+  name: 'social_category',
+  up: (db) => {
+    // The platform is the sender, even when the activity is another person's:
+    // that is the line against "promotions" (a company selling) and against a
+    // person writing to the user directly.
+    const socialPrompt = `TRUE if the email is sent by a social network, a forum or an online community
+about activity there. The platform itself is the sender, even when the
+activity is another person's.
+TRUE for:
+  * Social networks: LinkedIn, Instagram, Facebook, X (Twitter), Threads,
+    YouTube, TikTok, Snapchat, Pinterest, Reddit, Quora
+  * Activity on the user's account there: followers, connection or friend
+    requests, likes, reactions, comments, replies, mentions, tags, shares,
+    profile views, birthdays and work anniversaries
+  * Messages the platform relays by email ("You have a new message from ...",
+    LinkedIn InMail), including a recruiter's InMail
+  * The platform's own digests and suggestions: top posts this week, people
+    you may know, trending in your network, LinkedIn job alerts
+  * Forums and communities: Discourse, Google Groups or mailing-list posts and
+    digests, Stack Overflow / Stack Exchange activity, Meetup groups and their
+    event announcements, community Discord or Slack digests
+NOT social:
+  * The platform selling to the user (Premium or ads offers, "upgrade", paid
+    features, free trials): that is "promotions"
+  * Newsletters, webinars and product news from companies: that is "promotions"
+  * Account security from the platform (sign-in alerts, password resets,
+    verification codes): not social, judge those on their own
+  * A person writing to the user directly by email, even someone the user
+    knows from a social network
+  * Work tools (GitHub issues and pull requests, Jira, CI, a company's own
+    Slack workspace): not social unless it is a public community forum`;
+
+    const added = db.prepare(`
+      INSERT INTO ai_category_definitions
+        (slug, name, description, prompt, icon, color, sort_order, is_system, is_enabled)
+      SELECT 'social', 'Social', ?, ?, 'Users', 'purple', 9, 1, 1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ai_category_definitions
+        WHERE slug = 'social' OR lower(trim(name)) = 'social'
+      )
+    `).run('Social networks, forums and online communities', socialPrompt).changes;
+
+    if (added > 0) {
+      const queued = enqueueThreadsTaggedWith(db, 'social');
+      logger.info(`Added social category (v99)${queued ? `; ${queued} thread(s) queued for the read model` : ''}`);
+    } else {
+      logger.info('Social category (v99): kept the user\'s own "Social" category');
+    }
+  },
+  down: (db) => {
+    // Only the row this migration seeded; a user's own Social is theirs.
+    db.exec("DELETE FROM ai_category_definitions WHERE slug = 'social' AND is_system = 1");
+  },
+};
+
+/**
+ * v100 — `emails.pgp_status`: which rows are OpenPGP mail.
+ *
+ * Set when the body is parsed. For 'encrypted' it is also the only sign the
+ * row's body is a placeholder: the ciphertext is never parsed into the body
+ * columns (so nothing — FTS, snippets, AI — ever sees it or the plaintext),
+ * and the reader decrypts from the message source on view. 'signed' mail
+ * keeps its body; the reader verifies the signature from the source.
+ *
+ * Not backfilled: mail whose body was stored before v100 reads NULL until its
+ * body is re-downloaded, and shows as ordinary mail — what it did before.
+ */
+export const emailPgpStatus: Migration = {
+  version: 100,
+  name: 'email_pgp_status',
+  up: (db) => {
+    addColumnIfMissing(db, 'emails', 'pgp_status', 'TEXT DEFAULT NULL');
+    logger.info('OpenPGP (v100): emails.pgp_status added');
+  },
+  down: (db) => {
+    // As v93: clear rather than DROP COLUMN (a rewrite of the bodies' table).
+    db.exec('UPDATE emails SET pgp_status = NULL WHERE pgp_status IS NOT NULL;');
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -3976,5 +4077,7 @@ export function createMigrationManager(
   manager.register(inReplyToSelfRepair);
   manager.register(firstEmailSplits);
   manager.register(retireConversationExtractions);
+  manager.register(socialCategory);
+  manager.register(emailPgpStatus);
   return manager;
 }

@@ -17,6 +17,7 @@ import { firstFlaggedEmailId } from '../../utils/email-security';
 import { toForwardSource } from '../../utils/forward-quote';
 import { messageAccountOf, paneAccountOf } from '../../utils/pane-account';
 import { remoteImageFactsOf } from '../../utils/remote-images';
+import { toReplySource } from '../../utils/reply-source';
 import { useLinkRules } from '../../utils/security-rules';
 import { useTrustedSenders } from '../../utils/trusted-senders';
 import { AttachmentChips } from '../attachment-viewer/AttachmentChips';
@@ -28,6 +29,7 @@ import { DuplicateCopiesBadge } from './DuplicateCopiesBadge';
 import { buildEmailMenuHandlers, buildReplyHandlers } from './email-menu-handlers';
 import { EmailHeaderDetails } from './EmailHeaderDetails';
 import { EmailMenu } from './EmailMenu';
+import { PgpMessageView } from './PgpMessageView';
 import { clearAfterTrust, PhishingWarningBanner } from './PhishingWarningBanner';
 import { ReplyActionsBar } from './ReplyActionsBar';
 import { SecurityIndicator } from './SecurityIndicator';
@@ -293,6 +295,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
                         html={email.rawBody}
                       />
                     )}
+                    <PgpMessageView email={email} paneAccountId={paneAccountId}>
                     <div className="max-w-none">
                       {isHtml ? (
                         <SandboxedEmailBody key={`${(displayContent || '').length}:${(displayContent || '').slice(0, 32)}`} html={displayContent || '(no content)'} remoteImagesFrom={remoteImageFactsOf(email, paneAccountId)} />
@@ -302,6 +305,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
                         </div>
                       )}
                     </div>
+                    </PgpMessageView>
                     {/* Toggle buttons for quoted content and signature */}
                     <div className="flex items-center gap-2 flex-wrap">
                       {hasQuoted && (
@@ -352,20 +356,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
               {showInlineReply && replyingToEmail?.id === email.id && (
                 <div id="inline-reply-compose">
                 <InlineReply
-                  replyToEmail={{
-                    id: email.id,
-                    messageId: (email as any).messageId,
-                    threadId: (email as any).threadId,
-                    accountId: (email as any).accountId,
-                    subject: email.subject || '',
-                    fromAddress: email.fromAddress,
-                    fromName: email.fromName,
-                    toAddress: email.toAddress || '',
-                    ccAddress: email.ccAddress,
-                    date: email.date,
-                    cleanBody: email.cleanBody,
-                    rawBody: email.rawBody,
-                  }}
+                  replyToEmail={toReplySource(email)}
                   mode={inlineReplyMode}
                   onClose={handleCloseInlineReply}
                   onModeChange={setInlineReplyMode}

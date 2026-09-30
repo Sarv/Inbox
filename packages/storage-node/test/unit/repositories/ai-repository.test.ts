@@ -109,8 +109,9 @@ describe('AIRepository', () => {
 
       // Exact set on purpose: adding/removing a category is a product decision
       // that must be made deliberately (update this list with the migration).
+      // CHANGED: v99 added 'social' (sort_order 9, after promotions).
       expect(defs.map((d) => d.slug)).toEqual([
-        'important', 'needs_response', 'reminders', 'meeting', 'invoice', 'finance', 'promotions',
+        'important', 'needs_response', 'reminders', 'meeting', 'invoice', 'finance', 'promotions', 'social',
       ]);
       expect(defs.every((d) => d.isSystem)).toBe(true);
       expect(defs.every((d) => d.isEnabled)).toBe(true);
@@ -221,7 +222,8 @@ describe('AIRepository', () => {
 
     it('toggling an unknown slug is a silent no-op', () => {
       expect(() => repo.toggleCategoryDefinition('nope', false)).not.toThrow();
-      expect(repo.getCategoryDefinitions()).toHaveLength(7);
+      // CHANGED: 7 -> 8 seeded categories with Social (v99).
+      expect(repo.getCategoryDefinitions()).toHaveLength(8);
     });
   });
 
