@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A clearer download page at inbox.sarv.com.** See how conversations,
+  optional AI, multiple accounts, contacts and security work before you
+  install. The page detects macOS, Windows or Linux and links to the matching
+  installer in the latest GitHub Release; you can choose another system too.
 - **Choose trusted senders and categorized mail separately for remote
   images.** Under Security → Remote images, two switches decide which
   pictures load on their own, and you can turn on either, both or neither.
@@ -67,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remain in effect.
 
 ### Fixed
+- **AI category titles stay readable in dark mode.** The category cards now
+  use colors with enough contrast against the dark background.
+- **Long or malformed SMTP sender addresses no longer slow down parsing.**
+  Address handling now scans each character once.
 - **Allowed senders' images load straight away.** Right after starting the
   app or switching accounts, the first message you opened could keep the
   "Remote images blocked" bar even for a sender you had already chosen to
