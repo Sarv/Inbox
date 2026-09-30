@@ -45,7 +45,7 @@ const PAGES = [
 ];
 
 // Classes that only name an element for tests to find, never styled on purpose.
-const HOOK_CLASSES = new Set(['release-line']);
+const HOOK_CLASSES = new Set(['about', 'download-selection']);
 
 const classesIn = (root) =>
   [...root.querySelectorAll('[class]')].flatMap((node) => [...node.classList]);
@@ -54,8 +54,8 @@ const renderedClasses = () =>
   PAGES.flatMap(({ os, arch, release }) => {
     const root = document.createElement('div');
     renderDownloadPage(root, buildDownloadView({ platform: { os, arch }, release }), 'en-US');
-    // The other-platforms list is only built when opened.
-    root.querySelector('button.others-toggle')?.click();
+    // A manual choice can reveal a different platform's formats.
+    root.querySelector('button[data-os="linux"]')?.click();
     return classesIn(root);
   });
 
@@ -63,23 +63,15 @@ const indexHtmlClasses = () =>
   classesIn(new DOMParser().parseFromString(readSite('index.html'), 'text/html'));
 
 describe('src/styles.css', () => {
-  // Breaks if `hidden` stops actually hiding: the collapsed card is a `.stack`,
-  // and an author `display: flex` outranks the user-agent `[hidden]` rule, so
-  // "Hide other platforms" would flip the label and leave the list on screen.
+  // Breaks if a hidden element becomes visible because a display class overrides it.
   it('hides a hidden element that a class gives a display to', () => {
     document.head.innerHTML = `<style>${readSite('src/theme.css')}${readSite('src/styles.css')}</style>`;
     document.body.innerHTML = '<div id="app"></div>';
-    const root = document.getElementById('app');
-    renderDownloadPage(
-      root,
-      buildDownloadView({ platform: { os: OS.WINDOWS, arch: ARCH.X64 }, release: releaseV122() }),
-      'en-US'
-    );
-    const toggle = root.querySelector('button.others-toggle');
-    toggle.click();
-    const card = root.querySelector('#other-platforms');
+    const card = document.createElement('div');
+    card.className = 'stack';
+    document.getElementById('app').append(card);
     expect(getComputedStyle(card).display).not.toBe('none');
-    toggle.click();
+    card.hidden = true;
     expect(getComputedStyle(card).display).toBe('none');
   });
 });
