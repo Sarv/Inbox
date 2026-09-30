@@ -1,3 +1,4 @@
+import { senderIdentityPolicyFromSettings } from '@sarvinbox/core/sender-identity-policy';
 import { useState } from 'react';
 
 import { SignatureSettings } from './SignatureSettings';
@@ -24,6 +25,9 @@ function TimeSelect({ value, onChange }: { value: string; onChange: (v: string) 
 }
 
 export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
+  // What the three picture checkboxes show is exactly what is pushed to main
+  // (bootstrap/app-settings-sync): each on unless explicitly false.
+  const identityPolicy = senderIdentityPolicyFromSettings(settings);
   const [labelSync, setLabelSync] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: '' });
   const [testNotifMsg, setTestNotifMsg] = useState<string | null>(null);
 
@@ -238,47 +242,6 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
           Interface Settings
         </h3>
 
-        <div className="grid grid-cols-[26rem_auto] items-center justify-between gap-6 py-3">
-          <div>
-            <div className="font-medium">Remote images</div>
-            <div className="text-sm text-muted-foreground">
-              Remote images can track when you open mail. <span className="font-medium">Categorized only</span> auto-loads
-              them only for mail the AI has sorted into a category (excluding Promotional and Spam); uncategorized, Promotional
-              and Spam mail stay behind the “Load images” banner. <span className="font-medium">Block</span> blocks everything;
-              <span className="font-medium"> Always load</span> loads them everywhere.
-            </div>
-          </div>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={settings.remoteImageMode === 'block'}
-                onChange={() => updateSetting('remoteImageMode', 'block')}
-                className="w-4 h-4"
-              />
-              <span className="text-sm">Block</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={settings.remoteImageMode === 'safe'}
-                onChange={() => updateSetting('remoteImageMode', 'safe')}
-                className="w-4 h-4"
-              />
-              <span className="text-sm whitespace-nowrap">Categorized only</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                checked={settings.remoteImageMode === 'always'}
-                onChange={() => updateSetting('remoteImageMode', 'always')}
-                className="w-4 h-4"
-              />
-              <span className="text-sm whitespace-nowrap">Always load</span>
-            </label>
-          </div>
-        </div>
-
         <div className="grid grid-cols-[26rem_auto] items-start justify-between gap-6 py-3">
           <div>
             <div className="font-medium">Sender logos and favicons</div>
@@ -286,15 +249,16 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
               Brand logos come from the sender domain’s BIMI record and appear only on mail that passed DMARC; a domain whose
               Verified Mark Certificate checks out also gets the blue verified tick beside the sender. When a sender has no
               photo or logo, the domain’s favicon is used instead. Each is looked up once per domain in the background —
-              never per message, and never from inside a message. Gravatar photos are off unless you turn them on:
-              the app then sends Gravatar a one-way hash of each contact’s address to ask whether a photo exists.
+              never per message, and never from inside a message. Contact photos from Gravatar are on unless you
+              turn them off: to ask whether a photo exists, the app sends Gravatar a hash of each contact’s
+              address, which Gravatar can match to the address.
             </div>
           </div>
           <div className="flex flex-col gap-2">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                checked={settings.senderLogos !== false}
+                checked={identityPolicy.logos}
                 onChange={(e) => updateSetting('senderLogos', e.target.checked)}
                 className="w-4 h-4"
               />
@@ -303,7 +267,7 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                checked={settings.senderFavicons !== false}
+                checked={identityPolicy.favicons}
                 onChange={(e) => updateSetting('senderFavicons', e.target.checked)}
                 className="w-4 h-4"
               />
@@ -312,7 +276,7 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                checked={settings.contactGravatar === true}
+                checked={identityPolicy.gravatar}
                 onChange={(e) => updateSetting('contactGravatar', e.target.checked)}
                 className="w-4 h-4"
               />

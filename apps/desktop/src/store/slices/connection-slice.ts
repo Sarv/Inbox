@@ -3,8 +3,8 @@ import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
 import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
-import { resetTrustedSenders } from '../../utils/trusted-senders';
-import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, clearImageAllowedCache, loadQuotaCache, saveQuotaCache } from '../helpers';
+import { forgetImageTrustAccount, setImageTrustAccount } from '../../utils/remote-images';
+import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
 import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
 
 // Concurrent connects to the SAME account join one run.
@@ -146,12 +146,8 @@ async function doConnect(
         smtpConfig: acctSmtpConfig,
         smtpConfigured: acctSmtpConfigured,
       };
-      // Switching to a different account? Drop the per-account image allowlist
-      // so it re-warms from the new account's DB (harmless no-op on reconnect).
-      if (acctId !== get().activeAccountId) {
-        clearImageAllowedCache();
-        resetTrustedSenders();
-      }
+      // (The image-trust caches follow the `activeAccountId` written below —
+      // see followActiveAccount.)
       saveActiveAccountId(acctId);
       // Keep the global store fields + legacy localStorage in sync with THIS
       // account, so the SMTP form and banner read the active account's own
@@ -213,7 +209,34 @@ async function doConnect(
   }
 }
 
-export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) => ({
+/**
+ * The slice's `set`, watching `activeAccountId`. Whenever a write changes it —
+ * a switch, a connect, an add and its rollback, removing the last account, a
+ * registry hydrate — the remote-image trust caches follow it, from this ONE
+ * place. They used to be repointed by hand at two of those sites: adding a
+ * second account left them on the first, so the new account's mail was judged
+ * against the old account's lists and "Load images" / "Trust this sender" were
+ * written into the old account's database.
+ */
+export function followActiveAccount(
+  set: Parameters<SliceCreator<ConnectionSlice>>[0],
+  get: () => EmailStore,
+): Parameters<SliceCreator<ConnectionSlice>>[0] {
+  return ((partial: Parameters<typeof set>[0], replace?: boolean) => {
+    const before = get()?.activeAccountId ?? null;
+    (set as (p: typeof partial, r?: boolean) => void)(partial, replace);
+    const after = get()?.activeAccountId ?? null;
+    if (after !== before) setImageTrustAccount(after);
+  }) as Parameters<SliceCreator<ConnectionSlice>>[0];
+}
+
+export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =>
+  connectionSlice(followActiveAccount(set, get), get);
+
+const connectionSlice = (
+  set: Parameters<SliceCreator<ConnectionSlice>>[0],
+  get: () => EmailStore,
+): ConnectionSlice => ({
   connected: false,
   // Derive from the ACTIVE ACCOUNT's own config (secrets stripped — the vault
   // re-hydrates them on connect), NOT the legacy single-account `loadSavedCredentials`
@@ -576,10 +599,8 @@ export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =
     }
 
     // Make this account's credentials the "current" ones and reset the mailbox
-    // view so the previous account's folders/emails don't linger. The image
-    // auto-load allowlist is per-account — drop it so it re-warms for this one.
-    clearImageAllowedCache();
-    resetTrustedSenders();
+    // view so the previous account's folders/emails don't linger. (The image
+    // trust sources follow the `activeAccountId` set below — followActiveAccount.)
     saveActiveAccountId(accountId);
     saveCredentials(acct.imapConfig);
     // Resolve the account's REAL sending config: OAuth accounts always send via
@@ -925,6 +946,10 @@ export const createConnectionSlice: SliceCreator<ConnectionSlice> = (set, get) =
         saveQuotaCache(quotaByAccount);
         set({ quotaByAccount });
       }
+
+      // Its remote-image trust lists go with its database, so re-adding the
+      // same address (the same id) never starts from the old lists.
+      forgetImageTrustAccount(accountId);
 
       // Only now that the durable wipe succeeded do we drop the row and move the
       // active account away.

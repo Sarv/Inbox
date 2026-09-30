@@ -25,14 +25,17 @@
 
 import {
   createLogger,
+  DEFAULT_SENDER_IDENTITY_POLICY,
   discoverFavicon,
   lookupBimi,
+  normalizeSenderIdentityPolicy,
   withTimeout,
   type BimiLookup,
   type BimiStatus,
   type FaviconResult,
   type FaviconStatus,
   type FetchLike,
+  type SenderIdentityPolicy,
 } from '@sarvinbox/core';
 
 import { getAllAccountRuntimes, getMainWindow } from '../shared';
@@ -51,34 +54,17 @@ import { chromiumFetch } from './net-fetch';
 const logger = createLogger('sender-identity');
 
 // --------------------------------------------------------------------- policy
+// The policy's shape, defaults and normalisation live in core
+// (utils/sender-identity-policy.ts), shared with the renderer that reads the
+// switches out of the settings blob and pushes them here. Every lookup —
+// Gravatar included — is ON unless the reader turned it off; until the
+// renderer's first push arrives, the persisted policy (or else that default)
+// governs.
 
-export interface SenderIdentityPolicy {
-  /** Look up and show BIMI logos / verified marks. */
-  logos: boolean;
-  /** Look up and show domain favicons. */
-  favicons: boolean;
-  /**
-   * Ask Gravatar for contacts' photos. OFF by default: it sends a hash of
-   * every contact's address to a third party, with the contact list coming
-   * from the user's mail — that is mailbox-derived data leaving the device, so
-   * it needs the user's say-so (Google Limited Use; see the privacy policy).
-   */
-  gravatar: boolean;
-}
+export { DEFAULT_SENDER_IDENTITY_POLICY, normalizeSenderIdentityPolicy, type SenderIdentityPolicy };
 
-export const DEFAULT_SENDER_IDENTITY_POLICY: SenderIdentityPolicy = { logos: true, favicons: true, gravatar: false };
 const POLICY_BLOB_KEY = 'sender-identity-policy';
 let cachedPolicy: SenderIdentityPolicy | null = null;
-
-/** Coerce whatever the renderer pushed into a policy; anything odd means the default. */
-export function normalizeSenderIdentityPolicy(raw: unknown): SenderIdentityPolicy {
-  const r = (raw ?? {}) as Record<string, unknown>;
-  return {
-    logos: typeof r.logos === 'boolean' ? r.logos : DEFAULT_SENDER_IDENTITY_POLICY.logos,
-    favicons: typeof r.favicons === 'boolean' ? r.favicons : DEFAULT_SENDER_IDENTITY_POLICY.favicons,
-    gravatar: typeof r.gravatar === 'boolean' ? r.gravatar : DEFAULT_SENDER_IDENTITY_POLICY.gravatar,
-  };
-}
 
 export function getSenderIdentityPolicy(): SenderIdentityPolicy {
   if (cachedPolicy) return cachedPolicy;
@@ -86,7 +72,11 @@ export function getSenderIdentityPolicy(): SenderIdentityPolicy {
     const blob = getBlob(POLICY_BLOB_KEY);
     cachedPolicy = normalizeSenderIdentityPolicy(blob ? JSON.parse(blob.toString('utf8')) : null);
   } catch {
-    cachedPolicy = { ...DEFAULT_SENDER_IDENTITY_POLICY };
+    // Unreadable is not the same as never set. Logos and favicons keep their
+    // defaults, but contact hashes are not sent to Gravatar on a guess: the
+    // renderer pushes the reader's actual choice at every boot, long before
+    // the first avatar-discovery tick.
+    cachedPolicy = { ...DEFAULT_SENDER_IDENTITY_POLICY, gravatar: false };
   }
   return cachedPolicy;
 }

@@ -36,8 +36,12 @@ const cache = new Map<string, SenderIdentity>();
 const inflight = new Map<string, Promise<void>>();
 const listeners = new Set<() => void>();
 let subscribed = false;
+let version = 0;
 
-const notify = () => listeners.forEach((l) => l());
+const notify = () => {
+  version += 1;
+  listeners.forEach((l) => l());
+};
 
 const key = (address: string | null | undefined): string => (address || '').trim().toLowerCase();
 
@@ -92,6 +96,31 @@ export function clearSenderIdentityCache(): void {
 /** Synchronous read of what is cached — for code outside React. */
 export function getCachedSenderIdentity(address: string | null | undefined): SenderIdentity | null {
   return cache.get(key(address)) ?? null;
+}
+
+/**
+ * Ask main for an identity that is not cached yet (no-op when it is, or while
+ * it is being asked). For synchronous deciders outside React — the
+ * remote-image decision reads the verified-brand tick — which re-run when
+ * {@link subscribeSenderIdentity} fires.
+ */
+export function requestSenderIdentity(address: string | null | undefined): void {
+  const k = key(address);
+  if (!k || cache.has(k)) return;
+  subscribeOnce();
+  void load(k);
+}
+
+/** Be told whenever any cached identity changes (a lookup lands, the cache clears). */
+export function subscribeSenderIdentity(listener: () => void): () => void {
+  subscribeOnce();
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/** Changes whenever {@link subscribeSenderIdentity} fires — a `useSyncExternalStore` snapshot. */
+export function getSenderIdentityVersion(): number {
+  return version;
 }
 
 /**

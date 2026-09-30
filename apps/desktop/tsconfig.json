@@ -61,6 +61,9 @@
       // Same: pure blocklist-preference reader, shared so the Blocklists tab
       // shows exactly what main queries.
       "@sarvinbox/core/blocklist-prefs": ["../../packages/core/src/utils/blocklist-prefs.ts"],
+      // Same: the sender-identity policy (logos, favicons, Gravatar) and its
+      // defaults, shared so the General tab and main agree on what is on.
+      "@sarvinbox/core/sender-identity-policy": ["../../packages/core/src/utils/sender-identity-policy.ts"],
       // Same: the one conversation-membership predicate (drafts, Trash copies,
       // order), shared so the thread view and main's counts/drafter agree.
       "@sarvinbox/core/conversation-membership": ["../../packages/core/src/utils/conversation-membership.ts"],

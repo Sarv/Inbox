@@ -44,3 +44,12 @@ export const SECTION_FILTER_LABELS: Record<SectionFilter, string> = {
 };
 
 export const SETTINGS_KEY = 'sarvinbox-settings';
+
+/**
+ * Fired on `window` after this window writes the {@link SETTINGS_KEY} blob
+ * (bootstrap/app-settings-sync's write mirror), so a reader that keeps a parsed
+ * copy in memory — the remote-image mode — re-reads it only when it may have
+ * changed, instead of re-parsing the whole blob (signatures and all) per read.
+ * Another window's write arrives as the ordinary `storage` event.
+ */
+export const SETTINGS_WRITTEN_EVENT = 'sarvinbox:settings-written';

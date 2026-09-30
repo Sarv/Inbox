@@ -7,22 +7,53 @@ import type { CategoryDefinition } from '../aibox/types';
 // Cache category definitions so we don't re-fetch per row
 let cachedDefs: CategoryDefinition[] | null = null;
 let defsPromise: Promise<CategoryDefinition[]> | null = null;
+// Set by clearCategoryBadgeCache: the defs are kept (and still answered from)
+// but re-read on the next load. See there for why they are not dropped.
+let defsStale = false;
+
+// Observers of the enabled-slug set — the remote-image decision re-runs when
+// it changes (it gates categorized-mail auto-load), instead of an open message
+// keeping the banner until the reader navigates away and back.
+const defsListeners = new Set<() => void>();
+let defsVersion = 0;
+const slugKey = (defs: CategoryDefinition[] | null) => (defs ? defs.map((d) => d.slug).join('|') : '');
 
 function loadDefs(): Promise<CategoryDefinition[]> {
-  if (cachedDefs) return Promise.resolve(cachedDefs);
+  if (cachedDefs && !defsStale) return Promise.resolve(cachedDefs);
   if (defsPromise) return defsPromise;
-  defsPromise = window.electronAPI.ai.getCategoryDefinitions().then(result => {
+  // Asked from a resolved promise, so a missing bridge (a window before
+  // preload ran, a test) is a failed load the catch below retries — never a
+  // synchronous throw into whoever wanted the slugs warm (an account switch).
+  defsPromise = Promise.resolve().then(() => window.electronAPI.ai.getCategoryDefinitions()).then(result => {
     if (result.success && result.data) {
+      const before = slugKey(cachedDefs);
+      const wasCold = cachedDefs === null;
       cachedDefs = (result.data as CategoryDefinition[]).filter(d => d.isEnabled);
+      defsStale = false;
+      if (wasCold || slugKey(cachedDefs) !== before) {
+        defsVersion += 1;
+        defsListeners.forEach((l) => l());
+      }
     } else {
       defsPromise = null; // Allow retry on next call
     }
     return cachedDefs || [];
   }).catch(() => {
     defsPromise = null; // Allow retry on next call
-    return [];
+    return cachedDefs || [];
   });
   return defsPromise;
+}
+
+/** Be told when the enabled category slugs change (first load included). */
+export function subscribeCategoryDefs(listener: () => void): () => void {
+  defsListeners.add(listener);
+  return () => { defsListeners.delete(listener); };
+}
+
+/** Changes whenever {@link subscribeCategoryDefs} fires — a `useSyncExternalStore` snapshot. */
+export function getCategoryDefsVersion(): number {
+  return defsVersion;
 }
 
 /**
@@ -33,6 +64,7 @@ function loadDefs(): Promise<CategoryDefinition[]> {
  * self-corrects once the list has rendered once (defs load early).
  */
 export function getCachedCategorySlugs(): string[] {
+  if (defsStale && !defsPromise) void loadDefs();
   return cachedDefs ? cachedDefs.map((d) => d.slug) : [];
 }
 
@@ -105,10 +137,17 @@ function retryBatch(ids: string[], listeners: (() => void)[], attempt: number) {
   }
 }
 
-// Clear cache when AI processing finishes (to pick up new categories)
+// Clear cache when AI processing finishes (to pick up new categories).
+//
+// The per-email categories are dropped; the DEFINITIONS are only marked stale
+// and re-read, never blanked. This runs on every sync that brings new mail, and
+// a blank slug list reads as "nothing is categorized" to everything that asks
+// synchronously — for one round trip the list filters showed the wrong mail,
+// and an open message's images (remote images "From categorized mail") blinked
+// off and back on.
 export function clearCategoryBadgeCache() {
   batchCache = {};
-  cachedDefs = null;
+  defsStale = true;
   defsPromise = null;
 }
 

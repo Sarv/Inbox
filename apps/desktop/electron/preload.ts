@@ -324,10 +324,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('emails:delete', emailId, accountId),
     bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) =>
       ipcRenderer.invoke('emails:bulkAction', emailIds, action, accountId, allowPermanent),
-    // Remote-image sender allowlist (per active account).
-    allowImagesForSender: (address: string) => ipcRenderer.invoke('images:allowSender', address),
-    getImageAllowedSenders: () => ipcRenderer.invoke('images:getAllowedSenders'),
-    disallowImagesForSender: (address: string) => ipcRenderer.invoke('images:disallowSender', address),
+    // Remote-image trust sources, per account: the explicit allowlist and the
+    // people this account has emailed. No accountId = the active account.
+    allowImagesForSender: (address: string, accountId?: string) => ipcRenderer.invoke('images:allowSender', address, accountId),
+    getImageAllowedSenders: (accountId?: string) => ipcRenderer.invoke('images:getAllowedSenders', accountId),
+    disallowImagesForSender: (address: string, accountId?: string) => ipcRenderer.invoke('images:disallowSender', address, accountId),
+    getEmailedAddresses: (accountId?: string) => ipcRenderer.invoke('images:getEmailedAddresses', accountId),
   },
 
   // Security: the user's link trust/block rules (see Security page).
@@ -1258,9 +1260,10 @@ export interface ElectronAPI {
     archive: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     delete: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => Promise<{ success: boolean; error?: string }>;
-    allowImagesForSender: (address: string) => Promise<{ success: boolean; error?: string }>;
-    getImageAllowedSenders: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
-    disallowImagesForSender: (address: string) => Promise<{ success: boolean; error?: string }>;
+    allowImagesForSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    getImageAllowedSenders: (accountId?: string) => Promise<{ success: boolean; data?: string[]; error?: string }>;
+    disallowImagesForSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    getEmailedAddresses: (accountId?: string) => Promise<{ success: boolean; data?: string[]; error?: string }>;
   };
   security: {
     listLinkRules: () => Promise<{ success: boolean; data?: Array<{ id: number; senderDomain: string; shownDomain: string; actualDomain: string; verdict: 'trust' | 'block'; createdAt: number }>; error?: string }>;

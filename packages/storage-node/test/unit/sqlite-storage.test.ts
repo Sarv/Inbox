@@ -1055,6 +1055,65 @@ describe('SQLiteStorage trusted senders', () => {
   });
 });
 
+// "People you've emailed" — one of the sources the remote-image 'trusted' mode
+// lets load images. A wrong answer either fetches a stranger's tracking pixels
+// (a received-only sender counted as a correspondent) or keeps the banner on a
+// colleague's mail; a leak between accounts vouches for mail the other mailbox
+// never wrote to.
+describe('SQLiteStorage people you have emailed', () => {
+  const a = withStorage(async (storage) => {
+    await storage.syncFolders([makeFolder('f-inbox', 'INBOX'), makeFolder('f-sent', 'Sent', { specialUse: '\\Sent' })]);
+  });
+  const b = withStorage(async (storage) => {
+    await storage.syncFolders([makeFolder('f-inbox', 'INBOX')]);
+  });
+
+  // Breaks: the ingest of Sent mail stops counting its recipients, so nobody
+  // the user writes to is ever "emailed" and 'trusted' mode trusts no one.
+  it('lists the recipients of Sent mail, bare and lowercased, and not the senders of received mail', async () => {
+    const storage = a.get();
+    await storage.insertEmailBatch([
+      makeEmail({
+        id: 'sent-1', messageId: '<sent-1@x>', uid: 21, folderId: 'f-sent', tags: '|Sent|',
+        fromAddress: 'me@example.test', toAddress: 'Pat Doe <PAT@Example.test>',
+      }),
+      makeEmail({ id: 'recv-1', messageId: '<recv-1@x>', uid: 22, fromAddress: 'stranger@example.test' }),
+    ]);
+    await vi.waitFor(async () => expect(await storage.getEmailedAddresses()).toEqual(['pat@example.test']));
+  });
+
+  // Breaks: the contact scan's absolute restatement is not counted, so a
+  // rescan makes correspondents look like strangers.
+  it('counts recipients the contact scan restated, and ignores rows with no outbound mail', async () => {
+    const storage = a.get();
+    await storage.setSenderStatsCounts([
+      { email: 'Scanned@Example.test', receivedCount: 3, readCount: 3, deletedCount: 0, repliedCount: 1, sentToCount: 2 },
+      { email: 'reader-only@example.test', receivedCount: 5, readCount: 5, deletedCount: 0, repliedCount: 0, sentToCount: 0 },
+    ]);
+    const emailed = await storage.getEmailedAddresses();
+    expect(emailed).toContain('scanned@example.test');
+    expect(emailed).not.toContain('reader-only@example.test');
+    expect(emailed).not.toContain('stranger@example.test');
+  });
+
+  // DELIBERATE CHANGE (it used to count a reply count alone). Breaks: a row
+  // with only a reply count — which comes from a logged "reply" action, and the
+  // AI agent logs one when it merely SAVES a draft reply — makes a sender the
+  // user never wrote to "emailed", and their pixels load in 'trusted' mode.
+  it('does not count a reply count with no mail actually sent', async () => {
+    const storage = a.get();
+    await storage.upsertSenderStats({ email: 'drafted-only@example.test', repliedCount: 1 });
+    expect(await storage.getEmailedAddresses()).not.toContain('drafted-only@example.test');
+  });
+
+  // Multi-account: each account has its own DB, so account A's correspondents
+  // must never vouch for mail arriving at account B.
+  it("keeps each account's correspondents to itself", async () => {
+    expect(await a.get().getEmailedAddresses()).toContain('pat@example.test');
+    expect(await b.get().getEmailedAddresses()).toEqual([]);
+  });
+});
+
 describe('SQLiteStorage filter rules and labels', () => {
   const ctx = withStorage();
 

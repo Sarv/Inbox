@@ -9,6 +9,7 @@ import { createLogger } from '@sarvinbox/core/logger';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import type { InboxSection } from '../../config/inbox-types';
+import { noteAccountFolders } from '../../utils/remote-images';
 import { buildThreads, threadRowCount, threadRowKey } from '../../utils/thread-utils';
 import { isRetryableBodyFetchError, looksGoneFromServer, withFailedBody } from '../body-fetch-failures';
 import { getEmailsPerPage, getPageSizeForView, getPageSizeForState, isThreadPagedView, mergePageWindow, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal, fetchVirtualFolderTotal, computeSectionFetchLimit, sectionDataUnchanged } from '../helpers';
@@ -482,6 +483,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       const result = await window.electronAPI.folders.list();
       if (result.success && result.data) {
         set({ folders: result.data });
+        // The account's Spam/Junk folders by their special-use, whatever they
+        // are called — so mail in them never counts as a trusted sender's.
+        noteAccountFolders(get().activeAccountId, result.data);
 
         const currentSelectedId = get().selectedFolderId;
         const currentVirtual = get().selectedVirtualFolder;

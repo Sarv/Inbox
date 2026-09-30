@@ -45,6 +45,7 @@ export * from './cid-images';
 export * from './inline-images';
 export * from './remote-image-requests';
 export * from './image-allowlist';
+export * from './sender-identity-policy';
 export * from './lru-cache';
 export * from './ai-categories';
 export * from './single-flight';
