@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Social category.** New mail from social networks, forums and online
+  communities (LinkedIn, Instagram, Facebook, X, Reddit, Discourse or Google
+  Groups digests, Meetup groups and the like) is now sorted into its own
+  Social category. A platform's own marketing, such as Premium offers or free
+  trials, still goes to Promotions. Mail that was already sorted keeps its
+  categories, and if you had made your own "Social" category, yours is kept
+  as it is. With "Mirror AI categories to my mailbox" on, a Social label is
+  added to your mailbox too.
+
 ### Fixed
 - **One switch for AI sorting, and it works.** Settings → AI → Categorization
   had a "Smart Email Categorization" switch that stopped nothing: with it off,

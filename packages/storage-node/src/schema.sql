@@ -700,6 +700,8 @@ END;
 -- ============================================================
 -- Seed Data: Default AI Category Definitions
 -- ============================================================
+-- Categories added after this baseline are seeded by their own migration in
+-- migrations.ts, which also runs on a fresh install: social (v99).
 
 INSERT OR IGNORE INTO ai_category_definitions (slug, name, description, prompt, icon, color, sort_order, is_system, is_enabled) VALUES
 ('important', 'Important', 'Urgent emails needing immediate attention',

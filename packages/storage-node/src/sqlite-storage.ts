@@ -52,6 +52,7 @@ import {
   SPAM_REPAIR_QUEUE_TABLE,
   withServerUid,
 } from './migrations';
+import { enqueueThreadsTaggedWith } from './read-model-dirty';
 import { ReadModelMaintainer } from './read-model-maintainer';
 import {
   EmailRepository,
@@ -2573,9 +2574,7 @@ export class SQLiteStorage implements IEmailStorage {
   private dirtyThreadsForCategorySlug(slug: string): void {
     if (!this.db || !slug) return;
     try {
-      this.db.prepare(
-        "INSERT OR IGNORE INTO read_model_dirty(thread_id) SELECT DISTINCT thread_id FROM emails WHERE instr(tags, '|' || ? || '|') > 0",
-      ).run(slug);
+      enqueueThreadsTaggedWith(this.db, slug);
       this.readModel?.schedule();
     } catch (error) {
       log.warn(`[Storage] Failed to enqueue threads for category '${slug}':`, error);
