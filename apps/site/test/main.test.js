@@ -13,7 +13,8 @@ const fakeWindow = ({ userAgent = UA.macSafari, userAgentData, fetchImpl } = {})
 
 beforeEach(() => {
   document.head.innerHTML = '';
-  document.body.innerHTML = '<img data-app-icon alt="" /><div id="app"></div>';
+  document.body.innerHTML =
+    '<img data-app-icon alt="" /><img data-product-image alt="" /><div id="app"></div>';
 });
 
 describe('showAppIcon', () => {
@@ -55,7 +56,10 @@ describe('start', () => {
     await start(win);
     expect(win.fetch).toHaveBeenCalledTimes(1);
     expect(document.querySelector('[data-app-icon]').getAttribute('src')).toMatch(/icon\.svg/);
-    expect(document.querySelector('h1').textContent).toBe('Download Sarv Inbox for Linux');
+    expect(document.querySelector('[data-product-image]').getAttribute('src')).toMatch(
+      /screenshot-inbox\.png/
+    );
+    expect(document.querySelector('.download-choice h3').textContent).toBe('Linux download');
     expect(document.querySelector('a.btn-primary').getAttribute('href')).toContain(
       'sarv-inbox-1.2.2-arm64.AppImage'
     );

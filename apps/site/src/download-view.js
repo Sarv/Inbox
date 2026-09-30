@@ -80,6 +80,20 @@ const platformSections = (installables, excludeOs) =>
     })
     .filter((section) => section.links.length > 0);
 
+// Keep every desktop choice available in the selector, including the detected
+// one. For another OS we cannot know the CPU, so the common x64 build leads.
+const allPlatforms = (installables, detectedPlatform) =>
+  DESKTOP_OSES.map((os) => {
+    const arch = os === detectedPlatform.os ? detectedPlatform.arch : ARCH.UNKNOWN;
+    const { primary, alternatives } = pickDownloads(installables, { os, arch });
+    return {
+      os,
+      osName: OS_NAME[os],
+      primary: primary ? toLink(primary) : null,
+      alternatives: alternatives.map(toLink),
+    };
+  });
+
 const releaseFacts = (release) => ({
   version: release.tag_name?.replace(/^v/, '') ?? null,
   publishedAt: release.published_at ?? null,
@@ -106,6 +120,7 @@ export const buildDownloadView = ({ platform, release }) => {
       osName,
       releasesUrl: LATEST_RELEASE_URL,
       reachedGitHub: false,
+      platforms: allPlatforms([], platform),
     };
   }
 
@@ -124,5 +139,6 @@ export const buildDownloadView = ({ platform, release }) => {
     primary: isDownload ? toLink(primary) : null,
     alternatives: isDownload ? alternatives.map(toLink) : [],
     others: platformSections(installables, isDownload ? platform.os : null),
+    platforms: allPlatforms(installables, platform),
   };
 };

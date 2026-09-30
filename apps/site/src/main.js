@@ -6,6 +6,7 @@ import './styles.css';
 // Imported, not referenced from index.html: Vite resolves an import in dev and
 // build alike, whereas a `../desktop/...` URL in the HTML became a broken image
 // under the dev server. The desktop app's icon, not a second copy of it.
+import inboxScreenshotUrl from '../../../docs/images/screenshot-inbox.png';
 import appIconUrl from '../../desktop/public/icon.svg';
 
 import { showAppIcon } from './app-icon.js';
@@ -30,6 +31,8 @@ export const readClientHints = async (nav) => {
 
 export const start = async (win) => {
   showAppIcon(win.document, appIconUrl);
+  const productImage = win.document.querySelector('[data-product-image]');
+  if (productImage) productImage.src = inboxScreenshotUrl;
   const { navigator: nav } = win;
   const [hints, release] = await Promise.all([
     readClientHints(nav),
