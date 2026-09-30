@@ -1017,8 +1017,19 @@ a.btn:hover {
   }
   .landing-hero {
     grid-template-columns: 1fr;
-    gap: 30px;
-    padding-top: 48px;
+    gap: 24px;
+    min-height: 0;
+    padding-block: 28px 32px;
+  }
+  .landing-section {
+    padding-top: 72px;
+  }
+  .privacy-panel {
+    margin-top: 72px;
+  }
+  .landing-compliance {
+    margin-top: 64px;
+    padding-top: 28px;
   }
   .hero-copy {
     max-width: 720px;
@@ -1039,6 +1050,35 @@ a.btn:hover {
   .privacy-panel > a {
     grid-column: 2;
     justify-self: start;
+  }
+}
+@media (max-width: 800px) {
+  .landing-section {
+    padding-top: 62px;
+  }
+  .section-heading {
+    display: block;
+    margin-bottom: 28px;
+  }
+  .section-heading > p {
+    max-width: 620px;
+    margin: 16px 0 0;
+  }
+  .feature-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .feature-card-featured {
+    grid-column: 1 / -1;
+    min-height: 0;
+  }
+  .feature-card-featured .feature-art {
+    height: auto;
+  }
+  .feature-art-accounts {
+    max-width: none;
+  }
+  .download-heading {
+    margin-bottom: 28px;
   }
 }
 @media (max-width: 680px) {
@@ -1072,9 +1112,7 @@ a.btn:hover {
     font-size: 12px;
   }
   .landing-hero {
-    padding-top: 37px;
-    padding-bottom: 48px;
-    min-height: 0;
+    padding-block: 20px 28px;
   }
   .landing-hero h1 {
     margin-block: 18px;
@@ -1093,7 +1131,7 @@ a.btn:hover {
     padding: 21px;
   }
   .landing-section {
-    padding-top: 82px;
+    padding-top: 52px;
   }
   .conversation-steps,
   .ai-grid {
@@ -1106,14 +1144,13 @@ a.btn:hover {
     min-height: 285px;
   }
   .section-heading {
-    display: block;
-    margin-bottom: 28px;
+    margin-bottom: 24px;
   }
   .section-heading h2 {
     font-size: 34px;
   }
   .section-heading > p {
-    margin-top: 18px;
+    margin-top: 12px;
   }
   .feature-grid {
     grid-template-columns: 1fr;
@@ -1127,7 +1164,7 @@ a.btn:hover {
   .privacy-panel {
     display: block;
     min-height: 0;
-    margin-top: 80px;
+    margin-top: 56px;
     padding: 29px;
   }
   .privacy-mark {
@@ -1166,7 +1203,7 @@ a.btn:hover {
     margin-left: 0;
   }
   .landing-compliance {
-    margin-top: 76px;
+    margin-top: 44px;
   }
   .landing-footer {
     padding-block: 28px;
