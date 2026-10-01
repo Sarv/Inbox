@@ -20,7 +20,7 @@ type OAuthProviderId = 'gmail' | 'microsoft' | 'yahoo';
 const PROVIDER_HINTS = EMAIL_PROVIDERS.map((p) => ({ name: p.name, host: p.imapHost, port: String(p.imapPort) }));
 
 export function IMAPStep({ onNext, onBack, onSyncStarted }: IMAPStepProps) {
-  const { connect } = useEmailStore();
+  const { addAccount } = useEmailStore();
 
   const [host, setHost] = useState('imap.sarv.com');
   const [port, setPort] = useState('9993');
@@ -66,7 +66,10 @@ export function IMAPStep({ onNext, onBack, onSyncStarted }: IMAPStepProps) {
       if (!imap) {
         throw new Error(`${providerId} returned no IMAP config`);
       }
-      await connect({
+      // A fresh install has no sync engine until an account is activated.
+      // addAccount verifies the token and creates that account's runtime before
+      // connecting, just as the add-account dialog does.
+      await addAccount({
         host: imap.host,
         port: imap.port,
         secure: imap.secure,
@@ -74,7 +77,7 @@ export function IMAPStep({ onNext, onBack, onSyncStarted }: IMAPStepProps) {
         password: '',
         authMethod: 'oauth2',
         oauthProvider: providerId,
-      } as any);
+      });
       onSyncStarted();
       onNext();
     } catch (err) {
@@ -96,7 +99,7 @@ export function IMAPStep({ onNext, onBack, onSyncStarted }: IMAPStepProps) {
 
     try {
       const cleanPassword = password.replace(/\s+/g, '');
-      await connect({
+      await addAccount({
         host,
         port: parseInt(port),
         username,

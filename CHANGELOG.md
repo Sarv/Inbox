@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **First-run email sign-in.** Gmail and manual IMAP setup now create the
+  account's sync service before connecting, so a new installation no longer
+  stops with “Sync engine not initialized.”
+
 ## [1.3.0] - 2026-09-30
 
 ### Added
