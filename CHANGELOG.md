@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-01
+
 ### Fixed
 - **First-run email sign-in.** Gmail and manual IMAP setup now create the
   account's sync service before connecting, so a new installation no longer
@@ -663,7 +665,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/Sarv/Inbox/releases/tag/v1.3.1
 [1.3.0]: https://github.com/Sarv/Inbox/releases/tag/v1.3.0
 [1.2.6]: https://github.com/Sarv/Inbox/releases/tag/v1.2.6
 [1.2.5]: https://github.com/Sarv/Inbox/releases/tag/v1.2.5
