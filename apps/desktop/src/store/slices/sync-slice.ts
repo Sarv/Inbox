@@ -171,7 +171,7 @@ async function refreshVisibleViewForFolder(
     const state = get();
     const isCurrentFolder = isFolderInView(state.folders, state.selectedFolderId, folderPath);
 
-    if (state.viewingAICategory && isCurrentFolder) {
+    if (state.viewingAICategory && (isCurrentFolder || state.selectedVirtualFolder)) {
       // AI-categorized view (Needs Response, Reminders, etc.).
       console.log(`[Store] refreshView: re-fetching AI category (${state.viewingAICategory}) after ${folderPath} sync`);
       await state.loadAICategoryEmails?.(state.viewingAICategory);
@@ -426,7 +426,7 @@ async function flushRealtimeBatch(set: StoreSet, get: StoreGet): Promise<void> {
     const sawActiveFlags = pending.flaggedIds.size > 0;
     const touchesBadges = pending.sawNew || pending.sawBackground || sawActiveFlags;
     if (touchesBadges) {
-      if (virtualFolder === 'virtual-unified') void get().refreshVirtualFolder('unified');
+      if (virtualFolder === 'virtual-unified' && !get().viewingAICategory) void get().refreshVirtualFolder('unified');
       void get().refreshUnreadSummary();
     }
     if (pending.sawNew || sawActiveFlags) {
@@ -462,8 +462,17 @@ async function flushRealtimeBatch(set: StoreSet, get: StoreGet): Promise<void> {
     }
     await Promise.all([...foldersToRefresh].map((folderPath) => refreshVisibleViewForFolder(get, folderPath)));
 
+    // Some cross-account events carry no folder path. Refresh the active
+    // category directly so its rows and total still reflect those writes.
+    if (get().viewingAICategory && get().selectedVirtualFolder
+      && foldersToRefresh.size === 0 && touchesBadges && !pending.deletedWithoutFolder) {
+      await get().loadAICategoryEmails(get().viewingAICategory);
+    }
+
     if (pending.deletedWithoutFolder) {
-      if (virtualFolder === 'virtual-all') await get().mergeNewEmailsVirtualAll?.();
+      if (get().viewingAICategory && get().selectedVirtualFolder) {
+        await get().loadAICategoryEmails(get().viewingAICategory);
+      } else if (virtualFolder === 'virtual-all') await get().mergeNewEmailsVirtualAll?.();
       else if (virtualFolder === 'virtual-starred') await get().mergeNewEmailsVirtualStarred?.();
     }
 
@@ -759,6 +768,9 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
       // a fixed 100 at offset 0 refreshed page 1 while the user read page 4,
       // and stretched the page past its own size.
       const result = await window.electronAPI.emails.list(folderId, pageSize, offset);
+      // The reader may have switched folders while the IPC was in flight.
+      if (get().selectedFolderId !== folderId || get().selectedVirtualFolder
+        || get().viewingAICategory || get().emailsPage !== emailsPage) return;
 
       if (result.success && result.data) {
         const merge = mergePageWindow(emails as any[], result.data as any[], pageSize, pendingDeleteIds);
@@ -779,6 +791,8 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
       const { emails, emailsPage } = get();
       const pageSize = getPageSizeForState(get());
       const result = await window.electronAPI.emails.getAll(pageSize, emailsPage * pageSize);
+      if (get().selectedVirtualFolder !== 'virtual-all' || get().viewingAICategory
+        || get().emailsPage !== emailsPage) return;
       if (result.success && result.data) {
         // getAll pages by CONVERSATION, so the window holds pageSize threads (all
         // of their messages) — capping by message would truncate a thread.
@@ -800,6 +814,8 @@ export const createSyncSlice: SliceCreator<SyncSlice> = (set, get) => ({
       const { emails, emailsPage } = get();
       const pageSize = getPageSizeForState(get());
       const result = await window.electronAPI.emails.getStarred(pageSize, emailsPage * pageSize);
+      if (get().selectedVirtualFolder !== 'virtual-starred' || get().viewingAICategory
+        || get().emailsPage !== emailsPage) return;
       if (result.success && result.data) {
         // getStarred pages by CONVERSATION, so the window holds pageSize threads
         // (all of their messages) — capping by message would truncate a thread.

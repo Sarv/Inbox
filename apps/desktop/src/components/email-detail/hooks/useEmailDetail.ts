@@ -10,6 +10,7 @@ import { createLogger } from '@sarvinbox/core/logger';
 import prettyBytes from 'pretty-bytes';
 import { useState, useEffect, useRef, useMemo } from 'react';
 
+import { classifyFolder } from '../../../config/folder-mapping';
 import { isAutoChatViewEnabled, isConversationModeEnabled } from '../../../services/ai-features';
 import {
   buildPolishThreadContext,
@@ -82,6 +83,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     deleteEmail,
     archiveEmail,
     bulkRemoveEmails,
+    restoreFromTrash,
     moveToSpam,
     moveFromSpam,
     clearSelectedEmail,
@@ -1087,7 +1089,7 @@ export function useEmailDetail(): EmailDetailContext | null {
   // Detect if viewing Trash or Spam folder
   const selectedFolder = selectedFolderId ? folders.find((f: any) => f.id === selectedFolderId) : null;
   const folderPath = selectedFolder?.path?.toLowerCase() || '';
-  const isInTrash = folderPath.includes('trash') || folderPath === 'deleted items' || (selectedFolder as any)?.specialUse === '\\Trash';
+  const isInTrash = !!selectedFolder && classifyFolder(selectedFolder) === 'trash';
   const isInSpam = folderPath.includes('spam') || folderPath.includes('junk') || (selectedFolder as any)?.specialUse === '\\Junk';
 
   const attachments = parseAttachments(displayEmail.attachmentNames, displayEmail.attachmentSizes)
@@ -1500,27 +1502,24 @@ export function useEmailDetail(): EmailDetailContext | null {
   const handleNotSpam = () => removeWholeThread('notspam');
 
   const handleRestore = async (emailId: string) => {
-    const inboxFolder = folders.find((f: any) =>
-      f.path === 'INBOX' || f.name?.toLowerCase() === 'inbox'
-    );
-    if (!inboxFolder) {
-      log.error('cannot restore: INBOX folder not found');
-      return;
-    }
+    const trashPaths = folders.filter((folder) => classifyFolder(folder) === 'trash').map((folder) => folder.path);
+    const inTrash = (email: { tags?: string }) => trashPaths.some((path) => (email.tags || '').includes(`|${path}|`));
+    // The ordinary conversation view drops Trash copies when a live sibling
+    // exists. Use the raw thread and select only its Trash members, or a mixed
+    // Inbox+Trash thread would move the Inbox mail and leave Trash untouched.
+    const idsToRestore = rawThreadEmails.filter(inTrash).map((email) => email.id);
+    if (idsToRestore.length === 0 && selectedEmail && inTrash(selectedEmail)) idsToRestore.push(emailId);
+    if (idsToRestore.length === 0) return;
     setIsRestoring(true);
     try {
-      // Restore all emails in the thread (or just the single email if no thread)
-      const idsToRestore = allThreadEmails.length > 1
-        ? allThreadEmails.map(e => e.id)
-        : [emailId];
-      const acctId = useEmailStore.getState()._accountIdFor(emailId);
-      for (const id of idsToRestore) {
-        await window.electronAPI.emails.moveToFolder(id, inboxFolder.id, acctId);
+      const restored = await restoreFromTrash(idsToRestore);
+      const failed = idsToRestore.length - restored.length;
+      if (failed > 0) {
+        window.alert(`Could not restore ${failed} message${failed === 1 ? '' : 's'}. ${failed === 1 ? 'It remains' : 'They remain'} in Trash. Check your connection and try again.`);
       }
-      // Remove from current view
-      const idSet = new Set(idsToRestore);
-      setEmails(emails.filter(e => !idSet.has(e.id)));
-      clearSelectedEmail();
+    } catch (error) {
+      log.error('Restore from Trash failed:', error);
+      window.alert('Could not restore the message. It remains in Trash. Check your connection and try again.');
     } finally {
       setIsRestoring(false);
     }

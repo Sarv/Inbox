@@ -52,7 +52,7 @@ interface OpRow {
   createdAt: number;
 }
 
-interface EmailRow { id: string; folderId: string; uid: number; messageId: string | null }
+interface EmailRow { id: string; folderId: string; uid: number | null; messageId: string | null }
 
 /**
  * In-memory stand-in for the pending_operations / folders / emails methods the
@@ -175,6 +175,9 @@ function makeFakeStorage() {
     },
     async getEmailByFolderAndUid(folderId: string, uid: number) {
       return emails.find((e) => e.folderId === folderId && e.uid === uid) ?? null;
+    },
+    async getEmail(id: string) {
+      return emails.find((e) => e.id === id) ?? null;
     },
     updateEmail: vi.fn(async (id: string, updates: { uid?: number }) => {
       const row = emails.find((e) => e.id === id);
@@ -366,6 +369,67 @@ describe('OperationQueue — persist-first', () => {
     failFirst(h.server, 'addFlags', permErr());
     await expect(h.queue.bulkMarkAsRead('INBOX', [1, 2, 3])).rejects.toThrow();
     expect(h.storage.statuses()).toEqual(['failed', 'failed', 'failed']);
+  });
+});
+
+describe('OperationQueue — accepted server operations survive cleanup failures', () => {
+  it.each([permErr('database cleanup failed'), connErr()])('returns success for a completed single MOVE when cleanup fails: %s', async (error) => {
+    const h = await makeHarness();
+    failFirst(h.storage, 'deletePendingOperation', error);
+
+    expect(await h.queue.move('INBOX', 1, 'Trash')).toBe('success');
+
+    expect(h.server.uidsIn('INBOX')).toEqual([2, 3]);
+    expect(h.server.messageCount('Trash')).toBe(6);
+    expect(h.storage.statuses()).toEqual(['executing']);
+    expect(h.storage.rows()[0].retryCount).toBe(0);
+    expect(h.queue.isEmpty).toBe(true);
+  });
+
+  it.each([permErr('database cleanup failed'), connErr()])('returns success for a completed bulk MOVE when cleanup fails: %s', async (error) => {
+    const h = await makeHarness();
+    failFirst(h.storage, 'deletePendingOperationsBatch', error);
+
+    expect(await h.queue.bulkMoveToTrash('INBOX', [1, 2])).toBe('success');
+
+    expect(h.server.uidsIn('INBOX')).toEqual([3]);
+    expect(h.server.messageCount('Trash')).toBe(7);
+    expect(h.storage.statuses()).toEqual(['executing', 'executing']);
+    expect(h.storage.rows().map((row) => row.retryCount)).toEqual([0, 0]);
+    expect(h.queue.isEmpty).toBe(true);
+  });
+
+  it.each([permErr('database cleanup failed'), connErr()])('releases a successful pooled STORE without poisoning or requeueing after cleanup fails: %s', async (error) => {
+    const pool = await makeServer();
+    const release = vi.fn();
+    const poison = vi.fn();
+    const h = await makeHarness({ acquireConnection: async () => ({ client: pool as any, release, poison }) });
+    failFirst(h.storage, 'deletePendingOperation', error);
+
+    expect(await h.queue.markAsRead('INBOX', 1)).toBe('success');
+
+    expect(pool.flagsOf('INBOX', 1)).toEqual(['\\Seen']);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(poison).not.toHaveBeenCalled();
+    expect(h.storage.statuses()).toEqual(['executing']);
+    expect(h.storage.rows()[0].retryCount).toBe(0);
+    expect(h.queue.isEmpty).toBe(true);
+  });
+
+  it.each([permErr('database cleanup failed'), connErr()])('counts an accepted queued batch as success without immediate replay when cleanup fails: %s', async (error) => {
+    const h = await makeHarness();
+    h.state.connected = false;
+    await h.queue.bulkMoveToTrash('INBOX', [1, 2]);
+    h.state.connected = true;
+    failFirst(h.storage, 'deletePendingOperationsBatch', error);
+
+    expect(await h.queue.processQueue()).toEqual({ success: 2, failed: 0 });
+
+    expect(h.storage.statuses()).toEqual(['executing', 'executing']);
+    expect(h.storage.rows().map((row) => row.retryCount)).toEqual([0, 0]);
+    expect(h.queue.isEmpty).toBe(true);
+    expect(await h.queue.processQueue()).toEqual({ success: 0, failed: 0 });
+    expect(h.server.callCount('moveMessages')).toBe(1);
   });
 });
 
@@ -987,6 +1051,110 @@ describe('OperationQueue — moves, archive and delete', () => {
 });
 
 describe('OperationQueue — destination UID remap after a move', () => {
+  it('remaps explicit bulk row ids despite existing Trash UIDs and overlapping source/destination UIDs', async () => {
+    const h = await makeHarness();
+    h.storage.addFolder('Trash');
+    const existing = h.storage.addEmail({ id: 'existing', folderId: 'f-Trash', uid: 1, messageId: '<existing@x>' });
+    const first = h.storage.addEmail({ id: 'e1', folderId: 'f-Trash', uid: 1, messageId: '<a@x>' });
+    const second = h.storage.addEmail({ id: 'e2', folderId: 'f-Trash', uid: 2, messageId: '<b@x>' });
+    vi.spyOn(h.server, 'moveMessages').mockResolvedValue(new Map([[1, 2], [2, 3]]));
+
+    await h.queue.bulkMoveToTrash('INBOX', [1, 2], ['e1', 'e2']);
+
+    expect(existing.uid).toBe(1);
+    expect(first.uid).toBe(2);
+    expect(second.uid).toBe(3);
+    expect(h.storage.updateEmail.mock.calls).toEqual([
+      ['e1', { uid: 2 }], ['e2', { uid: 3 }],
+    ]);
+  });
+
+  it('persists bulk row ids and replays one batch onto rows whose destination UIDs are null', async () => {
+    const h = await makeHarness();
+    h.storage.addFolder('Trash');
+    h.storage.addEmail({ id: 'existing', folderId: 'f-Trash', uid: 1, messageId: '<existing@x>' });
+    h.storage.addEmail({ id: 'e1', folderId: 'f-Trash', uid: null, messageId: '<a@x>' });
+    h.storage.addEmail({ id: 'e2', folderId: 'f-Trash', uid: null, messageId: '<b@x>' });
+    h.state.connected = false;
+
+    expect(await h.queue.bulkMoveToTrash('INBOX', [1, 2], ['e1', 'e2'])).toBe('queued');
+    expect(h.storage.rows().map((row) => row.data)).toEqual([
+      { emailIdsByUid: { 1: 'e1', 2: 'e2' } },
+      { emailIdsByUid: { 1: 'e1', 2: 'e2' } },
+    ]);
+    const fresh = new OperationQueue();
+    fresh.initialize({
+      client: h.server as any, storage: h.storage as any,
+      isConnected: () => true, isSyncing: () => false,
+    });
+    await fresh.loadFromStorage();
+
+    expect(await fresh.processQueue()).toEqual({ success: 2, failed: 0 });
+    expect(h.server.callCount('moveMessages')).toBe(1);
+    expect(h.storage.updateEmail.mock.calls).toEqual([
+      ['e1', { uid: 6 }], ['e2', { uid: 7 }],
+    ]);
+    expect(h.storage.emails[0].uid).toBe(1);
+  });
+
+  it('writes an explicit moved row even when source and destination UIDs are equal', async () => {
+    const h = await makeHarness();
+    h.storage.addFolder('Archive');
+    h.storage.addEmail({ id: 'e1', folderId: 'f-Archive', uid: null, messageId: '<a@x>' });
+
+    await h.queue.move('INBOX', 1, 'Archive', 'e1');
+
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', { uid: 1 });
+  });
+
+  it('never falls back to UID lookup for an absent explicit row or a row moved elsewhere', async () => {
+    const h = await makeHarness();
+    h.storage.addFolder('Trash');
+    h.storage.addEmail({ id: 'existing1', folderId: 'f-Trash', uid: 1, messageId: '<existing1@x>' });
+    h.storage.addEmail({ id: 'existing2', folderId: 'f-Trash', uid: 2, messageId: '<existing2@x>' });
+    h.storage.addEmail({ id: 'elsewhere', folderId: 'f-INBOX', uid: null, messageId: '<a@x>' });
+
+    await h.queue.bulkMoveToTrash('INBOX', [1, 2], ['missing', 'elsewhere']);
+
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
+  it('uses the explicit row Message-ID for servers without UIDPLUS', async () => {
+    const h = await makeHarness();
+    h.storage.addFolder('Trash');
+    h.storage.addEmail({ id: 'existing', folderId: 'f-Trash', uid: 1, messageId: '<existing@x>' });
+    h.storage.addEmail({ id: 'e1', folderId: 'f-Trash', uid: null, messageId: '<a@x>' });
+    vi.spyOn(h.server, 'moveMessages').mockResolvedValue(new Map());
+    const search = vi.spyOn(h.server, 'search').mockResolvedValue([42]);
+
+    await h.queue.bulkMoveToTrash('INBOX', [1], ['e1']);
+
+    expect(search).toHaveBeenCalledWith({ header: [{ name: 'Message-ID', value: 'a@x' }] });
+    expect(h.storage.updateEmail.mock.calls).toEqual([['e1', { uid: 42 }]]);
+  });
+
+  it('does not write a destination UID when the row moves elsewhere during SEARCH', async () => {
+    const h = await makeHarness();
+    h.storage.addFolder('Trash');
+    const row = h.storage.addEmail({ id: 'e1', folderId: 'f-Trash', uid: null, messageId: '<a@x>' });
+    vi.spyOn(h.server, 'moveMessages').mockResolvedValue(new Map());
+    vi.spyOn(h.server, 'search').mockImplementation(async () => {
+      row.folderId = 'f-INBOX';
+      return [42];
+    });
+
+    await h.queue.bulkMoveToTrash('INBOX', [1], ['e1']);
+
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
+  it('rejects an incomplete UID to row-id mapping before sending a move', async () => {
+    const h = await makeHarness();
+    await expect(h.queue.bulkMoveToTrash('INBOX', [1, 2], ['e1'])).rejects.toThrow(/each source UID/);
+    expect(h.server.callCount('moveMessages')).toBe(0);
+    expect(h.storage.rows()).toHaveLength(0);
+  });
+
   it('falls back to a Message-ID SEARCH when the server returns no UIDPLUS map', async () => {
     const h = await makeHarness();
     h.storage.addFolder('Trash');

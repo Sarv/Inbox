@@ -55,6 +55,7 @@ import {
   requireAccountStorage,
   requireNamedOrActiveStorage,
   resolveAccountTarget,
+  resolveNamedOrActiveAccountTarget,
 } from '../../../../electron/services/account-target';
 import { readRegistryAccounts } from '../../../../electron/services/accounts-registry';
 import { ensureAccountRuntime } from '../../../../electron/services/accounts-runtime';
@@ -174,6 +175,51 @@ describe('resolveAccountTarget — lenient, unchanged', () => {
     await expect(resolveAccountTarget()).resolves.toEqual(active);
     await expect(resolveAccountTarget('acct-a')).resolves.toEqual(active);
     await expect(resolveAccountTarget('acct-gone')).resolves.toEqual(active);
+  });
+});
+
+describe('resolveNamedOrActiveAccountTarget — mutations use the named account', () => {
+  it('uses active storage and engine for no id or the active id', async () => {
+    const active = { storage: h.active, syncEngine: h.activeEngine };
+    await expect(resolveNamedOrActiveAccountTarget()).resolves.toEqual(active);
+    await expect(resolveNamedOrActiveAccountTarget('acct-a')).resolves.toEqual(active);
+    expect(ensureAccountRuntime).not.toHaveBeenCalled();
+    expect(readRegistryAccounts).not.toHaveBeenCalled();
+  });
+
+  it('returns the other account storage and engine together', async () => {
+    await expect(resolveNamedOrActiveAccountTarget('acct-b')).resolves.toEqual({
+      storage: B, syncEngine: { name: 'engine-b' },
+    });
+    expect(ensureAccountRuntime).not.toHaveBeenCalled();
+  });
+
+  it('opens only a configured account whose runtime is not open', async () => {
+    await expect(resolveNamedOrActiveAccountTarget('acct-c')).resolves.toEqual({
+      storage: { name: 'storage-acct-c' }, syncEngine: { name: 'engine-acct-c' },
+    });
+    expect(ensureAccountRuntime).toHaveBeenCalledWith('acct-c');
+  });
+
+  it('rejects a removed account without creating it or using the active account', async () => {
+    await expect(resolveNamedOrActiveAccountTarget('acct-gone')).rejects.toThrow(/acct-gone is not available/);
+    expect(ensureAccountRuntime).not.toHaveBeenCalled();
+    expect(h.created).toEqual([]);
+  });
+
+  it('rejects an unavailable configured account instead of falling back', async () => {
+    vi.mocked(ensureAccountRuntime).mockResolvedValueOnce(null);
+    await expect(resolveNamedOrActiveAccountTarget('acct-c')).rejects.toThrow(/acct-c is not available/);
+  });
+
+  it('surfaces registry failures and resolves named accounts before an active account exists', async () => {
+    h.current = null;
+    await expect(resolveNamedOrActiveAccountTarget('acct-b')).resolves.toEqual({
+      storage: B, syncEngine: { name: 'engine-b' },
+    });
+    h.registryError = new Error('core DB unreadable');
+    await expect(resolveNamedOrActiveAccountTarget('acct-c')).rejects.toThrow(/core DB unreadable/);
+    expect(ensureAccountRuntime).not.toHaveBeenCalled();
   });
 });
 

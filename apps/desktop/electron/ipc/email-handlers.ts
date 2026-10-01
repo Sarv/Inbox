@@ -6,11 +6,11 @@
 
 import * as fs from 'fs';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, type ParsedSearchQuery } from '@sarvinbox/core';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, type ParsedSearchQuery } from '@sarvinbox/core';
 import { ipcMain, dialog, shell } from 'electron';
 import ICAL from 'ical.js';
 
-import { resolveAccountTarget } from '../services/account-target';
+import { resolveAccountTarget, resolveNamedOrActiveAccountTarget } from '../services/account-target';
 import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
 import {
   deferBodyPrefetch,
@@ -375,6 +375,113 @@ export async function moveOrCopyOne(
   const sourceFolder = await storage.getFolder(email.folderId);
   await placeEmailInFolder(storage, syncEngine, email, sourceFolder, destFolder, mode);
   return { ok: true };
+}
+
+/**
+ * Restore only rows that actually belong to Trash. Folder lists are tag-based,
+ * while `folderId` names just one primary copy; a Gmail message can have a
+ * primary All Mail UID and a secondary Trash membership. In that case moving
+ * from `folderId` leaves the Trash tag behind (which hides it from Inbox) and
+ * sends the server the wrong source mailbox/UID.
+ *
+ * Resolve the UID in the tagged Trash mailbox before changing local state. A
+ * secondary Trash UID cannot be inferred from the primary folder's UID while
+ * offline, so leave that row in place and report it as a failure for retry.
+ */
+export async function restoreEmailsFromTrash(
+  storage: ReturnType<typeof requireStorage>,
+  syncEngine: ReturnType<typeof getSyncEngine>,
+  emailIds: string[],
+): Promise<{ restoredIds: string[]; failedIds: string[] }> {
+  const folders = await storage.getFolders();
+  const inbox = folders.find((f: any) => f.path === 'INBOX') ?? findFolderByType(folders as any, 'inbox');
+  if (!inbox) return { restoredIds: [], failedIds: [...emailIds] };
+
+  const trashFolders = folders.filter((f: any) => isTrashFolder(f));
+  const restoredIds: string[] = [];
+  const failedIds: string[] = [];
+
+  for (const id of [...new Set(emailIds)]) {
+    try {
+      const email = await storage.getEmail(id);
+      const trash = email && trashFolders.find((f: any) => hasTag(email.tags || '||', f.path));
+      if (!email || !trash) {
+        failedIds.push(id);
+        continue;
+      }
+
+      const primaryIsTrash = email.folderId === trash.id;
+      let trashUid: number | null = null;
+      // A Message-ID SEARCH is necessary when Trash is secondary: its UID is
+      // in a different mailbox from `email.uid`. It also corrects a stale
+      // primary Trash UID after an earlier server-side move.
+      const realMessageId = email.messageId && !email.messageId.startsWith('<missing-')
+        ? email.messageId.replace(/^<|>$/g, '')
+        : null;
+      if (syncEngine?.isConnected() && realMessageId) {
+        const pool = (syncEngine as any).connectionPool;
+        if (pool) {
+          const { client, release } = await pool.acquire();
+          try {
+            const uids = await withFolderSelected<number[]>(client, trash.path, () =>
+              client.search({ header: [{ name: 'Message-ID', value: realMessageId }] }));
+            trashUid = uids[0] ?? null;
+          } finally {
+            release();
+          }
+        } else {
+          trashUid = await syncEngine.fetchUidByMessageId(trash.path, realMessageId);
+        }
+      } else if (primaryIsTrash && typeof email.uid === 'number' && email.uid > 0) {
+        trashUid = email.uid;
+      }
+
+      // A primary UID from All Mail/Inbox must never be used as a Trash UID.
+      // If a connected SEARCH says the server copy is absent, do not report a
+      // successful restore while leaving it in Trash on the server.
+      // A NULL primary Trash UID may be a move still waiting in the queue.
+      // A local-only restore would leave that move scheduled and re-trash the
+      // message on reconnect. Wait until its actual Trash copy is addressable.
+      if (trashUid == null || !syncEngine) {
+        failedIds.push(id);
+        continue;
+      }
+
+      // Keep UID NULL until MOVE supplies an Inbox UID. The queue remaps by
+      // this row's identity; a Trash UID can collide with unrelated Inbox mail.
+      await storage.updateEmail(id, {
+        folderId: inbox.id,
+        tags: addTag(removeTag(email.tags || '||', trash.path), inbox.path),
+        uid: null,
+      } as any);
+
+      try {
+        const outcome = await syncEngine.move(trash.path, trashUid, inbox.path, id);
+        if (outcome === 'failed') throw new Error('IMAP restore failed');
+      } catch (error) {
+        // Only a rejected request rolls back. Once persisted or accepted, the
+        // queue owns completion and a later local recount cannot undo it.
+        try {
+          await storage.updateEmail(id, {
+            folderId: email.folderId, tags: email.tags, uid: email.uid ?? null,
+          } as any);
+        } catch (rollbackError) {
+          logger.error(`[Main] Restore rollback failed for ${id}:`, rollbackError);
+        }
+        throw error;
+      }
+      restoredIds.push(id);
+    } catch (error) {
+      logger.error(`[Main] Restore from Trash failed for ${id}:`, error);
+      failedIds.push(id);
+    }
+  }
+
+  if (restoredIds.length > 0) {
+    try { await storage.recalculateFolderCounts(); }
+    catch (error) { logger.error('[Main] Restore folder recount failed:', error); }
+  }
+  return { restoredIds, failedIds };
 }
 
 /**
@@ -1328,6 +1435,18 @@ export function registerEmailHandlers(): void {
     }
   });
 
+  /** Restore tagged Trash members to Inbox, including rows whose primary copy is elsewhere. */
+  ipcMain.handle('emails:restoreFromTrash', async (_event, emailIds: string[], accountId?: string) => {
+    try {
+      const { storage, syncEngine } = await resolveAccountTarget(accountId);
+      const data = await restoreEmailsFromTrash(storage, syncEngine, emailIds);
+      return { success: data.failedIds.length === 0, data };
+    } catch (error) {
+      logger.error('Restore from Trash error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
   /**
    * Copy email to an arbitrary folder — the message stays in its current folder
    * AND appears in the destination (on Gmail: also applies that label).
@@ -1862,12 +1981,16 @@ export function registerEmailHandlers(): void {
    * Groups emails by source folder, updates local DB in batch, fires single bulk IMAP call per folder group
    */
   ipcMain.handle('emails:bulkAction', async (_event, emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => {
+    emailIds = [...new Set(emailIds)];
+    const processedIds: string[] = [];
+    const queuedIds: string[] = [];
+    const failedIds: string[] = [];
     try {
       // Route to the rows' OWNING account (unified "All Inboxes" groups its
       // selection by account and calls this once per account) so cross-account
       // bulk actions actually hit the right DB + IMAP engine, instead of only
       // ever the active account (which silently skipped other accounts' rows).
-      const { storage, syncEngine } = await resolveAccountTarget(accountId);
+      const { storage, syncEngine } = await resolveNamedOrActiveAccountTarget(accountId);
 
       if (emailIds.length === 0) {
         return { success: true };
@@ -1890,13 +2013,12 @@ export function registerEmailHandlers(): void {
       const emails = await storage.getEmailsByIds(emailIds);
       const emailById = new Map(emails.map((e) => [e.id, e]));
 
-      // Diagnostic: ids not found in THIS account's DB. bulkAction runs against
-      // the active account only (no per-row accountId), so unified "All Inboxes"
-      // rows owned by another account fall through here and are NOT processed —
-      // a distinct failure mode from the uid-less one below.
+      // A selected row may have vanished during sync. Report it as unprocessed
+      // rather than acknowledging a successful operation on another mailbox.
       const missingIds = emailIds.filter((id) => !emailById.has(id));
+      failedIds.push(...missingIds);
       if (missingIds.length > 0) {
-        logger.info(`[bulkAction] ${action}: ${missingIds.length} of ${emailIds.length} id(s) not in the active account DB (likely another account's rows — not processed)`);
+        logger.warn(`[bulkAction] ${action}: ${missingIds.length} of ${emailIds.length} selected rows unavailable in the owning account`);
       }
 
       for (const emailId of emailIds) {
@@ -1910,7 +2032,10 @@ export function registerEmailHandlers(): void {
         if (!email) continue;
 
         const folder = folderById.get(email.folderId);
-        if (!folder) continue;
+        if (!folder) {
+          failedIds.push(emailId);
+          continue;
+        }
 
         const key = folder.path;
         if (!emailsByFolder.has(key)) {
@@ -1948,6 +2073,7 @@ export function registerEmailHandlers(): void {
             // uid-bearing set as the IMAP op (`uids`); leave uid-less rows in place so
             // they reconcile via sync, not a silent local-only delete.
             const deletable = items.filter((i) => typeof i.uid === 'number' && i.uid > 0);
+            failedIds.push(...items.filter((i) => !deletable.includes(i)).map((i) => i.id));
             if (deletable.length < items.length) {
               logger.warn(`[bulkAction] ${folderPath}: ${items.length - deletable.length} uid-less row(s) left in place for delete (no server UID — avoids a local/server mismatch)`);
             }
@@ -1958,51 +2084,69 @@ export function registerEmailHandlers(): void {
             // Trash instead — so a mis-detected row can never be silently expunged.
             const sourceFolder = allFolders.find((f: any) => f.path === folderPath);
             const isTrash = sourceFolder ? isTrashFolder(sourceFolder) : (folderPath === 'Deleted Items');
+            if (deletable.length === 0) break;
+            if (!syncEngine) {
+              failedIds.push(...deletable.map((i) => i.id));
+              break;
+            }
             if (isTrash && allowPermanent === true) {
-              // Permanent delete from DB
-              await storage.deleteEmails(deletable.map(i => i.id));
-              // IMAP bulk delete. Enqueue REGARDLESS of connection state — the
-              // operationQueue persists the expunge and replays it on reconnect
-              // (gating on isConnected() dropped offline deletes, which a resync
-              // then re-created). folderPath + uids are the source location,
-              // captured before the local mutations above.
-              if (syncEngine) {
-                syncEngine.bulkDelete(folderPath, uids).catch((err: any) => {
-                  logger.error('[Main] Bulk IMAP delete failed:', err);
-                });
+              let outcome: string;
+              try {
+                // Acknowledge only after the server accepts or the durable queue
+                // persists the request. A rejected enqueue must leave Trash intact.
+                outcome = await syncEngine.bulkDelete(folderPath, uids);
+                if (outcome === 'failed') throw new Error('IMAP delete failed');
+              } catch (error) {
+                failedIds.push(...deletable.map((i) => i.id));
+                logger.error('[Main] Bulk IMAP delete failed:', error);
+                break;
               }
+              processedIds.push(...deletable.map((i) => i.id));
+              if (outcome === 'queued') queuedIds.push(...deletable.map((i) => i.id));
+              try { await storage.deleteEmails(deletable.map((i) => i.id)); }
+              catch (error) { logger.error('[Main] Accepted bulk delete local cleanup failed:', error); }
             } else {
               if (isTrash && allowPermanent !== true) {
                 logger.warn(`[bulkAction] delete in ${folderPath}: permanent expunge NOT confirmed by renderer — moving to Trash instead (no silent data loss)`);
               }
               // Find trash folder for local DB update (exact classification).
               const trashFolder = findFolderByType(allFolders as any, 'trash') as any;
-              if (trashFolder) {
+              if (!trashFolder) {
+                failedIds.push(...deletable.map((i) => i.id));
+                break;
+              }
+              const placed: typeof deletable = [];
+              let outcome: string;
+              try {
                 for (const item of deletable) {
-                  let tags = item.email.tags || '';
-                  if (tags.includes('|' + folderPath + '|')) {
-                    tags = tags.replace('|' + folderPath + '|', '|');
-                  }
-                  if (!tags.includes('|' + trashFolder.path + '|')) {
-                    const list = tags.split('|').filter(Boolean);
-                    list.push(trashFolder.path);
-                    tags = '|' + list.join('|') + '|';
-                  }
-                  await storage.updateEmail(item.id, { folderId: trashFolder.id, tags });
-                  // Track deletion in sender stats
-                  if (item.email.fromAddress) {
-                    storage.upsertSenderStats({ email: item.email.fromAddress, deletedCount: 1 }).catch(() => { });
+                  const tags = addTag(removeTag(item.email.tags || '||', folderPath), trashFolder.path);
+                  // Never put a source mailbox UID into Trash. Destination
+                  // remapping uses row ids, even during persisted queue replay.
+                  await storage.updateEmail(item.id, { folderId: trashFolder.id, tags, uid: null } as any);
+                  placed.push(item);
+                }
+                outcome = await syncEngine.bulkMoveToTrash(folderPath, uids, deletable.map((i) => i.id));
+                if (outcome === 'failed') throw new Error('IMAP trash move failed');
+              } catch (error) {
+                failedIds.push(...deletable.map((i) => i.id));
+                for (const item of placed) {
+                  try {
+                    await storage.updateEmail(item.id, {
+                      folderId: item.email.folderId, tags: item.email.tags, uid: item.uid ?? null,
+                    } as any);
+                  } catch (rollbackError) {
+                    logger.error('[Main] Bulk trash rollback failed:', rollbackError);
                   }
                 }
+                logger.error('[Main] Bulk IMAP trash move failed:', error);
+                break;
               }
-              // IMAP bulk move to trash. Enqueue REGARDLESS of connection state
-              // — the operationQueue persists the op and replays it on reconnect
-              // (gating on isConnected() dropped offline actions). folderPath +
-              // uids are the source location, captured before the mutations.
-              if (syncEngine) {
-                syncEngine.bulkMoveToTrash(folderPath, uids).catch((err: any) => {
-                  logger.error('[Main] Bulk IMAP trash move failed:', err);
-                });
+              processedIds.push(...deletable.map((i) => i.id));
+              if (outcome === 'queued') queuedIds.push(...deletable.map((i) => i.id));
+              for (const item of deletable) {
+                if (item.email.fromAddress) {
+                  void storage.upsertSenderStats({ email: item.email.fromAddress, deletedCount: 1 }).catch(() => { });
+                }
               }
             }
             break;
@@ -2204,7 +2348,7 @@ export function registerEmailHandlers(): void {
       // op). Historically these were skipped entirely, so "mark all read" left
       // them unread forever and the folder badge never dropped.
       const uidlessCount = [...emailsByFolder.values()].reduce((n, items) => n + items.filter((i) => !i.uid).length, 0);
-      if (uidlessCount > 0) {
+      if (uidlessCount > 0 && action !== 'delete') {
         logger.info(`[bulkAction] ${action}: ${uidlessCount} row(s) had no server UID — updated locally only`);
       }
 
@@ -2241,10 +2385,23 @@ export function registerEmailHandlers(): void {
         logger.error('[email-handlers] folder unread recount failed:', err);
       }
 
+      if (action === 'delete') {
+        logger.info(`[bulkAction] delete: selected=${emailIds.length}, accepted=${processedIds.length}, queued=${queuedIds.length}, failed=${failedIds.length}`);
+        return {
+          success: failedIds.length === 0,
+          data: { processedIds, queuedIds, failedIds },
+          ...(failedIds.length > 0 ? { error: `${failedIds.length} messages could not be deleted` } : {}),
+        };
+      }
       return { success: true };
     } catch (error) {
       logger.error('Bulk action error:', error);
-      return { success: false, error: (error as Error).message };
+      return {
+        success: false, error: (error as Error).message,
+        ...(action === 'delete' ? { data: {
+          processedIds, queuedIds, failedIds: emailIds.filter((id) => !processedIds.includes(id)),
+        } } : {}),
+      };
     }
   });
 

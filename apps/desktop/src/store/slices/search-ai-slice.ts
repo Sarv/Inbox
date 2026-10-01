@@ -318,10 +318,20 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     // A category list follows the user's setting whatever view it was opened
     // from — the same size the Paginator and goToEmailPage resolve.
     const PAGE_SIZE = getPageSizeForView({ aiCategory: category });
-    // Differentiate between a NEW category selection (user intent — clear
-    // slate is correct) and a BACKGROUND refresh of the same category (sync
-    // just finished, merge additively so scroll/selection isn't nuked).
+    // A refresh of the selected category re-reads its current page. Merging a
+    // new first page into old rows retained messages that left the category.
     const isRefresh = currentCategory === category;
+
+    if (isRefresh) {
+      if (get().loadingMoreEmails) return;
+      const page = get().emailsPage;
+      set({ emailsTotal: 0 });
+      await get().goToEmailPage(page);
+      if (get().viewingAICategory === category && get().emails.length === 0 && get().emailsPage > 0) {
+        await get().goToEmailPage(0);
+      }
+      return;
+    }
 
     // Real total for the category so the paginator shows "1–N of total" (was hard-set
     // to 0) and the number matches the chip — from the SAME count source the chip uses.
@@ -332,27 +342,27 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       unifiedAccountIds: get().accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id),
     });
 
-    if (!isRefresh) {
-      // Keep sectionData cached (not rendered in the AI-category view) so
-      // returning to the sectioned INBOX shows it instantly instead of
-      // hitting the full loading spinner. See selectFolder note.
-      set({
-        loadingEmails: true,
-        emails: [],
-        selectedEmailId: null,
-        highlightedEmailId: null,
-        viewingAICategory: category,
-        viewingSnoozed: false,
-        hasMoreEmails: false,
-        emailsOffset: PAGE_SIZE,
-        // Leaving a section full-page view — clear it so the category paginator
-        // uses the category page size, not the stale section's.
-        viewingSection: null, viewingSectionLabel: null, viewingSectionPageSize: SECTION_FULL_PAGE_SIZE,
-        emailsPage: 0, emailsTotal: 0,
-      });
-    }
+    // Keep sectionData cached (not rendered in the AI-category view) so
+    // returning to the sectioned INBOX shows it instantly instead of
+    // hitting the full loading spinner. See selectFolder note.
+    set({
+      loadingEmails: true,
+      emails: [],
+      selectedEmailId: null,
+      highlightedEmailId: null,
+      viewingAICategory: category,
+      viewingSnoozed: false,
+      hasMoreEmails: false,
+      emailsOffset: PAGE_SIZE,
+      // Leaving a section full-page view — clear it so the category paginator
+      // uses the category page size, not the stale section's.
+      viewingSection: null, viewingSectionLabel: null, viewingSectionPageSize: SECTION_FULL_PAGE_SIZE,
+      emailsPage: 0, emailsTotal: 0,
+    });
     // Bail if the user left this category (or this view) while in flight
-    const isStale = () => get().viewingAICategory !== category;
+    const isStale = () => get().viewingAICategory !== category
+      || get().selectedFolderId !== selectedFolderId
+      || get().selectedVirtualFolder !== selectedVirtualFolder;
     try {
       // On All Inboxes, browse the category across EVERY opted-in account (each
       // row tagged with its accountId for the color) instead of just the active
@@ -370,42 +380,19 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       const total = await fetchCategoryTotal();
       if (isStale()) return;
       if (result.success && result.data) {
-        if (isRefresh) {
-          // Additive: update-in-place + prepend new; never drop existing rows.
-          const fresh = result.data as any[];
-          const currentEmails = get().emails;
-          const existingIds = new Set(currentEmails.map(e => e.id));
-          const freshMap = new Map<string, any>(fresh.map(e => [e.id, e]));
-          const updated = currentEmails.map(e => {
-            const f = freshMap.get(e.id);
-            if (!f) return e;
-            if (e.tags !== f.tags || e.date !== f.date || e.subject !== f.subject
-              || (e as any).threadIsStarred !== (f as any).threadIsStarred
-              || (e as any).threadIsImportant !== (f as any).threadIsImportant) return f;
-            return e;
-          });
-          const newOnes = fresh.filter(e => !existingIds.has(e.id));
-          if (newOnes.length > 0 || updated !== currentEmails) {
-            const merged = [...newOnes, ...updated].sort((a, b) => (b.date || 0) - (a.date || 0));
-            set({ emails: merged, emailsTotal: total });
-          } else {
-            set({ emailsTotal: total });
-          }
-        } else {
-          set({
-            emails: result.data,
-            loadingEmails: false,
-            hasMoreEmails: result.data.length >= PAGE_SIZE,
-            emailsTotal: total,
-          });
-        }
+        set({
+          emails: result.data,
+          loadingEmails: false,
+          hasMoreEmails: total ? result.data.length < total : result.data.length >= PAGE_SIZE,
+          emailsTotal: total,
+        });
       } else {
         console.error('[Store] Failed to load AI category emails:', result.error);
-        if (!isRefresh) set({ loadingEmails: false });
+        set({ loadingEmails: false });
       }
     } catch (error) {
       console.error('[Store] Error loading AI category emails:', error);
-      if (!isRefresh) set({ loadingEmails: false });
+      set({ loadingEmails: false });
     }
   },
 

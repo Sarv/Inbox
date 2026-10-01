@@ -16,9 +16,12 @@ const h = vi.hoisted(() => ({
     getFolder: vi.fn(),
     getFolders: vi.fn(),
     getEmailsByIds: vi.fn(),
+    updateEmail: vi.fn(),
     bulkUpdateTags: vi.fn(),
     recalculateFolderCounts: vi.fn(),
     searchEmails: vi.fn(),
+    upsertSenderStats: vi.fn(),
+    deleteEmails: vi.fn(),
   },
   syncEngine: {
     isConnected: vi.fn(() => true),
@@ -27,6 +30,10 @@ const h = vi.hoisted(() => ({
     bulkMarkAsUnread: vi.fn(),
     bulkStar: vi.fn(),
     bulkUnstar: vi.fn(),
+    fetchUidByMessageId: vi.fn(),
+    move: vi.fn(),
+    bulkMoveToTrash: vi.fn(),
+    bulkDelete: vi.fn(),
   },
   /** false ⇒ getSyncEngine() returns null (account still initialising). */
   engineAvailable: true,
@@ -54,6 +61,7 @@ import {
   CID_REPAIR_MEMORY,
   claimCidRepairAttempt,
   registerEmailHandlers,
+  restoreEmailsFromTrash,
 } from '../../../../electron/ipc/email-handlers';
 import { isRetryableBodyFetchError, looksGoneFromServer } from '../../../../src/store/body-fetch-failures';
 
@@ -70,11 +78,18 @@ beforeEach(() => {
   h.storage.getFolder.mockReset().mockResolvedValue({ path: 'INBOX' });
   h.storage.getFolders.mockReset().mockResolvedValue([]);
   h.storage.getEmailsByIds.mockReset().mockResolvedValue([]);
+  h.storage.updateEmail.mockReset().mockResolvedValue(undefined);
   h.storage.bulkUpdateTags.mockReset().mockResolvedValue(undefined);
   h.storage.recalculateFolderCounts.mockReset().mockResolvedValue(undefined);
   h.storage.searchEmails.mockReset().mockResolvedValue([]);
+  h.storage.upsertSenderStats.mockReset().mockResolvedValue(undefined);
+  h.storage.deleteEmails.mockReset().mockResolvedValue(undefined);
   h.syncEngine.isConnected.mockReset().mockReturnValue(true);
   h.syncEngine.fetchBody.mockReset();
+  h.syncEngine.fetchUidByMessageId.mockReset().mockResolvedValue(null);
+  h.syncEngine.move.mockReset().mockResolvedValue('success');
+  h.syncEngine.bulkMoveToTrash.mockReset().mockResolvedValue('success');
+  h.syncEngine.bulkDelete.mockReset().mockResolvedValue('success');
   for (const method of ['bulkMarkAsRead', 'bulkMarkAsUnread', 'bulkStar', 'bulkUnstar'] as const) {
     h.syncEngine[method].mockReset().mockResolvedValue(undefined);
   }
@@ -86,6 +101,126 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('restoreEmailsFromTrash', () => {
+  const folders = [
+    { id: 'inbox', path: 'INBOX', name: 'Inbox' },
+    { id: 'all', path: '[Gmail]/All Mail', name: 'All Mail' },
+    { id: 'trash', path: '[Gmail]/Trash', name: 'Trash', specialUse: '\\Trash' },
+  ];
+
+  it('moves a secondary Trash copy using its Trash UID and removes the hiding tag', async () => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    h.storage.getEmail.mockResolvedValue({
+      id: 'e1', folderId: 'all', uid: 77 as number | null, messageId: '<e1@example.com>',
+      tags: '|[Gmail]/All Mail|[Gmail]/Trash|promotions|',
+    });
+    h.syncEngine.fetchUidByMessageId.mockResolvedValue(55);
+
+    const result = await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['e1']);
+
+    expect(result).toEqual({ restoredIds: ['e1'], failedIds: [] });
+    expect(h.syncEngine.fetchUidByMessageId).toHaveBeenCalledWith('[Gmail]/Trash', 'e1@example.com');
+    expect(h.syncEngine.move).toHaveBeenCalledWith('[Gmail]/Trash', 55, 'INBOX', 'e1');
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', {
+      folderId: 'inbox', tags: '|[Gmail]/All Mail|promotions|INBOX|', uid: null,
+    });
+  });
+
+  it('has the row ready for the queue to remap and keeps the destination UID after success', async () => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    const row = {
+      id: 'e1', folderId: 'all', uid: 77 as number | null, messageId: '<e1@example.com>',
+      tags: '|[Gmail]/All Mail|[Gmail]/Trash|',
+    };
+    h.storage.getEmail.mockImplementation(async () => ({ ...row }));
+    h.storage.updateEmail.mockImplementation(async (_id: string, patch: any) => {
+      // Folder changes leave UID NULL until the queue remaps by row identity.
+      if (patch.folderId && patch.folderId !== row.folderId && patch.uid === undefined) row.uid = null;
+      Object.assign(row, patch);
+    });
+    h.syncEngine.fetchUidByMessageId.mockResolvedValue(55);
+    h.syncEngine.move.mockImplementation(async (_src: string, _sourceUid: number, _dest: string, emailId: string) => {
+      if (row.folderId === 'inbox' && row.id === emailId) row.uid = 900;
+      return 'success';
+    });
+
+    expect(await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['e1']))
+      .toEqual({ restoredIds: ['e1'], failedIds: [] });
+    expect(row.folderId).toBe('inbox');
+    expect(row.uid).toBe(900); // queue's remap survived; no later patch overwrote it
+    expect(row.tags).toBe('|[Gmail]/All Mail|INBOX|');
+  });
+
+  it('keeps a secondary Trash row in place when offline (its primary UID is not a Trash UID)', async () => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    h.storage.getEmail.mockResolvedValue({
+      id: 'e1', folderId: 'all', uid: 77, messageId: '<e1@example.com>',
+      tags: '|[Gmail]/All Mail|[Gmail]/Trash|',
+    });
+    h.syncEngine.isConnected.mockReturnValue(false);
+
+    expect(await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['e1']))
+      .toEqual({ restoredIds: [], failedIds: ['e1'] });
+    expect(h.syncEngine.move).not.toHaveBeenCalled();
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
+  it('restores only Trash members and leaves a live sibling untouched', async () => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    h.storage.getEmail.mockImplementation(async (id: string) => id === 'trash-mail'
+      ? { id, folderId: 'trash', uid: 9, tags: '|[Gmail]/Trash|' }
+      : { id, folderId: 'inbox', uid: 10, tags: '|INBOX|' });
+
+    expect(await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['trash-mail', 'live-mail']))
+      .toEqual({ restoredIds: ['trash-mail'], failedIds: ['live-mail'] });
+    expect(h.syncEngine.move).toHaveBeenCalledTimes(1);
+    expect(h.syncEngine.move).toHaveBeenCalledWith('[Gmail]/Trash', 9, 'INBOX', 'trash-mail');
+    expect(h.storage.updateEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the exact Trash placement when the server move fails', async () => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    const row = { id: 'e1', folderId: 'trash', uid: 9, tags: '|[Gmail]/Trash|' };
+    h.storage.getEmail.mockImplementation(async () => ({ ...row }));
+    h.storage.updateEmail.mockImplementation(async (_id: string, patch: any) => { Object.assign(row, patch); });
+    h.syncEngine.move.mockRejectedValue(new Error('NO permission'));
+
+    expect(await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['e1']))
+      .toEqual({ restoredIds: [], failedIds: ['e1'] });
+    expect(h.storage.updateEmail).toHaveBeenCalledTimes(2); // local placement, then rollback
+    expect(row).toEqual({ id: 'e1', folderId: 'trash', uid: 9, tags: '|[Gmail]/Trash|' });
+  });
+
+  it('keeps a queued restore in Inbox with no foreign Trash UID', async () => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    const row = { id: 'e1', folderId: 'trash', uid: 9 as number | null, tags: '|[Gmail]/Trash|' };
+    h.storage.getEmail.mockImplementation(async () => ({ ...row }));
+    h.storage.updateEmail.mockImplementation(async (_id: string, patch: any) => { Object.assign(row, patch); });
+    h.syncEngine.isConnected.mockReturnValue(false);
+    h.syncEngine.move.mockResolvedValue('queued');
+
+    expect(await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['e1']))
+      .toEqual({ restoredIds: ['e1'], failedIds: [] });
+    expect(h.syncEngine.move).toHaveBeenCalledWith('[Gmail]/Trash', 9, 'INBOX', 'e1');
+    expect(row).toEqual({ id: 'e1', folderId: 'inbox', uid: null, tags: '|INBOX|' });
+  });
+
+  it.each([true, false])('does not locally restore a queued delete whose Trash UID is unresolved (connected=%s)', async (connected) => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    h.storage.getEmail.mockResolvedValue({
+      id: 'queued-delete', folderId: 'trash', uid: null,
+      messageId: '<pending@example.com>', tags: '|[Gmail]/Trash|',
+    });
+    h.syncEngine.isConnected.mockReturnValue(connected);
+    h.syncEngine.fetchUidByMessageId.mockResolvedValue(null);
+
+    expect(await restoreEmailsFromTrash(h.storage as never, h.syncEngine as never, ['queued-delete']))
+      .toEqual({ restoredIds: [], failedIds: ['queued-delete'] });
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+    expect(h.syncEngine.move).not.toHaveBeenCalled();
+  });
 });
 
 describe('emails:fetchBodiesBatch', () => {
@@ -143,6 +278,149 @@ describe('emails:fetchBodiesBatch', () => {
     h.syncEngine.fetchBody.mockResolvedValue({ rawBody: 'r', cleanBody: 'c', contentType: 'text/html' });
     await fetchBodiesBatch()(null, ['a', 'b']);
     expect(batchWarns()).toHaveLength(0);
+  });
+});
+
+describe('emails:bulkAction — deletion acknowledgements', () => {
+  const bulkAction = () => h.handlers.get('emails:bulkAction')!;
+  const folders = [
+    { id: 'inbox', path: 'INBOX' },
+    { id: 'all', path: '[Gmail]/All Mail' },
+    { id: 'promotions', path: 'Sarv Inbox/Promotions' },
+    { id: 'trash', path: '[Gmail]/Trash', specialUse: '\\Trash' },
+  ];
+  const seed = (rows: any[]) => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    h.storage.getEmailsByIds.mockResolvedValue(rows);
+  };
+
+  it('acknowledges all 25 across immediate and queued source groups', async () => {
+    const rows = [
+      ...Array.from({ length: 10 }, (_, i) => ({ id: `a${i}`, folderId: 'all', uid: i + 1, tags: '|[Gmail]/All Mail|' })),
+      ...Array.from({ length: 3 }, (_, i) => ({ id: `b${i}`, folderId: 'inbox', uid: i + 1, tags: '|INBOX|' })),
+      ...Array.from({ length: 12 }, (_, i) => ({ id: `c${i}`, folderId: 'promotions', uid: i + 1, tags: '|Sarv Inbox/Promotions|' })),
+    ];
+    seed(rows);
+    h.syncEngine.bulkMoveToTrash.mockImplementation(async (path: string) => path === '[Gmail]/All Mail' ? 'success' : 'queued');
+
+    const result = await bulkAction()(null, rows.map((e) => e.id), 'delete');
+
+    expect(result.success).toBe(true);
+    expect(result.data.processedIds).toEqual(rows.map((e) => e.id));
+    expect(result.data.queuedIds).toEqual(rows.slice(10).map((e) => e.id));
+    expect(result.data.failedIds).toEqual([]);
+    expect(h.syncEngine.bulkMoveToTrash).toHaveBeenCalledTimes(3);
+    for (const row of rows.slice(10)) {
+      expect(h.storage.updateEmail).toHaveBeenCalledWith(row.id, expect.objectContaining({ folderId: 'trash', uid: null }));
+    }
+  });
+
+  it('reports missing, UID-less and unknown-folder rows instead of hiding them', async () => {
+    seed([
+      { id: 'ok', folderId: 'inbox', uid: 1, tags: '|INBOX|' },
+      { id: 'no-uid', folderId: 'inbox', uid: null, tags: '|INBOX|' },
+      { id: 'no-folder', folderId: 'gone', uid: 2, tags: '|gone|' },
+    ]);
+    const result = await bulkAction()(null, ['ok', 'no-uid', 'no-folder', 'missing'], 'delete');
+
+    expect(result.success).toBe(false);
+    expect(result.data.processedIds).toEqual(['ok']);
+    expect(result.data.failedIds).toEqual(expect.arrayContaining(['missing', 'no-folder', 'no-uid']));
+    expect(result.data.failedIds).toHaveLength(3);
+    expect(h.syncEngine.bulkMoveToTrash).toHaveBeenCalledWith('INBOX', [1], ['ok']);
+    expect(h.storage.updateEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls back only the failed source group and continues the remaining group', async () => {
+    const row = { id: 'failed', folderId: 'inbox', uid: 9, tags: '|INBOX|promotions|' };
+    seed([row, { id: 'ok', folderId: 'all', uid: 10, tags: '|[Gmail]/All Mail|' }]);
+    h.syncEngine.bulkMoveToTrash.mockImplementation(async (path: string) => {
+      if (path === 'INBOX') throw new Error('queue write failed');
+      return 'success';
+    });
+
+    const result = await bulkAction()(null, ['failed', 'ok'], 'delete');
+
+    expect(result.data).toEqual({ processedIds: ['ok'], queuedIds: [], failedIds: ['failed'] });
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('failed', {
+      folderId: 'inbox', uid: 9, tags: '|INBOX|promotions|',
+    });
+  });
+
+  it('keeps the destination UID remapped by the queue', async () => {
+    const row = { id: 'e1', folderId: 'inbox', uid: 9 as number | null, tags: '|INBOX|' };
+    seed([row]);
+    h.storage.updateEmail.mockImplementation(async (_id: string, patch: any) => { Object.assign(row, patch); });
+    h.syncEngine.bulkMoveToTrash.mockImplementation(async (_path: string, _uids: number[], emailIds: string[]) => {
+      if (row.folderId === 'trash' && row.id === emailIds[0]) row.uid = 500;
+      return 'success';
+    });
+
+    expect((await bulkAction()(null, ['e1'], 'delete')).data.processedIds).toEqual(['e1']);
+    expect(row).toEqual({ id: 'e1', folderId: 'trash', uid: 500, tags: '|[Gmail]/Trash|' });
+  });
+
+  it.each(['no engine', 'no trash folder'])('leaves rows in place with %s', async (condition) => {
+    seed([{ id: 'e1', folderId: 'inbox', uid: 9, tags: '|INBOX|' }]);
+    if (condition === 'no engine') h.engineAvailable = false;
+    else h.storage.getFolders.mockResolvedValue(folders.filter((f) => f.id !== 'trash'));
+
+    const result = await bulkAction()(null, ['e1'], 'delete');
+
+    expect(result.data).toEqual({ processedIds: [], queuedIds: [], failedIds: ['e1'] });
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+    expect(h.syncEngine.bulkMoveToTrash).not.toHaveBeenCalled();
+  });
+
+  it('leaves Trash intact when a confirmed permanent-delete enqueue fails', async () => {
+    seed([{ id: 'e1', folderId: 'trash', uid: 9, tags: '|[Gmail]/Trash|' }]);
+    h.syncEngine.bulkDelete.mockRejectedValue(new Error('queue write failed'));
+
+    const result = await bulkAction()(null, ['e1'], 'delete', undefined, true);
+
+    expect(result.data.failedIds).toEqual(['e1']);
+    expect(h.storage.deleteEmails).not.toHaveBeenCalled();
+  });
+
+  it('keeps an accepted permanent delete acknowledged if local cleanup fails', async () => {
+    seed([{ id: 'e1', folderId: 'trash', uid: 9, tags: '|[Gmail]/Trash|' }]);
+    h.syncEngine.bulkDelete.mockResolvedValue('queued');
+    h.storage.deleteEmails.mockRejectedValue(new Error('local write failed'));
+
+    const result = await bulkAction()(null, ['e1'], 'delete', undefined, true);
+
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({ processedIds: ['e1'], queuedIds: ['e1'], failedIds: [] });
+  });
+
+  it('does not do fallible UID cleanup after a queued trash request is accepted', async () => {
+    seed([{ id: 'e1', folderId: 'inbox', uid: 9, tags: '|INBOX|' }]);
+    h.syncEngine.bulkMoveToTrash.mockResolvedValue('queued');
+    // A second write would have failed and rolled back a move already persisted.
+    h.storage.updateEmail.mockResolvedValueOnce(undefined).mockRejectedValue(new Error('later write failed'));
+
+    const result = await bulkAction()(null, ['e1'], 'delete');
+
+    expect(result.data).toEqual({ processedIds: ['e1'], queuedIds: ['e1'], failedIds: [] });
+    expect(h.storage.updateEmail).toHaveBeenCalledTimes(1);
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', {
+      folderId: 'trash', tags: '|[Gmail]/Trash|', uid: null,
+    });
+  });
+
+  it('does not acknowledge a delete before its queue operation completes', async () => {
+    seed([{ id: 'e1', folderId: 'inbox', uid: 9, tags: '|INBOX|' }]);
+    let complete!: (result: string) => void;
+    h.syncEngine.bulkMoveToTrash.mockReturnValue(new Promise((resolve) => { complete = resolve; }));
+    let acknowledged = false;
+    const pending = bulkAction()(null, ['e1', 'e1'], 'delete').then((result: any) => {
+      acknowledged = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(h.syncEngine.bulkMoveToTrash).toHaveBeenCalled());
+    expect(acknowledged).toBe(false);
+    complete('queued');
+    expect((await pending).data).toEqual({ processedIds: ['e1'], queuedIds: ['e1'], failedIds: [] });
   });
 });
 

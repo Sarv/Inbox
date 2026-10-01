@@ -803,6 +803,7 @@ describe('refreshVirtualFolder — a refresh must not leave the page window', ()
       fresh: () => [],
       unified: { emails: rows('u', pageSize), total: 5000, hasMore: true },
     });
+    h.state.selectedVirtualFolder = 'virtual-unified';
 
     await h.slice.refreshVirtualFolder('unified');
 
@@ -811,12 +812,33 @@ describe('refreshVirtualFolder — a refresh must not leave the page window', ()
     expect(h.state.emailsOffset).toBe(2 * pageSize + pageSize);
   });
 
+  it('does not paint an in-flight unified refresh into Trash', async () => {
+    const h = harness({ fresh: () => [] });
+    h.state.selectedVirtualFolder = 'virtual-unified';
+    let resolve!: (value: unknown) => void;
+    (globalThis as any).window.electronAPI.accounts.unifiedInbox = vi.fn(() =>
+      new Promise((done) => { resolve = done; }));
+
+    const refreshing = h.slice.refreshVirtualFolder('unified');
+    // selectFolder(Trash) clears the virtual selection and starts its own list.
+    h.state.selectedVirtualFolder = null;
+    h.state.selectedFolderId = 'trash';
+    h.state.emails = rows('trash-', 1);
+    h.state.emailsTotal = 1;
+    resolve({ success: true, data: { emails: rows('inbox-', 2), total: 200, hasMore: true } });
+    await refreshing;
+
+    expect(h.state.emails.map((email: any) => email.id)).toEqual(['trash-0']);
+    expect(h.state.emailsTotal).toBe(1);
+  });
+
   // Breaks: Snoozed refreshed itself with snooze RECORDS, which are not rows the
   // list can render, and called however many it got the total. It now takes the
   // same page-of-conversations path as every other virtual folder, with the
   // total from the counter the sidebar badge reads.
   it('snoozed: refreshes a page of emails and takes the counter as its total', async () => {
     const h = harness({ page: 1, fresh: () => rows('s', 3), counts: { snoozed: 9 } });
+    h.state.selectedVirtualFolder = 'virtual-snoozed';
 
     await h.slice.refreshVirtualFolder('snoozed');
 
@@ -824,6 +846,90 @@ describe('refreshVirtualFolder — a refresh must not leave the page window', ()
     expect(h.offsets).toEqual([snoozedSize]); // the page the reader is on
     expect(h.state.emailsTotal).toBe(9);
     expect(h.state.emails.map((e: any) => e.id)).toEqual(['s0', 's1', 's2']);
+  });
+});
+
+describe('Promotions over All Inboxes stays category-scoped', () => {
+  const makeHarness = () => {
+    const state: Record<string, any> = {
+      accounts: [{ id: 'acct-a', includeInUnified: true }],
+      folders: [],
+      selectedFolderId: null,
+      selectedVirtualFolder: 'virtual-unified',
+      viewingAICategory: 'promotions',
+      viewingSection: null,
+      viewingSectionPageSize: 0,
+      emails: [row('promo-1')],
+      emailsPage: 0,
+      emailsOffset: 1,
+      emailsTotal: 2,
+      hasMoreEmails: true,
+      loadingMoreEmails: false,
+    };
+    const unifiedInbox = vi.fn(async ({ aiCategory, offset }: { aiCategory?: string; offset: number }) => ({
+      success: true,
+      data: aiCategory === 'promotions'
+        ? { emails: [row(offset ? 'promo-2' : 'promo-1')], total: 2, hasMore: offset === 0 }
+        : { emails: [row('unrelated')], total: 50, hasMore: true },
+    }));
+    (globalThis as any).window = {
+      electronAPI: {
+        accounts: {
+          unifiedInbox,
+          unifiedCategoryCounts: vi.fn(async () => ({ success: true, data: { promotions: 2 } })),
+        },
+      },
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
+    const get = () => ({ ...slice, ...state });
+    const slice = createEmailsSlice(set as any, get as any, undefined as any);
+    return { state, slice, unifiedInbox };
+  };
+
+  afterEach(() => { delete (globalThis as any).window; });
+
+  it('reloads the current page through the Promotions query after a delete', async () => {
+    const h = makeHarness();
+    h.state.emails = [];
+    h.state.emailsTotal = 0;
+
+    await h.slice.goToEmailPage(0);
+
+    expect(h.unifiedInbox).toHaveBeenCalledWith(expect.objectContaining({ aiCategory: 'promotions', offset: 0 }));
+    expect(h.state.emails.map((email: any) => email.id)).toEqual(['promo-1']);
+    expect(h.state.viewingAICategory).toBe('promotions');
+  });
+
+  it('loads the next page through the same Promotions query', async () => {
+    const h = makeHarness();
+
+    await h.slice.loadMoreEmails();
+
+    expect(h.unifiedInbox).toHaveBeenCalledWith(expect.objectContaining({ aiCategory: 'promotions', offset: 1 }));
+    expect(h.state.emails.map((email: any) => email.id)).toEqual(['promo-1', 'promo-2']);
+  });
+
+  it('does not let an unfiltered unified refresh overwrite Promotions', async () => {
+    const h = makeHarness();
+
+    await h.slice.refreshVirtualFolder('unified');
+
+    expect(h.state.emails.map((email: any) => email.id)).toEqual(['promo-1']);
+  });
+
+  it('refreshes Promotions after a cross-account sync without loading all inboxes', async () => {
+    const h = makeHarness();
+    h.state.accounts.push({ id: 'acct-b', includeInUnified: true });
+    h.state.activeAccountId = 'acct-a';
+    (globalThis as any).window.electronAPI.accounts.backgroundSync = vi.fn(async () => ({ success: true, data: { unread: 0 } }));
+    h.state.loadAICategoryEmails = vi.fn(async () => {});
+    h.state.refreshVirtualFolder = vi.fn(async () => {});
+    h.state.refreshUnreadSummary = vi.fn(async () => {});
+
+    await h.slice.runBackgroundSyncCycle();
+
+    expect(h.state.loadAICategoryEmails).toHaveBeenCalledWith('promotions');
+    expect(h.state.refreshVirtualFolder).not.toHaveBeenCalled();
   });
 });
 
@@ -990,6 +1096,7 @@ describe('Starred/Important/All Email page in CONVERSATIONS, not messages', () =
   it('a background refresh caps the window by conversation, never mid-thread', async () => {
     const onScreen = conversation(2, 3);
     const h = harness(() => conversation(starredSize + 2, 3), 60, { emails: onScreen });
+    h.state.selectedVirtualFolder = 'virtual-starred';
 
     await h.slice.refreshVirtualFolder('starred');
 

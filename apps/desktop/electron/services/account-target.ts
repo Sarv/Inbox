@@ -79,6 +79,23 @@ export async function resolveAccountTarget(
 }
 
 /**
+ * Resolve a mutation's storage and sync engine. A named account must resolve
+ * to its own runtime; an unavailable or removed account is an error instead
+ * of a fallback to the active mailbox. Requests without an id use the active
+ * account, preserving the single-account path.
+ */
+export async function resolveNamedOrActiveAccountTarget(
+  accountId?: string,
+): Promise<{ storage: AccountStorage; syncEngine: AccountSyncEngine }> {
+  if (!accountId || accountId === getCurrentAccountId()) {
+    return { storage: requireStorage(), syncEngine: getSyncEngine() };
+  }
+  const found = await lookupAccountRuntime(accountId, { strict: true });
+  if (!found) throw new Error(`Account ${accountId} is not available`);
+  return found;
+}
+
+/**
  * STRICT: the storage of exactly `accountId`, or a throw — NEVER another
  * account's, and never a database created for an id that is not configured.
  *

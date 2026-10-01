@@ -307,6 +307,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     syncStarred: () => ipcRenderer.invoke('emails:syncStarred'),
     moveToFolder: (emailId: string, folderId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:moveToFolder', emailId, folderId, accountId),
+    restoreFromTrash: (emailIds: string[], accountId?: string) =>
+      ipcRenderer.invoke('emails:restoreFromTrash', emailIds, accountId),
     copyToFolder: (emailId: string, folderId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:copyToFolder', emailId, folderId, accountId),
     bulkMoveToFolder: (emailIds: string[], folderId: string, accountId?: string) =>
@@ -1277,6 +1279,7 @@ export interface ElectronAPI {
     markImportant: (emailId: string, important: boolean) => Promise<{ success: boolean; error?: string }>;
     syncStarred: () => Promise<{ success: boolean; data?: { synced: number; total: number }; error?: string }>;
     moveToFolder: (emailId: string, folderId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    restoreFromTrash: (emailIds: string[], accountId?: string) => Promise<{ success: boolean; data?: { restoredIds: string[]; failedIds: string[] }; error?: string }>;
     copyToFolder: (emailId: string, folderId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     bulkMoveToFolder: (emailIds: string[], folderId: string, accountId?: string) => Promise<{ success: boolean; data?: { moved: number }; error?: string }>;
     bulkCopyToFolder: (emailIds: string[], folderId: string, accountId?: string) => Promise<{ success: boolean; data?: { copied: number }; error?: string }>;
@@ -1286,7 +1289,7 @@ export interface ElectronAPI {
     moveFromSpam: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     archive: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     delete: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
-    bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => Promise<{ success: boolean; error?: string }>;
+    bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => Promise<{ success: boolean; data?: { processedIds: string[]; queuedIds?: string[]; failedIds: string[] }; error?: string }>;
     allowImagesForSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     getImageAllowedSenders: (accountId?: string) => Promise<{ success: boolean; data?: string[]; error?: string }>;
     disallowImagesForSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;

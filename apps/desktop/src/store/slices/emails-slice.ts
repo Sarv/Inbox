@@ -592,15 +592,19 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
 
     const PAGE_SIZE = getPageSizeForState(get());
 
-    // Unified "All Inboxes" pagination — over-fetch per account + merge (main),
-    // then append only genuinely new rows (dedupe by id across the merge window).
+    // Unified pagination keeps an active category in the server query. The
+    // category pill leaves virtual-unified selected as its underlying view.
     if (selectedVirtualFolder === 'virtual-unified') {
       set({ loadingMoreEmails: true });
       try {
         const accountIds = get().accounts
           .filter((a) => a.includeInUnified !== false)
           .map((a) => a.id);
-        const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset: emailsOffset });
+        const res = await window.electronAPI.accounts.unifiedInbox({
+          accountIds, limit: PAGE_SIZE, offset: emailsOffset,
+          ...(viewingAICategory ? { aiCategory: viewingAICategory } : {}),
+        });
+        if (get().selectedVirtualFolder !== selectedVirtualFolder || get().viewingAICategory !== viewingAICategory) return;
         if (res?.success && res.data && res.data.emails.length > 0) {
           const currentEmails = get().emails;
           const existingIds = new Set(currentEmails.map((e) => e.id));
@@ -756,10 +760,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         set({ emails: rows, emailsPage: page, emailsOffset: offset + rows.length, emailsTotal: total, hasMoreEmails: offset + rows.length < total });
         return;
       }
-      // Unified "All Inboxes" (no exact total → prev/next gated by hasMore).
-      if (selectedVirtualFolder === 'virtual-unified') {
+      // A category over All Inboxes must reach the category branch below.
+      if (selectedVirtualFolder === 'virtual-unified' && !viewingAICategory) {
         const accountIds = accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id);
         const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset });
+        if (get().selectedVirtualFolder !== 'virtual-unified' || get().viewingAICategory) return;
         if (res?.success && res.data) {
           set({ emails: res.data.emails, emailsPage: page, emailsOffset: offset + res.data.emails.length, hasMoreEmails: res.data.hasMore, emailsTotal: res.data.total ?? 0 });
         }
@@ -798,6 +803,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
               })
             : Promise.resolve(cachedTotal),
         ]);
+        if (get().viewingAICategory !== viewingAICategory
+          || get().selectedVirtualFolder !== selectedVirtualFolder
+          || get().selectedFolderId !== selectedFolderId) return;
         set({ emails: rows, emailsPage: page, emailsOffset: offset + rows.length, hasMoreEmails: total ? offset + rows.length < total : rows.length >= PAGE_SIZE, emailsTotal: total });
         return;
       }
@@ -1196,6 +1204,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     // mail into page 4's list and grow it past the window ("1-111 of ...").
     const page = get().emailsPage;
     const offset = page * PAGE_SIZE;
+    // A folder switch clears the virtual selection before its own list loads.
+    // Ignore an older virtual response or it can paint Inbox rows under Trash.
+    const expectedVirtualFolder = `virtual-${type}`;
+    const isStale = () => get().selectedVirtualFolder !== expectedVirtualFolder
+      || !!get().viewingAICategory || get().emailsPage !== page;
     try {
       let result;
       if (type === 'unified') {
@@ -1206,6 +1219,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           .filter((a) => a.includeInUnified !== false)
           .map((a) => a.id);
         const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset });
+        if (isStale()) return;
         if (res?.success && res.data) {
           const merged = res.data.emails as any[];
           set({ emails: merged, hasMoreEmails: res.data.hasMore, emailsOffset: offset + merged.length, emailsTotal: res.data.total ?? 0 });
@@ -1239,6 +1253,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         // `viewingSnoozed` and reloads through loadSnoozedEmails.)
         result = await window.electronAPI.snooze.listEmails({ limit: PAGE_SIZE, offset });
       }
+      if (isStale()) return;
       if (result?.success && result.data) {
         // Merge instead of replace to avoid flicker, but CAP to the page window:
         // a refresh must never leave more rows on screen than the page holds.
@@ -1252,6 +1267,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           threadPaged ? (row: any) => threadRowKey(row) : undefined,
         );
         const total = await fetchVirtualFolderTotal(`virtual-${type}`);
+        if (isStale()) return;
         const mergedRows = threadPaged ? threadRowCount(merge.emails as any[]) : merge.emails.length;
         const freshRows = threadPaged ? threadRowCount(freshEmails) : freshEmails.length;
         set({
@@ -1338,7 +1354,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       }
       // If the merged view is open, refresh it so newly-synced mail appears.
       if (get().selectedVirtualFolder === 'virtual-unified') {
-        await get().refreshVirtualFolder('unified');
+        const category = get().viewingAICategory;
+        if (category) await get().loadAICategoryEmails(category);
+        else await get().refreshVirtualFolder('unified');
       }
       // Recompute every account's unread badge from LOCAL folder counts (no IMAP
       // needed, so it's accurate even when an account's background IMAP sync

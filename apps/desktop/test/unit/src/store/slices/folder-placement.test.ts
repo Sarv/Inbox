@@ -9,10 +9,12 @@ const loadSlice = async (seed: Record<string, any> = {}) => {
   vi.resetModules();
   type Res = { success: boolean; error?: string; data?: any };
   const emailsApi = {
+    moveToTrash: vi.fn(async (): Promise<Res> => ({ success: true })),
     moveToFolder: vi.fn(async (): Promise<Res> => ({ success: true })),
     copyToFolder: vi.fn(async (): Promise<Res> => ({ success: true })),
     bulkMoveToFolder: vi.fn(async (): Promise<Res> => ({ success: true, data: { moved: 2 } })),
     bulkCopyToFolder: vi.fn(async (): Promise<Res> => ({ success: true, data: { copied: 2 } })),
+    restoreFromTrash: vi.fn(async (): Promise<Res> => ({ success: true, data: { restoredIds: ['e1'], failedIds: [] } })),
   };
   (globalThis as any).window = { electronAPI: { emails: emailsApi } };
   const mod = await import('../../../../../src/store/slices/email-actions-slice');
@@ -29,6 +31,7 @@ const loadSlice = async (seed: Record<string, any> = {}) => {
     _accountIdFor: () => 'acct-1',
     loadFolders: vi.fn(),
     refreshCategoryCounts: vi.fn(),
+    goToEmailPage: vi.fn(),
   };
   return { get, actions: slice as any, emailsApi };
 };
@@ -105,5 +108,64 @@ describe('bulk move / copy to folder', () => {
     await actions.bulkMoveToFolder([], 'folderX');
     expect(emailsApi.moveToFolder).not.toHaveBeenCalled();
     expect(emailsApi.bulkMoveToFolder).not.toHaveBeenCalled();
+  });
+});
+
+describe('restoreFromTrash', () => {
+  it('removes only confirmed restorations and refills the Trash page', async () => {
+    const { get, actions, emailsApi } = await loadSlice({
+      emails: rows('e1', 'e2'), searchResults: rows('e1', 'e2'),
+      selectedEmailId: 'e2', selectedFolderId: 'trash', emailsPage: 0,
+      folders: [{ id: 'trash', path: '[Gmail]/Trash', specialUse: '\\Trash' }],
+    });
+    emailsApi.restoreFromTrash.mockResolvedValueOnce({
+      success: false, data: { restoredIds: ['e1'], failedIds: ['e2'] },
+    });
+
+    expect(await actions.restoreFromTrash(['e1', 'e2'])).toEqual(['e1']);
+    expect(emailsApi.restoreFromTrash).toHaveBeenCalledWith(['e1', 'e2'], 'acct-1');
+    expect(get().emails.map((e: any) => e.id)).toEqual(['e2']);
+    expect(get().searchResults.map((e: any) => e.id)).toEqual(['e2']);
+    expect(get().selectedEmailId).toBe('e2');
+    expect(get().loadFolders).toHaveBeenCalled();
+    expect(get().goToEmailPage).toHaveBeenCalledWith(0);
+  });
+
+  it('keeps failed rows visible', async () => {
+    const { get, actions, emailsApi } = await loadSlice({ emails: rows('e1') });
+    emailsApi.restoreFromTrash.mockResolvedValueOnce({ success: false, data: { restoredIds: [], failedIds: ['e1'] } });
+
+    expect(await actions.restoreFromTrash(['e1'])).toEqual([]);
+    expect(get().emails.map((e: any) => e.id)).toEqual(['e1']);
+    expect(get().loadFolders).not.toHaveBeenCalled();
+  });
+});
+
+describe('commitDelete in an AI category', () => {
+  it('refills and clamps the page after the last Promotions row commits', async () => {
+    const { get, actions, emailsApi } = await loadSlice({
+      emails: [],
+      emailsPage: 1,
+      emailsTotal: 26,
+      viewingAICategory: 'promotions',
+      pendingDeletes: [{ emailId: 'e1', email: { id: 'e1' }, inTrash: false }],
+    });
+    get().goToEmailPage.mockImplementation(async (page: number) => {
+      expect(get().emailsTotal).toBe(0); // the category query must recount
+      if (page === 0) {
+        get().emails = rows('next-promotion');
+        get().emailsPage = 0;
+      }
+    });
+
+    await actions.commitDelete('e1');
+
+    expect(emailsApi.moveToTrash).toHaveBeenCalledWith('e1', 'acct-1');
+    expect(get().goToEmailPage).toHaveBeenNthCalledWith(1, 1);
+    expect(get().goToEmailPage).toHaveBeenNthCalledWith(2, 0);
+    expect(get().goToEmailPage).toHaveBeenCalledTimes(2);
+    expect(get().emails.map((email: { id: string }) => email.id)).toEqual(['next-promotion']);
+    expect(get().viewingAICategory).toBe('promotions');
+    expect(get().pendingDeletes).toEqual([]);
   });
 });

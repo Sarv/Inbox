@@ -828,6 +828,27 @@ describe('mergeNewEmails (page-window refresh)', () => {
     expect(state.emails.map((e: any) => e.id)).toEqual(['e1']);
   });
 
+  it('does not paint an in-flight Inbox merge into Trash', async () => {
+    const { slice, state, list } = await mergeHarness(
+      {
+        folders: [{ id: 'f-inbox', path: 'INBOX' }, { id: 'f-trash', path: '[Gmail]/Trash' }],
+        selectedFolderId: 'f-inbox',
+        emails: [row('inbox-old', 5)],
+      },
+      [],
+    );
+    let resolve!: (value: { success: boolean; data: ReturnType<typeof row>[] }) => void;
+    list.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+
+    const merging = slice.mergeNewEmails('f-inbox');
+    state.selectedFolderId = 'f-trash';
+    state.emails = [row('trash', 7)];
+    resolve({ success: true, data: [row('inbox-new', 9)] });
+    await merging;
+
+    expect(state.emails.map((email: any) => email.id)).toEqual(['trash']);
+  });
+
   it('swallows an IPC failure rather than breaking the sync-complete handler', async () => {
     vi.resetModules();
     (globalThis as any).window = {
@@ -841,6 +862,31 @@ describe('mergeNewEmails (page-window refresh)', () => {
 });
 
 describe('mergeNewEmailsVirtualStarred — the window is CONVERSATIONS', () => {
+  it('does not paint an in-flight All Email merge into Trash', async () => {
+    vi.resetModules();
+    let resolve!: (value: unknown) => void;
+    (globalThis as any).window = { electronAPI: { emails: {
+      getAll: vi.fn(() => new Promise((done) => { resolve = done; })),
+    } } };
+    const mod = await import('../../../../../src/store/slices/sync-slice');
+    const state: Record<string, any> = {
+      emails: [], emailsPage: 0, selectedVirtualFolder: 'virtual-all',
+      viewingSection: null, viewingSectionPageSize: 0, viewingAICategory: null,
+      selectedFolderId: null, folders: [],
+    };
+    const set = (patch: Record<string, any>) => { Object.assign(state, patch); };
+    const slice = mod.createSyncSlice(set as never, (() => state) as never, {} as never);
+
+    const merging = slice.mergeNewEmailsVirtualAll();
+    state.selectedVirtualFolder = null;
+    state.selectedFolderId = 'f-trash';
+    state.emails = [{ id: 'trash', threadId: 'trash-thread' }];
+    resolve({ success: true, data: [{ id: 'inbox', threadId: 'inbox-thread' }] });
+    await merging;
+
+    expect(state.emails.map((email: any) => email.id)).toEqual(['trash']);
+  });
+
   // Breaks: getStarred hands back every message of the page's threads, so a
   // message-grained cap chops the tail off the last conversation — the row
   // renders missing its older mail and the next page repeats it.

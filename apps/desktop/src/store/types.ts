@@ -400,6 +400,8 @@ export interface EmailActionsSlice {
   /** Copy a selection to a folder in one bulk op (originals stay). */
   bulkCopyToFolder: (emailIds: string[], destFolderId: string) => Promise<void>;
   bulkRemoveEmails: (emailIds: string[], action: 'delete' | 'archive' | 'spam' | 'notspam') => Promise<void>;
+  /** Restore Trash members to Inbox; returns only ids actually restored. */
+  restoreFromTrash: (emailIds: string[]) => Promise<string[]>;
   /** Batched optimistic mark read/unread — one state update + one bulk IPC. */
   bulkMarkRead: (emailIds: string[], read: boolean) => void;
   /** Batched optimistic star/unstar — one state update + one bulk IPC. */

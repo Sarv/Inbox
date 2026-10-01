@@ -30,6 +30,8 @@ export type BulkSelectionInput = {
   selectedThreadIds: ReadonlySet<string>;
   /** True when the list is showing a Drafts folder. */
   viewIsDrafts: boolean;
+  /** Real Trash paths when acting in Trash; live thread siblings are excluded. */
+  trashFolderPaths?: readonly string[];
   /**
    * Where the account's drafts and sent copies live — provider paths included
    * (`conversationFoldersOf(folders)`), so a sent copy with a stale `|draft|`
@@ -50,11 +52,15 @@ export function actionableEmailIds(
   emails: readonly EmailRecord[],
   viewIsDrafts: boolean,
   conversationFolders?: ConversationFolders | null,
+  trashFolderPaths?: readonly string[],
 ): string[] {
   // `isDraftEmail` is the shared definition — it also rejects a sent copy or a
   // trashed draft still carrying a stale `|draft|` tag — so this cannot drift
   // from what the rest of the app treats as a draft.
-  const rows = viewIsDrafts ? emails.filter((e) => isDraftEmail(e, conversationFolders)) : emails;
+  const inView = trashFolderPaths
+    ? emails.filter((e) => trashFolderPaths.some((path) => (e.tags || '').includes(`|${path}|`)))
+    : emails;
+  const rows = viewIsDrafts ? inView.filter((e) => isDraftEmail(e, conversationFolders)) : inView;
   return rows.map((e) => e.id);
 }
 
@@ -68,8 +74,9 @@ export function selectedEmailIdsFor({
   selectedThreadIds,
   viewIsDrafts,
   conversationFolders,
+  trashFolderPaths,
 }: BulkSelectionInput): string[] {
   return visibleThreads
     .filter((t) => selectedThreadIds.has(t.threadId))
-    .flatMap((t) => actionableEmailIds(t.emails as EmailRecord[], viewIsDrafts, conversationFolders));
+    .flatMap((t) => actionableEmailIds(t.emails as EmailRecord[], viewIsDrafts, conversationFolders, trashFolderPaths));
 }

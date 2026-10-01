@@ -59,7 +59,7 @@ function isInTrashContext(
 }
 
 /** Resolve an email row (for its tags) by id across every live state slice. */
-function resolveRowById(get: any, id: string): { tags?: string } | undefined {
+function resolveRowById(get: any, id: string): { tags?: string; accountId?: string } | undefined {
   const s = get();
   const inLists = s.emails.find((x: any) => x.id === id)
     || s.threadEmails.find((x: any) => x.id === id)
@@ -80,7 +80,7 @@ function resolveRowById(get: any, id: string): { tags?: string } | undefined {
  * bulk delete paths so an "open mail → delete" and a "select-all → delete"
  * behave identically for the same danger.
  */
-function destructiveConfirmOptions(action: string, count: number, permanent: boolean) {
+function destructiveConfirmOptions(action: string, count: number, permanent: boolean, accountCount = 1) {
   if (permanent) {
     return {
       title: 'Permanently delete',
@@ -92,7 +92,9 @@ function destructiveConfirmOptions(action: string, count: number, permanent: boo
   const verb = BULK_ACTION_VERB[action] ?? action;
   return {
     title: 'Confirm bulk action',
-    message: `You're about to ${verb} ${count} messages. Continue?`,
+    message: action === 'delete' && accountCount > 1
+      ? `You're about to move ${count} messages to Trash across ${accountCount} accounts. Find these messages in each account's Trash. Continue?`
+      : `You're about to ${verb} ${count} messages. Continue?`,
     confirmLabel: `Yes, ${verb} ${count}`,
     destructive: action === 'delete' || action === 'spam',
   };
@@ -367,7 +369,8 @@ function applyOptimisticRead(get: any, set: any, ids: string[], read: boolean): 
 /**
  * Group email ids by their OWNING account (unified "All Inboxes" rows carry an
  * `accountId`), so a bulk action can be dispatched to each account's own DB and
- * IMAP engine. The `undefined` key means "the active account". MUST be resolved
+ * IMAP engine. Single-account rows use the current active account id, captured
+ * now so a later account switch cannot retarget an awaited action. MUST be resolved
  * BEFORE any optimistic state mutation — removal-style actions (delete/archive)
  * clear the rows from state, after which the account can no longer be resolved.
  *
@@ -378,7 +381,7 @@ function applyOptimisticRead(get: any, set: any, ids: string[], read: boolean): 
 function groupIdsByAccount(get: any, emailIds: string[]): Map<string | undefined, string[]> {
   const byAccount = new Map<string | undefined, string[]>();
   for (const id of emailIds) {
-    const acct = get()._accountIdFor(id);
+    const acct = get()._accountIdFor(id) ?? get().activeAccountId ?? undefined;
     const list = byAccount.get(acct) ?? [];
     list.push(id);
     byAccount.set(acct, list);
@@ -386,16 +389,72 @@ function groupIdsByAccount(get: any, emailIds: string[]): Map<string | undefined
   return byAccount;
 }
 
-/** Fire ONE bulkAction IPC per owning account (each routes to that account's
- *  storage + engine). Errors are per-group and non-fatal. */
-async function dispatchBulkByAccount(grouped: Map<string | undefined, string[]>, action: string, allowPermanent = false): Promise<void> {
-  await Promise.all(
-    [...grouped.entries()].map(([acct, ids]) =>
-      window.electronAPI.emails.bulkAction(ids, action, acct, allowPermanent).catch((err) => {
-        console.warn('[Store] bulkAction failed for account', acct ?? '(active)', err);
-      }),
-    ),
-  );
+type BulkActionResult = { processedIds: string[]; failedIds: string[]; queuedIds: string[] };
+
+/** One IPC per owning account; accept only the ids the backend acknowledged. */
+async function dispatchBulkByAccount(grouped: Map<string | undefined, string[]>, action: string, allowPermanent = false): Promise<BulkActionResult> {
+  const results = await Promise.all([...grouped.entries()].map(async ([acct, ids]): Promise<BulkActionResult> => {
+    try {
+      const result = await window.electronAPI.emails.bulkAction(ids, action, acct, allowPermanent) as {
+        success: boolean;
+        error?: string;
+        data?: { processedIds: string[]; failedIds: string[]; queuedIds?: string[] };
+      };
+      if (!result.data) {
+        return { processedIds: result.success ? ids : [], failedIds: result.success ? [] : ids, queuedIds: [] };
+      }
+      const failed = new Set(result.data.failedIds);
+      const accepted = new Set([...result.data.processedIds, ...(result.data.queuedIds ?? [])]);
+      return {
+        processedIds: ids.filter((id) => accepted.has(id) && !failed.has(id)),
+        // An omitted id is unprocessed, not a successful optimistic removal.
+        failedIds: ids.filter((id) => failed.has(id) || !accepted.has(id)),
+        queuedIds: ids.filter((id) => result.data!.queuedIds?.includes(id) && !failed.has(id)),
+      };
+    } catch (error) {
+      console.warn('[Store] bulkAction failed for account', acct ?? '(active)', error);
+      return { processedIds: [], failedIds: ids, queuedIds: [] };
+    }
+  }));
+  return {
+    processedIds: results.flatMap((result) => result.processedIds),
+    failedIds: results.flatMap((result) => result.failedIds),
+    queuedIds: results.flatMap((result) => result.queuedIds),
+  };
+}
+
+function reportBulkFailure(action: string, failedCount: number): void {
+  if (failedCount === 0) return;
+  const verb = BULK_ACTION_VERB[action] ?? action;
+  window.alert(`Could not ${verb} ${failedCount} message${failedCount === 1 ? '' : 's'}. Check your connection and try again.`);
+}
+
+/** A failed removal must not insert the old page into a different view. */
+function bulkRemovalViewKey(state: any): string {
+  return JSON.stringify([
+    state.activeAccountId, state.selectedFolderId, state.selectedVirtualFolder,
+    state.viewingAICategory, state.viewingSection, state.viewingSnoozed,
+    state.searchQuery, state.searchInterpretation, state.activeInboxFilter,
+    state.emailsPage,
+  ]);
+}
+
+/** Restore only missing failures, retaining refreshed rows and their order. */
+function restoreBulkRows(current: any[], original: any[], failedIds: Set<string>): any[] {
+  const restored = [...current];
+  const present = new Set(current.map((row) => row.id));
+  for (let index = 0; index < original.length; index++) {
+    const row = original[index];
+    if (!failedIds.has(row.id) || present.has(row.id)) continue;
+    const nextId = original.slice(index + 1).find((next) => present.has(next.id))?.id;
+    const priorId = original.slice(0, index).reverse().find((prior) => present.has(prior.id))?.id;
+    const position = nextId
+      ? restored.findIndex((next) => next.id === nextId)
+      : priorId ? restored.findIndex((prior) => prior.id === priorId) + 1 : Math.min(index, restored.length);
+    restored.splice(position, 0, row);
+    present.add(row.id);
+  }
+  return restored.length === current.length ? current : restored;
 }
 
 /**
@@ -482,9 +541,7 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
   // route to the right DB/engine. undefined for normal single-account views.
   _accountIdFor: (id: string): string | undefined => {
     const s = get();
-    const e = s.emails.find((x) => x.id === id)
-      || s.threadEmails.find((x) => x.id === id)
-      || s.searchResults.find((x) => x.id === id);
+    const e = resolveRowById(get, id);
     return e?.accountId ?? s.viewAccountId ?? undefined;
   },
 
@@ -563,7 +620,8 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     // re-renders), then one bulk IPC PER account, counts refreshed ONCE.
     if (!applyOptimisticRead(get, set, emailIds, read)) return;
     (async () => {
-      await dispatchBulkByAccount(grouped, read ? 'markRead' : 'markUnread');
+      const result = await dispatchBulkByAccount(grouped, read ? 'markRead' : 'markUnread');
+      reportBulkFailure(read ? 'mark as read' : 'mark as unread', result.failedIds.length);
       refreshMailCounts(get, { unreadSummary: true });
     })();
   },
@@ -585,7 +643,8 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     if (Object.keys(updates).length === 0) return;
     set(updates);
     (async () => {
-      await dispatchBulkByAccount(grouped, starred ? 'star' : 'unstar');
+      const result = await dispatchBulkByAccount(grouped, starred ? 'star' : 'unstar');
+      reportBulkFailure(starred ? 'star' : 'unstar', result.failedIds.length);
       refreshMailCounts(get, {});
     })();
   },
@@ -1208,6 +1267,22 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
   bulkRemoveEmails: async (emailIds, action) => {
     if (emailIds.length === 0) return;
 
+    emailIds = [...new Set(emailIds)];
+    // Confirmation can outlive a background page refresh. Keep ownership and
+    // the selected rows now, while every unified row still names its account.
+    const grouped = groupIdsByAccount(get, emailIds);
+    const initial = get();
+    const viewKey = bulkRemovalViewKey(initial);
+    const snapshot = {
+      emails: initial.emails,
+      searchResults: initial.searchResults,
+      threadEmails: initial.threadEmails,
+      sectionData: initial.sectionData || {},
+      selectedEmailId: initial.selectedEmailId,
+      highlightedEmailId: initial.highlightedEmailId,
+      threadAccountId: initial.threadAccountId,
+    };
+
     // Determine permanent-delete vs move BEFORE mutating anything, so we can
     // guard first. `delete` is an irreversible expunge ONLY for mail that truly
     // lives in Trash; elsewhere it's a recoverable move to Trash.
@@ -1228,16 +1303,26 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     // delete ALWAYS confirms. `notspam` is benign recovery and is never gated.
     const needsConfirm = permanent || (emailIds.length >= BULK_CONFIRM_THRESHOLD && action !== 'notspam');
     if (needsConfirm) {
-      const ok = await requestConfirm(destructiveConfirmOptions(action, emailIds.length, permanent));
+      const ok = await requestConfirm(destructiveConfirmOptions(action, emailIds.length, permanent, grouped.size));
       if (!ok) return;
     }
 
     const idSet = new Set(emailIds);
-    // Group by owning account NOW, while the rows are still in state — the
-    // removal below clears them, after which the account can't be resolved.
-    const grouped = groupIdsByAccount(get, emailIds);
-    // Re-read state AFTER the (possibly awaited) confirm — it may have changed.
+    // Use fresh rows for rollback when sync changed their flags while the
+    // confirmation was open; keep the original rows if they left that page.
+    const updateSnapshotRows = (original: any[], current: any[]) => {
+      const fresh = new Map(current.map((row) => [row.id, row]));
+      return original.map((row) => fresh.get(row.id) ?? row);
+    };
     const { emails, searchResults, threadEmails, selectedEmailId, sectionData: bulkSD } = get();
+    if (bulkRemovalViewKey(get()) === viewKey) {
+      snapshot.emails = updateSnapshotRows(snapshot.emails, emails);
+      snapshot.searchResults = updateSnapshotRows(snapshot.searchResults, searchResults);
+      snapshot.threadEmails = updateSnapshotRows(snapshot.threadEmails, threadEmails);
+      snapshot.sectionData = Object.fromEntries(Object.entries(snapshot.sectionData).map(([key, sd]: [string, any]) => [
+        key, { ...sd, emails: updateSnapshotRows(sd.emails, bulkSD?.[key]?.emails ?? []) },
+      ]));
+    }
 
     // 1. Instantly remove all from UI state in one batch
     const newEmails = emails.filter(e => !idSet.has(e.id));
@@ -1261,32 +1346,143 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
       updates.highlightedEmailId = null;
     }
 
-    set(updates);
+    // Navigating during confirmation must not remove rows from the new view.
+    const optimisticSections = updatedBulkSD || bulkSD;
+    if (bulkRemovalViewKey(get()) === viewKey) set(updates);
 
-    // 2. Single bulk backend call — fire-and-forget. `allowPermanent` gates the
+    // 2. Await all account groups. `allowPermanent` gates the
     // server-side EXPUNGE: the main process permanently deletes ONLY when this
     // renderer confirmed it (permanent === true). Without the flag it moves to
     // Trash, so a Trash row we failed to detect can never be silently expunged.
-    (async () => {
-      await dispatchBulkByAccount(grouped, action, permanent);
-      get().loadFolders();
-      // Emails left the inbox → refresh unread-per-category badges.
-      get().refreshCategoryCounts();
-      // Category view: the optimistic splice above removed the deleted rows but
-      // never pulled the following page, so deleting the whole visible page left
-      // an empty list AND hid the footer paginator (it renders only with rows) —
-      // unrecoverable. Reload the current page from the DB so the next page's rows
-      // slide up; invalidate the total first so the "of N" refetches, and clamp a
-      // now-past-the-end page back to the first page.
-      const cat = get().viewingAICategory;
-      if (cat) {
+    const result = await dispatchBulkByAccount(grouped, action, permanent);
+    const failedIds = new Set(result.failedIds);
+    const processedIds = new Set(result.processedIds);
+    const removeAcknowledgedRows = () => {
+      const current = get();
+      if (processedIds.size === 0 || bulkRemovalViewKey(current) !== viewKey) return;
+      // A refresh started before the backend mutation can finish after our
+      // optimistic splice. Reapply only acknowledged removals to that fresh
+      // page; unrelated arrivals and their updated fields stay intact.
+      const acknowledged: any = {
+        emails: current.emails.filter((email: any) => !processedIds.has(email.id)),
+        searchResults: current.searchResults.filter((email: any) => !processedIds.has(email.id)),
+        threadEmails: current.threadEmails.filter((email: any) => !processedIds.has(email.id)),
+      };
+      const sections = removeEmailsFromSectionData(current.sectionData || {}, processedIds);
+      if (sections) acknowledged.sectionData = sections;
+      if (current.selectedEmailId && processedIds.has(current.selectedEmailId)) acknowledged.selectedEmailId = null;
+      if (current.highlightedEmailId && processedIds.has(current.highlightedEmailId)) acknowledged.highlightedEmailId = null;
+      set(acknowledged);
+    };
+    const rollbackFailures = () => {
+      const current = get();
+      if (failedIds.size === 0 || bulkRemovalViewKey(current) !== viewKey) return;
+      const rollback: any = {
+        emails: restoreBulkRows(current.emails, snapshot.emails, failedIds),
+        searchResults: restoreBulkRows(current.searchResults, snapshot.searchResults, failedIds),
+      };
+      // Do not put the old conversation into a message opened during the IPC.
+      const sameThread = current.threadAccountId === snapshot.threadAccountId
+        && (current.selectedEmailId == null || current.selectedEmailId === snapshot.selectedEmailId)
+        && (!current.threadEmails.length || current.threadEmails[0]?.threadId === snapshot.threadEmails[0]?.threadId);
+      if (sameThread) {
+        rollback.threadEmails = restoreBulkRows(current.threadEmails, snapshot.threadEmails, failedIds);
+        if (current.selectedEmailId == null && snapshot.selectedEmailId && failedIds.has(snapshot.selectedEmailId)) rollback.selectedEmailId = snapshot.selectedEmailId;
+        if (current.highlightedEmailId == null && snapshot.highlightedEmailId && failedIds.has(snapshot.highlightedEmailId)) rollback.highlightedEmailId = snapshot.highlightedEmailId;
+      }
+      const sectionData = { ...(current.sectionData || {}) };
+      for (const [key, original] of Object.entries(snapshot.sectionData) as [string, any][]) {
+        const section = sectionData[key];
+        if (!section || section.page !== original.page) continue;
+        const restored = restoreBulkRows(section.emails, original.emails, failedIds);
+        if (restored === section.emails) continue;
+        sectionData[key] = {
+          ...section, emails: restored, threads: buildThreads(restored),
+          // A refreshed count already includes failures; only undo our own
+          // optimistic decrement when that section was not reloaded meanwhile.
+          total: section === optimisticSections?.[key]
+            ? section.total + restored.length - section.emails.length : section.total,
+        };
+      }
+      rollback.sectionData = sectionData;
+      set(rollback);
+    };
+    removeAcknowledgedRows();
+    rollbackFailures();
+    reportBulkFailure(action, failedIds.size);
+
+    try {
+      await get().loadFolders();
+      await get().refreshCategoryCounts();
+      await get().refreshUnreadSummary();
+      // Refill only the original category/unified page. A completed bulk call
+      // must not reset a filter or navigation the user changed while it ran.
+      if (result.processedIds.length > 0 && bulkRemovalViewKey(get()) === viewKey
+        && !get().searchQuery && (get().viewingAICategory || get().selectedVirtualFolder === 'virtual-unified')) {
         set({ emailsTotal: 0 });
         await get().goToEmailPage(get().emailsPage);
-        if (get().emails.length === 0 && get().emailsPage > 0) {
+        if (bulkRemovalViewKey(get()) === viewKey && failedIds.size === 0 && get().emails.length === 0 && get().emailsPage > 0) {
           await get().goToEmailPage(0);
         }
+        removeAcknowledgedRows();
+        rollbackFailures();
       }
-    })();
+    } catch (error) {
+      console.error('[Store] bulk action view refresh failed:', error);
+    }
+  },
+
+  restoreFromTrash: async (emailIds) => {
+    if (emailIds.length === 0) return [];
+    // Resolve ownership before any view mutation; a unified thread may contain
+    // messages from more than one account.
+    const grouped = groupIdsByAccount(get, [...new Set(emailIds)]);
+    const results = await Promise.all([...grouped.entries()].map(async ([accountId, ids]) => {
+      try {
+        const result = await window.electronAPI.emails.restoreFromTrash(ids, accountId);
+        if (!result.success && !result.data) {
+          console.error('[Store] restoreFromTrash failed:', result.error);
+        }
+        return result.data?.restoredIds ?? [];
+      } catch (error) {
+        console.error('[Store] restoreFromTrash failed:', error);
+        return [];
+      }
+    }));
+    const restoredIds = results.flat();
+    if (restoredIds.length === 0) return [];
+
+    // The server may accept some members and reject others. Remove only the
+    // confirmed rows; failed ones stay visible in Trash for another attempt.
+    const restored = new Set(restoredIds);
+    const { emails, searchResults, threadEmails, sectionData } = get();
+    const updates: any = {
+      emails: emails.filter((e: any) => !restored.has(e.id)),
+      searchResults: searchResults.filter((e: any) => !restored.has(e.id)),
+      threadEmails: threadEmails.filter((e: any) => !restored.has(e.id)),
+    };
+    const selectedId = get().selectedEmailId;
+    const highlightedId = get().highlightedEmailId;
+    if (selectedId && restored.has(selectedId)) updates.selectedEmailId = null;
+    if (highlightedId && restored.has(highlightedId)) updates.highlightedEmailId = null;
+    const updatedSD = removeEmailsFromSectionData(sectionData || {}, restored);
+    if (updatedSD) updates.sectionData = updatedSD;
+    set(updates);
+    try {
+      await get().loadFolders();
+      get().refreshCategoryCounts();
+      // Refill the current Trash page from the DB. Removing its last visible
+      // row otherwise leaves an empty page and hides the footer pager.
+      const { selectedFolderId, folders, emailsPage, searchQuery, viewingAICategory } = get();
+      const selectedFolder = folders.find((f: any) => f.id === selectedFolderId);
+      if (selectedFolder && classifyFolder(selectedFolder) === 'trash' && !searchQuery && !viewingAICategory) {
+        await get().goToEmailPage(emailsPage);
+        if (get().emails.length === 0 && get().emailsPage > 0) await get().goToEmailPage(0);
+      }
+    } catch (error) {
+      console.error('[Store] restoreFromTrash view refresh failed:', error);
+    }
+    return restoredIds;
   },
 
   undoDelete: (emailId?: string) => {
@@ -1346,6 +1542,17 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     get().loadFolders();
     // DB row removed/trashed → refresh unread-per-category badges.
     get().refreshCategoryCounts();
+    // The single-message path waits for Undo before writing to the DB. Once
+    // committed, refill the current category page just as the bulk path does;
+    // otherwise deleting its last row leaves an empty page with no paginator.
+    const category = get().viewingAICategory;
+    if (category) {
+      set({ emailsTotal: 0 });
+      await get().goToEmailPage(get().emailsPage);
+      if (get().viewingAICategory === category && get().emails.length === 0 && get().emailsPage > 0) {
+        await get().goToEmailPage(0);
+      }
+    }
   },
 
   clearSelectedEmail: () => {

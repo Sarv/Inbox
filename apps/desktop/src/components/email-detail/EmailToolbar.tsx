@@ -40,6 +40,7 @@ interface EmailToolbarProps {
 export function EmailToolbar({ ctx }: EmailToolbarProps) {
   const {
     displayEmail,
+    selectedEmail,
     isRead,
     isInTrash,
     isInSpam,
@@ -118,7 +119,7 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
           name="Restore"
           tooltip="Restore to Inbox"
           icon={isRestoring ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-          onClick={() => displayEmail && !isRestoring && handleRestore(displayEmail.id)}
+          onClick={() => selectedEmail && !isRestoring && handleRestore(selectedEmail.id)}
           disabled={isRestoring}
           className="text-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
         />

@@ -226,8 +226,9 @@ export class OperationQueue {
     return this.persistAndExecute('markUnstarred', folderPath, uid, null);
   }
 
-  async move(sourcePath: string, uid: number, destPath: string): Promise<OperationResult> {
-    return this.persistAndExecute('move', sourcePath, uid, { destPath });
+  async move(sourcePath: string, uid: number, destPath: string, emailId?: string): Promise<OperationResult> {
+    const data = emailId === undefined ? { destPath } : { destPath, emailIdsByUid: { [uid]: emailId } };
+    return this.persistAndExecute('move', sourcePath, uid, data);
   }
 
   // COPY, not move: the message stays in sourcePath AND appears in destPath. On a
@@ -424,8 +425,17 @@ export class OperationQueue {
     return this.persistAndExecuteBulk('markUnstarred', folderPath, uids, null);
   }
 
-  async bulkMoveToTrash(folderPath: string, uids: number[]): Promise<OperationResult> {
-    return this.persistAndExecuteBulk('moveToTrash', folderPath, uids, null);
+  async bulkMoveToTrash(folderPath: string, uids: number[], emailIds?: string[]): Promise<OperationResult> {
+    if (emailIds !== undefined && emailIds.length !== uids.length) {
+      throw new Error('bulkMoveToTrash: each source UID requires its email id');
+    }
+    // Persist the same complete mapping on each row so a queued batch stays
+    // batched, including after an app restart. Destination UIDs cannot safely
+    // identify the moved local rows: each mailbox has its own UID namespace.
+    const data = emailIds === undefined ? null : {
+      emailIdsByUid: Object.fromEntries(uids.map((uid, index) => [uid, emailIds[index]])),
+    };
+    return this.persistAndExecuteBulk('moveToTrash', folderPath, uids, data);
   }
 
   async bulkMoveToSpam(folderPath: string, uids: number[]): Promise<OperationResult> {
@@ -484,18 +494,12 @@ export class OperationQueue {
       const lease = await this.acquireConnection().catch(() => null);
       if (lease) {
         const acquireMs = Date.now() - acqStart;
+        let execMs = 0;
         try {
           await this.storage!.updatePendingOperationStatus(id, 'executing');
           const execStart = Date.now();
           await this.runFlagOp(lease.client, type, folderPath, [uid]);
-          const execMs = Date.now() - execStart;
-          await this.storage!.deletePendingOperation(id);
-          lease.release();
-          // acquire = pool-contention cost; exec = SELECT+STORE round-trips (what
-          // the ensureFolderSelected fast-path trims). Split so we can tell which
-          // dominates the residual latency.
-          logger.info(`Operation ${type} on UID ${uid}: success (pool, acquire ${acquireMs}ms, exec ${execMs}ms)`);
-          return 'success';
+          execMs = Date.now() - execStart;
         } catch (error) {
           lease.poison(); // its command may still be in-flight — never reuse it
           if (this.isConnectionError(error)) {
@@ -508,6 +512,13 @@ export class OperationQueue {
           logger.error(`Operation ${type} on UID ${uid}: failed (dead-lettered)`, error);
           throw error;
         }
+        lease.release();
+        await this.cleanupAcceptedOperations([id], false);
+        // acquire = pool-contention cost; exec = SELECT+STORE round-trips (what
+        // the ensureFolderSelected fast-path trims). Split so we can tell which
+        // dominates the residual latency.
+        logger.info(`Operation ${type} on UID ${uid}: success (pool, acquire ${acquireMs}ms, exec ${execMs}ms)`);
+        return 'success';
       }
       // No free pool connection right now — fall through to the primary path.
     }
@@ -517,9 +528,6 @@ export class OperationQueue {
       try {
         await this.storage!.updatePendingOperationStatus(id, 'executing');
         await this.executeSingleOperation(type, folderPath, uid, data);
-        await this.storage!.deletePendingOperation(id);
-        logger.info(`Operation ${type} on UID ${uid}: success`);
-        return 'success';
       } catch (error) {
         if (this.isConnectionError(error)) {
           await this.storage!.updatePendingOperationStatus(id, 'pending');
@@ -534,6 +542,9 @@ export class OperationQueue {
         logger.error(`Operation ${type} on UID ${uid}: failed (dead-lettered)`, error);
         throw error;
       }
+      await this.cleanupAcceptedOperations([id], false);
+      logger.info(`Operation ${type} on UID ${uid}: success`);
+      return 'success';
     }
 
     // 3. Not connected — add to in-memory queue for later
@@ -577,10 +588,6 @@ export class OperationQueue {
         // Execute as single IMAP batch
         await this.executeBatchedOperation(type, folderPath, uids, data);
 
-        // Delete all on success
-        await this.storage!.deletePendingOperationsBatch(ids);
-        logger.info(`Bulk ${type} on ${uids.length} UIDs in ${folderPath}: success`);
-        return 'success';
       } catch (error) {
         if (this.isConnectionError(error)) {
           // Reset all to pending, add to memory queue
@@ -598,6 +605,9 @@ export class OperationQueue {
         logger.error(`Bulk ${type} failed (dead-lettered ${ids.length})`, error);
         throw error;
       }
+      await this.cleanupAcceptedOperations(ids, true);
+      logger.info(`Bulk ${type} on ${uids.length} UIDs in ${folderPath}: success`);
+      return 'success';
     }
 
     // 3. Not connected — queue all
@@ -606,6 +616,18 @@ export class OperationQueue {
     }
     logger.info(`Bulk ${type}: ${uids.length} ops queued (offline)`);
     return 'queued';
+  }
+
+  /** The server has accepted these operations. A local cleanup failure must
+   * not tell the caller to roll back a completed MOVE, dead-letter it, or retry
+   * it immediately. Retain the durable executing rows for startup recovery. */
+  private async cleanupAcceptedOperations(ids: number[], bulk: boolean): Promise<void> {
+    try {
+      if (bulk) await this.storage!.deletePendingOperationsBatch(ids);
+      else await this.storage!.deletePendingOperation(ids[0]);
+    } catch (error) {
+      logger.warn(`Accepted ${ids.length} operation(s), but pending-row cleanup failed; retained for startup recovery`, error);
+    }
   }
 
   // ========== Queue Management ==========
@@ -679,10 +701,6 @@ export class OperationQueue {
           const uids = batch.ops.map(op => op.uid);
           await this.executeBatchedOperation(batch.type, batch.folderPath, uids, batch.ops[0].data);
 
-          // Delete all on success
-          const ids = batch.ops.map(op => op.id);
-          await this.storage!.deletePendingOperationsBatch(ids);
-          result.success += batch.ops.length;
         } catch (error) {
           result.failed += batch.ops.length;
           const msg = (error as Error)?.message ?? String(error);
@@ -715,7 +733,10 @@ export class OperationQueue {
               } catch { /* ignore */ }
             }
           }
+          continue;
         }
+        await this.cleanupAcceptedOperations(batch.ops.map(op => op.id), true);
+        result.success += batch.ops.length;
       }
     } finally {
       this.processing = false;
@@ -835,7 +856,7 @@ export class OperationQueue {
 
       case 'move': {
         const uidMap = await withFolderSelected(this.client!, folderPath, () => this.client!.moveMessages(uids, data.destPath));
-        await this.remapMovedUids(data.destPath, uids, uidMap);
+        await this.remapMovedUids(data.destPath, uids, uidMap, data?.emailIdsByUid);
         break;
       }
 
@@ -850,7 +871,7 @@ export class OperationQueue {
       case 'moveToTrash': {
         const trashFolder = await this.findSpecialFolder('trash');
         const uidMap = await withFolderSelected(this.client!, folderPath, () => this.client!.moveMessages(uids, trashFolder.path));
-        await this.remapMovedUids(trashFolder.path, uids, uidMap);
+        await this.remapMovedUids(trashFolder.path, uids, uidMap, data?.emailIdsByUid);
         break;
       }
 
@@ -914,11 +935,10 @@ export class OperationQueue {
   /**
    * Re-home moved rows' UIDs after a server MOVE succeeds.
    *
-   * A move leaves the local row with `folder_id = destination` but `uid` still
-   * pointing at the SOURCE folder's UID space. Deletion-detection then sees that
-   * UID missing from the destination folder and DELETES the moved mail, and flag
-   * sync targets a stale UID. This resolves each message's real destination UID
-   * and persists it onto the local row so `emails.uid` matches its folder.
+   * The local row is already in the destination, with a null or stale UID.
+   * Resolve its real destination UID so reconciliation and flag operations use
+   * that folder's UID namespace. New callers identify rows explicitly; legacy
+   * operations without ids retain the source-UID lookup.
    *
    * Two resolution paths:
    *  - UIDPLUS servers (Gmail and most modern IMAPs) return `uidMap`
@@ -927,14 +947,14 @@ export class OperationQueue {
    *    the destination folder for each moved row.
    *
    * Best-effort and idempotent: the enclosing move already succeeded on the
-   * server, so a failure here must never throw or roll it back; and re-running a
-   * move whose row already carries the destination UID is a no-op (the
-   * source-UID lookup no longer matches, or the UID is already correct).
+   * server, so a failure here must never throw or roll it back. An explicitly
+   * named row outside the destination is skipped, and a matching UID is a no-op.
    */
   private async remapMovedUids(
     destPath: string,
     sourceUids: number[],
     uidMap: Map<number, number> | null,
+    emailIdsByUid?: Record<string, string>,
   ): Promise<void> {
     if (!this.storage) return;
     try {
@@ -947,7 +967,7 @@ export class OperationQueue {
       // Exact path: server gave us source->dest UIDs.
       if (uidMap && uidMap.size > 0) {
         for (const [srcUid, destUid] of uidMap) {
-          await this.persistDestUid(destFolder.id, srcUid, destUid);
+          await this.persistDestUid(destFolder.id, srcUid, destUid, emailIdsByUid);
         }
         return;
       }
@@ -960,7 +980,7 @@ export class OperationQueue {
         return;
       }
       for (const srcUid of sourceUids) {
-        const row = await this.storage.getEmailByFolderAndUid(destFolder.id, srcUid);
+        const row = await this.getMovedEmail(destFolder.id, srcUid, emailIdsByUid);
         if (!row || !row.messageId) continue;
         const msgId = row.messageId.replace(/^<|>$/g, '');
         if (!msgId) continue;
@@ -969,8 +989,13 @@ export class OperationQueue {
         // storage round-trips between iterations are ample room for a re-select.
         const hits = await withFolderSelected(this.client!, destPath, () =>
           this.client!.search({ header: [{ name: 'Message-ID', value: msgId }] }));
-        if (hits.length > 0 && hits[0] !== row.uid) {
-          await this.storage.updateEmail(row.id, { uid: hits[0] });
+        if (hits.length > 0) {
+          // SEARCH can wait on the network; the user may have moved this row
+          // again meanwhile. Its new folder must not receive this folder's UID.
+          const current = await this.storage.getEmail(row.id);
+          if (current?.folderId === destFolder.id && hits[0] !== current.uid) {
+            await this.storage.updateEmail(row.id, { uid: hits[0] });
+          }
         }
       }
     } catch (error) {
@@ -981,15 +1006,37 @@ export class OperationQueue {
 
   /**
    * Persist a single moved message's destination UID onto its local row.
-   * Idempotent: no-op when source==dest UID, when no row still carries the
-   * source UID in the destination folder, or when the row already has destUid.
+   * No-op for a row outside the destination or one already carrying destUid.
+   * Legacy operations also skip equal source/destination UIDs.
    */
-  private async persistDestUid(destFolderId: string, srcUid: number, destUid: number): Promise<void> {
-    if (srcUid === destUid) return;
-    const row = await this.storage!.getEmailByFolderAndUid(destFolderId, srcUid);
+  private async persistDestUid(
+    destFolderId: string,
+    srcUid: number,
+    destUid: number,
+    emailIdsByUid?: Record<string, string>,
+  ): Promise<void> {
+    if (emailIdsByUid === undefined && srcUid === destUid) return;
+    const row = await this.getMovedEmail(destFolderId, srcUid, emailIdsByUid);
     if (row && row.uid !== destUid) {
       await this.storage!.updateEmail(row.id, { uid: destUid });
     }
+  }
+
+  /** Explicit row ids must never fall back to a destination UID lookup. An
+   * unrelated destination message may already have the source mailbox's UID,
+   * or an earlier row in this batch may just have been assigned it. */
+  private async getMovedEmail(
+    destFolderId: string,
+    srcUid: number,
+    emailIdsByUid?: Record<string, string>,
+  ) {
+    if (emailIdsByUid !== undefined) {
+      const emailId = emailIdsByUid[srcUid];
+      if (!emailId) return null;
+      const row = await this.storage!.getEmail(emailId);
+      return row?.folderId === destFolderId ? row : null;
+    }
+    return this.storage!.getEmailByFolderAndUid(destFolderId, srcUid);
   }
 
   // ========== Persistence ==========

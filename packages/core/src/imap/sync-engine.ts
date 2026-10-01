@@ -1769,8 +1769,8 @@ export class SyncEngine {
   /**
    * Move to folder
    */
-  async move(sourcePath: string, uid: number, destPath: string): Promise<OperationResult> {
-    return this.operationQueue.move(sourcePath, uid, destPath);
+  async move(sourcePath: string, uid: number, destPath: string, emailId?: string): Promise<OperationResult> {
+    return this.operationQueue.move(sourcePath, uid, destPath, emailId);
   }
 
   /**
@@ -1831,8 +1831,8 @@ export class SyncEngine {
     return this.operationQueue.bulkUnstar(folderPath, uids);
   }
 
-  async bulkMoveToTrash(folderPath: string, uids: number[]): Promise<OperationResult> {
-    return this.operationQueue.bulkMoveToTrash(folderPath, uids);
+  async bulkMoveToTrash(folderPath: string, uids: number[], emailIds?: string[]): Promise<OperationResult> {
+    return this.operationQueue.bulkMoveToTrash(folderPath, uids, emailIds);
   }
 
   async bulkMoveToSpam(folderPath: string, uids: number[]): Promise<OperationResult> {

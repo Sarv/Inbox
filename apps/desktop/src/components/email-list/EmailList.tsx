@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppearance } from '../../appearance';
-import { isDraftsFolder } from '../../config/folder-mapping';
+import { classifyFolder, isDraftsFolder } from '../../config/folder-mapping';
 import { SECTION_FILTER_LABELS, SETTINGS_KEY, DEFAULT_SECTIONS } from '../../config/inbox-types';
 import type { SectionFilter } from '../../config/inbox-types';
 import { useEmailStore } from '../../store/email-store';
@@ -91,6 +91,7 @@ export function EmailList() {
     snoozeEmail,
     unsnoozeEmail,
     bulkRemoveEmails,
+    restoreFromTrash,
     bulkMarkRead,
     bulkMarkStarred,
     bulkMoveToFolder,
@@ -145,6 +146,7 @@ export function EmailList() {
       snoozeEmail: s.snoozeEmail,
       unsnoozeEmail: s.unsnoozeEmail,
       bulkRemoveEmails: s.bulkRemoveEmails,
+      restoreFromTrash: s.restoreFromTrash,
       bulkMarkRead: s.bulkMarkRead,
       bulkMarkStarred: s.bulkMarkStarred,
       bulkMoveToFolder: s.bulkMoveToFolder,
@@ -205,12 +207,11 @@ export function EmailList() {
                           selectedFolder?.path?.includes('[Gmail]/Starred');
   const isImportantFolder = selectedFolder?.path?.toLowerCase().includes('important') ||
                             selectedFolder?.path?.includes('[Gmail]/Important');
-  const folderPathLc = selectedFolder?.path?.toLowerCase() ?? '';
-  const folderSpecialUse = (selectedFolder as { specialUse?: string | null } | undefined)?.specialUse;
-  const isTrashFolder = folderSpecialUse === '\\Trash' ||
-                        folderPathLc.includes('trash') || folderPathLc === 'deleted items';
-  const isSpamFolder = folderSpecialUse === '\\Junk' ||
-                       folderPathLc.includes('spam') || folderPathLc.includes('junk');
+  const isTrashFolder = !!selectedFolder && classifyFolder(selectedFolder) === 'trash';
+  const isSpamFolder = !!selectedFolder && classifyFolder(selectedFolder) === 'spam';
+  const trashFolderPaths = useMemo(() => isTrashFolder
+    ? folders.filter((folder) => classifyFolder(folder) === 'trash').map((folder) => folder.path)
+    : undefined, [folders, isTrashFolder]);
   const isVirtualImportant = selectedVirtualFolder === 'virtual-important';
   const isImportantView = isImportantFolder || isVirtualImportant;
 
@@ -465,9 +466,9 @@ export function EmailList() {
     // Narrowed for Drafts by the SAME rule the bulk toolbar uses: the hover
     // trash icon on a draft row must not delete the mail it replies to either.
     return thread
-      ? actionableEmailIds(thread.emails, viewIsDrafts, conversationFolders)
+      ? actionableEmailIds(thread.emails, viewIsDrafts, conversationFolders, trashFolderPaths)
       : [emailId];
-  }, [visibleThreads, viewIsDrafts, conversationFolders]);
+  }, [visibleThreads, viewIsDrafts, conversationFolders, trashFolderPaths]);
 
   const toggleStar = useCallback((emailId: string, currentlyStarred: boolean, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -551,7 +552,7 @@ export function EmailList() {
   // --- Bulk Action Handlers ---
 
   const getSelectedEmailIds = (): string[] =>
-    selectedEmailIdsFor({ visibleThreads, selectedThreadIds, viewIsDrafts, conversationFolders });
+    selectedEmailIdsFor({ visibleThreads, selectedThreadIds, viewIsDrafts, conversationFolders, trashFolderPaths });
 
   const handleBulkArchive = () => {
     const ids = getSelectedEmailIds();
@@ -585,7 +586,16 @@ export function EmailList() {
   // drops the source-folder tag, adds INBOX, and IMAP-moves the messages).
   const handleBulkMoveToInbox = () => {
     const ids = getSelectedEmailIds();
-    bulkRemoveEmails(ids, 'notspam');
+    if (isTrashFolder) {
+      void restoreFromTrash(ids).then((restored) => {
+        const failed = ids.length - restored.length;
+        if (failed > 0) {
+          window.alert(`Could not restore ${failed} message${failed === 1 ? '' : 's'}. ${failed === 1 ? 'It remains' : 'They remain'} in Trash. Check your connection and try again.`);
+        }
+      }).catch(() => {
+        window.alert('Could not restore the selected messages. They remain in Trash. Check your connection and try again.');
+      });
+    } else bulkRemoveEmails(ids, 'notspam');
     setSelectedThreadIds(new Set());
   };
 

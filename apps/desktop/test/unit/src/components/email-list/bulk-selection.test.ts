@@ -187,6 +187,21 @@ describe('selectedEmailIdsFor — in Drafts', () => {
   });
 });
 
+describe('selectedEmailIdsFor — in Trash', () => {
+  it('restores only the Trash member of a mixed live/trashed conversation', () => {
+    const mixedRows = [
+      { id: 'live', tags: '|INBOX|' },
+      { id: 'deleted', tags: '|[Gmail]/Trash|promotions|' },
+    ];
+    const mixed = thread('mixed', mixedRows);
+    expect(selectedEmailIdsFor({
+      visibleThreads: [mixed], selectedThreadIds: new Set(['mixed']),
+      viewIsDrafts: false, trashFolderPaths: ['[Gmail]/Trash'],
+    })).toEqual(['deleted']);
+    expect(actionableEmailIds(mixedRows as never, false, null, ['[Gmail]/Trash'])).toEqual(['deleted']);
+  });
+});
+
 /**
  * The row-level hover actions (trash / archive icons on a single row) share this
  * rule with the bulk toolbar. They were fixed together on purpose: narrowing
