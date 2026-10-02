@@ -121,10 +121,11 @@ describe('fresh install reaches the current production schema', () => {
     // 96 -> 97 with the first_email_splits cache and
     // agent_decisions.draft_message_id (v97); 97 -> 98 with the retirement of
     // the whole-thread conversation_extractions cache (v98); 98 -> 99 with the
-    // Social category (v99); 99 -> 100 adds emails.pgp_status (v100).
-    expect(CURRENT_VERSION).toBe(100);
+    // Social category (v99); 99 -> 100 adds emails.pgp_status (v100); 100 ->
+    // 101 with the authentication re-check queue (v101).
+    expect(CURRENT_VERSION).toBe(101);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
-    // v24 is stamped by schema.sql itself; the chain stamps 25..100 contiguously.
+    // v24 is stamped by schema.sql itself; the chain stamps 25..101 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
   });
 
@@ -153,6 +154,9 @@ describe('fresh install reaches the current production schema', () => {
       'trusted_senders',
       // v96: drained by the main-process spam repair at startup.
       'spam_repair_queue',
+      // v101: drained by the header backfill. Missing, verdicts a forged
+      // Authentication-Results wrote are never re-read.
+      'auth_reverify_queue',
       // v97: read on every thread open in the chat view's AI mode and by the
       // background split scheduler. Missing, every open fails its lookup.
       'first_email_splits',

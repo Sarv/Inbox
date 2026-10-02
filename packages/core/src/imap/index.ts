@@ -103,8 +103,9 @@ export { withFolderSelected } from './with-folder';
 // the origin IP from a fetched message. Shared by ingest (`convertMessage`)
 // and the header backfill, so mail scored at either moment gets one answer.
 export { autocryptSighting, headerStage } from './header-stage';
+export { receivingAuthserv } from './receiving-authserv';
 export type { AutocryptSighting, AutocryptSink, HeaderStageOptions, HeaderStageResult } from './header-stage';
-export { bodyStage, recipientDomainsOf, rescoreContent, rescoreWithBody } from './body-stage';
+export { bodyStage, recipientDomainsOf, rescoreAuth, rescoreContent, rescoreWithBody } from './body-stage';
 export type { BodyStageInput } from './body-stage';
 
 // The reputation stage — blocklist lookups for the sender as mail arrives and
