@@ -27,6 +27,11 @@ import type {
   ExtensionSettings,
   ExtensionMail,
   ExtensionMailFolder,
+  ExtensionSecurity,
+  AntivirusScanTarget,
+  AntivirusSetupStatus,
+  AntivirusScanJob,
+  AntivirusScanSubmitOptions,
   ExtensionUI,
   ExtensionUIAction,
   ExtensionUIActionHandler,
@@ -60,6 +65,7 @@ export interface ExtensionContextOptions {
   settingsBackend: ExtensionSettingsBackend;
   uiBackend?: ExtensionUIBackend;
   mailBackend?: ExtensionMailBackend;
+  securityBackend?: ExtensionSecurityBackend;
 }
 
 /**
@@ -129,6 +135,19 @@ export interface ExtensionMailBackend {
   trash(extensionId: string, emailId: string): Promise<void>;
 }
 
+/** Scanner backend implemented only by the trusted host. */
+export interface ExtensionSecurityBackend {
+  getTargets(extensionId: string): Promise<AntivirusScanTarget[]>;
+  getSetup(extensionId: string): Promise<AntivirusSetupStatus>;
+  openSetup(extensionId: string): Promise<void>;
+  submit(extensionId: string, targetIds: string[], options?: AntivirusScanSubmitOptions): Promise<AntivirusScanJob>;
+  get(extensionId: string, jobId: string): Promise<AntivirusScanJob>;
+  cancel(extensionId: string, jobId: string): Promise<AntivirusScanJob>;
+  onExtensionDisabled?(extensionId: string): void | Promise<void>;
+  onExtensionDeactivated?(extensionId: string): void | Promise<void>;
+  dispose?(): void | Promise<void>;
+}
+
 /**
  * Settings backend interface (implemented by host)
  */
@@ -177,6 +196,7 @@ export class ExtensionContextImpl implements ExtensionContext {
   readonly ai?: ExtensionAI;
   readonly settings: ExtensionSettings;
   readonly mail: ExtensionMail;
+  readonly security: ExtensionSecurity;
   readonly ui: ExtensionUI;
   readonly log: ExtensionLogger;
   subscriptions: Unsubscribe[] = [];
@@ -185,6 +205,7 @@ export class ExtensionContextImpl implements ExtensionContext {
   exports: Record<string, unknown> = {};
 
   private grantedPermissions: Set<ExtensionPermission>;
+  private securityAccessEnabled = true;
   private registeredWorkflows: Map<string, RegisteredWorkflow> = new Map();
   /** `ui.onAction` subscribers, in registration order. */
   private uiActionHandlers: Set<ExtensionUIActionHandler> = new Set();
@@ -210,6 +231,8 @@ export class ExtensionContextImpl implements ExtensionContext {
 
     // Create permission-checked mail access
     this.mail = this.createMail();
+
+    this.security = this.createSecurity();
 
     // Create permission-checked UI notifications
     this.ui = this.createUI();
@@ -309,6 +332,7 @@ export class ExtensionContextImpl implements ExtensionContext {
    * Cleanup all resources
    */
   dispose(): void {
+    this.revokeSecurityAccess();
     // Unsubscribe from all events
     for (const unsubscribe of this.subscriptions) {
       try {
@@ -325,6 +349,11 @@ export class ExtensionContextImpl implements ExtensionContext {
     // Drop card-action subscribers, so a card still on screen when an
     // extension is disabled cannot call back into code that has gone away.
     this.uiActionHandlers.clear();
+  }
+
+  /** Stop scanner calls immediately while the extension is being torn down. */
+  revokeSecurityAccess(): void {
+    this.securityAccessEnabled = false;
   }
 
   /**
@@ -457,6 +486,64 @@ export class ExtensionContextImpl implements ExtensionContext {
       has(key: string): boolean {
         context.requirePermission('settings:read', 'settings.has');
         return backend.has(extensionId, key);
+      },
+    };
+  }
+
+  /** Create the scanner wrapper with permissions and per-submission consent. */
+  private createSecurity(): ExtensionSecurity {
+    const backend = (operation: string): ExtensionSecurityBackend => {
+      this.requirePermission('security:scan-attachments', operation);
+      if (!this.securityAccessEnabled) throw new Error('Extension scanner access has been revoked');
+      if (!this.options.securityBackend) throw new Error('Antivirus scanning is unavailable');
+      return this.options.securityBackend;
+    };
+    const requireJobId = (jobId: string): void => {
+      if (typeof jobId !== 'string' || !jobId) throw new Error('A scan job id is required');
+    };
+    return {
+      getTargets: () => backend('security.getTargets').getTargets(this.manifest.id),
+      getSetup: () => backend('security.getSetup').getSetup(this.manifest.id),
+      openSetup: () => backend('security.openSetup').openSetup(this.manifest.id),
+      submit: async (targetIds, options) => {
+        const service = backend('security.submit');
+        if (!Array.isArray(targetIds) || targetIds.length === 0 ||
+            targetIds.some((id) => typeof id !== 'string' || !id) ||
+            new Set(targetIds).size !== targetIds.length) {
+          throw new Error('Select distinct scan target ids');
+        }
+        if (options !== undefined && (!options || typeof options !== 'object' ||
+            (options.includeBodyConsent !== undefined && typeof options.includeBodyConsent !== 'boolean'))) {
+          throw new Error('Invalid scan submission options');
+        }
+        if (options?.includeBodyConsent === true) {
+          this.requirePermission('security:scan-body', 'security.submit');
+        }
+        // Resolve target kinds from the trusted host, never from request data.
+        const available = await service.getTargets(this.manifest.id);
+        const selected = targetIds.map((id) => available.find((target) => target.targetId === id));
+        if (selected.some((target) => !target)) throw new Error('A scan target is unavailable or stale');
+        const unavailable = selected.find((target) => target?.unavailableReason);
+        if (unavailable) throw new Error(unavailable.unavailableReason);
+        if (selected.some((target) => target?.kind === 'email-body')) {
+          this.requirePermission('security:scan-body', 'security.submit');
+          if (options?.includeBodyConsent !== true) {
+            throw new Error('Email body scanning requires explicit consent for this submission');
+          }
+        }
+        return backend('security.submit').submit(this.manifest.id, [...targetIds], {
+          includeBodyConsent: options?.includeBodyConsent === true,
+        });
+      },
+      get: (jobId) => {
+        const service = backend('security.get');
+        requireJobId(jobId);
+        return service.get(this.manifest.id, jobId);
+      },
+      cancel: (jobId) => {
+        const service = backend('security.cancel');
+        requireJobId(jobId);
+        return service.cancel(this.manifest.id, jobId);
       },
     };
   }

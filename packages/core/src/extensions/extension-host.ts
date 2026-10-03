@@ -31,6 +31,7 @@ import {
   type ExtensionSettingsBackend,
   type ExtensionUIBackend,
   type ExtensionMailBackend,
+  type ExtensionSecurityBackend,
   toWorkflowResult,
 } from './extension-api';
 import type { LoadedExtension } from './extension-loader';
@@ -49,6 +50,7 @@ import {
   type ExtensionWorkflow,
   type ExtensionUIAction,
   type ExtensionUINotification,
+  type AntivirusScanSubmitOptions,
 } from './types';
 
 /**
@@ -106,6 +108,7 @@ export interface ExtensionHostOptions {
 
   /** Mail backend (omit for a host with no mailbox to change) */
   mailBackend?: ExtensionMailBackend;
+  securityBackend?: ExtensionSecurityBackend;
 
   /** Base path for extension storage */
   extensionStoragePath: string;
@@ -148,6 +151,7 @@ export class ExtensionHost {
   private settingsBackend: ExtensionSettingsBackend;
   private uiBackend?: ExtensionUIBackend;
   private mailBackend?: ExtensionMailBackend;
+  private securityBackend?: ExtensionSecurityBackend;
   private extensionStoragePath: string;
 
   private createChannel: () => ExtensionChannel | Promise<ExtensionChannel>;
@@ -167,6 +171,7 @@ export class ExtensionHost {
     this.settingsBackend = options.settingsBackend;
     this.uiBackend = options.uiBackend;
     this.mailBackend = options.mailBackend;
+    this.securityBackend = options.securityBackend;
     this.extensionStoragePath = options.extensionStoragePath;
     this.createChannel = options.createChannel ?? createInProcessSandboxChannel;
   }
@@ -319,6 +324,8 @@ export class ExtensionHost {
     }
     logger.error(`Extension sandbox stopped with ${this.activeExtensions.size} extensions active`);
     for (const [extensionId, active] of this.activeExtensions) {
+      active.context.revokeSecurityAccess();
+      void this.revokeSecurity(extensionId);
       try {
         active.context.dispose();
       } catch {
@@ -400,6 +407,7 @@ export class ExtensionHost {
         settingsBackend: this.settingsBackend,
         uiBackend: this.uiBackend,
         mailBackend: this.mailBackend,
+        securityBackend: this.securityBackend,
       });
 
       // Registered BEFORE activate() returns, because the extension makes host
@@ -465,6 +473,8 @@ export class ExtensionHost {
       // A failed activation must leave nothing behind: the sandbox already
       // dropped its half, and an entry kept here would make the next attempt
       // report the extension as already active.
+      this.activeExtensions.get(manifest.id)?.context.revokeSecurityAccess();
+      await this.revokeSecurity(manifest.id);
       this.activeExtensions.delete(manifest.id);
       info.state = ExtensionState.ERROR;
       info.error = error instanceof Error ? error.message : String(error);
@@ -479,6 +489,8 @@ export class ExtensionHost {
    */
   async deactivate(extensionId: string): Promise<void> {
     const active = this.activeExtensions.get(extensionId);
+    active?.context.revokeSecurityAccess();
+    await this.revokeSecurity(extensionId);
     if (!active) {
       return;
     }
@@ -542,6 +554,14 @@ export class ExtensionHost {
       }
 
       logger.error(`Error deactivating extension ${extensionId}:`, error);
+    }
+  }
+
+  private async revokeSecurity(extensionId: string): Promise<void> {
+    try {
+      await this.securityBackend?.onExtensionDeactivated?.(extensionId);
+    } catch (error) {
+      logger.error(`Error revoking scanner access for ${extensionId}:`, error);
     }
   }
 
@@ -761,6 +781,21 @@ export class ExtensionHost {
         // method means and no way for the two to drift apart.
         case 'mail.get':
           return reply(await context.mail.get(String(params.emailId)));
+        case 'security.getTargets':
+          return reply(await context.security.getTargets());
+        case 'security.getSetup':
+          return reply(await context.security.getSetup());
+        case 'security.openSetup':
+          await context.security.openSetup();
+          return reply(undefined);
+        case 'security.submit':
+          return reply(await context.security.submit(
+            params.targetIds as string[], params.options as AntivirusScanSubmitOptions | undefined
+          ));
+        case 'security.get':
+          return reply(await context.security.get(params.jobId as string));
+        case 'security.cancel':
+          return reply(await context.security.cancel(params.jobId as string));
         case 'mail.folders':
           return reply(
             await context.mail.folders(
@@ -896,6 +931,7 @@ export class ExtensionHost {
     this.workflowAdapters.clear();
     await this.bridge?.shutdown();
     this.bridge = null;
+    await this.securityBackend?.dispose?.();
   }
 }
 

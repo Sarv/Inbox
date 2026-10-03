@@ -1,8 +1,9 @@
 /**
  * Browsing and installing extensions from the GitHub-hosted registry.
  *
- * Extensions are not bundled with the app and do not live in this repository.
- * They are published to https://github.com/Sarv/SarvInbox-extensions, which
+ * Marketplace packages are distributed through Sarv/SarvInbox-extensions;
+ * the optional ClamAV extension's source is maintained in Inbox/extensions.
+ * Registry packages are published to https://github.com/Sarv/SarvInbox-extensions, which
  * serves a `registry.json` index; each entry points at a `.tgz` attached to a
  * GitHub release and pins its SHA-256.
  *

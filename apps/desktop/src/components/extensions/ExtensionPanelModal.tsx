@@ -19,12 +19,14 @@ import { ExtensionPanelFrame } from './ExtensionPanelFrame';
 interface ExtensionPanelModalProps {
   available: AvailablePanel;
   currentMessageId?: string;
+  currentAccountId?: string;
   onClose: () => void;
 }
 
 export function ExtensionPanelModal({
   available,
   currentMessageId,
+  currentAccountId,
   onClose,
 }: ExtensionPanelModalProps) {
   // Escape closes it from the app side. A sandboxed panel cannot install a
@@ -68,6 +70,7 @@ export function ExtensionPanelModal({
           <ExtensionPanelFrame
             available={available}
             currentMessageId={currentMessageId}
+            currentAccountId={currentAccountId}
             onRequestClose={onClose}
           />
         </div>

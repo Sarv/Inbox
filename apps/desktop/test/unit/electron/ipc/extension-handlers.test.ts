@@ -17,6 +17,8 @@ const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => unknown>(),
   manager: null as any,
   errors: [] as string[],
+  parsePanelRequest: vi.fn(),
+  setMessageContext: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -35,7 +37,7 @@ vi.mock('@sarvinbox/core', () => ({
     error: (...args: unknown[]) => h.errors.push(args.join(' ')),
     debug: () => {},
   }),
-  parsePanelRequest: () => null,
+  parsePanelRequest: (payload: unknown) => h.parsePanelRequest(payload),
   toPanelMessage: (value: unknown) => value,
 }));
 
@@ -44,6 +46,10 @@ vi.mock('../../../../electron/services/extension-marketplace', () => ({
   getExtensionsConfig: vi.fn(),
   getRegistryEntry: vi.fn(),
   installFromRegistry: vi.fn(),
+}));
+
+vi.mock('../../../../electron/services/antivirus-scan-service', () => ({
+  getAntivirusScanService: () => ({ setMessageContext: h.setMessageContext }),
 }));
 
 vi.mock('../../../../electron/shared', () => ({
@@ -65,7 +71,51 @@ beforeEach(() => {
   h.handlers.clear();
   h.manager = null;
   h.errors.length = 0;
+  h.parsePanelRequest.mockReset().mockReturnValue(null);
+  h.setMessageContext.mockReset();
   registerExtensionHandlers();
+});
+
+describe('extensions:panelRequest scanner context', () => {
+  it('uses the app frame message and account instead of panel supplied values', async () => {
+    const request = { requestId: 'r', method: 'security.submit', params: {
+      targetIds: ['opaque-target'], currentMessageId: 'forged-message', currentAccountId: 'forged-account',
+    } };
+    h.parsePanelRequest.mockReturnValue(request);
+    h.manager = { servePanelRequest: vi.fn(async () => {
+      expect(h.setMessageContext).toHaveBeenCalledWith('scanner', 'real-message', 'real-account');
+      return { requestId: 'r', ok: true };
+    }) };
+
+    expect(await call('extensions:panelRequest', 'scanner', request, {
+      currentMessageId: 'real-message', currentAccountId: 'real-account',
+    })).toEqual({ requestId: 'r', ok: true });
+    expect(h.manager.servePanelRequest).toHaveBeenCalledWith('scanner', request, expect.any(Object));
+  });
+
+  it('clears the scan context when the app frame has no open message', async () => {
+    h.parsePanelRequest.mockReturnValue({ requestId: 'r', method: 'security.getTargets' });
+    h.manager = { servePanelRequest: vi.fn(async () => ({ requestId: 'r', ok: true, value: [] })) };
+    await call('extensions:panelRequest', 'scanner', {});
+    expect(h.setMessageContext).toHaveBeenCalledWith('scanner', undefined, undefined);
+  });
+
+  it('does not set scan context for malformed panel requests', async () => {
+    h.manager = { servePanelRequest: vi.fn() };
+    expect(await call('extensions:panelRequest', 'scanner', { params: { messageId: 'forged' } }))
+      .toMatchObject({ ok: false, error: 'Malformed panel request' });
+    expect(h.setMessageContext).not.toHaveBeenCalled();
+    expect(h.manager.servePanelRequest).not.toHaveBeenCalled();
+  });
+
+  it('returns a panel error if the scanner context is unavailable', async () => {
+    h.parsePanelRequest.mockReturnValue({ requestId: 'r', method: 'security.getTargets' });
+    h.manager = { servePanelRequest: vi.fn() };
+    h.setMessageContext.mockImplementationOnce(() => { throw new Error('Scanner is unavailable'); });
+    expect(await call('extensions:panelRequest', 'scanner', {}))
+      .toEqual({ requestId: 'r', ok: false, error: 'Scanner is unavailable' });
+    expect(h.manager.servePanelRequest).not.toHaveBeenCalled();
+  });
 });
 
 describe('extensions:invoke', () => {

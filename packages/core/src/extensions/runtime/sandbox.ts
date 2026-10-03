@@ -31,6 +31,10 @@ import type {
   ExtensionLogger,
   ExtensionMail,
   ExtensionMailFolder,
+  ExtensionSecurity,
+  AntivirusScanTarget,
+  AntivirusScanJob,
+  AntivirusSetupStatus,
   ExtensionManifest,
   ExtensionPermission,
   ExtensionSettings,
@@ -283,6 +287,34 @@ export function startExtensionSandbox(
       },
     };
 
+    const security: ExtensionSecurity = {
+      getTargets: () => {
+        require_('security:scan-attachments', 'security.getTargets');
+        return hostCall(extensionId, 'security.getTargets', []) as Promise<AntivirusScanTarget[]>;
+      },
+      getSetup: () => {
+        require_('security:scan-attachments', 'security.getSetup');
+        return hostCall(extensionId, 'security.getSetup', []) as Promise<AntivirusSetupStatus>;
+      },
+      openSetup: () => {
+        require_('security:scan-attachments', 'security.openSetup');
+        return hostCall(extensionId, 'security.openSetup', []) as Promise<void>;
+      },
+      submit: (targetIds, options) => {
+        require_('security:scan-attachments', 'security.submit');
+        if (options?.includeBodyConsent === true) require_('security:scan-body', 'security.submit');
+        return hostCall(extensionId, 'security.submit', [targetIds, options]) as Promise<AntivirusScanJob>;
+      },
+      get: (jobId) => {
+        require_('security:scan-attachments', 'security.get');
+        return hostCall(extensionId, 'security.get', [jobId]) as Promise<AntivirusScanJob>;
+      },
+      cancel: (jobId) => {
+        require_('security:scan-attachments', 'security.cancel');
+        return hostCall(extensionId, 'security.cancel', [jobId]) as Promise<AntivirusScanJob>;
+      },
+    };
+
     const ui: ExtensionUI = {
       notify: (notification: ExtensionUINotification) => {
         require_('ui:notify', 'ui.notify');
@@ -390,6 +422,7 @@ export function startExtensionSandbox(
       ai: has('ai:use') ? ai : undefined,
       settings,
       mail,
+      security,
       ui,
       log,
       subscriptions: [],

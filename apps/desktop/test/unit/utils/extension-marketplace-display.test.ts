@@ -46,8 +46,14 @@ describe('describePermission', () => {
 
   // Reading mail, deleting it, and calling out to the network are the three
   // that can do real damage; nothing else may be ranked above them.
-  it.each(['email:read', 'email:delete', 'network:fetch'])('ranks %s as high risk', (permission) => {
+  it.each(['email:read', 'email:delete', 'network:fetch', 'security:scan-attachments', 'security:scan-body'])('ranks %s as high risk', (permission) => {
     expect(describePermission(permission).risk).toBe('high');
+  });
+
+  it('explains that scanner permissions share selected bytes and require body consent', () => {
+    expect(describePermission('security:scan-attachments').description).toContain('attachment bytes');
+    expect(describePermission('security:scan-body').description).toContain('separate consent for each scan');
+    expect(describePermission('ui:panel').risk).toBe('low');
   });
 });
 

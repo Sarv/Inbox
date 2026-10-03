@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { AgentDashboard } from './components/agent/AgentDashboard';
 import { AIStatusBanner } from './components/AIStatusBanner';
+import { AntivirusSetupModal } from './components/antivirus/AntivirusSetupModal';
 import { AppSidebar, AppSection } from './components/AppSidebar';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
@@ -964,6 +965,7 @@ function App() {
       {/* App-wide confirmation prompt — backs requestConfirm() so store-level
           guards (e.g. bulk delete) can prompt regardless of entry point. */}
       <GlobalConfirmDialog />
+      <AntivirusSetupModal />
       {/* Auto-update prompt. Self-hiding: renders nothing unless the main
           process says there is something to show. */}
       <UpdateDialog />

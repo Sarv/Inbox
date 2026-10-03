@@ -1209,16 +1209,61 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * collected stream IS the raw file — no base64/QP handling here. The folder
    * must already be selected by the caller. Returns null if the part is missing.
    */
-  async downloadPart(uid: number, part: string): Promise<Buffer | null> {
+  async downloadPart(uid: number, part: string, options?: { maxBytes?: number; signal?: AbortSignal; timeoutMs?: number }): Promise<Buffer | null> {
     this.ensureConnected();
-    const dl: any = await this.op('DOWNLOAD', this.client!.download(String(uid), part, { uid: true }));
-    const content = dl && dl.content;
-    if (!content) return null;
+    const bounded = options?.maxBytes !== undefined || options?.signal !== undefined || options?.timeoutMs !== undefined;
+    if (options?.signal?.aborted) throw new Error('Attachment scan cancelled');
+    let content: any;
     const chunks: Buffer[] = [];
-    for await (const chunk of content as AsyncIterable<Buffer>) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    let bytes = 0;
+    let stopReason: Error | undefined;
+    let rejectStopped: (error: Error) => void = () => {};
+    const stopped = new Promise<never>((_resolve, reject) => { rejectStopped = reject; });
+    // The initial command retains the mailbox lock until ImapFlow's guarded
+    // operation finishes. Once it yields a stream, cancellation destroys that
+    // stream and races its next chunk so a stalled attachment cannot retain
+    // selected content indefinitely.
+    void stopped.catch(() => {});
+    const stop = (error: Error) => {
+      if (stopReason) return;
+      stopReason = error;
+      content?.destroy?.();
+      rejectStopped(error);
+    };
+    const abort = () => stop(new Error('Attachment scan cancelled'));
+    options?.signal?.addEventListener('abort', abort, { once: true });
+    const timer = bounded ? setTimeout(() => stop(new Error('Attachment scan download timed out')),
+      Math.max(1, Math.min(options?.timeoutMs ?? 90_000, 90_000))) : undefined;
+    timer?.unref();
+    try {
+      const dl: any = await this.op('DOWNLOAD', this.client!.download(String(uid), part, { uid: true }));
+      content = dl && dl.content;
+      if (stopReason) { content?.destroy?.(); throw stopReason; }
+      if (!content) return null;
+      const iterator = (content as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
+      for (;;) {
+        const next = bounded ? await Promise.race([iterator.next(), stopped]) : await iterator.next();
+        if (next.done) break;
+        const buffer = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
+        bytes += buffer.length;
+        if (options?.maxBytes !== undefined && bytes > options.maxBytes) {
+          buffer.fill(0);
+          throw new Error('Attachment exceeds the scan byte limit');
+        }
+        chunks.push(buffer);
+      }
+      return Buffer.concat(chunks);
+    } catch (error) {
+      if (bounded) {
+        content?.destroy?.();
+        for (const chunk of chunks) chunk.fill(0);
+      }
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      options?.signal?.removeEventListener('abort', abort);
+      if (bounded) for (const chunk of chunks) chunk.fill(0);
     }
-    return Buffer.concat(chunks);
   }
 
   /**

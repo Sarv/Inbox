@@ -9,6 +9,7 @@ import { Tooltip } from '../Tooltip';
 
 import { ExtensionPanelModal } from './ExtensionPanelModal';
 import { ExtensionPanelSidebar } from './ExtensionPanelSidebar';
+import { panelMessageAccount } from './panel-message-context';
 import { RegistryImage } from './RegistryImage';
 import { panelsForSurface, useExtensionPanels } from './useExtensionPanels';
 
@@ -27,6 +28,7 @@ import { panelsForSurface, useExtensionPanels } from './useExtensionPanels';
  */
 export function MailDetailWithPanels() {
   const selectedEmailId = useEmailStore((state) => state.selectedEmailId);
+  const currentAccountId = useEmailStore(panelMessageAccount);
   const { panels } = useExtensionPanels();
   const [dismissed, setDismissed] = useState(false);
   const [modalPanel, setModalPanel] = useState<AvailablePanel | null>(null);
@@ -88,6 +90,7 @@ export function MailDetailWithPanels() {
         <ExtensionPanelSidebar
           panels={sidebarPanels}
           currentMessageId={currentMessageId}
+          currentAccountId={currentAccountId}
           onClose={() => {
             setOpen(false);
             setDismissed(true);
@@ -146,6 +149,7 @@ export function MailDetailWithPanels() {
         <ExtensionPanelModal
           available={modalPanel}
           currentMessageId={currentMessageId}
+          currentAccountId={currentAccountId}
           onClose={() => setModalPanel(null)}
         />
       )}

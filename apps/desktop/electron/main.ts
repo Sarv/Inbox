@@ -43,6 +43,7 @@ import {
 } from './services/accounts-runtime';
 import { loadAgentConfig } from './services/agent-config-store';
 import { getAllAiSecrets } from './services/ai-secret-store';
+import { createAntivirusDesktopBackend } from './services/antivirus-desktop-backend';
 import {
   ATTACHMENT_SCHEME_PRIVILEGES,
   registerAttachmentProtocol,
@@ -766,9 +767,10 @@ async function initializeExtensionManager(): Promise<void> {
   const userDataPath = app.getPath('userData');
   const extensionsBaseDir = join(userDataPath, 'extensions-data');
 
-  // No extensions are compiled into the app. They live in their own repository
-  // (https://github.com/Sarv/SarvInbox-extensions), are published as signed-
-  // by-checksum release archives, and are installed into `extensionsBaseDir`
+  // Extension packages are loaded from `extensionsBaseDir`, including local
+  // folder installs such as Inbox's extensions/clamav-scan. Marketplace packages
+  // come from Sarv/SarvInbox-extensions as checksum-pinned release archives,
+  // and are installed into `extensionsBaseDir`
   // like any other — including the ones `extensions.config.json` names as
   // system extensions, which are simply installed for the user on first run.
   // That keeps one code path for a shipped extension and a user-installed one.
@@ -785,6 +787,7 @@ async function initializeExtensionManager(): Promise<void> {
     // Reading and changing mail on the extension's own schedule, each method
     // gated on the permission the reader approved at install time.
     mailBackend: createExtensionMailBackend(),
+    securityBackend: createAntivirusDesktopBackend(),
     // Extension code runs in its own process, not this one. Main keeps the
     // database key, the credential vault and the IMAP connections; the sandbox
     // gets a message port and has to ask for everything else.

@@ -50,6 +50,13 @@ export type PanelRequestMethod =
   | 'mail.move'
   /** Move to trash — never an expunge. Requires `email:delete`. */
   | 'mail.trash'
+  /** Scan targets from the trusted reader context. Requires `security:scan-attachments`. */
+  | 'security.getTargets'
+  | 'security.getSetup'
+  | 'security.openSetup'
+  | 'security.submit'
+  | 'security.get'
+  | 'security.cancel'
   /** Ask the app to close this panel. Always allowed — it is the panel itself. */
   | 'panel.close'
   /** Ask for a different height, for a panel that sizes to its content. */
@@ -93,6 +100,12 @@ const PANEL_REQUEST_PERMISSIONS: Readonly<
   'mail.removeLabel': 'email:label',
   'mail.move': 'email:move',
   'mail.trash': 'email:delete',
+  'security.getTargets': 'security:scan-attachments',
+  'security.getSetup': 'security:scan-attachments',
+  'security.openSetup': 'security:scan-attachments',
+  'security.submit': 'security:scan-attachments',
+  'security.get': 'security:scan-attachments',
+  'security.cancel': 'security:scan-attachments',
   'panel.close': null,
   'panel.resize': null,
 };

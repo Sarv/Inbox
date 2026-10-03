@@ -20,7 +20,7 @@ import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import type { EmailProvider } from '../utils/provider';
 import { withStallTimeout, isTimeoutError } from '../utils/timeout';
 
-import { base64DecodeCollapsed, findAttachmentNodeByName } from './body-structure';
+import { attachmentNodes, base64DecodeCollapsed, findAttachmentNodeByName } from './body-structure';
 import { poolIdleTimeoutForHost } from './connection-budget';
 import { ConnectionManager } from './connection-manager';
 import { IMAPConnectionPool, PoolConnectionParkedError, type ConnectionPoolConfig } from './connection-pool';
@@ -2389,6 +2389,46 @@ export class SyncEngine {
    * doesn't support per-part download, so the caller falls back to the full
    * fetchAttachment path — never a silent failure.
    */
+  async listAttachmentScanParts(folderPath: string, uid: number): Promise<Array<{ partId: string; filename: string; byteLength: number | null }>> {
+    if (!this.isConnected() || !uid) throw new Error('Connect this mailbox before scanning attachments');
+    const run = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
+      const rows = await client.fetchMessagesByUID([uid], { fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
+      const nodes = attachmentNodes(rows[0]?.bodyStructure);
+      return nodes.map((node) => ({ partId: node.part!, filename: node.disposition?.params?.filename || node.params?.name || `Attachment ${node.part}`,
+        byteLength: null })); // BODYSTRUCTURE sizes describe encoded bytes, not the bytes submitted.
+    });
+    if (this.connectionPool?.isInitialized()) return this.connectionPool.withConnection(run);
+    if (this.isSyncing()) throw new Error('Mailbox is syncing. Try scanning again shortly');
+    try { return await run(this.connectionManager.client); }
+    finally { await this.reselectMonitoredFolder(); }
+  }
+
+  async fetchAttachmentScanPart(folderPath: string, uid: number, partId: string, expectedName: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer> {
+    if (!this.isConnected() || !uid || !/^\d+(\.\d+)*$/.test(partId) || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+      throw new Error('This attachment cannot be scanned');
+    }
+    const run = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
+      if (signal?.aborted) throw new Error('Attachment scan cancelled');
+      const rows = await client.fetchMessagesByUID([uid], { fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
+      if (signal?.aborted) throw new Error('Attachment scan cancelled');
+      const node = attachmentNodes(rows[0]?.bodyStructure).find(n => n.part === partId);
+      const name = node?.disposition?.params?.filename || node?.params?.name || `Attachment ${partId}`;
+      if (!node || name !== expectedName || !client.downloadPart) throw new Error('The selected MIME attachment changed or is unavailable');
+      const content = await client.downloadPart(uid, partId, { maxBytes, signal, timeoutMs: 90_000 });
+      if (signal?.aborted) { content?.fill(0); throw new Error('Attachment scan cancelled'); }
+      if (!content?.length || content.length > maxBytes) throw new Error('Attachment is empty or exceeds the scan limit');
+      if (base64DecodeCollapsed(node.encoding, node.size, content.length)) {
+        content.fill(0);
+        throw new Error('Attachment encoding cannot be fully inspected');
+      }
+      return content;
+    });
+    if (this.connectionPool?.isInitialized()) return this.connectionPool.withConnection(run);
+    if (this.isSyncing()) throw new Error('Mailbox is syncing. Try scanning again shortly');
+    try { return await run(this.connectionManager.client); }
+    finally { await this.reselectMonitoredFolder(); }
+  }
+
   async fetchAttachmentPart(
     _emailId: string,
     folderPath: string,

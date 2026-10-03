@@ -8,6 +8,7 @@ import type { ExtensionUIAction, PanelRequest, PanelResponse } from '@sarvinbox/
 import { createLogger, parsePanelRequest, toPanelMessage } from '@sarvinbox/core';
 import { ipcMain, dialog } from 'electron';
 
+import { getAntivirusScanService } from '../services/antivirus-scan-service';
 import {
   fetchCatalog,
   getExtensionsConfig,
@@ -362,7 +363,7 @@ export function registerExtensionHandlers(): void {
       _event,
       extensionId: string,
       payload: unknown,
-      context?: { currentMessageId?: string }
+      context?: { currentMessageId?: string; currentAccountId?: string }
     ): Promise<PanelResponse> => {
       const request: PanelRequest | undefined = parsePanelRequest(payload);
       if (!request) {
@@ -373,6 +374,21 @@ export function registerExtensionHandlers(): void {
       const extensionManager = getExtensionManager();
       if (!extensionManager) {
         return { requestId: request.requestId, ok: false, error: 'Extensions are not running' };
+      }
+
+      if (request.method.startsWith('security.')) {
+        // This context comes from the app's panel frame. A panel request's
+        // params never choose a message or its owning account for a scan.
+        try {
+          getAntivirusScanService().setMessageContext(
+            extensionId, context?.currentMessageId, context?.currentAccountId
+          );
+        } catch (error) {
+          return {
+            requestId: request.requestId, ok: false,
+            error: error instanceof Error ? error.message : 'Antivirus scanning is unavailable',
+          };
+        }
       }
 
       return extensionManager.servePanelRequest(extensionId, request, {

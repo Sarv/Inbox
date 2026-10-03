@@ -1,5 +1,13 @@
 import type { BodyStructure } from '../types/imap';
 
+/** Exact part handles keep attachments with identical names distinct. */
+export function attachmentNodes(node: BodyStructure | undefined): BodyStructure[] {
+  if (!node) return [];
+  const own = node.part && (node.disposition?.type?.toLowerCase() === 'attachment' ||
+    node.disposition?.params?.filename || node.params?.name) ? [node] : [];
+  return [...own, ...(node.parts ?? []).flatMap(attachmentNodes)];
+}
+
 /**
  * Walk a bodystructure tree and return the NODE of the attachment whose filename
  * matches `filename` (case-insensitive), or null. Prefers the

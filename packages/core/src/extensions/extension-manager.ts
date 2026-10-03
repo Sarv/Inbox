@@ -19,6 +19,7 @@ import type {
   ExtensionSettingsBackend,
   ExtensionUIBackend,
   ExtensionMailBackend,
+  ExtensionSecurityBackend,
 } from './extension-api';
 import {
   ExtensionHost,
@@ -79,6 +80,7 @@ export interface ExtensionManagerOptions {
   /** Optional: UI notification backend (omit for a host that renders no UI) */
   uiBackend?: ExtensionUIBackend;
   mailBackend?: ExtensionMailBackend;
+  securityBackend?: ExtensionSecurityBackend;
 
   /** Optional: event bus (shared with pipeline) */
   eventBus?: EventBus;
@@ -97,6 +99,7 @@ export interface ExtensionManagerOptions {
  * Extension Manager - orchestrates the extension system
  */
 export class ExtensionManager {
+  private securityBackend?: ExtensionSecurityBackend;
   private baseDir: string;
   private registry: ExtensionRegistry;
   private host: ExtensionHost;
@@ -109,6 +112,7 @@ export class ExtensionManager {
   private stateFile: string;
 
   constructor(options: ExtensionManagerOptions) {
+    this.securityBackend = options.securityBackend;
     this.baseDir = options.extensionsBaseDir;
 
     // Set up directories
@@ -138,6 +142,7 @@ export class ExtensionManager {
       settingsBackend,
       uiBackend: options.uiBackend,
       mailBackend: options.mailBackend,
+      securityBackend: options.securityBackend,
       extensionStoragePath: this.storageDir,
       createChannel: options.createChannel,
     });
@@ -426,6 +431,7 @@ export class ExtensionManager {
   async uninstallExtension(extensionId: string): Promise<void> {
     // Deactivate first
     await this.host.deactivate(extensionId);
+    await this.securityBackend?.onExtensionDisabled?.(extensionId);
 
     // Then uninstall
     await this.registry.uninstall(extensionId);
@@ -451,6 +457,7 @@ export class ExtensionManager {
   async disableExtension(extensionId: string): Promise<void> {
     // Deactivate first
     await this.host.deactivate(extensionId);
+    await this.securityBackend?.onExtensionDisabled?.(extensionId);
 
     // Then disable in registry
     await this.registry.disable(extensionId);

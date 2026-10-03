@@ -1,0 +1,15 @@
+{
+  "id": "clamav-scan",
+  "name": "ClamAV Scan",
+  "version": "1.0.0",
+  "description": "Scan selected attachments with your configured ClamAV service. Email body sharing requires separate consent.",
+  "author": "Sarv",
+  "main": "index.js",
+  "engines": { "sarvinbox": ">=1.3.1" },
+  "categories": ["security"],
+  "permissions": ["ui:panel", "security:scan-attachments", "security:scan-body"],
+  "contributes": {
+    "panels": [{ "id": "scan", "title": "Antivirus scan", "entry": "panel/index.html", "surface": "sidebar", "icon": "icon.svg", "description": "Scan selected files and inspect complete or incomplete results" }],
+    "capabilities": [{ "id": "attachment.scan", "export": "scanAttachments", "description": "Open the antivirus scan panel" }]
+  }
+}

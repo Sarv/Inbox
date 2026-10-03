@@ -10,6 +10,7 @@ import { registerAccountsHandlers } from './accounts-handlers';
 import { registerAgentHandlers } from './agent-handlers';
 import { registerAICategorizationHandlers } from './ai-categorization-handlers';
 import { registerAIHandlers } from './ai-handlers';
+import { registerAntivirusHandlers } from './antivirus-handlers';
 import { registerAppHandlers } from './app-handlers';
 import { registerContactEnrichmentHandlers } from './contact-enrichment-handlers';
 import { registerContactsHandlers } from './contacts-handlers';
@@ -55,6 +56,7 @@ export function registerAllHandlers(): void {
   registerContactsHandlers();
   registerAIHandlers();
   registerExtensionHandlers();
+  registerAntivirusHandlers();
   registerMiscHandlers();
   registerFollowUpHandlers();
   registerAICategorizationHandlers();

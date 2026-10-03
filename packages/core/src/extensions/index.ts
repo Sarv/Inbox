@@ -30,6 +30,11 @@ export type {
   ExtensionSettings,
   ExtensionMail,
   ExtensionMailFolder,
+  ExtensionSecurity,
+  AntivirusScanTarget,
+  AntivirusSetupStatus,
+  AntivirusScanJob,
+  AntivirusScanSubmitOptions,
   ExtensionUI,
   ExtensionUIAction,
   ExtensionUIActionHandler,
@@ -100,6 +105,7 @@ export {
   type ExtensionSettingsBackend,
   type ExtensionUIBackend,
   type ExtensionMailBackend,
+  type ExtensionSecurityBackend,
   type RegisteredWorkflow,
 } from './extension-api';
 

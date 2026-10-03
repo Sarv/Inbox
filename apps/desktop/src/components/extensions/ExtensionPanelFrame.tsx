@@ -28,6 +28,7 @@ interface ExtensionPanelFrameProps {
   available: AvailablePanel;
   /** Id of the message the reader has open, or undefined when none is. */
   currentMessageId?: string;
+  currentAccountId?: string;
   /** The panel asked to close itself. */
   onRequestClose?: () => void;
   className?: string;
@@ -36,6 +37,7 @@ interface ExtensionPanelFrameProps {
 export function ExtensionPanelFrame({
   available,
   currentMessageId,
+  currentAccountId,
   onRequestClose,
   className,
 }: ExtensionPanelFrameProps) {
@@ -45,6 +47,8 @@ export function ExtensionPanelFrame({
   // was attached.
   const messageIdRef = useRef(currentMessageId);
   messageIdRef.current = currentMessageId;
+  const accountIdRef = useRef(currentAccountId);
+  accountIdRef.current = currentAccountId;
 
   const post = useCallback((payload: unknown) => {
     // '*' because a sandboxed frame's origin is not something the parent can
@@ -81,7 +85,7 @@ export function ExtensionPanelFrame({
       const response = await window.electronAPI.extensions.panelRequest(
         available.extensionId,
         event.data,
-        { currentMessageId: messageIdRef.current }
+        { currentMessageId: messageIdRef.current, currentAccountId: accountIdRef.current }
       );
       post({ channel: PANEL_BRIDGE_CHANNEL, ...response });
     };
@@ -98,7 +102,7 @@ export function ExtensionPanelFrame({
       event: 'message-changed',
       payload: { id: currentMessageId ?? null },
     });
-  }, [currentMessageId, post]);
+  }, [currentMessageId, currentAccountId, post]);
 
   return (
     <iframe

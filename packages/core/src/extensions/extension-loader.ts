@@ -215,6 +215,8 @@ export function validateManifest(manifest: ExtensionManifest): ValidationResult 
       'settings:write',
       'ui:notify',
       'ui:panel',
+      'security:scan-attachments',
+      'security:scan-body',
     ]);
 
     for (const permission of manifest.permissions) {

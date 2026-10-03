@@ -29,7 +29,7 @@ compare the policy against the app, and a mismatch fails verification.
 
 # Sarv Inbox Privacy Policy
 
-**Effective date:** 29 September 2026
+**Effective date:** 2 October 2026
 
 Sarv Inbox ("the app") is a desktop email client for macOS, Windows and Linux,
 published by Sarv Webs Private Limited ("Sarv", "we", "us"), IT-10, EPIP RIICO
@@ -226,6 +226,56 @@ If you sign in with a Sarv account, Sarv processes your mailbox (for Sarv Mail),
 the AI requests described above, and your account details under the
 [Sarv privacy policy](https://sarv.com/privacy-policy).
 
+### 4.9 Optional ClamAV attachment scans
+
+The **ClamAV Scan** extension is optional and off by default. Installing it
+does not upload mail. Before enabling scans, you choose a scanner server,
+review its operator, processing region, privacy policy and retention disclosure,
+select the accounts that may use it, and explicitly agree to sharing selected
+attachments. Production connections require HTTPS. A development build can
+also connect to an explicitly configured scanner on HTTP loopback on your own
+computer.
+
+- **What is sent:** only the bytes of attachments you select and manually ask
+  to scan, together with random item identifiers and byte counts. Your mail
+  account identity, subjects, envelope headers, original filenames and
+  Gmail/IMAP credentials are not added to the scan request. The file contents
+  can themselves contain personal information.
+- **Message text:** disabled by default and requires separate setup consent
+  and confirmation for each scan. Only the selected message's stored HTML or
+  text body is sent, which can include quoted messages and signatures. Remote
+  images and links are not fetched. Encrypted OpenPGP messages are not supported
+  for remote scanning in this version.
+- **Processing:** the configured service streams content to ClamAV and returns
+  a verdict through an authenticated temporary ticket. The included server
+  implementation uses volatile memory for ticket content and results; ClamAV
+  may unpack files into temporary memory backed storage while inspecting them.
+  Content is not intentionally written to persistent storage, shared as
+  samples, used for advertising or used to train models. Server authentication,
+  security and quota records are separate from ticket content and may be
+  retained as disclosed by the operator. A third party scanner's privacy
+  policy also applies.
+- **Retention:** the included ticket service accepts new uploads and results
+  only within its declared content deadline (at most five minutes after ticket
+  creation); its retained ticket results expire within fifteen minutes of a
+  terminal state. Active ClamAV inspection may continue until its worker ends
+  even after cancellation or expiry; a universal deadline for daemon extraction
+  has not been established. The client requests ticket deletion after scanning.
+  Operator declarations and a deletion request are not proof that bytes already
+  transmitted have been erased. Local result state is kept only in memory,
+  expires within fifteen minutes and is lost when the app closes.
+- **Your controls:** every scan is manual. Disable scanning in the trusted
+  setup dialog, disable/uninstall the extension, or remove an allowed account
+  to stop new uploads and request cancellation of pending work. Changing the
+  server, privacy terms or scan policy requires renewed setup consent. Scanner
+  credentials are stored using operating system secure storage inside the
+  encrypted app profile; setup is refused if secure credential storage is
+  unavailable.
+
+This feature does not change your mailbox or quarantine files. A "No threat
+detected" result describes the submitted bytes under the scanner's evaluated
+limits and definitions; it does not guarantee that a file or a link is safe.
+
 ## 5. What we do not do
 
 - We do not sell or rent personal data.
@@ -275,7 +325,7 @@ Depending on where you live (for example under India's Digital Personal Data
 Protection Act, the GDPR or US state laws), you may have the right to access,
 correct or delete personal data we hold, or to object to its use. Most of your
 data never reaches us; for the data that does (AI requests to Sarv AI, Sarv
-reputation reports, crash reports), write to rc@sarv.com and we will answer
+reputation reports, scanner authentication/security records, crash reports), write to rc@sarv.com and we will answer
 within 30 days.
 
 ## 10. Changes

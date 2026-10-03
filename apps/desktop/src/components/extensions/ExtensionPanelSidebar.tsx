@@ -26,6 +26,7 @@ interface ExtensionPanelSidebarProps {
   panels: AvailablePanel[];
   /** Id of the message the reader has open, or undefined when none is. */
   currentMessageId?: string;
+  currentAccountId?: string;
   onClose: () => void;
 }
 
@@ -43,6 +44,7 @@ function widthFor(available: AvailablePanel | undefined): number {
 export function ExtensionPanelSidebar({
   panels,
   currentMessageId,
+  currentAccountId,
   onClose,
 }: ExtensionPanelSidebarProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -139,6 +141,7 @@ export function ExtensionPanelSidebar({
           key={selected.key}
           available={selected.available}
           currentMessageId={currentMessageId}
+          currentAccountId={currentAccountId}
           onRequestClose={onClose}
         />
       </div>

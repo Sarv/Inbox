@@ -287,7 +287,9 @@ export type ExtensionPermission =
   | 'settings:read'   // Read user settings
   | 'settings:write'  // Modify user settings
   | 'ui:notify'       // Surface a notification card in the app window
-  | 'ui:panel';       // Render its own UI panel inside the app window
+  | 'ui:panel'        // Render its own UI panel inside the app window
+  | 'security:scan-attachments' // Submit selected attachments to the configured scanner
+  | 'security:scan-body'; // Submit an email body with separate, explicit consent
 
 /**
  * Permission metadata
@@ -387,6 +389,20 @@ export const PERMISSION_INFO: Record<ExtensionPermission, PermissionInfo> = {
     description: 'Render its own pages beside your mail and in dialogs',
     dangerous: false,
     requiresConfirmation: false,
+  },
+  'security:scan-attachments': {
+    id: 'security:scan-attachments',
+    name: 'Scan Attachments',
+    description: 'Send selected attachments to your configured antivirus service',
+    dangerous: true,
+    requiresConfirmation: true,
+  },
+  'security:scan-body': {
+    id: 'security:scan-body',
+    name: 'Scan Email Bodies',
+    description: 'Send an email body to your configured antivirus service with separate consent',
+    dangerous: true,
+    requiresConfirmation: true,
   },
 };
 
@@ -488,6 +504,9 @@ export interface ExtensionContext {
    */
   readonly mail: ExtensionMail;
 
+  /** Antivirus scans of targets issued for the message open in the app. */
+  readonly security: ExtensionSecurity;
+
   /** Notification cards shown in the app window (if ui:notify granted) */
   readonly ui: ExtensionUI;
 
@@ -508,6 +527,78 @@ export interface ExtensionContext {
    * cast is where the export contract stops being checked.
    */
   exports: Record<string, unknown>;
+}
+
+/** Opaque scan target issued by the host; it never contains message bytes. */
+export interface AntivirusScanTarget {
+  targetId: string;
+  kind: 'attachment' | 'email-body';
+  displayName: string;
+  byteLength: number | null;
+  unavailableReason?: string;
+}
+
+/** Public scanner setup. Credentials stay in the app's credential store. */
+export interface AntivirusSetupStatus {
+  endpoint: string;
+  configured: boolean;
+  enabled: boolean;
+  operator?: string;
+  region?: string;
+  privacyPolicyUrl?: string;
+  privacyTermsVersion?: string;
+  scanPolicyVersion?: string;
+  allowedAccountIds: string[];
+  allowBody: boolean;
+  metadataRetentionSeconds?: number;
+  contentLifetimeSeconds?: number;
+  resultLifetimeSeconds?: number;
+  accounts?: Array<{ id: string; name: string; email: string }>;
+  developmentOnly?: boolean;
+  error?: string;
+}
+
+/** A scan's public progress and results, without transport credentials. */
+export interface AntivirusScanJob {
+  id: string;
+  state: 'preparing' | 'uploading' | 'queued' | 'scanning' | 'completed' | 'cancelled' | 'error' | 'expired';
+  items: Array<{
+    targetId: string;
+    displayName: string;
+    kind: 'attachment' | 'email-body';
+    status: 'pending' | 'no-threat-detected' | 'threat-detected' | 'incomplete' | 'error';
+    reason?: string;
+    signatures?: string[];
+    sha256?: string;
+    bytes?: number;
+    completedAt?: string;
+    engine?: {
+      name: string;
+      version: string;
+      signatureVersion: string;
+      signaturesUpdatedAt: string;
+      scanPolicyVersion: string;
+    };
+  }>;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt?: string;
+}
+
+export interface AntivirusScanSubmitOptions {
+  /** Explicit consent for this submission to include an email body. */
+  includeBodyConsent?: boolean;
+}
+
+/** The host owns retrieval, upload, credentials and scan job ownership. */
+export interface ExtensionSecurity {
+  getTargets(): Promise<AntivirusScanTarget[]>;
+  getSetup(): Promise<AntivirusSetupStatus>;
+  openSetup(): Promise<void>;
+  submit(targetIds: string[], options?: AntivirusScanSubmitOptions): Promise<AntivirusScanJob>;
+  get(jobId: string): Promise<AntivirusScanJob>;
+  cancel(jobId: string): Promise<AntivirusScanJob>;
 }
 
 /**

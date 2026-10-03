@@ -6,8 +6,9 @@
 // preload script. Safe/no-op when Sentry has no DSN configured.
 import '@sentry/electron/preload';
 
-import type { IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
+import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
+
 
 import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
 import type { DomainIdentityRow } from './services/domain-identity-store';
@@ -37,6 +38,19 @@ interface InAppToast {
 interface SecureAccountSecrets {
   imap?: { password?: string; accessToken?: string; refreshToken?: string };
   smtp?: { password?: string; accessToken?: string; refreshToken?: string };
+}
+
+interface AntivirusConfigureRequest {
+  challenge: string;
+  allowedAccountIds: string[];
+  allowBody: boolean;
+  attachmentConsent: boolean;
+  bodyConsent: boolean;
+}
+
+interface AntivirusProbeResult {
+  challenge: string;
+  setup: AntivirusSetupStatus;
 }
 
 /**
@@ -349,6 +363,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const listener = (_e: unknown, state: HeaderBackfillState) => cb(state);
       ipcRenderer.on('header-backfill:progress', listener);
       return () => ipcRenderer.removeListener('header-backfill:progress', listener);
+    },
+  },
+
+  // Trusted scanner setup. This namespace is never exposed to extension frames.
+  antivirus: {
+    getSetup: (extensionId: string) => ipcRenderer.invoke('antivirus:getSetup', extensionId),
+    probe: (extensionId: string, endpoint: string, credential?: string) =>
+      ipcRenderer.invoke('antivirus:probe', extensionId, endpoint, credential),
+    configure: (extensionId: string, config: AntivirusConfigureRequest) =>
+      ipcRenderer.invoke('antivirus:configure', extensionId, config),
+    disable: (extensionId: string) => ipcRenderer.invoke('antivirus:disable', extensionId),
+    onOpenSetup: (callback: (payload: { extensionId: string }) => void) => {
+      const listener = (_event: unknown, payload: { extensionId: string }) => callback(payload);
+      ipcRenderer.on('antivirus:openSetup', listener);
+      return () => ipcRenderer.removeListener('antivirus:openSetup', listener);
     },
   },
 
@@ -1025,7 +1054,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     panelRequest: (
       extensionId: string,
       payload: unknown,
-      context?: { currentMessageId?: string },
+      context?: { currentMessageId?: string; currentAccountId?: string },
     ) => ipcRenderer.invoke('extensions:panelRequest', extensionId, payload, context),
     // Cards an extension asked to show. The payload is already sanitised in the
     // main process (capped strings, namespaced id, malformed fields dropped) —
@@ -1307,6 +1336,13 @@ export interface ElectronAPI {
   diagnostics: {
     getCrashReports: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
     setCrashReports: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  };
+  antivirus: {
+    getSetup: (extensionId: string) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
+    probe: (extensionId: string, endpoint: string, credential?: string) => Promise<{ success: boolean; data?: AntivirusProbeResult; error?: string }>;
+    configure: (extensionId: string, config: AntivirusConfigureRequest) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
+    disable: (extensionId: string) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
+    onOpenSetup: (callback: (payload: { extensionId: string }) => void) => () => void;
   };
   identity: {
     getSender: (address: string) => Promise<{ success: boolean; data?: SenderIdentity; error?: string }>;
@@ -1830,7 +1866,7 @@ export interface ElectronAPI {
     panelRequest: (
       extensionId: string,
       payload: unknown,
-      context?: { currentMessageId?: string },
+      context?: { currentMessageId?: string; currentAccountId?: string },
     ) => Promise<PanelResponse>;
     onNotify: (callback: (card: ExtensionNotificationCard) => void) => () => void;
     onDismiss: (callback: (payload: { id: string; extensionId: string }) => void) => () => void;

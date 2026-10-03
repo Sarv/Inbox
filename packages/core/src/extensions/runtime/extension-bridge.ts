@@ -18,7 +18,7 @@ import type { PipelineEvent } from '../../pipeline/types';
 import { createLogger } from '../../utils/logger';
 import { withTimeout } from '../../utils/timeout';
 import type { ExtensionContextImpl } from '../extension-api';
-import type { ExtensionUINotification } from '../types';
+import type { AntivirusScanSubmitOptions, ExtensionUINotification } from '../types';
 
 import {
   deserializeError,
@@ -318,6 +318,18 @@ export class ExtensionBridge {
         return context.settings.update(args[0] as string, args[1]);
       case 'mail.get':
         return context.mail.get(args[0] as string);
+      case 'security.getTargets':
+        return context.security.getTargets();
+      case 'security.getSetup':
+        return context.security.getSetup();
+      case 'security.openSetup':
+        return context.security.openSetup();
+      case 'security.submit':
+        return context.security.submit(args[0] as string[], args[1] as AntivirusScanSubmitOptions | undefined);
+      case 'security.get':
+        return context.security.get(args[0] as string);
+      case 'security.cancel':
+        return context.security.cancel(args[0] as string);
       case 'mail.folders':
         return context.mail.folders(args[0] as string | undefined);
       case 'mail.applyLabels':

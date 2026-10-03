@@ -203,7 +203,7 @@
       "icon": "build/icon.png",
       "category": "Office;Network;Email",
       "synopsis": "Privacy-first email client with AI-powered features",
-      "description": "Sarv Inbox is a source-available, privacy-first IMAP email client. Mail is stored locally in SQLite and nothing leaves the device unless an AI provider is configured.",
+      "description": "Sarv Inbox is a source-available IMAP email client with encrypted local mail storage, optional AI providers and optional user-authorized ClamAV scans.",
       "maintainer": "Sarv Webs Private Limited <support@sarv.com>",
       "artifactName": "sarv-inbox-${version}-${arch}.${ext}",
       "desktop": {

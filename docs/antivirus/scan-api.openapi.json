@@ -1,0 +1,1702 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Sarv Inbox optional ClamAV scanner ticket protocol",
+    "version": "1.0.0",
+    "description": "Implemented desktop contract for optional, user-authorized ClamAV scanning. The separate Inbox-av-server repository provides the authenticated gateway. Scanner credentials are separate from Gmail/IMAP tokens. Tickets use random identifiers, selected bytes and lengths, never mail/account identity or original filenames. Production requires HTTPS without redirects; development permits explicitly configured HTTP loopback. Ticket content/results are volatile and bounded. contentDeadlineAt controls upload admission, expiry and acceptance of results; it is not proof that active clamd extraction has stopped. Active cancellation returns 202 until its worker completes. Operator retention declarations are claims, not client proof. Result metadata expires within 900 seconds of terminal state. Authentication/quota/security metadata retention is disclosed separately. Unknown, partial, stale, mismatched, timed-out or expired scans never imply safety."
+  },
+  "servers": [
+    {
+      "url": "https://scanner.example.invalid",
+      "description": "Placeholder for an explicitly configured scanner origin. A production service is not deployed by this repository."
+    }
+  ],
+  "security": [
+    {
+      "ScannerBearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Scanner",
+      "description": "Optional transient scanning gateway; all endpoints authenticated."
+    }
+  ],
+  "paths": {
+    "/v1/scanner-capabilities": {
+      "get": {
+        "operationId": "getScannerCapabilities",
+        "summary": "Inspect scanner limits and operator disclosures before uploading",
+        "description": "Authenticated, metadata-only discovery. The desktop validates the complete response, presents operator/region/privacy policy and ephemeral retention claim, and obtains explicit endpoint/account/scope consent before creating a ticket. No upload is permitted on missing operator/retention fields or incompatible protocol. Do not automatically open privacyPolicyUrl or send mail to it.",
+        "responses": {
+          "200": {
+            "description": "Supported protocol, operator, engine, and bounded limits.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScannerCapabilities"
+                },
+                "examples": {
+                  "syntheticCapabilities": {
+                    "summary": "Synthetic example; retention is an operator claim",
+                    "value": {
+                      "protocolVersion": 1,
+                      "engine": {
+                        "name": "ClamAV",
+                        "version": "synthetic-version",
+                        "signatureVersion": "synthetic-signatures",
+                        "signaturesUpdatedAt": "2030-01-01T12:00:00Z",
+                        "scanPolicyVersion": "example-policy-1"
+                      },
+                      "maxItemBytes": 26214400,
+                      "maxTotalBytes": 52428800,
+                      "maxItems": 10,
+                      "contentLifetimeSeconds": 300,
+                      "resultLifetimeSeconds": 900,
+                      "operator": {
+                        "name": "Example Scanner Operator",
+                        "region": "Example region",
+                        "privacyPolicyUrl": "https://scanner.example.invalid/privacy",
+                        "privacyTermsVersion": "example-terms-1"
+                      },
+                      "contentStorage": {
+                        "mode": "ephemeral",
+                        "noPersistentRetention": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "tags": [
+          "Scanner"
+        ]
+      }
+    },
+    "/v1/scan-tickets": {
+      "post": {
+        "operationId": "createScanTicket",
+        "summary": "Allocate an opaque ticket without uploading mail content",
+        "description": "Validate per-item, count, and aggregate limits before accepting metadata. One authenticated principal owns the unpredictable ticket and every child item. Creating a ticket does not consent to disclosure: the desktop has already bound consent to the selected account, endpoint, operator disclosures and upload scope. No mailbox/account identity is sent. Idempotency keys are principal-scoped; an uncertain timeout is retried with the original key and identical metadata, within the original lifetime.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScanTicketRequest"
+              },
+              "example": {
+                "items": [
+                  {
+                    "clientItemId": "114df8bf-d904-4d6f-a928-62c3718320e7",
+                    "kind": "attachment",
+                    "byteLength": 1024
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Ticket allocated in awaiting_upload; no content received.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedScanTicket"
+                },
+                "examples": {
+                  "syntheticCreatedTicket": {
+                    "summary": "Predictable example identifiers must never be used in production",
+                    "value": {
+                      "ticketId": "00000000000000000000000000000001",
+                      "status": "awaiting_upload",
+                      "createdAt": "2030-01-01T12:00:00Z",
+                      "contentDeadlineAt": "2030-01-01T12:05:00Z",
+                      "resultExpiresAt": null,
+                      "items": [
+                        {
+                          "clientItemId": "114df8bf-d904-4d6f-a928-62c3718320e7",
+                          "itemId": "00000000000000000000000000000002",
+                          "uploadPath": "/v1/scan-tickets/00000000000000000000000000000001/items/00000000000000000000000000000002"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "tags": [
+          "Scanner"
+        ]
+      }
+    },
+    "/v1/scan-tickets/{ticketId}/items/{itemId}": {
+      "put": {
+        "operationId": "uploadScanItem",
+        "summary": "Upload exact item bytes to its same-origin ticket slot",
+        "description": "Only the owning principal may upload to awaiting_upload. Stream bounded application/octet-stream bytes; compute SHA-256 on the server. No multipart filenames, client-supplied hash, mail identities or credentials in the payload. Enforce declared length, actual length, advertised total bytes and fixed contentDeadlineAt. Hold bytes in bounded RAM/tmpfs only. Atomic upload: incomplete/time-limited transfers do not become uploaded. An exact duplicate PUT of the same bytes/length before submit may return 204; differing bytes for an occupied slot return 409. Never follow redirects, including credential-bearing redirects. A client network timeout is uncertain acceptance: retry the exact slot/bytes or inspect the ticket, never assume a verdict or extend lifetime.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TicketId"
+          },
+          {
+            "$ref": "#/components/parameters/ItemId"
+          },
+          {
+            "$ref": "#/components/parameters/ContentLength"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "Exact consented item bytes; minimum 1 byte, maximum advertised maxItemBytes, protocol ceiling 25 MiB. Enforced while streaming, not solely after buffering."
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Exact item bytes accepted, server hash computed; no verdict yet.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "410": {
+            "$ref": "#/components/responses/Gone"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "tags": [
+          "Scanner"
+        ]
+      }
+    },
+    "/v1/scan-tickets/{ticketId}/submit": {
+      "post": {
+        "operationId": "submitScanTicket",
+        "summary": "Queue all completely uploaded ticket items for ClamAV scanning",
+        "description": "Start owner-only asynchronous scanning after complete uploads, without extending the creation deadline. Missing/partial uploads return 409. Replays return existing state. Late results are rejected at the content deadline; active clamd processing may continue until its worker ends. Expiry or timeout never produces a no-threat result.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TicketId"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Queued for scanning. Poll using Retry-After.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmittedScanTicket"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Idempotent repeat; ticket is already submitted. Read current status/result.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanTicket"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "410": {
+            "$ref": "#/components/responses/Gone"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "tags": [
+          "Scanner"
+        ]
+      }
+    },
+    "/v1/scan-tickets/{ticketId}": {
+      "get": {
+        "operationId": "getScanTicket",
+        "summary": "Poll item status and byte-bound scan verdict metadata",
+        "description": "Owner-only. For awaiting_upload/queued/scanning, Retry-After supplies integer seconds for bounded polling. Terminal results contain no uploaded bytes and must expire within 900 seconds from terminalAt. Do not cache at proxies/browsers, share hashes/results between users, or use results for reputation/sample collection. No callback or absolute result URL. The desktop stops polling at cancellation, expiry, consent revocation, account/endpoint changes or credential revocation. Only a matching local SHA-256, no_threat_detected, fullCoverage:true, current definitions and no incomplete flags allow a no-threat display. Scan limitations, unknown archive coverage and transport timeouts never become clean.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TicketId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current ticket metadata. Retry-After applies only to nonterminal states; terminal polling stops.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanTicket"
+                },
+                "examples": {
+                  "syntheticCompletedTicket": {
+                    "summary": "Synthetic hash placeholder; a real client must match its own SHA-256",
+                    "value": {
+                      "ticketId": "00000000000000000000000000000001",
+                      "status": "completed",
+                      "createdAt": "2030-01-01T12:00:00Z",
+                      "contentDeadlineAt": "2030-01-01T12:05:00Z",
+                      "terminalAt": "2030-01-01T12:00:10Z",
+                      "resultExpiresAt": "2030-01-01T12:15:10Z",
+                      "items": [
+                        {
+                          "clientItemId": "114df8bf-d904-4d6f-a928-62c3718320e7",
+                          "itemId": "00000000000000000000000000000002",
+                          "kind": "attachment",
+                          "byteLength": 1024,
+                          "status": "completed",
+                          "result": {
+                            "verdict": "no_threat_detected",
+                            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                            "fullCoverage": true,
+                            "reason": {
+                              "code": "scan_completed",
+                              "retryable": false
+                            },
+                            "signatures": [],
+                            "engine": {
+                              "name": "ClamAV",
+                              "version": "synthetic-version",
+                              "signatureVersion": "synthetic-signatures",
+                              "signaturesUpdatedAt": "2030-01-01T12:00:00Z",
+                              "scanPolicyVersion": "example-policy-1"
+                            },
+                            "completedAt": "2030-01-01T12:00:10Z",
+                            "limitations": []
+                          },
+                          "reason": null
+                        }
+                      ]
+                    }
+                  },
+                  "syntheticEncryptedArchive": {
+                    "summary": "Completed request with incomplete scan coverage is not clean",
+                    "value": {
+                      "ticketId": "00000000000000000000000000000001",
+                      "status": "completed",
+                      "createdAt": "2030-01-01T12:00:00Z",
+                      "contentDeadlineAt": "2030-01-01T12:05:00Z",
+                      "terminalAt": "2030-01-01T12:00:10Z",
+                      "resultExpiresAt": "2030-01-01T12:15:10Z",
+                      "items": [
+                        {
+                          "clientItemId": "114df8bf-d904-4d6f-a928-62c3718320e7",
+                          "itemId": "00000000000000000000000000000002",
+                          "kind": "attachment",
+                          "byteLength": 1024,
+                          "status": "completed",
+                          "result": {
+                            "verdict": "incomplete",
+                            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                            "fullCoverage": false,
+                            "reason": {
+                              "code": "encrypted_archive",
+                              "retryable": false
+                            },
+                            "signatures": [],
+                            "engine": {
+                              "name": "ClamAV",
+                              "version": "synthetic-version",
+                              "signatureVersion": "synthetic-signatures",
+                              "signaturesUpdatedAt": "2030-01-01T12:00:00Z",
+                              "scanPolicyVersion": "example-policy-1"
+                            },
+                            "completedAt": "2030-01-01T12:00:10Z",
+                            "limitations": [
+                              "encrypted_archive"
+                            ]
+                          },
+                          "reason": null
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "410": {
+            "$ref": "#/components/responses/Gone"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "tags": [
+          "Scanner"
+        ]
+      },
+      "delete": {
+        "operationId": "cancelAndPurgeScanTicket",
+        "summary": "Request best-effort cancellation and purge of content and result",
+        "description": "Owner-only cancellation/deletion request. Return 204 after the gateway worker finished and ticket data was purged, or 202 while active inspection/cancellation remains pending. Stop client uploads and polling immediately on revocation. A 202, timeout, lost response, or metadata deadline is not proof that daemon extraction has stopped or transmitted content has been erased. Forgotten IDs return indistinguishable 404.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TicketId"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation and purge requested; not proof that deletion has completed.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "204": {
+            "description": "Content and result metadata purged for the owned ticket.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "410": {
+            "$ref": "#/components/responses/Gone"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "tags": [
+          "Scanner"
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ScannerBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque scanner credential",
+        "description": "Dedicated scanner API credential, scoped to one principal. Stored in the desktop main-process encrypted secret vault and never exposed to an extension panel, logs, URL query or uploaded content. Do not send Gmail/Google OAuth access/refresh tokens. Every resource operation re-checks authenticated ownership; unowned tickets/items are indistinguishable from unknown resources (404)."
+      }
+    },
+    "parameters": {
+      "TicketId": {
+        "name": "ticketId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/OpaqueId"
+        }
+      },
+      "ItemId": {
+        "name": "itemId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/OpaqueId"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid",
+          "maxLength": 36
+        },
+        "description": "Random UUID scoped to the authenticated principal, this endpoint, and the exact request bytes. Repeating the same key/body returns the original ticket; differing metadata returns 409 idempotency_conflict. Keep key mapping only for the original ticket lifetime; retries never create a new content deadline. The client never reuses this key across account/consent/endpoint scopes."
+      },
+      "ContentLength": {
+        "name": "Content-Length",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 26214400
+        },
+        "description": "Must equal the item byteLength declared at ticket creation. The server also counts actual bytes and aborts before advertised per-item/per-ticket bounds are exceeded. Header values are never trusted as the only limit."
+      }
+    },
+    "headers": {
+      "NoStore": {
+        "description": "Every response uses Cache-Control: no-store, including metadata and errors.",
+        "schema": {
+          "type": "string",
+          "const": "no-store"
+        }
+      },
+      "RetryAfter": {
+        "description": "Integer delay in seconds before another permitted request. Required for 429/503 and active ticket polling; optional/ignored on terminal responses. Never extends ticket/content/result lifetime and never authorizes disclosure after consent revocation.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed or unsupported request. The client fixes input; no upload content is echoed.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Scanner credential missing, invalid, expired, or revoked. Never send a Google/Gmail OAuth token to this service. Stop uploads and polls; do not retry automatically with other credentials.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          },
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            },
+            "description": "Scanner bearer credential challenge."
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated principal is forbidden by operator policy. Ticket ownership failures use indistinguishable 404, not 403.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Identical response for unknown ticket/item and a ticket/item owned by another authenticated principal. Also permitted after expired/purged metadata is forgotten. No resource existence or ownership disclosure.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Wrong state, reused idempotency key with different metadata, missing upload, inconsistent item bytes/length, or conflicting duplicate upload. No new ticket, deadline, or clean verdict is inferred.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "Gone": {
+        "description": "Known owned ticket expired. Upload bytes have been purged. Once its metadata is purged, respond 404 instead. Expiry is not a clean scan result.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "TooLarge": {
+        "description": "Declared/actual item bytes, total ticket bytes, or item count exceed protocol/operator limits. Abort receiving bytes and purge rejected content. Never silently truncate or mark clean.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Principal or operator capacity is limited. Retry only after Retry-After and only within unchanged consent and ticket deadline.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          },
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "Gateway or scanner temporarily unavailable. Retry only after Retry-After within valid consent/deadline; unavailable is not a scan verdict.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          },
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "OpaqueId": {
+        "type": "string",
+        "minLength": 32,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_-]{32,128}$",
+        "description": "Cryptographically unpredictable opaque identifier with at least 128 bits of entropy; never a mailbox, account, filename, or content hash."
+      },
+      "Engine": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "const": "ClamAV"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "signatureVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "signaturesUpdatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "scanPolicyVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Opaque version of archive/parser/limit and heuristic-mapping policy. Appears in capabilities and actual results; changes invalidate client consent/cache bindings."
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "signatureVersion",
+          "signaturesUpdatedAt",
+          "scanPolicyVersion"
+        ],
+        "description": "Engine and definition versions actually used for this scan, or currently available for capabilities. Version strings are bounded display data, never commands."
+      },
+      "Operator": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "privacyPolicyUrl": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://",
+            "minLength": 9,
+            "maxLength": 2048
+          },
+          "privacyTermsVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Opaque version of the disclosed operator privacy terms. A change at the same policy URL invalidates existing client upload consent."
+          }
+        },
+        "required": [
+          "name",
+          "region",
+          "privacyPolicyUrl",
+          "privacyTermsVersion"
+        ],
+        "description": "Required operator disclosure shown before the client accepts upload consent. A privacy policy link is informational, not an upload destination, redirect target, or a resource the client fetches automatically."
+      },
+      "ContentStorage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "const": "ephemeral"
+          },
+          "noPersistentRetention": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "mode",
+          "noPersistentRetention"
+        ],
+        "description": "Operator claim, not evidence the desktop client can independently prove. Content may exist only in RAM or bounded tmpfs while scanning. No persistent disk, logs, backups, samples, telemetry, or cross-user content/hash reputation retention. Proxies, scanners, crash dumps and subprocesses must meet the same rule."
+      },
+      "ScannerCapabilities": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "protocolVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "engine": {
+            "$ref": "#/components/schemas/Engine"
+          },
+          "maxItemBytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 26214400
+          },
+          "maxTotalBytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 52428800
+          },
+          "maxItems": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "contentLifetimeSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "resultLifetimeSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 900
+          },
+          "operator": {
+            "$ref": "#/components/schemas/Operator"
+          },
+          "contentStorage": {
+            "$ref": "#/components/schemas/ContentStorage"
+          },
+          "authenticationRetentionSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 31536000,
+            "description": "Separate persistent authentication/quota/security metadata retention; not ticket content/result retention."
+          }
+        },
+        "required": [
+          "protocolVersion",
+          "engine",
+          "maxItemBytes",
+          "maxTotalBytes",
+          "maxItems",
+          "contentLifetimeSeconds",
+          "resultLifetimeSeconds",
+          "operator",
+          "contentStorage"
+        ],
+        "description": "Operator-declared limits and policy, with actual engine metadata. Volatile storage does not prove universal daemon cleanup deadlines."
+      },
+      "CreateScanItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "clientItemId": {
+            "type": "string",
+            "format": "uuid",
+            "maxLength": 36
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "attachment",
+              "email-body"
+            ]
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 26214400
+          }
+        },
+        "required": [
+          "clientItemId",
+          "kind",
+          "byteLength"
+        ],
+        "description": "Metadata only. clientItemId is a newly generated random UUID, unrelated to local email/account IDs. Attachment means exact decoded bytes; email-body means explicitly consented UTF-8 text/HTML body bytes, not headers or an RFC822 message. No filename, subject, sender, recipient, Message-ID, credentials, or client-supplied hash."
+      },
+      "CreateScanTicketRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/CreateScanItem"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "description": "clientItemId values must be unique. Sum(byteLength) must not exceed the advertised maxTotalBytes or 50 MiB, and every item must obey advertised item/count limits. Arithmetic bounds and distinct clientItemId enforcement are server validation requirements not expressible as a simple array schema. The client must never reuse one ticket across accounts, consent scopes, endpoints, or credentials."
+      },
+      "CreatedScanItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "clientItemId": {
+            "type": "string",
+            "format": "uuid",
+            "maxLength": 36
+          },
+          "itemId": {
+            "$ref": "#/components/schemas/OpaqueId"
+          },
+          "uploadPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "pattern": "^/v1/scan-tickets/[A-Za-z0-9_-]{32,128}/items/[A-Za-z0-9_-]{32,128}$"
+          }
+        },
+        "required": [
+          "clientItemId",
+          "itemId",
+          "uploadPath"
+        ],
+        "description": "The relative path must match this ticketId and itemId exactly. Resolve against the configured HTTPS origin, with no query or fragment. Absolute URLs, origin changes and redirects are forbidden."
+      },
+      "CreatedScanTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ticketId": {
+            "$ref": "#/components/schemas/OpaqueId"
+          },
+          "status": {
+            "type": "string",
+            "const": "awaiting_upload"
+          },
+          "contentDeadlineAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "resultExpiresAt": {
+            "type": "null"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/CreatedScanItem"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          }
+        },
+        "required": [
+          "ticketId",
+          "status",
+          "contentDeadlineAt",
+          "resultExpiresAt",
+          "items",
+          "createdAt"
+        ],
+        "description": "The content deadline is fixed at creation and no later than createdAt + advertised contentLifetimeSeconds (at most 300 seconds). resultExpiresAt is null because terminal time is not known yet. Metadata idempotent replay returns the original response, not a new deadline or new ticket."
+      },
+      "ScanReason": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "scan_completed",
+              "signature_match",
+              "encrypted_archive",
+              "scan_limit",
+              "unsupported",
+              "stale_definitions",
+              "coverage_unknown",
+              "scan_timeout",
+              "upload_timeout",
+              "engine_unavailable",
+              "invalid_content",
+              "scan_failed",
+              "ticket_deadline_expired",
+              "upload_incomplete",
+              "cancelled"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "retryable"
+        ],
+        "description": "Bounded machine codes only; no arbitrary engine errors, paths, mail content, or stack traces. retryable is advisory and never permits re-upload without valid consent."
+      },
+      "ScanResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "no_threat_detected",
+              "threat_detected",
+              "incomplete",
+              "error"
+            ]
+          },
+          "sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "fullCoverage": {
+            "type": "boolean"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ScanReason"
+          },
+          "signatures": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "engine": {
+            "$ref": "#/components/schemas/Engine"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "limitations": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 5,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "encrypted_archive",
+                "scan_limit",
+                "unsupported",
+                "stale_definitions",
+                "coverage_unknown"
+              ]
+            },
+            "description": "All observed conditions that prevented complete evaluation. Empty is necessary but not sufficient for no_threat_detected; explicit fullCoverage:true and successful byte/definition checks are also required."
+          }
+        },
+        "required": [
+          "verdict",
+          "sha256",
+          "fullCoverage",
+          "reason",
+          "signatures",
+          "engine",
+          "completedAt",
+          "limitations"
+        ],
+        "description": "sha256 is computed by the server over the exact uploaded bytes. The desktop must match it against its own hash before displaying or caching a verdict; a mismatch is an error, never clean. fullCoverage means evaluation completed within configured engine limits with no parser/limit/encryption/unsupported/staleness flags, not proof every file format was recognized or that all malware is detectable. ClamAV OK alone does not establish archive coverage; unknown coverage maps to incomplete. Signature strings are untrusted bounded display text, never HTML. No result contains uploaded bytes. The limitations array reports every observed incomplete condition; an empty array alone does not establish coverage. ClamAV encryption or scan-limit heuristic detections map to incomplete, not automatically to threat_detected. Only actual malware signatures support threat_detected.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "no_threat_detected"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "fullCoverage": {
+                  "const": true
+                },
+                "signatures": {
+                  "maxItems": 0
+                },
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "const": "scan_completed"
+                    }
+                  }
+                },
+                "limitations": {
+                  "maxItems": 0
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "threat_detected"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "signatures": {
+                  "minItems": 1
+                },
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "const": "signature_match"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "incomplete"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "fullCoverage": {
+                  "const": false
+                },
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "encrypted_archive",
+                        "scan_limit",
+                        "unsupported",
+                        "stale_definitions",
+                        "coverage_unknown"
+                      ]
+                    }
+                  }
+                },
+                "limitations": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "error"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "fullCoverage": {
+                  "const": false
+                },
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "scan_timeout",
+                        "upload_timeout",
+                        "engine_unavailable",
+                        "invalid_content",
+                        "scan_failed",
+                        "ticket_deadline_expired",
+                        "upload_incomplete"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ScanTicketItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "clientItemId": {
+            "type": "string",
+            "format": "uuid",
+            "maxLength": 36
+          },
+          "itemId": {
+            "$ref": "#/components/schemas/OpaqueId"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "attachment",
+              "email-body"
+            ]
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 26214400
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "uploaded",
+              "scanning",
+              "completed",
+              "failed",
+              "cancelled",
+              "expired"
+            ]
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScanResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScanReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "clientItemId",
+          "itemId",
+          "kind",
+          "byteLength",
+          "status",
+          "result",
+          "reason"
+        ],
+        "description": "result is null until a scan produced a byte-bound verdict. An item cancelled/expired/failed before scanning has result:null and a bounded reason; it must never become no_threat_detected. Completed may mean an incomplete verdict, so clients read verdict and fullCoverage, not status alone.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "result": {
+                  "$ref": "#/components/schemas/ScanResult"
+                },
+                "reason": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "pending",
+                    "uploaded",
+                    "scanning"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "result": {
+                  "type": "null"
+                },
+                "reason": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "failed",
+                    "cancelled",
+                    "expired"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/components/schemas/ScanReason"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "cancelled",
+                    "expired"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "result": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "cancelled"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "const": "cancelled"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "expired"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "const": "ticket_deadline_expired"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "failed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "result": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/ScanResult"
+                        },
+                        {
+                          "properties": {
+                            "verdict": {
+                              "enum": [
+                                "incomplete",
+                                "error"
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "reason": {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "encrypted_archive",
+                        "scan_limit",
+                        "unsupported",
+                        "stale_definitions",
+                        "coverage_unknown",
+                        "scan_timeout",
+                        "upload_timeout",
+                        "engine_unavailable",
+                        "invalid_content",
+                        "scan_failed",
+                        "ticket_deadline_expired",
+                        "upload_incomplete"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ScanTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ticketId": {
+            "$ref": "#/components/schemas/OpaqueId"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "awaiting_upload",
+              "queued",
+              "scanning",
+              "completed",
+              "failed",
+              "cancelled",
+              "expired"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "contentDeadlineAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "terminalAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "resultExpiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/ScanTicketItem"
+            }
+          }
+        },
+        "required": [
+          "ticketId",
+          "status",
+          "createdAt",
+          "contentDeadlineAt",
+          "terminalAt",
+          "resultExpiresAt",
+          "items"
+        ],
+        "description": "All original item identities remain present. completed means every item is terminal, not that every item is safe. Ticket results are volatile for at most advertised resultLifetimeSeconds from terminalAt; GET does not extend expiry. Upload admission and result acceptance end at contentDeadlineAt. Active ClamAV extraction may continue until the worker finishes after cancellation or expiry. Nonterminal states have terminalAt/resultExpiresAt:null.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "awaiting_upload",
+                    "queued",
+                    "scanning"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "terminalAt": {
+                  "type": "null"
+                },
+                "resultExpiresAt": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "expired"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "terminalAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 40
+                },
+                "resultExpiresAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 40
+                },
+                "items": {
+                  "items": {
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "completed",
+                          "failed",
+                          "cancelled",
+                          "expired"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "SubmittedScanTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ticketId": {
+            "$ref": "#/components/schemas/OpaqueId"
+          },
+          "status": {
+            "type": "string",
+            "const": "queued"
+          },
+          "contentDeadlineAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40
+          },
+          "resultExpiresAt": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "ticketId",
+          "status",
+          "contentDeadlineAt",
+          "resultExpiresAt"
+        ],
+        "description": "Accepted for scanning; this response is not a verdict. Submission does not extend the creation-based content deadline."
+      },
+      "ApiError": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_request",
+                  "invalid_credentials",
+                  "policy_denied",
+                  "not_found",
+                  "state_conflict",
+                  "idempotency_conflict",
+                  "content_length_mismatch",
+                  "expired",
+                  "item_too_large",
+                  "ticket_too_large",
+                  "too_many_items",
+                  "rate_limited",
+                  "service_unavailable",
+                  "invalid_content"
+                ]
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "requestId": {
+                "type": "string",
+                "format": "uuid",
+                "maxLength": 36
+              }
+            },
+            "required": [
+              "code",
+              "retryable",
+              "requestId"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "Errors expose no raw engine output, private filenames, content, account identifiers, token values, ticket ownership information, or internal paths. Clients render local text mapped from this bounded code."
+      }
+    }
+  }
+}

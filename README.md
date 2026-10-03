@@ -148,6 +148,12 @@ published today — one-time passcodes, VIP scoring, and thread summarization �
 and the build decides which of them a new profile starts with in
 [`apps/desktop/extensions.config.json`](apps/desktop/extensions.config.json).
 
+The optional **ClamAV Scan** extension is maintained here in
+[`extensions/clamav-scan`](extensions/clamav-scan), with its desktop setup and
+SDK integration. Install that folder through **Extensions → Install from
+folder**. Its authenticated scan server and Docker configuration live in the
+separate `Inbox-av-server` repository. See [ClamAV setup](docs/antivirus/README.md).
+
 Write your own against [`@sarvinbox/extension-sdk`](packages/extension-sdk).
 [docs/EXTENSIONS.md](docs/EXTENSIONS.md) covers the host side — the manifest,
 the permission model, the workflow contract, the SDK, and how an install is
@@ -156,8 +162,8 @@ publishing a release, and running a registry of your own.
 
 ### Design principles
 
-1. **Privacy first** — mail stays on the device; message text reaches an AI
-   provider only after the user connects one.
+1. **Privacy first** — mail is stored on the device; optional AI processing and
+   remote antivirus scans require explicit user authorization.
 2. **AI suggests, doesn't act silently** — deterministic, explainable behavior.
 3. **Fail safe** — the email client works even if AI is unavailable.
 4. **Reuse over duplication** — shared logic lives in `packages/core`.

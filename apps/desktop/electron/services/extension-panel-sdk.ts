@@ -97,6 +97,27 @@ export const PANEL_SDK_SOURCE = `/* Sarv Inbox panel SDK */
       },
     },
 
+    security: {
+      getTargets: function () {
+        return request('security.getTargets');
+      },
+      getSetup: function () {
+        return request('security.getSetup');
+      },
+      openSetup: function () {
+        return request('security.openSetup');
+      },
+      submit: function (targetIds, options) {
+        return request('security.submit', { targetIds: targetIds, options: options });
+      },
+      get: function (jobId) {
+        return request('security.get', { jobId: jobId });
+      },
+      cancel: function (jobId) {
+        return request('security.cancel', { jobId: jobId });
+      },
+    },
+
     settings: {
       get: function (key) {
         return request('settings.get', { key: key });

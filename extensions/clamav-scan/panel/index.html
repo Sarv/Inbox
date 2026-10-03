@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' sarv-extension://sdk; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>Antivirus scan</title>
+  <link rel="stylesheet" href="panel.css">
+  <script src="sarv-extension://sdk/sarv.js" defer></script>
+  <script src="panel.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="heading"><img src="../icon.svg" alt="" width="28" height="28"><div><p class="eyebrow">CLAMAV SCAN</p><h1>Inspect before opening</h1></div></header>
+    <p class="intro">Choose the files you want to send to your configured scanner.</p>
+    <section class="service" aria-label="Scanner status"><span id="service-state" class="badge">Loading setup</span><p id="service-info"></p><div class="actions"><button id="configure" type="button">Configure scanner</button><button id="refresh" type="button">Refresh</button></div></section>
+    <section aria-labelledby="targets-heading"><h2 id="targets-heading">Targets in this message</h2><p id="target-summary" class="muted" aria-live="polite">Loading targets…</p><div id="targets" class="targets"></div></section>
+    <label id="body-consent-row" class="body-consent" hidden><input id="body-consent" type="checkbox"><span>I agree to send this message's body text to the scanner for this scan.</span></label>
+    <p id="sharing-note" class="muted"></p>
+    <div class="actions scan-actions"><button id="scan" type="button" class="primary" disabled>Scan selected</button><button id="cancel" type="button" hidden>Cancel scan</button></div>
+    <p id="error" class="error" role="alert" hidden></p>
+    <section id="job" class="job" aria-labelledby="job-heading" hidden><div class="job-heading"><h2 id="job-heading">Scan results</h2><span id="job-state" class="badge" aria-live="polite"></span></div><div id="results"></div><p id="job-detail" class="muted"></p></section>
+    <footer>No threat detected describes what the scanner found. Incomplete, expired and cancelled scans do not establish a result. Cancellation requests do not prove deletion; active inspection may continue until the scanner worker finishes.</footer>
+  </main>
+</body>
+</html>

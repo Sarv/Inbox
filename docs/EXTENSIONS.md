@@ -11,13 +11,20 @@ the open message or as a dialog. A panel needs no build step and no background
 code at all — an `index.html` in a folder is a complete extension. See
 [Panels](#panels).
 
-**Extensions do not live in this repository.** They are published to
+Published extensions are distributed through
 [Sarv/SarvInbox-extensions](https://github.com/Sarv/SarvInbox-extensions),
 which serves a registry index, and the app installs them from there —
 including the ones it ships with. That repository's README is the full
 author-and-publish guide; this document is the host side of the contract: what
 the app gives an extension, what it will and will not let one do, and how an
 install is verified.
+
+The ClamAV extension is maintained in this Inbox repository at
+`extensions/clamav-scan`, alongside its desktop host and SDK integration.
+Install that folder locally to use the scan API. Its scanning server is
+maintained separately in `Inbox-av-server`; registry publication does not move
+the extension source out of Inbox. See
+[ClamAV Scan](antivirus/README.md) for setup, consent and verification.
 
 Three extensions are published today, and this build installs the first two on
 first run:

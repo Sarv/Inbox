@@ -87,6 +87,24 @@ export const PERMISSION_DISPLAY: Record<string, PermissionDisplay> = {
     icon: '🔔',
     risk: 'low',
   },
+  'ui:panel': {
+    name: 'Show Its Own Panels',
+    description: 'Show its own pages beside your mail and in dialogs',
+    icon: '▤',
+    risk: 'low',
+  },
+  'security:scan-attachments': {
+    name: 'Scan Attachments',
+    description: 'Send selected attachment bytes to the antivirus service you configured',
+    icon: '🛡️',
+    risk: 'high',
+  },
+  'security:scan-body': {
+    name: 'Scan Email Bodies',
+    description: 'Send email body text to your configured scanner with separate consent for each scan',
+    icon: '🛡️',
+    risk: 'high',
+  },
 };
 
 const RISK_ORDER: Record<PermissionRisk, number> = { high: 0, medium: 1, low: 2 };
