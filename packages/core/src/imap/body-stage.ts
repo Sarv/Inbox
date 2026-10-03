@@ -37,6 +37,7 @@ import {
   parseSpamReasons,
   stageOfReason,
   type SpamAssessment,
+  type SpamReason,
 } from '@sarv-in/mailguard';
 
 import { parseAddresses } from '../utils/email-address';
@@ -146,17 +147,52 @@ export function rescoreContent(
   return replaceStages(stored, ['content'], content);
 }
 
+/**
+ * A stored verdict with its `auth-failed` reason re-decided — for a row whose
+ * SPF / DKIM / DMARC verdict was re-read with a stricter parser (mailguard
+ * 0.4.3 stopped believing forged `Authentication-Results`; see migration v101).
+ *
+ * `authReasons` is what the header stage charges for the re-read verdict:
+ * `auth-failed` or nothing. Only that one reason is replaced. The rest of the
+ * header stage is NOT re-run, because that would be judging the message afresh
+ * with every rule change since it arrived, not correcting the verdict the
+ * forged header wrote.
+ *
+ * Null — leave the row alone — when it was never scored, when its reasons are
+ * unreadable (see {@link rescoreWithBody}), and when the reason would come out
+ * exactly as it is stored: a re-read that changes nothing must not rewrite the
+ * column, or every re-checked row would be churned for no difference.
+ */
+export function rescoreAuth(
+  stored: { spamScore?: number | null; spamReasons?: string | null },
+  authReasons: readonly SpamReason[],
+): SpamAssessment | null {
+  const before = parseSpamReasons(stored.spamReasons).filter((reason) => reason.id === 'auth-failed');
+  const same = before.length === authReasons.length
+    && before.every((reason, i) => reason.points === authReasons[i]!.points && reason.detail === authReasons[i]!.detail);
+  if (same) return null;
+  return replaceReasons(stored, (reason) => reason.id === 'auth-failed', assessmentOf([...authReasons]));
+}
+
 function replaceStages(
   stored: { spamScore?: number | null; spamReasons?: string | null },
   stages: readonly string[],
   fresh: SpamAssessment,
 ): SpamAssessment | null {
+  return replaceReasons(stored, (reason) => {
+    const stage = stageOfReason(reason.id);
+    return stage !== null && stages.includes(stage);
+  }, fresh);
+}
+
+/** The stored reasons minus the ones `drop` picks, plus `fresh`; null for a row that was never scored or cannot be read. */
+function replaceReasons(
+  stored: { spamScore?: number | null; spamReasons?: string | null },
+  drop: (reason: SpamReason) => boolean,
+  fresh: SpamAssessment,
+): SpamAssessment | null {
   if (typeof stored.spamScore !== 'number') return null;
   const reasons = parseSpamReasons(stored.spamReasons);
   if (reasons.length === 0 && stored.spamScore !== 0) return null;
-  const kept = reasons.filter((reason) => {
-    const stage = stageOfReason(reason.id);
-    return stage === null || !stages.includes(stage);
-  });
-  return mergeAssessments(assessmentOf(kept), fresh);
+  return mergeAssessments(assessmentOf(reasons.filter((reason) => !drop(reason))), fresh);
 }

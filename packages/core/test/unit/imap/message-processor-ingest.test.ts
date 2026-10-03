@@ -827,11 +827,20 @@ describe('processBatch — spam filter (header stage)', () => {
     expect(db.tagsOf(row.id)).toContain('spam');
   });
 
+  // CHANGED (mailguard origin-IP fix): this used to feed a bare
+  // `Received-SPF: client-ip=` and expect it to win — the very line a sender
+  // can type to choose the address the blocklists are asked about. The
+  // receiving server's own Authentication-Results is the source now; a
+  // Received-SPF is never read (see the reputation-stage regression below).
   it('records the connecting IP from the SPF verdict ahead of the Received trace', async () => {
     const { db, mp } = setup();
 
     await mp.processBatch([
-      msg({ uid: 1, authHeaders: 'Received-SPF: pass client-ip=209.85.220.41;', rawHeaders: spamHeaders }),
+      msg({
+        uid: 1,
+        authHeaders: 'Authentication-Results: mx.test.local; spf=pass (sender IP is 209.85.220.41) smtp.mailfrom=example.net',
+        rawHeaders: spamHeaders,
+      }),
       msg({ uid: 2 }), // no headers at all
     ], db.folder(INBOX), db.asStorage());
 
@@ -1162,6 +1171,55 @@ describe('processBatch — reputation stage', () => {
     expect(lookup).toHaveBeenCalledWith({ ip: '185.199.108.1', domains: ['evil.example'] });
   });
 
+  // Regression: a listed spam source typed `Received-SPF: pass client-ip=<a
+  // clean address>` into its own message, and the first `client-ip=` in the
+  // block was recorded as the origin — so Spamhaus was asked about the clean
+  // address and the listing never counted. Two accounts, because the guard
+  // differs by provider: a Gmail account (authserv known) reads Gmail's own
+  // header, an account on an unknown provider falls back to the Received
+  // trace when its topmost header names nothing. Both must ask about the
+  // address the receiving server actually saw.
+  it('asks the blocklists about the address the server saw, not a forged Received-SPF', async () => {
+    const SPAMMER = '185.199.108.1';
+    const forgedSpf = 'Received-SPF: pass (mx.test.local: domain of evil.example designates 1.1.1.1 as permitted sender) client-ip=1.1.1.1;';
+    const accounts = [
+      {
+        name: 'gmail',
+        authserv: ['mx.google.com'] as const,
+        authHeaders: [
+          `Authentication-Results: mx.google.com; spf=softfail (google.com: domain of transitioning x@evil.example does not designate ${SPAMMER} as permitted sender) smtp.mailfrom=x@evil.example`,
+          forgedSpf,
+        ].join('\n'),
+      },
+      {
+        name: 'unknown provider',
+        authserv: undefined,
+        authHeaders: ['Authentication-Results: mx.test.local; dkim=none; dmarc=none', forgedSpf].join('\n'),
+      },
+    ];
+    for (const account of accounts) {
+      const { db, mp } = setup();
+      const lookup = listed(5);
+      mp.setReputationLookup(lookup);
+
+      await mp.processBatch([
+        msg({
+          uid: 1,
+          authHeaders: account.authHeaders,
+          ...(account.authserv ? { authserv: account.authserv } : {}),
+          rawHeaders: cleanHeaders,
+          envelope: { from: [{ address: 'billing@evil.example', name: '' }] } as never,
+        }),
+      ], db.folder(INBOX), db.asStorage());
+
+      expect(lookup, account.name).toHaveBeenCalledWith({ ip: SPAMMER, domains: ['evil.example'] });
+      const row = db.allRows()[0];
+      expect(row.originIp, account.name).toBe(SPAMMER);
+      // The listing reaches the score, which is the point of asking.
+      expect(reasonIds(row), account.name).toContain('reputation-ip-listed');
+    }
+  });
+
   // Regression: a clean From with a notorious Reply-To is where the answers
   // go. Only the retired background pass used to ask about the Reply-To; the
   // ingest check is now the only sender check, so it must ask about both —
@@ -1357,6 +1415,33 @@ describe('processBatch — a sender the user trusts', () => {
     expect(row.folderId).toBe(db.folderId('Spam'));
     expect(db.tagsOf(row.id).sort()).toEqual(['Spam', 'spam']);
     expect(row.spamUserVerdict ?? null).toBeNull();
+  });
+
+  // Regression (mailguard 0.4.3), the forged-header edge: a spammer who knows
+  // whom you trust adds their own `Authentication-Results: …; dmarc=pass`. The
+  // receiving server's real verdict fails; the forgery must not buy the ham
+  // verdict — on top of the real header when the server's authserv-id is
+  // known, and below it when it is not.
+  it('files a trusted address whose forged Authentication-Results claims a pass', async () => {
+    const forged = 'Authentication-Results: mx.evil.example; spf=pass; dkim=pass; dmarc=pass';
+    for (const [authHeaders, authserv] of [
+      [`${forged}\n${FAIL}`, ['mx.test.local']],
+      [`${FAIL}\n${forged}`, undefined],
+    ] as const) {
+      const { db, mp } = setup();
+      db.addFolder('Spam');
+      db.markTrusted('alerts@axis.bank.in');
+
+      await mp.processBatch(
+        [msg({ uid: 1, envelope: from('alerts@axis.bank.in'), rawHeaders: spamHeaders, authHeaders, authserv })],
+        db.folder(INBOX), db.asStorage(),
+      );
+
+      const row = db.allRows()[0];
+      expect(JSON.parse(row.authStatus!).dmarc).toBe('fail');
+      expect(row.folderId).toBe(db.folderId('Spam'));
+      expect(row.spamUserVerdict ?? null).toBeNull();
+    }
   });
 
   // No authentication verdict recorded is not a failure: nothing contradicts

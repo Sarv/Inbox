@@ -41,12 +41,14 @@
  * backlog query for that reason; left in, they would be fetched, declined, and
  * selected again every 1.5 seconds forever.
  */
-import { createLogger, headerStage, isOwnMailFolder, parseAuthenticationHeaders, type IMAPMessage } from '@sarvinbox/core';
+import { unknownAuthStatus } from '@sarv-in/mailguard';
+import { createLogger, headerStage, isOwnMailFolder, type IMAPMessage, type SpamReason } from '@sarvinbox/core';
 import { HEADER_STAGE_MAX_ATTEMPTS } from '@sarvinbox/storage-node';
 
 import { getStorage, getSyncEngine, getMainWindow, getAllAccountRuntimes } from '../shared';
 
 import { isConnectionRecentlyUnstable } from './connection-health';
+import { startSpamVerdictRepair } from './spam-verdict-repair';
 
 const logger = createLogger('header-backfill');
 
@@ -138,24 +140,68 @@ export function verdictRows(
   for (const w of wanted) {
     const message = fetched.get(w.uid);
     if (!message) continue;
-    const { spam, originIp } = headerStage(message, {
+    const { auth, spam, originIp } = headerStage(message, {
       knownSpammer: w.knownSpammer,
       ownMail: w.ownMail,
     });
     out.push({
       id: w.id,
-      // NOT `headerStage`'s `auth`, and the difference is deliberate. That one
-      // is null when the server recorded no verdict, which is what the SCORER
-      // must see — and what ingest stores, leaving the column NULL. Here NULL
-      // means "not checked yet", so storing it would put the row straight back
-      // in the backlog to be fetched again forever. `parseAuthenticationHeaders`
-      // turns the absent block into an all-unknown verdict instead: a real,
-      // final answer that reads as Unverified for the right reason. The score
-      // above is unaffected — it saw the null, exactly as ingest would have.
-      authStatus: JSON.stringify(parseAuthenticationHeaders(message.authHeaders)),
+      authStatus: storedAuthStatus(auth),
       spamScore: spam ? spam.score : null,
       spamReasons: spam ? JSON.stringify(spam.reasons) : null,
       originIp,
+    });
+  }
+  return out;
+}
+
+/**
+ * `headerStage`'s `auth` as the backfill stores it — the SAME verdict the score
+ * was built on, read with the same trusted-server rule (`message.authserv`), so
+ * the shield and the score cannot disagree about which header was believed.
+ *
+ * One difference, deliberate: `auth` is null when the server recorded no
+ * verdict, which is what the SCORER must see — and what ingest stores, leaving
+ * the column NULL. Here NULL means "not checked yet", so storing it would put
+ * the row straight back in the backlog to be fetched again forever. The absent
+ * verdict becomes an all-unknown one instead: a real, final answer that reads
+ * as Unverified for the right reason.
+ */
+function storedAuthStatus(auth: ReturnType<typeof headerStage>['auth']): string {
+  return JSON.stringify(auth ?? unknownAuthStatus());
+}
+
+/** What one re-checked message writes back (migration v101). */
+export interface AuthReverifyRow {
+  id: string;
+  authStatus: string;
+  /** The `auth-failed` reason the re-read verdict earns, or none. */
+  authReasons: SpamReason[];
+}
+
+/**
+ * Turn one folder's fetch result into re-read verdicts for v101's queue.
+ *
+ * The verdict comes from `headerStage`, exactly as ingest and the backfill
+ * derive it, so a re-checked message reads the way it would had it arrived
+ * today. Of the spam verdict only `auth-failed` is taken — the storage write
+ * swaps that one reason and leaves every other one as it was charged. A uid
+ * absent from `fetched` is skipped here and counted as a miss by the caller.
+ * Pure, so the mapping is testable without a socket.
+ */
+export function reverifyRows(
+  wanted: ReadonlyArray<{ id: string; uid: number }>,
+  fetched: ReadonlyMap<number, IMAPMessage>,
+): AuthReverifyRow[] {
+  const out: AuthReverifyRow[] = [];
+  for (const w of wanted) {
+    const message = fetched.get(w.uid);
+    if (!message) continue;
+    const { auth, spam } = headerStage(message);
+    out.push({
+      id: w.id,
+      authStatus: storedAuthStatus(auth),
+      authReasons: (spam?.reasons ?? []).filter((reason) => reason.id === 'auth-failed'),
     });
   }
   return out;
@@ -225,23 +271,27 @@ async function ownMailFolderIds(storage: any): Promise<string[]> {
   return folders.filter((f) => isOwnMailFolder(f)).map((f) => f.id);
 }
 
-/** One account's tick: a few folders' worth of the backlog. Returns rows written. */
-async function backfillAccount(t: Target): Promise<{ written: number; remaining: number; missed: number }> {
-  const storage = t.storage;
-  if (typeof storage.getEmailsMissingHeaderStage !== 'function' || typeof t.engine.fetchHeaderMessages !== 'function') {
-    return { written: 0, remaining: 0, missed: 0 }; // older storage/engine — nothing to do here
-  }
-  const ownMail = await ownMailFolderIds(storage);
-  const ownMailSet = new Set(ownMail);
-  const slice = storage.getEmailsMissingHeaderStage(BATCH_SIZE * FOLDERS_PER_TICK, ownMail) as Array<{
-    id: string; uid: number; folderPath: string; folderId: string;
-  }>;
-  if (slice.length === 0) return { written: 0, remaining: 0, missed: 0 };
+type BacklogRow = { id: string; uid: number; folderPath: string; folderId: string };
 
+/**
+ * Fetch a backlog slice folder by folder, one FETCH per chunk, within the
+ * tick's time budget — the loop both phases share. `write` turns a chunk's
+ * result into stored rows and returns how many it wrote. A uid asked for and
+ * not returned is one attempt spent (`miss`); three and the row leaves its
+ * backlog. Without that bound an expunged message, or a folder that will not
+ * open, is selected and re-fetched every 1.5 seconds for as long as the app
+ * runs, writing nothing and saying nothing.
+ */
+async function sweepFolders(
+  t: Target,
+  slice: readonly BacklogRow[],
+  deadline: number,
+  write: (chunk: BacklogRow[], fetched: Map<number, IMAPMessage>) => Promise<number>,
+  miss: (ids: string[]) => void,
+): Promise<{ written: number; missed: number }> {
   let written = 0;
   let missed = 0;
   let folders = 0;
-  const deadline = Date.now() + TICK_BUDGET_MS;
   for (const [folderPath, wanted] of groupByFolder(slice)) {
     if (folders >= FOLDERS_PER_TICK || Date.now() >= deadline) break;
     folders += 1;
@@ -249,30 +299,68 @@ async function backfillAccount(t: Target): Promise<{ written: number; remaining:
       if (Date.now() >= deadline) break;
       const chunk = wanted.slice(i, i + BATCH_SIZE);
       const fetched: Map<number, IMAPMessage> = await t.engine.fetchHeaderMessages(folderPath, chunk.map((w) => w.uid));
-      // A uid we asked for and did not get back is one attempt spent. Three of
-      // them and the row leaves the backlog: without this an expunged message,
-      // or a folder that will not open, is selected and re-fetched every 1.5
-      // seconds for as long as the app runs, writing nothing and saying
-      // nothing. The columns stay NULL, which is still the truth.
       const absent = chunk.filter((w) => !fetched.has(w.uid)).map((w) => w.id);
-      if (absent.length > 0 && typeof storage.recordHeaderStageMiss === 'function') {
-        storage.recordHeaderStageMiss(absent);
+      if (absent.length > 0) {
+        miss(absent);
         missed += absent.length;
       }
-      // The same lookup ingest does before scoring, so a sender the user has
-      // reported scores here exactly as they would on arrival. One indexed
-      // primary-key read per message; a failure is "unknown", never a failed row.
-      const scored = await Promise.all(chunk.map(async (w) => ({
-        ...w,
-        ownMail: ownMailSet.has(w.folderId),
-        knownSpammer: await isKnownSpammer(storage, fetched.get(w.uid)),
-      })));
-      const rows = verdictRows(scored, fetched);
-      if (rows.length) written += storage.updateEmailHeaderStageBatch(rows);
+      written += await write(chunk, fetched);
     }
   }
-  const remaining = storage.countEmailsMissingHeaderStage(ownMail) as number;
-  return { written, remaining, missed };
+  return { written, missed };
+}
+
+/** One account's tick: a few folders' worth of the backlog, then of the re-check queue. */
+async function backfillAccount(t: Target): Promise<{ written: number; remaining: number; missed: number }> {
+  const storage = t.storage;
+  if (typeof storage.getEmailsMissingHeaderStage !== 'function' || typeof t.engine.fetchHeaderMessages !== 'function') {
+    return { written: 0, remaining: 0, missed: 0 }; // older storage/engine — nothing to do here
+  }
+  const deadline = Date.now() + TICK_BUDGET_MS;
+  const ownMail = await ownMailFolderIds(storage);
+  const ownMailSet = new Set(ownMail);
+  const slice = storage.getEmailsMissingHeaderStage(BATCH_SIZE * FOLDERS_PER_TICK, ownMail) as BacklogRow[];
+  const missing = await sweepFolders(t, slice, deadline, async (chunk, fetched) => {
+    // The same lookup ingest does before scoring, so a sender the user has
+    // reported scores here exactly as they would on arrival. One indexed
+    // primary-key read per message; a failure is "unknown", never a failed row.
+    const scored = await Promise.all(chunk.map(async (w) => ({
+      ...w,
+      ownMail: ownMailSet.has(w.folderId),
+      knownSpammer: await isKnownSpammer(storage, fetched.get(w.uid)),
+    })));
+    const rows = verdictRows(scored, fetched);
+    return rows.length ? storage.updateEmailHeaderStageBatch(rows) : 0;
+  }, (ids) => { if (typeof storage.recordHeaderStageMiss === 'function') storage.recordHeaderStageMiss(ids); });
+
+  // Mail with a verdict gets a missing one first; what is left of the tick
+  // re-reads the verdicts v101 queued (see reverifyRows).
+  const reverify = await reverifyAccount(t, deadline);
+  const remaining = (storage.countEmailsMissingHeaderStage(ownMail) as number) + reverify.remaining;
+  return { written: missing.written + reverify.written, remaining, missed: missing.missed + reverify.missed };
+}
+
+/**
+ * One account's share of v101's re-check: re-fetch the headers of queued
+ * messages and replace the verdict a forged `Authentication-Results` may have
+ * written. When a correction takes a filed message back under the spam line,
+ * the spam repair is (re)scheduled to take it out of Spam.
+ */
+async function reverifyAccount(t: Target, deadline: number): Promise<{ written: number; remaining: number; missed: number }> {
+  const storage = t.storage;
+  if (typeof storage.getAuthReverifyBatch !== 'function') return { written: 0, remaining: 0, missed: 0 };
+  let repairQueued = 0;
+  const slice = Date.now() < deadline ? storage.getAuthReverifyBatch(BATCH_SIZE * FOLDERS_PER_TICK) as BacklogRow[] : [];
+  const r = await sweepFolders(t, slice, deadline, async (chunk, fetched) => {
+    const applied = storage.applyAuthReverify(reverifyRows(chunk, fetched)) as { written: number; repairQueued: number };
+    repairQueued += applied.repairQueued;
+    return applied.written;
+  }, (ids) => storage.recordAuthReverifyMiss(ids));
+  if (repairQueued > 0) {
+    logger.info(`[HeaderBackfill] ${t.label}: ${repairQueued} corrected verdict(s) fell under the spam line; spam repair scheduled`);
+    startSpamVerdictRepair();
+  }
+  return { ...r, remaining: storage.countAuthReverify() as number };
 }
 
 /** Has the user reported this sender? Unknown (false) on any failure. */

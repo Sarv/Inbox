@@ -71,11 +71,22 @@ export function unsubscribeHeaders(rawHeaders: string | null | undefined): Unsub
 }
 
 export interface HeaderStageResult {
-  /** SPF / DKIM / DMARC as the receiving server recorded it; null when it recorded none. */
+  /**
+   * SPF / DKIM / DMARC as the receiving server recorded it; null when the
+   * message carried no authentication header at all. Only the headers worth
+   * believing count (the receiving server's, by `message.authserv` when known,
+   * else the topmost) — see `parseAuthenticationHeaders`.
+   */
   auth: AuthStatus | null;
   /** Null for own mail — "not judged", which the shield renders differently from "judged clean". */
   spam: SpamAssessment | null;
-  /** The address that handed the message to the recipient's mail system. */
+  /**
+   * The address that handed the message to the recipient's mail system, and
+   * the one every blocklist is asked about. Read from the same trusted
+   * `Authentication-Results` as `auth`, else from the Received trace. Never
+   * from a `Received-SPF` or ARC header, which a sender can type in to name a
+   * clean address of their choosing (see mailguard's `extractOriginIp`).
+   */
   originIp: string | null;
   /** How to leave the list, verbatim; both null when the sender offered none. */
   unsubscribe: UnsubscribeHeaders;
@@ -86,10 +97,13 @@ export interface HeaderStageResult {
  *
  * `auth` is parsed once and handed to the scorer rather than re-parsed, so the
  * spam score keys on the very same DMARC verdict the shield displays. Anything
- * else would let the two disagree on screen about a single message.
+ * else would let the two disagree on screen about a single message — which is
+ * also why the header backfill stores THIS `auth` rather than parsing again.
  */
 export function headerStage(message: IMAPMessage, opts?: HeaderStageOptions): HeaderStageResult {
-  const auth = message.authHeaders ? parseAuthenticationHeaders(message.authHeaders) : null;
+  const auth = message.authHeaders
+    ? parseAuthenticationHeaders(message.authHeaders, { authserv: message.authserv })
+    : null;
   const headers = message.rawHeaders ? headerLookupFromText(message.rawHeaders) : null;
   const envelopeFields = mapEnvelopeFields(message.envelope);
 
@@ -119,6 +133,9 @@ export function headerStage(message: IMAPMessage, opts?: HeaderStageOptions): He
     originIp: extractOriginIp({
       authHeaders: message.authHeaders,
       received: message.rawHeaders ? headerValuesFromText(message.rawHeaders, 'received') : null,
+      // The same server `auth` believes, so the address the blocklists judge
+      // and the verdict the shield shows come from one header.
+      authserv: message.authserv,
     }),
     unsubscribe: unsubscribeHeaders(message.rawHeaders),
   };

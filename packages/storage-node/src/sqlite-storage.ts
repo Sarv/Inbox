@@ -26,6 +26,7 @@ import type {
   FirstSplitRow,
   FirstSplitSaveRequest,
   FirstSplitSaveResult,
+  SpamReason,
 } from '@sarvinbox/core';
 import {
   bareSenderAddress,
@@ -33,6 +34,8 @@ import {
   createLogger,
   firstMemberKeyOf,
   isSameFirstSplitKey,
+  isSpamScore,
+  rescoreAuth,
 } from '@sarvinbox/core';
 import Database from 'better-sqlite3';
 
@@ -41,7 +44,9 @@ import { escapeDbKey, isExistingPlaintextDb } from './db-encryption';
 import { InlineImageBackfill } from './inline-image-backfill';
 import {
   AUTH_PENDING_INDEX,
+  AUTH_REVERIFY_QUEUE_TABLE,
   createMigrationManager,
+  HEADER_STAGE_MAX_ATTEMPTS,
   headerStageAuthPending,
   headerStageSpamPending,
   LINK_REPUTATION_PENDING_INDEX,
@@ -1952,6 +1957,124 @@ export class SQLiteStorage implements IEmailStorage {
       return n;
     });
     return run(rows);
+  }
+
+  // ---- authentication re-check (v101) --------------------------------------
+
+  /** The re-check predicate: queued, fetchable by uid, and not yet given up on. */
+  private static readonly AUTH_REVERIFY_WHERE =
+    `q.attempts < ${HEADER_STAGE_MAX_ATTEMPTS} AND e.uid IS NOT NULL AND e.uid > 0`;
+
+  /**
+   * The next slice of v101's queue — messages whose stored SPF / DKIM / DMARC
+   * verdict must be read again from the server — newest first, with the folder
+   * path the fetch needs. Empty once drained, and on a database without the
+   * queue.
+   */
+  getAuthReverifyBatch(limit: number): Array<{ id: string; uid: number; folderPath: string; folderId: string }> {
+    this.ensureInitialized();
+    try {
+      return this.db!.prepare(
+        `SELECT e.id, e.uid, f.path AS folderPath, e.folder_id AS folderId
+           FROM ${AUTH_REVERIFY_QUEUE_TABLE} q
+           JOIN emails e ON e.id = q.email_id
+           JOIN folders f ON f.id = e.folder_id
+          WHERE ${SQLiteStorage.AUTH_REVERIFY_WHERE}
+          ORDER BY e.date DESC LIMIT ?`,
+      ).all(Math.max(1, limit)) as Array<{ id: string; uid: number; folderPath: string; folderId: string }>;
+    } catch {
+      return [];
+    }
+  }
+
+  /** How many re-checks are still to do — part of the backfill's "remaining". */
+  countAuthReverify(): number {
+    this.ensureInitialized();
+    try {
+      return (this.db!.prepare(
+        `SELECT COUNT(*) AS n FROM ${AUTH_REVERIFY_QUEUE_TABLE} q JOIN emails e ON e.id = q.email_id
+          WHERE ${SQLiteStorage.AUTH_REVERIFY_WHERE}`,
+      ).get() as { n: number }).n;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count one fetch that came back without these messages. At
+   * HEADER_STAGE_MAX_ATTEMPTS a row stops being asked for and keeps the verdict
+   * it has — the same bound, for the same reason, as the backfill's own misses:
+   * an expunged message must not be re-fetched every tick forever.
+   */
+  recordAuthReverifyMiss(ids: readonly string[]): number {
+    this.ensureInitialized();
+    if (ids.length === 0) return 0;
+    const bump = this.db!.prepare(
+      `UPDATE ${AUTH_REVERIFY_QUEUE_TABLE} SET attempts = attempts + 1 WHERE email_id = ?`,
+    );
+    return this.db!.transaction((batch: readonly string[]) => {
+      let changed = 0;
+      for (const id of batch) changed += bump.run(id).changes;
+      return changed;
+    })(ids);
+  }
+
+  /**
+   * Write re-read verdicts and take the rows off the queue, in one transaction.
+   *
+   * `auth_status` is REPLACED — this is the one writer allowed to overwrite
+   * it, because the value it replaces is the one a forged header wrote. The
+   * spam verdict gets only its `auth-failed` reason re-decided (`rescoreAuth`),
+   * read and written inside the same transaction so a body rescore landing
+   * between the two cannot be overwritten with a stale copy.
+   *
+   * A row the correction takes back under the spam line is handed to the spam
+   * repair (`spam_repair_queue`, with the score it was filed on), which takes
+   * mail the filter filed back out of Spam exactly as it does for v96. A row
+   * pushed OVER the line is not moved: the shield and the banner now say what
+   * is wrong with it, and old mail vanishing from the inbox is a louder
+   * surprise than the one being fixed.
+   *
+   * Returns how many rows changed and how many were handed to the repair.
+   */
+  applyAuthReverify(rows: ReadonlyArray<{ id: string; authStatus: string; authReasons: readonly SpamReason[] }>): {
+    written: number;
+    repairQueued: number;
+  } {
+    this.ensureInitialized();
+    if (rows.length === 0) return { written: 0, repairQueued: 0 };
+    const read = this.db!.prepare('SELECT auth_status, spam_score, spam_reasons FROM emails WHERE id = ?');
+    const write = this.db!.prepare(
+      'UPDATE emails SET auth_status = @authStatus, spam_score = @spamScore, spam_reasons = @spamReasons WHERE id = @id',
+    );
+    const repair = this.db!.prepare(
+      `INSERT OR IGNORE INTO ${SPAM_REPAIR_QUEUE_TABLE} (email_id, score_before) VALUES (?, ?)`,
+    );
+    const done = this.db!.prepare(`DELETE FROM ${AUTH_REVERIFY_QUEUE_TABLE} WHERE email_id = ?`);
+    return this.db!.transaction((batch: typeof rows) => {
+      let written = 0;
+      let repairQueued = 0;
+      for (const row of batch) {
+        done.run(row.id);
+        const stored = read.get(row.id) as
+          | { auth_status: string | null; spam_score: number | null; spam_reasons: string | null }
+          | undefined;
+        if (!stored) continue;
+        const rescored = rescoreAuth({ spamScore: stored.spam_score, spamReasons: stored.spam_reasons }, row.authReasons);
+        if (!rescored && stored.auth_status === row.authStatus) continue;
+        write.run({
+          id: row.id,
+          authStatus: row.authStatus,
+          spamScore: rescored ? rescored.score : stored.spam_score,
+          spamReasons: rescored ? JSON.stringify(rescored.reasons) : stored.spam_reasons,
+        });
+        written += 1;
+        if (rescored && isSpamScore(stored.spam_score) && !isSpamScore(rescored.score)) {
+          repairQueued += repair.run(row.id, stored.spam_score).changes;
+        }
+      }
+      return { written, repairQueued };
+    })(rows);
   }
 
   // ---- Spam filter, reputation stage --------------------------------------

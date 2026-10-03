@@ -1,7 +1,7 @@
 import { assessmentOf, type SpamReason } from '@sarv-in/mailguard';
 import { describe, it, expect } from 'vitest';
 
-import { bodyStage, recipientDomainsOf, rescoreContent, rescoreWithBody } from '../../../src/imap/body-stage';
+import { bodyStage, recipientDomainsOf, rescoreAuth, rescoreContent, rescoreWithBody } from '../../../src/imap/body-stage';
 
 /**
  * The body stage is the half of the spam score that cannot run at sync,
@@ -213,5 +213,51 @@ describe('rescoreContent', () => {
     const content = assessmentOf([]);
     expect(rescoreContent({ spamScore: null, spamReasons: null }, content)).toBeNull();
     expect(rescoreContent({ spamScore: 5, spamReasons: '{bad' }, content)).toBeNull();
+  });
+});
+
+describe('rescoreAuth', () => {
+  const authFailed = (detail = 'DMARC failed'): SpamReason => ({ ...reason('auth-failed', 3), detail });
+
+  // The v100 re-check: a forged `dmarc=pass` hid the failure, so the stored
+  // verdict never carried `auth-failed`. It gains the reason and the points;
+  // nothing else moves.
+  it('charges auth-failed on a verdict that lacked it', () => {
+    const result = rescoreAuth(stored(3, [reason('display-name-spoof', 3)]), [authFailed()]);
+    expect(result!.score).toBe(6);
+    expect(result!.reasons.map((r) => r.id)).toEqual(['display-name-spoof', 'auth-failed']);
+  });
+
+  // The other direction: the failure was read from a header nobody should
+  // have believed. The reason and its points come off; the rest stays.
+  it('takes auth-failed off when the re-read verdict no longer fails', () => {
+    const result = rescoreAuth(stored(4, [reason('bulk-no-unsubscribe', 1), authFailed()]), []);
+    expect(result!.score).toBe(1);
+    expect(result!.reasons.map((r) => r.id)).toEqual(['bulk-no-unsubscribe']);
+  });
+
+  // DMARC failing and "SPF and DKIM both failed" are two sentences for one
+  // reason; the stored one must say what the re-read verdict says.
+  it('replaces the reason when its wording changed', () => {
+    const result = rescoreAuth(stored(3, [authFailed('SPF and DKIM both failed')]), [authFailed('DMARC failed')]);
+    expect(result!.reasons).toEqual([authFailed('DMARC failed')]);
+    expect(result!.score).toBe(3);
+  });
+
+  // Nothing to change — null, so the caller does not rewrite the row. The
+  // whole queue is re-read; rewriting every row for no difference is churn.
+  it('returns null when the reason would come out as stored', () => {
+    expect(rescoreAuth(stored(4, [reason('bulk-no-unsubscribe', 1), authFailed()]), [authFailed()])).toBeNull();
+    expect(rescoreAuth(stored(1, [reason('bulk-no-unsubscribe', 1)]), [])).toBeNull();
+  });
+
+  // The same guards as rescoreWithBody: never scored stays never scored, and
+  // an unreadable column keeps its score rather than being rebuilt from
+  // nothing (unreadable and clean are the same value, opposite facts).
+  it('leaves unscored and unreadable verdicts alone', () => {
+    expect(rescoreAuth({ spamScore: null, spamReasons: null }, [authFailed()])).toBeNull();
+    expect(rescoreAuth({ spamScore: 5, spamReasons: '{bad' }, [authFailed()])).toBeNull();
+    // A clean score of 0 with no reasons IS readable, and gains the reason.
+    expect(rescoreAuth({ spamScore: 0, spamReasons: '[]' }, [authFailed()])!.score).toBe(3);
   });
 });

@@ -3995,6 +3995,84 @@ export const emailPgpStatus: Migration = {
 };
 
 /**
+ * The queue v101 fills and the header backfill drains (`header-backfill.ts`):
+ * one row per message whose stored SPF / DKIM / DMARC verdict must be read
+ * again from the server's headers. `attempts` counts fetches that came back
+ * without the message; at HEADER_STAGE_MAX_ATTEMPTS it stops being asked for.
+ */
+export const AUTH_REVERIFY_QUEUE_TABLE = 'auth_reverify_queue';
+
+/** How far back v101 re-checks stored verdicts, in days of `emails.date`. */
+export const AUTH_REVERIFY_WINDOW_DAYS = 90;
+
+/** True when a stored `auth_status` records nothing but `unknown` — nothing a stricter parser could take back. */
+function isAllUnknownAuth(authStatus: string): boolean {
+  try {
+    const parsed = JSON.parse(authStatus) as Record<string, unknown> | null;
+    return !!parsed && ['spf', 'dkim', 'dmarc'].every((key) => parsed[key] === 'unknown');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * v101 — queue recent mail for a re-read of its authentication verdict.
+ *
+ * mailguard < 0.4.3 believed ANY `Authentication-Results` in a message: every
+ * such header (and every ARC copy) was scanned for substrings, and
+ * `dmarc=pass` was looked for before `dmarc=fail`. A sender who typed
+ * `Authentication-Results: …; dmarc=pass` into their own message was believed
+ * over the receiving server's failure — and the stored verdict decides whether
+ * a trusted sender's mail skips the spam filter, whether a sender's images
+ * load on their own, whether the verified tick shows and whether the phishing
+ * banner warns. 0.4.3 believes only the receiving server's header.
+ *
+ * The headers themselves are not stored, so the correction cannot happen
+ * here: this queues the rows, and the header backfill re-fetches their
+ * headers (a headers-only FETCH) and re-derives the verdict with the fixed
+ * parser, together with the one spam reason that rests on it (`auth-failed`).
+ *
+ * Which rows: the last AUTH_REVERIFY_WINDOW_DAYS days of mail that has a uid
+ * to fetch by and a stored verdict that asserts something. An all-`unknown`
+ * verdict is left out — the old reader found no verdict text anywhere in that
+ * message, so the new one, which reads a subset of it, cannot find any either.
+ * A verdict that will not parse IS queued: re-reading it can only help.
+ *
+ * Idempotent: INSERT OR IGNORE, so a second run queues nothing twice.
+ */
+export const authResultsReverify: Migration = {
+  version: 101,
+  name: 'auth_results_reverify',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${AUTH_REVERIFY_QUEUE_TABLE} (
+        email_id TEXT PRIMARY KEY,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+    `);
+    const since = Math.floor(Date.now() / 1000) - AUTH_REVERIFY_WINDOW_DAYS * 86_400;
+    const rows = db.prepare(`
+      SELECT id, auth_status FROM emails
+      WHERE date >= ? AND uid IS NOT NULL AND uid > 0 AND auth_status IS NOT NULL
+    `).all(since) as Array<{ id: string; auth_status: string }>;
+    const enqueue = db.prepare(`INSERT OR IGNORE INTO ${AUTH_REVERIFY_QUEUE_TABLE} (email_id) VALUES (?)`);
+    let queued = 0;
+    for (const row of rows) {
+      if (isAllUnknownAuth(row.auth_status)) continue;
+      queued += enqueue.run(row.id).changes;
+    }
+    logger.info(
+      `Authentication re-check (v101): ${queued} of ${rows.length} recent verdict(s) queued for a re-read`,
+    );
+  },
+  down: (db) => {
+    // The verdicts already re-read stay corrected; only the pending work goes.
+    db.exec(`DROP TABLE IF EXISTS ${AUTH_REVERIFY_QUEUE_TABLE};`);
+  },
+};
+
+/**
  * Create migration manager with the fresh schema
  */
 export function createMigrationManager(
@@ -4079,5 +4157,6 @@ export function createMigrationManager(
   manager.register(retireConversationExtractions);
   manager.register(socialCategory);
   manager.register(emailPgpStatus);
+  manager.register(authResultsReverify);
   return manager;
 }
