@@ -495,6 +495,15 @@ export interface IMAPMessage {
   authHeaders?: string;
 
   /**
+   * The authserv-id(s) the server this message was fetched from stamps on the
+   * `Authentication-Results` it writes (see imap/receiving-authserv), when the
+   * provider's is known. Only headers carrying one are believed; absent, only
+   * the topmost header is. Set by the IMAP client, which is the one piece of
+   * the pipeline that knows which server it read the message from.
+   */
+  authserv?: readonly string[];
+
+  /**
    * The header fields the fetch asked for, verbatim and unparsed (the
    * `BODY.PEEK[HEADER.FIELDS (...)]` text). Feeds the header-only stages that
    * run at ingest — the spam signals read the upstream filter's verdict and

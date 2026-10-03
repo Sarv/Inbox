@@ -67,9 +67,14 @@ describe('isPublicIp', () => {
 });
 
 describe('originIpFromAuthHeaders', () => {
-  it('reads client-ip= from Received-SPF (Gmail, Zoho, Postfix policyd)', () => {
+  // CHANGED (mailguard origin-IP fix): this pinned `client-ip=` in a
+  // Received-SPF as the first source — the line a listed sender types into its
+  // own message to have the blocklists asked about a clean address. It names
+  // no author, so it is never read; Gmail's own address comes from its
+  // Authentication-Results (next tests), Postfix's from its Received line.
+  it('never reads client-ip= from a Received-SPF, which names no author', () => {
     const block = `Received-SPF: pass (google.com: domain of x@sarv.com designates ${GOOGLE} as permitted sender) client-ip=${GOOGLE};`;
-    expect(originIpFromAuthHeaders(block)).toBe(GOOGLE);
+    expect(originIpFromAuthHeaders(block)).toBeNull();
   });
 
   it('reads "sender IP is" from a Microsoft 365 Authentication-Results', () => {
@@ -84,22 +89,23 @@ describe('originIpFromAuthHeaders', () => {
     expect(originIpFromAuthHeaders(`Authentication-Results: mx; iprev=pass policy.iprev=${HOST} smtp.remote-ip=${HOST}`)).toBe(HOST);
   });
 
-  // Headers are prepended per hop, so the first line is OUR server's verdict.
-  // An ARC header a forwarder carried along names the hop before it; that is
-  // not the client that connected to us.
-  it('prefers the newest hop — the receiving server’s own — over a forwarder’s ARC line', () => {
-    const block = [
+  // CHANGED (mailguard origin-IP fix): this preferred the topmost line of a
+  // Received-SPF + ARC block. An ARC header is a copy a hop sealed for the
+  // next one, prepended like any other, so a sender's copy can be on top;
+  // neither it nor a Received-SPF supplies an address now. The receiving
+  // server's own Authentication-Results beside them does.
+  it('reads neither a Received-SPF nor an ARC line, only the receiving server’s own header', () => {
+    const forged = [
       `Received-SPF: pass (sarv.com: domain designates ${HOST}) client-ip=${HOST};`,
-      `ARC-Authentication-Results: i=1; mx.google.com; spf=pass client-ip=${GOOGLE}`,
-    ].join('\n');
-    expect(originIpFromAuthHeaders(block)).toBe(HOST);
+      `ARC-Authentication-Results: i=1; mx.google.com; spf=pass (sender IP is ${GOOGLE}) smtp.remote-ip=${GOOGLE}`,
+    ];
+    expect(originIpFromAuthHeaders(forged.join('\n'))).toBeNull();
+    const real = `Authentication-Results: mx; spf=fail (sender IP is ${M365})`;
+    expect(originIpFromAuthHeaders([...forged, real].join('\n'))).toBe(M365);
   });
 
-  it('skips a private client-ip and falls through to the next public one', () => {
-    const block = [
-      'Received-SPF: none client-ip=10.1.2.3;',
-      `Authentication-Results: mx; spf=pass (sender IP is ${M365})`,
-    ].join('\n');
+  it('skips a private address and falls through to the next public one', () => {
+    const block = `Authentication-Results: mx; iprev=pass smtp.remote-ip=10.1.2.3; spf=pass (sender IP is ${M365})`;
     expect(originIpFromAuthHeaders(block)).toBe(M365);
   });
 
@@ -153,11 +159,18 @@ describe('originIpFromReceived', () => {
 });
 
 describe('extractOriginIp', () => {
-  it('prefers the SPF evaluator’s address over the Received trace', () => {
+  // CHANGED (mailguard origin-IP fix): the SPF evaluator's address is the
+  // one in the receiving server's Authentication-Results; a Received-SPF beside
+  // it used to be that source, and a forged one beat the trace.
+  it('prefers the receiving server’s own address over the Received trace, and the trace over a Received-SPF', () => {
+    expect(extractOriginIp({
+      authHeaders: `Authentication-Results: mx; spf=pass (sender IP is ${M365})`,
+      received: [`from x (x [${HOST}]) by y`],
+    })).toBe(M365);
     expect(extractOriginIp({
       authHeaders: `Received-SPF: pass client-ip=${M365};`,
       received: [`from x (x [${HOST}]) by y`],
-    })).toBe(M365);
+    })).toBe(HOST);
   });
 
   it('falls back to the Received trace when the SPF headers name nothing', () => {

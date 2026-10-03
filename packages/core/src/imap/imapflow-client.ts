@@ -53,6 +53,7 @@ import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout'
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { isConnectionError, isAuthError } from './imap-errors';
+import { receivingAuthserv } from './receiving-authserv';
 
 // Max time to wait for the OAuth bearer resolver (token refresh) during connect.
 // It runs before any socket opens; a hung DNS/OAuth window must fail fast into the
@@ -1004,6 +1005,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     const bcc = env.bcc?.length ? this.mapAddresses(env.bcc) : this.headerAddresses(headers, 'bcc');
     const replyTo = env.replyTo?.length ? this.mapAddresses(env.replyTo) : this.headerAddresses(headers, 'reply-to');
     const envDate = env.date ? new Date(env.date) : this.headerDate(headers);
+    const authserv = receivingAuthserv(this.connectedHost);
 
     return {
       uid: m.uid,
@@ -1017,6 +1019,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // We carry the flag through to threading (see thread-resolver Path 3).
       isBulk: this.detectBulk(headers),
       authHeaders: extractAuthHeaderBlock(headers),
+      // Whose verdict in that block to believe: the receiving server's, when
+      // this provider's authserv-id is known (see receiving-authserv).
+      ...(authserv ? { authserv } : {}),
       // The fetched header fields, verbatim, for the header-only stages that
       // run at ingest (spam signals, origin IP). Only the fields asked for
       // above — a few hundred bytes — never the whole message.

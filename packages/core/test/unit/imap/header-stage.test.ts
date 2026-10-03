@@ -45,6 +45,34 @@ describe('headerStage', () => {
     expect(auth).toMatchObject({ spf: 'pass', dkim: 'pass', dmarc: 'pass' });
   });
 
+  // Regression (mailguard 0.4.3): a sender typed `dmarc=pass` into their own
+  // message. The verdict the shield shows, the trusted-sender bypass and the
+  // image auto-load all read this `auth`, and the score's `auth-failed` reason
+  // keys on it — so the forged header must lose here, whichever side of the
+  // real one it sits on.
+  it('reads the receiving server\'s verdict, not a forged one, by the message\'s authserv-id', () => {
+    const real = 'Authentication-Results: mx.google.com; spf=fail smtp.mailfrom=paypal.com; dkim=none; dmarc=fail header.from=paypal.com';
+    const forged = 'Authentication-Results: mx.evil.example; spf=pass; dkim=pass; dmarc=pass';
+    for (const authHeaders of [`${forged}\n${real}`, `${real}\n${forged}`]) {
+      const { auth, spam } = headerStage(message({ authHeaders, authserv: ['mx.google.com'] }));
+      expect(auth?.dmarc).toBe('fail');
+      expect(spam?.reasons.map((r) => r.id)).toContain('auth-failed');
+    }
+  });
+
+  // Without a known authserv-id only the topmost header counts — the receiving
+  // server's on every mainstream provider — and ARC copies never do.
+  it('believes only the topmost Authentication-Results when the server\'s id is unknown', () => {
+    const { auth } = headerStage(message({
+      authHeaders: [
+        'ARC-Authentication-Results: i=1; mx.test.local; dmarc=pass',
+        'Authentication-Results: mx.test.local; dmarc=fail',
+        'Authentication-Results: mx.evil.example; dmarc=pass',
+      ].join('\n'),
+    }));
+    expect(auth?.dmarc).toBe('fail');
+  });
+
   // NULL here means exactly "the server recorded no verdict", and that is what
   // the scorer must see — an all-unknown verdict would look like a judgement
   // that was made. The backfill converts it to one only at the point of
@@ -128,6 +156,73 @@ describe('headerStage', () => {
     expect(r.spam).not.toBeNull();
   });
 });
+
+/**
+ * Forged origin addresses. `originIp` is what the reputation stage asks every
+ * blocklist about, so an address the SENDER chooses turns a listed spam source
+ * into a clean one. The forgery is one header line anybody can type:
+ * `Received-SPF: pass client-ip=<a clean address>`. The first `client-ip=`
+ * anywhere in the block used to win.
+ */
+describe('headerStage origin IP: forged headers', () => {
+  // The spammer's real address, as the receiving server saw it, and the clean
+  // one they would rather be judged by. Both routable: the documentation
+  // ranges are `reserved` and the extractor never returns one.
+  const SPAMMER = '185.199.108.1';
+  const FORGED = '1.1.1.1';
+  // Gmail's own verdict for a message whose SPF softfailed at the spammer's IP.
+  const GMAIL_AR = `Authentication-Results: mx.google.com; spf=softfail (google.com: domain of transitioning x@evil.example does not designate ${SPAMMER} as permitted sender) smtp.mailfrom=x@evil.example; dmarc=fail header.from=evil.example`;
+  const TRACE =
+    `Received: from mta.evil.example (mta.evil.example. [${SPAMMER}]) by mx.google.com with ESMTPS id 1; Thu, 1 Jan 2026 00:00:01 +0000\r\n` +
+    'Subject: Subject\r\n';
+
+  // Regression: THE bug. The sender's Received-SPF sits below everything the
+  // receiving server prepended; its client-ip was read before the real one.
+  it('records the address the receiving server saw, not a forged Received-SPF', () => {
+    const authHeaders = [GMAIL_AR, `Received-SPF: pass (evil) client-ip=${FORGED};`].join('\n');
+    for (const authserv of [['mx.google.com'], undefined]) {
+      expect(headerStage(message({ authHeaders, authserv, rawHeaders: TRACE })).originIp).toBe(SPAMMER);
+    }
+  });
+
+  // Regression: an ARC header is a copy sealed for the NEXT hop and is
+  // prepended like any other, so a sender's copy can sit on top of the block.
+  it('never takes the address from an ARC-Authentication-Results', () => {
+    const arc = `ARC-Authentication-Results: i=1; mx.google.com; spf=pass (google.com: domain of x designates ${FORGED} as permitted sender) smtp.mailfrom=x; iprev=pass smtp.remote-ip=${FORGED}`;
+    const { originIp } = headerStage(message({ authHeaders: [arc, GMAIL_AR].join('\n'), authserv: ['mx.google.com'] }));
+    expect(originIp).toBe(SPAMMER);
+  });
+
+  // Regression: the message's authserv-id has to reach the extractor, not
+  // just the verdict. A forged header on TOP naming another server is what
+  // it rescues. Without the id the topmost header is believed (the same known
+  // limit the verdict has), which is why the Gmail account gets the real
+  // address and an account on an unknown provider does not. That limit
+  // closes for any provider added to receiving-authserv.
+  it('reads the address from the server the message\'s authserv-id names', () => {
+    const forgedAr = `Authentication-Results: mx.evil.example; spf=pass (sender IP is ${FORGED})`;
+    const authHeaders = [forgedAr, GMAIL_AR].join('\n');
+    const gmail = headerStage(message({ authHeaders, authserv: ['mx.google.com'], rawHeaders: TRACE }));
+    expect(gmail.originIp).toBe(SPAMMER);
+    expect(gmail.auth?.dmarc).toBe('fail');
+    const unknownProvider = headerStage(message({ authHeaders, rawHeaders: TRACE }));
+    expect(unknownProvider.originIp).toBe(FORGED);
+  });
+
+  // With no trusted header naming an address, the Received trace the
+  // receiving server wrote answers. Never the forged lines beside it.
+  it('falls back to the Received trace when no trusted header names an address', () => {
+    const authHeaders = [
+      `Authentication-Results: mx.evil.example; spf=pass (sender IP is ${FORGED})`,
+      `Received-SPF: pass client-ip=${FORGED};`,
+    ].join('\n');
+    const { originIp, auth } = headerStage(message({ authHeaders, authserv: ['mx.google.com'], rawHeaders: TRACE }));
+    expect(originIp).toBe(SPAMMER);
+    // The same rule left the verdict untrusted too: no header was believed.
+    expect(auth).toMatchObject({ spf: 'unknown', dkim: 'unknown', dmarc: 'unknown' });
+  });
+});
+
 
 /**
  * The unsubscribe headers the stage lifts out for storage (migration v93).

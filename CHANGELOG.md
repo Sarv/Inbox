@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **A forged "authenticated" header no longer fools the app.** A sender
+  could add their own `Authentication-Results: … dmarc=pass` line to a
+  message, and the app believed it over your mail server's real verdict.
+  That could let a forged copy of a trusted sender skip the spam filter,
+  load its images on its own, and appear without the phishing warning. Now
+  only the verdict your own mail server wrote counts (for Gmail accounts,
+  Gmail's by name; for others, the one on top), copies forwarded by other
+  servers are ignored, and when two verdicts disagree, a failure wins. Mail
+  from the last 90 days is re-checked against your server in the
+  background, and anything filed as spam only because of a misread verdict
+  is moved back to your inbox. Some mailing-list mail may now show
+  "DMARC failed" where it showed a pass: that is what your server recorded
+  for it.
+- **A forged header can no longer hide a spammer from the blocklists.** The
+  spam filter asks blocklists such as Spamhaus about the address a message
+  came from. A sender could add a fake `Received-SPF` line naming a clean
+  address, and the app asked about that address instead of the real one, so
+  a listed spam source slipped through. The address now comes only from your
+  own mail server's verdict (for Gmail accounts, Gmail's by name), or, when
+  that names none, from the delivery trace your server wrote. Lines a sender
+  can type, and copies forwarded by other servers, are never read.
+
 ## [1.3.1] - 2026-10-01
 
 ### Fixed

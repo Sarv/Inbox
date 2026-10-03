@@ -27,6 +27,7 @@ const h = vi.hoisted(() => ({
   window: { destroyed: false, sent: [] as Array<{ channel: string; payload: unknown }> },
   unstable: new Set<unknown>(),
   logs: [] as string[],
+  repairScheduled: 0,
 }));
 
 vi.mock('../../../../electron/shared', () => ({
@@ -46,34 +47,39 @@ vi.mock('../../../../electron/services/connection-health', () => ({
   isConnectionRecentlyUnstable: (engine: unknown) => h.unstable.has(engine),
 }));
 
+vi.mock('../../../../electron/services/spam-verdict-repair', () => ({
+  startSpamVerdictRepair: () => { h.repairScheduled += 1; },
+}));
+
 vi.mock('@sarvinbox/core', () => ({
   createLogger: () => ({
     info: (...a: unknown[]) => { h.logs.push(a.join(' ')); },
     warn: (...a: unknown[]) => { h.logs.push(a.join(' ')); },
     error: () => {}, debug: () => {},
   }),
-  // The real parser is exercised in core's own tests; here we only need a
-  // stable, recognisable mapping from header text to verdict. Note it answers
-  // for absent input too — that is the property the backfill depends on.
-  parseAuthenticationHeaders: (raw: string | undefined) => ({
-    spf: raw?.includes('spf=pass') ? 'pass' : 'unknown',
-    dkim: raw?.includes('dkim=pass') ? 'pass' : 'unknown',
-    dmarc: raw?.includes('dmarc=fail') ? 'fail' : raw?.includes('dmarc=pass') ? 'pass' : 'unknown',
-    overall: raw ? (raw.includes('fail') ? 'fail' : 'pass') : 'none',
-  }),
-  // Core's own tests exercise the real derivation; the shape and the two
-  // decisions this service cares about are what matter here: own mail is never
-  // scored, and a reported sender scores worse.
-  headerStage: (message: FakeMessage, opts?: { ownMail?: boolean; knownSpammer?: boolean }) => ({
-    auth: message.authHeaders ? { overall: 'pass' } : null,
-    spam: opts?.ownMail
-      ? null
-      : {
-          score: (message.authHeaders?.includes('dmarc=fail') ? 6 : 1) + (opts?.knownSpammer ? 4 : 0),
-          reasons: opts?.knownSpammer ? ['KNOWN_SPAMMER'] : ['BASE'],
-        },
-    originIp: message.originIp ?? null,
-  }),
+  // Core's own tests exercise the real derivation (and mailguard's the real
+  // parser); the shape and the decisions this service cares about are what
+  // matter here: the verdict it stores is the one headerStage returned, null
+  // when the server recorded none; own mail is never scored; a reported
+  // sender scores worse; a DMARC failure carries the `auth-failed` reason.
+  headerStage: (message: FakeMessage, opts?: { ownMail?: boolean; knownSpammer?: boolean }) => {
+    const failed = message.authHeaders?.includes('dmarc=fail') ?? false;
+    return {
+      auth: message.authHeaders
+        ? { spf: 'unknown', dkim: 'unknown', dmarc: failed ? 'fail' : 'pass', overall: failed ? 'fail' : 'pass' }
+        : null,
+      spam: opts?.ownMail
+        ? null
+        : {
+            score: (failed ? 6 : 1) + (opts?.knownSpammer ? 4 : 0),
+            reasons: [
+              opts?.knownSpammer ? 'KNOWN_SPAMMER' : 'BASE',
+              ...(failed ? [{ id: 'auth-failed', points: 3, detail: 'DMARC failed' }] : []),
+            ],
+          },
+      originIp: message.originIp ?? null,
+    };
+  },
   isOwnMailFolder: (folder: { path: string }) => folder.path.toLowerCase().includes('sent'),
 }));
 
@@ -193,7 +199,7 @@ const ACTIVE = 1_500;
 beforeEach(() => {
   vi.useFakeTimers();
   h.activeStorage = null; h.activeEngine = null; h.runtimes = [];
-  h.window = { destroyed: false, sent: [] }; h.unstable = new Set(); h.logs = [];
+  h.window = { destroyed: false, sent: [] }; h.unstable = new Set(); h.logs = []; h.repairScheduled = 0;
 });
 afterEach(() => { vi.useRealTimers(); });
 
@@ -571,5 +577,205 @@ describe('lifecycle', () => {
     svc.startHeaderBackfill(); svc.startHeaderBackfill();
     await advance(FIRST + 10);
     expect(a.state.fetchCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * The v101 re-check: verdicts a forged `Authentication-Results` wrote, read
+ * again from the server. Storage owns the write (a real SQLite transaction,
+ * tested in storage-node); these pin what the SERVICE must get right — which
+ * rows it fetches, what it hands storage, and how it treats a fetch that
+ * failed versus a message that is gone.
+ */
+interface Queued { id: string; uid: number; folderPath: string; folderId: string; attempts: number }
+
+const queuedRow = (id: string, uid: number, folderPath = 'INBOX', folderId = 'f-inbox'): Queued => ({
+  id, uid, folderPath, folderId, attempts: 0,
+});
+
+/** An account whose header backlog is drained and whose v101 queue is not. */
+const makeReverifyAccount = (queue: Queued[], serverHeaders: Record<string, string | undefined | 'MISSING'> = {}) => {
+  const base = makeAccount([], serverHeaders);
+  const r = {
+    queue,
+    applied: [] as Array<{ id: string; authStatus: string; authReasons: unknown[] }>,
+    repairQueuedPerRow: 0,
+  };
+  const live = () => r.queue.filter((q) => q.attempts < 3);
+  Object.assign(base.storage, {
+    getAuthReverifyBatch: (limit: number) =>
+      live().slice(0, limit).map(({ id, uid, folderPath, folderId }) => ({ id, uid, folderPath, folderId })),
+    countAuthReverify: () => live().length,
+    recordAuthReverifyMiss: (ids: readonly string[]) => {
+      for (const id of ids) { const q = r.queue.find((x) => x.id === id); if (q) q.attempts += 1; }
+      return ids.length;
+    },
+    applyAuthReverify: (rows: Array<{ id: string; authStatus: string; authReasons: unknown[] }>) => {
+      r.applied.push(...rows);
+      r.queue = r.queue.filter((q) => !rows.some((row) => row.id === q.id));
+      return { written: rows.length, repairQueued: rows.length * r.repairQueuedPerRow };
+    },
+  });
+  return { ...base, r };
+};
+
+describe('the v101 authentication re-check', () => {
+  // The verdict stored is headerStage's own — read by the message's
+  // authserv-id — and of the spam reasons only `auth-failed` goes to storage,
+  // which swaps that one reason and leaves the rest as charged.
+  it('maps each answered uid to its re-read verdict and its auth-failed reason alone', async () => {
+    const { reverifyRows } = await load();
+    const rows = reverifyRows(
+      [{ id: 'a', uid: 1 }, { id: 'b', uid: 2 }, { id: 'gone', uid: 3 }],
+      new Map<number, never>([[1, message(1, 'dmarc=fail') as never], [2, message(2) as never]]),
+    );
+    expect(rows).toEqual([
+      {
+        id: 'a',
+        authStatus: JSON.stringify({ spf: 'unknown', dkim: 'unknown', dmarc: 'fail', overall: 'fail' }),
+        authReasons: [{ id: 'auth-failed', points: 3, detail: 'DMARC failed' }],
+      },
+      // Answered with no auth header at all: a final all-unknown verdict, never
+      // a null the queue would hand out again.
+      { id: 'b', authStatus: JSON.stringify({ spf: 'unknown', dkim: 'unknown', dmarc: 'unknown', overall: 'none' }), authReasons: [] },
+    ]);
+  });
+
+  // THE flow: queued rows are fetched folder by folder, their verdicts handed
+  // to storage, and the queue drains — after which the loop goes idle.
+  it('re-reads every queued verdict and drains the queue', async () => {
+    const a = makeReverifyAccount(
+      [queuedRow('a', 1), queuedRow('b', 9, 'Archive', 'f-arch')],
+      { '1': 'dmarc=fail', '9': 'spf=pass dmarc=pass' },
+    );
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startHeaderBackfill();
+    await advance(FIRST + 10);
+
+    expect(a.state.fetchCalls).toEqual([{ folder: 'INBOX', uids: [1] }, { folder: 'Archive', uids: [9] }]);
+    expect(a.r.applied.map((row) => [row.id, JSON.parse(row.authStatus).dmarc])).toEqual([['a', 'fail'], ['b', 'pass']]);
+    expect(a.r.queue).toEqual([]);
+    expect(svc.getHeaderBackfillState()).toMatchObject({ done: 2, remaining: 0, drained: true });
+  });
+
+  // Idempotent: once drained, a later tick fetches nothing and writes nothing.
+  it('does nothing more once the queue is empty', async () => {
+    const a = makeReverifyAccount([queuedRow('a', 1)], { '1': 'dmarc=pass' });
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startHeaderBackfill();
+    await advance(FIRST + 10);
+    svc.kickHeaderBackfill();
+    await advance(300);
+    expect(a.state.fetchCalls).toHaveLength(1); // the first tick's only
+    expect(a.r.applied).toHaveLength(1);
+  });
+
+  // TRANSIENT: a fetch that throws (a connection blip) spends nothing — the
+  // row stays queued with its attempts untouched, and the next tick drains it.
+  // Counting a blip as a miss would retire real mail after three bad seconds.
+  it('keeps a row queued, unpenalised, when the fetch fails, and retries it', async () => {
+    const a = makeReverifyAccount([queuedRow('a', 1)], { '1': 'dmarc=fail' });
+    a.state.fetchThrows = true;
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startHeaderBackfill();
+    await advance(FIRST + 10);
+    expect(a.r.queue).toEqual([queuedRow('a', 1)]);
+    expect(h.logs.some((l) => l.includes('tick failed (isolated)'))).toBe(true);
+
+    a.state.fetchThrows = false;
+    await advance(ACTIVE + 10);
+    expect(a.r.applied.map((row) => row.id)).toEqual(['a']);
+    expect(a.r.queue).toEqual([]);
+  });
+
+  // PERMANENT: a uid the server answered for without the message (expunged)
+  // is one attempt; three and it stops being asked for, keeping its verdict.
+  it('counts a message the server no longer has, and stops asking after three', async () => {
+    const a = makeReverifyAccount([queuedRow('gone', 7), queuedRow('ok', 8)], { '7': 'MISSING', '8': 'dmarc=pass' });
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startHeaderBackfill();
+    await advance(FIRST + 10);
+    // Partial run: the answered row is written, the missing one counted.
+    expect(a.r.applied.map((row) => row.id)).toEqual(['ok']);
+    expect(a.r.queue).toEqual([{ ...queuedRow('gone', 7), attempts: 1 }]);
+    expect(svc.getHeaderBackfillState().remaining).toBe(1);
+
+    await advance(ACTIVE + 10);
+    await advance(ACTIVE + 10);
+    expect(a.r.queue[0]!.attempts).toBe(3);
+    const fetches = a.state.fetchCalls.length;
+    await advance(ACTIVE * 5);
+    expect(a.state.fetchCalls).toHaveLength(fetches);
+    expect(svc.getHeaderBackfillState().drained).toBe(true);
+  });
+
+  // Multi-account: each account drains its own queue, on its own engine, and
+  // one account's failure never holds up another's corrections.
+  it('drains each account\'s queue on its own connection, isolating a failure', async () => {
+    const bad = makeReverifyAccount([queuedRow('x', 1)], { '1': 'dmarc=fail' });
+    bad.state.fetchThrows = true;
+    const good = makeReverifyAccount([queuedRow('y', 1)], { '1': 'dmarc=fail' });
+    h.activeStorage = bad.storage; h.activeEngine = bad.engine;
+    h.runtimes = [['acct-b', { storage: good.storage, syncEngine: good.engine, smtpClient: null }]];
+    (await load()).startHeaderBackfill();
+    await advance(FIRST + 10);
+
+    expect(good.r.applied.map((row) => row.id)).toEqual(['y']);
+    expect(bad.r.applied).toEqual([]);
+    expect(bad.r.queue).toHaveLength(1);
+  });
+
+  // A correction that takes filed mail back under the spam line is only half
+  // done until the spam repair moves it out of Spam: the repair must be
+  // scheduled — and only then, since it walks every account's queue.
+  it('schedules the spam repair only when a correction fell under the spam line', async () => {
+    const a = makeReverifyAccount([queuedRow('a', 1)], { '1': 'dmarc=pass' });
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    (await load()).startHeaderBackfill();
+    await advance(FIRST + 10);
+    expect(h.repairScheduled).toBe(0);
+
+    const b = makeReverifyAccount([queuedRow('b', 2)], { '2': 'dmarc=pass' });
+    b.r.repairQueuedPerRow = 1;
+    h.activeStorage = b.storage; h.activeEngine = b.engine;
+    (await load()).startHeaderBackfill();
+    await advance(FIRST + 10);
+    expect(h.repairScheduled).toBe(1);
+    expect(h.logs.some((l) => l.includes('spam repair scheduled'))).toBe(true);
+  });
+
+  // Missing verdicts come first: a message with NO verdict shows nothing at
+  // all. The re-check only gets what is left of the tick's time budget.
+  it('fills missing verdicts before re-checking, within one time budget', async () => {
+    const { TICK_BUDGET_MS } = await load();
+    const a = makeReverifyAccount([queuedRow('q', 5)], { '1': 'spf=pass', '5': 'dmarc=fail' });
+    a.state.rows.push(row('missing', 1));
+    const realFetch = a.engine.fetchHeaderMessages;
+    a.engine.fetchHeaderMessages = async (folder: string, uids: number[]) => {
+      vi.setSystemTime(Date.now() + TICK_BUDGET_MS);
+      return realFetch(folder, uids);
+    };
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    (await load()).startHeaderBackfill();
+    await advance(FIRST + 10);
+    expect(a.state.fetchCalls.map((c) => c.uids)).toEqual([[1]]);
+    expect(a.r.applied).toEqual([]);
+    await advance(ACTIVE + 10);
+    expect(a.r.applied.map((row) => row.id)).toEqual(['q']);
+  });
+
+  // Older storage without the queue methods: the backfill runs as before.
+  it('skips the re-check on storage that has no queue', async () => {
+    const a = makeAccount([row('a', 1)], { '1': 'spf=pass' });
+    h.activeStorage = a.storage; h.activeEngine = a.engine;
+    const svc = await load();
+    svc.startHeaderBackfill();
+    await advance(FIRST + 10);
+    expect(a.state.rows[0]!.authStatus).not.toBeNull();
+    expect(svc.getHeaderBackfillState()).toMatchObject({ remaining: 0, drained: true });
   });
 });
