@@ -3,7 +3,7 @@ import { MailChatView, type ChatMessage } from '@sarv-in/email-chat-view';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AttachmentPills } from '../../../../../src/components/attachment-viewer/AttachmentPills';
-import { act, render, toggle, type Mounted } from '../../../../helpers/render';
+import { act, render, settle, toggle, type Mounted } from '../../../../helpers/render';
 
 /**
  * The attachment strip inside a REAL chat bubble, with the viewer it opens.
@@ -19,8 +19,10 @@ import { act, render, toggle, type Mounted } from '../../../../helpers/render';
  * would only test the stand-in.
  */
 
+const preparePreview = vi.fn(async () => 'sarv-attachment://attachment/m1/contract.png');
+
 vi.mock('../../../../../src/components/attachment-viewer/useAttachmentActions', () => ({
-  useAttachmentActions: () => ({ isBusy: () => false, saveCopy: vi.fn(), openInSystemApp: vi.fn() }),
+  useAttachmentActions: () => ({ isBusy: () => false, getStatus: () => undefined, saveCopy: vi.fn(), openInSystemApp: vi.fn(), preparePreview, cancelDownload: vi.fn() }),
 }));
 
 const MESSAGE: ChatMessage = {
@@ -78,10 +80,12 @@ describe('AttachmentPills in a chat bubble', () => {
   });
 
   // THE regression: the preview is not the message.
-  it('opens no message menu for a right-click inside an open preview', () => {
+  it('opens no message menu for a right-click inside an open preview', async () => {
     const onMessageMenu = vi.fn(() => true);
     const view = mountBubble(onMessageMenu);
+    (window as unknown as { electronAPI: unknown }).electronAPI = { emails: { releaseAttachmentPreview: vi.fn(async () => ({ success: true })) } };
     toggle(view.byLabel('Open contract.png'));
+    await settle();
 
     const viewer = view.find('[role="dialog"]');
     expect(viewer).not.toBeNull();

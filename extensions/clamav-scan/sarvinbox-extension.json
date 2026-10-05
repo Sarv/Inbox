@@ -2,7 +2,7 @@
   "id": "clamav-scan",
   "name": "ClamAV Scan",
   "version": "1.0.0",
-  "description": "Scan selected attachments with your configured ClamAV service. Email body sharing requires separate consent.",
+  "description": "Optional ClamAV attachment scans for viewing, opening, saving and selected manual scans. Missing setup offers an in-app warning with an account warning preference; email text sharing needs separate consent.",
   "author": "Sarv",
   "main": "index.js",
   "engines": { "sarvinbox": ">=1.3.1" },

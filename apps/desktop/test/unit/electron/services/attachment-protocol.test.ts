@@ -22,6 +22,8 @@ const h = vi.hoisted(() => ({
   userData: '',
   /** What `resolveAttachmentFile` should do for the next request. */
   resolve: null as null | ((ref: unknown) => Promise<{ filePath: string; filename: string }>),
+  preview: null as
+    null | ((ref: unknown, url: string, signal?: AbortSignal) => Promise<Buffer | undefined>),
   registered: new Map<string, (request: Request) => Promise<Response>>(),
 }));
 
@@ -50,7 +52,7 @@ vi.mock('../../../../electron/services/attachment-cache', () => {
   class AttachmentError extends Error {
     constructor(
       message: string,
-      public readonly status: number,
+      public readonly status: number
     ) {
       super(message);
     }
@@ -63,6 +65,10 @@ vi.mock('../../../../electron/services/attachment-cache', () => {
     },
   };
 });
+
+vi.mock('../../../../electron/services/attachment-preview-protection', () => ({
+  getAttachmentPreviewProtection: () => (h.preview ? { contentForRequest: h.preview } : undefined),
+}));
 
 import { AttachmentError } from '../../../../electron/services/attachment-cache';
 import {
@@ -90,7 +96,133 @@ function url(filename: string, { emailId = 'e1', account = '' } = {}): string {
 beforeEach(() => {
   h.userData = TMP;
   h.resolve = null;
+  h.preview = async () => undefined;
   h.registered.clear();
+});
+
+describe('handleAttachmentRequest — verified preview bytes', () => {
+  // Regression confirmed in Electron: its custom-protocol request includes the
+  // PDF iframe's toolbar fragment, unlike an ordinary HTTP network request.
+  it('validates the fragmentless lease URL when a PDF includes display options', async () => {
+    const preparedUrl = `${url('report.pdf', { account: 'acct-2' })}&preview=lease`;
+    h.preview = async (_ref, requestedUrl) => {
+      expect(requestedUrl).toBe(preparedUrl);
+      if (new URL(requestedUrl).hash) throw new AttachmentError('Invalid preview URL', 403);
+      return Buffer.from('%PDF-1.7 verified');
+    };
+    const res = await handleAttachmentRequest(new Request(`${preparedUrl}#toolbar=0`));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('%PDF-1.7 verified');
+  });
+
+  // Regression: cached or direct attachment URLs must not bypass the scan gate.
+  it('serves only retained clean bytes, without resolving a cached copy', async () => {
+    const clean = Buffer.from('%PDF-1.7 verified');
+    const resolve = vi.fn(async () => {
+      throw new Error('unchecked cache must never be read');
+    });
+    h.resolve = resolve;
+    const preview = vi.fn(async () => clean);
+    h.preview = preview;
+    const request = new Request(`${url('report.pdf', { account: 'acct-2' })}&preview=lease`);
+
+    const res = await handleAttachmentRequest(request);
+    // Revoking the lease after response creation must not alter its byte copy.
+    clean.fill(0);
+
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe('%PDF-1.7 verified');
+    expect(preview).toHaveBeenCalledWith(
+      { emailId: 'e1', filename: 'report.pdf', accountId: 'acct-2' },
+      request.url,
+      request.signal
+    );
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  // Regression: PDFs and video must seek within the same scanned buffer.
+  it('answers ranges and HEAD using the verified buffer', async () => {
+    h.preview = async () => Buffer.from('0123456789abcdefghij');
+    const requestUrl = `${url('clip.mp4', { account: 'acct-1' })}&preview=lease`;
+    const res = await handleAttachmentRequest(
+      new Request(requestUrl, { headers: { Range: 'bytes=-5' } })
+    );
+    expect(res.status).toBe(206);
+    expect(res.headers.get('Content-Range')).toBe('bytes 15-19/20');
+    expect(await res.text()).toBe('fghij');
+
+    const head = await handleAttachmentRequest(new Request(requestUrl, { method: 'HEAD' }));
+    expect(head.status).toBe(200);
+    expect(head.headers.get('Content-Length')).toBe('20');
+    expect(await head.text()).toBe('');
+
+    const past = await handleAttachmentRequest(
+      new Request(requestUrl, { headers: { Range: 'bytes=20-' } })
+    );
+    expect(past.status).toBe(416);
+    expect(past.headers.get('Content-Range')).toBe('bytes */20');
+  });
+
+  it('serves an empty verified attachment without touching the legacy cache', async () => {
+    h.preview = async () => Buffer.alloc(0);
+    const res = await handleAttachmentRequest(new Request(url('empty.txt')));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Length')).toBe('0');
+    expect(await res.text()).toBe('');
+  });
+
+  // Regression: missing, expired, revoked and cross-account leases refuse reads
+  // even when the old unscanned attachment is already cached.
+  it('passes a blocked preview error without falling back to the cache', async () => {
+    registerAttachmentProtocol('http://localhost:5173/');
+    const resolve = vi.fn(async () => {
+      throw new Error('must never reach cache');
+    });
+    h.resolve = resolve;
+    h.preview = async () => {
+      throw new AttachmentError('Preview blocked: scan this attachment again before viewing.', 403);
+    };
+    const res = await handleAttachmentRequest(
+      new Request(url('report.pdf'), {
+        headers: { Origin: 'http://localhost:5173' },
+      })
+    );
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain('Preview blocked');
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:5173');
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('fails closed while the preview controller has not initialized', async () => {
+    h.preview = null;
+    const res = await handleAttachmentRequest(new Request(url('report.pdf')));
+    expect(res.status).toBe(503);
+    expect(await res.text()).toBe('Attachment preview is not ready. Try again.');
+  });
+
+  // Regression: scanner enablement while IMAP fetch awaits cannot authorize the
+  // old cache path based on the scanner state from before the fetch.
+  it('rechecks protection after a legacy cache read', async () => {
+    serving('report.pdf', 'unchecked');
+    let reads = 0;
+    h.preview = async () => {
+      if (++reads === 1) return undefined;
+      throw new AttachmentError('Preview blocked: scan this attachment again before viewing.', 403);
+    };
+    const res = await handleAttachmentRequest(new Request(url('report.pdf')));
+    expect(reads).toBe(2);
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('unchecked');
+  });
+
+  it('sanitizes an unexpected preview verification failure', async () => {
+    h.preview = async () => {
+      throw new Error(`/private/account/secret-db ${TMP}`);
+    };
+    const res = await handleAttachmentRequest(new Request(url('report.pdf')));
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe('Attachment could not be read');
+  });
 });
 
 describe('handleAttachmentRequest — serving', () => {
@@ -156,7 +288,7 @@ describe('handleAttachmentRequest — range requests', () => {
     serving('clip.mp4', body);
 
     const res = await handleAttachmentRequest(
-      new Request(url('clip.mp4'), { headers: { Range: 'bytes=10-19' } }),
+      new Request(url('clip.mp4'), { headers: { Range: 'bytes=10-19' } })
     );
 
     expect(res.status).toBe(206);
@@ -171,7 +303,7 @@ describe('handleAttachmentRequest — range requests', () => {
     serving('clip.mp4', body);
 
     const res = await handleAttachmentRequest(
-      new Request(url('clip.mp4'), { headers: { Range: 'bytes=15-' } }),
+      new Request(url('clip.mp4'), { headers: { Range: 'bytes=15-' } })
     );
 
     expect(res.status).toBe(206);
@@ -185,7 +317,7 @@ describe('handleAttachmentRequest — range requests', () => {
     serving('clip.mp4', body);
 
     const res = await handleAttachmentRequest(
-      new Request(url('clip.mp4'), { headers: { Range: 'bytes=999-1200' } }),
+      new Request(url('clip.mp4'), { headers: { Range: 'bytes=999-1200' } })
     );
 
     expect(res.status).toBe(416);
@@ -198,7 +330,7 @@ describe('handleAttachmentRequest — range requests', () => {
     serving('clip.mp4', body);
 
     const res = await handleAttachmentRequest(
-      new Request(url('clip.mp4'), { headers: { Range: 'pages=1-2' } }),
+      new Request(url('clip.mp4'), { headers: { Range: 'pages=1-2' } })
     );
 
     expect(res.status).toBe(200);
@@ -365,7 +497,7 @@ describe('handleAttachmentRequest — cross-origin reads', () => {
     serving('note.txt', 'hello');
 
     const res = await handleAttachmentRequest(
-      new Request(url('note.txt'), { headers: { Origin: 'http://localhost:5173' } }),
+      new Request(url('note.txt'), { headers: { Origin: 'http://localhost:5173' } })
     );
 
     expect(res.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:5173');
@@ -380,7 +512,7 @@ describe('handleAttachmentRequest — cross-origin reads', () => {
     serving('note.txt', 'hello');
 
     const res = await handleAttachmentRequest(
-      new Request(url('note.txt'), { headers: { Origin: 'null' } }),
+      new Request(url('note.txt'), { headers: { Origin: 'null' } })
     );
 
     expect(res.headers.get('Access-Control-Allow-Origin')).toBe('null');
@@ -393,7 +525,7 @@ describe('handleAttachmentRequest — cross-origin reads', () => {
     serving('note.txt', 'hello');
 
     const res = await handleAttachmentRequest(
-      new Request(url('note.txt'), { headers: { Origin: 'https://evil.example' } }),
+      new Request(url('note.txt'), { headers: { Origin: 'https://evil.example' } })
     );
 
     expect(res.status).toBe(200);
@@ -419,7 +551,7 @@ describe('handleAttachmentRequest — cross-origin reads', () => {
     registerAttachmentProtocol('http://localhost:5173');
 
     const res = await handleAttachmentRequest(
-      new Request(url('setup.exe'), { headers: { Origin: 'http://localhost:5173' } }),
+      new Request(url('setup.exe'), { headers: { Origin: 'http://localhost:5173' } })
     );
 
     expect(res.status).toBe(403);

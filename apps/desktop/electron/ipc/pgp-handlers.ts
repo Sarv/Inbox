@@ -12,15 +12,16 @@
 import { writeFile } from 'fs/promises';
 import path from 'path';
 
-import { createLogger } from '@sarvinbox/core';
+import { createLogger, waitForAbortableOperation } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER, PgpKeyError } from '@sarvinbox/core/pgp';
 import { dialog, ipcMain } from 'electron';
 
-import { resolveAccountTarget } from '../services/account-target';
+import { requireTargetAccountId, resolveAccountTarget } from '../services/account-target';
+import { attachmentScanRequired, getAttachmentOperationProtection, writeProtectedAttachment, type ProtectedAttachmentOperation } from '../services/attachment-download-protection';
 import { PgpKeyringError, type PgpKeyring } from '../services/pgp-keyring';
 import { PgpReader, type StoredSource } from '../services/pgp-reader';
 import { getPgpKeyring, readPgpPrefsFromSettings } from '../services/pgp-service';
-import { getMainWindow } from '../shared';
+import { getExtensionManager, getMainWindow } from '../shared';
 
 const logger = createLogger('pgp-handlers');
 
@@ -41,6 +42,11 @@ export interface PgpHandlerDeps {
   /** Ask where to save; null when the user cancels. */
   chooseSavePath: (defaultName: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
   writeFile: (filePath: string, content: string | Buffer) => Promise<void>;
+  /** Plaintext remote sharing is not covered by the attachment scanner's consent. */
+  attachmentScanRequired: () => boolean;
+  protectAttachmentSave?<T>(target: { emailId: string; accountId?: string; filename: string },
+    consume: (operation: ProtectedAttachmentOperation) => Promise<T>): Promise<T>;
+  writeProtectedAttachment?: typeof writeProtectedAttachment;
 }
 
 const ok = <T>(data: T): PgpIpcResult<T> => ({ success: true, data });
@@ -154,9 +160,33 @@ export function createPgpHandlers(deps: PgpHandlerDeps) {
       return deps.reader.openDraft(emailId, accountId);
     },
     'pgp:saveAttachment': guarded(async (emailId: string, accountId: string | undefined, index: number) => {
+      const requireUnprotectedSave = () => {
+        if (deps.attachmentScanRequired()) throw new Error('Download blocked: encrypted OpenPGP attachments cannot be scanned.');
+      };
+      if (!deps.protectAttachmentSave) requireUnprotectedSave();
       const attachment = deps.reader.attachment(emailId, accountId, index);
       if (!attachment) throw new Error('Open the message again to save this attachment');
-      return saveTo(safeDefaultName(attachment.name, 'attachment'), attachment.content);
+      if (deps.protectAttachmentSave) {
+        return deps.protectAttachmentSave({ emailId, accountId, filename: attachment.name }, async operation => {
+          await operation.assertCurrent();
+          const filePath = await waitForAbortableOperation(deps.chooseSavePath(safeDefaultName(attachment.name, 'attachment')), operation.signal);
+          if (!filePath) return { saved: false as const };
+          await operation.assertCurrent();
+          if (deps.writeProtectedAttachment) {
+            await deps.writeProtectedAttachment(filePath, attachment.content, operation.signal, operation.assertCurrent);
+          } else {
+            if (operation.notScanned) throw new Error('Attachment protection is unavailable. Try again.');
+            await deps.writeFile(filePath, attachment.content);
+          }
+          await operation.assertCurrent();
+          return { saved: true as const, filePath, ...(operation.notScanned ? { notScanned: true } : {}) };
+        });
+      }
+      const filePath = await deps.chooseSavePath(safeDefaultName(attachment.name, 'attachment'));
+      if (!filePath) return { saved: false as const };
+      requireUnprotectedSave();
+      await deps.writeFile(filePath, attachment.content);
+      return { saved: true as const, filePath };
     }),
   };
 }
@@ -207,8 +237,24 @@ export function registerPgpHandlers(): void {
     },
     // 0600 where POSIX modes exist; a no-op on Windows, where the folder's ACL governs.
     writeFile: (filePath, content) => writeFile(filePath, content, { mode: 0o600 }),
+    attachmentScanRequired: () => attachmentScanRequired(getExtensionManager()),
+    protectAttachmentSave: async (target, consume) => {
+      const operations = getAttachmentOperationProtection();
+      if (!operations) throw new Error('Attachment protection is unavailable. Try again.');
+      return operations.run(target.emailId, requireTargetAccountId(target.accountId), target.filename, consume, undefined,
+        'Download blocked: encrypted OpenPGP attachments cannot be scanned.', 'download');
+    },
+    writeProtectedAttachment,
   });
   for (const [channel, handler] of Object.entries(handlers)) {
-    ipcMain.handle(channel, (_event, ...args: unknown[]) => (handler as (...a: unknown[]) => unknown)(...args));
+    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+      if (channel === 'pgp:saveAttachment') {
+        const window = getMainWindow();
+        if (!window || event?.sender !== window.webContents || event?.senderFrame !== window.webContents.mainFrame) {
+          return failure(new Error('Attachment downloads must be requested from Sarv Inbox.'));
+        }
+      }
+      return (handler as (...a: unknown[]) => unknown)(...args);
+    });
   }
 }

@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   registryThrows: false,
   calls: [] as string[],
   signOut: vi.fn(),
+  clearWarning: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -57,6 +58,9 @@ vi.mock('../../../../electron/services/oauth-refresh-scheduler', () => ({
   signOutOAuthAccount: (p: string, e: string) => { h.calls.push(`signout:${p}:${e}`); return h.signOut(p, e); },
 }));
 vi.mock('../../../../electron/services/outbox-service', () => ({ rebindOutboxStorage: () => {} }));
+vi.mock('../../../../electron/services/attachment-warning-preferences', () => ({
+  clearUnscannedWarningPreference: h.clearWarning,
+}));
 vi.mock('../../../../electron/services/reputation-service', () => ({ noteAppSettingChanged: () => {} }));
 vi.mock('../../../../electron/services/unified-pipeline-service', () => ({
   disablePipelineAIIfProviderRemoved: async () => { h.calls.push('ai-revalidate'); },
@@ -79,10 +83,29 @@ beforeEach(() => {
   h.registryThrows = false;
   h.calls.length = 0;
   h.signOut.mockReset().mockResolvedValue({ revocation: Promise.resolve('revoked') });
+  h.clearWarning.mockReset();
   registerAccountsHandlers();
 });
 
 describe('accounts:remove — OAuth sign-out', () => {
+  // Breaks: removing/re-adding a mailbox inherits an old warning-suppression choice or clears another mailbox's choice.
+  it('clears only the removed account warning preference before deleting its data', async () => {
+    h.registry = [oauth('a1', 'gmail', 'me@gmail.com'), oauth('a2', 'microsoft', 'me@outlook.com')];
+    h.clearWarning.mockImplementation((accountId: string) => {
+      expect(accountId).toBe('a1');
+      expect(h.calls).toEqual([]);
+    });
+    await expect(remove('a1')).resolves.toEqual({ success: true });
+    expect(h.clearWarning).toHaveBeenCalledExactlyOnceWith('a1');
+  });
+
+  // Breaks: account data is wiped while durable suppression could not be cleared.
+  it('does not remove data when the warning preference store is unreadable', async () => {
+    h.clearWarning.mockImplementation(() => { throw new Error('warning store unreadable'); });
+    await expect(remove('a1')).resolves.toEqual({ success: false, error: 'warning store unreadable' });
+    expect(h.calls).toEqual([]);
+  });
+
   // Multi-account: a NON-active Gmail account is signed out too, after its data
   // is wiped and BEFORE AI is revalidated (a removed Sarv grant must read as gone).
   it('signs out the removed account\'s grant between the wipe and the AI revalidation', async () => {

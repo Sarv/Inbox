@@ -125,6 +125,72 @@ describe('PgpMessageView', () => {
     expect(view.container.textContent).toContain('Open the message again');
   });
 
+  // Breaks: accepting the missing-setup warning for a decrypted attachment
+  // presents its saved plaintext as scanned, or labels a different attachment.
+  it('marks only the successfully saved unscanned decrypted attachment', async () => {
+    api.open.mockResolvedValue(opened({ attachments: [
+      { index: 0, name: 'plan.pdf', contentType: 'application/pdf', size: 13 },
+      { index: 1, name: 'notes.txt', contentType: 'text/plain', size: 8 },
+    ] }));
+    api.saveAttachment.mockResolvedValue({ success: true, data: { saved: true, notScanned: true } });
+    const view = await mount('encrypted');
+    await act(async () => view.byLabel('Save plan.pdf')!.click());
+    expect(view.find('[role="status"]')?.textContent).toBe('Not scanned for viruses.');
+    expect(view.byLabel('Save plan.pdf')!.parentElement!.parentElement!.textContent).toContain('Not scanned for viruses.');
+    expect(view.byLabel('Save notes.txt')!.parentElement!.parentElement!.textContent).not.toContain('Not scanned for viruses.');
+  });
+
+  // Breaks: a cancelled save, ordinary local save, or unsuccessful scan reply
+  // gets the same successful unscanned outcome as an accepted host warning.
+  it.each([
+    { success: true },
+    { success: true, data: { saved: true } },
+    { success: true, data: { saved: true, notScanned: 'true' } },
+    { success: true, data: { saved: false, notScanned: true } },
+    { success: false, error: 'Download blocked: encrypted OpenPGP attachments cannot be scanned.', data: { saved: true, notScanned: true } },
+  ])('does not mark a failed, cancelled or unflagged save (%j)', async (reply) => {
+    api.open.mockResolvedValue(opened());
+    api.saveAttachment.mockResolvedValue(reply);
+    const view = await mount('encrypted');
+    await act(async () => view.byLabel('Save plan.pdf')!.click());
+    expect(view.container.textContent).not.toContain('Not scanned for viruses.');
+    if (!reply.success) expect(view.container.textContent).toContain(reply.error);
+  });
+
+  // Breaks: a stale unscanned outcome remains while a subsequent save is
+  // pending, hiding that the new operation has not completed.
+  it('clears the previous unscanned outcome when saving again', async () => {
+    api.open.mockResolvedValue(opened());
+    api.saveAttachment.mockResolvedValueOnce({ success: true, data: { saved: true, notScanned: true } });
+    const view = await mount('encrypted');
+    await act(async () => view.byLabel('Save plan.pdf')!.click());
+    expect(view.container.textContent).toContain('Not scanned for viruses.');
+    let finish!: (result: unknown) => void;
+    api.saveAttachment.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    act(() => view.byLabel('Save plan.pdf')!.click());
+    expect(view.container.textContent).not.toContain('Not scanned for viruses.');
+    finish({ success: true, data: { saved: false } });
+    await settle();
+  });
+
+  // Breaks: reusing the reader for another mailbox/message attributes an old
+  // attachment's warning to the newly selected account, including late replies.
+  it.each([
+    { id: 'e2', accountId: 'acct' },
+    { id: 'e1', accountId: 'other-account' },
+  ])('binds a late unscanned save to its original message and account (%j)', async (target) => {
+    api.open.mockResolvedValue(opened());
+    let finish!: (result: unknown) => void;
+    api.saveAttachment.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const view = await mount('encrypted');
+    act(() => view.byLabel('Save plan.pdf')!.click());
+    view.rerender(<PgpMessageView email={{ ...target, pgpStatus: 'encrypted' }}><div>stored</div></PgpMessageView>);
+    await settle();
+    finish({ success: true, data: { saved: true, notScanned: true } });
+    await settle();
+    expect(view.container.textContent).not.toContain('Not scanned for viruses.');
+  });
+
   // Breaks: a signed message is replaced by nothing while its signature is checked.
   it('keeps the stored body for signed mail and adds the badge', async () => {
     api.open.mockResolvedValue(opened({ wasEncrypted: false }));

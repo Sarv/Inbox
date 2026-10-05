@@ -38,6 +38,7 @@ import {
   scrollTopToReveal,
   type MenuAnchor,
 } from '../../utils/menu-placement';
+import { isModalAlertOpen } from '../../utils/modal-alert';
 import { IconButton } from '../Tooltip';
 
 /** What each of the menu's items does, for one message. */
@@ -195,6 +196,9 @@ export function EmailMenuPopover({
     // thread the reader was acting on. Capture phase on `window` runs before
     // that listener wherever focus is in this document.
     const onKeyDown = (event: KeyboardEvent) => {
+      // A warning above this menu owns Escape, even if our capture listener
+      // was registered before the warning mounted.
+      if (isModalAlertOpen()) return;
       if (event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { getFileIcon, getFileType } from '../email-detail/utils';
 import { Tooltip } from '../Tooltip';
 
+import { AttachmentDownloadStatus } from './AttachmentDownloadStatus';
 import { AttachmentViewer, type ViewerAttachment } from './AttachmentViewer';
 import { useAttachmentActions } from './useAttachmentActions';
 
@@ -53,7 +54,8 @@ export function AttachmentChips({
   size = 'md',
   stopPropagation = false,
 }: AttachmentChipsProps) {
-  const { isBusy, saveCopy, saveAll } = useAttachmentActions();
+  const actions = useAttachmentActions();
+  const { isBusy, getStatus, saveCopy, saveAll, cancelDownload } = actions;
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
   const style = SIZES[size];
 
@@ -79,7 +81,8 @@ export function AttachmentChips({
               void saveAll(emailId, attachments.map((a) => a.name), accountId);
             }}
             aria-label="Save all attachments"
-            className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            disabled={attachments.some((attachment) => isBusy(emailId, attachment.name))}
+            className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
           >
             <Download className="h-3.5 w-3.5" />
             <span>Save all</span>
@@ -106,7 +109,8 @@ export function AttachmentChips({
                     void saveCopy({ emailId, filename: attachment.name, accountId });
                   }}
                   aria-label={`Save a copy of ${attachment.name}`}
-                  className="absolute right-1 top-1 rounded bg-background/80 p-1 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100"
+                  disabled={busy}
+                  className="absolute right-1 top-1 rounded bg-background/80 p-1 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 disabled:opacity-50"
                 >
                   <Download className="h-3 w-3 text-muted-foreground" />
                 </button>
@@ -125,8 +129,9 @@ export function AttachmentChips({
                   {attachment.name}
                 </div>
                 <div className="text-[10px] text-muted-foreground mt-0.5">
-                  {busy ? 'Working…' : getFileType(attachment.name)}
+                  {!busy && getFileType(attachment.name)}
                 </div>
+                <AttachmentDownloadStatus status={getStatus(emailId, attachment.name)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name); }} />
               </div>
             </div>
           );
@@ -139,6 +144,7 @@ export function AttachmentChips({
           accountId={accountId}
           attachments={attachments}
           initialIndex={viewerIndex}
+          actions={actions}
           onClose={() => setViewerIndex(null)}
         />
       )}

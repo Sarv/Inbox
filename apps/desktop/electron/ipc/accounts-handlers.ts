@@ -35,6 +35,7 @@ import {
 } from '../services/accounts-registry';
 import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accountInboxUnread, rekeyAccount, deleteAccountData, legacyDbExists, cleanupOrphanedAccountDbs } from '../services/accounts-runtime';
 import { peekAntivirusScanService } from '../services/antivirus-scan-service';
+import { clearUnscannedWarningPreference } from '../services/attachment-warning-preferences';
 import { signOutOAuthAccount } from '../services/oauth-refresh-scheduler';
 import { rebindOutboxStorage } from '../services/outbox-service';
 import { noteAppSettingChanged } from '../services/reputation-service';
@@ -164,6 +165,9 @@ export function registerAccountsHandlers(): void {
       // Read BEFORE the registry row is dropped: it is the only record of which
       // OAuth grant this mailbox used.
       const removedOAuth = oauthIdentityOf(listRegistryAccounts().find((a) => a.id === accountId));
+      // Clear before deleting data so a re-added account never inherits a
+      // remembered warning choice. An unreadable preference store stops removal.
+      clearUnscannedWarningPreference(accountId);
       await peekAntivirusScanService()?.onAccountRemoved(accountId);
       await deleteAccountData(accountId);
       // Drop it from the durable registry too, so it doesn't reappear on the

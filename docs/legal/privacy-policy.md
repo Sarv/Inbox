@@ -236,16 +236,35 @@ attachments. Production connections require HTTPS. A development build can
 also connect to an explicitly configured scanner on HTTP loopback on your own
 computer.
 
-- **What is sent:** only the bytes of attachments you select and manually ask
-  to scan, together with random item identifiers and byte counts. Your mail
-  account identity, subjects, envelope headers, original filenames and
+- **What is sent:** only the bytes of attachments you select in the scan panel
+  or choose to view, open in a system application or download with the enabled
+  ClamAV Scan extension, together with random item identifiers and byte counts.
+  Attachment previews, **Open in system app**, **Download** and **Save all** scan
+  selected attachments from your approved accounts before releasing their bytes;
+  configured scans require a verified clean result before viewing, opening or
+  saving. If scanner setup or account sharing approval is missing, a trusted
+  in-app warning displays the complete attachment filename and offers Cancel,
+  Set up antivirus or View anyway for a preview, with corresponding controls for
+  opening and saving. Continuing sends no content to the scanner and is shown as
+  Not scanned. Don't show this message again saves a local preference for that
+  account's missing-setup warnings only after you continue; cancelling does not
+  save the choice. This preference never disables configured antivirus scanning
+  or creates consent to future uploads. These actions do not upload the message
+  body or inline images in it. Opening a message alone
+  does not upload its attachments.
+  Your mail account identity, subjects, envelope headers, original filenames and
   Gmail/IMAP credentials are not added to the scan request. The file contents
   can themselves contain personal information.
 - **Message text:** disabled by default and requires separate setup consent
   and confirmation for each scan. Only the selected message's stored HTML or
   text body is sent, which can include quoted messages and signatures. Remote
   images and links are not fetched. Encrypted OpenPGP messages are not supported
-  for remote scanning in this version.
+  for remote scanning in this version. With scanning configured for an account,
+  local OpenPGP attachment saves and generated calendar imports are blocked; use
+  a named `.ics` attachment's protected controls for calendar files. When setup
+  or account approval is missing, the warning can permit a local unscanned save
+  or import without uploading decrypted content or calendar text. The message's
+  calendar summary is not uploaded.
 - **Processing:** the configured service streams content to ClamAV and returns
   a verdict through an authenticated temporary ticket. The included server
   implementation uses volatile memory for ticket content and results; ClamAV
@@ -263,9 +282,26 @@ computer.
   has not been established. The client requests ticket deletion after scanning.
   Operator declarations and a deletion request are not proof that bytes already
   transmitted have been erased. Local result state is kept only in memory,
-  expires within fifteen minutes and is lost when the app closes.
-- **Your controls:** every scan is manual. Disable scanning in the trusted
-  setup dialog, disable/uninstall the extension, or remove an allowed account
+  expires within fifteen minutes and is lost when the app closes. In-app preview
+  bytes, including an explicitly unscanned preview, are kept in main-process
+  memory for at most five minutes and are erased when the preview is released.
+  Opening an attachment in a system application writes a private temporary
+  copy; the app schedules removal within five minutes
+  and removes its copies on normal shutdown. Copies left by an interrupted
+  process are removed before the next protected system-app open. The external
+  application may keep its own copy.
+- **Your controls:** scanning starts only when you request a scan, view an
+  attachment, open it in a system application or download it;
+  the app does not scan your mailbox in the background. Choosing an anyway action
+  when setup is missing authorizes the requested local action. You can choose
+  Don't show this message again to remember the warning choice for that account;
+  it does not approve attachment sharing. Show warnings again in scanner setup
+  clears that account's choice. Saving scanner configuration or
+  disabling/uninstalling the scanner clears remembered choices; removing an
+  account clears its choice. Virus detections, incomplete scans and
+  configured scanner errors cannot be bypassed through that warning. Disable
+  scanning in the trusted setup dialog, disable/uninstall the extension, or
+  remove an allowed account
   to stop new uploads and request cancellation of pending work. Changing the
   server, privacy terms or scan policy requires renewed setup consent. Scanner
   credentials are stored using operating system secure storage inside the

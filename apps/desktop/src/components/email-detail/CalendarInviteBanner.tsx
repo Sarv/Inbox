@@ -1,5 +1,6 @@
+import { createLogger } from '@sarvinbox/core/logger';
 import { CalendarCheck, CalendarClock, CalendarPlus, Loader2, MapPin, Users, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   formatEventRange,
@@ -7,8 +8,10 @@ import {
   parseCalendarInvite,
   type CalendarInvite,
 } from '../../utils/calendar-invite';
+import { UnscannedAttachmentNotice } from '../attachment-viewer/AttachmentDownloadStatus';
 import { Tooltip } from '../Tooltip';
 
+const log = createLogger('CalendarInvite');
 
 interface CalendarInviteBannerProps {
   emailId: string;
@@ -50,12 +53,25 @@ export function CalendarInviteBanner({ emailId, accountId, calendarIcs, calendar
   const [opening, setOpening] = useState(false);
   const [added, setAdded] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [unscannedOpen, setUnscannedOpen] = useState<{ emailId: string; accountId?: string }>();
+  const identity = JSON.stringify([emailId, accountId]);
+  const currentIdentity = useRef(identity);
+  currentIdentity.current = identity;
+  const activeOpen = useRef<symbol | undefined>(undefined);
+
+  useEffect(() => {
+    activeOpen.current = undefined;
+    setOpening(false);
+    setOpenError(null);
+    setUnscannedOpen(undefined);
+    return () => { activeOpen.current = undefined; };
+  }, [identity]);
 
   // Mirror the DB-backed "added" flag (persists across reopen/restart). Local
   // state is updated optimistically on add/remove; this resyncs it per email.
   useEffect(() => {
     setAdded(Boolean(calendarAdded));
-  }, [emailId, calendarAdded]);
+  }, [emailId, accountId, calendarAdded]);
 
   // Legacy fallback: the row was never checked (calendarIcs == null) — ask the
   // main process to extract the invite from the message source (catching unnamed
@@ -78,7 +94,7 @@ export function CalendarInviteBanner({ emailId, accountId, calendarIcs, calendar
     return () => {
       cancelled = true;
     };
-  }, [emailId, localInvite, canFetch]);
+  }, [emailId, accountId, localInvite, canFetch]);
 
   const invite = localInvite ?? fetchedInvite;
   if (!invite) return null;
@@ -87,14 +103,21 @@ export function CalendarInviteBanner({ emailId, accountId, calendarIcs, calendar
   const timeRange = formatEventRange(invite.startMs, invite.endMs, invite.isAllDay);
 
   const handleAddToCalendar = async () => {
+    const request = Symbol('calendar-open');
+    activeOpen.current = request;
+    const isCurrent = () => currentIdentity.current === identity && activeOpen.current === request;
     setOpening(true);
     setOpenError(null);
+    setUnscannedOpen(undefined);
     try {
       const res = await window.electronAPI.emails.openCalendarInvite(emailId, accountId);
       if (res.success) {
-        setAdded(true); // optimistic
         void window.electronAPI.emails.setCalendarAdded(emailId, true, accountId);
-      } else {
+        if (isCurrent()) {
+          if (res.notScanned === true) setUnscannedOpen({ emailId, accountId });
+          setAdded(true); // optimistic
+        }
+      } else if (isCurrent()) {
         setOpenError(
           res.noHandler
             ? 'No calendar app is set up to open this invite on your system.'
@@ -102,10 +125,13 @@ export function CalendarInviteBanner({ emailId, accountId, calendarIcs, calendar
         );
       }
     } catch (error) {
-      console.error('[CalendarInvite] Open failed:', error);
-      setOpenError('Could not open the invite.');
+      log.error('Open failed:', error);
+      if (isCurrent()) setOpenError('Could not open the invite.');
     } finally {
-      setOpening(false);
+      if (isCurrent()) {
+        activeOpen.current = undefined;
+        setOpening(false);
+      }
     }
   };
 
@@ -114,6 +140,7 @@ export function CalendarInviteBanner({ emailId, accountId, calendarIcs, calendar
   const handleClearAdded = () => {
     setAdded(false); // optimistic
     setOpenError(null);
+    setUnscannedOpen(undefined);
     void window.electronAPI.emails.setCalendarAdded(emailId, false, accountId);
   };
 
@@ -195,6 +222,7 @@ export function CalendarInviteBanner({ emailId, accountId, calendarIcs, calendar
             )}
             {openError && <span className="text-xs text-amber-600 dark:text-amber-400">{openError}</span>}
           </div>
+          {unscannedOpen?.emailId === emailId && unscannedOpen.accountId === accountId && <UnscannedAttachmentNotice />}
         </div>
       </div>
     </div>

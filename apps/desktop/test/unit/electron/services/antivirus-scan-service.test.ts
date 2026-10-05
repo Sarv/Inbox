@@ -145,6 +145,120 @@ describe('antivirus host consent and mailbox boundaries', () => {
   });
 });
 
+// Breaks: a one-file warning bypass is offered for an unreadable, removed or already configured scanner account.
+describe('trusted missing attachment setup snapshots', () => {
+  it('returns no missing-setup proof for a configured, approved account without contacting the scanner', async () => {
+    const f = fixture();
+    expect(await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).toBeUndefined();
+    expect(f.request).not.toHaveBeenCalled(); expect(f.sourceRead).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('proves missing setup when configured=%s without uploading, changing consent or opening setup', async configured => {
+    const f = fixture({ configured });
+    const accountId = configured ? 'account-a' : 'account-b';
+    const first = await f.service.getAttachmentSetupRequirement('clamav-scan', accountId);
+    const next = await f.service.getAttachmentSetupRequirement('clamav-scan', accountId);
+    expect(first).toBeDefined(); expect(next).toBeDefined(); expect(first).not.toBe(next);
+    await first!.assertCurrent(); await next!.assertCurrent();
+    expect(f.request).not.toHaveBeenCalled(); expect(f.sourceRead).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled();
+    expect(f.writeConfiguration).not.toHaveBeenCalled(); expect(f.deps.openSetup).not.toHaveBeenCalled();
+  });
+
+  it('propagates unreadable configuration on initial and repeated checks', async () => {
+    const f = fixture({ configured: false });
+    const proof = await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b');
+    f.deps.readConfiguration = vi.fn().mockRejectedValue(new Error('Secure storage is unavailable'));
+    await expect(f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).rejects.toThrow('Secure storage is unavailable');
+    await expect(proof!.assertCurrent()).rejects.toThrow('Secure storage is unavailable');
+  });
+
+  it.each(['credential', 'endpoint', 'allowedAccountIds', 'allowBody', 'fingerprint', 'capabilities'] as const)(
+    'invalidates an unapproved-account proof when %s changes', async field => {
+      const f = fixture(); const proof = await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-a');
+      const config = f.config()!;
+      if (field === 'allowedAccountIds') config.allowedAccountIds.push('account-a');
+      else if (field === 'allowBody') config.allowBody = true;
+      else if (field === 'capabilities') config.capabilities.operator.privacyTermsVersion = 'changed';
+      else config[field] += '-changed';
+      await expect(proof!.assertCurrent()).rejects.toThrow(/Antivirus setup changed|configuration cannot be securely read/);
+      expect(f.sourceRead).not.toHaveBeenCalled(); expect(f.request).not.toHaveBeenCalled();
+    });
+
+  it('invalidates absent setup once configuration appears, and an unapproved config once removed', async () => {
+    const missing = fixture({ configured: false }); const proof = await missing.service.getAttachmentSetupRequirement('clamav-scan', 'account-b');
+    const configured = fixture().config();
+    missing.deps.readConfiguration = async () => configured;
+    await expect(proof!.assertCurrent()).rejects.toThrow('Antivirus setup changed');
+    const f = fixture(); const unapproved = await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-a');
+    f.deps.readConfiguration = async () => undefined;
+    await expect(unapproved!.assertCurrent()).rejects.toThrow('Antivirus setup changed');
+  });
+
+  it.each(['disable', 'remove', 'remove-not-yet-persisted', 'dispose'] as const)('invalidates a missing setup proof on %s', async action => {
+    const f = fixture({ configured: false }); const proof = await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b');
+    if (action === 'disable') await f.service.onExtensionDisabled('clamav-scan');
+    if (action === 'remove') f.accountRemove();
+    if (action === 'remove-not-yet-persisted') await f.service.onAccountRemoved('account-b');
+    if (action === 'dispose') await f.service.dispose();
+    await expect(proof!.assertCurrent()).rejects.toThrow(/unavailable|changed/);
+  });
+
+  it('refuses an unavailable account or service before reading configuration', async () => {
+    const f = fixture({ configured: false }); const read = vi.spyOn(f.deps, 'readConfiguration');
+    await expect(f.service.getAttachmentSetupRequirement('clamav-scan', 'removed')).rejects.toThrow('unavailable');
+    await f.service.dispose();
+    await expect(f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).rejects.toThrow('unavailable');
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each(['disable', 'remove', 'removed-in-registry'] as const)('rechecks %s during an asynchronous setup read', async action => {
+    const f = fixture({ configured: false });
+    f.deps.readConfiguration = async () => {
+      if (action === 'disable') await f.service.onExtensionDisabled('clamav-scan');
+      if (action === 'remove') await f.service.onAccountRemoved('account-b');
+      if (action === 'removed-in-registry') f.accountRemove();
+      return undefined;
+    };
+    await expect(f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).rejects.toThrow(/unavailable|changed/);
+  });
+
+  it.each(['disable', 'remove', 'removed-in-registry'] as const)('rechecks %s during an asynchronous missing-setup snapshot assertion', async action => {
+    const f = fixture({ configured: false }); const proof = await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b');
+    f.deps.readConfiguration = async () => {
+      if (action === 'disable') await f.service.onExtensionDisabled('clamav-scan');
+      if (action === 'remove') await f.service.onAccountRemoved('account-b');
+      if (action === 'removed-in-registry') f.accountRemove();
+      return undefined;
+    };
+    await expect(proof!.assertCurrent()).rejects.toThrow(/unavailable|changed/);
+  });
+
+  it.each([
+    ['null', () => null], ['array', () => []], ['boolean', () => false],
+    ['account ids missing', () => ({ allowedAccountIds: undefined })], ['account ids invalid', () => ({ allowedAccountIds: [1] })],
+    ['empty account id', () => ({ allowedAccountIds: [''] })], ['body flag invalid', () => ({ allowBody: 'false' })],
+    ['fingerprint invalid type', () => ({ fingerprint: null })], ['endpoint invalid type', () => ({ endpoint: null })],
+    ['endpoint insecure', () => ({ endpoint: 'http://scanner.test' })], ['credential invalid type', () => ({ credential: 1 })],
+    ['credential invalid', () => ({ credential: 'invalid credential' })], ['capabilities absent', () => ({ capabilities: null })],
+    ['capabilities corrupt', () => ({ capabilities: { engine: { signaturesUpdatedAt: new Date().toISOString() } } })],
+    ['fingerprint mismatched', () => ({ fingerprint: 'corrupt' })],
+  ])('rejects present unreadable %s config initially and while a missing setup proof is retained', async (_name, malformed) => {
+    const f = fixture(); const proof = await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-a');
+    const changed = malformed();
+    f.deps.readConfiguration = async () => (changed !== null && typeof changed === 'object' && !Array.isArray(changed)
+      ? { ...f.config(), ...changed } : changed) as ScannerConfiguration;
+    await expect(f.service.getAttachmentSetupRequirement('clamav-scan', 'account-a')).rejects.toThrow('configuration cannot be securely read');
+    await expect(proof!.assertCurrent()).rejects.toThrow('configuration cannot be securely read');
+    expect(f.request).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled(); expect(f.deps.openSetup).not.toHaveBeenCalled();
+  });
+
+  it('validates stored capability shape without treating old saved engine metadata as missing setup', async () => {
+    const f = fixture(); f.advance(49 * 60 * 60 * 1000);
+    expect(await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).toBeUndefined();
+    expect(f.request).not.toHaveBeenCalled();
+  });
+});
+
 describe('antivirus ticket results and cleanup', () => {
   it('uploads only exact selected bytes, verifies the digest, and erases local read buffers', async () => {
     const f = fixture(); const [target] = await f.service.getTargets('clamav-scan');
@@ -206,5 +320,162 @@ describe('antivirus ticket results and cleanup', () => {
     expect(f.uploaded.size).toBe(0); expect(held.every(byte => byte === 0)).toBe(true);
     expect(f.request.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(false);
     if (action === 'disable') { expect(f.config()).toBeUndefined(); await expect(f.service.get('clamav-scan', job.id)).rejects.toThrow(/unavailable/); }
+  });
+});
+
+describe('trusted scan before attachment download', () => {
+  // Breaks: saving fetches a second attachment after scanning, or returns the upload buffer after it was erased.
+  it('retains the exact clean bytes, independent of the panel context, until the save is disposed', async () => {
+    const f = fixture(); const onProgress = vi.fn();
+    f.service.setMessageContext('clamav-scan', 'another-message', 'account-a');
+    const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { onProgress });
+    expect(f.sourceRead).toHaveBeenCalledWith('message-b', 'account-b');
+    expect(f.read).toHaveBeenCalledTimes(1);
+    expect(receipt.content.toString()).toBe('synthetic scan fixture');
+    expect(receipt.content).not.toBe(f.readBuffers[0]);
+    expect(f.readBuffers[0]?.every(byte => byte === 0)).toBe(true);
+    expect([...f.uploaded.values()][0]).toEqual(receipt.content);
+    expect(onProgress.mock.calls).toEqual([['downloading'], ['scanning']]);
+    await receipt.assertCurrent();
+    receipt.dispose(); receipt.dispose();
+    expect(receipt.content.every(byte => byte === 0)).toBe(true);
+    await expect(receipt.assertCurrent()).rejects.toThrow(/could not be fully scanned/);
+  });
+
+  // Breaks: installing the extension shares content before a scanner/account has been explicitly approved.
+  it('opens setup and blocks unconfigured or unapproved accounts before mailbox reads', async () => {
+    const absent = fixture({ configured: false });
+    await expect(absent.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(/Configure/);
+    expect(absent.deps.openSetup).toHaveBeenCalledWith('clamav-scan');
+    expect(absent.sourceRead).not.toHaveBeenCalled(); expect(absent.read).not.toHaveBeenCalled();
+    const denied = fixture();
+    await expect(denied.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-a', 'sample.txt')).rejects.toThrow(/not approved/);
+    expect(denied.deps.openSetup).toHaveBeenCalled(); expect(denied.sourceRead).not.toHaveBeenCalled();
+  });
+
+  // Breaks: filename ambiguity or a foreign MIME descriptor saves different bytes from the user's selected attachment.
+  it.each(['missing', 'duplicate', 'foreign', 'unavailable'] as const)('refuses %s attachment metadata before content retrieval', async kind => {
+    const f = fixture();
+    const source: ScanSource = { accountId: kind === 'foreign' ? 'account-a' : 'account-b', messageId: 'message-b', kind: 'attachment',
+      displayName: 'sample.txt', partFilename: 'sample.txt', partId: '2', byteLength: null,
+      ...(kind === 'unavailable' ? { unavailableReason: 'Encrypted message' } : {}) };
+    f.sources(kind === 'missing' ? [] : kind === 'duplicate' ? [source, { ...source, partId: '3' }] : [source]);
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(/unavailable/);
+    expect(f.read).not.toHaveBeenCalled(); expect(f.uploaded.size).toBe(0);
+  });
+
+  // Breaks: a threat, incomplete scan or malformed verdict is mistaken for permission to save.
+  it.each([
+    ['virus', (ticket: any) => { const r = ticket.items[0].result; r.verdict = 'threat_detected'; r.reason.code = 'signature_match'; r.signatures = ['Eicar-Test']; }, /detected a threat/],
+    ['encrypted archive', (ticket: any) => { const r = ticket.items[0].result; r.verdict = 'incomplete'; r.fullCoverage = false; r.reason.code = 'encrypted_archive'; r.limitations = ['encrypted_archive']; }, /fully scanned/],
+    ['scan error', (ticket: any) => { const r = ticket.items[0].result; r.verdict = 'error'; r.fullCoverage = false; r.reason.code = 'scan_failed'; }, /fully scanned/],
+    ['wrong digest', (ticket: any) => { ticket.items[0].result.sha256 = '0'.repeat(64); }, /scanning failed/],
+    ['false coverage', (ticket: any) => { ticket.items[0].result.fullCoverage = false; }, /scanning failed/],
+  ])('blocks saving after %s', async (_reason, changeTicket, error) => {
+    const f = fixture({ changeTicket });
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(error);
+    expect(f.readBuffers.every(buffer => buffer.every(byte => byte === 0))).toBe(true);
+    expect(f.request.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(true);
+  });
+
+  // Breaks: a once-clean receipt remains usable after consent revocation, account removal, expiration or content mutation.
+  it.each(['disable', 'remove-account', 'expire', 'mutate'] as const)('rechecks %s immediately before save', async action => {
+    const f = fixture();
+    const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt');
+    if (action === 'disable') await f.service.onExtensionDisabled('clamav-scan');
+    if (action === 'remove-account') { await f.service.onAccountRemoved('account-b'); f.accountRemove(); }
+    if (action === 'expire') f.advance(900_001);
+    if (action === 'mutate') receipt.content[0] = 0;
+    await expect(receipt.assertCurrent()).rejects.toThrow(/Download blocked/);
+    receipt.dispose(); expect(receipt.content.every(byte => byte === 0)).toBe(true);
+  });
+
+  // Breaks: cancelling a pending IMAP read still uploads its late result and permits a save.
+  it('stops a delayed read after cancellation and erases its bytes without upload', async () => {
+    const f = fixture(); const abort = new AbortController();
+    let release!: (content: Buffer<ArrayBuffer>) => void;
+    f.read.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const pending = f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { signal: abort.signal });
+    const rejected = expect(pending).rejects.toThrow(/Download cancelled/);
+    await vi.waitFor(() => expect(f.read).toHaveBeenCalled());
+    abort.abort(); const content = Buffer.from('late content'); release(content); await rejected;
+    expect(f.uploaded.size).toBe(0); expect(content.every(byte => byte === 0)).toBe(true);
+  });
+
+  // Breaks: a pre-cancelled click fetches mail, or a changed scanner policy uploads before fresh consent.
+  it('rejects pre-cancelled downloads and scanner policy changes before retrieval', async () => {
+    const f = fixture(); const abort = new AbortController(); abort.abort();
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { signal: abort.signal })).rejects.toThrow(/cancelled/);
+    expect(f.sourceRead).not.toHaveBeenCalled();
+    f.cap.engine.scanPolicyVersion = 'new-policy';
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(/scanning failed/);
+    expect(f.read).not.toHaveBeenCalled(); expect(f.uploaded.size).toBe(0);
+  });
+
+  // Breaks: cancelling stalled MIME metadata keeps the button busy and lets late lookup results start an upload.
+  it('cancels a stalled metadata lookup immediately and ignores its late result', async () => {
+    const f = fixture(); const abort = new AbortController();
+    let release!: (value: ScanSource[]) => void;
+    f.sourceRead.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const pending = f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { signal: abort.signal });
+    const rejected = expect(pending).rejects.toThrow(/Download cancelled/);
+    await vi.waitFor(() => expect(f.sourceRead).toHaveBeenCalled());
+    abort.abort(new Error('Download cancelled.')); await rejected;
+    release([{ accountId: 'account-b', messageId: 'message-b', kind: 'attachment', displayName: 'sample.txt', byteLength: 1 }]);
+    await flush(); expect(f.read).not.toHaveBeenCalled(); expect(f.request).not.toHaveBeenCalled();
+  });
+
+  // Breaks: Download bypasses the queue limit shared with manual scans and starts unbounded mail reads.
+  it('shares running scan limits and frees capacity after cancellation', async () => {
+    const f = fixture();
+    f.read.mockImplementation((_source, _limit, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new Error('Download cancelled.')), { once: true });
+    }));
+    const [target] = await f.service.getTargets('clamav-scan');
+    const first = await f.service.submit('clamav-scan', [target!.targetId]);
+    const second = await f.service.submit('clamav-scan', [target!.targetId]);
+    await vi.waitFor(() => expect(f.read).toHaveBeenCalledTimes(2));
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(/scanning failed/);
+    expect(f.read).toHaveBeenCalledTimes(2);
+    await f.service.cancel('clamav-scan', first.id);
+    await f.service.cancel('clamav-scan', second.id);
+    f.read.mockImplementation(async () => Buffer.from('synthetic retry fixture'));
+    const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt');
+    expect(receipt.content.toString()).toBe('synthetic retry fixture'); receipt.dispose();
+  });
+
+  // Breaks: cancelling after a clean verdict still permits a destination write with its retained bytes.
+  it('rejects a clean receipt after cancellation and after disposal', async () => {
+    const f = fixture(); const abort = new AbortController();
+    const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { signal: abort.signal });
+    abort.abort();
+    await expect(receipt.assertCurrent()).rejects.toThrow(/Download cancelled/);
+    receipt.dispose();
+    expect(receipt.content.every(byte => byte === 0)).toBe(true);
+    const fresh = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt');
+    fresh.dispose();
+    await expect(fresh.assertCurrent()).rejects.toThrow(/fully scanned/);
+  });
+
+  // Breaks: a closed, revoked or removed account leaves clean attachment bytes retained while its save dialog is open.
+  it.each(['disable', 'deactivate', 'remove-account', 'dispose'] as const)('erases retained clean bytes immediately on %s', async action => {
+    const f = fixture();
+    const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt');
+    if (action === 'disable') await f.service.onExtensionDisabled('clamav-scan');
+    if (action === 'deactivate') await f.service.onExtensionDeactivated('clamav-scan');
+    if (action === 'remove-account') { await f.service.onAccountRemoved('account-b'); f.accountRemove(); }
+    if (action === 'dispose') await f.service.dispose();
+    expect(receipt.content.every(byte => byte === 0)).toBe(true);
+    await expect(receipt.assertCurrent()).rejects.toThrow(/Download (blocked|cancelled)/);
+    receipt.dispose();
+  });
+
+  // Breaks: an attachment with a display alias cannot be downloaded using its actual MIME filename.
+  it('matches the MIME filename rather than a display alias', async () => {
+    const f = fixture();
+    f.sources([{ accountId: 'account-b', messageId: 'message-b', kind: 'attachment', displayName: 'Friendly display name', partFilename: 'actual.txt', byteLength: 22, partId: '2' }]);
+    const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'actual.txt');
+    expect(receipt.content.toString()).toBe('synthetic scan fixture'); receipt.dispose();
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'Friendly display name')).rejects.toThrow(/unavailable/);
   });
 });

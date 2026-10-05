@@ -1,7 +1,6 @@
 import {
   MAX_INLINE_TEXT_BYTES,
   attachmentViewerKind,
-  buildAttachmentUrl,
   isPreviewableAttachment,
   type AttachmentViewerKind,
 } from '@sarvinbox/core/attachment-kind';
@@ -23,13 +22,15 @@ import { getFileIcon, getFileType } from '../email-detail/utils';
 import { Tooltip } from '../Tooltip';
 
 
-import { useAttachmentActions } from './useAttachmentActions';
+import { AttachmentDownloadStatus } from './AttachmentDownloadStatus';
+import { useAttachmentActions, type AttachmentActions } from './useAttachmentActions';
 
 /**
  * The in-app attachment viewer.
  *
- * Everything here reads from ONE `sarv-attachment://` URL, which the main
- * process serves with a `Content-Type` derived from the same allow-list
+ * Everything here waits for a host-prepared `sarv-attachment://` URL before
+ * rendering any bytes. The main process scans selected files when the AV
+ * extension is enabled and serves a `Content-Type` derived from the same allow-list
  * `attachmentViewerKind` consults. The element and the type are therefore always
  * two views of one decision — the renderer never picks an element for a file the
  * main process would refuse to serve inline.
@@ -47,6 +48,8 @@ interface AttachmentViewerProps {
   attachments: ViewerAttachment[];
   /** Index of the attachment to show first. */
   initialIndex: number;
+  /** Shares attachment scan progress with the message strip that opened it. */
+  actions?: AttachmentActions;
   onClose: () => void;
 }
 
@@ -75,6 +78,7 @@ export function AttachmentViewer({
   accountId,
   attachments,
   initialIndex,
+  actions,
   onClose,
 }: AttachmentViewerProps) {
   const { index, goTo } = useGalleryNavigation({
@@ -82,22 +86,42 @@ export function AttachmentViewer({
     initialIndex,
     onClose,
   });
-  const { isBusy, saveCopy, openInSystemApp } = useAttachmentActions();
+  const localActions = useAttachmentActions();
+  const { isBusy, getStatus, saveCopy, openInSystemApp, preparePreview, cancelDownload } = actions ?? localActions;
 
   const current = attachments[index];
   const filename = current?.name ?? '';
   const kind: AttachmentViewerKind = useMemo(() => attachmentViewerKind(filename), [filename]);
-  const url = useMemo(
-    () => (filename ? buildAttachmentUrl({ emailId, filename, accountId }) : ''),
-    [emailId, filename, accountId],
-  );
-
-  // `failed` is set by each element's onError. A file whose bytes don't match
-  // its extension (a .png that is really something else, a truncated fetch)
-  // otherwise shows a silent broken box with no way forward — this turns it into
-  // the same fallback card an unsupported type gets.
+  const identity = JSON.stringify([accountId, emailId, filename]);
+  const [preview, setPreview] = useState<{ identity: string; url: string }>();
+  const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [url]);
+  const url = preview?.identity === identity ? preview.url : '';
+
+  useEffect(() => {
+    setFailed(false);
+    setPreview(undefined);
+    if (!filename || kind === 'unsupported') return;
+    const controller = new AbortController();
+    let releasedUrl: string | undefined;
+    const release = (value: string) => {
+      // The main process erases the retained clean bytes for this viewer lease.
+      void window.electronAPI.emails.releaseAttachmentPreview(value).catch(() => {});
+    };
+    void preparePreview({ emailId, filename, accountId }, controller.signal).then((preparedUrl) => {
+      if (!preparedUrl) return;
+      if (controller.signal.aborted) {
+        release(preparedUrl);
+        return;
+      }
+      releasedUrl = preparedUrl;
+      setPreview({ identity, url: preparedUrl });
+    });
+    return () => {
+      controller.abort();
+      if (releasedUrl) release(releasedUrl);
+    };
+  }, [preparePreview, emailId, filename, accountId, identity, kind, attempt]);
 
   if (!current) return null;
 
@@ -133,6 +157,7 @@ export function AttachmentViewer({
               {[getFileType(filename), formatSize(current.size)].filter(Boolean).join(' · ')}
               {attachments.length > 1 ? ` · ${index + 1} of ${attachments.length}` : ''}
             </div>
+            <AttachmentDownloadStatus status={getStatus(emailId, filename)} filename={filename} onCancel={() => { void cancelDownload(emailId, filename); }} />
           </div>
 
           {attachments.length > 1 && (
@@ -198,7 +223,12 @@ export function AttachmentViewer({
         </div>
 
         <div className="flex-1 overflow-auto bg-muted/30">
-          {failed || kind === 'unsupported' ? (
+          {kind !== 'unsupported' && !url ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center" aria-label="Attachment preview pending">
+              {busy ? <Loader2 className="h-6 w-6 animate-spin text-primary" /> : <button type="button" onClick={() => setAttempt((value) => value + 1)} className="rounded border border-border px-3 py-2 text-sm hover:bg-accent">Retry preview</button>}
+              <p className="text-sm text-muted-foreground">{busy ? 'Preparing this attachment for viewing…' : 'This attachment has not been opened.'}</p>
+            </div>
+          ) : failed || kind === 'unsupported' ? (
             <UnsupportedCard
               filename={filename}
               failed={failed}
@@ -206,9 +236,11 @@ export function AttachmentViewer({
               busy={busy}
               onSave={() => saveCopy({ emailId, filename, accountId })}
               onOpenExternally={() => openInSystemApp({ emailId, filename, accountId })}
+              onRetry={failed ? () => setAttempt((value) => value + 1) : undefined}
             />
           ) : (
             <AttachmentBody
+              key={url}
               kind={kind}
               url={url}
               filename={filename}
@@ -241,26 +273,22 @@ function AttachmentBody({
   if (kind === 'audio') {
     return (
       <div className="flex h-full items-center justify-center p-8">
-        <audio src={url} controls className="w-full max-w-xl" onError={onError} />
+        {/* Saves belong to the app's scan-aware control. The main-session
+            download guard also enforces this for native/context-menu paths. */}
+        <audio src={url} controls controlsList="nodownload" className="w-full max-w-xl" onError={onError} />
       </div>
     );
   }
 
   return (
     <div className="flex h-full items-center justify-center bg-black">
-      <video src={url} controls className="max-h-full max-w-full" onError={onError} />
+      <video src={url} controls controlsList="nodownload" className="max-h-full max-w-full" onError={onError} />
     </div>
   );
 }
 
-/**
- * Shown over an element that loads its own bytes, until that element says it is
- * done. The FIRST open of an attachment fetches it from the mail server before a
- * single byte reaches the element — seconds, for a big PDF on a slow mailbox —
- * and with nothing on top the user is looking at a blank white panel with no
- * sign the app is doing anything. `bg-card` rather than a translucent wash so a
- * half-paged PDF doesn't show through underneath it.
- */
+/** Covers an element while it decodes its already-prepared attachment bytes.
+ *  `bg-card` prevents a half-rendered PDF from showing through the loading state. */
 function PendingOverlay() {
   return (
     <div
@@ -300,9 +328,13 @@ function PdfBody({
           HTML is still handed to the PDF plugin instead of being parsed as a
           document — this frame cannot become a script-executing one. Only the
           `pdf` kind reaches here; every other kind renders through
-          <img>/<pre>/<audio>/<video>, never a frame. */}
+          <img>/<pre>/<audio>/<video>, never a frame.
+
+          Hide Chromium's toolbar so the app's scan-aware Save control is the
+          visible download path. The main-session guard enforces native saves;
+          this display parameter alone is not a security boundary. */}
       <iframe
-        src={url}
+        src={`${url}#toolbar=0`}
         title={filename}
         referrerPolicy="no-referrer"
         className="h-full w-full border-0 bg-white"
@@ -433,6 +465,7 @@ function UnsupportedCard({
   busy,
   onSave,
   onOpenExternally,
+  onRetry,
 }: {
   filename: string;
   failed: boolean;
@@ -440,6 +473,7 @@ function UnsupportedCard({
   busy: boolean;
   onSave: () => void;
   onOpenExternally: () => void;
+  onRetry?: () => void;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
@@ -453,6 +487,7 @@ function UnsupportedCard({
           : ' Save a copy to open it yourself.'}
       </div>
       <div className="flex items-center gap-2">
+        {onRetry && <button type="button" onClick={onRetry} disabled={busy} className="rounded border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:opacity-50">Retry preview</button>}
         <button
           onClick={onSave}
           disabled={busy}

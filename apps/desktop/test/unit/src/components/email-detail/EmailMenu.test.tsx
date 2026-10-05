@@ -2,13 +2,15 @@
 import { Copy } from 'lucide-react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
+import type { UnscannedWarningRequest } from '../../../../../electron/preload';
+import { UnscannedAttachmentWarning } from '../../../../../src/components/antivirus/UnscannedAttachmentWarning';
 import {
   EmailMenu,
   EmailMenuPopover,
   type EmailMenuHandlers,
 } from '../../../../../src/components/email-detail/EmailMenu';
 import type { MenuAnchor } from '../../../../../src/utils/menu-placement';
-import { act, fire, render, toggle, type Mounted } from '../../../../helpers/render';
+import { act, fire, render, settle, toggle, type Mounted } from '../../../../helpers/render';
 
 /**
  * The message menu: the three-dot button every message has (a reply in the
@@ -308,6 +310,36 @@ describe('EmailMenu — every way it closes', () => {
     // Dismissed from the keyboard, focus goes back to the button.
     expect(document.activeElement).toBe(button);
     document.removeEventListener('keydown', globalShortcut);
+  });
+
+  // Breaks: an earlier window capture listener dismisses the underlying message menu while the attachment warning owns Escape.
+  it('leaves Escape to a later-mounted warning, then resumes normal menu dismissal', async () => {
+    openAt(box(100, 600));
+    let onWarning: ((request: UnscannedWarningRequest) => void) | undefined;
+    const respond = vi.fn(async () => ({ success: true }));
+    (window as unknown as { electronAPI: unknown }).electronAPI = {
+      antivirus: {
+        onUnscannedWarning: (callback: typeof onWarning) => { onWarning = callback; return () => {}; },
+        onUnscannedWarningClosed: () => () => {},
+        getPendingUnscannedWarning: async () => ({ success: true, data: null }),
+        respondUnscannedWarning: respond,
+      },
+    };
+    mount(<UnscannedAttachmentWarning />);
+    act(() => onWarning?.({
+      id: 'synthetic-warning', accountId: 'synthetic-work', action: 'view',
+      filename: 'arakiri_A_50186774_/_3.pdf',
+    }));
+
+    keydown(document.activeElement!, 'Escape');
+    await settle();
+
+    expect(respond).toHaveBeenCalledWith({ id: 'synthetic-warning', choice: 'cancel', dontShowAgain: false });
+    expect(menu()).not.toBeNull();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    keydown(document.activeElement!, 'Escape');
+    expect(menu()).toBeNull();
+    delete (window as { electronAPI?: unknown }).electronAPI;
   });
 
   // Wherever focus is in this document — not only on an item.

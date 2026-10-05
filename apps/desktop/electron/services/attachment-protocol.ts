@@ -11,6 +11,7 @@ import {
 import { protocol } from 'electron';
 
 import { AttachmentError, resolveAttachmentFile } from './attachment-cache';
+import { getAttachmentPreviewProtection } from './attachment-preview-protection';
 
 const logger = createLogger('attachment-protocol');
 
@@ -78,7 +79,7 @@ function applyCors(headers: Headers, request: Request): Headers {
     // Loud, because the symptom downstream is a bare "could not be read" with no
     // status: the browser discards the response before the viewer sees it.
     logger.warn(
-      `[attachment-protocol] no CORS allow for origin ${origin} (renderer origin is ${appOrigin})`,
+      `[attachment-protocol] no CORS allow for origin ${origin} (renderer origin is ${appOrigin})`
     );
   }
   return headers;
@@ -97,7 +98,7 @@ const STREAM_CHUNK_BYTES = 256 * 1024;
  */
 export function parseRangeHeader(
   header: string | null,
-  size: number,
+  size: number
 ): { start: number; end: number } | 'unsatisfiable' | null {
   if (!header) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
@@ -141,7 +142,7 @@ function errorResponse(request: Request, status: number, message: string): Respo
   // opaque network error, so the viewer cannot tell "wrong type" from "offline".
   const headers = applyCors(
     new Headers({ 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }),
-    request,
+    request
   );
   return new Response(message, { status, headers });
 }
@@ -164,24 +165,44 @@ export async function handleAttachmentRequest(request: Request): Promise<Respons
     return errorResponse(request, 403, 'This file type cannot be shown in Sarv Inbox');
   }
 
-  let filePath: string;
+  // Electron includes display fragments (for example PDF #toolbar=0) in a
+  // custom-protocol Request.url. They do not identify attachment bytes; the
+  // lease validator receives the same fragmentless URL the host prepared.
+  const contentUrl = new URL(request.url);
+  contentUrl.hash = '';
+
+  let filePath: string | undefined;
+  let verified: Buffer | undefined;
+  let size: number;
   try {
-    // Resolves the owning account, asserts the email really declares this
-    // filename, and fetches from IMAP into the cache if needed.
-    ({ filePath } = await resolveAttachmentFile(ref));
+    const previews = getAttachmentPreviewProtection();
+    if (!previews) {
+      return errorResponse(request, 503, 'Attachment preview is not ready. Try again.');
+    }
+    // With scanning enabled, only an opaque clean lease may supply bytes. The
+    // receipt verifies the owning account, verdict, digest and current consent
+    // on every request, including PDF/media ranges; cached files are irrelevant.
+    verified = await previews.contentForRequest(ref, contentUrl.toString(), request.signal);
+    if (verified !== undefined) {
+      size = verified.length;
+    } else {
+      // The old cache path remains available when scanning is disabled.
+      ({ filePath } = await resolveAttachmentFile(ref));
+      try {
+        size = (await fs.promises.stat(filePath)).size;
+      } catch {
+        return errorResponse(request, 404, 'Attachment not available');
+      }
+      // Resolving an uncached attachment can await IMAP. Enabling the scanner
+      // during that wait must not expose unchecked bytes when it completes.
+      await previews.contentForRequest(ref, contentUrl.toString(), request.signal);
+    }
   } catch (error) {
     if (error instanceof AttachmentError) {
       return errorResponse(request, error.status, error.message);
     }
     logger.error('[attachment-protocol] request failed:', error);
     return errorResponse(request, 500, 'Attachment could not be read');
-  }
-
-  let size: number;
-  try {
-    size = (await fs.promises.stat(filePath)).size;
-  } catch {
-    return errorResponse(request, 404, 'Attachment not available');
   }
 
   const headers = new Headers({
@@ -212,14 +233,22 @@ export async function handleAttachmentRequest(request: Request): Promise<Respons
   headers.set('Content-Length', String(size === 0 ? 0 : end - start + 1));
   if (range) headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
 
-  // An empty file has no valid byte range to stream — answer an empty body.
-  if (size === 0) return new Response(null, { status: range ? 206 : 200, headers });
+  // Empty files and HEAD requests have no body to stream.
+  if (size === 0 || request.method === 'HEAD') {
+    return new Response(null, { status: range ? 206 : 200, headers });
+  }
 
   logger.info(
     `[attachment-protocol] served ${ref.filename} ${start}-${end}/${size} ` +
-      `type=${headers.get('Content-Type')} origin=${request.headers.get('Origin') ?? 'none'}`,
+      `type=${headers.get('Content-Type')} origin=${request.headers.get('Origin') ?? 'none'}`
   );
-  return new Response(fileStream(filePath, start, end), {
+  // Copy before yielding: closing a viewer or revoking scanner consent erases
+  // its retained receipt. A response owns only the exact verified byte slice.
+  const body =
+    verified !== undefined
+      ? new Uint8Array(verified.subarray(start, end + 1))
+      : fileStream(filePath!, start, end);
+  return new Response(body, {
     status: range ? 206 : 200,
     headers,
   });
