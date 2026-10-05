@@ -432,3 +432,111 @@ describe('useEmailDetail — replies from the end-of-chat row', () => {
     expect(ctx().forwardingEmail?.id).toBe('b');
   });
 });
+
+describe('useEmailDetail — focusing an inline composer once it has mounted', () => {
+  const REPLY_ID = 'inline-reply-compose';
+  const FORWARD_ID = 'inline-forward-compose';
+  /** A composer as InlineReply / InlineForward render it: `fieldHtml` is the field the pane focuses. */
+  const plantComposer = (id: string, fieldHtml: string) => {
+    const composer = document.createElement('div');
+    composer.id = id;
+    const scrolls = vi.fn();
+    composer.scrollIntoView = scrolls;
+    composer.innerHTML = fieldHtml;
+    document.body.appendChild(composer);
+    const focus = vi.spyOn(composer.firstElementChild as HTMLElement, 'focus');
+    return { scrolls, focus };
+  };
+  /** How many times the pane went looking for the composer `id`. */
+  const lookupsFor = (spy: { mock: { calls: unknown[][] } }, id: string) =>
+    spy.mock.calls.filter(([asked]) => asked === id).length;
+  afterEach(() => {
+    // The getElementById spies, so one test's lookups never count in the next.
+    vi.restoreAllMocks();
+    document.getElementById(REPLY_ID)?.remove();
+    document.getElementById(FORWARD_ID)?.remove();
+  });
+
+  // Reply must put the caret in the editor, or the reader's typing goes nowhere.
+  it('scrolls to the reply composer and focuses its editor', async () => {
+    await mount();
+    const { scrolls, focus } = plantComposer(REPLY_ID, '<div class="ProseMirror" tabindex="0"></div>');
+    run(() => ctx().handleReply(B, false));
+    vi.advanceTimersByTime(100);
+    expect(scrolls).toHaveBeenCalledExactlyOnceWith({ behavior: 'smooth', block: 'end' });
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  // Forward must land on its To field: that is the first thing a forward needs.
+  it('scrolls to the forward composer and focuses its To field', async () => {
+    await mount();
+    const { scrolls, focus } = plantComposer(FORWARD_ID, '<input type="text" />');
+    run(() => ctx().handleInlineForward(B));
+    vi.advanceTimersByTime(100);
+    expect(scrolls).toHaveBeenCalledExactlyOnceWith({ behavior: 'smooth', block: 'end' });
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  // Undo send reopens the reply, and the reader expects to carry on typing in it.
+  it('focuses the reply editor that Undo send reopened', async () => {
+    const { focus } = plantComposer(REPLY_ID, '<div contenteditable="true"></div>');
+    state.restoreDraft = restored('reply', A);
+    await mount();
+    vi.advanceTimersByTime(100);
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  // The composer mounts a beat after the click: a single early look would miss
+  // it and leave the caret wherever it was.
+  it('focuses a composer that mounts while the pane is still looking for it', async () => {
+    await mount();
+    run(() => ctx().handleReply(B, false));
+    vi.advanceTimersByTime(100);
+    const { focus } = plantComposer(REPLY_ID, '<div class="ProseMirror" tabindex="0"></div>');
+    vi.advanceTimersByTime(150);
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  // The editor mounts inside the composer's box after the box itself: finding
+  // the box with no editor yet must keep looking, not stop at the scroll.
+  it('keeps looking until the editor mounts inside a composer already on screen', async () => {
+    await mount();
+    const composer = document.createElement('div');
+    composer.id = REPLY_ID;
+    composer.scrollIntoView = vi.fn();
+    document.body.appendChild(composer);
+    run(() => ctx().handleReply(B, false));
+    vi.advanceTimersByTime(100);
+    expect(composer.scrollIntoView).toHaveBeenCalledOnce();
+
+    composer.innerHTML = '<div class="ProseMirror" tabindex="0"></div>';
+    const focus = vi.spyOn(composer.firstElementChild as HTMLElement, 'focus');
+    vi.advanceTimersByTime(150);
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  // A composer that never mounts must not be polled for forever: one look,
+  // five retries 150 ms apart, then nothing.
+  it('gives up after five retries when the composer never mounts', async () => {
+    await mount();
+    const lookups = vi.spyOn(document, 'getElementById');
+    run(() => ctx().handleReply(B, false));
+    vi.advanceTimersByTime(100 + 5 * 150);
+    expect(lookupsFor(lookups, REPLY_ID)).toBe(6);
+    vi.advanceTimersByTime(10_000);
+    expect(lookupsFor(lookups, REPLY_ID)).toBe(6);
+  });
+
+  // The composer side of main's CI leak: retries outlived a closed pane and
+  // went looking in a document that, at the end of a test file, was gone.
+  it('stops looking when the pane closes first', async () => {
+    await mount();
+    run(() => ctx().handleReply(B, false));
+    vi.advanceTimersByTime(100); // the first look: nothing there yet
+    mounted!.unmount();
+    mounted = undefined;
+    const lookups = vi.spyOn(document, 'getElementById');
+    vi.advanceTimersByTime(10_000);
+    expect(lookupsFor(lookups, REPLY_ID)).toBe(0);
+  });
+});

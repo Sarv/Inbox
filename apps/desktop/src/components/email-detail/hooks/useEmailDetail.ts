@@ -11,6 +11,7 @@ import prettyBytes from 'pretty-bytes';
 import { useState, useEffect, useRef, useMemo } from 'react';
 
 import { classifyFolder } from '../../../config/folder-mapping';
+import { useMountedTimeout, type MountedTimeout } from '../../../hooks/useMountedTimeout';
 import { isAutoChatViewEnabled, isConversationModeEnabled } from '../../../services/ai-features';
 import {
   buildPolishThreadContext,
@@ -68,6 +69,38 @@ function replySubjectFor(draftSubject?: string | null, parentSubject?: string | 
   const parent = (parentSubject || '').trim();
   if (!parent) return '';
   return parent.toLowerCase().startsWith('re:') ? parent : `Re: ${parent}`;
+}
+
+/** Bring a thread member's card into view (ThreadList renders it as `thread-<id>`). */
+function scrollThreadCardIntoView(emailId: string): void {
+  document.getElementById(`thread-${emailId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+const INLINE_REPLY = { composerId: 'inline-reply-compose', field: '.ProseMirror, [contenteditable="true"]' };
+const INLINE_FORWARD = { composerId: 'inline-forward-compose', field: 'input[type="text"]' };
+
+/**
+ * Scroll an inline composer into view and focus its first field. The composer
+ * mounts a beat after whatever opened it, so look after 100 ms, then up to five
+ * more times 150 ms apart.
+ */
+function focusComposerWhenMounted(
+  later: MountedTimeout,
+  { composerId, field }: { composerId: string; field: string },
+): void {
+  const tryFocus = (attempt: number) => {
+    const composer = document.getElementById(composerId);
+    if (composer) {
+      composer.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      const input = composer.querySelector<HTMLElement>(field);
+      if (input) {
+        input.focus();
+        return;
+      }
+    }
+    if (attempt < 5) later(() => tryFocus(attempt + 1), 150);
+  };
+  later(() => tryFocus(0), 100);
 }
 
 export function useEmailDetail(): EmailDetailContext | null {
@@ -478,6 +511,8 @@ export function useEmailDetail(): EmailDetailContext | null {
   // ALREADY-OPEN thread (via the "new message" banner's Show) get auto-expanded
   // — the initial auto-expand effect below only runs once per selectedEmailId.
   const threadExpandTrackRef = useRef<{ selectedId: string | null; ids: Set<string> }>({ selectedId: null, ids: new Set() });
+  // Delayed scrolls and composer focus: run only while the pane is still mounted.
+  const later = useMountedTimeout();
   // Pending "mark whole thread read on open" timer (0ms — immediate), kept in a
   // ref so we can cancel it if the user navigates to a different thread before
   // it fires (otherwise it could mark the PREVIOUS thread's emails read).
@@ -549,19 +584,15 @@ export function useEmailDetail(): EmailDetailContext | null {
           setMainEmailExpanded(oldestUnread);
           setExpandedThreads(new Set(unreadInThread.map((e) => e.id)));
           const scrollTarget = unreadInThread[0].id;
-          setTimeout(() => {
-            document.getElementById(`thread-${scrollTarget}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }, 100);
+          later(() => scrollThreadCardIntoView(scrollTarget), 100);
         } else if (latestEmail) {
           setMainEmailExpanded(false);
           setExpandedThreads(new Set([latestEmail.id]));
-          setTimeout(() => {
-            document.getElementById(`thread-${latestEmail.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }, 100);
+          later(() => scrollThreadCardIntoView(latestEmail.id), 100);
         }
       }
     }
-  }, [loadingThread, threadEmails, allThreadEmails, selectedEmailId, displayEmail, latestThreadEmail, markAsRead, manuallyMarkedUnreadId]);
+  }, [loadingThread, threadEmails, allThreadEmails, selectedEmailId, displayEmail, latestThreadEmail, markAsRead, manuallyMarkedUnreadId, later]);
 
   // Clear the pending mark-thread-read timer on unmount so it can't fire
   // markAsRead(...) against a torn-down detail pane (e.g. the user closes the
@@ -602,12 +633,10 @@ export function useEmailDetail(): EmailDetailContext | null {
       });
       // Scroll to the latest folded-in message so the new content is in view.
       const target = newlyAdded[newlyAdded.length - 1];
-      setTimeout(() => {
-        document.getElementById(`thread-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 100);
+      later(() => scrollThreadCardIntoView(target), 100);
     }
     threadExpandTrackRef.current = { selectedId: selectedEmailId, ids: new Set(currentIds) };
-  }, [threadEmails, loadingThread, selectedEmailId]);
+  }, [threadEmails, loadingThread, selectedEmailId, later]);
 
   // Auto-open inline reply when a saved draft (manual OR AI-generated) exists
   // for any email in the currently-viewed thread. Gmail-style: open thread →
@@ -1059,22 +1088,8 @@ export function useEmailDetail(): EmailDetailContext | null {
     clearRestoreDraft();
 
     // Scroll to the reply composer
-    const tryFocus = (attempt: number) => {
-      const el = document.getElementById('inline-reply-compose');
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        const editor = el.querySelector('.ProseMirror, [contenteditable="true"]') as HTMLElement;
-        if (editor) {
-          editor.focus();
-          return;
-        }
-      }
-      if (attempt < 5) {
-        setTimeout(() => tryFocus(attempt + 1), 150);
-      }
-    };
-    setTimeout(() => tryFocus(0), 100);
-  }, [restoreDraft]);
+    focusComposerWhenMounted(later, INLINE_REPLY);
+  }, [restoreDraft, later]);
 
   // Return null if nothing selected
   if (!selectedEmailId || !selectedEmail || !displayEmail) {
@@ -1176,43 +1191,9 @@ export function useEmailDetail(): EmailDetailContext | null {
     }
   };
 
-  const scrollToInlineReply = () => {
-    const tryFocus = (attempt: number) => {
-      const el = document.getElementById('inline-reply-compose');
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        const editor = el.querySelector('.ProseMirror, [contenteditable="true"]') as HTMLElement;
-        if (editor) {
-          editor.focus();
-          return;
-        }
-      }
-      // Retry up to 5 times with increasing delay (editor may not be mounted yet)
-      if (attempt < 5) {
-        setTimeout(() => tryFocus(attempt + 1), 150);
-      }
-    };
-    setTimeout(() => tryFocus(0), 100);
-  };
-
-  const scrollToInlineForward = () => {
-    const tryFocus = (attempt: number) => {
-      const el = document.getElementById('inline-forward-compose');
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        // Focus the To input inside InlineForward
-        const toInput = el.querySelector('input[type="text"]') as HTMLElement;
-        if (toInput) {
-          toInput.focus();
-          return;
-        }
-      }
-      if (attempt < 5) {
-        setTimeout(() => tryFocus(attempt + 1), 150);
-      }
-    };
-    setTimeout(() => tryFocus(0), 100);
-  };
+  const scrollToInlineReply = () => focusComposerWhenMounted(later, INLINE_REPLY);
+  // Lands on the forward's To field.
+  const scrollToInlineForward = () => focusComposerWhenMounted(later, INLINE_FORWARD);
 
   // Open (or re-point) the inline reply at `email`. The seed stays as it is:
   // the composer is handed it only while it is open on the seed's own message

@@ -156,6 +156,12 @@ mail. See `packages/storage-node/test/unit/thread-resolver.test.ts` for the patt
   bend the test around it.
 - **A failing test is a finding, not an obstacle.** If behaviour looks wrong,
   raise it; don't assert the bug into permanence.
+- **Nothing outlives its test file.** A timer that a component leaves pending
+  fires after the file's DOM environment is torn down and throws "document is
+  not defined", an unhandled error that fails the whole run though every
+  assertion passed. A component's delayed DOM work goes through
+  `useMountedTimeout` (`apps/desktop/src/hooks/`), and a test unmounts what it
+  rendered in `afterEach`.
 - **A cold import is not the first test's to pay.** The first `await import()`
   of a heavy module transforms its whole graph, which takes 3–5 s on a loaded CI
   runner with coverage on, inside that test's 5 s budget. `vi.resetModules()`
