@@ -486,6 +486,18 @@ describe('useEmailDetail — focusing an inline composer once it has mounted', (
     expect(focus).toHaveBeenCalledOnce();
   });
 
+  // Regression: Undo send of a FORWARD went looking for the reply composer,
+  // which is not on screen, so the restored forward was never scrolled to or
+  // focused and the reader's typing went nowhere.
+  it('focuses the To field of a forward that Undo send reopened', async () => {
+    const { scrolls, focus } = plantComposer(FORWARD_ID, '<input type="text" />');
+    state.restoreDraft = restored('forward', A);
+    await mount();
+    vi.advanceTimersByTime(100);
+    expect(scrolls).toHaveBeenCalledExactlyOnceWith({ behavior: 'smooth', block: 'end' });
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
   // The composer mounts a beat after the click: a single early look would miss
   // it and leave the caret wherever it was.
   it('focuses a composer that mounts while the pane is still looking for it', async () => {

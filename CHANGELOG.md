@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanning token is stored in the device keychain. Existing scanner connections
   are preserved, and Skip retains the unscanned attachment warning.
 
+### Fixed
+- **Undo send on a forward puts you back in it.** Undoing the send of an
+  inline forward reopened it with what you had written but left it unfocused,
+  so typing went nowhere until you clicked into it. It now scrolls to the
+  forward and puts the cursor in its To field, as undoing a reply already did.
+
 ### Security
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`

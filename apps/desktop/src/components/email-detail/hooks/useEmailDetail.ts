@@ -1087,8 +1087,9 @@ export function useEmailDetail(): EmailDetailContext | null {
 
     clearRestoreDraft();
 
-    // Scroll to the reply composer
-    focusComposerWhenMounted(later, INLINE_REPLY);
+    // Scroll to the composer just reopened. A forward went looking for the
+    // reply composer, which is not on screen, and was never focused.
+    focusComposerWhenMounted(later, restoreDraft.mode === 'forward' ? INLINE_FORWARD : INLINE_REPLY);
   }, [restoreDraft, later]);
 
   // Return null if nothing selected
