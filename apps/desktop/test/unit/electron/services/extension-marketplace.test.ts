@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 
 import { c as createTar } from 'tar';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Installing an extension published on GitHub.
@@ -46,6 +46,9 @@ const h = vi.hoisted(() => ({
   /** What `app.getAppPath()` reports: apps/desktop, which is vitest's own cwd. */
   appDir: process.cwd(),
 }));
+
+/** Where `app.getAppPath()` points unless a test moves it. */
+const DESKTOP_APP_DIR = process.cwd();
 
 vi.mock('electron', () => ({
   app: {
@@ -222,8 +225,23 @@ async function loadService(): Promise<MarketplaceService> {
   return service;
 }
 
+// The first import of the service is a cold one - it transforms and evaluates
+// the @sarvinbox/core barrel and `tar` - and `vi.resetModules()` does not undo
+// that work, so whichever test loads it first paid for it inside its own 5 s
+// budget: ~0.4 s locally, 3-5 s on a loaded CI runner with coverage on, and
+// "reads the build config" timed out on main's CI (PR #53). Paid here once, on
+// an explicit budget, every test times only what it asserts. The module does
+// no I/O on import, so nothing reads `h.userData` before beforeEach sets it.
+beforeAll(async () => {
+  await import('../../../../electron/services/extension-marketplace');
+}, 60_000);
+
 beforeEach(() => {
   h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-marketplace-'));
+  // Tests that move the app directory must not move it for every later one:
+  // "falls back to defaults" pointed it at a missing folder and every test
+  // after it then ran on the default config instead of the shipped file.
+  h.appDir = DESKTOP_APP_DIR;
   h.appVersion = '1.1.1';
   h.responses = new Map();
   h.requested = [];

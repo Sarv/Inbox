@@ -156,6 +156,11 @@ mail. See `packages/storage-node/test/unit/thread-resolver.test.ts` for the patt
   bend the test around it.
 - **A failing test is a finding, not an obstacle.** If behaviour looks wrong,
   raise it; don't assert the bug into permanence.
+- **A cold import is not the first test's to pay.** The first `await import()`
+  of a heavy module transforms its whole graph, which takes 3–5 s on a loaded CI
+  runner with coverage on, inside that test's 5 s budget. `vi.resetModules()`
+  does not undo the work, so warm the import once in `beforeAll` with an
+  explicit timeout (see `extension-marketplace.test.ts`).
 
 ## What isn't covered, deliberately
 
