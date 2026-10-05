@@ -55,6 +55,10 @@ describe('shouldShowNoAccountEmptyState', () => {
 });
 
 describe('shouldShowOnboarding', () => {
+  it('resumes a pending wizard even after email was durably created', () => {
+    expect(shouldShowOnboarding({ ...bootingWithAccount, onboardingComplete: false, onboardingPending: true })).toBe(true);
+    expect(shouldShowOnboarding({ ...bootingWithAccount, onboardingPending: true })).toBe(false);
+  });
   it('shows for a brand-new user with no account and no prior onboarding', () => {
     expect(
       shouldShowOnboarding({

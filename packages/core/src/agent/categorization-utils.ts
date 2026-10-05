@@ -15,6 +15,7 @@ import {
 } from '@sarv-in/mailguard/verdict';
 import pRetry, { AbortError } from 'p-retry';
 
+import { buildAIAuthHeaders } from '../utils/ai-provider-auth';
 import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
@@ -1038,17 +1039,12 @@ async function callOpenAICompatibleAPI(
       // Guard against empty bearer — `Authorization: Bearer ` is an illegal
       // header value and triggers a generic 502 at the gateway that would
       // otherwise look like an upstream outage.
-      if (typeof bearer !== 'string' || bearer.trim() === '') {
-        throw new Error(
-          `callOpenAICompatibleAPI: empty bearer token for provider '${config.type}'. ` +
-          `OAuth token refresh may have returned no accessToken, or apiKey is missing.`,
-        );
-      }
+      const authHeaders = buildAIAuthHeaders(config, bearer);
       return doFetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${bearer}`,
+          ...authHeaders,
         },
         body: JSON.stringify({
           model: config.model,

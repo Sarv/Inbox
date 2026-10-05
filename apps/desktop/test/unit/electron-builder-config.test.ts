@@ -38,6 +38,20 @@ const buildConfig = packageJson['build'] as Record<string, unknown>;
 const hookPath = fileURLToPath(new URL('../../build/beforeBuild.js', import.meta.url));
 
 describe('electron-builder configuration', () => {
+  it('ships the optional scanner code and panel without enabling it by default', () => {
+    const resources = buildConfig['extraResources'] as Array<{ from: string; to: string; filter?: string[] }>;
+    const scanner = resources.find((entry) => entry.to === 'optional-extensions/clamav-scan');
+    expect(scanner).toBeDefined();
+    const extensionRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)), scanner!.from);
+    const require_ = createRequire(require.resolve('app-builder-lib/package.json'));
+    const { minimatch } = require_('minimatch') as { minimatch: (target: string, pattern: string) => boolean };
+    const files = readdirSync(extensionRoot, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => /\.(js|json|html|css|svg|md)$/.test(entry));
+    expect(files).toContain('panel/index.html');
+    for (const file of files) expect(scanner!.filter!.some((pattern) => minimatch(file, pattern)), file).toBe(true);
+    const config = require('../../extensions.config.json') as { systemExtensions: string[] };
+    expect(config.systemExtensions).not.toContain('clamav-scan');
+  });
   const targetsOf = (platform: string): string[] => {
     const config = buildConfig[platform] as { target?: Array<{ target: string }> };
     return (config.target ?? []).map((entry) => entry.target);

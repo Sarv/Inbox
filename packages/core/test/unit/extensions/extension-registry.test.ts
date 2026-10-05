@@ -1,11 +1,11 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createExtensionRegistry } from '../../../src/extensions/extension-registry';
-import { ExtensionSource } from '../../../src/extensions/types';
+import { ExtensionSource, type ExtensionPermission } from '../../../src/extensions/types';
 
 /**
  * What the registry does with a profile written by an older build.
@@ -35,6 +35,46 @@ const record = (id: string, source: ExtensionSource, path: string) => ({
   enabled: true,
   grantedPermissions: ['email:read'],
   settings: {},
+});
+
+describe('atomic optional extension permission approval', () => {
+  const createSource = () => {
+    const source = join(dir, 'source'); mkdirSync(source);
+    writeFileSync(join(source, 'sarvinbox-extension.json'), JSON.stringify({ id: 'test-scanner', name: 'Test scanner', version: '1.0.0',
+      description: 'Synthetic scanner for permission testing', author: 'Test', main: 'index.js', engines: { sarvinbox: '>=1.0.0' },
+      permissions: ['ui:panel', 'security:scan-attachments', 'security:scan-body'] }));
+    writeFileSync(join(source, 'index.js'), 'module.exports = {};');
+    return source;
+  };
+
+  // Regression: installing before narrowing capabilities briefly persisted broad unapproved permissions across a crash/restart.
+  it('persists and emits only the approved subset on the first installation', async () => {
+    const registry = await open(); const source = createSource(); const permissions: ExtensionPermission[] = ['ui:panel', 'security:scan-attachments'];
+    const grantedAtInstall: ExtensionPermission[][] = [];
+    registry.subscribe(event => { if (event.type === 'installed') grantedAtInstall.push([...event.extension.grantedPermissions]); });
+    expect((await registry.install(source, permissions)).grantedPermissions).toEqual(permissions);
+    expect(grantedAtInstall).toEqual([permissions]);
+    const saved = JSON.parse(readFileSync(statePath(), 'utf8'));
+    expect(saved.extensions['test-scanner'].grantedPermissions).toEqual(permissions);
+    permissions.push('security:scan-body');
+    expect(registry.get('test-scanner')!.grantedPermissions).toEqual(['ui:panel', 'security:scan-attachments']);
+    const reopened = await open();
+    expect(reopened.get('test-scanner')!.grantedPermissions).toEqual(['ui:panel', 'security:scan-attachments']);
+  });
+
+  // Regression: permission approval must reject undeclared/duplicate/invalid grants before any copied or persisted installation.
+  it.each([{ permissions: ['network:fetch'] }, { permissions: ['ui:panel', 'ui:panel'] }, { permissions: null }])('refuses invalid initial permissions $permissions before installation', async ({ permissions }) => {
+    const registry = await open(); const source = createSource();
+    await expect(registry.install(source, permissions as ExtensionPermission[])).rejects.toThrow(/unique subset/);
+    expect(registry.has('test-scanner')).toBe(false);
+    expect(existsSync(join(dir, 'extensions', 'test-scanner'))).toBe(false);
+  });
+
+  // Regression: existing folder/marketplace callers and deliberately empty approvals must remain supported.
+  it.each([{ permissions: undefined }, { permissions: [] as ExtensionPermission[] }])('retains default compatibility and supports an empty explicit approval', async ({ permissions }) => {
+    const registry = await open(); const source = createSource(); const installed = await registry.install(source, permissions);
+    expect(installed.grantedPermissions).toEqual(permissions ?? ['ui:panel', 'security:scan-attachments', 'security:scan-body']);
+  });
 });
 
 const open = async () => {

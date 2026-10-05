@@ -10,6 +10,10 @@
 // here. Fetch logic is small enough that duplicating it is cheaper than
 // making core safe to import from the renderer.
 
+import { createLogger } from '@sarvinbox/core/logger';
+
+const log = createLogger('sarv-cai-api');
+
 // Normalized shapes the UI consumes. `code` maps to whatever the server
 // calls the stable identifier (some endpoints use `id`, others `code`);
 // the wrapper normalizes either into `code` so consumers don't care.
@@ -80,13 +84,14 @@ async function freshBearer(email: string): Promise<string> {
 }
 
 async function getJson<T>(url: string, accessToken: string): Promise<T> {
-  console.log('[sarv-cai-api] GET', url);
+  log.info('GET', url);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
   let res: Response;
   try {
     res = await fetch(url, {
       method: 'GET',
+      redirect: 'error',
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${accessToken}`,
@@ -106,7 +111,7 @@ async function getJson<T>(url: string, accessToken: string): Promise<T> {
   } finally {
     clearTimeout(timeout);
   }
-  console.log('[sarv-cai-api]', url, '→', res.status);
+  log.info(`${url} → ${res.status}`);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     let code = String(res.status);
@@ -155,7 +160,7 @@ async function getJson<T>(url: string, accessToken: string): Promise<T> {
     // `cai_account_required` (signed in, but no CAI account — onboarding), and
     // `invalid_token`. Without the code, "the AI stopped working" is
     // undiagnosable from the log, which is exactly where it was last time.
-    console.warn('[sarv-cai-api]', url, '→', res.status, `code=${code}`, message);
+    log.warn(`${url} → ${res.status} code=${code}`, message);
     throw err;
   }
   return (await res.json()) as T;
@@ -304,7 +309,7 @@ export async function loadZoneSelection(
     // `insufficient_scope` here means the token lacks llm:view, which will also
     // fail providers/models — i.e. the whole AI catalog, not just zones. That is
     // worth one line in the log to tell apart from the ordinary org-scoped 403.
-    console.warn('[sarv-cai-api] zone lookup failed (non-fatal):', (err as Error).message);
+    log.warn('zone lookup failed (non-fatal):', (err as Error).message);
     return { zones: [], zoneCode: '' };
   }
 }

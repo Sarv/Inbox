@@ -176,7 +176,8 @@ export class ExtensionRegistry {
    */
   private async registerDiscoveredExtension(
     loaded: LoadedExtension,
-    source: ExtensionSource
+    source: ExtensionSource,
+    initialPermissions?: ExtensionPermission[]
   ): Promise<void> {
     const { manifest } = loaded;
 
@@ -210,7 +211,7 @@ export class ExtensionRegistry {
         version: manifest.version,
         installedAt: Date.now(),
         enabled: true, // Dropped into the extensions folder deliberately, so: on
-        grantedPermissions: manifest.permissions, // Grant all by default (user can revoke)
+        grantedPermissions: [...(initialPermissions ?? manifest.permissions)],
         settings: {},
       };
 
@@ -227,10 +228,19 @@ export class ExtensionRegistry {
   /**
    * Install an extension from a path
    */
-  async install(extensionPath: string): Promise<InstalledExtension> {
+  async install(extensionPath: string, initialPermissions?: ExtensionPermission[]): Promise<InstalledExtension> {
+    const approvedPermissions = Array.isArray(initialPermissions) ? [...initialPermissions] : initialPermissions;
     // Load and validate
     const loaded = await loadExtension(extensionPath);
     const { manifest } = loaded;
+
+    // Optional built-in setup can approve a smaller capability set atomically,
+    // before its first registry event or disk write. Existing installs keep their default behavior.
+    if (approvedPermissions !== undefined && (!Array.isArray(approvedPermissions) ||
+      new Set(approvedPermissions).size !== approvedPermissions.length ||
+      approvedPermissions.some(permission => !manifest.permissions.includes(permission)))) {
+      throw new Error('Initial extension permissions must be a unique subset of the manifest permissions');
+    }
 
     // Check if already installed
     if (this.extensions.has(manifest.id)) {
@@ -246,7 +256,8 @@ export class ExtensionRegistry {
     // Register
     await this.registerDiscoveredExtension(
       { ...loaded, path: targetPath },
-      ExtensionSource.LOCAL
+      ExtensionSource.LOCAL,
+      approvedPermissions
     );
 
     return this.extensions.get(manifest.id)!;

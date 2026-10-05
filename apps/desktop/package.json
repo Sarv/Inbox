@@ -141,6 +141,17 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "../../extensions/clamav-scan",
+        "to": "optional-extensions/clamav-scan",
+        "filter": [
+          "sarvinbox-extension.json",
+          "index.js",
+          "icon.svg",
+          "panel/**/*",
+          "README.md"
+        ]
       }
     ],
     "mac": {

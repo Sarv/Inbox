@@ -30,6 +30,7 @@ import {
 import { createLogger } from '@sarvinbox/core/logger';
 
 import { aiEligibilityFor, firstEmailFacts } from '../../components/email-detail/ai-view-compose';
+import { isAIAssistEnabled } from '../agent-settings';
 import { isBackgroundSplitEnabled, syncBackgroundSplitToMain } from '../ai-features';
 import { getAIHealth, getDefaultProvider } from '../ai-service';
 
@@ -72,7 +73,8 @@ export interface FirstSplitJobDeps extends FirstSplitStoreDeps {
 
 /** The default gate: every switch the background split depends on. */
 export function backgroundSplitAllowed(): boolean {
-  return isBackgroundSplitEnabled()
+  return isAIAssistEnabled()
+    && isBackgroundSplitEnabled()
     && !!getDefaultProvider()
     && getAIHealth().healthy;
 }

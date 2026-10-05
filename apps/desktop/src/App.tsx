@@ -37,10 +37,12 @@ import { useActiveSection } from './hooks/useActiveSection';
 import { useAppVersion } from './hooks/useAppVersion';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNotificationBridge } from './hooks/useNotificationBridge';
-import { pushAgentSettingsToBackend, pushCategoryLabelSetting } from './services/agent-settings';
-import { makeAICompletion, getDefaultProvider, hydrateAiSecrets, syncAIProviderToMain, pruneOrphanedOAuthProviders } from './services/ai-service';
+import { AI_ASSIST_CHANGED_EVENT, loadAgentSettings, pushAgentSettingsToBackend, pushCategoryLabelSetting } from './services/agent-settings';
+import { makeAICompletion, hydrateAiSecrets, syncAIProviderToMain, pruneOrphanedOAuthProviders } from './services/ai-service';
 import { installEnrichmentBatchListener } from './services/contact-enrichment-service';
 import { removeFirstSplitJob, startFirstSplitJob } from './services/first-split/job';
+import { suspendOnboardingAI } from './services/onboarding-ai-choice';
+import { isOnboardingPending } from './services/onboarding-progress';
 import { ensureSarvAiProvider } from './services/sarv-ai-auto-register';
 import { requestConfirm } from './store/confirm-service';
 import { useEmailStore } from './store/email-store';
@@ -120,9 +122,12 @@ function App() {
   // Latched once onboarding appears, so its own addAccount (Login with Sarv,
   // Connect Email) doesn't flip hasAccounts and unmount it mid-flow.
   const [onboardingInProgress, setOnboardingInProgress] = useState(false);
+  const onboardingPending = isOnboardingPending();
   const showOnboarding = shouldShowOnboarding({
-    checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection, onboardingInProgress,
+    checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection, onboardingInProgress, onboardingPending,
   });
+  const [aiSecretsReady, setAiSecretsReady] = useState(false);
+  const [aiAssistEnabled, setAiAssistEnabled] = useState(() => loadAgentSettings().enabled);
   useEffect(() => {
     if (showOnboarding) setOnboardingInProgress(true);
   }, [showOnboarding]);
@@ -229,7 +234,7 @@ function App() {
     return () => { try { off?.(); } catch { /* ignore */ } };
   }, []);
 
-  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch });
+  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, enabled: !showOnboarding });
   useNotificationBridge();
 
   // Load user-defined labels once on mount (local DB — no connection needed).
@@ -237,17 +242,35 @@ function App() {
     void loadLabels();
   }, [loadLabels]);
 
-  // Pull AI provider API keys from the main-process safeStorage vault into memory
-  // (and migrate any legacy plaintext keys out of localStorage). Runs before any
-  // AI feature is user-triggered. CRUCIAL: once the keys are hydrated, RE-PUSH the
-  // provider config to the main pipeline — the earlier synchronous push (below)
-  // may have sent an empty key because the vault IPC hadn't resolved yet. Without
-  // this re-push the pipeline categorizes with no key until a lucky sync/restart.
   useEffect(() => {
-    // Then make sure a signed-in Sarv account isn't left without an AI provider
-    // (e.g. onboarding closed before its picker rendered) — see sarv-ai-auto-register.
-    void hydrateAiSecrets().then(() => syncAIProviderToMain()).then(() => ensureSarvAiProvider());
+    const update = () => setAiAssistEnabled(loadAgentSettings().enabled);
+    window.addEventListener(AI_ASSIST_CHANGED_EVENT, update);
+    return () => window.removeEventListener(AI_ASSIST_CHANGED_EVENT, update);
   }, []);
+
+  // Hydrate secrets first. Restoring the default provider waits for the boot
+  // gate, so signing into email during onboarding cannot enable AI early.
+  useEffect(() => {
+    let mounted = true;
+    void hydrateAiSecrets().then(() => {
+      if (mounted) setAiSecretsReady(true);
+    }).catch(() => { if (mounted) setAiSecretsReady(true); });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!aiSecretsReady || checkingConnection || showOnboarding || onboardingPending) return;
+    if (!aiAssistEnabled) {
+      void window.electronAPI?.ai?.setProviderConfigured?.(false).catch(() => {});
+      return;
+    }
+    let current = true;
+    void syncAIProviderToMain().then(() => {
+      if (current && !isOnboardingPending()) return ensureSarvAiProvider();
+      return undefined;
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [aiSecretsReady, checkingConnection, showOnboarding, onboardingPending, aiAssistEnabled]);
 
   // Log app version from main process
   const appVersion = useAppVersion();
@@ -285,9 +308,10 @@ function App() {
   // restart new mail wasn't categorized until that tab was opened. Main mirrors
   // what it receives to agent-config.json so it survives subsequent restarts.
   useEffect(() => {
-    pushAgentSettingsToBackend();
+    if (onboardingPending || showOnboarding) suspendOnboardingAI();
+    else pushAgentSettingsToBackend(checkingConnection ? { ...loadAgentSettings(), enabled: false } : loadAgentSettings());
     pushCategoryLabelSetting();
-  }, []);
+  }, [checkingConnection, showOnboarding, onboardingPending]);
 
   useEffect(() => {
     console.log('[App] Component mounted');
@@ -504,43 +528,13 @@ function App() {
     // Handle contact enrichment batches pushed from the main-process
     // scheduler — runs LLM calls serially in the renderer.
     installEnrichmentBatchListener();
-    // Notify main process whether AI provider is configured. Optional-chained
-    // like the rest of this effect: window.electronAPI is injected by the
-    // preload bridge and can be absent early / in a non-Electron context —
-    // an unguarded access here would just relocate the contactEnrichment crash.
-    window.electronAPI?.ai?.setProviderConfigured?.(!!getDefaultProvider());
-
-    // Configure the unified agent pipeline at STARTUP, independent of sync.
-    // Previously the pipeline's AI provider + userEmail were pushed only by
-    // startAutoAICategorization, which runs after a *successful* sync — so on
-    // a slow/disconnected start the pipeline sat with hasAI=false/userEmail=""
-    // and silently marked needs_response emails done WITHOUT ever drafting a
-    // reply (the "needs_response but 0 drafts" bug). Push here so drafting
-    // works as soon as the app opens.
+    // Provider restore is handled by the hydrated, onboarding-aware effect
+    // above. The user's profile can be pushed independently of AI activation.
     try {
-      const prov = getDefaultProvider();
-      if (prov) {
-        window.electronAPI.agent.setAIConfig({
-          type: prov.type,
-          apiKey: prov.apiKey,
-          model: prov.model,
-          baseUrl: prov.baseUrl,
-          authMethod: prov.authMethod,
-          oauthProvider: prov.oauthProvider,
-          oauthEmail: prov.oauthEmail,
-        }).catch(() => {});
-        let ue = '';
-        try {
-          const s = localStorage.getItem('sarvinbox-settings');
-          if (s) ue = JSON.parse(s).profileEmail || '';
-          if (!ue) {
-            const c = localStorage.getItem('sarvinbox-credentials');
-            if (c) ue = JSON.parse(c).username || '';
-          }
-        } catch { /* ignore */ }
-        if (ue) window.electronAPI.agent.setConfig({ userEmail: ue } as any).catch(() => {});
-      }
-    } catch { /* best effort — startAutoAICategorization re-pushes after sync */ }
+      const raw = localStorage.getItem('sarvinbox-settings');
+      const userEmail = raw ? JSON.parse(raw).profileEmail : '';
+      if (userEmail) void window.electronAPI?.agent?.setConfig({ userEmail } as any).catch(() => {});
+    } catch { /* unreadable profile does not interrupt setup */ }
 
     // Set up AI bridge listener for extension backend
     // When extensions in main process need AI, they send requests here
@@ -895,9 +889,11 @@ function App() {
 
       {/* Onboarding — first-time users only (genuinely no account in the
           registry, not merely a transient null imapConfig during boot/reconnect). */}
-      {showOnboarding && (
-        <Onboarding onComplete={() => setOnboardingComplete(true)} />
-      )}
+      {showOnboarding && (aiSecretsReady ? (
+        <Onboarding onComplete={() => { setOnboardingComplete(true); setOnboardingInProgress(false); }} />
+      ) : (
+        <div role="status" className="fixed inset-0 z-50 flex items-center justify-center bg-background text-sm text-muted-foreground">Preparing setup…</div>
+      ))}
 
       {/* Re-auth is NO LONGER a blocking gate. When the server rejects auth
           (needsReauth), the cached mailbox stays readable and other accounts stay

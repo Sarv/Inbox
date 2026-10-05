@@ -399,6 +399,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Trusted scanner setup. This namespace is never exposed to extension frames.
   antivirus: {
+    getOnboardingSetup: () => ipcRenderer.invoke('antivirus:getOnboardingSetup'),
+    connectSarvOAuth: (accountId: string) => ipcRenderer.invoke('antivirus:connectSarvOAuth', accountId),
+    completeSarvOAuth: (input: { challenge: string; accountId: string; attachmentConsent: boolean }) =>
+      ipcRenderer.invoke('antivirus:completeSarvOAuth', input),
+    cancelSarvOAuth: () => ipcRenderer.invoke('antivirus:cancelSarvOAuth'),
     getSetup: (extensionId: string) => ipcRenderer.invoke('antivirus:getSetup', extensionId),
     probe: (extensionId: string, endpoint: string, credential?: string) =>
       ipcRenderer.invoke('antivirus:probe', extensionId, endpoint, credential),
@@ -1387,6 +1392,10 @@ export interface ElectronAPI {
     setCrashReports: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   };
   antivirus: {
+    getOnboardingSetup: () => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
+    connectSarvOAuth: (accountId: string) => Promise<{ success: boolean; data?: { challenge: string; setup: AntivirusSetupStatus }; error?: string }>;
+    completeSarvOAuth: (input: { challenge: string; accountId: string; attachmentConsent: boolean }) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
+    cancelSarvOAuth: () => Promise<{ success: boolean; error?: string }>;
     getSetup: (extensionId: string) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
     probe: (extensionId: string, endpoint: string, credential?: string) => Promise<{ success: boolean; data?: AntivirusProbeResult; error?: string }>;
     configure: (extensionId: string, config: AntivirusConfigureRequest) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;

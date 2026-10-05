@@ -3,6 +3,7 @@
 import { setLogLevel } from '@sarvinbox/core/logger';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AGENT_CONFIG_KEY, loadAgentSettings, saveAgentSettings } from '../../../../../src/services/agent-settings';
 import { reportAIHealthy, reportAIUnhealthy, type AIProvider } from '../../../../../src/services/ai-service';
 import {
   backgroundSplitAllowed,
@@ -234,6 +235,31 @@ describe('backgroundSplitAllowed', () => {
     expect(backgroundSplitAllowed()).toBe(false);
     setProvider(true);
     reportAIUnhealthy('Authentication failed');
+    expect(backgroundSplitAllowed()).toBe(false);
+  });
+
+  // Regression: Skip/onboarding suspension must prevent automatic splitting
+  // even when provider credentials and Auto Chat Extract remain saved.
+  it('does not transmit a nominated email while AI Assist is disabled', async () => {
+    setFeatures(true); setProvider(true);
+    const settings = loadAgentSettings();
+    saveAgentSettings({ ...settings, enabled: false });
+    bridge.seed('acct-a', 't1', loopedInEmail());
+    expect(backgroundSplitAllowed()).toBe(false);
+    expect(await processCandidate(ref('t1'), deps({ gate: undefined }))).toBe('gated');
+    expect(complete).not.toHaveBeenCalled();
+    expect(bridge.saves).toHaveLength(0);
+
+    saveAgentSettings({ ...settings, enabled: true });
+    expect(await processCandidate(ref('t1'), deps({ gate: undefined }))).toBe('split');
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  // Regression: unreadable consent/enable settings must never act like a fresh
+  // opt-in and trigger background mail transmission.
+  it('keeps automatic splits gated when the AI Assist setting is unreadable', () => {
+    setFeatures(true); setProvider(true);
+    localStorage.setItem(AGENT_CONFIG_KEY, 'corrupt');
     expect(backgroundSplitAllowed()).toBe(false);
   });
 });

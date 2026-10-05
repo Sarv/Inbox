@@ -15,7 +15,7 @@ const key = (id: string) => {
   return `antivirus-config:${id}`;
 };
 
-function requireSecureStorage(): void {
+export function requireScannerSecureStorage(): void {
   if (!safeStorage.isEncryptionAvailable() ||
     (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text')) {
     throw new Error('An operating system secure key store is required for scanner credentials.');
@@ -26,7 +26,7 @@ async function readConfiguration(id: string): Promise<ScannerConfiguration | und
   getCoreDb(); // An unavailable encrypted profile must not look like a new empty profile.
   const blob = getBlob(key(id));
   if (!blob) return undefined;
-  requireSecureStorage();
+  requireScannerSecureStorage();
   if (blob.subarray(0, 5).toString() !== 'ENC1:') throw new Error('Scanner configuration cannot be securely read.');
   try { return JSON.parse(safeStorage.decryptString(blob.subarray(5))) as ScannerConfiguration; }
   catch { throw new Error('Scanner configuration cannot be securely read.'); }
@@ -40,7 +40,7 @@ async function writeConfiguration(id: string, config: ScannerConfiguration | und
     unscannedWarningPreferences.resetAll();
     return;
   }
-  requireSecureStorage();
+  requireScannerSecureStorage();
   const encoded = Buffer.concat([Buffer.from('ENC1:'), safeStorage.encryptString(JSON.stringify(config))]);
   setBlob(key(id), encoded);
   if (!getBlob(key(id))?.equals(encoded)) throw new Error('Scanner configuration could not be securely saved.');

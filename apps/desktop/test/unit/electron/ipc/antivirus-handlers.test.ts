@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   warning: { snapshot: vi.fn(), respond: vi.fn(), read: vi.fn(), reset: vi.fn() },
   registeredAccounts: [{ id: 'account-a' }, { id: 'account-b' }],
   requireAccount: vi.fn(),
+  onboarding: { setup: vi.fn(), connect: vi.fn(), complete: vi.fn(), cancel: vi.fn() },
 }));
 
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, handler: (...args: any[]) => Promise<any>) => h.handlers.set(channel, handler) } }));
@@ -19,6 +20,10 @@ vi.mock('../../../../electron/services/attachment-unscanned-warning', () => ({ g
 vi.mock('../../../../electron/services/attachment-warning-preferences', () => ({ unscannedWarningPreferences: { read: h.warning.read, reset: h.warning.reset } }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({ readRegistryAccounts: () => h.registeredAccounts }));
 vi.mock('../../../../electron/services/account-target', () => ({ requireTargetAccountId: h.requireAccount }));
+vi.mock('../../../../electron/services/antivirus-onboarding', () => ({
+  getOnboardingScannerSetup: h.onboarding.setup, connectSarvScannerOAuth: h.onboarding.connect,
+  completeSarvScannerOAuth: h.onboarding.complete, cancelSarvScannerOAuth: h.onboarding.cancel,
+}));
 
 import { registerAntivirusHandlers } from '../../../../electron/ipc/antivirus-handlers';
 
@@ -33,6 +38,44 @@ beforeEach(() => {
   h.warning.snapshot.mockReturnValue(null); h.warning.respond.mockResolvedValue(undefined); h.warning.read.mockReturnValue(false);
   h.requireAccount.mockImplementation((id: string) => { if (!h.registeredAccounts.some(account => account.id === id)) throw new Error('The attachment account is unavailable.'); return id; });
   registerAntivirusHandlers();
+});
+
+describe('trusted optional scanner onboarding IPC', () => {
+  // Regression: extension frames could silently install scanner code or create reusable scanning credentials.
+  it.each(['antivirus:getOnboardingSetup', 'antivirus:connectSarvOAuth', 'antivirus:completeSarvOAuth', 'antivirus:cancelSarvOAuth'])('blocks foreign frames for %s', async channel => {
+    for (const event of [{ sender: h.sender, senderFrame: {} }, { sender: {}, senderFrame: h.frame }]) {
+      expect(await callWarning(channel, event, 'account-a')).toMatchObject({ success: false, error: expect.stringContaining('Sarv Inbox') });
+    }
+    for (const method of Object.values(h.onboarding)) expect(method).not.toHaveBeenCalled();
+  });
+
+  // Regression: a fresh profile needs a trusted installation entry point without weakening sandbox extension permissions.
+  it('allows setup inspection and explicit sign-in in the main frame even before the extension is installed', async () => {
+    h.active = false; h.permissions = [];
+    h.onboarding.setup.mockResolvedValue({ configured: false });
+    expect(await callWarning('antivirus:getOnboardingSetup', trusted())).toEqual({ success: true, data: { configured: false } });
+    expect(await callWarning('antivirus:connectSarvOAuth', trusted(), 'account-b')).toMatchObject({ success: true });
+    expect(h.requireAccount).toHaveBeenCalledWith('account-b'); expect(h.onboarding.connect).toHaveBeenCalledWith('account-b');
+    expect(await callWarning('antivirus:cancelSarvOAuth', trusted())).toMatchObject({ success: true });
+    expect(h.onboarding.cancel).toHaveBeenCalledOnce();
+  });
+
+  // Regression: native OAuth transactions must bind to an existing explicit mailbox and actual attachment consent.
+  it('validates account, opaque challenge and privacy consent before finalization', async () => {
+    for (const value of [undefined, '', 42, 'x'.repeat(129), 'removed-account']) {
+      expect(await callWarning('antivirus:connectSarvOAuth', trusted(), value)).toMatchObject({ success: false });
+    }
+    for (const value of [undefined, 42, {}, { challenge: '', accountId: 'account-a', attachmentConsent: true },
+      { challenge: 'x'.repeat(129), accountId: 'account-a', attachmentConsent: true },
+      { challenge: 'challenge', accountId: 'account-a', attachmentConsent: false },
+      { challenge: 'challenge', accountId: 'removed-account', attachmentConsent: true }]) {
+      expect(await callWarning('antivirus:completeSarvOAuth', trusted(), value)).toMatchObject({ success: false });
+    }
+    expect(h.onboarding.connect).not.toHaveBeenCalled(); expect(h.onboarding.complete).not.toHaveBeenCalled();
+    const request = { challenge: 'synthetic-challenge', accountId: 'account-a', attachmentConsent: true };
+    expect(await callWarning('antivirus:completeSarvOAuth', trusted(), request)).toMatchObject({ success: true });
+    expect(h.onboarding.complete).toHaveBeenCalledWith(request);
+  });
 });
 
 // Breaks: extension/secondary frames answer warnings or change remembered decisions, or reset follows the active mailbox.
