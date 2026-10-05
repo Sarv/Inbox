@@ -70,8 +70,8 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.6.0",
     "prettier": "^3.9.9",
-    "turbo": "^2.11.4",
-    "typescript": "^6.0.0",
+    "turbo": "^2.11.7",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.2"
   },
   "packageManager": "pnpm@8.15.0",
