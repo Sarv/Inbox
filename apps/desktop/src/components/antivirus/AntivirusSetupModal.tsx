@@ -21,6 +21,8 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
   const [bodyConsent, setBodyConsent] = useState(false);
   const [busy, setBusy] = useState<'loading' | 'probing' | 'saving' | 'disabling' | null>('loading');
   const [error, setError] = useState('');
+  const [suppressedWarningAccounts, setSuppressedWarningAccounts] = useState<string[]>([]);
+  const [resettingWarningAccount, setResettingWarningAccount] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const activeRef = useRef(true);
@@ -38,13 +40,19 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
     const load = async () => {
       try {
         if (!api) throw new Error('Scanner setup is unavailable');
-        const response = await api.getSetup(extensionId);
+        const [response, warningPreferences] = await Promise.all([
+          api.getSetup(extensionId),
+          api.getUnscannedWarningPreferences?.().catch(() => undefined),
+        ]);
         if (!current) return;
         if (!response.success || !response.data) throw new Error(response.error || 'Could not load scanner setup');
         setSetup(response.data);
         setEndpoint(response.data.endpoint);
         setSelectedAccounts(response.data.allowedAccountIds);
         setAllowBody(response.data.allowBody);
+        if (warningPreferences?.success && warningPreferences.data) {
+          setSuppressedWarningAccounts(warningPreferences.data.suppressedAccountIds);
+        }
       } catch (failure) {
         if (current) setError(failure instanceof Error ? failure.message : String(failure));
       } finally {
@@ -134,6 +142,21 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
     }
   };
 
+  const showWarningsAgain = async (accountId: string) => {
+    if (!api || resettingWarningAccount) return;
+    setResettingWarningAccount(accountId); setError('');
+    try {
+      const response = await api.resetUnscannedWarningPreference(accountId);
+      if (!activeRef.current) return;
+      if (!response.success) throw new Error('Could not restore antivirus warnings. Try again.');
+      setSuppressedWarningAccounts((accounts) => accounts.filter((id) => id !== accountId));
+    } catch {
+      if (activeRef.current) setError('Could not restore antivirus warnings. Try again.');
+    } finally {
+      if (activeRef.current) setResettingWarningAccount(null);
+    }
+  };
+
   const privacyUrl = setup?.privacyPolicyUrl && /^https?:\/\//i.test(setup.privacyPolicyUrl) ? setup.privacyPolicyUrl : null;
   return (
     <div className="fixed inset-0 z-[280] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="antivirus-setup-title">
@@ -146,8 +169,22 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
           <button ref={cancelRef} type="button" disabled={busy === 'saving' || busy === 'disabling'} onClick={onClose} className="rounded px-2 py-1 text-sm hover:bg-muted" aria-label="Close scanner setup">Close</button>
         </header>
         <div className="space-y-4 overflow-y-auto p-4 text-sm">
-          <p className="text-muted-foreground">Selected files are sent to the service you configure. The extension receives scan results. Review the operator and privacy terms before enabling sharing.</p>
+          <p className="text-muted-foreground">When you view, open or download an attachment from an approved account, the app fetches it in the background and sends it to this scanner. You can view, open or save it only after a complete scan reports no threat. Manual scans remain available. Review the operator and privacy terms before enabling sharing.</p>
+          <p className="text-muted-foreground">If scanning has not been set up for an account, you can choose to continue without scanning after a warning. The attachment will be marked as not scanned.</p>
+          <p className="text-xs text-muted-foreground">This applies to every mail provider in the accounts you approve below. Attachment viewing, opening and downloads do not send the email body.</p>
           <p className="text-xs text-muted-foreground">Temporary processing; cancellation requests do not prove deletion and active inspection may continue until the scanner worker finishes.</p>
+          {setup?.accounts?.some((account) => suppressedWarningAccounts.includes(account.id)) && (
+            <section aria-label="Missing-setup warnings" className="space-y-2 rounded border border-border bg-muted/30 p-3">
+              <h3 className="font-medium">Missing-setup warnings</h3>
+              <p className="text-xs text-muted-foreground">You chose to hide the warning before viewing, opening or downloading unscanned attachments from these accounts.</p>
+              {setup.accounts.filter((account) => suppressedWarningAccounts.includes(account.id)).map((account) => (
+                <div key={account.id} className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 break-all">{account.name || account.email}</span>
+                  <button type="button" disabled={Boolean(busy) || Boolean(resettingWarningAccount)} aria-label={`Show antivirus warnings again for ${account.email}`} onClick={() => { void showWarningsAgain(account.id); }} className="shrink-0 text-xs text-primary underline underline-offset-2 disabled:opacity-50">{resettingWarningAccount === account.id ? 'Restoring…' : 'Show warnings again'}</button>
+                </div>
+              ))}
+            </section>
+          )}
           <label className="block">Scanner endpoint
             <input aria-label="Scanner endpoint" type="url" value={endpoint} disabled={Boolean(busy)} placeholder="https://scanner.example" onChange={(event) => {
               setEndpoint(event.target.value); invalidate(); setSelectedAccounts([]); setAllowBody(false);
@@ -184,7 +221,7 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
             </label>)}
             {!setup?.accounts?.length && <p className="text-muted-foreground">Add a mail account before enabling scanner sharing.</p>}
           </fieldset>
-          <label className="flex items-start gap-2"><input type="checkbox" checked={attachmentConsent} disabled={!challenge || Boolean(busy)} onChange={(event) => setAttachmentConsent(event.target.checked)} /><span>I agree to send selected attachments from these accounts to {setup?.operator || 'this scanner'} under the privacy terms shown above.</span></label>
+          <label className="flex items-start gap-2"><input type="checkbox" checked={attachmentConsent} disabled={!challenge || Boolean(busy)} onChange={(event) => setAttachmentConsent(event.target.checked)} /><span>I agree to send selected attachments, including each attachment I view, open or download from these accounts, to {setup?.operator || 'this scanner'} under the privacy terms shown above.</span></label>
           <label className="flex items-start gap-2"><input type="checkbox" checked={allowBody} disabled={Boolean(busy)} onChange={(event) => { setAllowBody(event.target.checked); setBodyConsent(false); }} /><span>Allow email body scanning when I choose it for a message</span></label>
           {allowBody && <label className="flex items-start gap-2"><input type="checkbox" checked={bodyConsent} disabled={!challenge || Boolean(busy)} onChange={(event) => setBodyConsent(event.target.checked)} /><span>I separately agree to share email body text with this scanner. Each body scan still requires my explicit choice.</span></label>}
           {error && <p role="alert" className="rounded border border-destructive/40 bg-destructive/10 p-3 text-destructive">{error}</p>}

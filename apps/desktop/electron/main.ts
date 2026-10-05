@@ -18,7 +18,7 @@ import { join } from 'path';
 
 import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
-import { app, BrowserWindow, Menu, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain, powerMonitor, protocol, session, shell } from 'electron';
 
 import { registerAllHandlers } from './ipc';
 import { sendEmailFromMain, appendSentCopy } from './ipc/smtp-handlers';
@@ -44,6 +44,8 @@ import {
 import { loadAgentConfig } from './services/agent-config-store';
 import { getAllAiSecrets } from './services/ai-secret-store';
 import { createAntivirusDesktopBackend } from './services/antivirus-desktop-backend';
+import { attachmentScanRequired } from './services/attachment-download-protection';
+import { getAttachmentPreviewProtection } from './services/attachment-preview-protection';
 import {
   ATTACHMENT_SCHEME_PRIVILEGES,
   registerAttachmentProtocol,
@@ -74,6 +76,7 @@ import { startFollowUpChecker, stopFollowUpChecker } from './services/follow-up-
 import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
 import { offerMoveToApplications } from './services/mac-install-location';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
+import { installNativeAttachmentDownloadGuard } from './services/native-attachment-download-guard';
 import { startNotificationService, stopNotificationService } from './services/notification-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
 import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
@@ -475,6 +478,20 @@ function createWindow(): void {
 
   setMainWindow(mainWindow);
 
+  // Chromium PDF/media controls use session downloads instead of the attachment IPC.
+  // Install before navigation, and tie the listener to this window's lifecycle.
+  const removeNativeDownloadGuard = installNativeAttachmentDownloadGuard(mainWindow.webContents.session, {
+    inboxWebContents: () => mainWindow.isDestroyed() ? undefined : mainWindow.webContents,
+    scanningRequired: () => attachmentScanRequired(getExtensionManager()),
+    notifyBlocked: () => dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Attachment download protected',
+      message: 'Use “Save a copy” to download this attachment.',
+      detail: 'Antivirus scanning is enabled. Use the download button in Sarv Inbox so the attachment is scanned before it is saved.',
+      buttons: ['OK'],
+    }).catch(() => { logger.warn('[Main] Could not show the attachment download instruction.'); }),
+  });
+
   // Load URL
   if (VITE_DEV_SERVER_URL) {
     // The cache reset must NEVER gate navigation. The window is `show: false`
@@ -559,6 +576,7 @@ function createWindow(): void {
   });
 
   mainWindow.on('closed', () => {
+    removeNativeDownloadGuard();
     setMainWindow(null);
   });
 }
@@ -1273,6 +1291,13 @@ app.on('before-quit', (event) => {
     // captures everything below.
     muteTerminalOutput();
     stopBackgroundTimers();
+    // Cancel pending attachment actions and erase retained clean preview bytes
+    // before disconnecting their account runtimes or exiting the process.
+    try {
+      await getAttachmentPreviewProtection()?.dispose();
+    } catch (error) {
+      logger.warn('Could not clear attachment previews on shutdown:', error);
+    }
     // Let the pipeline-event persister's final flush reach the DB before we
     // start closing things underneath it.
     await awaitBackgroundTimerShutdown();

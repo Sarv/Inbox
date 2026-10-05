@@ -1,11 +1,13 @@
 import type { ExtensionSecurityBackend } from '@sarvinbox/core';
-import { app, safeStorage } from 'electron';
+import { safeStorage } from 'electron';
 
 import { getMainWindow, getSyncEngineFor } from '../shared';
+import { isDevBuild } from '../utils/dev-mode';
 
 import { requireAccountStorage } from './account-target';
 import { readRegistryAccounts } from './accounts-registry';
 import { initializeAntivirusScanService, type ScanSource, type ScannerConfiguration } from './antivirus-scan-service';
+import { unscannedWarningPreferences } from './attachment-warning-preferences';
 import { getBlob, getCoreDb, setBlob, deleteBlob } from './core-db';
 
 const key = (id: string) => {
@@ -32,11 +34,17 @@ async function readConfiguration(id: string): Promise<ScannerConfiguration | und
 
 async function writeConfiguration(id: string, config: ScannerConfiguration | undefined): Promise<void> {
   getCoreDb();
-  if (!config) { deleteBlob(key(id)); if (getBlob(key(id))) throw new Error('Scanner configuration could not be removed.'); return; }
+  if (!config) {
+    deleteBlob(key(id));
+    if (getBlob(key(id))) throw new Error('Scanner configuration could not be removed.');
+    unscannedWarningPreferences.resetAll();
+    return;
+  }
   requireSecureStorage();
   const encoded = Buffer.concat([Buffer.from('ENC1:'), safeStorage.encryptString(JSON.stringify(config))]);
   setBlob(key(id), encoded);
   if (!getBlob(key(id))?.equals(encoded)) throw new Error('Scanner configuration could not be securely saved.');
+  unscannedWarningPreferences.resetAll();
 }
 
 function names(value: string | null): string[] {
@@ -97,7 +105,7 @@ async function read(source: ScanSource, maxBytes: number, signal?: AbortSignal):
 export function createAntivirusDesktopBackend(): ExtensionSecurityBackend {
   return initializeAntivirusScanService({ readConfiguration, writeConfiguration,
     accounts: () => readRegistryAccounts().map(a => ({ id: a.id, name: a.name || a.email, email: a.email })), sources, read,
-    allowDevelopmentLoopback: !app.isPackaged,
+    allowDevelopmentLoopback: isDevBuild(),
     openSetup: extensionId => getMainWindow()?.webContents.send('antivirus:openSetup', { extensionId }),
   });
 }

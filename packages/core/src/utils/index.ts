@@ -9,6 +9,7 @@ export * from './oauth-imap-presets';
 export * from './gmail-labels';
 export * from './role-address';
 export * from './timeout';
+export * from './abortable-operation';
 export * from './connect-timeout';
 export * from './deferred-fetch-error';
 export * from './event-loop';

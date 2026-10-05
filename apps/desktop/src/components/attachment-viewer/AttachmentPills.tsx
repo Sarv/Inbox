@@ -3,6 +3,7 @@ import { useState } from 'react';
 
 import { Tooltip } from '../Tooltip';
 
+import { AttachmentDownloadStatus } from './AttachmentDownloadStatus';
 import { AttachmentViewer, formatSize, type ViewerAttachment } from './AttachmentViewer';
 import { useAttachmentActions } from './useAttachmentActions';
 
@@ -36,7 +37,8 @@ interface AttachmentPillsProps {
 }
 
 export function AttachmentPills({ emailId, accountId, attachments }: AttachmentPillsProps) {
-  const { isBusy, saveCopy } = useAttachmentActions();
+  const actions = useAttachmentActions();
+  const { isBusy, getStatus, saveCopy, cancelDownload } = actions;
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
 
   if (attachments.length === 0) return null;
@@ -50,38 +52,42 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
           const busy = isBusy(emailId, attachment.name);
           const size = formatSize(attachment.size);
           return (
-            <span className="sec-chip" key={`${attachment.name}:${index}`}>
-              {/* The filename, not just "Open": the library ellipsises the
-                  name at 22ch and the native `title` that used to reveal it in
-                  full is gone, so this tooltip is now the only way to read a
-                  long one. */}
-              <Tooltip content={`Open ${attachment.name}`} delayMs={40}>
-                <button
-                  type="button"
-                  className="sarv-chip__open"
-                  aria-label={`Open ${attachment.name}`}
-                  onClick={() => setViewerIndex(index)}
-                >
-                  {busy ? (
-                    <Loader2 className="sec-chip__clip h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Paperclip className="sec-chip__clip h-3.5 w-3.5" />
-                  )}
-                  <span className="sec-chip__name">{attachment.name}</span>
-                  {size ? <span className="sec-chip__size">{size}</span> : null}
-                </button>
-              </Tooltip>
-              <Tooltip content="Save a copy" delayMs={40}>
-                <button
-                  type="button"
-                  className="sec-chip__btn"
-                  aria-label={`Save a copy of ${attachment.name}`}
-                  onClick={() => void saveCopy({ emailId, filename: attachment.name, accountId })}
-                >
-                  <Download className="h-3.5 w-3.5" />
-                </button>
-              </Tooltip>
-            </span>
+            <div className="inline-flex min-w-0 max-w-full flex-col" key={`${attachment.name}:${index}`}>
+              <span className="sec-chip">
+                {/* The filename, not just "Open": the library ellipsises the
+                    name at 22ch and the native `title` that used to reveal it in
+                    full is gone, so this tooltip is now the only way to read a
+                    long one. */}
+                <Tooltip content={`Open ${attachment.name}`} delayMs={40}>
+                  <button
+                    type="button"
+                    className="sarv-chip__open"
+                    aria-label={`Open ${attachment.name}`}
+                    onClick={() => setViewerIndex(index)}
+                  >
+                    {busy ? (
+                      <Loader2 className="sec-chip__clip h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Paperclip className="sec-chip__clip h-3.5 w-3.5" />
+                    )}
+                    <span className="sec-chip__name">{attachment.name}</span>
+                    {size ? <span className="sec-chip__size">{size}</span> : null}
+                  </button>
+                </Tooltip>
+                <Tooltip content="Save a copy" delayMs={40}>
+                  <button
+                    type="button"
+                    className="sec-chip__btn"
+                    aria-label={`Save a copy of ${attachment.name}`}
+                    disabled={busy}
+                    onClick={() => void saveCopy({ emailId, filename: attachment.name, accountId })}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
+              </span>
+              <AttachmentDownloadStatus status={getStatus(emailId, attachment.name)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name); }} />
+            </div>
           );
         })}
       </div>
@@ -92,6 +98,7 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
           accountId={accountId}
           attachments={attachments}
           initialIndex={viewerIndex}
+          actions={actions}
           onClose={() => setViewerIndex(null)}
         />
       )}

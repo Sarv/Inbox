@@ -105,7 +105,7 @@ vi.mock('../../../../../src/components/attachment-viewer/AttachmentViewer', () =
 
 const saveCopy = vi.fn();
 vi.mock('../../../../../src/components/attachment-viewer/useAttachmentActions', () => ({
-  useAttachmentActions: () => ({ saveCopy, isBusy: () => false }),
+  useAttachmentActions: () => ({ saveCopy, isBusy: () => false, getStatus: () => undefined }),
 }));
 vi.mock('../../../../../src/services/ai-service', () => ({
   getCurrentUserEmail: () => 'me@acme.example',

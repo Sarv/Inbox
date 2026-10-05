@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
+import { isModalAlertOpen } from '../utils/modal-alert';
+
 /**
  * Index state and keyboard handling for anything shown one-at-a-time in an
  * overlay: the attachment viewer, the extension screenshots.
@@ -34,6 +36,10 @@ export function useGalleryNavigation({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      // The attachment warning mounts after the viewer, so its capture listener
+      // cannot prevent this earlier listener from navigating or closing beneath it.
+      // Check the modal itself, including when focus has stayed in the background.
+      if (isModalAlertOpen()) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();

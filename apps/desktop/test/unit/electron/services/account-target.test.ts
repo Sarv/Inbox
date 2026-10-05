@@ -54,6 +54,7 @@ import {
   openAccountStorages,
   requireAccountStorage,
   requireNamedOrActiveStorage,
+  requireTargetAccountId,
   resolveAccountTarget,
   resolveNamedOrActiveAccountTarget,
 } from '../../../../electron/services/account-target';
@@ -73,6 +74,25 @@ beforeEach(() => {
   h.created = [];
   vi.mocked(ensureAccountRuntime).mockClear();
   vi.mocked(readRegistryAccounts).mockClear();
+});
+
+describe('attachment download account identity', () => {
+  // Breaks: All Inboxes scans a non-active mailbox's attachment under the active account's consent.
+  it('preserves the named owner and resolves the active owner only when omitted', () => {
+    expect(requireTargetAccountId('acct-b')).toBe('acct-b');
+    expect(requireTargetAccountId()).toBe('acct-a');
+    expect(ensureAccountRuntime).not.toHaveBeenCalled();
+  });
+  // Breaks: a removed, blank or unreadable mailbox silently falls back and shares another account's bytes.
+  it('rejects unavailable identities and propagates unreadable registry failures', () => {
+    expect(() => requireTargetAccountId('')).toThrow(/unavailable/);
+    expect(() => requireTargetAccountId('acct-gone')).toThrow(/unavailable/);
+    h.current = null;
+    expect(() => requireTargetAccountId()).toThrow(/unavailable/);
+    h.registryError = new Error('Encrypted registry is unavailable');
+    expect(() => requireTargetAccountId('acct-b')).toThrow(/Encrypted registry/);
+    expect(ensureAccountRuntime).not.toHaveBeenCalled();
+  });
 });
 
 describe('requireAccountStorage — strict, per account', () => {

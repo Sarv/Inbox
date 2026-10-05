@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
 import { messageAccountOf } from '../../utils/pane-account';
 import { remoteImageFactsOf } from '../../utils/remote-images';
+import { UnscannedAttachmentNotice } from '../attachment-viewer/AttachmentDownloadStatus';
 import { formatSize } from '../attachment-viewer/AttachmentViewer';
 import { SandboxedEmailBody } from '../SandboxedEmailBody';
 import { Tooltip } from '../Tooltip';
@@ -115,6 +116,7 @@ export function PgpMessageView({ email, paneAccountId, children }: PgpMessageVie
   const [state, setState] = useState<OpenState>({ phase: 'opening' });
   const [attempt, setAttempt] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [unscannedSave, setUnscannedSave] = useState<{ emailId: string; accountId?: string; index: number }>();
 
   useEffect(() => {
     if (!status) return undefined;
@@ -184,8 +186,12 @@ export function PgpMessageView({ email, paneAccountId, children }: PgpMessageVie
 
   const save = async (index: number) => {
     setSaveError(null);
+    setUnscannedSave(undefined);
     const result = await window.electronAPI.pgp.saveAttachment(email.id, accountId, index);
     if (!result.success) setSaveError(result.error);
+    else if (result.data?.saved === true && result.data.notScanned === true) {
+      setUnscannedSave({ emailId: email.id, accountId, index });
+    }
   };
 
   return (
@@ -201,17 +207,20 @@ export function PgpMessageView({ email, paneAccountId, children }: PgpMessageVie
       {view.attachments.length > 0 && (
         <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4">
           {view.attachments.map((attachment) => (
-            <Tooltip key={attachment.index} content={`Save ${attachment.name}`} delayMs={40}>
-              <button
-                onClick={() => void save(attachment.index)}
-                aria-label={`Save ${attachment.name}`}
-                className="inline-flex max-w-xs items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-sm hover:bg-accent"
-              >
-                <Download className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-                <span className="truncate">{attachment.name}</span>
-                <span className="flex-shrink-0 text-xs text-muted-foreground">{formatSize(attachment.size)}</span>
-              </button>
-            </Tooltip>
+            <div key={attachment.index}>
+              <Tooltip content={`Save ${attachment.name}`} delayMs={40}>
+                <button
+                  onClick={() => void save(attachment.index)}
+                  aria-label={`Save ${attachment.name}`}
+                  className="inline-flex max-w-xs items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-sm hover:bg-accent"
+                >
+                  <Download className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                  <span className="truncate">{attachment.name}</span>
+                  <span className="flex-shrink-0 text-xs text-muted-foreground">{formatSize(attachment.size)}</span>
+                </button>
+              </Tooltip>
+              {unscannedSave?.emailId === email.id && unscannedSave.accountId === accountId && unscannedSave.index === attachment.index && <UnscannedAttachmentNotice />}
+            </div>
           ))}
         </div>
       )}

@@ -22,6 +22,8 @@ const api = {
   probe: vi.fn(async (_extensionId: string, _endpoint: string, _credential?: string) => ({ success: true, data: { challenge: 'verified-challenge', setup: verified } })),
   configure: vi.fn(async () => ({ success: true })),
   disable: vi.fn(async () => ({ success: true })),
+  getUnscannedWarningPreferences: vi.fn(async () => ({ success: true, data: { suppressedAccountIds: [] as string[] } })),
+  resetUnscannedWarningPreference: vi.fn(async (_accountId: string) => ({ success: true })),
   onOpenSetup: (callback: typeof openSetup) => { openSetup = callback; return () => { openSetup = undefined; }; },
 };
 const openExternal = vi.fn(async () => ({ success: true }));
@@ -44,6 +46,8 @@ beforeEach(() => {
   api.probe.mockReset().mockResolvedValue({ success: true, data: { challenge: 'verified-challenge', setup: verified } });
   api.configure.mockReset().mockResolvedValue({ success: true });
   api.disable.mockReset().mockResolvedValue({ success: true });
+  api.getUnscannedWarningPreferences.mockReset().mockResolvedValue({ success: true, data: { suppressedAccountIds: [] } });
+  api.resetUnscannedWarningPreference.mockReset().mockResolvedValue({ success: true });
   openExternal.mockClear();
   (window as unknown as { electronAPI: unknown }).electronAPI = { antivirus: api, app: { openExternal } };
   mounted = render(<AntivirusSetupModal />);
@@ -51,6 +55,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); document.body.innerHTML = ''; });
 
 describe('trusted antivirus setup', () => {
+  // Breaks: consent still describes manual scans alone, hiding the automatic
+  // attachment upload on Download or implying that email bodies are uploaded.
+  it('discloses scan-before-save for approved accounts across mail providers', async () => {
+    await open(); await probe();
+    const copy = mounted.container.textContent;
+    expect(copy).toContain('When you view, open or download an attachment from an approved account');
+    expect(copy).toContain('view, open or save it only after a complete scan reports no threat');
+    expect(copy).toContain('If scanning has not been set up for an account, you can choose to continue without scanning after a warning.');
+    expect(copy).toContain('The attachment will be marked as not scanned.');
+    expect(copy).toContain('every mail provider');
+    expect(copy).toContain('Attachment viewing, opening and downloads do not send the email body');
+    expect(checkbox('including each attachment I view, open or download')).not.toBeNull();
+    expect((checkbox('Allow email body scanning') as HTMLInputElement).checked).toBe(false);
+  });
+
   it('opens only for the app event and leaves new account consent unchecked', async () => {
     expect(mounted.find('[role="dialog"]')).toBeNull();
     await open();
@@ -122,5 +141,93 @@ describe('trusted antivirus setup', () => {
     await settle();
     expect(api.disable).toHaveBeenCalledWith('clamav-scan');
     expect(mounted.find('[role="dialog"]')).toBeNull();
+  });
+
+  // Breaks: a user cannot restore the warning hidden for one account without changing scanner consent.
+  it('restores missing-setup warnings for only the account selected in scanner setup', async () => {
+    api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: true, data: { suppressedAccountIds: ['work', 'personal'] } });
+    await open();
+    const section = mounted.byLabel('Missing-setup warnings');
+    expect(section?.textContent).toContain('Work');
+    expect(section?.textContent).toContain('Personal');
+    fire(mounted.byLabel('Show antivirus warnings again for work@example.test'), 'click');
+    await settle();
+    expect(api.resetUnscannedWarningPreference).toHaveBeenCalledExactlyOnceWith('work');
+    expect(mounted.byLabel('Show antivirus warnings again for work@example.test')).toBeNull();
+    expect(mounted.byLabel('Show antivirus warnings again for personal@example.test')).not.toBeNull();
+    expect(api.configure).not.toHaveBeenCalled();
+    expect(api.disable).not.toHaveBeenCalled();
+  });
+
+  // Breaks: warning preferences for a deleted account appear as an unrelated mailbox setting.
+  it('shows no reset section for unknown accounts or when no warnings are hidden', async () => {
+    api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: true, data: { suppressedAccountIds: ['deleted-account'] } });
+    await open();
+    expect(mounted.byLabel('Missing-setup warnings')).toBeNull();
+  });
+
+  // Breaks: a preference read failure prevents the user from configuring antivirus scanning.
+  it.each(['result', 'rejection'] as const)('allows scanner setup when warning preference loading fails with %s', async (failure) => {
+    if (failure === 'result') api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: false, data: { suppressedAccountIds: [] } });
+    else api.getUnscannedWarningPreferences.mockRejectedValueOnce(new Error('synthetic preference failure'));
+    await open();
+    expect(mounted.find('[role="dialog"]')).not.toBeNull();
+    expect(mounted.byLabel('Scanner endpoint')).not.toBeNull();
+    expect(mounted.byLabel('Missing-setup warnings')).toBeNull();
+    expect(mounted.find('[role="alert"]')).toBeNull();
+  });
+
+  // Breaks: a failed reset silently claims warnings are restored instead of allowing a retry.
+  it.each(['result', 'rejection'] as const)('keeps the preference and supports retry after a reset %s failure', async (failure) => {
+    api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: true, data: { suppressedAccountIds: ['work'] } });
+    if (failure === 'result') api.resetUnscannedWarningPreference.mockResolvedValueOnce({ success: false });
+    else api.resetUnscannedWarningPreference.mockRejectedValueOnce(new Error('synthetic private path'));
+    await open();
+    fire(mounted.byLabel('Show antivirus warnings again for work@example.test'), 'click');
+    await settle();
+    expect(mounted.find('[role="alert"]')?.textContent).toBe('Could not restore antivirus warnings. Try again.');
+    expect(mounted.container.textContent).not.toContain('synthetic private path');
+    expect(mounted.byLabel('Show antivirus warnings again for work@example.test')).not.toBeNull();
+    fire(mounted.byLabel('Show antivirus warnings again for work@example.test'), 'click');
+    await settle();
+    expect(api.resetUnscannedWarningPreference).toHaveBeenCalledTimes(2);
+    expect(mounted.byLabel('Missing-setup warnings')).toBeNull();
+  });
+
+  // Breaks: a user without an account display name cannot identify its hidden warning preference.
+  it('uses the account email as the reset label when a display name is absent', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: { ...base, accounts: [{ id: 'work', name: '', email: 'work@example.test' }] } });
+    api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: true, data: { suppressedAccountIds: ['work'] } });
+    await open();
+    expect(mounted.byLabel('Missing-setup warnings')?.textContent).toContain('work@example.test');
+  });
+
+  // Breaks: repeated clicks submit duplicate resets while a preference is being saved.
+  it('disables reset controls while saving and ignores late success after setup closes', async () => {
+    let resolve!: (value: { success: boolean }) => void;
+    api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: true, data: { suppressedAccountIds: ['work'] } });
+    api.resetUnscannedWarningPreference.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    await open();
+    const resetButton = mounted.byLabel('Show antivirus warnings again for work@example.test');
+    fire(resetButton, 'click'); fire(resetButton, 'click');
+    expect(resetButton?.textContent).toBe('Restoring…');
+    expect((resetButton as HTMLButtonElement).disabled).toBe(true);
+    expect(api.resetUnscannedWarningPreference).toHaveBeenCalledTimes(1);
+    fire(button('Cancel'), 'click');
+    await act(async () => resolve({ success: true }));
+    expect(mounted.find('[role="dialog"]')).toBeNull();
+  });
+
+  // Breaks: a late reset rejection reopens or mutates a scanner setup dialog that was closed.
+  it('ignores late reset errors after setup closes', async () => {
+    let reject!: (failure: Error) => void;
+    api.getUnscannedWarningPreferences.mockResolvedValueOnce({ success: true, data: { suppressedAccountIds: ['work'] } });
+    api.resetUnscannedWarningPreference.mockImplementationOnce(() => new Promise((_done, fail) => { reject = fail; }));
+    await open();
+    fire(mounted.byLabel('Show antivirus warnings again for work@example.test'), 'click');
+    fire(button('Cancel'), 'click');
+    await act(async () => reject(new Error('late preference failure')));
+    expect(mounted.find('[role="dialog"]')).toBeNull();
+    expect(mounted.find('[role="alert"]')).toBeNull();
   });
 });

@@ -7,15 +7,16 @@ vi.mock('electron', () => ({
   safeStorage: {},
 }));
 vi.mock('fs/promises', () => ({ writeFile: h.writeFile }));
-vi.mock('../../../../electron/services/account-target', () => ({ resolveAccountTarget: h.resolve }));
+vi.mock('../../../../electron/services/account-target', () => ({ resolveAccountTarget: h.resolve, requireTargetAccountId: h.requireTarget }));
 vi.mock('../../../../electron/services/pgp-service', () => ({
   getPgpKeyring: () => h.keyring,
   readPgpPrefsFromSettings: () => h.prefs(),
 }));
-vi.mock('../../../../electron/shared', () => ({ getMainWindow: () => h.window }));
+vi.mock('../../../../electron/shared', () => ({ getMainWindow: () => h.window, getExtensionManager: () => null }));
 
 const h = vi.hoisted(() => ({
   resolve: vi.fn(),
+  requireTarget: vi.fn((id?: string) => id ?? 'current-account'),
   channels: new Map<string, (...a: unknown[]) => unknown>(),
   showSaveDialog: vi.fn(),
   writeFile: vi.fn(async () => undefined),
@@ -24,7 +25,8 @@ const h = vi.hoisted(() => ({
   window: null as unknown,
 }));
 
-import { createPgpHandlers, getPgpReader, registerPgpHandlers, safeDefaultName, storedSourceFor } from '../../../../electron/ipc/pgp-handlers';
+import { createPgpHandlers, getPgpReader, registerPgpHandlers, safeDefaultName, storedSourceFor, type PgpHandlerDeps } from '../../../../electron/ipc/pgp-handlers';
+import { AttachmentOperationProtection, setAttachmentOperationProtection } from '../../../../electron/services/attachment-download-protection';
 import { PgpKeyringError, type PgpKeyring } from '../../../../electron/services/pgp-keyring';
 import type { PgpReader } from '../../../../electron/services/pgp-reader';
 
@@ -55,7 +57,8 @@ const keyringStub = (over: Partial<Record<keyof PgpKeyring, unknown>> = {}) =>
     ...over,
   }) as unknown as PgpKeyring;
 
-const setup = (options: { keyring?: PgpKeyring; savePath?: string | null; attachment?: unknown } = {}) => {
+const setup = (options: { keyring?: PgpKeyring; savePath?: string | null; attachment?: unknown; scanRequired?: boolean;
+  protectAttachmentSave?: PgpHandlerDeps['protectAttachmentSave']; writeProtectedAttachment?: PgpHandlerDeps['writeProtectedAttachment'] } = {}) => {
   const keyring = options.keyring ?? keyringStub();
   const reader = {
     open: vi.fn(async () => ({ ok: true })),
@@ -69,8 +72,10 @@ const setup = (options: { keyring?: PgpKeyring; savePath?: string | null; attach
   };
   const chooseSavePath = vi.fn(async () => (options.savePath === undefined ? '/chosen/file' : options.savePath));
   const writeFile = vi.fn(async () => undefined);
-  const handlers = createPgpHandlers({ keyring: () => keyring, reader, autoEncrypt: () => true, chooseSavePath, writeFile });
-  return { handlers, keyring, reader, chooseSavePath, writeFile };
+  const scanRequired = vi.fn(() => options.scanRequired ?? false);
+  const handlers = createPgpHandlers({ keyring: () => keyring, reader, autoEncrypt: () => true, chooseSavePath, writeFile, attachmentScanRequired: scanRequired,
+    protectAttachmentSave: options.protectAttachmentSave, writeProtectedAttachment: options.writeProtectedAttachment });
+  return { handlers, keyring, reader, chooseSavePath, writeFile, scanRequired };
 };
 
 describe('key management', () => {
@@ -225,8 +230,35 @@ describe('reading', () => {
       attachment: { name: '..\\..\\evil/plan.pdf', content: Buffer.from('pdf') },
     });
     expect(await handlers['pgp:saveAttachment']('e1', 'acct', 0)).toMatchObject({ success: true, data: { saved: true } });
-    expect(chooseSavePath).toHaveBeenCalledWith('plan.pdf', undefined);
+    expect(chooseSavePath).toHaveBeenCalledWith('plan.pdf');
     expect(writeFile).toHaveBeenCalledWith('/chosen/file', Buffer.from('pdf'));
+  });
+
+  // Breaks: encrypted-message saves bypass AV or upload private plaintext without reviewed consent.
+  it('blocks decrypted attachment saves when antivirus is enabled without sharing plaintext', async () => {
+    const f = setup({ scanRequired: true, attachment: { name: 'private.pdf', content: Buffer.from('private plaintext') } });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'acct', 0)).toEqual({
+      success: false, error: 'Download blocked: encrypted OpenPGP attachments cannot be scanned.',
+    });
+    expect(f.reader.attachment).not.toHaveBeenCalled(); expect(f.chooseSavePath).not.toHaveBeenCalled();
+    expect(f.writeFile).not.toHaveBeenCalled();
+  });
+
+  // Breaks: an open native save dialog bypasses protection enabled before the final write.
+  it('blocks the decrypted save if antivirus becomes enabled while choosing a destination', async () => {
+    const f = setup({ attachment: { name: 'private.pdf', content: Buffer.from('private plaintext') } });
+    f.chooseSavePath.mockImplementation(async () => { f.scanRequired.mockReturnValue(true); return '/chosen/file'; });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'acct', 0)).toMatchObject({
+      success: false, error: 'Download blocked: encrypted OpenPGP attachments cannot be scanned.',
+    });
+    expect(f.writeFile).not.toHaveBeenCalled();
+  });
+
+  // Breaks: enabling attachment AV prevents users from backing up their own OpenPGP keys.
+  it('allows key backups independently of attachment antivirus protection', async () => {
+    const f = setup({ scanRequired: true });
+    expect(await f.handlers['pgp:exportOwnKey']('F'.repeat(40), 'passphrase')).toMatchObject({ success: true, data: { saved: true } });
+    expect(f.writeFile).toHaveBeenCalledWith('/chosen/file', 'SECRET-ARMOR');
   });
 
   // Breaks: saving from a message evicted from memory silently writes nothing.
@@ -306,6 +338,92 @@ describe('storedSourceFor', () => {
   });
 });
 
+// Breaks: decrypted attachments are uploaded, treated as clean, or saved after one-action warning consent changes.
+describe('optional setup for decrypted attachment saves', () => {
+  const protectedSetup = (options: { missing?: boolean; choice?: 'continue' | 'setup' | 'cancel'; savePath?: string | null; atomic?: boolean } = {}) => {
+    const current = vi.fn().mockResolvedValue(undefined);
+    const confirm = vi.fn().mockResolvedValue(options.choice ?? 'continue');
+    const scan = vi.fn().mockRejectedValue(new Error('Plaintext must not be uploaded'));
+    const openSetup = vi.fn();
+    const operations = new AttachmentOperationProtection({
+      scanners: () => [{ id: 'clamav-scan', enabled: true, active: true, scanner: true, granted: true }],
+      checkSetup: async () => options.missing === false ? undefined : { assertCurrent: current },
+      confirmUnscanned: confirm, scan, openSetup, progress: vi.fn(),
+    });
+    const atomic = vi.fn(async (_file: string, _content: Buffer, _signal: AbortSignal, beforeCommit: () => Promise<void>) => { await beforeCommit(); });
+    const f = setup({
+      attachment: { name: 'private.pdf', content: Buffer.from('synthetic private plaintext') }, savePath: options.savePath,
+      protectAttachmentSave: (target, consume) => operations.run(target.emailId, target.accountId ?? 'current-account', target.filename,
+        consume, 'pgp-save-test', 'Download blocked: encrypted OpenPGP attachments cannot be scanned.', 'download'),
+      writeProtectedAttachment: options.atomic === false ? undefined : atomic,
+    });
+    return { ...f, current, confirm, scan, openSetup, atomic, operations };
+  };
+
+  it('requires a warning for each plaintext save and uses the atomic guarded writer without uploading', async () => {
+    const f = protectedSetup();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await f.handlers['pgp:saveAttachment']('message-b', 'account-b', 0)).toEqual({ success: true,
+        data: { saved: true, filePath: '/chosen/file', notScanned: true } });
+    }
+    expect(f.confirm).toHaveBeenCalledTimes(2);
+    expect(f.confirm).toHaveBeenCalledWith({ messageId: 'message-b', accountId: 'account-b', filename: 'private.pdf', action: 'download' }, expect.any(AbortSignal), expect.any(Function));
+    expect(f.atomic).toHaveBeenCalledWith('/chosen/file', Buffer.from('synthetic private plaintext'), expect.any(AbortSignal), expect.any(Function));
+    expect(f.scan).not.toHaveBeenCalled(); expect(f.writeFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'setup'] as const)('does not choose or write a plaintext file after %s', async choice => {
+    const f = protectedSetup({ choice });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'account-b', 0)).toEqual({ success: false, error: 'Download cancelled.' });
+    expect(f.openSetup).toHaveBeenCalledTimes(choice === 'setup' ? 1 : 0);
+    expect(f.chooseSavePath).not.toHaveBeenCalled(); expect(f.atomic).not.toHaveBeenCalled(); expect(f.scan).not.toHaveBeenCalled();
+  });
+
+  it('blocks configured scanners without warning or plaintext upload', async () => {
+    const f = protectedSetup({ missing: false });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'account-b', 0)).toEqual({ success: false, error: 'Download blocked: encrypted OpenPGP attachments cannot be scanned.' });
+    expect(f.confirm).not.toHaveBeenCalled(); expect(f.chooseSavePath).not.toHaveBeenCalled(); expect(f.scan).not.toHaveBeenCalled();
+  });
+
+  it('cancels the destination without marking anything as scanned or saved', async () => {
+    const f = protectedSetup({ savePath: null });
+    expect(await f.handlers['pgp:saveAttachment']('e1', undefined, 0)).toEqual({ success: true, data: { saved: false } });
+    expect(f.confirm).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'current-account', action: 'download' }), expect.any(AbortSignal), expect.any(Function));
+    expect(f.atomic).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the warned save has no guarded atomic writer', async () => {
+    const f = protectedSetup({ atomic: false });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'account-b', 0)).toEqual({ success: false, error: 'Attachment protection is unavailable. Try again.' });
+    expect(f.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('blocks a setup change during the destination dialog before committing plaintext', async () => {
+    const f = protectedSetup();
+    f.chooseSavePath.mockImplementation(async () => { f.current.mockRejectedValue(new Error('Antivirus setup changed. Try again.')); return '/chosen/file'; });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'account-b', 0)).toEqual({ success: false, error: 'Antivirus setup changed. Try again.' });
+    expect(f.atomic).not.toHaveBeenCalled(); expect(f.scan).not.toHaveBeenCalled();
+  });
+
+  it('cancels an open destination dialog immediately and ignores its late path', async () => {
+    const f = protectedSetup(); let finish!: (path: string) => void;
+    f.chooseSavePath.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = f.handlers['pgp:saveAttachment']('e1', 'account-b', 0);
+    await vi.waitFor(() => expect(f.chooseSavePath).toHaveBeenCalled());
+    expect(f.operations.cancel('pgp-save-test')).toBe(true);
+    expect(await pending).toEqual({ success: false, error: 'Download cancelled.' });
+    finish('/late/path'); await Promise.resolve(); expect(f.atomic).not.toHaveBeenCalled();
+  });
+
+  it('uses the legacy writer only for a protected operation with no enabled scanner', async () => {
+    const operations = new AttachmentOperationProtection({ scanners: () => [], scan: vi.fn(), openSetup: vi.fn(), progress: vi.fn() });
+    const f = setup({ attachment: { name: 'private.pdf', content: Buffer.from('synthetic') },
+      protectAttachmentSave: (target, consume) => operations.run(target.emailId, target.accountId ?? 'current-account', target.filename, consume) });
+    expect(await f.handlers['pgp:saveAttachment']('e1', 'account-b', 0)).toEqual({ success: true, data: { saved: true, filePath: '/chosen/file' } });
+    expect(f.writeFile).toHaveBeenCalledWith('/chosen/file', Buffer.from('synthetic'));
+  });
+});
+
 describe('registerPgpHandlers', () => {
   // Breaks: a channel the preload calls has no handler, so that button rejects with "No handler registered".
   it('registers every channel, wired to the real dialog, file write and settings', async () => {
@@ -339,5 +457,30 @@ describe('registerPgpHandlers', () => {
   // Breaks: key deletion clears a different reader's cache than the one that holds the plaintext.
   it('shares one reader across the process', () => {
     expect(getPgpReader()).toBe(getPgpReader());
+  });
+
+  // Breaks: another renderer frame launches a decrypted save or a stale shared host accepts it without protection.
+  it('requires the trusted frame and routes plaintext saves through the configured shared host gate', async () => {
+    h.window = { webContents: { mainFrame: {} } };
+    const window = h.window as { webContents: { mainFrame: object } };
+    const trusted = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    registerPgpHandlers();
+    const save = h.channels.get('pgp:saveAttachment')!;
+    expect(await save({ ...trusted, senderFrame: {} }, 'e1', 'account-b', 0)).toMatchObject({ success: false, error: 'Attachment downloads must be requested from Sarv Inbox.' });
+    h.window = null;
+    expect(await save(trusted, 'e1', 'account-b', 0)).toMatchObject({ success: false });
+    h.window = window;
+    const readerSpy = vi.spyOn(getPgpReader(), 'attachment').mockReturnValue({ name: 'private.pdf', content: Buffer.from('synthetic'), contentType: 'application/pdf' } as never);
+    expect(await save(trusted, 'e1', 'account-b', 0)).toEqual({ success: false, error: 'Attachment protection is unavailable. Try again.' });
+    const operations = new AttachmentOperationProtection({
+      scanners: () => [{ id: 'clamav-scan', enabled: true, active: true, scanner: true, granted: true }],
+      checkSetup: async () => undefined, scan: vi.fn(), openSetup: vi.fn(), progress: vi.fn(),
+    });
+    setAttachmentOperationProtection(operations);
+    expect(await save(trusted, 'e1', 'account-b', 0)).toEqual({ success: false, error: 'Download blocked: encrypted OpenPGP attachments cannot be scanned.' });
+    expect(h.requireTarget).toHaveBeenCalledWith('account-b');
+    operations.dispose();
+    expect(await save(trusted, 'e1', 'account-b', 0)).toMatchObject({ success: false });
+    readerSpy.mockRestore();
   });
 });

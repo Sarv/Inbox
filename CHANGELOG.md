@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Local scanner setup works in the development app.** The renamed development
+  executable is recognised correctly, so a scanner at `http://localhost:8080`
+  can be verified when launching with `sh scripts/dev.sh`. Released apps still
+  require HTTPS, and development apps permit HTTP only for loopback addresses.
+- **Scan attachments before viewing, opening or saving them.** With the ClamAV
+  Scan extension enabled and configured for an account, attachment previews,
+  Open in system app, Download and Save all retrieve the selected
+  attachment in the background and show scanning progress. The app releases only
+  the exact bytes that received a complete no-threat verdict. Virus detections,
+  incomplete scans and server errors stop the requested action. When scanner
+  setup or an account's sharing approval is missing, an in-app warning shows the
+  complete attachment filename and offers Cancel, Set up antivirus or View anyway
+  for a preview, with corresponding open/save actions. Don't show this message
+  again remembers that account's warning choice only after continuing. Continuing
+  shows Not scanned and uploads nothing; the preference never disables configured
+  scanning or approves attachment sharing. PDFs and other supported documents
+  with configured protection cannot open before the
+  scan succeeds. This applies to supported mail providers, not only Gmail;
+  the manual scan panel remains available.
 - **A forged "authenticated" header no longer fools the app.** A sender
   could add their own `Authentication-Results: … dmarc=pass` line to a
   message, and the app believed it over your mail server's real verdict.

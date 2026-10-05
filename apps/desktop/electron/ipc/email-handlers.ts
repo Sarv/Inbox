@@ -5,13 +5,18 @@
  */
 
 import * as fs from 'fs';
+import path from 'path';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isPreviewableAttachment, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, type ParsedSearchQuery } from '@sarvinbox/core';
-import { ipcMain, dialog, shell } from 'electron';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, type ParsedSearchQuery } from '@sarvinbox/core';
+import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
-import { resolveAccountTarget, resolveNamedOrActiveAccountTarget } from '../services/account-target';
-import { attachmentCacheDir, attachmentErrorMessage, resolveAttachmentFile } from '../services/attachment-cache';
+import { resolveAccountTarget, resolveNamedOrActiveAccountTarget, requireTargetAccountId } from '../services/account-target';
+import { getAntivirusScanService } from '../services/antivirus-scan-service';
+import { attachmentCacheDir, attachmentErrorMessage, MAX_ATTACHMENT_BYTES, resolveAttachmentFile } from '../services/attachment-cache';
+import { AttachmentDownloadProtection, downloadScanners, readUnscannedAttachment, setAttachmentOperationProtection, writeProtectedAttachment } from '../services/attachment-download-protection';
+import { AttachmentPreviewProtection, setAttachmentPreviewProtection } from '../services/attachment-preview-protection';
+import { confirmUnscannedAttachment } from '../services/attachment-unscanned-warning';
 import {
   deferBodyPrefetch,
   startManualBodyDownload,
@@ -21,7 +26,7 @@ import {
 import { getHeaderBackfillState, kickHeaderBackfill } from '../services/header-backfill';
 import { reportSenderVerdict } from '../services/reputation-service';
 import { applyUserSpamVerdict } from '../services/spam-verdict-actions';
-import { getSyncEngine, getMainWindow, requireStorage, requireSyncEngine } from '../shared';
+import { getSyncEngine, getMainWindow, getExtensionManager, requireStorage, requireSyncEngine } from '../shared';
 
 import { logUserAction } from './agent-handlers';
 
@@ -502,6 +507,44 @@ function reportVerdictsOnce(emails: Array<{ fromAddress?: string | null; originI
 }
 
 export function registerEmailHandlers(): void {
+  const requireDownloadCaller = (event: IpcMainInvokeEvent) => {
+    const window = getMainWindow();
+    if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) {
+      throw new Error('Attachment downloads must be requested from Sarv Inbox.');
+    }
+  };
+  const downloads = new AttachmentDownloadProtection({
+    scanners: () => downloadScanners(getExtensionManager()),
+    checkSetup: (extensionId, accountId) => getAntivirusScanService().getAttachmentSetupRequirement(extensionId, accountId),
+    confirmUnscanned: confirmUnscannedAttachment,
+    scan: (extensionId, messageId, accountId, filename, options) =>
+      getAntivirusScanService().scanAttachmentForDownload(extensionId, messageId, accountId, filename, options),
+    openSetup: extensionId => getAntivirusScanService().openSetup(extensionId),
+    resolveLegacy: async (emailId, filename, accountId) =>
+      (await resolveAttachmentFile({ emailId, filename, accountId })).filePath,
+    chooseSavePath: async filename => {
+      const window = getMainWindow();
+      const options: Electron.SaveDialogOptions = {
+        defaultPath: path.win32.basename(filename) || 'attachment',
+        filters: [{ name: 'All Files', extensions: ['*'] }],
+      };
+      const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+      return result.canceled || !result.filePath ? null : result.filePath;
+    },
+    writeContent: writeProtectedAttachment,
+    readLegacy: (source, signal) => readUnscannedAttachment(source, signal, MAX_ATTACHMENT_BYTES),
+    copyLegacy: (source, destination) => fs.promises.copyFile(source, destination),
+    progress: (requestId, phase) => getMainWindow()?.webContents.send('emails:attachmentDownloadProgress', { requestId, phase }),
+  });
+  setAttachmentOperationProtection(downloads.operations);
+  const previews = new AttachmentPreviewProtection({
+    operations: downloads.operations,
+    resolveLegacy: async (emailId, filename, accountId) =>
+      (await resolveAttachmentFile({ emailId, filename, accountId })).filePath,
+    openPath: filePath => shell.openPath(filePath),
+    temporaryRoot: () => path.join(app.getPath('userData'), 'attachment-previews'),
+  });
+  setAttachmentPreviewProtection(previews);
   // The remote-image allowlist lives in image-trust-handlers.ts (per account).
 
   // Link trust/block rules (per active account) — the security indicator and
@@ -1779,39 +1822,32 @@ export function registerEmailHandlers(): void {
   });
 
   /**
-   * Download an email attachment — cache on disk, then show save dialog
+   * Download an attachment. An enabled scanner gates the destination write.
    */
   ipcMain.handle(
     'emails:downloadAttachment',
-    async (_event, emailId: string, filename: string, accountId?: string) => {
-    try {
-      const mainWindow = getMainWindow();
-
-      const { filePath: cachedPath } = await resolveAttachmentFile({ emailId, filename, accountId });
-
-      // Show save dialog and copy from cache
-      const dialogOptions: Electron.SaveDialogOptions = {
-        defaultPath: filename,
-        filters: [{ name: 'All Files', extensions: ['*'] }],
-      };
-
-      const result = mainWindow
-        ? await dialog.showSaveDialog(mainWindow, dialogOptions)
-        : await dialog.showSaveDialog(dialogOptions);
-
-      if (result.canceled || !result.filePath) {
-        return { success: false, error: 'Save cancelled' };
+    async (event, emailId: string, filename: string, accountId?: string, requestId?: string) => {
+      try {
+        requireDownloadCaller(event);
+        const targetAccountId = requireTargetAccountId(accountId);
+        let notScanned = false;
+        const filePath = await downloads.download(emailId, targetAccountId, filename, requestId, () => { notScanned = true; });
+        return filePath ? { success: true, filePath, ...(notScanned ? { notScanned: true } : {}) } : { success: false, error: 'Save cancelled' };
+      } catch (error) {
+        logger.error('[Main] Download attachment error:', error);
+        return { success: false, error: attachmentErrorMessage(error) };
       }
+    },
+  );
 
-      await fs.promises.copyFile(cachedPath, result.filePath);
-
-      return { success: true, filePath: result.filePath };
+  ipcMain.handle('emails:cancelAttachmentDownload', async (event, requestId: string) => {
+    try {
+      requireDownloadCaller(event);
+      return { success: true, data: { cancelled: downloads.cancel(requestId) } };
     } catch (error) {
-      logger.error('[Main] Download attachment error:', error);
       return { success: false, error: attachmentErrorMessage(error) };
     }
-  },
-  );
+  });
 
   /**
    * Get attachment as base64 string for forwarding
@@ -1896,59 +1932,70 @@ export function registerEmailHandlers(): void {
    * `{ success: false, noHandler: true }` so the renderer can offer to save the
    * .ics instead — never assume the macOS "Calendar.app always present" path.
    */
-  ipcMain.handle('emails:openCalendarInvite', async (_event, emailId: string, accountId?: string) => {
+  ipcMain.handle('emails:openCalendarInvite', async (event, emailId: string, accountId?: string) => {
     try {
+      requireDownloadCaller(event);
       if (typeof emailId !== 'string' || !emailId) {
         return { success: false, error: 'Invalid emailId' };
       }
-      // Owning-account routing — otherwise "Add to calendar" on an All-Inboxes
-      // mail from a non-active account failed with "Email not found".
-      const { storage, syncEngine } = await resolveAccountTarget(accountId);
-      const email = await storage.getEmail(emailId);
-      if (!email) return { success: false, error: 'Email not found' };
+      const targetAccountId = requireTargetAccountId(accountId);
+      return await downloads.operations.run(emailId, targetAccountId, 'calendar-event.ics', async operation => {
+        // Owning-account routing — otherwise "Add to calendar" on an All-Inboxes
+        // mail from a non-active account failed with "Email not found".
+        const { storage, syncEngine } = await resolveAccountTarget(targetAccountId);
+        await operation.assertCurrent();
+        const email = await storage.getEmail(emailId);
+        await operation.assertCurrent();
+        if (!email) return { success: false, error: 'Email not found' };
 
-      // Write the SAME validated ICS text the banner renders from — never the
-      // re-fetched attachment bytes. Re-fetching a named .ics can return a
-      // corrupt/partial blob (seen: a 207-byte binary garbage invite during a
-      // connection drop), and getOrCacheAttachment then serves that garbage from
-      // cache on every click → macOS Calendar "can't read this calendar file".
-      let ics = sanitizeIcsText(email.calendarIcs);
-      if (!ics) {
-        // Not captured on the row — extract from the message source (+ backfill).
-        const folder = await storage.getFolder(email.folderId);
-        if (folder && email.uid && syncEngine) {
-          ics = sanitizeIcsText(await syncEngine.getCalendarIcs(emailId, folder.path, email.uid));
-          if (ics) {
-            try {
-              await storage.updateEmail(emailId, { calendarIcs: ics });
-            } catch {
-              /* backfill is best-effort */
+        // Write the SAME validated ICS text the banner renders from — never the
+        // re-fetched attachment bytes. Re-fetching a named .ics can return a
+        // corrupt/partial blob (seen: a 207-byte binary garbage invite during a
+        // connection drop), and getOrCacheAttachment then serves that garbage from
+        // cache on every click → macOS Calendar "can't read this calendar file".
+        let ics = sanitizeIcsText(email.calendarIcs);
+        if (!ics) {
+          // Not captured on the row — extract from the message source (+ backfill).
+          const folder = await storage.getFolder(email.folderId);
+          await operation.assertCurrent();
+          if (folder && email.uid && syncEngine) {
+            ics = sanitizeIcsText(await syncEngine.getCalendarIcs(emailId, folder.path, email.uid));
+            await operation.assertCurrent();
+            if (ics) {
+              try {
+                await storage.updateEmail(emailId, { calendarIcs: ics });
+              } catch {
+                /* backfill is best-effort */
+              }
             }
           }
         }
-      }
-      if (!ics) return { success: false, error: 'No calendar invite found for this email' };
+        if (!ics) return { success: false, error: 'No calendar invite found for this email' };
 
-      // Import as a plain event, not an RSVP invitation (see toPlainEventIcs),
-      // then normalize line endings to CRLF with a trailing CRLF. RFC 5545
-      // mandates CRLF; strict importers (macOS Calendar) reject bare-LF files
-      // and rely on CRLF for line unfolding of long (folded) properties.
-      const published = toPlainEventIcs(ics);
-      const crlf = published.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
-      const body = crlf.endsWith('\r\n') ? crlf : `${crlf}\r\n`;
+        // Import as a plain event, not an RSVP invitation (see toPlainEventIcs),
+        // then normalize line endings to CRLF with a trailing CRLF. RFC 5545
+        // mandates CRLF; strict importers (macOS Calendar) reject bare-LF files
+        // and rely on CRLF for line unfolding of long (folded) properties.
+        const published = toPlainEventIcs(ics);
+        const crlf = published.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+        const body = crlf.endsWith('\r\n') ? crlf : `${crlf}\r\n`;
 
-      const cacheDir = attachmentCacheDir(emailId);
-      await fs.promises.mkdir(cacheDir, { recursive: true, mode: 0o700 });
-      // Dedicated filename (not the attachment's invite.ics) so a stale/corrupt
-      // cached attachment is never reused; always overwrite with fresh text.
-      const icsPath = resolveWithinDir(cacheDir, 'calendar-event.ics');
-      await fs.promises.writeFile(icsPath, body, { mode: 0o600 });
+        const cacheDir = attachmentCacheDir(emailId);
+        await fs.promises.mkdir(cacheDir, { recursive: true, mode: 0o700 });
+        await operation.assertCurrent();
+        // Dedicated filename (not the attachment's invite.ics) so a stale/corrupt
+        // cached attachment is never reused; always overwrite with fresh text.
+        const icsPath = resolveWithinDir(cacheDir, 'calendar-event.ics');
+        await fs.promises.writeFile(icsPath, body, { mode: 0o600, signal: operation.signal });
+        await operation.assertCurrent();
 
-      const errMsg = await shell.openPath(icsPath);
-      if (errMsg) {
-        return { success: false, error: errMsg, noHandler: true };
-      }
-      return { success: true };
+        const errMsg = await shell.openPath(icsPath);
+        await operation.assertCurrent();
+        if (errMsg) {
+          return { success: false, error: errMsg, noHandler: true };
+        }
+        return { success: true, ...(operation.notScanned ? { notScanned: true } : {}) };
+      }, undefined, 'Calendar import blocked: save or open the calendar attachment after scanning it.', 'calendar');
     } catch (error) {
       logger.error('[Main] openCalendarInvite error:', error);
       return { success: false, error: (error as Error).message };
@@ -2405,34 +2452,38 @@ export function registerEmailHandlers(): void {
     }
   });
 
-  /**
-   * Preview an email attachment — cache on disk, then open with OS default viewer
-   */
-  ipcMain.handle(
-    'emails:previewAttachment',
-    async (_event, emailId: string, filename: string, accountId?: string) => {
-      try {
-        // SECURITY: handing a path to `shell.openPath` asks the OS to LAUNCH it,
-        // so an executable, installer or script would run with the user's
-        // privileges on a single click. The renderer already only offers this for
-        // allow-listed types; re-check it here, because the main process must not
-        // trust the renderer to be the only gate. Anything else can still be
-        // saved by the user to a location they chose — saving opens nothing.
-        if (!isPreviewableAttachment(filename)) {
-          return { success: false, error: 'This file type cannot be opened from Sarv Inbox' };
-        }
+  /** Prepare a viewer URL only after its exact bytes pass the configured scanner. */
+  ipcMain.handle('emails:prepareAttachmentPreview', async (event, emailId: string, filename: string, accountId?: string, requestId?: string) => {
+    try {
+      requireDownloadCaller(event);
+      let notScanned = false;
+      const url = await previews.preparePreview(emailId, requireTargetAccountId(accountId), filename, requestId, () => { notScanned = true; });
+      return { success: true, url, ...(notScanned ? { notScanned: true } : {}) };
+    } catch (error) {
+      logger.error('[Main] Prepare attachment preview error:', error);
+      return { success: false, error: attachmentErrorMessage(error) };
+    }
+  });
 
-        const { filePath } = await resolveAttachmentFile({ emailId, filename, accountId });
-        const errorMessage = await shell.openPath(filePath);
-        if (errorMessage) {
-          return { success: false, error: errorMessage };
-        }
+  ipcMain.handle('emails:releaseAttachmentPreview', async (event, url: string) => {
+    try {
+      requireDownloadCaller(event);
+      previews.releasePreview(url);
+      return { success: true };
+    } catch (error) { return { success: false, error: attachmentErrorMessage(error) }; }
+  });
 
-        return { success: true };
-      } catch (error) {
-        logger.error('[Main] Preview attachment error:', error);
-        return { success: false, error: attachmentErrorMessage(error) };
-      }
-    },
-  );
+  /** System viewers receive only the same clean bytes that passed the scanner. */
+  ipcMain.handle('emails:previewAttachment', async (event, emailId: string, filename: string, accountId?: string, requestId?: string) => {
+    try {
+      requireDownloadCaller(event);
+      let notScanned = false;
+      await previews.openPreview(emailId, requireTargetAccountId(accountId), filename, requestId, () => { notScanned = true; });
+      return { success: true, ...(notScanned ? { notScanned: true } : {}) };
+    } catch (error) {
+      logger.error('[Main] Preview attachment error:', error);
+      return { success: false, error: attachmentErrorMessage(error) };
+    }
+  });
+
 }

@@ -23,6 +23,15 @@ function isRegisteredAccount(accountId: string): boolean {
   return readRegistryAccounts().some((account) => account.id === accountId);
 }
 
+/** Resolve a download's owner once, without falling back from a named mailbox. */
+export function requireTargetAccountId(accountId?: string): string {
+  const target = accountId === undefined ? getCurrentAccountId() : accountId;
+  if (typeof target !== 'string' || !target || !isRegisteredAccount(target)) {
+    throw new Error('The attachment account is unavailable. Select its mailbox and try again.');
+  }
+  return target;
+}
+
 /**
  * The storage + sync engine of one SPECIFIC, non-active account: its open
  * runtime, or one opened now. Null when the account cannot be resolved (unknown,

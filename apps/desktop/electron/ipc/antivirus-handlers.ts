@@ -1,16 +1,24 @@
 import type { ExtensionPermission } from '@sarvinbox/core';
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 
+import { requireTargetAccountId } from '../services/account-target';
+import { readRegistryAccounts } from '../services/accounts-registry';
 import { getAntivirusScanService } from '../services/antivirus-scan-service';
+import { getPendingUnscannedAttachmentWarning, respondUnscannedAttachmentWarning } from '../services/attachment-unscanned-warning';
+import { unscannedWarningPreferences } from '../services/attachment-warning-preferences';
 import { getExtensionManager, getMainWindow } from '../shared';
 
-function authorize(event: IpcMainInvokeEvent, extensionId: string, permission: ExtensionPermission = 'security:scan-attachments'): void {
+function authorizeWindow(event: IpcMainInvokeEvent): void {
   const window = getMainWindow();
   // Only the trusted app frame may configure uploads. Sandboxed extension
   // frames get the restricted panel bridge, never this credential-bearing API.
   if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) {
     throw new Error('Scanner setup must be opened from Sarv Inbox.');
   }
+}
+
+function authorize(event: IpcMainInvokeEvent, extensionId: string, permission: ExtensionPermission = 'security:scan-attachments'): void {
+  authorizeWindow(event);
   const manager = getExtensionManager();
   const installed = typeof extensionId === 'string' ? manager?.getRegistry().get(extensionId) : undefined;
   if (!installed || !manager?.getHost().isActive(extensionId) || !installed.grantedPermissions.includes(permission)) {
@@ -32,7 +40,7 @@ export function registerAntivirusHandlers(): void {
     }
     return getAntivirusScanService().probe(id, endpoint, credential);
   });
-  register('antivirus:configure', (event, id, input) => {
+  register('antivirus:configure', async (event, id, input) => {
     if (!input || typeof input !== 'object' || typeof input.challenge !== 'string' || typeof input.allowBody !== 'boolean') {
       throw new Error('Review scanner setup before enabling uploads.');
     }
@@ -42,5 +50,22 @@ export function registerAntivirusHandlers(): void {
   register('antivirus:disable', async (_event, id) => {
     await getAntivirusScanService().onExtensionDisabled(id);
     return getAntivirusScanService().getTrustedSetup(id);
+  });
+
+  const registerWarning = (channel: string, run: (...args: unknown[]) => Promise<unknown> | unknown) => {
+    ipcMain.handle(channel, async (event, ...args) => {
+      try { authorizeWindow(event); return { success: true, data: await run(...args) }; }
+      catch (error) { return { success: false, error: error instanceof Error ? error.message : 'The antivirus warning could not be updated.' }; }
+    });
+  };
+  registerWarning('antivirus:getPendingUnscannedWarning', getPendingUnscannedAttachmentWarning);
+  registerWarning('antivirus:respondUnscannedWarning', respondUnscannedAttachmentWarning);
+  registerWarning('antivirus:getUnscannedWarningPreferences', () => ({
+    suppressedAccountIds: readRegistryAccounts().filter(account => unscannedWarningPreferences.read(account.id)).map(account => account.id),
+  }));
+  registerWarning('antivirus:resetUnscannedWarningPreference', (accountId: unknown) => {
+    if (typeof accountId !== 'string' || !accountId) throw new Error('The attachment account is unavailable.');
+    const targetAccountId = requireTargetAccountId(accountId);
+    unscannedWarningPreferences.reset(targetAccountId);
   });
 }

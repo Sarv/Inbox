@@ -29,10 +29,22 @@ const h = vi.hoisted(() => ({
     isConnected: vi.fn(() => true),
     fetchAttachmentPart: vi.fn(),
     fetchAttachment: vi.fn(),
+    getCalendarIcs: vi.fn(),
   },
   saveDialog: { canceled: false, filePath: '' },
   openPath: vi.fn(async (_filePath: string) => ''),
+  frame: {},
+  webContents: { mainFrame: {} as object, send: vi.fn() },
+  manager: null as any,
+  scannerSetup: vi.fn(),
+  missingSetupAssert: vi.fn(),
+  warning: vi.fn(),
+  scanDownload: vi.fn(),
+  openScannerSetup: vi.fn(),
+  scanAssertCurrent: vi.fn(),
+  scanDispose: vi.fn(),
 }));
+h.webContents.mainFrame = h.frame;
 
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
@@ -43,7 +55,8 @@ vi.mock('electron', () => ({
 vi.mock('../../../../electron/shared', () => ({
   requireStorage: () => h.storage,
   requireSyncEngine: () => h.syncEngine,
-  getMainWindow: () => null,
+  getMainWindow: () => ({ webContents: h.webContents, isDestroyed: () => false }),
+  getExtensionManager: () => h.manager,
   getSyncEngine: () => h.syncEngine,
   getStorageFor: (id: string) => (id === 'acct-2' ? h.otherStorage : null),
   getSyncEngineFor: () => h.syncEngine,
@@ -53,6 +66,22 @@ vi.mock('../../../../electron/services/body-prefetch-scheduler', () => ({
   deferBodyPrefetch: vi.fn(),
 }));
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
+vi.mock('../../../../electron/services/accounts-registry', () => ({
+  readRegistryAccounts: () => [{ id: 'acct-1' }, { id: 'acct-2' }],
+}));
+vi.mock('../../../../electron/services/antivirus-scan-service', () => ({
+  getAntivirusScanService: () => ({
+    getAttachmentSetupRequirement: async (extensionId: string, accountId: string) => {
+      const setup = await h.scannerSetup(extensionId, accountId);
+      return setup.configured && setup.allowedAccountIds.includes(accountId) ? undefined : { assertCurrent: h.missingSetupAssert };
+    },
+    scanAttachmentForDownload: h.scanDownload,
+    openSetup: h.openScannerSetup,
+  }),
+}));
+vi.mock('../../../../electron/services/attachment-unscanned-warning', () => ({
+  confirmUnscannedAttachment: h.warning,
+}));
 vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: vi.fn() }));
 
 import { registerEmailHandlers } from '../../../../electron/ipc/email-handlers';
@@ -73,6 +102,7 @@ afterAll(() => rmSync(TMP, { recursive: true, force: true }));
 const EMAIL_ID = 'email-1';
 const FILENAME = 'report.pdf';
 const BYTES = Buffer.from('%PDF-1.7 body');
+const CALENDAR_ICS = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:synthetic@example.invalid\r\nDTSTART:20261005T090000Z\r\nSUMMARY:Synthetic\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n';
 
 /** The sync engine as `getOrCacheAttachment` wants it. */
 const engine = () => h.syncEngine as unknown as Parameters<typeof getOrCacheAttachment>[4];
@@ -84,10 +114,33 @@ const cachedNames = (emailId = EMAIL_ID) =>
 const download = () => h.handlers.get('emails:downloadAttachment')!;
 const base64 = () => h.handlers.get('emails:getAttachmentBase64')!;
 const preview = () => h.handlers.get('emails:previewAttachment')!;
+const downloadEvent = () => ({ sender: h.webContents, senderFrame: h.frame });
+
+function enableScanner(options: { active?: boolean; granted?: boolean; manifest?: boolean } = {}) {
+  h.manager = {
+    getRegistry: () => ({
+      getAll: () => [{ id: 'clamav-scan', enabled: true, grantedPermissions: options.granted === false ? [] : ['security:scan-attachments'] }],
+      getLoaded: () => options.manifest === false ? undefined : { manifest: { permissions: ['security:scan-attachments'] } },
+    }),
+    getHost: () => ({ isActive: () => options.active !== false }),
+  };
+}
 
 beforeEach(() => {
   h.userData = mkdtempSync(join(TMP, 'ud-'));
   h.handlers.clear();
+  h.manager = null;
+  h.webContents.send.mockClear();
+  h.scannerSetup.mockReset().mockResolvedValue({ configured: true, allowedAccountIds: ['acct-1', 'acct-2'] });
+  h.missingSetupAssert.mockReset().mockResolvedValue(undefined);
+  h.warning.mockReset().mockResolvedValue('cancel');
+  h.scanAssertCurrent.mockReset().mockResolvedValue(undefined);
+  h.scanDispose.mockReset(); h.openScannerSetup.mockReset().mockResolvedValue(undefined);
+  h.scanDownload.mockReset().mockImplementation(async (_id, _email, _account, _name, options) => {
+    const content = Buffer.from('scanner verified bytes');
+    options.onProgress('scanning');
+    return { content, assertCurrent: h.scanAssertCurrent, dispose: () => { content.fill(0); h.scanDispose(); } };
+  });
   h.storage.getEmail.mockReset().mockResolvedValue({
     id: EMAIL_ID,
     folderId: 'f1',
@@ -107,6 +160,7 @@ beforeEach(() => {
   h.syncEngine.isConnected.mockReset().mockReturnValue(true);
   h.syncEngine.fetchAttachmentPart.mockReset().mockResolvedValue({ content: BYTES });
   h.syncEngine.fetchAttachment.mockReset().mockResolvedValue({ content: BYTES });
+  h.syncEngine.getCalendarIcs.mockReset().mockResolvedValue(CALENDAR_ICS);
   h.saveDialog = { canceled: false, filePath: join(TMP, 'saved-copy.pdf') };
   h.openPath.mockReset().mockResolvedValue('');
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -289,7 +343,7 @@ describe('emails:previewAttachment', () => {
   // hides these, but main must not trust the renderer to be the only gate.
   it('refuses to launch a type outside the allow-list, without calling the shell', async () => {
     for (const name of ['setup.exe', 'run.sh', 'app.js', 'macro.vbs', 'invoice.html']) {
-      const result = await preview()({}, EMAIL_ID, name);
+      const result = await preview()(downloadEvent(), EMAIL_ID, name);
       expect(result, name).toEqual({
         success: false,
         error: 'This file type cannot be opened from Sarv Inbox',
@@ -301,16 +355,16 @@ describe('emails:previewAttachment', () => {
   // SECURITY. Breaks: "invoice.pdf.exe" — the OS launches by the LAST extension,
   // so that is what the gate must classify on.
   it('refuses a double extension by its real (last) extension', async () => {
-    expect(await preview()({}, EMAIL_ID, 'invoice.pdf.exe')).toMatchObject({ success: false });
+    expect(await preview()(downloadEvent(), EMAIL_ID, 'invoice.pdf.exe')).toMatchObject({ success: false });
     expect(h.openPath).not.toHaveBeenCalled();
   });
 
   it('hands an allow-listed file to the OS and reports a launch failure', async () => {
-    expect(await preview()({}, EMAIL_ID, FILENAME)).toEqual({ success: true });
+    expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: true });
     expect(h.openPath).toHaveBeenCalledWith(join(cache(), FILENAME));
 
     h.openPath.mockResolvedValue('No application is registered');
-    expect(await preview()({}, EMAIL_ID, FILENAME)).toEqual({
+    expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({
       success: false,
       error: 'No application is registered',
     });
@@ -318,18 +372,244 @@ describe('emails:previewAttachment', () => {
 
   // MULTI-ACCOUNT, at the IPC edge rather than inside the resolver.
   it('honours accountId', async () => {
-    await preview()({}, EMAIL_ID, FILENAME, 'acct-2');
+    await preview()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2');
 
     expect(h.otherStorage.getEmail).toHaveBeenCalledWith(EMAIL_ID);
   });
 });
 
+// Breaks: PDFs/docs bypass the scan gate through either viewer preparation or OS opening IPC.
+describe('trusted attachment preview scan handlers', () => {
+  const prepare = () => h.handlers.get('emails:prepareAttachmentPreview')!;
+  const release = () => h.handlers.get('emails:releaseAttachmentPreview')!;
+
+  it('requires the trusted main frame for preview preparation, release and OS open', async () => {
+    const foreign = { sender: h.webContents, senderFrame: {} };
+    for (const result of [await prepare()(foreign, EMAIL_ID, FILENAME), await release()(foreign, 'sarv-attachment://attachment/email-1/report.pdf'),
+      await preview()(foreign, EMAIL_ID, FILENAME)]) {
+      expect(result).toEqual({ success: false, error: 'Attachment downloads must be requested from Sarv Inbox.' });
+    }
+    expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.openPath).not.toHaveBeenCalled();
+  });
+
+  it('prepares a bound opaque URL for the owning account and releases retained clean bytes on close', async () => {
+    enableScanner(); const result = await prepare()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'view-request');
+    expect(result.success).toBe(true); expect(result.url).toContain('account=acct-2'); expect(result.url).toContain('preview=');
+    expect(h.scanDownload).toHaveBeenCalledWith('clamav-scan', EMAIL_ID, 'acct-2', FILENAME, expect.any(Object));
+    expect(h.scanDispose).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+    expect(await release()(downloadEvent(), result.url)).toEqual({ success: true }); expect(h.scanDispose).toHaveBeenCalledOnce();
+    expect(await release()(downloadEvent(), 'malformed URL')).toMatchObject({ success: false });
+  });
+
+  it('returns a usable legacy viewer URL when the scanner is absent', async () => {
+    const result = await prepare()(downloadEvent(), EMAIL_ID, FILENAME);
+    expect(result).toEqual({ success: true, url: 'sarv-attachment://attachment/email-1/report.pdf?account=acct-1' });
+    expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledOnce();
+  });
+
+  it('writes and opens exact clean bytes instead of the legacy cache, using the owning account', async () => {
+    enableScanner(); let opened = '';
+    h.openPath.mockImplementation(async file => { opened = file; expect(readFileSync(file, 'utf8')).toBe('scanner verified bytes'); return ''; });
+    expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'open-request')).toEqual({ success: true });
+    expect(opened.startsWith(join(h.userData, 'attachment-previews'))).toBe(true);
+    expect(h.scanDownload).toHaveBeenCalledWith('clamav-scan', EMAIL_ID, 'acct-2', FILENAME, expect.any(Object));
+    expect(h.scanDispose).toHaveBeenCalledOnce(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  it('blocks both viewers after threat, incomplete coverage or missing scanner setup', async () => {
+    enableScanner();
+    for (const reason of ['Download blocked: ClamAV detected a threat.', 'Download blocked: the attachment could not be fully scanned.']) {
+      h.scanDownload.mockRejectedValue(new Error(reason));
+      expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: reason });
+      expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: reason });
+    }
+    h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME)).toMatchObject({ success: false });
+    expect(h.warning).toHaveBeenCalled(); expect(h.openScannerSetup).not.toHaveBeenCalled();
+    expect(h.openPath).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  it('uses the same trusted cancellation endpoint for a pending viewer scan', async () => {
+    enableScanner(); let observed: AbortSignal | undefined;
+    h.scanDownload.mockImplementation((_id, _message, _account, _filename, options) => new Promise((_resolve, reject) => {
+      observed = options.signal; options.signal.addEventListener('abort', () => reject(new Error('Download cancelled.')), { once: true });
+    }));
+    const pending = prepare()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'view-cancel');
+    await vi.waitFor(() => expect(observed).toBeDefined());
+    expect(await h.handlers.get('emails:cancelAttachmentDownload')!(downloadEvent(), 'view-cancel')).toEqual({ success: true, data: { cancelled: true } });
+    expect(await pending).toEqual({ success: false, error: 'Download cancelled.' });
+    expect(h.openPath).not.toHaveBeenCalled();
+  });
+
+  it('refuses removed accounts before either viewer reads mail', async () => {
+    expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME, 'removed')).toMatchObject({ success: false });
+    expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME, 'removed')).toMatchObject({ success: false });
+    expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled();
+  });
+});
+
+// Breaks: generated calendar files bypass protected document opening by launching unscanned message-derived bytes.
+describe('protected calendar import', () => {
+  const calendar = () => h.handlers.get('emails:openCalendarInvite')!;
+
+  it('blocks generated calendar imports while a scanner is enabled before reading or writing mail', async () => {
+    enableScanner();
+    expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toEqual({
+      success: false, error: 'Calendar import blocked: save or open the calendar attachment after scanning it.',
+    });
+    expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.otherStorage.getEmail).not.toHaveBeenCalled();
+    expect(h.openPath).not.toHaveBeenCalled(); expect(cachedNames()).toEqual([]); expect(h.scanDownload).not.toHaveBeenCalled();
+  });
+
+  it('requires the trusted main frame and preserves legacy import without an enabled scanner', async () => {
+    expect(await calendar()({ sender: h.webContents, senderFrame: {} }, EMAIL_ID)).toEqual({
+      success: false, error: 'Attachment downloads must be requested from Sarv Inbox.',
+    });
+    h.storage.getEmail.mockResolvedValue({ id: EMAIL_ID, calendarIcs: CALENDAR_ICS });
+    expect(await calendar()(downloadEvent(), EMAIL_ID)).toEqual({ success: true });
+    expect(h.openPath).toHaveBeenCalledWith(join(cache(), 'calendar-event.ics'));
+  });
+
+  it('allows a generated calendar only after missing setup is explicitly accepted, using the owning account', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    h.warning.mockResolvedValue('continue');
+    h.otherStorage.getEmail.mockResolvedValue({ id: EMAIL_ID, calendarIcs: CALENDAR_ICS });
+    expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toEqual({ success: true, notScanned: true });
+    expect(h.scannerSetup).toHaveBeenCalledWith('clamav-scan', 'acct-2');
+    expect(h.warning).toHaveBeenCalledWith(
+      { messageId: EMAIL_ID, accountId: 'acct-2', filename: 'calendar-event.ics', action: 'calendar' },
+      expect.any(AbortSignal), expect.any(Function)
+    );
+    expect(h.otherStorage.getEmail).toHaveBeenCalledWith(EMAIL_ID); expect(h.storage.getEmail).not.toHaveBeenCalled();
+    expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.openPath).toHaveBeenCalledOnce();
+  });
+
+  it('blocks a generated calendar when setup changes after the warning', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    h.warning.mockImplementation(async () => { h.missingSetupAssert.mockRejectedValue(new Error('Antivirus setup changed. Try again.')); return 'continue'; });
+    expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toMatchObject({ success: false, error: 'Antivirus setup changed. Try again.' });
+    expect(h.otherStorage.getEmail).not.toHaveBeenCalled(); expect(h.openPath).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('guards calendar fallback reads and opens after missing setup with backfill failure=%s', async failedBackfill => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
+    if (failedBackfill) h.otherStorage.updateEmail.mockRejectedValue(new Error('Transient storage failure'));
+    expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toEqual({ success: true, notScanned: true });
+    expect(h.syncEngine.getCalendarIcs).toHaveBeenCalledWith(EMAIL_ID, 'Archive', 7);
+    expect(h.otherStorage.updateEmail).toHaveBeenCalledWith(EMAIL_ID, { calendarIcs: CALENDAR_ICS.trim() });
+    expect(h.missingSetupAssert.mock.calls.length).toBeGreaterThan(6); expect(h.scanDownload).not.toHaveBeenCalled();
+  });
+
+  it('rechecks setup after a calendar fallback read and before writing or opening the generated file', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
+    h.syncEngine.getCalendarIcs.mockImplementation(async () => {
+      h.missingSetupAssert.mockRejectedValue(new Error('Antivirus setup changed. Try again.')); return CALENDAR_ICS;
+    });
+    expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toEqual({ success: false, error: 'Antivirus setup changed. Try again.' });
+    expect(h.openPath).not.toHaveBeenCalled(); expect(cachedNames()).toEqual([]);
+  });
+
+  it('preserves calendar missing-message, missing-invite and OS-handler errors after warning acceptance', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
+    expect(await calendar()(downloadEvent(), '')).toEqual({ success: false, error: 'Invalid emailId' });
+    h.storage.getEmail.mockResolvedValue(null);
+    expect(await calendar()(downloadEvent(), EMAIL_ID)).toEqual({ success: false, error: 'Email not found' });
+    h.storage.getEmail.mockResolvedValue({ id: EMAIL_ID });
+    expect(await calendar()(downloadEvent(), EMAIL_ID)).toEqual({ success: false, error: 'No calendar invite found for this email' });
+    h.storage.getEmail.mockResolvedValue({ id: EMAIL_ID, calendarIcs: CALENDAR_ICS }); h.openPath.mockResolvedValue('No calendar app');
+    expect(await calendar()(downloadEvent(), EMAIL_ID)).toEqual({ success: false, error: 'No calendar app', noHandler: true });
+  });
+});
+
+// Breaks: optional setup is mistaken for an offline/threat bypass, or explicit bypass is presented as a clean scan.
+describe('per-action missing antivirus setup warnings', () => {
+  const prepare = () => h.handlers.get('emails:prepareAttachmentPreview')!;
+
+  it('allows an explicit unscanned save and warns again for the same cached file', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
+    const target = join(h.userData, 'unscanned.pdf'); h.saveDialog = { canceled: false, filePath: target };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2')).toEqual({ success: true, filePath: target, notScanned: true });
+      expect(readFileSync(target)).toEqual(BYTES);
+    }
+    expect(h.warning).toHaveBeenCalledTimes(2); expect(h.scannerSetup).toHaveBeenCalledWith('clamav-scan', 'acct-2');
+    expect(h.warning).toHaveBeenCalledWith(
+      { messageId: EMAIL_ID, accountId: 'acct-2', filename: FILENAME, action: 'download' },
+      expect.any(AbortSignal), expect.any(Function)
+    );
+    expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.openScannerSetup).not.toHaveBeenCalled();
+  });
+
+  it('allows one unapproved account action without changing scanner consent or scanning another account', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: true, allowedAccountIds: ['acct-1'] }); h.warning.mockResolvedValue('continue');
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2')).toMatchObject({ success: true, notScanned: true });
+    expect(h.otherStorage.getEmail).toHaveBeenCalled(); expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled();
+  });
+
+  it('returns a bound unscanned viewer lease and opens an OS document from a private unscanned snapshot', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
+    const viewed = await prepare()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2');
+    expect(viewed).toMatchObject({ success: true, notScanned: true }); expect(viewed.url).toContain('preview='); expect(viewed.url).toContain('account=acct-2');
+    const opened = await preview()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2');
+    expect(opened).toEqual({ success: true, notScanned: true });
+    const file = h.openPath.mock.calls[0]![0]; expect(file.startsWith(join(h.userData, 'attachment-previews'))).toBe(true);
+    expect(readFileSync(file)).toEqual(BYTES); expect(h.warning).toHaveBeenCalledTimes(2); expect(h.scanDownload).not.toHaveBeenCalled();
+    expect(h.warning.mock.calls.map(([target]) => target.action)).toEqual(['view', 'open']);
+  });
+
+  it.each(['cancel', 'setup'] as const)('reads no bytes for warning choice %s, opening setup only when requested', async response => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue(response);
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: 'Download cancelled.' });
+    expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: 'Download cancelled.' });
+    expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: 'Download cancelled.' });
+    expect(h.openScannerSetup).toHaveBeenCalledTimes(response === 'setup' ? 3 : 0);
+    expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.openPath).not.toHaveBeenCalled();
+  });
+
+  it.each(['Download blocked: ClamAV detected a threat.', 'Download blocked: the attachment could not be fully scanned.',
+    'Download blocked: scanning failed. Try again when the scanner is available.'])('offers no warning for configured scan failure: %s', async error => {
+    enableScanner(); h.scanDownload.mockRejectedValue(new Error(error));
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error });
+    expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error });
+    expect(h.warning).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  it('does not interpret unreadable configuration or an inactive scanner as missing setup', async () => {
+    enableScanner(); h.scannerSetup.mockRejectedValue(new Error('Secure scanner storage unavailable'));
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toMatchObject({ success: false }); expect(h.warning).not.toHaveBeenCalled();
+    enableScanner({ active: false }); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    expect(await prepare()(downloadEvent(), EMAIL_ID, FILENAME)).toMatchObject({ success: false }); expect(h.warning).not.toHaveBeenCalled();
+    expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  it('does not mark a cancelled destination or failed OS open as an unscanned success', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
+    h.saveDialog = { canceled: true, filePath: '' };
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: 'Save cancelled' });
+    h.openPath.mockResolvedValue('No application is registered');
+    expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: false, error: 'No application is registered' });
+  });
+
+  it('cancels a pending custom warning through the trusted cancellation endpoint and ignores late Continue', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    let finish!: (result: 'continue') => void;
+    h.warning.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = prepare()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'warning-cancel');
+    await vi.waitFor(() => expect(h.warning).toHaveBeenCalled());
+    expect(await h.handlers.get('emails:cancelAttachmentDownload')!(downloadEvent(), 'warning-cancel')).toEqual({ success: true, data: { cancelled: true } });
+    expect(await pending).toEqual({ success: false, error: 'Download cancelled.' });
+    finish('continue'); await Promise.resolve();
+    expect(h.otherStorage.getEmail).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled();
+  });
+});
+
 describe('emails:downloadAttachment', () => {
+
   it('copies the cached file to the chosen path', async () => {
     const target = join(TMP, 'chosen.pdf');
     h.saveDialog = { canceled: false, filePath: target };
 
-    const result = await download()({}, EMAIL_ID, FILENAME);
+    const result = await download()(downloadEvent(), EMAIL_ID, FILENAME);
 
     expect(result).toEqual({ success: true, filePath: target });
     expect(readFileSync(target)).toEqual(BYTES);
@@ -341,7 +621,7 @@ describe('emails:downloadAttachment', () => {
   it('reports a cancelled dialog as "Save cancelled"', async () => {
     h.saveDialog = { canceled: true, filePath: '' };
 
-    expect(await download()({}, EMAIL_ID, FILENAME)).toEqual({
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({
       success: false,
       error: 'Save cancelled',
     });
@@ -352,16 +632,68 @@ describe('emails:downloadAttachment', () => {
   it('returns the error message rather than throwing', async () => {
     h.storage.getEmail.mockResolvedValue(null);
 
-    expect(await download()({}, EMAIL_ID, FILENAME)).toEqual({
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({
       success: false,
       error: 'Email not found',
     });
   });
 
   it('honours accountId', async () => {
-    await download()({}, EMAIL_ID, FILENAME, 'acct-2');
+    await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2');
 
     expect(h.otherStorage.getEmail).toHaveBeenCalledWith(EMAIL_ID);
+  });
+
+  // Breaks: an untrusted extension frame reads mail or initiates a destination write through the app IPC.
+  it('rejects requests from an extension frame before reading or opening a save dialog', async () => {
+    const result = await download()({ sender: h.webContents, senderFrame: {} }, EMAIL_ID, FILENAME);
+    expect(result).toEqual({ success: false, error: 'Attachment downloads must be requested from Sarv Inbox.' });
+    expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a removed account silently downloads an identically named attachment from the active account.
+  it('rejects an unavailable explicit account instead of downloading from the active account', async () => {
+    const result = await download()(downloadEvent(), EMAIL_ID, FILENAME, 'removed-account');
+    expect(result.success).toBe(false); expect(h.storage.getEmail).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the saved attachment differs from the scanned bytes or the scan reads the wrong mailbox.
+  it('uses the owning account and saves the exact protected bytes without another IMAP fetch', async () => {
+    enableScanner(); const target = join(h.userData, 'scanned.txt'); h.saveDialog = { canceled: false, filePath: target };
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'request-scanned')).toEqual({ success: true, filePath: target });
+    expect(h.scanDownload).toHaveBeenCalledWith('clamav-scan', EMAIL_ID, 'acct-2', FILENAME, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(readFileSync(target, 'utf8')).toBe('scanner verified bytes');
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled(); expect(h.otherStorage.getEmail).not.toHaveBeenCalled();
+    expect(h.scanDispose).toHaveBeenCalledOnce();
+    expect(h.webContents.send.mock.calls).toEqual([
+      ['emails:attachmentDownloadProgress', { requestId: 'request-scanned', phase: 'downloading' }],
+      ['emails:attachmentDownloadProgress', { requestId: 'request-scanned', phase: 'scanning' }],
+      ['emails:attachmentDownloadProgress', { requestId: 'request-scanned', phase: 'saving' }],
+    ]);
+  });
+
+  // Breaks: a missing setup silently bypasses AV instead of requiring an explicit per-file warning.
+  it('defaults to cancellation for an enabled but unconfigured scanner', async () => {
+    enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] });
+    const result = await download()(downloadEvent(), EMAIL_ID, FILENAME);
+    expect(result).toEqual({ success: false, error: 'Download cancelled.' });
+    expect(h.warning).toHaveBeenCalledOnce(); expect(h.openScannerSetup).not.toHaveBeenCalled();
+    expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  // Breaks: revoking permission or losing a manifest accidentally turns off the mandatory gate.
+  it('blocks a recognized scanner even if permission is revoked and its manifest failed to load', async () => {
+    enableScanner({ granted: false, manifest: false });
+    const result = await download()(downloadEvent(), EMAIL_ID, FILENAME);
+    expect(result.success).toBe(false); expect(h.openScannerSetup).toHaveBeenCalledWith('clamav-scan');
+    expect(h.scanDownload).not.toHaveBeenCalled(); expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+  });
+
+  // Breaks: an extension frame can cancel another user's host-owned download operation.
+  it('authorizes cancellation from the trusted main frame only', async () => {
+    const cancel = h.handlers.get('emails:cancelAttachmentDownload')!;
+    expect(await cancel({ sender: h.webContents, senderFrame: {} }, 'request-1')).toEqual({ success: false, error: 'Attachment downloads must be requested from Sarv Inbox.' });
+    expect(await cancel(downloadEvent(), 'request-1')).toEqual({ success: true, data: { cancelled: false } });
   });
 });
 

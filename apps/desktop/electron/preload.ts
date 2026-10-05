@@ -48,6 +48,27 @@ interface AntivirusConfigureRequest {
   bodyConsent: boolean;
 }
 
+/** Host-owned missing-setup warning. The ID alone binds the answer to its original attachment. */
+export interface UnscannedWarningRequest {
+  id: string;
+  filename: string;
+  accountId: string;
+  action: 'view' | 'open' | 'download' | 'calendar';
+}
+
+export interface UnscannedWarningResponse {
+  id: string;
+  choice: 'continue' | 'setup' | 'cancel';
+  dontShowAgain: boolean;
+}
+
+/** Progress for a trusted, host-owned attachment save or preview. Contains no file bytes. */
+export type AttachmentDownloadPhase = 'downloading' | 'scanning' | 'saving';
+export interface AttachmentDownloadProgress {
+  requestId: string;
+  phase: AttachmentDownloadPhase;
+}
+
 interface AntivirusProbeResult {
   challenge: string;
   setup: AntivirusSetupStatus;
@@ -285,12 +306,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     removeBodyFetchedListener: () => {
       ipcRenderer.removeAllListeners('body:fetched');
     },
-    downloadAttachment: (emailId: string, filename: string, accountId?: string) =>
-      ipcRenderer.invoke('emails:downloadAttachment', emailId, filename, accountId),
+    downloadAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) =>
+      ipcRenderer.invoke('emails:downloadAttachment', emailId, filename, accountId, requestId),
+    onAttachmentDownloadProgress: (callback: (progress: AttachmentDownloadProgress) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress: AttachmentDownloadProgress) => callback(progress);
+      ipcRenderer.on('emails:attachmentDownloadProgress', listener);
+      return () => ipcRenderer.removeListener('emails:attachmentDownloadProgress', listener);
+    },
+    cancelAttachmentDownload: (requestId: string) =>
+      ipcRenderer.invoke('emails:cancelAttachmentDownload', requestId),
     getAttachmentBase64: (emailId: string, filename: string, accountId?: string) =>
       ipcRenderer.invoke('emails:getAttachmentBase64', emailId, filename, accountId),
-    previewAttachment: (emailId: string, filename: string, accountId?: string) =>
-      ipcRenderer.invoke('emails:previewAttachment', emailId, filename, accountId),
+    prepareAttachmentPreview: (emailId: string, filename: string, accountId?: string, requestId?: string) =>
+      ipcRenderer.invoke('emails:prepareAttachmentPreview', emailId, filename, accountId, requestId),
+    releaseAttachmentPreview: (url: string) => ipcRenderer.invoke('emails:releaseAttachmentPreview', url),
+    previewAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) =>
+      ipcRenderer.invoke('emails:previewAttachment', emailId, filename, accountId, requestId),
     getCalendarInvite: (emailId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:getCalendarInvite', emailId, accountId),
     openCalendarInvite: (emailId: string, accountId?: string) =>
@@ -374,6 +405,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     configure: (extensionId: string, config: AntivirusConfigureRequest) =>
       ipcRenderer.invoke('antivirus:configure', extensionId, config),
     disable: (extensionId: string) => ipcRenderer.invoke('antivirus:disable', extensionId),
+    getPendingUnscannedWarning: () => ipcRenderer.invoke('antivirus:getPendingUnscannedWarning'),
+    respondUnscannedWarning: (response: UnscannedWarningResponse) => ipcRenderer.invoke('antivirus:respondUnscannedWarning', response),
+    getUnscannedWarningPreferences: () => ipcRenderer.invoke('antivirus:getUnscannedWarningPreferences'),
+    resetUnscannedWarningPreference: (accountId: string) => ipcRenderer.invoke('antivirus:resetUnscannedWarningPreference', accountId),
+    onUnscannedWarning: (callback: (payload: UnscannedWarningRequest) => void) => {
+      const listener = (_event: unknown, payload: UnscannedWarningRequest) => callback(payload);
+      ipcRenderer.on('antivirus:unscannedWarning', listener);
+      return () => ipcRenderer.removeListener('antivirus:unscannedWarning', listener);
+    },
+    onUnscannedWarningClosed: (callback: (id: string) => void) => {
+      const listener = (_event: unknown, id: string) => callback(id);
+      ipcRenderer.on('antivirus:unscannedWarningClosed', listener);
+      return () => ipcRenderer.removeListener('antivirus:unscannedWarningClosed', listener);
+    },
     onOpenSetup: (callback: (payload: { extensionId: string }) => void) => {
       const listener = (_event: unknown, payload: { extensionId: string }) => callback(payload);
       ipcRenderer.on('antivirus:openSetup', listener);
@@ -1294,11 +1339,15 @@ export interface ElectronAPI {
     downloadBodies: (limit?: number) => Promise<{ success: boolean; data?: { downloaded: number }; error?: string }>;
     onBodyFetched: (callback: (email: any) => void) => () => void;
     removeBodyFetchedListener: () => void;
-    downloadAttachment: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    downloadAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) => Promise<{ success: boolean; filePath?: string; notScanned?: boolean; error?: string }>;
+    onAttachmentDownloadProgress: (callback: (progress: AttachmentDownloadProgress) => void) => () => void;
+    cancelAttachmentDownload: (requestId: string) => Promise<{ success: boolean; error?: string }>;
     getAttachmentBase64: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; base64?: string; error?: string }>;
-    previewAttachment: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    prepareAttachmentPreview: (emailId: string, filename: string, accountId?: string, requestId?: string) => Promise<{ success: boolean; url?: string; notScanned?: boolean; error?: string }>;
+    releaseAttachmentPreview: (url: string) => Promise<{ success: boolean; error?: string }>;
+    previewAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) => Promise<{ success: boolean; notScanned?: boolean; error?: string }>;
     getCalendarInvite: (emailId: string, accountId?: string) => Promise<{ success: boolean; ics?: string | null; error?: string }>;
-    openCalendarInvite: (emailId: string, accountId?: string) => Promise<{ success: boolean; noHandler?: boolean; error?: string }>;
+    openCalendarInvite: (emailId: string, accountId?: string) => Promise<{ success: boolean; noHandler?: boolean; notScanned?: boolean; error?: string }>;
     setCalendarAdded: (emailId: string, added: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     markRead: (emailId: string, read: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     onTagsUpdated: (
@@ -1342,6 +1391,12 @@ export interface ElectronAPI {
     probe: (extensionId: string, endpoint: string, credential?: string) => Promise<{ success: boolean; data?: AntivirusProbeResult; error?: string }>;
     configure: (extensionId: string, config: AntivirusConfigureRequest) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
     disable: (extensionId: string) => Promise<{ success: boolean; data?: AntivirusSetupStatus; error?: string }>;
+    getPendingUnscannedWarning: () => Promise<{ success: boolean; data?: UnscannedWarningRequest | null; error?: string }>;
+    respondUnscannedWarning: (response: UnscannedWarningResponse) => Promise<{ success: boolean; error?: string }>;
+    getUnscannedWarningPreferences: () => Promise<{ success: boolean; data?: { suppressedAccountIds: string[] }; error?: string }>;
+    resetUnscannedWarningPreference: (accountId: string) => Promise<{ success: boolean; error?: string }>;
+    onUnscannedWarning: (callback: (payload: UnscannedWarningRequest) => void) => () => void;
+    onUnscannedWarningClosed: (callback: (id: string) => void) => () => void;
     onOpenSetup: (callback: (payload: { extensionId: string }) => void) => () => void;
   };
   identity: {
@@ -1468,7 +1523,7 @@ export interface ElectronAPI {
     composeDefaults: (fromEmail: string) => Promise<PgpIpcResult<PgpComposeDefaults>>;
     open: (emailId: string, accountId?: string) => Promise<PgpViewResult>;
     openDraft: (emailId: string, accountId?: string) => Promise<PgpDraftResult>;
-    saveAttachment: (emailId: string, accountId: string | undefined, index: number) => Promise<PgpIpcResult<{ saved: boolean; filePath?: string }>>;
+    saveAttachment: (emailId: string, accountId: string | undefined, index: number) => Promise<PgpIpcResult<{ saved: boolean; filePath?: string; notScanned?: boolean }>>;
   };
   dialog: {
     pickFiles: () => Promise<{ success: boolean; data?: Array<{ filename: string; content: string; contentType: string; encoding: 'base64'; size: number }>; error?: string }>;

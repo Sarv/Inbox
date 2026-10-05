@@ -2,17 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createAntivirusDesktopBackend } from '../../../../electron/services/antivirus-desktop-backend';
 import type { AntivirusDependencies, ScanSource, ScannerConfiguration } from '../../../../electron/services/antivirus-scan-service';
-import { consentFingerprint, type ScannerCapabilities } from '../../../../electron/services/antivirus-transport';
+import { consentFingerprint, scannerOrigin, type ScannerCapabilities } from '../../../../electron/services/antivirus-transport';
 
 const h = vi.hoisted(() => ({
   deps: null as AntivirusDependencies | null,
-  available: true, storageBackend: 'keychain', blobs: new Map<string, Buffer>(), ignoreWrite: false,
+  available: true, storageBackend: 'keychain', blobs: new Map<string, Buffer>(), ignoreWrite: false, isPackaged: false,
   accounts: [{ id: 'account-a', email: 'a@example.test' }, { id: 'account-b', email: 'b@example.test' }],
   storages: new Map<string, any>(), engines: new Map<string, any>(),
-  requireStorage: vi.fn(), encrypt: vi.fn(), decrypt: vi.fn(), send: vi.fn(),
+  requireStorage: vi.fn(), encrypt: vi.fn(), decrypt: vi.fn(), send: vi.fn(), resetWarnings: vi.fn(),
 }));
 vi.mock('electron', () => ({
-  app: { isPackaged: false },
+  app: { get isPackaged() { return h.isPackaged; } },
   safeStorage: {
     isEncryptionAvailable: () => h.available, getSelectedStorageBackend: () => h.storageBackend,
     encryptString: (value: string) => h.encrypt(value), decryptString: (value: Buffer) => h.decrypt(value),
@@ -21,6 +21,7 @@ vi.mock('electron', () => ({
 vi.mock('../../../../electron/shared', () => ({ getMainWindow: () => ({ webContents: { send: h.send } }), getSyncEngineFor: (id: string) => h.engines.get(id) ?? null }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({ readRegistryAccounts: () => h.accounts }));
 vi.mock('../../../../electron/services/account-target', () => ({ requireAccountStorage: (id: string) => h.requireStorage(id) }));
+vi.mock('../../../../electron/services/attachment-warning-preferences', () => ({ unscannedWarningPreferences: { resetAll: h.resetWarnings } }));
 vi.mock('../../../../electron/services/core-db', () => ({
   getCoreDb: () => ({}), getBlob: (key: string) => h.blobs.get(key) ?? null,
   setBlob: (key: string, value: Buffer) => { if (!h.ignoreWrite) h.blobs.set(key, value); }, deleteBlob: (key: string) => h.blobs.delete(key),
@@ -40,13 +41,41 @@ const configuration = (): ScannerConfiguration => { const capabilities = cap(); 
 
 beforeEach(() => {
   vi.resetAllMocks(); h.available = true; h.storageBackend = 'keychain'; h.ignoreWrite = false; h.blobs.clear(); h.storages.clear(); h.engines.clear();
+  h.isPackaged = false; vi.stubEnv('VITE_DEV_SERVER_URL', undefined);
   h.accounts = [{ id: 'account-a', email: 'a@example.test' }, { id: 'account-b', email: 'b@example.test' }];
   h.encrypt.mockImplementation((value: string) => Buffer.from(`sealed(${value})`));
   h.decrypt.mockImplementation((value: Buffer) => { const match = /^sealed\((.*)\)$/s.exec(value.toString()); if (!match) throw new Error('Unreadable'); return match[1]; });
   h.requireStorage.mockImplementation(async (id: string) => { const storage = h.storages.get(id); if (!storage) throw new Error('Unavailable'); return storage; });
   createAntivirusDesktopBackend();
 });
-afterEach(() => { if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform); });
+afterEach(() => { vi.unstubAllEnvs(); if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform); });
+
+describe('scanner development loopback policy', () => {
+  // Breaks: sh scripts/dev.sh uses a branded Electron binary that reports packaged and rejects the local scanner.
+  it.each(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://[::1]:8080'])('allows %s under Vite even when Electron reports packaged', endpoint => {
+    h.isPackaged = true; vi.stubEnv('VITE_DEV_SERVER_URL', 'http://localhost:5173');
+    createAntivirusDesktopBackend();
+    expect(deps().allowDevelopmentLoopback).toBe(true);
+    expect(scannerOrigin(endpoint, deps().allowDevelopmentLoopback)).toBe(endpoint);
+  });
+
+  // Breaks: accepting the development exception in a shipped build sends scanner credentials over HTTP.
+  it.each([undefined, ''])('requires HTTPS in a packaged app without a dev server (%s)', devServerUrl => {
+    h.isPackaged = true; vi.stubEnv('VITE_DEV_SERVER_URL', devServerUrl);
+    createAntivirusDesktopBackend();
+    expect(deps().allowDevelopmentLoopback).toBe(false);
+    expect(() => scannerOrigin('http://localhost:8080', deps().allowDevelopmentLoopback)).toThrow(/require HTTPS/);
+    expect(scannerOrigin('https://scanner.example.test', deps().allowDevelopmentLoopback)).toBe('https://scanner.example.test');
+  });
+
+  // Breaks: treating all HTTP as development-safe exposes credentials outside the local machine.
+  it.each(['http://scanner.example.test:8080', 'http://localhost.example.test:8080', 'http://192.168.1.20:8080'])('continues to reject non-loopback HTTP %s in development', endpoint => {
+    h.isPackaged = true; vi.stubEnv('VITE_DEV_SERVER_URL', 'http://localhost:5173');
+    createAntivirusDesktopBackend();
+    expect(deps().allowDevelopmentLoopback).toBe(true);
+    expect(() => scannerOrigin(endpoint, deps().allowDevelopmentLoopback)).toThrow(/require HTTPS/);
+  });
+});
 
 describe('scanner credential storage', () => {
   it('seals credentials with OS encryption, verifies saving, and removes them when revoked', async () => {
@@ -54,6 +83,7 @@ describe('scanner credential storage', () => {
     expect(h.encrypt).toHaveBeenCalledOnce(); expect(h.blobs.get('antivirus-config:clamav-scan')?.subarray(0, 5).toString()).toBe('ENC1:');
     expect(await deps().readConfiguration('clamav-scan')).toEqual(config);
     await deps().writeConfiguration('clamav-scan', undefined); expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+    expect(h.resetWarnings).toHaveBeenCalledTimes(2);
   });
 
   it('rejects insecure Linux basic_text and missing OS encryption', async () => {
@@ -61,6 +91,7 @@ describe('scanner credential storage', () => {
     h.available = true; Object.defineProperty(process, 'platform', { value: 'linux', configurable: true }); h.storageBackend = 'basic_text';
     await expect(deps().writeConfiguration('clamav-scan', configuration())).rejects.toThrow(/secure key store/);
     expect(h.encrypt).not.toHaveBeenCalled(); expect(h.blobs.size).toBe(0);
+    expect(h.resetWarnings).not.toHaveBeenCalled();
   });
 
   it('fails closed for an unreadable envelope or unsuccessful database write', async () => {
@@ -69,6 +100,14 @@ describe('scanner credential storage', () => {
     h.blobs.clear(); h.ignoreWrite = true;
     await expect(deps().writeConfiguration('clamav-scan', configuration())).rejects.toThrow(/securely saved/);
     await expect(deps().writeConfiguration('../other-extension', configuration())).rejects.toThrow(/Invalid scanner extension/);
+    expect(h.resetWarnings).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a broken preference store silently leaves old remembered bypasses active after scanner changes.
+  it('fails closed when remembered warnings cannot be cleared after a successful configuration change', async () => {
+    h.resetWarnings.mockImplementation(() => { throw new Error('Warning store unreadable'); });
+    await expect(deps().writeConfiguration('clamav-scan', configuration())).rejects.toThrow('Warning store unreadable');
+    await expect(deps().writeConfiguration('clamav-scan', undefined)).rejects.toThrow('Warning store unreadable');
   });
 });
 
