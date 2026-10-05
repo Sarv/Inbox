@@ -67,13 +67,20 @@ A handful cannot be fixed that way. Those are listed in
 pnpm 8 offers — and every entry must be justified here. An undocumented entry is
 a bug: the point of the gate is that nothing high-severity is silently carried.
 
-Reviewed 2026-09-23:
+Reviewed 2026-10-05:
 
 | CVE | Package | Why it is accepted | Removed when |
 | --- | --- | --- | --- |
-| CVE-2026-53571 | `vite` <= 6.4.2 | A `server.fs.deny` bypass in vite's **dev server** on Windows. The dev server is a local build tool — it is never started by the packaged app, and no shipped artifact contains vite. Clearing it means moving `apps/desktop` to vite 6, which forces `vite-plugin-electron` 0.28 -> 1.x, a build-system migration on the app's only build path. | `apps/desktop` moves to vite >= 6.4.3. |
-| CVE-2025-71329 | `image-size` <= 2.0.2 | JXL/HEIF parser infinite loop (denial of service). Reached only through `metro`, the React Native bundler, under `packages/storage-mobile` and `packages/ui-primitives`. It is a build-time tool for the mobile packages and is not part of the desktop app. **No patched version exists** — the advisory's fixed range is empty. | `image-size` publishes a fix, or `metro` drops it. |
-| CVE-2025-71330 | `image-size` <= 2.0.2 | ICNS parser infinite loop (denial of service). Same package, same path, same absence of a fix as above. | As above. |
+| [CVE-2026-93748](https://github.com/advisories/GHSA-ch52-4w7c-c8xp) | `http-cache-semantics` <= 4.2.0 | Cross-user response disclosure requires a shared HTTP cache accepting attacker-controlled `max-stale` directives. The dependency is reached only through the desktop **build tool** `electron-builder` → `app-builder-lib` → `@electron/get` → `got` → `cacheable-request`. Inbox does not use this chain to handle mail, OAuth, scanner requests, or shared user caches. **No patched release exists.** This is a temporary exception for that reviewed tooling scope, not a vulnerability fix. | A patched release becomes available, the build tool drops it, or a runtime/shared-cache path appears (reassess before shipping). |
+| [CVE-2026-93687](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces` <= 3.0.3 | Stack exhaustion requires deeply nested glob patterns. All dependency paths are **tooling**: ESLint/globby, Tailwind/chokidar/fast-glob, and Metro/Jest. These tools process project patterns, not mail bodies, attachments, or user-supplied runtime patterns. **No patched release exists.** The remaining build-tool risk is accepted temporarily; the package itself remains vulnerable. | A patched release becomes available, the tooling drops it, or an untrusted runtime-pattern path appears (reassess before shipping). |
+
+The previous Vite exception (`CVE-2026-53571`) was removed: the desktop now
+uses Vite 8. The two `image-size` exceptions (`CVE-2025-71329` and
+`CVE-2025-71330`) were also removed. The scoped `metro@0.83` override updates
+that bundler to 0.83.8, which [replaces the `image-size` dependency with
+vendored parsers](https://github.com/react/metro/releases/tag/v0.83.8);
+the other Metro line already omits it. No `image-size` package remains in the
+lockfile, and no incompatible major-version override is imposed on its consumers.
 
 The CI job prints the full unfiltered report as a separate non-blocking step, so
 an ignored advisory getting a fix — or a new path appearing for one — is visible
