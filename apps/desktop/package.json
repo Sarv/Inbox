@@ -99,7 +99,7 @@
     "vite": "^8.3.1",
     "vite-plugin-electron": "^1.1.2",
     "vite-plugin-electron-renderer": "^1.0.0",
-    "wait-on": "^7.2.0"
+    "wait-on": "^9.5.1"
   },
   "build": {
     "appId": "com.sarv.sarvinbox",
