@@ -23,10 +23,11 @@ import {
   stopManualBodyDownload,
   getManualBodyDownloadState,
 } from '../services/body-prefetch-scheduler';
+import { changeEmailCategory } from '../services/classification-actions';
 import { getHeaderBackfillState, kickHeaderBackfill } from '../services/header-backfill';
 import { reportSenderVerdict } from '../services/reputation-service';
 import { applyUserSpamVerdict } from '../services/spam-verdict-actions';
-import { getSyncEngine, getMainWindow, getExtensionManager, requireStorage, requireSyncEngine } from '../shared';
+import { getSyncEngine, getMainWindow, getExtensionManager, getAccountIdForStorage, requireStorage, requireSyncEngine } from '../shared';
 
 import { logUserAction } from './agent-handlers';
 
@@ -1355,39 +1356,33 @@ export function registerEmailHandlers(): void {
     }
   });
 
-  /**
-   * Mark email as important/not important (local tag only, no IMAP sync)
-   */
-  ipcMain.handle('emails:markImportant', async (_event, emailId: string, important: boolean) => {
+  /** Mark importance locally and queue the native provider flag durably. */
+  ipcMain.handle('emails:markImportant', async (_event, emailId: string, important: boolean, accountId?: string) => {
     try {
-      const storage = requireStorage();
-
+      const { storage, syncEngine } = await resolveNamedOrActiveAccountTarget(accountId);
+      const result = await changeEmailCategory(storage, syncEngine, emailId, 'important', important);
       const email = await storage.getEmail(emailId);
-      if (!email) {
-        return { success: false, error: 'Email not found' };
-      }
-
-      const tags = email.tags || '||';
-      const isCurrentlyImportant = tags.includes('|important|');
-
-      if (important && !isCurrentlyImportant) {
-        const tagList = tags.split('|').filter((t: string) => t.length > 0);
-        tagList.push('important');
-        await storage.updateEmail(emailId, { tags: '|' + tagList.join('|') + '|' });
-      } else if (!important && isCurrentlyImportant) {
-        const tagList = tags.split('|').filter((t: string) => t.length > 0 && t !== 'important');
-        await storage.updateEmail(emailId, { tags: tagList.length > 0 ? '|' + tagList.join('|') + '|' : '||' });
-      }
-
-      // Log action for agent learning
       logUserAction(emailId, important ? 'important' : 'unimportant', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
-      });
-
-      return { success: true };
+        threadId: email?.threadId,
+        senderAddress: email?.fromAddress,
+      }, storage);
+      if (email) getMainWindow()?.webContents.send('emails:tags-updated', { emailId, tags: email.tags, accountId: getAccountIdForStorage(storage) });
+      return { success: true, data: result.categories, syncStatus: result.syncStatus };
     } catch (error) {
       logger.error('Mark important error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  ipcMain.handle('emails:setCategory', async (_event, emailId: string, slug: string, on: boolean, accountId?: string) => {
+    try {
+      const { storage, syncEngine } = await resolveNamedOrActiveAccountTarget(accountId);
+      const result = await changeEmailCategory(storage, syncEngine, emailId, slug, on);
+      const email = await storage.getEmail(emailId);
+      if (email) getMainWindow()?.webContents.send('emails:tags-updated', { emailId, tags: email.tags, accountId: getAccountIdForStorage(storage) });
+      return { success: true, data: result.categories, syncStatus: result.syncStatus };
+    } catch (error) {
+      logger.error('Change category error:', error);
       return { success: false, error: (error as Error).message };
     }
   });

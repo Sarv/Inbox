@@ -52,7 +52,9 @@ import { createMutex, type Mutex } from '../utils/mutex';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
+import { GMAIL_NATIVE_CATEGORY_SLUGS, modifyGmailNativeCategories, type GmailNativeCategory } from './gmail-category-api';
 import { isConnectionError, isAuthError } from './imap-errors';
+import { isSarvHost } from './label-strategy';
 import { receivingAuthserv } from './receiving-authserv';
 
 // Max time to wait for the OAuth bearer resolver (token refresh) during connect.
@@ -110,6 +112,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   private idleHandlers: IdleHandlers | null = null;
   /** Host of the last connect() config — see IIMAPClient.host. */
   private connectedHost: string | null = null;
+  private gmailResolveBearer: IMAPConfig['resolveBearer'];
   // Releases this connection's per-account budget slot (see connection-budget).
   // Set on acquire (before connect), cleared on any close path. Idempotent.
   private releaseBudget: (() => void) | null = null;
@@ -204,6 +207,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    */
   private async establishWithToken(config: IMAPConfig, oauthAccessToken: string | undefined): Promise<void> {
     this.connectedHost = config.host;
+    this.gmailResolveBearer = config.authMethod === 'oauth2' ? config.resolveBearer : undefined;
     this.connectionState = 'connecting';
 
     // Connection security: when the first-class `security` field is set it is
@@ -901,6 +905,8 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     useUid: boolean,
     options?: FetchOptions,
   ): Promise<IMAPMessage[]> {
+    const selected = this.ensureCurrentFolder();
+    const uidValidity = this.getCurrentMailboxState()?.uidValidity;
     let messages;
     try {
       const fetching = this.client!.fetchAll(
@@ -967,7 +973,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       throw this.toImapError(err, 'FETCH_ERROR');
     }
 
-    const mapped = messages.map((m) => this.toIMAPMessage(m));
+    this.ensureCurrentFolder(selected);
+    const rawMapped = messages.map((m) => this.toIMAPMessage(m));
+    const mapped = options?.discoverCategories === false ? rawMapped : await this.attachGmailCategories(rawMapped, selected, uidValidity);
 
     // ImapFlow has no markSeen option on fetch, so emulate it by adding \Seen.
     if (options?.markSeen && mapped.length > 0) {
@@ -986,6 +994,47 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     }
 
     return mapped;
+  }
+
+  /** Five bounded Gmail category queries per UID batch, never one query per message. */
+  private async attachGmailCategories<T extends { uid: number }>(rows: T[], folderPath: string, uidValidity?: number): Promise<Array<T & { categories?: string[]; gmailCategoriesKnown?: boolean }>> {
+    if (!this.supportsGmailLabels() || rows.length === 0) return rows;
+    const result = rows.map((row) => ({ ...row, gmailCategoriesKnown: false } as T & { categories?: string[]; gmailCategoriesKnown?: boolean }));
+    if (!uidValidity || uidValidity <= 0) return result; // unknown mailbox identity cannot authorize a UID search
+    await this.withFolder(folderPath, async () => {
+      for (let start = 0; start < result.length; start += 500) {
+        if (this.getCurrentMailboxState()?.uidValidity !== uidValidity) throw new IMAPError('Mailbox identity changed during Gmail category discovery', 'UIDVALIDITY_MISMATCH');
+        const batch = result.slice(start, start + 500);
+        const requested = new Set(batch.map((row) => row.uid).filter((uid) => Number.isSafeInteger(uid) && uid > 0));
+        if (requested.size === 0) continue;
+        const categoriesByUid = new Map([...requested].map((uid) => [uid, [] as string[]]));
+        try {
+          for (const category of GMAIL_NATIVE_CATEGORY_SLUGS) {
+            // ImapFlow's typed gmraw compiles to X-GM-RAW; UID criterion and
+            // uid:true both matter (SEARCH sequence numbers are not message UIDs).
+            const matches = await this.op('UID SEARCH Gmail category', this.client!.search({ uid: [...requested].join(','), gmraw: `category:${category === 'personal' ? 'primary' : category}` }, { uid: true }));
+            if (!Array.isArray(matches)) throw new IMAPError('Gmail category query did not return a UID set', 'GMAIL_CATEGORY_DISCOVERY_FAILED');
+            this.ensureCurrentFolder(folderPath);
+            if (this.getCurrentMailboxState()?.uidValidity !== uidValidity) throw new IMAPError('Mailbox identity changed during Gmail category discovery', 'UIDVALIDITY_MISMATCH');
+            for (const uid of matches) {
+              if (!requested.has(uid)) throw new IMAPError('Gmail category query returned an out-of-batch UID', 'GMAIL_CATEGORY_DISCOVERY_FAILED');
+              categoriesByUid.get(uid)!.push(category);
+            }
+          }
+          // Publish only complete discovery: a partial/failing query is unknown,
+          // never evidence that the remaining messages lack native categories.
+          for (const row of batch) {
+            row.categories = categoriesByUid.get(row.uid) ?? [];
+            row.gmailCategoriesKnown = true;
+          }
+        } catch (error) {
+          if (error instanceof IMAPError && ['MAILBOX_MISMATCH', 'UIDVALIDITY_MISMATCH'].includes(error.code)) throw error;
+          logger.warn('Gmail native category discovery failed; automatic categorization deferred');
+          if (!this.isConnected()) break;
+        }
+      }
+    });
+    return result;
   }
 
   private toIMAPMessage(m: FetchMessageObject): IMAPMessage {
@@ -1315,17 +1364,18 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     uids: number[],
     onBatch?: () => void,
     expectedPath?: string,
-  ): Promise<Array<{ uid: number; flags: string[] }>> {
+  ): Promise<Array<{ uid: number; flags: string[]; labels?: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>> {
     // Anchored for the same reason as fetchAllUIDs: these flags are applied to
     // local rows BY UID, so a wrong mailbox silently rewrites this folder's
     // read/starred state from another folder's — the 2026-09-13 reconcile read
     // 24,662 flags from INBOX while reconciling a 917-message folder.
     const selected = this.ensureCurrentFolder(expectedPath);
+    const uidValidity = this.getCurrentMailboxState()?.uidValidity;
     if (uids.length === 0) return [];
 
     const BATCH = 500;
     const sorted = [...uids].sort((a, b) => a - b);
-    const out: Array<{ uid: number; flags: string[] }> = [];
+    const out: Array<{ uid: number; flags: string[]; labels?: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }> = [];
     let failedBatches = 0;
 
     for (let i = 0; i < sorted.length; i += BATCH) {
@@ -1349,10 +1399,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       try {
         const list = await this.op(
           'FETCH flags (batch)',
-          client.fetchAll(range, { uid: true, flags: true }, { uid: true }),
+          client.fetchAll(range, { uid: true, flags: true, ...(this.supportsGmailLabels() ? { labels: true } : {}) }, { uid: true }),
         );
         for (const m of list) {
-          if (m.uid > 0) out.push({ uid: m.uid, flags: m.flags ? [...m.flags] : [] });
+          if (m.uid > 0) out.push({ uid: m.uid, flags: m.flags ? [...m.flags] : [], ...(this.supportsGmailLabels() ? { labels: [...((m as { labels?: Set<string> }).labels ?? [])] } : {}) });
         }
         // Progress heartbeat for a pooled caller: a batch completed, so the
         // connection is alive and making progress — refresh stuck-eviction.
@@ -1374,7 +1424,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
         + `got flags for ${out.length}/${uids.length} uids`,
       );
     }
-    return out;
+    return this.attachGmailCategories(out, selected, uidValidity);
   }
 
   /**
@@ -1387,8 +1437,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * their labels cost a few bytes each. Empty array on a non-Gmail server so the
    * caller needs no capability check.
    */
-  async fetchAllLabels(expectedPath?: string): Promise<Array<{ uid: number; labels: string[] }>> {
+  async fetchAllLabels(expectedPath?: string): Promise<Array<{ uid: number; labels: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>> {
     const selected = this.ensureCurrentFolder(expectedPath);
+    const uidValidity = this.getCurrentMailboxState()?.uidValidity;
     if (!this.supportsGmailLabels()) return [];
     let rows: Array<{ uid: number; labels: string[] }>;
     try {
@@ -1406,24 +1457,25 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     // being relabelled a fetch failure. Labels are filed against local rows BY
     // UID, so a set harvested from a re-selected mailbox re-files this folder's mail.
     this.ensureCurrentFolder(selected);
-    return rows;
+    return this.attachGmailCategories(rows, selected, uidValidity);
   }
 
-  async fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[] }>> {
+  async fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[]; labels?: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>> {
     const selected = this.ensureCurrentFolder(expectedPath);
-    let rows: Array<{ uid: number; flags: string[] }>;
+    const uidValidity = this.getCurrentMailboxState()?.uidValidity;
+    let rows: Array<{ uid: number; flags: string[]; labels?: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>;
     try {
-      const list = await this.op('FETCH flags', this.client!.fetchAll('1:*', { uid: true, flags: true }, { uid: false }));
+      const list = await this.op('FETCH flags', this.client!.fetchAll('1:*', { uid: true, flags: true, ...(this.supportsGmailLabels() ? { labels: true } : {}) }, { uid: false }));
       rows = list
         .filter((m) => m.uid > 0)
-        .map((m) => ({ uid: m.uid, flags: m.flags ? [...m.flags] : [] }));
+        .map((m) => ({ uid: m.uid, flags: m.flags ? [...m.flags] : [], ...(this.supportsGmailLabels() ? { labels: [...((m as { labels?: Set<string> }).labels ?? [])] } : {}) }));
     } catch (err) {
       throw this.toImapError(err, 'FETCH_FLAGS_ERROR');
     }
     // Same anchoring as fetchFlagsOnly, and outside the catch for the same reason:
     // flags land on local rows by UID.
     this.ensureCurrentFolder(selected);
-    return rows;
+    return this.attachGmailCategories(rows, selected, uidValidity);
   }
 
   async fetchAllUIDs(expectedPath?: string): Promise<number[]> {
@@ -1658,13 +1710,14 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   }
 
   async fetchFlagsChangedSince(modseq: number): Promise<FlagChange[]> {
-    this.ensureCurrentFolder();
+    const selected = this.ensureCurrentFolder();
+    const uidValidity = this.getCurrentMailboxState()?.uidValidity;
     if (!this.supportsCondstore()) {
       throw new IMAPError('Server does not support CONDSTORE', 'CONDSTORE_NOT_SUPPORTED');
     }
     const list = await this.op('FETCH CHANGEDSINCE', this.client!.fetchAll(
       '1:*',
-      { uid: true, flags: true },
+      { uid: true, flags: true, ...(this.supportsGmailLabels() ? { labels: true } : {}) },
       { uid: false, changedSince: BigInt(modseq) },
     ));
     const results = list
@@ -1672,10 +1725,12 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       .map((m) => ({
         uid: m.uid,
         flags: m.flags ? [...m.flags] : [],
+        ...(this.supportsGmailLabels() ? { labels: [...((m as { labels?: Set<string> }).labels ?? [])] } : {}),
         modseq: m.modseq ? Number(m.modseq) : 0,
       }));
     logger.debug(`CONDSTORE: ${results.length} messages changed since modseq ${modseq}`);
-    return results;
+    this.ensureCurrentFolder(selected);
+    return this.attachGmailCategories(results, selected, uidValidity);
   }
 
   // ========== Append ==========
@@ -1711,7 +1766,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       logger.info(`[IMAP] UID STORE ${uids.join(',')} +FLAGS (${keywords.join(' ')}) in "${folder}" → matched=${matched}`);
       if (process.env.SARV_DEBUG_KEYWORDS === '1') {
         try {
-          const list = await this.client!.fetchAll(uids.join(','), { uid: true, flags: true }, { uid: true });
+          const list = await this.client!.fetchAll(uids.join(','), { uid: true, flags: true, ...(this.supportsGmailLabels() ? { labels: true } : {}) }, { uid: true });
           const back = list.map((m: any) => `uid ${m.uid}: [${[...(m.flags ?? [])].join(' ')}]`);
           logger.info(`[IMAP] server FLAGS after STORE → ${back.join('; ') || '(no messages returned)'}`);
         } catch (e) {
@@ -1738,6 +1793,78 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     this.ensureConnected();
     if (uids.length === 0 || labels.length === 0) return;
     await this.op('STORE -X-GM-LABELS', this.client!.messageFlagsRemove(uids, labels, { uid: true, useLabels: true } as any));
+  }
+
+  canModifyGmailCategories(): boolean {
+    return this.supportsGmailLabels() && typeof this.gmailResolveBearer === 'function';
+  }
+
+  async modifyGmailCategories(uids: number[], add: string[], remove: string[], expectedUidValidity: number): Promise<void> {
+    const selected = this.ensureCurrentFolder();
+    const activeClient = this.client;
+    const resolveBearer = this.gmailResolveBearer;
+    if (!this.canModifyGmailCategories()) throw new IMAPError('Connect Gmail with OAuth to change native categories', 'GMAIL_CATEGORY_OAUTH_REQUIRED');
+    const native = (slug: string): slug is GmailNativeCategory => (GMAIL_NATIVE_CATEGORY_SLUGS as readonly string[]).includes(slug);
+    if ([...add, ...remove].some((slug) => !native(slug))) throw new IMAPError('Unknown Gmail category', 'GMAIL_CATEGORY_INVALID');
+    const before = this.getCurrentMailboxState();
+    if (this.client!.mailbox && this.client!.mailbox.readOnly) throw new IMAPError('Mailbox is read-only', 'READ_ONLY_MAILBOX');
+    if (!expectedUidValidity || before?.uidValidity !== expectedUidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed; sync before changing categories', 'UIDVALIDITY_MISMATCH');
+    if (uids.length === 0 || (add.length === 0 && remove.length === 0)) return;
+    await this.withFolder(selected, async () => {
+      if (this.getCurrentMailboxState()?.uidValidity !== expectedUidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed', 'UIDVALIDITY_MISMATCH');
+      const requested = new Set(uids);
+      // ImapFlow always requests X-GM-MSGID on X-GM-EXT-1 FETCHes; there is no emailId query option.
+      const identities = await this.op('UID FETCH Gmail message IDs', this.client!.fetchAll(uids.join(','), { uid: true }, { uid: true }));
+      this.ensureCurrentFolder(selected);
+      if (this.getCurrentMailboxState()?.uidValidity !== expectedUidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed', 'UIDVALIDITY_MISMATCH');
+      const byUid = new Map(identities.filter((row) => requested.has(row.uid)).map((row) => [row.uid, row.emailId]));
+      if (byUid.size !== requested.size || [...byUid.values()].some((id) => !id)) throw new IMAPError('Gmail message identity is unavailable; sync this folder first', 'GMAIL_MESSAGE_ID_MISSING');
+      for (const messageId of new Set(byUid.values())) {
+        const accountBearer = async (forceRefresh?: boolean) => {
+          if (this.client !== activeClient || this.gmailResolveBearer !== resolveBearer) throw new IMAPError('Connection changed during category update', 'CONNECTION_CHANGED');
+          this.ensureCurrentFolder(selected);
+          if (this.getCurrentMailboxState()?.uidValidity !== expectedUidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed', 'UIDVALIDITY_MISMATCH');
+          const token = await resolveBearer!(forceRefresh);
+          if (this.client !== activeClient || this.gmailResolveBearer !== resolveBearer) throw new IMAPError('Connection changed during category update', 'CONNECTION_CHANGED');
+          this.ensureCurrentFolder(selected);
+          if (this.getCurrentMailboxState()?.uidValidity !== expectedUidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed', 'UIDVALIDITY_MISMATCH');
+          return token;
+        };
+        await modifyGmailNativeCategories({ messageId: messageId!, resolveBearer: accountBearer,
+          add: add.filter(native), remove: remove.filter(native) });
+      }
+    });
+  }
+
+  async setImportance(uids: number[], important: boolean, expectedUidValidity: number): Promise<void> {
+    const selected = this.ensureCurrentFolder();
+    if (uids.length === 0) return;
+    const mailbox = this.client!.mailbox;
+    if (!mailbox || Number(mailbox.uidValidity) !== expectedUidValidity || expectedUidValidity <= 0) {
+      throw new IMAPError('Mailbox UIDVALIDITY changed; sync this folder before changing importance', 'UIDVALIDITY_MISMATCH');
+    }
+    if (mailbox.readOnly) throw new IMAPError('Mailbox is read-only', 'READ_ONLY_MAILBOX');
+    if (this.supportsGmailLabels()) {
+      // Google documents native Important in X-GM-LABELS. This modifies only
+      // importance: category labels, inbox membership, and stars remain intact.
+      const command = important ? 'STORE +X-GM-LABELS Important' : 'STORE -X-GM-LABELS Important';
+      const mutate = important ? this.client!.messageFlagsAdd.bind(this.client!) : this.client!.messageFlagsRemove.bind(this.client!);
+      const matched = await this.op(command, mutate(uids, ['Important'], { uid: true, useLabels: true }));
+      if (matched === false) throw new IMAPError('The selected message no longer exists', 'MESSAGE_NOT_FOUND');
+    } else {
+      const permanent = [...(mailbox.permanentFlags ?? [])].map((flag) => String(flag).toLowerCase());
+      // Sarv reports canonical bare Important in FETCH FLAGS. Use that value
+      // for STORE rather than inferring a keyword from SEARCH spelling.
+      const sarv = isSarvHost(this.host ?? '') || permanent.includes('important');
+      const keyword = sarv ? 'Important' : '$Important';
+      if (!sarv && !permanent.includes('$important') && !permanent.includes('\\*')) {
+        throw new IMAPError('This mail server does not support an importance keyword', 'IMPORTANCE_NOT_SUPPORTED');
+      }
+      const mutate = important ? this.client!.messageFlagsAdd.bind(this.client!) : this.client!.messageFlagsRemove.bind(this.client!);
+      const matched = await this.op(important ? 'STORE +FLAGS Important' : 'STORE -FLAGS Important', mutate(uids, [keyword], { uid: true }));
+      if (matched === false) throw new IMAPError('The selected message no longer exists', 'MESSAGE_NOT_FOUND');
+    }
+    this.ensureCurrentFolder(selected);
   }
 
   async setFlags(uids: number[], flags: string[]): Promise<void> {

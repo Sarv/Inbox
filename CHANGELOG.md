@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Edit email categories and sync Important.** Use the Categories menu in the
+  message toolbar or email list to review and change assignments. Important
+  remains independent of categories and stars. Sarv uses its native `Important`
+  flag; Gmail uses its native importance label. Changes are queued for the
+  message's own account and mailbox, and a changed mailbox identity stops a
+  stale operation. Gmail's built-in category tabs can be changed after OAuth
+  sign-in; unsupported server changes show an error before saving locally.
+- **Respect existing server classifications.** Recognized provider category
+  folders, keywords, Gmail categories and Important suppress another automatic
+  AI categorization request. Server changes refresh local assignments, and an
+  intentional manual selection, including clearing every category, takes
+  precedence while syncing. A temporary failure reading Gmail categories
+  defers categorization until a successful sync. Conversation and contact
+  processing remain available; categorizer-driven actions do not run from a
+  provider classification alone.
 - **Provider-first onboarding.** Choose email, connect with Sarv/Gmail OAuth or
   manual IMAP/SMTP, then choose an optional AI provider and test a model. Sarv
   email sign-in reuses its AI session. Provider cards advance immediately, and

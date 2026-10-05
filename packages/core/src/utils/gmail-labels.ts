@@ -17,8 +17,7 @@
  *
  *   \\Inbox, \\Sent, \\Draft, \\Trash, \\Junk   → the FOLDER path for that role
  *   \\Starred                                   → a FLAG tag (never a folder!)
- *   \\Important                                 → DROPPED (this app's AI owns
- *                                                 importance; see below)
+ *   \\Important / Important                     → importance flag
  *   "Sarv Inbox/Promotions"                     → the CATEGORY slug it mirrors
  *   "access", "Work/Clients"                    → the user's own label, verbatim
  */
@@ -34,15 +33,12 @@ import { SARV_LABEL_PARENT } from '../imap/label-strategy';
  * rest map to a folder ROLE the caller resolves to a real path (a mailbox's path
  * differs per account: `[Gmail]/Sent Mail` vs `Sent`).
  *
- * `\\Important` is DELIBERATELY ABSENT — do not add it back. This app's AI is the
- * sole source of the `important` tag, which is why `getSelectableFolders` also
- * skips the `[Gmail]/Important` mailbox. Mapping the label here re-admitted
- * Gmail's own guess through the label path, so mail arriving while the AI was
- * down still wore an "Important" chip nothing in this app had decided on.
- * Unlisted `\\System` labels fall through to the drop branch in `mapGmailLabels`.
+ * Provider importance is authoritative; it suppresses redundant AI
+ * categorisation and is synchronised independently from category labels.
  */
 const SYSTEM_LABEL_FLAGS: Record<string, string> = {
   '\\starred': 'starred',
+  '\\important': 'important',
 };
 
 /** Folder ROLES a system label denotes, resolved to a path by the caller. */
@@ -120,7 +116,14 @@ export function matchKnownCategory(
   const match = knownCategories.find(
     (c) => (c.name && categoryNameSlug(c.name) === target) || categoryNameSlug(c.slug) === target,
   );
-  return match ? match.slug : null;
+  if (match) return match.slug;
+  // Sarv's provider folders use plural display names where bundled app
+  // definitions have singular slugs. Resolve only these established aliases.
+  const aliases: Record<string, string> = { meetings: 'meeting', invoices: 'invoice', reminders: 'reminder', forums: 'forum', promotions: 'promotion' };
+  const canonical = aliases[target] ?? Object.entries(aliases).find(([, singular]) => singular === target)?.[0];
+  if (!canonical) return null;
+  return knownCategories.find((category) => categoryNameSlug(category.slug) === canonical ||
+    (category.name && categoryNameSlug(category.name) === canonical))?.slug ?? null;
 }
 
 /**
@@ -176,6 +179,13 @@ export function mapGmailLabels(
     const label = normalizeLabel(raw);
     if (!label) continue;
 
+    const nativeSystemCategory = label.match(/^\\(?:category[_ ]?)?(promotions|social|updates|forums|personal)$/i);
+    if (nativeSystemCategory) {
+      const slug = matchKnownCategory(nativeSystemCategory[1], options.knownCategories)
+        ?? categoryNameSlug(nativeSystemCategory[1]);
+      if (!categories.includes(slug)) categories.push(slug);
+      continue;
+    }
     if (label.startsWith('\\')) {
       const key = label.toLowerCase();
       const flag = SYSTEM_LABEL_FLAGS[key];
@@ -188,6 +198,25 @@ export function mapGmailLabels(
         if (!roles.includes(role)) roles.push(role);
       }
       // Unknown `\System` label: intentionally ignored (see doc above).
+      continue;
+    }
+
+    // Gmail's documented X-GM-LABELS example returns bare Important; accept
+    // both that spelling and the backslash form used by other Gmail clients.
+    if (label.toLowerCase() === 'important') {
+      if (!flags.includes('important')) flags.push('important');
+      continue;
+    }
+    const nativeCategory = label.match(/^(?:(?:\[gmail\]|\[googlemail\]|categories)\/)?(promotions|social|updates|forums|personal)$/i);
+    if (nativeCategory) {
+      const nativeSlug = matchKnownCategory(nativeCategory[1], options.knownCategories)
+        ?? categoryNameSlug(nativeCategory[1]);
+      if (!categories.includes(nativeSlug)) categories.push(nativeSlug);
+      continue;
+    }
+    const bareCategory = matchKnownCategory(label, options.knownCategories);
+    if (bareCategory && bareCategory !== 'important') {
+      if (!categories.includes(bareCategory)) categories.push(bareCategory);
       continue;
     }
 

@@ -136,6 +136,30 @@ function withStorage(seed?: (storage: SQLiteStorage) => Promise<void>): { get: (
   return { get: () => storage, dir: () => dir };
 }
 
+describe('classification authority facade', () => {
+  const fixture = withStorage(async (storage) => {
+    await storage.syncFolders([makeFolder('f-inbox', 'INBOX')]);
+    await storage.insertEmail(makeEmail({ id: 'provider-classification', tags: '|INBOX|starred|' }));
+  });
+
+  // Regression: sync and manual IPC use these facade methods; metadata and ordinary tags must survive through the real database.
+  it('projects provider and user selections while preserving other message state', async () => {
+    const storage = fixture.get();
+    storage.setServerCategories('provider-classification', ['promotions']);
+    expect(await storage.getEmail('provider-classification')).toMatchObject({
+      serverCategories: ['promotions'], tags: '|INBOX|starred|promotions|',
+    });
+    storage.setEmailManualCategories('provider-classification', ['finance']);
+    expect(await storage.getEmail('provider-classification')).toMatchObject({
+      manualCategories: ['finance'], tags: '|INBOX|starred|finance|',
+    });
+    storage.setEmailManualCategories('provider-classification', null);
+    expect(await storage.getEmail('provider-classification')).toMatchObject({
+      manualCategories: null, tags: '|INBOX|starred|promotions|',
+    });
+  });
+});
+
 // ===========================================================================
 // Lifecycle
 // ===========================================================================
@@ -1259,6 +1283,25 @@ describe('SQLiteStorage pending operations queue', () => {
   const ctx = withStorage();
 
   afterEach(async () => { await ctx.get().clearPendingOperations(); });
+
+  // Regression: dead-lettered category choices cannot be erased by a server refresh or retrigger paid categorization before the user resolves them.
+  it('protects failed classification choices until retry or discard, while allowing failed read/star flags to reconcile', async () => {
+    const storage = ctx.get();
+    const categories = ['setImportance', 'setCategorySelection', 'applyCategoryLabel', 'removeCategoryLabel'];
+    const ids = [];
+    for (const [index, type] of [...categories, 'markRead', 'markStarred'].entries()) {
+      const id = await storage.savePendingOperation({ type, folderPath: 'INBOX', uid: index + 1, retryCount: 0 });
+      await storage.markPendingOperationFailed(id, 'Server rejected the command');
+      ids.push(id);
+    }
+    expect((await storage.getPendingOperationUidsByFolder('INBOX')).sort()).toEqual([1, 2, 3, 4]);
+    expect(await storage.getPendingOperationUidsByFolder('Archive')).toEqual([]);
+    expect(await storage.getPendingOperations()).toEqual([]);
+    await storage.updatePendingOperationStatus(ids[0], 'pending');
+    expect(await storage.getPendingOperationUidsByFolder('INBOX')).toContain(1);
+    await storage.deletePendingOperation(ids[1]);
+    expect((await storage.getPendingOperationUidsByFolder('INBOX')).sort()).toEqual([1, 3, 4]);
+  });
 
   it('saves, lists, retries, dead-letters and prunes operations', async () => {
     const storage = ctx.get();

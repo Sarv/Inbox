@@ -117,6 +117,8 @@ vi.mock('../../../../electron/services/pipeline-ai-config-store', () => ({
 
 import { resetFakeCoreDb } from '../../../../electron/services/__testing__/fake-core-db';
 import { upsertRegistryAccount } from '../../../../electron/services/accounts-registry';
+import { changeEmailCategory } from '../../../../electron/services/classification-actions';
+import * as oauthService from '../../../../electron/services/oauth-service';
 import {
   backfillCategoryLabels,
   mirrorCategoryLabels,
@@ -276,6 +278,7 @@ function addAccount(opts: AccountOptions) {
   const markLabelDone = vi.fn();
   const storage = {
     getCategoryDefinitions: () => DEFS,
+    getEmail: async (id: string) => emails.find((email) => email.id === id) ?? null,
     getFolders: async () => folders,
     getFolder: async (id: string) => folders.find((f) => f.id === id) ?? null,
     getEmailsByFolder: async (folderId: string, { limit }: { limit: number }) =>
@@ -654,5 +657,110 @@ describe('mirrorCategoryLabels (a freshly categorized mail)', () => {
     expect(writesTo(legacy)).toBe(0);
     expect(names(a)).toEqual([]);
     expect(writesTo(a)).toBe(0);
+  });
+});
+
+const classificationDeferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+describe('automatic mirrors respect explicit category mutations', () => {
+  it('ignores a stale mirror whose message no longer has an identity', async () => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth' });
+    await mirrorCategoryLabels(b.storage, {}, ['travel']);
+    expect(b.queue.applyCategoryLabels).not.toHaveBeenCalled();
+    expect(b.markLabelDone).not.toHaveBeenCalled();
+  });
+
+  it('finishes a token-paused mirror before a later explicit clear, leaving the clear last', async () => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    const entered = classificationDeferred();
+    const release = classificationDeferred();
+    const token = vi.spyOn(oauthService, 'getValidAccessToken').mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return `token-for:${b.email}`;
+    });
+    const row = b.emails[0] as any;
+    const storage = Object.assign(b.storage, {
+      setEmailManualCategories: (_id: string, categories: string[]) => {
+        row.tags = categories.map((category) => `|${category}`).join('') + '|';
+        row.manualCategories = [...categories];
+      },
+    });
+    const manualEngine = {
+      assertManualCategorySync: vi.fn(),
+      markImportant: vi.fn(async () => 'success' as const),
+      setCategorySelection: vi.fn(async (_path: string, uid: number, data: { remove: Array<{ name: string }>; apply: Array<{ name: string }> }) => {
+        const labels = b.messageLabels.get(uid) ?? new Set<string>();
+        data.remove.forEach((category) => labels.delete(label(category.name)));
+        data.apply.forEach((category) => labels.add(label(category.name)));
+        b.messageLabels.set(uid, labels);
+        return 'success' as const;
+      }),
+    };
+    try {
+      const mirror = mirrorCategoryLabels(storage, row, ['travel']);
+      await entered.promise;
+      const clear = changeEmailCategory(storage, manualEngine, row.id, 'travel', false);
+      await Promise.resolve();
+      expect(manualEngine.setCategorySelection).not.toHaveBeenCalled();
+      release.resolve();
+      await Promise.all([mirror, clear]);
+      expect(b.queue.applyCategoryLabels.mock.invocationCallOrder[0]).toBeLessThan(manualEngine.setCategorySelection.mock.invocationCallOrder[0]);
+      expect([...b.messageLabels.get(201)!]).toEqual([]);
+      expect(row.manualCategories).toEqual([]);
+      await mirrorCategoryLabels(storage, row, ['travel']); // a queued/stale AI result cannot put it back
+      expect(b.queue.applyCategoryLabels).toHaveBeenCalledOnce();
+    } finally { token.mockRestore(); }
+  });
+
+  it.each(['manual-clear', 'provider', 'unknown', 'missing', 'moved', 'folder-moved'])('rechecks %s state after awaited Gmail colours and does not finalize a skipped mirror', async (state) => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    const row = b.emails[0] as any;
+    const getEmail = vi.spyOn(b.storage, 'getEmail');
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      if (state === 'manual-clear') row.manualCategories = [];
+      else if (state === 'provider') row.serverCategories = ['invoices'];
+      else if (state === 'unknown') row.gmailCategoriesPending = true;
+      else if (state === 'missing') getEmail.mockResolvedValue(null);
+      else if (state === 'folder-moved') row.folderId = 'different-folder';
+      else row.uid = 999;
+      return fakeGmailApi(url, init);
+    });
+    await mirrorCategoryLabels(b.storage, { ...row }, ['travel']);
+    expect(b.queue.applyCategoryLabels).not.toHaveBeenCalled();
+    expect(b.queue.removeGmailLabels).not.toHaveBeenCalled();
+    expect(b.markLabelDone).not.toHaveBeenCalled();
+  });
+
+  it('rechecks provider authority before stale-label removal after an awaited apply', async () => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    b.queue.applyCategoryLabels.mockImplementationOnce(async () => {
+      (b.emails[0] as any).serverCategories = ['invoices'];
+      return 'success';
+    });
+    await mirrorCategoryLabels(b.storage, b.emails[0], ['travel']);
+    expect(b.queue.applyCategoryLabels).toHaveBeenCalledOnce();
+    expect(b.queue.removeGmailLabels).not.toHaveBeenCalled();
+    expect(b.markLabelDone).not.toHaveBeenCalled();
+  });
+
+  it.each(['manual', 'provider', 'unknown', 'missing', 'moved'])('skips already %s mail before Gmail or IMAP writes', async (state) => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    const row = b.emails[0] as any;
+    const stale = { ...row };
+    if (state === 'manual') row.manualCategories = [];
+    else if (state === 'provider') row.serverCategories = ['invoices'];
+    else if (state === 'unknown') row.gmailCategoriesPending = true;
+    else if (state === 'missing') vi.spyOn(b.storage, 'getEmail').mockResolvedValue(null);
+    else row.folderId = 'different-folder';
+    await mirrorCategoryLabels(b.storage, stale, ['travel']);
+    expect(writesTo(b)).toBe(0);
+    expect(b.queue.applyCategoryLabels).not.toHaveBeenCalled();
+    expect(b.queue.removeGmailLabels).not.toHaveBeenCalled();
+    expect(b.markLabelDone).not.toHaveBeenCalled();
   });
 });

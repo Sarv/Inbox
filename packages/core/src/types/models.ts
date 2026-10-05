@@ -24,6 +24,13 @@ export interface EmailRecord {
   // Replaces: flags[], labels[], is_starred, is_important, email_folders, email_category_assignments
   tags: string;
 
+  /** Recognized provider categories/importance, independent of any AI verdict. */
+  serverCategories?: string[] | null;
+  /** Explicit user category selection. An empty array means deliberately unlabelled. */
+  manualCategories?: string[] | null;
+  /** Gmail category discovery failed/has not completed; retry sync before spending AI tokens. */
+  gmailCategoriesPending?: boolean;
+
   // Headers
   subject: string | null;
   fromAddress: string; // Email address

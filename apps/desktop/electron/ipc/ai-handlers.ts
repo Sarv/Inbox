@@ -15,7 +15,7 @@ import {
 import { processingBreakdown, type SQLiteStorage } from '@sarvinbox/storage-node';
 import { ipcMain } from 'electron';
 
-import { openAccountStorages, requireAccountStorage } from '../services/account-target';
+import { openAccountStorages, requireAccountStorage, requireNamedOrActiveStorage } from '../services/account-target';
 import { readRegistryAccounts } from '../services/accounts-registry';
 import { getAutoBacklogCap, setAutoBacklogCap } from '../services/ai-backlog-cap';
 import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
@@ -197,9 +197,9 @@ export function registerAIHandlers(): void {
   /**
    * Get all category definitions
    */
-  ipcMain.handle('ai:getCategoryDefinitions', async () => {
+  ipcMain.handle('ai:getCategoryDefinitions', async (_event, accountId?: string) => {
     try {
-      const storage = requireStorage();
+      const storage = await requireNamedOrActiveStorage(accountId);
       const defs = storage.getCategoryDefinitions();
       return { success: true, data: defs };
     } catch (error) {
@@ -211,8 +211,12 @@ export function registerAIHandlers(): void {
   /**
    * Get category assignments for a batch of email IDs
    */
-  ipcMain.handle('ai:getEmailCategoriesBatch', async (_event, emailIds: string[]) => {
+  ipcMain.handle('ai:getEmailCategoriesBatch', async (_event, emailIds: string[], accountId?: string) => {
     try {
+      if (accountId) {
+        const storage = await requireNamedOrActiveStorage(accountId);
+        return { success: true, data: storage.getEmailCategoriesBatch(emailIds) || {} };
+      }
       // Query EVERY account and merge — the requested ids come from the unified
       // list and can belong to any account. Each id lives in exactly one
       // account's db, so the first non-empty result for an id wins.

@@ -123,7 +123,8 @@ describe('fresh install reaches the current production schema', () => {
     // the whole-thread conversation_extractions cache (v98); 98 -> 99 with the
     // Social category (v99); 99 -> 100 adds emails.pgp_status (v100); 100 ->
     // 101 with the authentication re-check queue (v101).
-    expect(CURRENT_VERSION).toBe(101);
+    // v102 tracks provider/manual authority separately from AI.
+    expect(CURRENT_VERSION).toBe(102);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
     // v24 is stamped by schema.sql itself; the chain stamps 25..101 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
@@ -376,7 +377,7 @@ describe('fresh install reaches the current production schema', () => {
 
   // The category rows ARE the AI classifier's taxonomy: a missing/duplicated
   // slug silently changes how every incoming mail is categorized.
-  it('seeds the AI category taxonomy exactly once, with the v33/v35/v36/v99 edits applied', () => {
+  it('seeds the AI category taxonomy exactly once, with the v33/v35/v36/v99/v102 edits applied', () => {
     const slugs = (
       db.prepare('SELECT slug FROM ai_category_definitions ORDER BY slug').all() as Array<{
         slug: string;
@@ -384,14 +385,17 @@ describe('fresh install reaches the current production schema', () => {
     ).map((r) => r.slug);
     expect(slugs).toEqual([
       'finance',
+      'forums',
       'important',
       'invoice',
       'meeting',
       'needs_response',
+      'personal',
       'promotions',
       'reminders',
       // CHANGED: v99 adds Social (social networks, forums, communities).
       'social',
+      'updates',
     ]);
     // v35 removed waiting_reply (it overlapped needs_response).
     expect(slugs).not.toContain('waiting_reply');

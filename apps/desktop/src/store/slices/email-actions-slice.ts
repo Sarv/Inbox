@@ -5,6 +5,7 @@
 // declared in vite.config.ts, vitest.config.ts and tsconfig.json.
 import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
 import { classifyFolder } from '@sarvinbox/core/folder-mapping';
+import { createLogger } from '@sarvinbox/core/logger';
 
 import { addTag, removeTag, hasTag } from '../../utils/tags';
 import { buildThreads } from '../../utils/thread-utils';
@@ -17,6 +18,21 @@ import type { EmailActionsSlice, SliceCreator } from '../types';
  * confirmation first — so an accidental select-all can't silently move/delete a
  * whole folder. An intentional user just clicks through.
  */
+const log = createLogger('EmailActionsSlice');
+
+const importanceTails = new WeakMap<object, Map<string, Promise<void>>>();
+
+/** Keep confirmations and rollbacks ordered for one store/account/message. */
+function serializeImportanceChange(store: object, key: string, run: () => Promise<void>): Promise<void> {
+  let tails = importanceTails.get(store);
+  if (!tails) { tails = new Map(); importanceTails.set(store, tails); }
+  const previous = tails.get(key);
+  const job = previous ? previous.catch(() => undefined).then(run) : run();
+  tails.set(key, job);
+  return job.finally(() => { if (tails.get(key) === job) tails.delete(key); });
+}
+
+
 const BULK_CONFIRM_THRESHOLD = 20;
 
 const BULK_ACTION_VERB: Record<string, string> = {
@@ -754,80 +770,83 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
   },
 
   markImportant: async (emailId, important) => {
-    console.log('[Store] markImportant called:', emailId, 'important:', important);
-    const { emails, threadEmails, searchResults } = get();
+    const accountId = get()._accountIdFor(emailId);
+    return serializeImportanceChange(get, `${accountId ?? ''}\0${emailId}`, async () => {
+      const { emails, threadEmails, searchResults } = get();
 
-    const emailIndex = emails.findIndex((e) => e.id === emailId);
-    const threadIndex = threadEmails.findIndex((e) => e.id === emailId);
-    const searchIndex = searchResults.findIndex((e) => e.id === emailId);
+      const emailIndex = emails.findIndex((e) => e.id === emailId);
+      const threadIndex = threadEmails.findIndex((e) => e.id === emailId);
+      const searchIndex = searchResults.findIndex((e) => e.id === emailId);
 
-    let originalTags = '||';
-    if (emailIndex !== -1) {
-      originalTags = emails[emailIndex].tags || '||';
-    } else if (threadIndex !== -1) {
-      originalTags = threadEmails[threadIndex].tags || '||';
-    } else if (searchIndex !== -1) {
-      originalTags = searchResults[searchIndex].tags || '||';
-    } else {
-      try {
-        await window.electronAPI.emails.markImportant(emailId, important);
-      } catch (error) {
-        console.error('[Store] markImportant API error:', error);
+      let originalTags = '||';
+      if (emailIndex !== -1) {
+        originalTags = emails[emailIndex].tags || '||';
+      } else if (threadIndex !== -1) {
+        originalTags = threadEmails[threadIndex].tags || '||';
+      } else if (searchIndex !== -1) {
+        originalTags = searchResults[searchIndex].tags || '||';
+      } else {
+        try {
+          const result = await window.electronAPI.emails.markImportant(emailId, important, accountId);
+          if (!result.success) log.warn('Unable to change importance', result.error);
+        } catch (error) {
+          log.error('Unable to change importance', error);
+        }
+        return;
       }
-      return;
-    }
 
-    const wasImportant = hasTag(originalTags, 'important');
-    if (wasImportant === important) return;
+      const wasImportant = hasTag(originalTags, 'important');
+      if (wasImportant === important) return;
 
-    const newTags = important ? addTag(originalTags, 'important') : removeTag(originalTags, 'important');
+      const newTags = important ? addTag(originalTags, 'important') : removeTag(originalTags, 'important');
 
-    const updates: any = {};
+      const updates: any = {};
 
-    const newEmails = patchTagsWithThreadAggregate(emails, emailId, newTags, 'threadIsImportant', 'important');
-    if (newEmails) updates.emails = newEmails;
+      const newEmails = patchTagsWithThreadAggregate(emails, emailId, newTags, 'threadIsImportant', 'important');
+      if (newEmails) updates.emails = newEmails;
 
-    const newThreadEmails = patchTagsWithThreadAggregate(threadEmails, emailId, newTags, 'threadIsImportant', 'important');
-    if (newThreadEmails) updates.threadEmails = newThreadEmails;
+      const newThreadEmails = patchTagsWithThreadAggregate(threadEmails, emailId, newTags, 'threadIsImportant', 'important');
+      if (newThreadEmails) updates.threadEmails = newThreadEmails;
 
-    const newSearchResults = patchTagsWithThreadAggregate(searchResults, emailId, newTags, 'threadIsImportant', 'important');
-    if (newSearchResults) updates.searchResults = newSearchResults;
+      const newSearchResults = patchTagsWithThreadAggregate(searchResults, emailId, newTags, 'threadIsImportant', 'important');
+      if (newSearchResults) updates.searchResults = newSearchResults;
 
-    // Also update sectionData so section UI reflects the change
-    const updatedSectionData = updateEmailInSectionData(get().sectionData, emailId, newTags, 'threadIsImportant', 'important');
-    if (updatedSectionData) updates.sectionData = updatedSectionData;
+      // Also update sectionData so section UI reflects the change
+      const updatedSectionData = updateEmailInSectionData(get().sectionData, emailId, newTags, 'threadIsImportant', 'important');
+      if (updatedSectionData) updates.sectionData = updatedSectionData;
 
-    set(updates);
+      set(updates);
 
-    setTimeout(async () => {
+      const rollback = () => {
+        const state = get();
+        const current = [...state.emails, ...state.threadEmails, ...state.searchResults].find((email) => email.id === emailId);
+        // Roll back only this flag so a simultaneous label/category edit survives.
+        const tags = current?.tags ?? originalTags;
+        const revertedTags = wasImportant ? addTag(tags, 'important') : removeTag(tags, 'important');
+        const revertUpdates: any = {};
+        const revertEmails = patchTagsWithThreadAggregate(state.emails, emailId, revertedTags, 'threadIsImportant', 'important');
+        if (revertEmails) revertUpdates.emails = revertEmails;
+        const revertThreads = patchTagsWithThreadAggregate(state.threadEmails, emailId, revertedTags, 'threadIsImportant', 'important');
+        if (revertThreads) revertUpdates.threadEmails = revertThreads;
+        const revertSearch = patchTagsWithThreadAggregate(state.searchResults, emailId, revertedTags, 'threadIsImportant', 'important');
+        if (revertSearch) revertUpdates.searchResults = revertSearch;
+        const revertSections = updateEmailInSectionData(state.sectionData, emailId, revertedTags, 'threadIsImportant', 'important');
+        if (revertSections) revertUpdates.sectionData = revertSections;
+        set(revertUpdates);
+      };
       try {
-        const result = await window.electronAPI.emails.markImportant(emailId, important);
-        if (result.success) {
-          // 'important' is one of the AI categories → refresh its badge count.
-          get().refreshCategoryCounts();
+        const result = await window.electronAPI.emails.markImportant(emailId, important, accountId);
+        if (!result.success) {
+          log.warn('Unable to change importance; reverting', result.error);
+          rollback();
         } else {
-          console.warn('[Store] markImportant API failed, reverting:', result.error);
-          const state = get();
-          const revertUpdates: any = {};
-
-          const revertedEmails = patchTagsWithThreadAggregate(state.emails, emailId, originalTags, 'threadIsImportant', 'important');
-          if (revertedEmails) revertUpdates.emails = revertedEmails;
-
-          const revertedThreads = patchTagsWithThreadAggregate(state.threadEmails, emailId, originalTags, 'threadIsImportant', 'important');
-          if (revertedThreads) revertUpdates.threadEmails = revertedThreads;
-
-          const revertedSearch = patchTagsWithThreadAggregate(state.searchResults, emailId, originalTags, 'threadIsImportant', 'important');
-          if (revertedSearch) revertUpdates.searchResults = revertedSearch;
-
-          const revertedSD = updateEmailInSectionData(state.sectionData, emailId, originalTags, 'threadIsImportant', 'important');
-          if (revertedSD) revertUpdates.sectionData = revertedSD;
-
-          set(revertUpdates);
+          get().refreshCategoryCounts();
         }
       } catch (error) {
-        console.error('[Store] markImportant network error:', error);
+        log.error('Unable to change importance; reverting', error);
+        rollback();
       }
-    }, 0);
+    });
   },
 
   // Per-MESSAGE star, for the chat/bubble view where each bubble is one email.

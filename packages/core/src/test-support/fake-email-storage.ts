@@ -258,6 +258,21 @@ export class FakeEmailStorage {
     return this.allRows().filter((e) => wanted.has(e.messageId)) as EmailRecord[];
   }
 
+  /** Same provider projection ownership as SQLite: provider state converges once pending operations have cleared. */
+  setServerCategories(id: string, categories: string[]): void {
+    const row = this.emails.get(id);
+    if (!row) return;
+    const prior = row.serverCategories ?? [];
+    row.serverCategories = [...new Set(categories)];
+    if (!prior.length && !categories.length && row.manualCategories == null) return;
+    let tags = row.tags || '||';
+    for (const slug of new Set([...prior, ...(row.manualCategories ?? [])])) tags = removeTag(tags, slug);
+    for (const slug of categories) tags = addTag(tags, slug);
+    row.tags = tags;
+    if (row.manualCategories != null) row.manualCategories = [...categories];
+    row.importanceSource = categories.includes('important') ? 'provider' : 'none';
+  }
+
   async updateEmail(id: string, updates: Partial<EmailRecord>): Promise<void> {
     this.note('updateEmail');
     const email = this.emails.get(id);
@@ -362,11 +377,11 @@ export class FakeEmailStorage {
       .map((e) => ({ id: e.id, uid: e.uid as number }));
   }
 
-  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string }>> {
+  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }>> {
     this.note('getEmailTagsInFolder');
     return this.allRows()
       .filter((e) => e.folderId === folderId)
-      .map((e) => ({ id: e.id, uid: e.uid ?? null, tags: e.tags }));
+      .map((e) => ({ id: e.id, uid: e.uid ?? null, tags: e.tags, serverCategories: e.serverCategories, gmailCategoriesPending: e.gmailCategoriesPending }));
   }
 
   async getOldestUidInFolder(folderId: string): Promise<number | null> {

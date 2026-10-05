@@ -4075,6 +4075,49 @@ export const authResultsReverify: Migration = {
 /**
  * Create migration manager with the fresh schema
  */
+export const serverCategoryAuthority: Migration = {
+  version: 102,
+  name: 'server_category_authority',
+  up: (db) => {
+    addColumnIfMissing(db, 'emails', 'server_categories', 'TEXT DEFAULT NULL');
+    addColumnIfMissing(db, 'emails', 'manual_categories', 'TEXT DEFAULT NULL');
+    addColumnIfMissing(db, 'emails', 'gmail_categories_pending', 'INTEGER NOT NULL DEFAULT 0');
+    // Cached Gmail rows predate native category discovery. Their empty metadata
+    // means unknown, so wait for the bounded IMAP query before spending on AI.
+    // Folder provider metadata and Google's reserved namespace identify this
+    // account without relying on a user's email address or a generic flag.
+    db.exec(`UPDATE emails SET gmail_categories_pending = 1
+      WHERE server_categories IS NULL AND manual_categories IS NULL AND EXISTS (
+        SELECT 1 FROM folders WHERE lower(provider) = 'gmail'
+          OR lower(path) = '[gmail]' OR lower(path) LIKE '[gmail]/%'
+          OR lower(path) = '[googlemail]' OR lower(path) LIKE '[googlemail]/%'
+      )`);
+    const nativeCategories = [
+      { slug: 'forums', name: 'Forums', icon: 'MessagesSquare', color: 'violet', order: 10,
+        prompt: 'Discussion groups, mailing lists, forums and community conversations. Use Forums for these rather than Social; Social is activity on social networks.' },
+      { slug: 'updates', name: 'Updates', icon: 'Bell', color: 'cyan', order: 11,
+        prompt: 'Automatic service notifications, status updates and account activity. Exclude marketing (Promotions), bills and receipts (Invoice or Finance), and social network activity (Social).' },
+      { slug: 'personal', name: 'Primary', icon: 'Mail', color: 'blue', order: 12,
+        prompt: 'Personal correspondence or direct work conversations that do not belong to Promotions, Social, Forums, Updates, Finance or Invoice. Primary is descriptive, not an Important or Needs Response judgment.' },
+    ];
+    const seed = db.prepare(`
+      INSERT INTO ai_category_definitions (slug,name,description,prompt,icon,color,sort_order,is_system,is_enabled)
+      SELECT ?,?,?,?,?,?,?,1,1 WHERE NOT EXISTS (
+        SELECT 1 FROM ai_category_definitions WHERE slug = ? OR lower(trim(name)) = lower(?)
+      )
+    `);
+    for (const category of nativeCategories) {
+      if (seed.run(category.slug, category.name, 'Provider category', category.prompt, category.icon, category.color, category.order, category.slug, category.name).changes) {
+        enqueueThreadsTaggedWith(db, category.slug);
+      }
+    }
+  },
+  down: (db) => {
+    db.exec('UPDATE emails SET server_categories = NULL, manual_categories = NULL, gmail_categories_pending = 0;');
+    db.exec("DELETE FROM ai_category_definitions WHERE slug IN ('forums', 'updates', 'personal') AND is_system = 1 AND description = 'Provider category';");
+  },
+};
+
 export function createMigrationManager(
   db: Database.Database,
   context: MigrationContext = {},
@@ -4158,5 +4201,6 @@ export function createMigrationManager(
   manager.register(socialCategory);
   manager.register(emailPgpStatus);
   manager.register(authResultsReverify);
+  manager.register(serverCategoryAuthority);
   return manager;
 }

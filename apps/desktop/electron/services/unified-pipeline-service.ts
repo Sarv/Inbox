@@ -21,6 +21,9 @@ import {
   classifyCategorizationPass,
   decideCategorizationAction,
   encodeAiCategories,
+  existingCategoryClassification,
+  automaticCategorizationDeferred,
+  parseCategorySelection,
   folderPathForCategory,
   getEventBus,
   labelDrainDecision,
@@ -52,6 +55,7 @@ import { registryAccountEmail, resolveAccountEmail, resolveAccountIdentity } fro
 import { loadAgentConfig } from './agent-config-store';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
+import { runClassificationMutation } from './classification-actions';
 import { getMeta, setMeta } from './core-db';
 import { ensureGmailLabelColor, renameGmailLabel, deleteGmailLabelsUnder } from './gmail-label-api';
 import { chromiumFetch } from './net-fetch';
@@ -284,8 +288,10 @@ function propagateCategoriesToLinkedAccounts(messageId: string | undefined, cate
   for (const [, rt] of getAllAccountRuntimes()) {
     if (!rt.storage || rt.storage === sourceStorage) continue;
     try {
-      const row = (rt.storage as any).db?.prepare?.('SELECT id, tags, agent_status FROM emails WHERE message_id = ? LIMIT 1')?.get(messageId) as { id?: string; tags?: string; agent_status?: string } | undefined;
+      const row = (rt.storage as any).db?.prepare?.('SELECT id, tags, agent_status, server_categories, manual_categories, gmail_categories_pending FROM emails WHERE message_id = ? LIMIT 1')?.get(messageId) as { id?: string; tags?: string; agent_status?: string; server_categories?: string | null; manual_categories?: string | null; gmail_categories_pending?: number } | undefined;
       if (!row?.id) continue;
+      const classification = { serverCategories: parseCategorySelection(row.server_categories), manualCategories: parseCategorySelection(row.manual_categories), gmailCategoriesPending: row.gmail_categories_pending === 1 };
+      if (existingCategoryClassification(classification) || automaticCategorizationDeferred(classification)) continue;
       // Never CLOBBER a copy that was independently categorized in its own
       // account: saveEmailCategoriesBatch REPLACES all category tags, so a copy
       // that already carries its own category tag(s) (e.g. [important]) must be
@@ -963,6 +969,8 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // revisits pending rows) never retries it. Leave it pending so it gets
     // categorized the moment the provider becomes ready.
     let categorizationSkipped = false;
+    let existingClassification = existingCategoryClassification(email);
+    let classificationPending = automaticCategorizationDeferred(email);
 
     // AI Assist is the ONE switch for sending this mail to the AI provider. Only
     // a real `true` opens it: a value that is not a boolean did not survive
@@ -981,11 +989,19 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // Master AI Assist gate — when the user turns AI off in settings we stop
     // categorization *and* the agent. Pure local scoring above still runs
     // (free, useful for Important sort even when AI is off).
-    if (pipeline && aiConfig && aiEnabled && !aiPaused) {
+    if (existingClassification) {
+      categories = existingClassification.categories;
+    } else if (classificationPending) {
+      categorizationSkipped = true;
+    } else if (pipeline && aiConfig && aiEnabled && !aiPaused) {
       try {
         // Serialize + set the account context so the pipeline's storage
         // callbacks (esp. saveEmailCategoriesBatch) hit THIS email's account db.
         const result = await runCategorizeExclusive(async () => {
+          const current = await storage.getEmail(emailId);
+          const authority = current && existingCategoryClassification(current);
+          if (authority) return { categories: authority.categories, classificationSource: authority.source, executed: false, proposed: false } as any;
+          if (current && automaticCategorizationDeferred(current)) return { categories: [], classificationPending: true, executed: false, proposed: false } as any;
           // Dual-delivery de-dup: if the SAME message was already categorized in
           // another account, reuse those categories — NO second AI call. Done
           // inside the serialized block so record-then-check can't interleave.
@@ -998,7 +1014,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
           try {
             const r = await pipeline!.processEmail(email);
             // Record for sibling copies still to be processed this session.
-            if (r && Array.isArray(r.categories)) siblingCache.record(email.messageId, r.categories);
+            if (r && !r.classificationSource && !r.classificationPending && Array.isArray(r.categories)) siblingCache.record(email.messageId, r.categories);
             return r;
           } finally { activeProcessingStorage = null; }
         });
@@ -1039,6 +1055,27 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // ready yet, leave agent_status pending so the 30s poll retries — marking
     // done here would permanently un-categorize the email.
     const repos = (storage as any).getRepositories();
+    // The authoritative classification may have arrived during an AI request.
+    // Recheck before storing/mirroring an obsolete result or spreading it to siblings.
+    const latest = await storage.getEmail(emailId);
+    existingClassification = latest && existingCategoryClassification(latest);
+    classificationPending = !!latest && automaticCategorizationDeferred(latest);
+    if (existingClassification) {
+      categories = existingClassification.categories;
+      categorizationFailed = false;
+      categorizationParseFailed = false;
+      categorizationSkipped = false;
+      executed = false;
+      proposed = false;
+    }
+    if (classificationPending) {
+      categorizationSkipped = true;
+      categorizationFailed = false;
+      categorizationParseFailed = false;
+      executed = false;
+      proposed = false;
+    }
+    let notifyWithCategories = !!existingClassification;
     if (repos?.agent) {
       // Which outcome this pass had, and finalize-or-retry, are decided by the
       // pure helpers in core so the precedence between the arms is unit-tested
@@ -1070,7 +1107,15 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
       const decision = decideCategorizationAction(outcome, strikes, MAX_API_RETRIES);
       const finalScore = { priorityScore, priorityTier, priorityReasoning, recommendedAction };
 
-      if (decision.type === 'retry') {
+      if (existingClassification) {
+        // Local scoring stays useful. Existing categories are neither an AI
+        // verdict nor approval to mirror/copy a provider's guess to other accounts.
+        repos.agent.markAgentDone(emailId, finalScore);
+      } else if (classificationPending) {
+        // Sync will retry native category discovery. Never finalize unknown
+        // category state as an empty AI verdict or charge an AI failure strike.
+        repos.agent.db?.prepare?.("UPDATE emails SET agent_status = 'pending' WHERE id = ?")?.run(emailId);
+      } else if (decision.type === 'retry') {
         logger.warn(`[Pipeline:P2] categorization ${outcome} for ${emailId} ` +
           `(${strikes}/${decision.limit ?? '-'}) — leaving agent_status pending for retry`);
       } else if (outcome !== 'success') {
@@ -1116,21 +1161,23 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
         repos.agent.recordAiCategories(emailId, encodeAiCategories(categories));
         repos.agent.markLabelPending(emailId);
         void mirrorCategoryLabels(storage, email, categories);
-        // New-mail OS notification (backfill-safe + coalesced; default 'important'
-        // mode filters on these AI categories). Best-effort — never blocks.
-        notifyNewMail({
-          emailId,
-          accountId: getAccountIdForStorage(storage) ?? 'active',
-          fromName: (email as any).fromName,
-          fromAddress: (email as any).fromAddress,
-          subject: (email as any).subject,
-          date: (email as any).date,
-          categories,
-          tags: (email as any).tags,
-          folderId: (email as any).folderId,
-        });
+        notifyWithCategories = true;
       }
     }
+
+    // Existing provider importance remains useful for new-mail notification;
+    // importing it must not depend on paying for a new AI categorization.
+    if (notifyWithCategories) notifyNewMail({
+      emailId,
+      accountId: getAccountIdForStorage(storage) ?? 'active',
+      fromName: email.fromName,
+      fromAddress: email.fromAddress,
+      subject: email.subject,
+      date: email.date,
+      categories,
+      tags: latest?.tags ?? email.tags,
+      folderId: email.folderId,
+    });
 
     // 4. Auto-draft reply when pipeline proposes "reply" action
     if (proposed && (recommendedAction === 'reply' || recommendedAction === 'reply_all') && aiConfig) {
@@ -2089,6 +2136,7 @@ async function applyEmailLabels(
   isGmail: boolean,
   token: string | null,
   bySlug: Map<string, { name?: string; color?: string }>,
+  canApply?: () => Promise<boolean>,
 ): Promise<string> {
   const queue = engine?.operationQueue;
   if (!queue) return 'noop';
@@ -2102,6 +2150,7 @@ async function applyEmailLabels(
         await ensureGmailLabelColor(token, folderPathForCategory(c, '/'), bySlug.get(c.slug)?.color);
       }
     }
+    if (canApply && !await canApply()) return 'superseded';
     res = await queue.applyCategoryLabels(folderPath, email.uid, { categories: cats, host: '', mode: categoryLabelConfig.folderMode });
   }
 
@@ -2119,6 +2168,7 @@ async function applyEmailLabels(
       if (!currentLabels.has(label)) stale.push(label);
     }
     if (stale.length) {
+      if (canApply && !await canApply()) return 'superseded';
       try { await queue.removeGmailLabels(folderPath, email.uid, stale); }
       catch (e) { logger.warn('[Pipeline] stale Gmail label cleanup failed:', (e as Error).message); }
     }
@@ -2161,61 +2211,74 @@ const noteMirrorDeferred = (acct: string, uid: number): void => mirrorDeferrals.
 /** Mirror one email's categories onto ITS OWN account's server. Exported only
  *  so the per-account Gmail-token tests can drive it directly. */
 export async function mirrorCategoryLabels(storage: any, email: any, categorySlugs: string[]): Promise<void> {
-  const accountId = getAccountIdForStorage(storage);
-  const acct = accountId ?? 'active';
-  try {
-    // NOTE: an EMPTY categorySlugs is valid and MUST proceed — that's how a mail
-    // the AI cleared gets its stale account labels stripped (applyEmailLabels
-    // removes every label not in the current set). Only bail on genuinely bad input.
-    if (!categoryLabelConfig.enabled || !email?.uid || !Array.isArray(categorySlugs)) return;
+  if (!email?.id) return;
+  const expectedUid = email.uid;
+  const expectedFolderId = email.folderId;
+  return runClassificationMutation(storage, email.id, async () => {
+    const canApply = async (): Promise<boolean> => {
+      const latest = await storage.getEmail(email.id);
+      return !!latest && latest.uid === expectedUid && latest.folderId === expectedFolderId &&
+        !existingCategoryClassification(latest) && !automaticCategorizationDeferred(latest);
+    };
+    const accountId = getAccountIdForStorage(storage);
+    const acct = accountId ?? 'active';
+    try {
+      // NOTE: an EMPTY categorySlugs is valid and MUST proceed — that's how a mail
+      // the AI cleared gets its stale account labels stripped (applyEmailLabels
+      // removes every label not in the current set). Only bail on genuinely bad input.
+      if (!categoryLabelConfig.enabled || !email?.uid || !Array.isArray(categorySlugs)) return;
+      const latest = await storage.getEmail(email.id);
+      if (!latest || latest.uid !== expectedUid || latest.folderId !== expectedFolderId ||
+          existingCategoryClassification(latest) || automaticCategorizationDeferred(latest)) return;
+      email = { ...latest };
 
-    // Resolve the engine STRICTLY from THIS email's own storage — the account
-    // identity reliably threaded through the pipeline. The email row has no
-    // accountId column, so any guess (the old `email.accountId`) fell back to
-    // the ACTIVE engine and mis-labelled background accounts. We must NOT fall
-    // back to the active engine here: doing so would copy this account's label
-    // onto whatever account is active (exactly the bug we're killing). If the
-    // account's own engine isn't available/connected yet, SKIP and log — the
-    // label is re-applied later (next categorization / the backfill action).
-    const engine: any = getSyncEngineForStorage(storage);
-    if (!engine) {
-      logger.warn(`[Pipeline] mirror skipped acct=${acct} uid=${email.uid}: no engine for this account's storage (won't apply to a wrong account)`);
-      return;
-    }
-    if (!engine.isConnected?.() || !engine.operationQueue) {
-      noteMirrorDeferred(acct, email.uid);
-      return;
-    }
+      // Resolve the engine STRICTLY from THIS email's own storage — the account
+      // identity reliably threaded through the pipeline. The email row has no
+      // accountId column, so any guess (the old `email.accountId`) fell back to
+      // the ACTIVE engine and mis-labelled background accounts. We must NOT fall
+      // back to the active engine here: doing so would copy this account's label
+      // onto whatever account is active (exactly the bug we're killing). If the
+      // account's own engine isn't available/connected yet, SKIP and log — the
+      // label is re-applied later (next categorization / the backfill action).
+      const engine: any = getSyncEngineForStorage(storage);
+      if (!engine) {
+        logger.warn(`[Pipeline] mirror skipped acct=${acct} uid=${email.uid}: no engine for this account's storage (won't apply to a wrong account)`);
+        return;
+      }
+      if (!engine.isConnected?.() || !engine.operationQueue) {
+        noteMirrorDeferred(acct, email.uid);
+        return;
+      }
 
-    const folder = await storage.getFolder(email.folderId);
-    if (!folder?.path) {
-      logger.info(`[Pipeline] mirror skipped acct=${acct} uid=${email.uid}: folder ${email.folderId} has no path`);
-      return;
-    }
+      const folder = await storage.getFolder(email.folderId);
+      if (!folder?.path) {
+        logger.info(`[Pipeline] mirror skipped acct=${acct} uid=${email.uid}: folder ${email.folderId} has no path`);
+        return;
+      }
 
-    const defs = storage.getCategoryDefinitions?.() ?? [];
-    const bySlug = new Map<string, { name?: string; color?: string }>(defs.map((d: any) => [d.slug, d]));
-    const cats = categorySlugs.map((slug) => ({ slug, name: bySlug.get(slug)?.name || slug }));
+      const defs = storage.getCategoryDefinitions?.() ?? [];
+      const bySlug = new Map<string, { name?: string; color?: string }>(defs.map((d: any) => [d.slug, d]));
+      const cats = categorySlugs.map((slug) => ({ slug, name: bySlug.get(slug)?.name || slug }));
 
-    const folders = await storage.getFolders();
-    const isGmail = engine.operationQueue.isGmailCapable?.() ?? isGmailAccount(folders);
-    // THIS account's grant, never the pipeline's profile address: that is the
-    // ACTIVE account, so a background Gmail account's labels used to be created
-    // and coloured in the active account's mailbox instead of its own.
-    const token = isGmail ? await resolveGmailToken(accountId) : null;
-    if (traceEnabled()) logger.trace(`[Pipeline] mirror acct=${acct} uid=${email.uid} folder="${folder.path}" isGmail=${isGmail} token=${token ? 'yes' : 'no'} cats=[${cats.map((c) => c.slug).join(',')}]`);
-    const result = await applyEmailLabels(engine, email, folder.path, cats, isGmail, token, bySlug);
-    // Flip label_status → 'done' ONLY on a CONFIRMED apply. A merely-'queued' op
-    // (background account mid-sync) is NOT yet on the server — if it later
-    // dead-letters it would be silently lost, so we keep the mail 'pending' and
-    // let the next drain re-apply (label ops are idempotent). This is the ONLY
-    // place label_status flips 'pending'/NULL → 'done'.
-    if (email.id && result !== 'queued') {
-      try { (storage as any).getRepositories?.()?.agent?.markLabelDone?.(email.id); } catch { /* non-fatal */ }
+      const folders = await storage.getFolders();
+      const isGmail = engine.operationQueue.isGmailCapable?.() ?? isGmailAccount(folders);
+      // THIS account's grant, never the pipeline's profile address: that is the
+      // ACTIVE account, so a background Gmail account's labels used to be created
+      // and coloured in the active account's mailbox instead of its own.
+      const token = isGmail ? await resolveGmailToken(accountId) : null;
+      if (traceEnabled()) logger.trace(`[Pipeline] mirror acct=${acct} uid=${email.uid} folder="${folder.path}" isGmail=${isGmail} token=${token ? 'yes' : 'no'} cats=[${cats.map((c) => c.slug).join(',')}]`);
+      const result = await applyEmailLabels(engine, email, folder.path, cats, isGmail, token, bySlug, canApply);
+      // Automatic mirrors mark label_status → 'done' only on a CONFIRMED apply. A merely-'queued' op
+      // (background account mid-sync) is NOT yet on the server — if it later
+      // dead-letters it would be silently lost, so we keep the mail 'pending' and
+      // let the next drain re-apply (label ops are idempotent).
+      if (email.id && result !== 'queued' && result !== 'superseded') {
+        try { (storage as any).getRepositories?.()?.agent?.markLabelDone?.(email.id); } catch { /* non-fatal */ }
+      }
+    } catch (e) {
+      logger.warn(`[Pipeline] mirror acct=${acct} uid=${email?.uid} best-effort failed:`, (e as Error).message);
     }
-  } catch (e) {
-    logger.warn(`[Pipeline] mirror acct=${acct} uid=${email?.uid} best-effort failed:`, (e as Error).message);
-  }
+  });
 }
 
 /**
@@ -2740,6 +2803,11 @@ function startPollingTrigger(): void {
           const slugSet = getCategorySlugSet(storage);
           const pendingLabel = repos.agent.getEmailsPendingLabel(LABEL_DRAIN_BATCH, AUTO_BACKLOG_RECENT_CAP());
           for (const e of pendingLabel) {
+            if (automaticCategorizationDeferred(e)) continue;
+            const authority = existingCategoryClassification(e);
+            // Manual changes already have a durable native/full-selection
+            // operation. A second AI mirror could overwrite a newer choice.
+            if (authority) { repos.agent.markLabelDone(e.id); continue; }
             // The AI's VERDICT, never the tag string. Reading tags here is what
             // wrote our own `Sarv Inbox/Important` label onto mail whose only
             // claim to importance was Gmail's own `\Important` guess.

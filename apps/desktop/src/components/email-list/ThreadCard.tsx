@@ -6,8 +6,10 @@ import { memo } from 'react';
 import { getShortcutHints } from '../../config/keyboard-shortcuts';
 import { formatCountdown } from '../../utils/format-time';
 import { threadTagsString } from '../../utils/thread-utils';
+import { CategoryMenu } from '../CategoryMenu';
 import { LabelChips } from '../LabelChips';
 import { Tooltip } from '../Tooltip';
+
 
 import { CategoryBadges } from './CategoryBadges';
 import { readStateTextClass } from './read-state-text';
@@ -120,7 +122,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
         )}
 
         {/* Time and Hover Actions - fixed width container */}
-        <div className="flex items-center gap-1 flex-shrink-0 w-28 justify-end relative">
+        <div className="flex items-center gap-1 flex-shrink-0 w-40 justify-end relative">
           {/* Category badges + Time - absolute right, hidden on hover */}
           <div className={`absolute right-0 flex items-center gap-1.5 transition-opacity ${isHovered ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
             <CategoryBadges emailId={thread.badgeEmailId} compact />
@@ -131,6 +133,9 @@ export const ThreadCard = memo(function ThreadCard({ thread, actions, uiState, h
 
           {/* Action buttons - always rendered, visible on hover */}
           <div className={`relative z-10 flex items-center gap-1 transition-opacity ${isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+            <CategoryMenu emailId={thread.badgeEmailId} accountId={latestEmail.accountId ?? undefined}
+              buttonClassName="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground" />
+
             {/* Archive */}
             <Tooltip content="Archive" shortcut={getShortcutHints('ARCHIVE')}>
               <button
