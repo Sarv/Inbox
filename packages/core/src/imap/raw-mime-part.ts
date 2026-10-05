@@ -6,7 +6,7 @@ import type { SplitterChunk } from '@zone-eu/mailsplit';
 
 import { logger } from '../utils/logger';
 
-import { base64DecodeCollapsed } from './body-structure';
+import { countNonBase64Bytes, misdeclaredBase64 } from './body-structure';
 
 /**
  * One named leaf part of a MIME message, as it travels — NOT decoded.
@@ -22,6 +22,12 @@ export interface RawMimePart {
   /** Lower-cased Content-Transfer-Encoding, `''` when the part declares none. */
   encoding: string;
   encodedLength: number;
+  /**
+   * Bytes of the body no base64 encoder writes (see `countNonBase64Bytes`).
+   * Counted only for a part declaring `base64` — the one case it is consulted —
+   * and 0 for every other part.
+   */
+  nonBase64Bytes: number;
   raw: Buffer | null;
 }
 
@@ -72,6 +78,7 @@ export async function readRawMimeParts(
         filename: chunk.filename,
         encoding: (chunk.encoding || '').toLowerCase(),
         encodedLength: 0,
+        nonBase64Bytes: 0,
         raw: null,
       };
       parts.push(current);
@@ -84,6 +91,7 @@ export async function readRawMimeParts(
     }
     if (chunk.type === 'body' && current) {
       current.encodedLength += chunk.value.length;
+      if (current.encoding === 'base64') current.nonBase64Bytes += countNonBase64Bytes(chunk.value);
       if (current === collecting) collected.push(chunk.value);
     }
   });
@@ -111,9 +119,11 @@ function partsNamed(parts: readonly RawMimePart[], filename: string): RawMimePar
  * The bytes that ARE the attachment, given what a MIME parser made of it.
  *
  * mailparser believes Content-Transfer-Encoding. When a part declares `base64`
- * and carries raw text, a base64 decoder keeps only alphabet characters and
- * stops at the first `=`, so the attachment collapses: `<p><span style=` decodes
- * to SEVEN bytes. The file is then the part's raw body, byte for byte — which is
+ * and carries raw text, a base64 decoder keeps only its alphabet characters and
+ * the attachment decodes to junk — 34 bytes from 64 of HTML under libbase64
+ * 1.3.1, seven under 1.3.0, which also stopped at the first `=`. The verdict is
+ * `misdeclaredBase64`, judged on the part's raw bytes so it holds whatever the
+ * decoder does. The file is then the part's raw body, byte for byte — which is
  * why this reads the message we already hold instead of asking the server for
  * the part again, a re-fetch that needs a part number the broken BODYSTRUCTURE
  * cannot supply (and a free socket, which a running sync does not leave).
@@ -136,7 +146,9 @@ export async function attachmentBytesFromSource(
   }
 
   if (!part) return decoded;
-  if (!base64DecodeCollapsed(part.encoding, part.encodedLength, decoded.length)) return decoded;
+  if (!misdeclaredBase64(part.encoding, part.encodedLength, decoded.length, part.nonBase64Bytes)) {
+    return decoded;
+  }
   if (!part.raw) return decoded;
 
   logger.warn(
@@ -183,7 +195,7 @@ export async function attachmentSizesFromSource(
   return attachments.map((attachment, index) => {
     const part = remaining.get((attachment.name || '').trim().toLowerCase())?.shift();
     if (!part) return decodedSizes[index];
-    return base64DecodeCollapsed(part.encoding, part.encodedLength, attachment.size)
+    return misdeclaredBase64(part.encoding, part.encodedLength, attachment.size, part.nonBase64Bytes)
       ? part.encodedLength
       : decodedSizes[index];
   });

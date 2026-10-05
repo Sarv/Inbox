@@ -1,3 +1,4 @@
+import { simpleParser } from 'mailparser';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -118,6 +119,83 @@ describe('readRawMimeParts', () => {
       message([[['Content-Disposition: attachment; filename="a.txt"'], 'A']]),
     );
     expect(parts[0].encoding).toBe('');
+  });
+
+  // Breaks if the bytes that decide a lying part stop being counted: every repair
+  // downstream then reads 0 and never fires — the junk decode is served again.
+  it('counts the bytes of a base64 part that no base64 encoder writes', async () => {
+    const parts = await readRawMimeParts(LYING_MESSAGE);
+    // < > < ␠ " : " > ␠ < > < >  — 13 of the 49.
+    expect(parts[0].nonBase64Bytes).toBe(13);
+  });
+
+  // Breaks if the count runs over every part: a large 7bit or quoted-printable
+  // attachment would pay a byte scan on import that nothing ever reads.
+  it('does not count the bytes of a part that does not declare base64', async () => {
+    const parts = await readRawMimeParts(message([[attachmentHeaders('a.txt', '7bit'), LYING_BODY]]));
+    expect(parts[0].nonBase64Bytes).toBe(0);
+  });
+});
+
+/** What mailparser — the real decoder chain — makes of a named attachment. */
+async function decodedBy(source: Buffer, filename: string): Promise<Buffer> {
+  const parsed = await simpleParser(source);
+  const attachment = parsed.attachments.find((a) => a.filename === filename);
+  if (!attachment) throw new Error(`mailparser found no ${filename}`);
+  return attachment.content;
+}
+
+// The cases below go through mailparser for the decode instead of stubbing a
+// length, because a stubbed length is exactly how this broke unnoticed: every
+// test here fed in the 7 bytes libbase64 1.3.0 produced, and libbase64 1.3.1
+// produces 25.
+describe('the repair, against the decode mailparser really produces', () => {
+  // THE regression of the libbase64 1.3.1 bump. Breaks if the verdict ever keys
+  // off one decoder's output again: the attachment is served as 25 junk bytes.
+  it('serves the raw bytes of HTML mislabelled base64', async () => {
+    const decoded = await decodedBy(LYING_MESSAGE, 'note.txt');
+    expect(decoded.toString('utf8')).not.toBe(LYING_BODY); // the decode IS junk
+    const bytes = await attachmentBytesFromSource(LYING_MESSAGE, 'note.txt', decoded);
+    expect(bytes.toString('utf8')).toBe(LYING_BODY);
+    expect(await attachmentSizesFromSource(LYING_MESSAGE, [{ name: 'note.txt', size: decoded.length }]))
+      .toEqual([LYING_BODY.length]);
+  });
+
+  // Breaks if prose is missed: with no `=` in it, the old decoder never stopped
+  // early and the old test never fired — its spaces are what give it away.
+  it('serves the raw bytes of prose mislabelled base64', async () => {
+    const prose = 'Hello, this is a short note. Thanks!';
+    const source = message([[attachmentHeaders('note.txt', 'base64'), prose]]);
+    const decoded = await decodedBy(source, 'note.txt');
+    expect((await attachmentBytesFromSource(source, 'note.txt', decoded)).toString('utf8')).toBe(prose);
+  });
+
+  // Breaks if an `=` in the middle of a part reads as "not base64". Mail that
+  // pads every line on its own is what libbase64 1.3.1 was fixed for; it now
+  // decodes in full and must be served as decoded, not as its base64 text.
+  it('leaves base64 padded line by line at its full decode', async () => {
+    const lines = ['first line of the file\n', 'second line\n'];
+    const body = lines.map((l) => Buffer.from(l).toString('base64')).join('\r\n');
+    const source = message([[attachmentHeaders('lines.txt', 'base64'), body]]);
+    const decoded = await decodedBy(source, 'lines.txt');
+    expect(decoded.toString('utf8')).toBe(lines.join(''));
+    expect(await attachmentBytesFromSource(source, 'lines.txt', decoded)).toBe(decoded);
+    expect(await attachmentSizesFromSource(source, [{ name: 'lines.txt', size: decoded.length }]))
+      .toEqual([decoded.length]);
+  });
+
+  // Breaks if a short decode alone convicts a part: base64 wrapped at 16
+  // characters decodes to two thirds of its length, and the file would be
+  // served — and sized — as its own base64 text.
+  it('keeps the decode of genuine base64 whose decode is short', async () => {
+    const file = Buffer.from('0123456789'.repeat(12));
+    const body = file.toString('base64').match(/.{1,16}/g)!.join('\r\n');
+    const source = message([[attachmentHeaders('digits.txt', 'base64'), body]]);
+    const decoded = await decodedBy(source, 'digits.txt');
+    expect(decoded).toEqual(file);
+    expect(await attachmentBytesFromSource(source, 'digits.txt', decoded)).toBe(decoded);
+    expect(await attachmentSizesFromSource(source, [{ name: 'digits.txt', size: decoded.length }]))
+      .toEqual([file.length]);
   });
 });
 
