@@ -15,6 +15,7 @@ import {
   BehaviorIntelligence,
   LogAggregator,
   MAX_API_RETRIES,
+  NATIVE_PROVIDER_CATEGORY_SLUGS,
   SARV_LABEL_PARENT,
   UnifiedPipeline,
   callAIWithRetry,
@@ -2142,11 +2143,14 @@ async function applyEmailLabels(
   if (!queue) return 'noop';
   // cats.length === 0 is VALID here: the mail lost all its categories, so we skip
   // the apply and fall straight to stale-removal below (strip every label).
+  const mirrorCats = isGmail
+    ? cats.filter((category) => !(NATIVE_PROVIDER_CATEGORY_SLUGS as readonly string[]).includes(category.slug))
+    : cats;
   let res: string = 'success';
   if (cats.length > 0) {
-    if (isGmail && token) {
+    if (isGmail && token && mirrorCats.length > 0) {
       await ensureGmailLabelColor(token, SARV_LABEL_PARENT); // parent so children nest
-      for (const c of cats) {
+      for (const c of mirrorCats) {
         await ensureGmailLabelColor(token, folderPathForCategory(c, '/'), bySlug.get(c.slug)?.color);
       }
     }
@@ -2161,7 +2165,7 @@ async function applyEmailLabels(
   // STORE -X-GM-LABELS command (no delete; a label the mail lacks is a no-op).
   // This keeps Gmail's labels == the app's categories. Best-effort.
   if (isGmail && typeof queue.removeGmailLabels === 'function') {
-    const currentLabels = new Set(cats.map((c) => folderPathForCategory(c, '/')));
+    const currentLabels = new Set(mirrorCats.map((c) => folderPathForCategory(c, '/')));
     const stale: string[] = [];
     for (const [slug, def] of bySlug) {
       const label = folderPathForCategory({ slug, name: def?.name || slug }, '/');

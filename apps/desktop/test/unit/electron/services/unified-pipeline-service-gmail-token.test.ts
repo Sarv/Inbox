@@ -1,4 +1,4 @@
-import { addTag, SARV_LABEL_PARENT } from '@sarvinbox/core';
+import { addTag, NATIVE_PROVIDER_CATEGORY_SLUGS, SARV_LABEL_PARENT } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -243,10 +243,11 @@ function addAccount(opts: AccountOptions) {
     isGmailCapable: () => gmail,
     ensureCategoryLabelsExist: vi.fn(async (cats: Array<{ name: string }>) =>
       cats.reduce((n, c) => n + ensure(label(c.name)), ensure(PARENT))),
-    applyCategoryLabels: vi.fn(async (_folder: string, uid: number, op: { categories: Array<{ name: string }> }) => {
-      ensure(PARENT);
+    applyCategoryLabels: vi.fn(async (_folder: string, uid: number, op: { categories: Array<{ slug?: string; name: string }> }) => {
+      const mirrorCategories = op.categories.filter((category) => !gmail || !(NATIVE_PROVIDER_CATEGORY_SLUGS as readonly string[]).includes(category.slug ?? ''));
+      if (mirrorCategories.length) ensure(PARENT);
       const on = messageLabels.get(uid) ?? new Set<string>();
-      for (const c of op.categories) { ensure(label(c.name)); on.add(label(c.name)); }
+      for (const c of mirrorCategories) { ensure(label(c.name)); on.add(label(c.name)); }
       messageLabels.set(uid, on);
       return 'success';
     }),
@@ -762,5 +763,28 @@ describe('automatic mirrors respect explicit category mutations', () => {
     expect(b.queue.applyCategoryLabels).not.toHaveBeenCalled();
     expect(b.queue.removeGmailLabels).not.toHaveBeenCalled();
     expect(b.markLabelDone).not.toHaveBeenCalled();
+  });
+});
+
+describe('native Gmail categories do not create app mirrors', () => {
+  it.each([{ slugs: ['important'] }, { slugs: ['promotions', 'social', 'updates', 'forums', 'personal'] }])('queues native intent and removes old native mirrors for %j', async ({ slugs }) => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    const definitions = slugs.map((slug) => ({ slug, name: slug, color: '#123456', isEnabled: 1 }));
+    vi.spyOn(b.storage, 'getCategoryDefinitions').mockReturnValue(definitions);
+    await mirrorCategoryLabels(b.storage, b.emails[0], slugs);
+    expect(writesTo(b)).toBe(0);
+    expect(b.queue.applyCategoryLabels).toHaveBeenCalledWith('INBOX', 201, expect.objectContaining({ categories: definitions.map(({ slug, name }) => ({ slug, name })) }));
+    expect(b.queue.removeGmailLabels).toHaveBeenCalledWith('INBOX', 201, slugs.map(label));
+  });
+
+  it('colors custom mirrors while retaining native intent and removing old native mirrors', async () => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    vi.spyOn(b.storage, 'getCategoryDefinitions').mockReturnValue([...DEFS, { slug: 'important', name: 'Important', color: '#123456', isEnabled: 1 }]);
+    await mirrorCategoryLabels(b.storage, b.emails[0], ['important', 'travel']);
+    expect(coloured(b)).toEqual([label('Travel')]);
+    expect(names(b)).not.toContain(label('Important'));
+    expect(b.queue.applyCategoryLabels).toHaveBeenCalledWith('INBOX', 201, expect.objectContaining({ categories: [{ slug: 'important', name: 'Important' }, { slug: 'travel', name: 'Travel' }] }));
+    expect(b.queue.removeGmailLabels).toHaveBeenCalledWith('INBOX', 201, expect.arrayContaining([label('Important')]));
+    expect(b.queue.removeGmailLabels.mock.calls[0][2]).not.toContain(label('Travel'));
   });
 });
