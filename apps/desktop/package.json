@@ -63,7 +63,7 @@
     "mailparser": "^3.9.28",
     "markdown-it": "^14.3.1",
     "nodemailer": "^10.0.10",
-    "p-limit": "^3.1.0",
+    "p-limit": "^7.3.3",
     "p-map": "^7.0.8",
     "pino": "^10.3.1",
     "postcss": "^8.5.28",
