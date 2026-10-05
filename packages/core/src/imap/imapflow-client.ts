@@ -1275,9 +1275,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * Download one MIME part WITHOUT reversing its transfer encoding.
    *
    * For a part whose `Content-Transfer-Encoding` header lies. A base64 decoder
-   * keeps only alphabet characters and stops at the first `=`, so raw HTML text
-   * mislabelled `base64` collapses to a handful of junk bytes (`<p><span style=`
-   * decoded to 7). These are the bytes Gmail shows for such a message.
+   * keeps only alphabet characters, so raw HTML text mislabelled `base64`
+   * decodes to junk (`<p><span style=…` came out as 7 bytes under libbase64
+   * 1.3.0, about half its length under 1.3.1). These are the bytes Gmail shows
+   * for such a message.
    */
   async downloadPartRaw(uid: number, part: string): Promise<Buffer | null> {
     this.ensureConnected();

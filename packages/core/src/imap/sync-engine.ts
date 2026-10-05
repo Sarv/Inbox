@@ -20,7 +20,13 @@ import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import type { EmailProvider } from '../utils/provider';
 import { withStallTimeout, isTimeoutError } from '../utils/timeout';
 
-import { attachmentNodes, base64DecodeCollapsed, findAttachmentNodeByName } from './body-structure';
+import {
+  attachmentNodes,
+  base64DecodeShort,
+  countNonBase64Bytes,
+  findAttachmentNodeByName,
+  misdeclaredBase64,
+} from './body-structure';
 import { poolIdleTimeoutForHost } from './connection-budget';
 import { ConnectionManager } from './connection-manager';
 import { IMAPConnectionPool, PoolConnectionParkedError, type ConnectionPoolConfig } from './connection-pool';
@@ -2417,7 +2423,11 @@ export class SyncEngine {
       const content = await client.downloadPart(uid, partId, { maxBytes, signal, timeoutMs: 90_000 });
       if (signal?.aborted) { content?.fill(0); throw new Error('Attachment scan cancelled'); }
       if (!content?.length || content.length > maxBytes) throw new Error('Attachment is empty or exceeds the scan limit');
-      if (base64DecodeCollapsed(node.encoding, node.size, content.length)) {
+      // A short decode may be text mislabelled base64, which the open path then
+      // serves RAW — bytes this scan never saw. It cannot read the raw part to
+      // tell (that would be a second, unbounded fetch), so it refuses the same
+      // set the open path re-examines, and the user gets the unscanned warning.
+      if (base64DecodeShort(node.encoding, node.size, content.length)) {
         content.fill(0);
         throw new Error('Attachment encoding cannot be fully inspected');
       }
@@ -2467,14 +2477,15 @@ export class SyncEngine {
   /**
    * Undo a part whose `Content-Transfer-Encoding` header lies.
    *
-   * A part that declares `base64` but carries raw text collapses when decoded:
-   * the decoder keeps only alphabet characters and stops at the first `=`, so a
-   * real message whose .txt attachment begins `"<p><span style=` decoded to
-   * SEVEN bytes of binary — which is what got cached, opened in the OS viewer,
-   * and stored as the attachment's size. The server's declared part size is the
-   * tell: genuine base64 decodes to about 75% of it and never to under half.
-   * Below that, re-fetch the part undecoded and use those bytes — the same
-   * content Gmail shows for the same attachment.
+   * A part that declares `base64` but carries raw text decodes to junk: the
+   * decoder keeps only alphabet characters, so a real message whose .txt
+   * attachment held `<p><span style=…` HTML decoded to SEVEN bytes of binary
+   * under libbase64 1.3.0 (which also stopped at the first `=`) and to just over
+   * half its length under 1.3.1 — junk either way, and what got cached, opened
+   * in the OS viewer, and stored as the attachment's size. A decode short of the
+   * server's declared part size (`base64DecodeShort`) is the cue to re-fetch the
+   * part undecoded; the raw bytes then decide (`misdeclaredBase64`), and only
+   * text is served in place of the decode — the same content Gmail shows.
    */
   private async repairMisdeclaredBase64(
     client: IIMAPClient,
@@ -2490,11 +2501,11 @@ export class SyncEngine {
       `Attachment part ${part.number}: encoding=${part.encoding} ` +
         `declared=${part.declaredSize} decoded=${decoded.length}`,
     );
-    if (!base64DecodeCollapsed(part.encoding, part.declaredSize, decoded.length)) return decoded;
+    if (!base64DecodeShort(part.encoding, part.declaredSize, decoded.length)) return decoded;
 
-    // Past here the bytes are known bad, so EVERY exit says why it could not
-    // repair them. Silent early returns are what made this undiagnosable: the
-    // absence of a log meant any of three different things.
+    // Past here the bytes are suspect, so EVERY exit says what it decided and
+    // why. Silent early returns are what made this undiagnosable: the absence of
+    // a log meant any of three different things.
     const context =
       `Part ${part.number} declares base64 but decoded to ${decoded.length} bytes of ~` +
       `${Math.round(part.declaredSize * 0.75)} expected`;
@@ -2521,7 +2532,17 @@ export class SyncEngine {
       );
       return decoded;
     }
-    logger.warn(`${context} — serving the ${raw.length} undecoded bytes`);
+    const nonBase64Bytes = countNonBase64Bytes(raw);
+    if (!misdeclaredBase64(part.encoding, raw.length, decoded.length, nonBase64Bytes)) {
+      // A short decode of a part that IS base64 (a tiny file, an odd line
+      // length): the decode is right, and the raw bytes are its base64 text.
+      logger.info(
+        `${context} — but the ${raw.length} undecoded bytes are base64 ` +
+          `(${nonBase64Bytes} not base64), keeping the decode`,
+      );
+      return decoded;
+    }
+    logger.warn(`${context} — serving the ${raw.length} undecoded bytes (${nonBase64Bytes} not base64)`);
     return raw;
   }
 

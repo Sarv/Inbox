@@ -185,6 +185,61 @@ describe('SyncEngine.fetchAttachmentPart — part that lies about base64', () =>
       (await makeEngine(client).fetchAttachmentPart('e1', 'INBOX', 42, 'note.txt'))?.content,
     ).toEqual(decoded);
   });
+
+  // The cases above stub the 7-byte decode libbase64 1.3.0 produced. imapflow
+  // decodes with libbase64 1.3.1 now, which turns the same 64 bytes of HTML into
+  // 34 — just over half — and the old "under half" test let that through.
+  const HTML = Buffer.from('<p><span style="font-family: sans-serif;">Hello World</span></p>');
+
+  // THE regression of the libbase64 1.3.1 bump on this path. Breaks if the
+  // trigger slides back to "under half": the attachment opens as 34 bytes of
+  // binary whenever the mailbox is idle, the case this path serves.
+  it('repairs the just-over-half decode libbase64 1.3.1 makes of mislabelled text', async () => {
+    const { client, downloadPartRaw } = makeClient({
+      bodyStructure: structure({ size: HTML.length }),
+      decoded: Buffer.alloc(34, 0xa6),
+      raw: HTML,
+    });
+
+    const result = await makeEngine(client).fetchAttachmentPart('e1', 'INBOX', 42, 'note.txt');
+
+    expect(result?.content).toEqual(HTML);
+    expect(downloadPartRaw).toHaveBeenCalledWith(42, '2');
+  });
+
+  // Breaks if a short decode alone is taken as proof: genuine base64 wrapped at
+  // 16 characters decodes to two thirds of its size, and the user would be
+  // handed the file's base64 text instead of the file.
+  it('keeps the decode when the raw part turns out to be genuine base64', async () => {
+    const file = Buffer.from('0123456789'.repeat(12));
+    const raw = Buffer.from(file.toString('base64').match(/.{1,16}/g)!.join('\r\n'));
+    const { client, downloadPartRaw } = makeClient({
+      bodyStructure: structure({ size: raw.length }),
+      decoded: file,
+      raw,
+    });
+
+    const result = await makeEngine(client).fetchAttachmentPart('e1', 'INBOX', 42, 'note.txt');
+
+    expect(downloadPartRaw).toHaveBeenCalledTimes(1); // it did look…
+    expect(result?.content).toEqual(file); // …and kept the decode
+  });
+
+  // Transient failure on the raw re-fetch, now reached for decodes the old test
+  // never questioned. Breaks if a connection blip there fails the open instead
+  // of falling back to the (wrong, but openable) decode.
+  it('keeps the decoded bytes when the raw re-fetch throws', async () => {
+    const decoded = Buffer.alloc(34, 0xa6);
+    const { client, downloadPartRaw } = makeClient({
+      bodyStructure: structure({ size: HTML.length }),
+      decoded,
+    });
+    downloadPartRaw.mockRejectedValue(new Error('Connection closed'));
+
+    const result = await makeEngine(client).fetchAttachmentPart('e1', 'INBOX', 42, 'note.txt');
+
+    expect(result?.content).toEqual(decoded);
+  });
 });
 
 /**
