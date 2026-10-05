@@ -9,7 +9,11 @@
 // (agent-config.json), so this push is what seeds that file on an existing
 // install whose enable-state lived only in renderer localStorage.
 
+import { createLogger } from '@sarvinbox/core/logger';
+
+const log = createLogger('AgentSettings');
 export const AGENT_CONFIG_KEY = 'sarvinbox-agent-config';
+export const AI_ASSIST_CHANGED_EVENT = 'sarvinbox:ai-assist-changed';
 const AGENT_CONFIG_VERSION = 2;
 const AGENT_CONFIG_VERSION_KEY = 'sarvinbox-agent-config-version';
 
@@ -60,7 +64,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
 const UNREADABLE_AGENT_SETTINGS: AgentSettings = { ...DEFAULT_AGENT_SETTINGS, enabled: false };
 
 function unreadable(reason: string): AgentSettings {
-  console.warn(`[AgentSettings] stored AI Assist settings are unreadable (${reason}) — AI Assist stays OFF until it is turned on again`);
+  log.warn(`Stored AI Assist settings are unreadable (${reason}) — AI Assist stays OFF until it is turned on again`);
   return UNREADABLE_AGENT_SETTINGS;
 }
 
@@ -124,10 +128,17 @@ export function isAIAssistEnabled(): boolean {
 }
 
 /** Persist agent settings to localStorage. */
-export function saveAgentSettings(s: AgentSettings): void {
+export function saveAgentSettings(s: AgentSettings, options: { strict?: boolean } = {}): void {
   try {
+    // This is an explicit user choice, not the historical default. Stamp the
+    // version first so a saved "off" cannot be migrated back to "on" later.
+    localStorage.setItem(AGENT_CONFIG_VERSION_KEY, String(AGENT_CONFIG_VERSION));
     localStorage.setItem(AGENT_CONFIG_KEY, JSON.stringify(s));
-  } catch { /* storage full / unavailable — non-fatal */ }
+  } catch (error) {
+    if (options.strict) throw error;
+    // Best-effort callers retain their existing non-fatal storage behavior.
+  }
+  (globalThis as { window?: Window }).window?.dispatchEvent?.(new Event(AI_ASSIST_CHANGED_EVENT));
 }
 
 /**
@@ -153,21 +164,29 @@ export function pushCategoryLabelSetting(): void {
   } catch { /* ignore */ }
 }
 
-export function pushAgentSettingsToBackend(s: AgentSettings = loadAgentSettings()): void {
+function backendConfig(s: AgentSettings) {
   const toList = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
+  return { ...s, neverAutoDeleteFrom: toList(s.neverAutoDeleteFrom), neverAutoReplyTo: toList(s.neverAutoReplyTo) };
+}
+
+/** Confirm the native pipeline has accepted an explicit onboarding choice. */
+export async function pushAgentSettingsToBackendStrict(s: AgentSettings): Promise<void> {
+  const api = (globalThis as { window?: Window }).window?.electronAPI?.agent?.setConfig;
+  if (typeof api !== 'function') throw new Error('AI settings could not be saved because the native app connection is unavailable.');
+  const response = await api(backendConfig(s));
+  if (!response?.success) throw new Error(response?.error || 'The native app could not save AI settings.');
+}
+
+export function pushAgentSettingsToBackend(s: AgentSettings = loadAgentSettings()): void {
   const api = window.electronAPI?.agent?.setConfig;
   // Loud, unmissable log so it's obvious in DevTools whether the boot push
   // actually fired and whether the IPC bridge is present.
-  console.log('[AgentSettings] pushing to backend — enabled:', s.enabled, 'setConfig present:', typeof api === 'function');
+  log.info('Pushing to backend — enabled:', s.enabled, 'setConfig present:', typeof api === 'function');
   if (typeof api !== 'function') {
-    console.warn('[AgentSettings] window.electronAPI.agent.setConfig is NOT available — preload may be stale/broken');
+    log.warn('window.electronAPI.agent.setConfig is NOT available — preload may be stale/broken');
     return;
   }
-  api({
-    ...s,
-    neverAutoDeleteFrom: toList(s.neverAutoDeleteFrom),
-    neverAutoReplyTo: toList(s.neverAutoReplyTo),
-  })
-    .then(() => console.log('[AgentSettings] backend accepted config (enabled:', s.enabled, ')'))
-    .catch((e) => console.warn('[AgentSettings] setConfig failed:', e?.message || e));
+  api(backendConfig(s))
+    .then(() => log.info('Backend accepted config (enabled:', s.enabled, ')'))
+    .catch((e) => log.warn('setConfig failed:', e?.message || e));
 }

@@ -46,6 +46,9 @@ const MANAGED_KEYS = [
   'sarvinbox-collapsed-sections',
   'sarvinbox-skip-discard-confirm',
   'sarvinbox-onboarding-complete',
+  'sarvinbox-onboarding-pending',
+  'sarvinbox-onboarding-email',
+  'sarvinbox-ai-consent',
   'sarvinbox-user-email',
 ] as const;
 

@@ -38,6 +38,7 @@ import {
 import { createLogger } from '@sarvinbox/core/logger';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { isAIAssistEnabled } from '../../../services/agent-settings';
 import { getAIHealth, getDefaultProvider, type AIProvider } from '../../../services/ai-service';
 import { nowSeconds } from '../../../services/first-split/split-first-email';
 import {
@@ -264,6 +265,7 @@ export function useFirstEmailSplit(input: FirstEmailSplitInput, deps: FirstEmail
   useEffect(() => {
     if (!identity || !accountId || !threadId || !current) return;
     if (!autoRunAI || !chatActive || running) return;
+    if (!isAIAssistEnabled()) return;
     if (!AUTO_RUN_STATES.has(state)) return;
     if (!(depsRef.current.healthy ?? (() => getAIHealth().healthy))()) return;
     if (!automaticRunAllowed(accountId, current)) return;

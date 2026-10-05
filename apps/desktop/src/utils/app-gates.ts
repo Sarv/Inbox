@@ -28,6 +28,8 @@ export interface AppGateState {
    * turns true MID-flow — this keeps the flow on screen until it completes.
    */
   onboardingInProgress: boolean;
+  /** Resume a first-run wizard that has already connected its email account. */
+  onboardingPending?: boolean;
 }
 
 /**
@@ -40,7 +42,7 @@ export const shouldShowOnboarding = (state: AppGateState): boolean =>
   !state.checkingConnection &&
   !state.onboardingComplete &&
   !state.needsReauth &&
-  (!state.hasAccounts || state.onboardingInProgress);
+  (!state.hasAccounts || state.onboardingInProgress || state.onboardingPending === true);
 
 /**
  * Returning-user empty state: shown only on the mail view, once onboarding is

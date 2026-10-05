@@ -1,8 +1,10 @@
 import type { SMTPConfig } from '@sarvinbox/core';
+import { createLogger } from '@sarvinbox/core/logger';
 import { createSingleFlight } from '@sarvinbox/core/single-flight';
 
 import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
+import { isOnboardingPending } from '../../services/onboarding-progress';
 import { forgetImageTrustAccount, setImageTrustAccount } from '../../utils/remote-images';
 import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
 import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
@@ -24,6 +26,7 @@ import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '.
 // save, a registry upsert and a background sync per duplicate call. Keyed by
 // ACCOUNT id, so switching accounts still connects both.
 const connectInFlight = createSingleFlight<void>();
+const connectionLogger = createLogger('connection-store');
 
 const initialAccounts = migrateAccounts();
 const initialActiveAccount =
@@ -165,14 +168,12 @@ async function doConnect(
         smtpConfigured: acctSmtpConfigured,
       });
 
-      // A successful connection means this account is set up — mark
-      // onboarding complete so a later credential loss surfaces the
-      // lightweight reconnect dialog, NOT the full first-run wizard
-      // (Sign in with Sarv / Connect Email / Shortcuts). Previously the
-      // flag was only set at the END of the wizard, so users who
-      // connected mid-wizard had it stuck false and saw the whole
-      // wizard again whenever creds went missing.
-      try { localStorage.setItem('sarvinbox-onboarding-complete', 'true'); } catch { /* ignore */ }
+      // A reconnect outside first-run setup should retain the completed gate.
+      // Inside the wizard, email is only its first connection: keep AI/model
+      // and antivirus available until the user opens their inbox.
+      try {
+        if (!isOnboardingPending()) localStorage.setItem('sarvinbox-onboarding-complete', 'true');
+      } catch { /* ignore */ }
 
       // Set up sync progress listener (remove old first to prevent accumulation)
       window.electronAPI.imap.removeSyncProgressListener();
@@ -759,7 +760,11 @@ const connectionSlice = (
       throw error;
     }
 
-    await get().loadLabels();
+    // Mailbox activation and its initial sync have already succeeded. A labels
+    // refresh is auxiliary: reporting it as a failed add prompts users to retry
+    // credentials that worked and can hide a fully connected account.
+    try { await get().loadLabels(); }
+    catch (error) { connectionLogger.warn('Account connected; label refresh will retry later:', (error as Error)?.message); }
   },
 
   // Self-heal OAuth mail accounts. OAuth accounts are stored durably by the main

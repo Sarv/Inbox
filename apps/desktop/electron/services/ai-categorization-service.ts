@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -982,17 +982,12 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
       // Guard against an empty bearer — we'd otherwise ship
       // `Authorization: Bearer ` which the gateway logs as
       // "Illegal header value" and returns 502.
-      if (typeof bearer !== 'string' || bearer.trim() === '') {
-        throw new Error(
-          `[AICategorizationService] Empty bearer token from provider '${config.type}'. ` +
-          `OAuth token may have failed to refresh, or apiKey is missing.`,
-        );
-      }
+      const authHeaders = buildAIAuthHeaders(config, bearer);
       return this.doFetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${bearer}`,
+          ...authHeaders,
         },
         body: JSON.stringify({
           model: config.model,

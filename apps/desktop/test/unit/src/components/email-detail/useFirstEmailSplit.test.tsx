@@ -13,6 +13,7 @@ import {
   type FirstEmailSplitDeps,
   type FirstEmailSplitInput,
 } from '../../../../../src/components/email-detail/hooks/useFirstEmailSplit';
+import { DEFAULT_AGENT_SETTINGS, saveAgentSettings } from '../../../../../src/services/agent-settings';
 import { reportAIHealthy, reportAIUnhealthy, type AIProvider } from '../../../../../src/services/ai-service';
 import type { SplitOutcome } from '../../../../../src/services/first-split/split-first-email';
 import {
@@ -123,6 +124,7 @@ const depsFor = (bridge: FirstSplitBridge, over: FirstEmailSplitDeps = {}): Firs
 });
 
 beforeEach(() => {
+  localStorage.clear();
   resetFirstSplitStoreForTests();
   latest = null;
   run = vi.fn(async () => ({ state: 'unknown' }));
@@ -250,6 +252,17 @@ describe('useFirstEmailSplit — the automatic run', () => {
     const { bridge } = bridgeWith({ t1: answerFor(FIRST) });
     await mount(AUTO, depsFor(bridge));
     expect(runs()).toEqual([[{ accountId: 'acct-b', threadId: 't1' }, 'open']]);
+  });
+
+  // Regression: retained provider settings after onboarding Skip must not
+  // transmit an opened email automatically; a deliberate Process now stays available.
+  it('keeps automatic open processing off while preserving the explicit manual action', async () => {
+    saveAgentSettings({ ...DEFAULT_AGENT_SETTINGS, enabled: false });
+    const { bridge } = bridgeWith({ t1: answerFor(FIRST) });
+    await mount(AUTO, depsFor(bridge));
+    expect(run).not.toHaveBeenCalled();
+    await act(async () => { await latest!.run(); });
+    expect(runs()).toEqual([[{ accountId: 'acct-b', threadId: 't1' }, 'manual']]);
   });
 
   it.each([

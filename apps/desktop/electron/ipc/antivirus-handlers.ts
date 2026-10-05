@@ -3,6 +3,7 @@ import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 
 import { requireTargetAccountId } from '../services/account-target';
 import { readRegistryAccounts } from '../services/accounts-registry';
+import { cancelSarvScannerOAuth, completeSarvScannerOAuth, connectSarvScannerOAuth, getOnboardingScannerSetup } from '../services/antivirus-onboarding';
 import { getAntivirusScanService } from '../services/antivirus-scan-service';
 import { getPendingUnscannedAttachmentWarning, respondUnscannedAttachmentWarning } from '../services/attachment-unscanned-warning';
 import { unscannedWarningPreferences } from '../services/attachment-warning-preferences';
@@ -68,4 +69,23 @@ export function registerAntivirusHandlers(): void {
     const targetAccountId = requireTargetAccountId(accountId);
     unscannedWarningPreferences.reset(targetAccountId);
   });
+
+  // Optional first-run installation and credentials belong only to the trusted app frame.
+  registerWarning('antivirus:getOnboardingSetup', getOnboardingScannerSetup);
+  registerWarning('antivirus:connectSarvOAuth', (accountId: unknown) => {
+    if (typeof accountId !== 'string' || !accountId || accountId.length > 128) throw new Error('Connect a mailbox before setting up antivirus.');
+    requireTargetAccountId(accountId);
+    return connectSarvScannerOAuth(accountId);
+  });
+  registerWarning('antivirus:completeSarvOAuth', (input: unknown) => {
+    if (!input || typeof input !== 'object') throw new Error('Review scanner privacy terms before enabling antivirus.');
+    const request = input as { challenge?: unknown; accountId?: unknown; attachmentConsent?: unknown };
+    if (typeof request.challenge !== 'string' || !request.challenge || request.challenge.length > 128 ||
+      typeof request.accountId !== 'string' || !request.accountId || request.accountId.length > 128 || request.attachmentConsent !== true) {
+      throw new Error('Review scanner privacy terms and select a mailbox before enabling antivirus.');
+    }
+    requireTargetAccountId(request.accountId);
+    return completeSarvScannerOAuth({ challenge: request.challenge, accountId: request.accountId, attachmentConsent: true });
+  });
+  registerWarning('antivirus:cancelSarvOAuth', cancelSarvScannerOAuth);
 }

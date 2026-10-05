@@ -6,6 +6,8 @@ import {
   isAIAssistEnabled,
   loadAgentSettings,
   pushAgentSettingsToBackend,
+  pushAgentSettingsToBackendStrict,
+  saveAgentSettings,
 } from '../../../../src/services/agent-settings';
 
 // AI Assist is the ONE switch that decides whether new mail is sent to the AI
@@ -17,7 +19,7 @@ import {
 
 const VERSION_KEY = 'sarvinbox-agent-config-version';
 const store = new Map<string, string>();
-const setConfig = vi.fn(async (_cfg: Record<string, unknown>) => ({ success: true }));
+const setConfig = vi.fn(async (_cfg: Record<string, unknown>): Promise<{ success: boolean; error?: string }> => ({ success: true }));
 
 beforeEach(() => {
   store.clear();
@@ -51,6 +53,16 @@ describe('loadAgentSettings — nothing stored', () => {
     expect(loadAgentSettings().enabled).toBe(true);
     expect(isAIAssistEnabled()).toBe(true);
     expect(store.size).toBe(0);
+  });
+
+  // Regression: a first-run explicit "off" was mistaken for the legacy
+  // default-off and flipped on by the next read, undoing onboarding Skip.
+  it('keeps an explicitly saved fresh-install off choice disabled on later reads', () => {
+    const settings = loadAgentSettings();
+    saveAgentSettings({ ...settings, enabled: false });
+    expect(store.get(VERSION_KEY)).toBe('2');
+    expect(loadAgentSettings().enabled).toBe(false);
+    expect(isAIAssistEnabled()).toBe(false);
   });
 });
 
@@ -132,5 +144,37 @@ describe('pushAgentSettingsToBackend', () => {
     saved({ enabled: false, neverAutoReplyTo: 'a@x.test, b@x.test' });
     pushAgentSettingsToBackend();
     expect(setConfig.mock.calls[0][0]).toMatchObject({ enabled: false, neverAutoReplyTo: ['a@x.test', 'b@x.test'] });
+  });
+});
+
+describe('explicit onboarding settings persistence', () => {
+  // Regression: best-effort settings writes must not silently complete a
+  // first-run wizard when its explicit enable/skip choice cannot be saved.
+  it('propagates storage failures only for a strict settings save', () => {
+    globalThis.localStorage.setItem = () => { throw new Error('Storage full'); };
+    expect(() => saveAgentSettings(DEFAULT_AGENT_SETTINGS)).not.toThrow();
+    expect(() => saveAgentSettings(DEFAULT_AGENT_SETTINGS, { strict: true })).toThrow('Storage full');
+  });
+
+  // Regression: strict and boot pushes must send the same canonical deny-lists.
+  it('awaits a successful native response with the shared transformed payload', async () => {
+    const settings = { ...DEFAULT_AGENT_SETTINGS, enabled: false, neverAutoDeleteFrom: ' a@x.test, , b@x.test ', neverAutoReplyTo: 'c@x.test' };
+    await pushAgentSettingsToBackendStrict(settings);
+    expect(setConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: false,
+      neverAutoDeleteFrom: ['a@x.test', 'b@x.test'], neverAutoReplyTo: ['c@x.test'] }));
+  });
+
+  // Regression: a native success:false result must remain an actionable failure.
+  it.each([false, true])('rejects a failed native save with an actionable error (has error=%s)', async (hasError) => {
+    setConfig.mockResolvedValueOnce(hasError ? { success: false, error: 'Pipeline storage unavailable' } : { success: false });
+    await expect(pushAgentSettingsToBackendStrict(DEFAULT_AGENT_SETTINGS)).rejects.toThrow(hasError ? 'Pipeline storage unavailable' : 'could not save AI settings');
+  });
+
+  // Regression: an absent bridge or IPC rejection must not claim the pipeline accepted consent.
+  it('rejects when the native bridge is missing or the IPC request rejects', async () => {
+    setConfig.mockRejectedValueOnce(new Error('IPC disconnected'));
+    await expect(pushAgentSettingsToBackendStrict(DEFAULT_AGENT_SETTINGS)).rejects.toThrow('IPC disconnected');
+    delete (globalThis as { window?: Window }).window;
+    await expect(pushAgentSettingsToBackendStrict(DEFAULT_AGENT_SETTINGS)).rejects.toThrow('native app connection is unavailable');
   });
 });

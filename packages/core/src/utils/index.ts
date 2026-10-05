@@ -99,3 +99,4 @@ export * from './spam-reputation';
 export * from './bimi';
 export * from './favicon';
 export * from './asar-path';
+export * from './ai-provider-auth';

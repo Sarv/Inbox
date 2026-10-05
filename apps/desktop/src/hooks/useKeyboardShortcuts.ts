@@ -13,6 +13,7 @@ import { useEmailStore } from '../store/email-store';
 interface UseKeyboardShortcutsOptions {
   setActiveSection: (section: AppSection) => void;
   focusSearch: () => void;
+  enabled?: boolean;
 }
 
 // Next/prev-email navigation always opens a different thread and thus triggers
@@ -97,13 +98,13 @@ function buildComposePayload(email: ReturnType<typeof getSelectedEmail>) {
   };
 }
 
-export function useKeyboardShortcuts({ setActiveSection, focusSearch }: UseKeyboardShortcutsOptions) {
+export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = true }: UseKeyboardShortcutsOptions) {
   const gotoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waitingForGotoRef = useRef(false);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isKeyboardShortcutsEnabled()) return;
+      if (!enabled || !isKeyboardShortcutsEnabled()) return;
 
       const isEscape = e.key === 'Escape';
 
@@ -568,5 +569,5 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch }: UseKeybo
       document.removeEventListener('keydown', handleKeyDown);
       if (gotoTimerRef.current) clearTimeout(gotoTimerRef.current);
     };
-  }, [setActiveSection, focusSearch]);
+  }, [setActiveSection, focusSearch, enabled]);
 }

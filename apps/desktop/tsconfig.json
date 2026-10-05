@@ -23,6 +23,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
+      "@sarvinbox/core/ai-provider-auth": ["../../packages/core/src/utils/ai-provider-auth.ts"],
       // Mirrors the Vite alias — subpath import of the pure contact-enrichment
       // module, so renderer and main share one implementation.
       "@sarvinbox/core/contact-enrichment": ["../../packages/core/src/contact-enrichment/index.ts"],

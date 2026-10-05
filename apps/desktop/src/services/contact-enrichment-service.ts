@@ -33,8 +33,12 @@ import {
   type ExtractedSignals,
   type ContactEnrichment,
 } from '@sarvinbox/core/contact-enrichment';
+import { createLogger } from '@sarvinbox/core/logger';
 
+import { isAIAssistEnabled } from './agent-settings';
 import { getDefaultProvider, makeAICompletion } from './ai-service';
+
+const log = createLogger('ContactEnrichment');
 
 export interface EnrichContactOptions {
   contactId: string;
@@ -46,6 +50,8 @@ export interface EnrichContactOptions {
    *  (UI Enrich button). Set by the scheduler when enriching a background
    *  account so every read/write targets that account, not the active one. */
   accountId?: string;
+  /** Scheduler calls honor the master AI switch; explicit Enrich stays available. */
+  automatic?: boolean;
 }
 
 export interface EnrichContactResult {
@@ -65,7 +71,9 @@ export interface EnrichContactSkipped {
     | 'no_signals'
     | 'llm_failed'
     | 'cadence_not_due'
-    | 'automated_sender';
+    | 'automated_sender'
+    // Automatic batches remain retryable; no watermark is advanced.
+    | 'ai_disabled';
   detail?: string;
 }
 
@@ -135,6 +143,7 @@ async function bumpEnrichmentWatermark(
 export async function enrichContact(
   opts: EnrichContactOptions,
 ): Promise<EnrichContactResult | EnrichContactSkipped> {
+  if (opts.automatic && !isAIAssistEnabled()) return { ok: false, reason: 'ai_disabled' };
   const api = window.electronAPI as any;
 
   // 1. Load contact + recent inbound emails in parallel. The contact
@@ -260,6 +269,8 @@ export async function enrichContact(
   // every 6h, burning tokens on a call that will never succeed. A future
   // email past the 90-day cadence still re-opens the contact for enrichment.
   let raw: string;
+  // The user can switch AI off while contact/body IPC is in flight.
+  if (opts.automatic && !isAIAssistEnabled()) return { ok: false, reason: 'ai_disabled' };
   try {
     raw = await makeAICompletion({
       systemPrompt: ENRICHMENT_SYSTEM_PROMPT,
@@ -391,21 +402,23 @@ export function installEnrichmentBatchListener(): void {
   batchListenerInstalled = true;
   api.contactEnrichment.onRunBatch(async (payload: { contactIds: string[]; accountId?: string }) => {
     if (!payload || !Array.isArray(payload.contactIds)) return;
-    for (const contactId of payload.contactIds) {
-      try {
-        const result = await enrichContact({ contactId, accountId: payload.accountId });
-        // Fire-and-forget progress report; the scheduler doesn't block on this.
-        api.contactEnrichment?.reportProgress?.({
-          contactId,
-          ok: result.ok,
-          reason: result.ok ? null : result.reason,
-        });
-      } catch (err) {
-        console.error('[enrichment] contact', contactId, 'failed:', err);
+    try {
+      for (const contactId of payload.contactIds) {
+        if (!isAIAssistEnabled()) break;
+        try {
+          const result = await enrichContact({ contactId, accountId: payload.accountId, automatic: true });
+          // Fire-and-forget progress report; the scheduler doesn't block on this.
+          api.contactEnrichment?.reportProgress?.({ contactId, ok: result.ok, reason: result.ok ? null : result.reason });
+        } catch (err) {
+          log.error('Contact enrichment failed:', contactId, err);
+        }
+        if (!isAIAssistEnabled()) break;
+        await sleep(THROTTLE_MS);
       }
-      await sleep(THROTTLE_MS);
+    } finally {
+      // Even a skipped batch must release native scheduler's in-flight lock.
+      api.contactEnrichment?.reportBatchDone?.();
     }
-    api.contactEnrichment?.reportBatchDone?.();
   });
 }
 

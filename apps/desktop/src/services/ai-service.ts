@@ -1,5 +1,7 @@
 // AI Service - Handles AI provider configuration and API calls
 
+import { buildAIAuthHeaders } from '@sarvinbox/core/ai-provider-auth';
+
 // Canonical AI feature defaults live in settings/types (a types+consts
 // leaf module — safe to import here, no component code, no cycle).
 import { DEFAULT_AI_FEATURES } from '../components/settings/types';
@@ -308,6 +310,7 @@ const AI_SETTINGS_KEY = 'sarvinbox-ai-settings';
 // This in-memory cache is hydrated once at startup (hydrateAiSecrets) so the
 // synchronous loadAISettings() can still return providers with their keys.
 let aiKeyCache: Record<string, string> = {};
+let aiKeyStorageEncrypted: boolean | undefined;
 
 /**
  * Pull provider API keys from the main-process vault into memory, and MIGRATE any
@@ -317,7 +320,10 @@ let aiKeyCache: Record<string, string> = {};
 export async function hydrateAiSecrets(): Promise<void> {
   try {
     const res = await window.electronAPI?.aiSecrets?.getAll?.();
-    if (res?.success && res.data) aiKeyCache = { ...res.data };
+    if (res?.success && res.data) {
+      aiKeyCache = { ...res.data };
+      aiKeyStorageEncrypted = res.encrypted;
+    }
   } catch (error) {
     console.error('Failed to load AI secrets from vault:', error);
   }
@@ -460,6 +466,55 @@ export function addProvider(
   return newProvider;
 }
 
+/**
+ * Onboarding saves only a tested, consented selection. Await the secret vault
+ * before publishing metadata; a cancelled save must never create a default.
+ * Keys remain in memory and safeStorage, never renderer localStorage.
+ */
+export async function addValidatedProvider(
+  draft: Omit<AIProvider, 'id' | 'isDefault'>,
+  isCurrent: () => boolean,
+): Promise<(AIProvider & { keyStorageEncrypted?: boolean }) | null> {
+  const existing = loadAISettings().providers.find((provider) =>
+    provider.type === draft.type && provider.model === draft.model
+    && provider.baseUrl === draft.baseUrl && provider.apiKey === draft.apiKey
+    && (provider.authMethod || 'apiKey') === (draft.authMethod || 'apiKey')
+    && provider.oauthEmail === draft.oauthEmail,
+  );
+  const id = existing?.id ?? generateId();
+  let keyStorageEncrypted = existing ? aiKeyStorageEncrypted : undefined;
+  if (!isCurrent()) return null;
+  if (draft.apiKey && !existing) {
+    let result: Awaited<ReturnType<typeof window.electronAPI.aiSecrets.set>>;
+    try { result = await window.electronAPI.aiSecrets.set(id, draft.apiKey); }
+    catch { throw new Error('Could not save your API key securely. Please try again.'); }
+    if (!isCurrent()) {
+      await window.electronAPI.aiSecrets.delete(id).catch(() => {});
+      return null;
+    }
+    if (!result.success) throw new Error('Could not save your API key securely. Please try again.');
+    keyStorageEncrypted = result.encrypted;
+    aiKeyStorageEncrypted = result.encrypted;
+  }
+  if (!isCurrent()) return null;
+  const settings = loadAISettings();
+  const provider: AIProvider = { ...draft, id, isDefault: true };
+  const providers = settings.providers.map((entry) => ({ ...entry, isDefault: false }));
+  const index = providers.findIndex((entry) => entry.id === id);
+  if (index < 0) providers.push(provider);
+  else providers[index] = provider;
+  // Unlike the general best-effort settings writer, propagate persistence
+  // failure here so the user stays on the model screen and can retry.
+  try {
+    persistStripped({ ...settings, providers });
+  } catch {
+    if (!existing && draft.apiKey) await window.electronAPI.aiSecrets.delete(id).catch(() => {});
+    throw new Error('Could not save AI settings. Please try again.');
+  }
+  if (draft.apiKey) aiKeyCache[id] = draft.apiKey;
+  return { ...provider, keyStorageEncrypted: draft.apiKey ? keyStorageEncrypted : undefined };
+}
+
 // Remove a provider
 export function removeProvider(id: string): void {
   const settings = loadAISettings();
@@ -593,26 +648,32 @@ export function aiFailureReason(status: number): string {
 }
 
 // Test provider connection
-export async function testProvider(provider: AIProvider): Promise<{ success: boolean; message: string }> {
+export async function testProvider(provider: AIProvider, options?: { signal?: AbortSignal }): Promise<{ success: boolean; message: string }> {
   try {
+    options?.signal?.throwIfAborted();
     const testPrompt = 'Say "Hello" in one word.';
 
     if (provider.type === 'gemini') {
       const baseUrl = provider.baseUrl || PROVIDER_CONFIGS.gemini.baseUrl;
-      const endpoint = `${baseUrl}/models/${provider.model}:generateContent?key=${provider.apiKey}`;
+      const endpoint = `${baseUrl}/models/${encodeURIComponent(provider.model)}:generateContent`;
 
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        redirect: 'error',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': provider.apiKey },
+        signal: options?.signal,
         body: JSON.stringify({
           contents: [{ parts: [{ text: testPrompt }] }],
-          generationConfig: { maxOutputTokens: 10 },
+          generationConfig: { maxOutputTokens: 128 },
         }),
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        return { success: false, message: `API Error: ${response.status} - ${errorText}` };
+        return { success: false, message: aiFailureReason(response.status) };
+      }
+      const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+      if (!body.candidates?.some((candidate) => candidate.content?.parts?.some((part) => part.text?.trim()))) {
+        return { success: false, message: 'The selected model did not return a usable response. Choose another model or try again.' };
       }
 
       reportAIHealthy();
@@ -622,30 +683,45 @@ export async function testProvider(provider: AIProvider): Promise<{ success: boo
       const baseUrl = provider.baseUrl || PROVIDER_CONFIGS[provider.type].baseUrl;
       const endpoint = `${baseUrl}/chat/completions`;
       const bearer = await resolveBearerToken(provider);
+      options?.signal?.throwIfAborted();
 
       const response = await fetch(endpoint, {
         method: 'POST',
+        redirect: 'error',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${bearer}`,
+          ...buildAIAuthHeaders(provider, bearer),
         },
+        signal: options?.signal,
         body: JSON.stringify({
           model: provider.model,
           messages: [{ role: 'user', content: testPrompt }],
-          max_completion_tokens: 10,
+          max_completion_tokens: 128,
+          ...(provider.type === 'sarv' ? {
+            chat_template_kwargs: { enable_thinking: false },
+            reasoning_effort: 'minimal',
+          } : /^(gpt-5|o\d)/.test(provider.model) ? {
+            reasoning_effort: provider.model.startsWith('gpt-5') ? 'minimal' : 'low',
+          } : {}),
         }),
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        return { success: false, message: `API Error: ${response.status} - ${errorText}` };
+        return { success: false, message: aiFailureReason(response.status) };
+      }
+      const body = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      if (!body.choices?.some((choice) => typeof choice.message?.content === 'string' && choice.message.content.trim())) {
+        return { success: false, message: 'The selected model did not return a usable response. Choose another model or try again.' };
       }
 
       reportAIHealthy();
       return { success: true, message: 'Connection successful!' };
     }
   } catch (error) {
-    return { success: false, message: (error as Error).message || 'Connection failed' };
+    return {
+      success: false,
+      message: options?.signal?.aborted ? 'Model test was cancelled or timed out. Please try again.' : 'Could not reach the AI provider. Check your connection and try again.',
+    };
   }
 }
 
@@ -963,7 +1039,7 @@ async function callOpenAICompatibleAPI(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${bearer}`,
+        ...buildAIAuthHeaders(provider, bearer),
       },
       body: JSON.stringify(requestBody),
       signal: abortController.signal,
@@ -1115,14 +1191,9 @@ async function resolveBearerToken(provider: AIProvider): Promise<string> {
     }
     return token;
   }
-  // API-key providers: same guard — empty key means the user never
-  // configured the provider.
-  if (!provider.apiKey || provider.apiKey.trim() === '') {
-    throw new Error(
-      `${provider.name}: missing apiKey. Add one in Settings → AI → Providers.`,
-    );
-  }
-  return provider.apiKey;
+  // The shared header builder validates missing keys and permits Custom
+  // providers deliberately configured without authentication.
+  return provider.apiKey || '';
 }
 
 /**

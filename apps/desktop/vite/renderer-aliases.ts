@@ -20,6 +20,8 @@ import type { Alias } from 'vite';
 function coreSubpathAliases(desktopDir: string): Record<string, string> {
   return {
     '@': resolve(desktopDir, './src'),
+    // Pure (zero imports) — all AI request paths apply the same bearer policy.
+    '@sarvinbox/core/ai-provider-auth': resolve(desktopDir, '../../packages/core/src/utils/ai-provider-auth.ts'),
     // Pure (libphonenumber-js only) — shared with core so the one implementation
     // doesn't drift into a second renderer copy.
     '@sarvinbox/core/contact-enrichment': resolve(

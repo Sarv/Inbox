@@ -8,6 +8,7 @@ import type { ClassifiableFolder, StandardFolderType } from '../config/folder-ma
 import { classifyFolder } from '../config/folder-mapping';
 import type { InboxType, InboxSection } from '../config/inbox-types';
 import { DEFAULT_SECTIONS, SETTINGS_KEY } from '../config/inbox-types';
+import { isAIAssistEnabled } from '../services/agent-settings';
 import { reportAIHealthy, reportAIUnhealthy, getDefaultProvider, syncAIProviderToMain } from '../services/ai-service';
 
 import { normalizeIdentities } from './identities';
@@ -1349,6 +1350,8 @@ export function setupAICategorizationListeners(useEmailStore: { setState: (state
   // in-memory config, and the already-mounted renderer never re-pushes). This
   // closes that silent-failure gap: either self-heal, or tell the user.
   window.electronAPI.agent?.onPipelineAIStatus?.((data) => {
+    // A deliberate Skip/off choice is not a lost pipeline configuration.
+    if (!isAIAssistEnabled()) return;
     if (data?.available) {
       // Pipeline has AI again — clear any "AI paused" banner.
       reportAIHealthy();

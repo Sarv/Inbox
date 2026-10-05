@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { applyEmailCategories, clearCategoryBadgeCache } from '../../../../src/components/email-list/CategoryBadges';
 import { DEFAULT_SECTIONS } from '../../../../src/config/inbox-types';
+import { DEFAULT_AGENT_SETTINGS, saveAgentSettings } from '../../../../src/services/agent-settings';
 import { getDefaultProvider, reportAIHealthy, reportAIUnhealthy, syncAIProviderToMain } from '../../../../src/services/ai-service';
 import {
   isDraftsFolder,
@@ -1510,6 +1511,17 @@ describe('setupAICategorizationListeners', () => {
     const { handlers } = setup();
     handlers.pipelineStatus({ available: false });
     expect(syncAIProviderToMain).toHaveBeenCalled();
+    expect(reportAIUnhealthy).not.toHaveBeenCalled();
+  });
+
+  // Regression: a deliberate onboarding Skip/off choice must not be undone by
+  // the unavailable pipeline status emitted while clearing its configuration.
+  it('does not self-heal a retained provider while AI Assist is disabled', () => {
+    saveAgentSettings({ ...DEFAULT_AGENT_SETTINGS, enabled: false });
+    vi.mocked(getDefaultProvider).mockReturnValue({ id: 'retained-provider' } as unknown as never);
+    const { handlers } = setup();
+    handlers.pipelineStatus({ available: false });
+    expect(syncAIProviderToMain).not.toHaveBeenCalled();
     expect(reportAIUnhealthy).not.toHaveBeenCalled();
   });
 

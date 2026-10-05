@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Provider-first onboarding.** Choose email, connect with Sarv/Gmail OAuth or
+  manual IMAP/SMTP, then choose an optional AI provider and test a model. Sarv
+  email sign-in reuses its AI session. Provider cards advance immediately, and
+  setup resumes after a restart without creating duplicate accounts. Sending
+  can be retried or deferred independently. AI starts only after explicit email
+  processing consent and the final Open inbox action; Skip keeps automatic AI off.
+- **Optional Sarv Antivirus setup.** Connect `https://av.sarv.com` through its
+  dedicated OAuth client, review the scanner's current privacy terms and approve
+  attachment sharing for the selected mailbox. The bundled optional extension
+  receives attachment/UI permissions only; body sharing stays off. A 90-day
+  scanning token is stored in the device keychain. Existing scanner connections
+  are preserved, and Skip retains the unscanned attachment warning.
+
 ### Security
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
