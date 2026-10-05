@@ -56,7 +56,7 @@
     "libmime": "^5.4.4",
     "libphonenumber-js": "^1.13.14",
     "libqp": "^2.1.1",
-    "lru-cache": "^7.18.3",
+    "lru-cache": "^11.5.3",
     "mailparser": "^3.9.28",
     "nodemailer": "^10.0.10",
     "openpgp": "^6.3.2",
