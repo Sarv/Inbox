@@ -28,7 +28,8 @@
 // Pure IMAP: works with password OR OAuth. Idempotent at the IMAP layer
 // (re-applying a keyword / re-copying to an existing Gmail label is a no-op);
 // the caller additionally guards re-runs with a local "mirrored" marker.
-import type { IIMAPClient } from '../types/imap';
+import { IMAPError, type IIMAPClient } from '../types/imap';
+import { mapGmailLabels } from '../utils/gmail-labels';
 import { logger } from '../utils/logger';
 import { detectProvider } from '../utils/provider';
 
@@ -136,6 +137,15 @@ export interface LabelStrategy {
   rename(oldCat: CategoryLabel, newCat: CategoryLabel): Promise<void>;
 }
 
+/** Important is native provider state, never a category mailbox to CREATE. */
+async function applyNativeImportance(client: IIMAPClient, folderPath: string, uids: number[], on: boolean): Promise<void> {
+  await withFolderSelected(client, folderPath, async () => {
+    const uidValidity = client.getCurrentMailboxState?.()?.uidValidity;
+    if (!client.setImportance || !uidValidity) throw new Error('Native importance sync is unavailable for this mailbox');
+    await client.setImportance(uids, on, uidValidity);
+  });
+}
+
 // ---- A: in-place keyword — OUR OWN HOST ONLY -------------------------------
 // The category is applied as an IMAP keyword (STORE +FLAGS) — in place, no move,
 // no copy, and NOTHING is created. The label is the bare category name
@@ -160,6 +170,7 @@ class KeywordStrategy implements LabelStrategy {
   private delimiter?: string;
   constructor(private client: IIMAPClient) {}
   async apply(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return applyNativeImportance(this.client, folderPath, uids, true);
     // UIDs are only meaningful in the mailbox they came from, so the STORE must
     // land in the mailbox this select opened — hence the held selection rather
     // than select-then-store (a concurrent re-select in the gap would flag
@@ -168,6 +179,7 @@ class KeywordStrategy implements LabelStrategy {
       this.client.addFlags(uids, [keywordForCategory(cat)]));
   }
   async remove(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return applyNativeImportance(this.client, folderPath, uids, false);
     await withFolderSelected(this.client, folderPath, () =>
       this.client.removeFlags(uids, [keywordForCategory(cat)]));
   }
@@ -183,6 +195,7 @@ class KeywordStrategy implements LabelStrategy {
    * message stays a single STORE and never pays for a one-time cleanup.
    */
   async migrate(cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return;
     if (this.delimiter === undefined) this.delimiter = (await this.client.getHierarchyDelimiter?.()) ?? '/';
     const nested = folderPathForCategory(cat, this.delimiter);
     if (await deleteIfEmpty(this.client, nested)) {
@@ -216,34 +229,68 @@ class KeywordStrategy implements LabelStrategy {
 class GmailLabelStrategy implements LabelStrategy {
   readonly kind = 'gmail' as const;
   private delimiter?: string;
+  private labelSnapshot = new Map<string, Promise<Array<{ uid: number; labels?: string[] }>>>();
   constructor(private client: IIMAPClient) {}
   private async path(cat: CategoryLabel): Promise<string> {
     if (this.delimiter === undefined) this.delimiter = (await this.client.getHierarchyDelimiter?.()) ?? '/';
     return folderPathForCategory(cat, this.delimiter);
   }
+  private labels(folderPath: string, uids: number[]): Promise<Array<{ uid: number; labels?: string[] }>> {
+    const key = `${folderPath}:${uids.join(',')}`;
+    let snapshot = this.labelSnapshot.get(key);
+    if (!snapshot) {
+      snapshot = withFolderSelected(this.client, folderPath, async () => {
+        const requested = new Set(uids);
+        const rows = (await this.client.fetchFlagsOnly(uids, undefined, folderPath)).filter((row) => requested.has(row.uid));
+        if (new Set(rows.map((row) => row.uid)).size !== requested.size) {
+          throw new IMAPError('A selected message no longer exists; sync this folder and try again', 'MESSAGE_NOT_FOUND');
+        }
+        return rows;
+      });
+      this.labelSnapshot.set(key, snapshot);
+    }
+    return snapshot;
+  }
+  private matches(label: string, cat: CategoryLabel): boolean {
+    return mapGmailLabels([label], { knownCategories: [cat] }).categories.includes(cat.slug);
+  }
   async apply(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return applyNativeImportance(this.client, folderPath, uids, true);
+    const existing = await this.labels(folderPath, uids);
+    const needed = uids.filter((uid) => !existing.find((row) => row.uid === uid)?.labels?.some((label) => this.matches(label, cat)));
+    if (!needed.length) return;
     // Create the PARENT label first so Gmail nests the children under it
     // (`Sarv Inbox` ▸ `Meetings`) instead of showing flat `Sarv Inbox/Meetings`.
     await this.client.createMailbox(SARV_LABEL_PARENT);
     const label = await this.path(cat);
     await this.client.createMailbox(label); // idempotent
     await withFolderSelected(this.client, folderPath, () =>
-      this.client.copyMessages(uids, label)); // Gmail: adds the label, keeps INBOX, no duplicate
+      this.client.copyMessages(needed, label)); // Gmail: adds the label, keeps INBOX, no duplicate
+    for (const row of existing) if (needed.includes(row.uid)) row.labels = [...(row.labels ?? []), label];
   }
   async remove(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return applyNativeImportance(this.client, folderPath, uids, false);
     // Remove the Gmail label in place via STORE -X-GM-LABELS (no delete, message
     // stays in All Mail). Works off the INBOX uid — no need for the label
-    // mailbox's own uid. No-op on a client without Gmail-label support.
-    if (!this.client.removeGmailLabels) return;
-    const label = await this.path(cat); // resolved outside the section — no round-trip held
-    await withFolderSelected(this.client, folderPath, () =>
-      this.client.removeGmailLabels!(uids, [label]));
+    // mailbox's own uid. Remove the actual matching provider/custom label too,
+    // otherwise it would reappear at the next server refresh.
+    if (!this.client.removeGmailLabels) throw new Error('Gmail label removal is unavailable');
+    const label = await this.path(cat);
+    await withFolderSelected(this.client, folderPath, async () => {
+      for (const row of await this.labels(folderPath, uids)) {
+        const matching = new Set([label, ...(row.labels ?? []).filter((raw) => this.matches(raw, cat))]);
+        await this.client.removeGmailLabels!([row.uid], [...matching]);
+        row.labels = (row.labels ?? []).filter((raw) => !matching.has(raw));
+      }
+    });
   }
   async ensure(cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return;
     await this.client.createMailbox(SARV_LABEL_PARENT);
     await this.client.createMailbox(await this.path(cat));
   }
   async rename(oldCat: CategoryLabel, newCat: CategoryLabel): Promise<void> {
+    if (oldCat.slug === 'important' || newCat.slug === 'important') return;
     if (!this.client.renameMailbox) return;
     await this.client.renameMailbox(await this.path(oldCat), await this.path(newCat));
   }
@@ -259,6 +306,7 @@ class FolderStrategy implements LabelStrategy {
     return folderPathForCategory(cat, this.delimiter);
   }
   async apply(folderPath: string, uids: number[], cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return applyNativeImportance(this.client, folderPath, uids, true);
     await this.client.createMailbox(SARV_LABEL_PARENT); // parent so it nests
     const dest = await this.path(cat);
     await this.client.createMailbox(dest);
@@ -271,9 +319,11 @@ class FolderStrategy implements LabelStrategy {
     });
   }
   async remove(_folderPath: string, _uids: number[], _cat: CategoryLabel): Promise<void> {
+    if (_cat.slug === 'important') return applyNativeImportance(this.client, _folderPath, _uids, false);
     logger.debug('[LabelStrategy] folder remove is a no-op in v1');
   }
   async ensure(cat: CategoryLabel): Promise<void> {
+    if (cat.slug === 'important') return;
     const dest = await this.path(cat);
     // Provisioning path (once per category per account per session) — log the
     // exact CREATE commands we send so the Sarv/IMAP label setup is visible.
@@ -282,6 +332,7 @@ class FolderStrategy implements LabelStrategy {
     await this.client.createMailbox(dest);
   }
   async rename(oldCat: CategoryLabel, newCat: CategoryLabel): Promise<void> {
+    if (oldCat.slug === 'important' || newCat.slug === 'important') return;
     if (!this.client.renameMailbox) return;
     await this.client.renameMailbox(await this.path(oldCat), await this.path(newCat));
   }

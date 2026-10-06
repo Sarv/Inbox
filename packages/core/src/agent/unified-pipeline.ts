@@ -20,6 +20,7 @@ import type {
   ContactType,
 } from '../types/agent';
 import type { EmailRecord } from '../types/models';
+import { automaticCategorizationDeferred, existingCategoryClassification } from '../utils/category-authority';
 import { logger } from '../utils/logger';
 
 import {
@@ -108,6 +109,10 @@ export interface PipelineResult {
    * failures pending for retry indefinitely.
    */
   categorizationParseFailed?: boolean;
+  /** Existing provider/user classification; no categorizer call or AI verdict was made. */
+  classificationSource?: 'provider' | 'user';
+  /** Provider discovery must be retried before considering this email unclassified. */
+  classificationPending?: boolean;
 }
 
 export interface UnifiedPipelineConfig extends AgentConfig {
@@ -187,6 +192,8 @@ export class UnifiedPipeline {
     if (this.processingSet.has(email.id)) return null;
     this.processingSet.add(email.id);
     try {
+      const existing = this.existingClassificationResult(email);
+      if (existing) return existing;
       const enriched = this.enrichEmail(email);
       let catResult: CategorizationResult | null = null;
       let catFailed = false;
@@ -210,6 +217,10 @@ export class UnifiedPipeline {
         logger.error(`[Pipeline] Categorize failed for ${email.id}:`, error);
       }
 
+      // Sync/manual edits can arrive while the provider request is outstanding.
+      const latest = await this.deps.getEmail(email.id);
+      const changed = latest && this.existingClassificationResult(latest);
+      if (changed) return changed;
       const prediction = this.predictFromCategories(email, catResult);
       const execution = await this.executeOrPropose(email, prediction);
 
@@ -246,13 +257,17 @@ export class UnifiedPipeline {
         // Fetch sender/thread/repetition stats ONCE for the whole chunk, then
         // enrich each email from those shared maps (was 3 storage calls per
         // email — 30 per 10-email chunk).
-        const context = this.buildEnrichmentContext(chunk);
-        const enriched = chunk.map(e => this.enrichWithContext(e, context));
+        const unclassified = chunk.filter((email) => !existingCategoryClassification(email) && !automaticCategorizationDeferred(email));
+        const context = this.buildEnrichmentContext(unclassified);
+        const enriched = unclassified.map(e => this.enrichWithContext(e, context));
         let catResults: CategorizationResult[] = [];
-        try { catResults = await this.categorize(enriched); } catch (e) { logger.error('[Pipeline] Batch categorize failed:', e); }
+        try { if (enriched.length > 0) catResults = await this.categorize(enriched); } catch (e) { logger.error('[Pipeline] Batch categorize failed:', e); }
         const catMap = new Map(catResults.map(r => [r.emailId, r]));
 
         for (const email of chunk) {
+          const latest = await this.deps.getEmail(email.id);
+          const existing = this.existingClassificationResult(latest ?? email);
+          if (existing) { results.push(existing); continue; }
           const catResult = catMap.get(email.id) || null;
           const prediction = this.predictFromCategories(email, catResult);
           const execution = await this.executeOrPropose(email, prediction);
@@ -280,6 +295,20 @@ export class UnifiedPipeline {
   }
 
   // ========== Enrich ==========
+
+  private existingClassificationResult(email: EmailRecord): PipelineResult | null {
+    const existing = existingCategoryClassification(email);
+    const pending = automaticCategorizationDeferred(email);
+    if (!existing && !pending) return null;
+    // A provider flag/category is not approval for a new autonomous action.
+    // Independent contact enrichment/conversation processing remains unchanged.
+    return {
+      emailId: email.id, categories: existing?.categories ?? [], classificationSource: existing?.source,
+      classificationPending: pending || undefined,
+      isSpam: false, categorizationConfidence: 0, reasoning: '', predictedAction: null,
+      actionConfidence: 0, executed: false, proposed: false,
+    };
+  }
 
   /**
    * Shared per-chunk enrichment inputs. The three batch deps are keyed/grouped
@@ -455,8 +484,15 @@ export class UnifiedPipeline {
     applySecurityGate(results, emails);
 
     if (results.length > 0) {
+      // Defense before the save seam, in addition to the storage transaction's
+      // check: direct core consumers must respect updates received during AI.
+      const stillEligible = [] as CategorizationResult[];
+      for (const result of results) {
+        const latest = await this.deps.getEmail(result.emailId);
+        if (!latest || (!existingCategoryClassification(latest) && !automaticCategorizationDeferred(latest))) stillEligible.push(result);
+      }
       const processedAt = Math.floor(Date.now() / 1000);
-      this.deps.saveEmailCategoriesBatch(results.map(r => ({
+      if (stillEligible.length > 0) this.deps.saveEmailCategoriesBatch(stillEligible.map(r => ({
         emailId: r.emailId,
         categories: r.categories.map(slug => ({ slug, confidence: r.confidence })),
         isSpam: r.isSpam,

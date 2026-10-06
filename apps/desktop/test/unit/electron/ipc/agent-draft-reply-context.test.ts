@@ -71,7 +71,7 @@ vi.mock('../../../../electron/services/thread-context', async (importOriginal) =
   };
 });
 
-import { registerAgentHandlers } from '../../../../electron/ipc/agent-handlers';
+import { logUserAction, registerAgentHandlers } from '../../../../electron/ipc/agent-handlers';
 import { openTestAccount, type TestAccount } from '../../../helpers/account-storage';
 
 registerAgentHandlers();
@@ -143,5 +143,23 @@ describe('agent:draftReply — thread context and account', () => {
     expect(result.error).toMatch(/acct-gone is not available/);
     expect(h.built).toEqual([]);
     expect(h.created).toEqual([]);
+  });
+});
+
+describe('importance action account ownership', () => {
+  // Regression: marking Important from unified inbox must not train the active account on another account's mail.
+  it('writes the action only into the explicitly resolved account database', async () => {
+    await logUserAction('b3', 'important', { threadId: 't', senderAddress: 'boss@x.test' }, b.storage);
+    expect(await a.storage.getRepositories().agent.getActionsByEmail('b3')).toEqual([]);
+    expect(await b.storage.getRepositories().agent.getActionsByEmail('b3')).toEqual([
+      expect.objectContaining({ emailId: 'b3', actionType: 'important', threadId: 't' }),
+    ]);
+  });
+
+  // Regression: older callers without an explicit account still log into their active account.
+  it('keeps active-account logging for an unscoped action', async () => {
+    await logUserAction('a-only', 'unimportant');
+    expect(await a.storage.getRepositories().agent.getActionsByEmail('a-only')).toHaveLength(1);
+    expect(await b.storage.getRepositories().agent.getActionsByEmail('a-only')).toEqual([]);
   });
 });

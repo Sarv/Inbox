@@ -34,8 +34,7 @@ function generateId(prefix: string): string {
 /**
  * Get the agent repository from storage
  */
-function getAgentRepo() {
-  const storage = requireStorage();
+function getAgentRepo(storage = requireStorage()) {
   const repos = (storage as any).getRepositories();
   return repos.agent;
 }
@@ -120,9 +119,11 @@ export async function logUserAction(
     source?: ActionSource;
     senderAddress?: string | null;
   } = {},
+  accountStorage?: ReturnType<typeof requireStorage>,
 ): Promise<void> {
   try {
-    const agentRepo = getAgentRepo();
+    const storage = accountStorage ?? requireStorage();
+    const agentRepo = getAgentRepo(storage);
     await agentRepo.logAction({
       id: generateId('act'),
       emailId,
@@ -138,7 +139,6 @@ export async function logUserAction(
     // Also update existing sender_stats aggregates (reuses existing system, no duplication)
     const sender = options.senderAddress;
     if (sender) {
-      const storage = requireStorage();
       const statsUpdate: Record<string, number> = {};
       if (actionType === 'read') statsUpdate.readCount = 1;
       else if (actionType === 'delete') statsUpdate.deletedCount = 1;

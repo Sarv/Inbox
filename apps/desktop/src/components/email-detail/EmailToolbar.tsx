@@ -23,6 +23,7 @@ import { useState, useEffect } from 'react';
 import { useAppearance } from '../../appearance';
 import { getShortcutHints } from '../../config/keyboard-shortcuts';
 import { useEmailStore } from '../../store/email-store';
+import { CategoryMenu } from '../CategoryMenu';
 import { SnoozeDropdown } from '../email-list/SnoozeDropdown';
 import { FolderPicker } from '../FolderPicker';
 import { LabelMenu } from '../LabelMenu';
@@ -204,6 +205,14 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
           accountId={displayEmail.accountId ?? viewAccountId ?? undefined}
         />
       )}
+
+      {displayEmail && <CategoryMenu
+        emailId={displayEmail.id}
+        accountId={displayEmail.accountId ?? viewAccountId ?? undefined}
+        buttonClassName={toolbarButtonClass(buttonLabels)}
+        label={showsToolbarLabel(buttonLabels) ? 'Categories' : undefined}
+        showIcon={showsToolbarIcon(buttonLabels)}
+      />}
 
       {/* Move / Copy to an arbitrary folder */}
       {displayEmail && (

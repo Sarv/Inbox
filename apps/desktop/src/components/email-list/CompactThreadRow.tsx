@@ -5,8 +5,10 @@ import { memo } from 'react';
 
 import { formatCountdown } from '../../utils/format-time';
 import { threadTagsString } from '../../utils/thread-utils';
+import { CategoryMenu } from '../CategoryMenu';
 import { LabelChips } from '../LabelChips';
 import { Tooltip } from '../Tooltip';
+
 
 import { CategoryBadges } from './CategoryBadges';
 import { readStateTextClass } from './read-state-text';
@@ -143,6 +145,9 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
         <span className={isHovered ? 'hidden' : 'contents'}>
           <CategoryBadges emailId={thread.badgeEmailId} />
         </span>
+
+          <CategoryMenu emailId={thread.badgeEmailId} accountId={latestEmail.accountId ?? undefined}
+            buttonClassName="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground" />
 
         {/* Snoozed countdown badge */}
         {isSnoozed && (

@@ -43,11 +43,11 @@ interface Ctx {
   storage: IEmailStorage;
 }
 
-function setup(options: { condstore?: boolean } = {}): Ctx {
+function setup(options: { condstore?: boolean; gmail?: boolean } = {}): Ctx {
   resetFakeMessageIds();
   resetFakeStorageIds();
   folderSeq += 1;
-  const server = new FakeImapServer({ condstore: options.condstore ?? false });
+  const server = new FakeImapServer({ condstore: options.condstore ?? false, gmailLabels: options.gmail ?? false });
   const db = new FakeEmailStorage();
   for (const path of [INBOX, 'Archive', 'Trash']) {
     server.addFolder(path, { uidValidity: 1 });
@@ -1544,5 +1544,174 @@ describe('syncFlags — Phase 2: is this UID set even THIS mailbox\'s?', () => {
     // ...and answers happily once the right mailbox is open.
     await ctx.server.selectFolder(INBOX);
     await expect(ctx.server.fetchAllUIDs(INBOX)).resolves.toHaveLength(1);
+  });
+});
+
+
+describe('syncFlags — provider classification before AI', () => {
+  // Important is a separate server flag and must converge without any AI decision.
+  it('imports and removes canonical Sarv importance, notifying the UI on flag-only changes', async () => {
+    const ctx = setup();
+    const uid = seedSynced(ctx, ['\\Seen', 'Important'], ['read']);
+    const changed = vi.fn();
+    await ctx.server.selectFolder(INBOX);
+    expect((await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage, changed)).updated).toBe(1);
+    expect(tagsAt(ctx, uid)).toContain('important');
+    expect(ctx.db.rowsPrimaryIn(INBOX)[0].serverCategories).toEqual(['important']);
+    expect(changed).toHaveBeenCalledOnce();
+    const setter = vi.spyOn(ctx.db, 'setServerCategories');
+    expect((await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage)).updated).toBe(0);
+    expect(setter).not.toHaveBeenCalled();
+    ctx.server.setFlagsOnServer(INBOX, uid, ['\\Seen']);
+    expect((await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage)).updated).toBe(1);
+    expect(tagsAt(ctx, uid)).not.toContain('important');
+    expect(ctx.db.rowsPrimaryIn(INBOX)[0].serverCategories).toEqual([]);
+  });
+
+  // Pending local changes remain protected until the server actually acknowledges them.
+  it('preserves an offline important correction during server reconciliation', async () => {
+    const ctx = setup();
+    const uid = seedSynced(ctx, [], ['important']);
+    ctx.db.rowsPrimaryIn(INBOX)[0].serverCategories = ['important'];
+    ctx.mp.setPendingUidsProvider(async () => new Set([uid]));
+    await ctx.server.selectFolder(INBOX);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(tagsAt(ctx, uid)).toContain('important');
+    expect(ctx.db.rowsPrimaryIn(INBOX)[0].serverCategories).toEqual(['important']);
+  });
+
+  // A removed Sarv category keyword must not suppress categorization forever.
+  it('removes a recognized keyword category while keeping real category folder membership', async () => {
+    const ctx = setup();
+    (ctx.db as unknown as { getCategoryDefinitions: () => Promise<unknown> }).getCategoryDefinitions = async () => [{ slug: 'promotions', name: 'Promotions' }];
+    const uid = seedSynced(ctx, ['promotions'], ['promotions']);
+    ctx.db.rowsPrimaryIn(INBOX)[0].serverCategories = ['promotions'];
+    await ctx.server.selectFolder(INBOX);
+    ctx.server.setFlagsOnServer(INBOX, uid, []);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(tagsAt(ctx, uid)).not.toContain('promotions');
+    ctx.db.addFolder('Promotions');
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0];
+    row.tags = '|INBOX|Promotions|promotions|';
+    row.serverCategories = ['promotions'];
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(tagsAt(ctx, uid)).toContain('promotions');
+    expect(row.serverCategories).toEqual(['promotions']);
+  });
+
+  // Reused UID numbers across accounts must never import another mailbox's importance.
+  it('keeps independent account UID spaces isolated', async () => {
+    const first = setup(); const second = setup();
+    const uidA = seedSynced(first, ['Important']); const uidB = seedSynced(second, []);
+    await first.server.selectFolder(INBOX); await second.server.selectFolder(INBOX);
+    await first.mp.syncFlags(first.server, first.folder(), first.storage);
+    await second.mp.syncFlags(second.server, second.folder(), second.storage);
+    expect(tagsAt(first, uidA)).toContain('important');
+    expect(tagsAt(second, uidB)).not.toContain('important');
+  });
+});
+
+
+describe('Gmail native category authority and discovery retry', () => {
+  // Google can omit category tabs from X-GM-LABELS entirely; discovery metadata must survive ingestion.
+  it('imports native categories absent from labels without fetching message bodies', async () => {
+    const ctx = setup({ gmail: true });
+    const uid = seedSynced(ctx);
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue([{ uid, flags: [], labels: [], categories: ['promotions'], gmailCategoriesKnown: true }] as any);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0];
+    expect(row.serverCategories).toEqual(['promotions']);
+    expect(row.gmailCategoriesPending).toBe(false);
+    expect(tagsAt(ctx, uid)).toContain('promotions');
+    expect(ctx.db.callCount('getEmail')).toBe(0);
+  });
+
+  // Failed discovery is unknown, protecting prior provider authority and deferring new AI work.
+  it('persists unknown discovery without clearing earlier provider categories', async () => {
+    const ctx = setup({ gmail: true });
+    const uid = seedSynced(ctx, [], ['promotions']);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0]; row.serverCategories = ['promotions'];
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue([{ uid, flags: [], labels: [], gmailCategoriesKnown: false }] as any);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(row.gmailCategoriesPending).toBe(true);
+    expect(row.serverCategories).toEqual(['promotions']);
+    expect(tagsAt(ctx, uid)).toContain('promotions');
+  });
+
+  // A failed SEARCH must recover even when Google category state changes without an IMAP MODSEQ delta.
+  it('retries pending native discovery on an empty CONDSTORE delta and clears unknown on success', async () => {
+    const ctx = setup({ gmail: true, condstore: true });
+    const uid = seedSynced(ctx, [], ['promotions']);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0]; row.serverCategories = ['promotions']; row.gmailCategoriesPending = true;
+    await ctx.server.selectFolder(INBOX);
+    await ctx.db.updateFolder(ctx.folder().id, { highestModseq: ((await ctx.server.getFolderStatus(INBOX)) as { highestModseq?: number }).highestModseq });
+    const delta = vi.spyOn(ctx.server, 'fetchFlagsChangedSince').mockResolvedValue([]);
+    const fresh = vi.spyOn(ctx.server, 'fetchFlagsOnly').mockResolvedValue([{ uid, flags: [], labels: [], categories: [], gmailCategoriesKnown: true }] as any);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(delta).toHaveBeenCalled();
+    expect(fresh).toHaveBeenCalledWith([uid], undefined, INBOX);
+    expect(row.gmailCategoriesPending).toBe(false);
+    expect(row.serverCategories).toEqual([]);
+    expect(tagsAt(ctx, uid)).not.toContain('promotions');
+  });
+
+  // Offline corrections retain their full snapshot and unknown state until the server acknowledges them.
+  it('does not alter provider authority or pending metadata for queued local edits', async () => {
+    const ctx = setup({ gmail: true });
+    const uid = seedSynced(ctx, [], ['important']);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0]; row.serverCategories = ['important']; row.gmailCategoriesPending = false;
+    await ctx.server.selectFolder(INBOX);
+    ctx.mp.setPendingUidsProvider(async () => new Set([uid]));
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue([{ uid, flags: [], labels: [], gmailCategoriesKnown: false }] as any);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(row.gmailCategoriesPending).toBe(false);
+    expect(row.serverCategories).toEqual(['important']);
+  });
+});
+
+
+describe('provider sync late local correction guard', () => {
+  // A local correction queued after page reconciliation cannot be overwritten by its stale tag snapshot.
+  it('preserves a new Important correction queued just before the page flush', async () => {
+    const ctx = setup(); const uid = seedSynced(ctx, ['\\Seen']);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0]; row.serverCategories = [];
+    let queued = false;
+    ctx.mp.setPendingUidsProvider(async () => queued ? new Set([uid]) : new Set());
+    await ctx.server.selectFolder(INBOX);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage, () => {
+      queued = true; row.tags = '|INBOX|important|'; row.manualCategories = ['important'];
+    });
+    expect(tagsAt(ctx, uid)).toEqual(['INBOX', 'important']);
+    expect(row.manualCategories).toEqual(['important']);
+    expect(row.serverCategories).toEqual([]);
+  });
+});
+
+
+describe('provider discovery retry failures', () => {
+  // A later temporary retry failure leaves the pending bit set, so AI still cannot guess the category.
+  it('keeps unknown discovery and earlier authority when the bounded retry fails', async () => {
+    const ctx = setup({ gmail: true, condstore: true }); const uid = seedSynced(ctx, [], ['social']);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0]; row.serverCategories = ['social']; row.gmailCategoriesPending = true;
+    await ctx.server.selectFolder(INBOX);
+    await ctx.db.updateFolder(ctx.folder().id, { highestModseq: ((await ctx.server.getFolderStatus(INBOX)) as { highestModseq?: number }).highestModseq });
+    vi.spyOn(ctx.server, 'fetchFlagsChangedSince').mockResolvedValue([]);
+    vi.spyOn(ctx.server, 'fetchFlagsOnly').mockRejectedValue(new Error('temporary failure'));
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(ctx.server.fetchFlagsOnly).toHaveBeenCalledWith([uid], undefined, INBOX);
+    expect(row.gmailCategoriesPending).toBe(true); expect(row.serverCategories).toEqual(['social']);
+  });
+
+  // A correction arriving after classification comparison must also protect the metadata setter at flush.
+  it('skips a late provider projection when a local category correction queues', async () => {
+    const ctx = setup({ gmail: true }); const uid = seedSynced(ctx);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0]; row.serverCategories = [];
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue([{ uid, flags: [], labels: [], categories: ['promotions'], gmailCategoriesKnown: true }] as any);
+    let queries = 0; ctx.mp.setPendingUidsProvider(async () => ++queries >= 2 ? new Set([uid]) : new Set());
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(row.serverCategories).toEqual([]); expect(row.gmailCategoriesPending).not.toBe(false);
   });
 });

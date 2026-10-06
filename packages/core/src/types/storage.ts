@@ -56,6 +56,11 @@ export interface IEmailStorage {
    */
   updateEmail(id: string, updates: Partial<EmailRecord>): Promise<void>;
 
+  /** Reconcile provider classification without recording a fake AI verdict. */
+  setServerCategories?(emailId: string, categories: string[]): void;
+  /** Persist an explicit user selection (including no categories). */
+  setEmailManualCategories?(emailId: string, categories: string[] | null): void;
+
   /**
    * Register the mailbox owner's own address(es) so thread resolution can exclude
    * "self" from same-subject participant overlap. Optional; when omitted the
@@ -274,7 +279,7 @@ export interface IEmailStorage {
    * `getEmailsByFolder` sweep was quadratic and materialised every message body
    * just to read a tag string.
    */
-  getEmailTagsInFolder?(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string }>>;
+  getEmailTagsInFolder?(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean }>>;
 
   /**
    * Count every email carrying `folderPath` as a folder-membership TAG — the same

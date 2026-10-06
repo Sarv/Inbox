@@ -505,14 +505,30 @@ describe('gmail strategy — COPY means "add label", not duplicate', () => {
     expect(server.messageCount('INBOX')).toBe(2);
   });
 
-  it('removal is a silent no-op on a client without Gmail-label support', async () => {
+  // Regression: an unsupported remove must not be reported as successfully synced.
+  it('reports removal unavailable on a client without Gmail-label support', async () => {
     const server = await makeServer({ gmailLabels: true });
     const strategy = await resolveLabelStrategy(server as any, 'imap.gmail.com', 'copy');
     (server as any).removeGmailLabels = undefined;
     const before = server.calls.length;
 
-    await expect(strategy.remove('INBOX', [1], FINANCE)).resolves.toBeUndefined();
+    await expect(strategy.remove('INBOX', [1], FINANCE)).rejects.toThrow('removal is unavailable');
     expect(server.calls.length).toBe(before); // not even a SELECT
+  });
+
+  // Regression: an existing provider classification must not get a duplicate app label or reappear after removal.
+  it('respects and removes the actual matching provider category label', async () => {
+    const server = await makeServer({ gmailLabels: true });
+    const fetch = vi.spyOn(server, 'fetchFlagsOnly').mockResolvedValue([{ uid: 1, flags: [], labels: ['Finance', '\\Inbox', 'Personal Project'] }]);
+    const remove = vi.spyOn(server, 'removeGmailLabels');
+    const strategy = await resolveLabelStrategy(server, 'imap.gmail.com', 'copy');
+    await strategy.apply('INBOX', [1], FINANCE);
+    expect(server.callCount('createMailbox')).toBe(0);
+    expect(server.callCount('copyMessages')).toBe(0);
+    await strategy.remove('INBOX', [1], FINANCE);
+    expect(remove).toHaveBeenCalledWith([1], ['Sarv Inbox/Finance', 'Finance']);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(server.callCount('deleteMessages')).toBe(0);
   });
 
   it('ensure creates the empty label without touching any message', async () => {
@@ -618,4 +634,119 @@ describe('folder strategy — the move-vs-copy trade-off the user picked', () =>
     (server as any).renameMailbox = undefined;
     await expect(strategy.rename(FINANCE, { slug: 'finance', name: 'Cash' })).resolves.toBeUndefined();
   });
+});
+
+describe('native Important remains independent of category label strategies', () => {
+  const IMPORTANT = { slug: 'important', name: 'Important' };
+  const providers = [
+    { host: 'imap.sarv.com', options: { keywords: true } },
+    { host: 'imap.gmail.com', options: { gmailLabels: true } },
+    { host: 'imap.example.test', options: { keywords: false } },
+  ];
+  it.each(providers)('uses native UID-bound toggles on $host without copying or creating Importance folders', async ({ host, options }) => {
+    const server = await makeServer(options);
+    await server.selectFolder('INBOX');
+    await server.addFlags([1], ['promotions', '\\Flagged']);
+    const native = vi.spyOn(server, 'setImportance');
+    const strategy = await resolveLabelStrategy(server, host, 'copy');
+    await strategy.apply('INBOX', [1], IMPORTANT);
+    await strategy.apply('INBOX', [1], IMPORTANT); // safe replay
+    let row = (await server.fetchFlagsOnly([1]))[0];
+    expect(row.flags).toEqual(expect.arrayContaining(['promotions', '\\Flagged']));
+    expect(options.gmailLabels ? row.labels : row.flags).toContain('Important');
+    await strategy.remove('INBOX', [1], IMPORTANT);
+    await strategy.remove('INBOX', [1], IMPORTANT); // safe replay
+    row = (await server.fetchFlagsOnly([1]))[0];
+    expect(options.gmailLabels ? row.labels : row.flags).not.toContain('Important');
+    expect(row.flags).toEqual(expect.arrayContaining(['promotions', '\\Flagged']));
+    expect(native.mock.calls).toEqual([[[1], true, 1], [[1], true, 1], [[1], false, 1], [[1], false, 1]]);
+    expect(server.callCount('createMailbox')).toBe(0);
+    expect(server.callCount('copyMessages')).toBe(0);
+    expect(server.callCount('moveMessages')).toBe(0);
+    expect(server.messageCount('INBOX')).toBe(2);
+  });
+  it.each(providers)('never provisions, migrates, or renames Importance folders on $host', async ({ host, options }) => {
+    const server = await makeServer(options);
+    server.addFolder('Sarv Inbox');
+    server.addFolder('Sarv Inbox/Important');
+    const strategy = await resolveLabelStrategy(server, host, 'copy');
+    await strategy.ensure(IMPORTANT);
+    await strategy.migrate?.(IMPORTANT);
+    await strategy.rename(IMPORTANT, { slug: 'important', name: 'Priority' });
+    await strategy.rename(FINANCE, IMPORTANT);
+    expect(server.callCount('createMailbox')).toBe(0);
+    expect(server.callCount('deleteMailbox')).toBe(0);
+    expect(server.callCount('renameMailbox')).toBe(0);
+    expect(await server.listMailboxPaths()).toContain('Sarv Inbox/Important');
+  });
+  it.each(['missing writer', 'missing identity'])('fails visibly on %s before mutating mailbox content', async (missing) => {
+    const server = await makeServer({ gmailLabels: true });
+    if (missing === 'missing writer') (server as any).setImportance = undefined;
+    else vi.spyOn(server, 'getCurrentMailboxState').mockReturnValue(null as any);
+    const strategy = await resolveLabelStrategy(server, 'imap.gmail.com', 'copy');
+    await expect(strategy.apply('INBOX', [1], IMPORTANT)).rejects.toThrow('importance sync is unavailable');
+    await expect(strategy.remove('INBOX', [1], IMPORTANT)).rejects.toThrow('importance sync is unavailable');
+    expect(server.callCount('copyMessages')).toBe(0);
+    expect(server.callCount('createMailbox')).toBe(0);
+  });
+  it('propagates a refused native mutation and passes the selected mailbox identity', async () => {
+    const server = await makeServer({ keywords: true });
+    server.addFolder('Other', { uidValidity: 42 });
+    server.addMessages('Other', 1);
+    const native = vi.spyOn(server, 'setImportance').mockRejectedValue(new Error('Native STORE refused'));
+    const strategy = await resolveLabelStrategy(server, 'imap.sarv.com', 'copy');
+    await expect(strategy.apply('Other', [1], IMPORTANT)).rejects.toThrow('Native STORE refused');
+    expect(native).toHaveBeenCalledWith([1], true, 42);
+    expect(server.callCount('addFlags')).toBe(0);
+  });
+});
+
+describe('Gmail category matching is per message and replay-safe', () => {
+  it('applies only to unlabelled UIDs and removes each UID actual labels without deleting mail', async () => {
+    const server = await makeServer({ gmailLabels: true });
+    const fetch = vi.spyOn(server, 'fetchFlagsOnly').mockResolvedValue([
+      { uid: 1, flags: [], labels: ['Finance', '\\Inbox', 'Personal Project'] },
+      { uid: 2, flags: [] },
+    ]);
+    const copy = vi.spyOn(server, 'copyMessages');
+    const remove = vi.spyOn(server, 'removeGmailLabels');
+    const strategy = await resolveLabelStrategy(server, 'imap.gmail.com', 'copy');
+    await strategy.apply('INBOX', [1, 2], FINANCE);
+    await strategy.apply('INBOX', [1, 2], FINANCE);
+    expect(copy).toHaveBeenCalledExactlyOnceWith([2], 'Sarv Inbox/Finance');
+    await strategy.remove('INBOX', [1, 2], FINANCE);
+    expect(remove.mock.calls).toEqual([
+      [[1], ['Sarv Inbox/Finance', 'Finance']],
+      [[2], ['Sarv Inbox/Finance']],
+    ]);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(server.callCount('deleteMessages')).toBe(0);
+  });
+});
+
+it('never removes Gmail labels from unselected intermediate UIDs returned by a ranged FLAGS fetch', async () => {
+  const server = await makeServer({ gmailLabels: true });
+  server.addMessages('INBOX', 1);
+  vi.spyOn(server, 'fetchFlagsOnly').mockResolvedValue([
+    { uid: 1, flags: [], labels: ['Finance'] },
+    { uid: 2, flags: [], labels: ['Finance', 'Unselected'] },
+    { uid: 3, flags: [], labels: ['Finance'] },
+  ]);
+  const remove = vi.spyOn(server, 'removeGmailLabels');
+  const strategy = await resolveLabelStrategy(server, 'imap.gmail.com', 'copy');
+  await strategy.remove('INBOX', [1, 3], FINANCE);
+  expect(remove.mock.calls.map(([uids]) => uids)).toEqual([[1], [3]]);
+});
+
+it('refuses a missing selected Gmail UID before applying or removing any labels', async () => {
+  const server = await makeServer({ gmailLabels: true });
+  vi.spyOn(server, 'fetchFlagsOnly').mockResolvedValue([{ uid: 1, flags: [], labels: ['Finance'] }]);
+  const copy = vi.spyOn(server, 'copyMessages');
+  const remove = vi.spyOn(server, 'removeGmailLabels');
+  const strategy = await resolveLabelStrategy(server, 'imap.gmail.com', 'copy');
+  await expect(strategy.apply('INBOX', [1, 3], FINANCE)).rejects.toMatchObject({ code: 'MESSAGE_NOT_FOUND' });
+  await expect(strategy.remove('INBOX', [1, 3], FINANCE)).rejects.toMatchObject({ code: 'MESSAGE_NOT_FOUND' });
+  expect(server.callCount('createMailbox')).toBe(0);
+  expect(copy).not.toHaveBeenCalled();
+  expect(remove).not.toHaveBeenCalled();
 });

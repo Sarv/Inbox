@@ -1250,7 +1250,10 @@ export function setupPersistedTagListener(useEmailStore: { getState: () => any }
 
   window.electronAPI.emails.onTagsUpdated((update) => {
     if (!update?.emailId) return;
-    useEmailStore.getState().applyPersistedTags(update.emailId, update.tags);
+    const state = useEmailStore.getState();
+    const owner = state._accountIdFor?.(update.emailId);
+    if (update.accountId && owner && update.accountId !== owner) return;
+    state.applyPersistedTags(update.emailId, update.tags);
   });
 }
 

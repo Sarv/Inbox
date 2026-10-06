@@ -64,6 +64,63 @@ function makePipeline(over: Partial<UnifiedPipelineDeps> = {}, config: Record<st
 const aiResponse = (rows: unknown[]) => JSON.stringify(rows);
 
 describe('UnifiedPipeline — received-email → AI flow (integration)', () => {
+  // Regression: native Gmail discovery failure is a retry condition rather than permission to classify through AI.
+  it('defers classification while native Gmail categories are unknown', async () => {
+    const { pipeline, callAI, saved } = makePipeline();
+    const result = await pipeline.processEmail(mkEmail({ gmailCategoriesPending: true }));
+    expect(result?.classificationPending).toBe(true);
+    expect(callAI).not.toHaveBeenCalled();
+    expect(saved.categories).toEqual([]);
+    expect(saved.actions).toEqual([]);
+  });
+  // Regression: native Gmail categories/Sarv Important and user choices must not incur classification calls or autonomous actions.
+  it.each([
+    { serverCategories: ['promotions'] },
+    { serverCategories: ['important'] },
+    { serverCategories: ['important'], manualCategories: [] },
+  ])('keeps existing classification %j without an AI verdict', async (metadata) => {
+    const { pipeline, callAI, saved } = makePipeline({ getCategoryCorrelations: () => ({ promotions: { action: 'archive', rate: 0.99 } }) }, { autoTriage: true });
+    const result = await pipeline.processEmail(mkEmail(metadata));
+    expect(callAI).not.toHaveBeenCalled();
+    expect(saved.categories).toEqual([]);
+    expect(saved.actions).toEqual([]);
+    expect(saved.decisions).toEqual([]);
+    expect(result?.categories).toEqual(metadata.manualCategories ?? metadata.serverCategories);
+    expect(result?.classificationSource).toBe(metadata.manualCategories ? 'user' : 'provider');
+  });
+
+  // Regression: a mixed batch must classify only unclassified mail rather than skipping unrelated eligible rows.
+  it('classifies ordinary mail in mixed batches while preserving server/user categories', async () => {
+    const { pipeline, callAI, saved } = makePipeline();
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'plain', categories: ['invoice'], is_spam: false, confidence: 0.9 }]));
+    const result = await pipeline.processBatch([
+      mkEmail({ id: 'native', serverCategories: ['important'] }),
+      mkEmail({ id: 'plain', serverCategories: [], tags: '|INBOX|starred|' }),
+      mkEmail({ id: 'manual', manualCategories: [] }),
+    ]);
+    expect(callAI).toHaveBeenCalledTimes(1);
+    expect(callAI.mock.calls[0]?.[1]).toContain('ID: plain');
+    expect(callAI.mock.calls[0]?.[1]).not.toContain('ID: native');
+    expect(saved.categories.map((r) => r.emailId)).toEqual(['plain']);
+    expect(result.map((r) => [r.emailId, r.categories])).toEqual([['native', ['important']], ['plain', ['invoice']], ['manual', []]]);
+  });
+
+  // Regression: a provider label arriving while AI is in flight must win before save/action prediction.
+  it('rechecks authority after a provider request', async () => {
+    let classification: string[] | null = null;
+    const { pipeline, callAI, saved } = makePipeline({ getEmail: async () => mkEmail({ serverCategories: classification }) }, { draftReplies: true });
+    callAI.mockImplementation(async () => {
+      classification = ['promotions'];
+      return aiResponse([{ emailId: 'e1', categories: ['needs_response'], is_spam: false, confidence: 0.99 }]);
+    });
+    const result = await pipeline.processEmail(mkEmail());
+    expect(result?.categories).toEqual(['promotions']);
+    expect(result?.classificationSource).toBe('provider');
+    expect(saved.categories).toEqual([]);
+    expect(saved.actions).toEqual([]);
+    expect(saved.decisions).toEqual([]);
+  });
+
   it('categorizes, saves contact notes, and proposes a reply — all from one email', async () => {
     const { pipeline, callAI, saved } = makePipeline();
     callAI.mockResolvedValue(aiResponse([{

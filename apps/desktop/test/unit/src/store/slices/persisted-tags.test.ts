@@ -168,6 +168,23 @@ describe('setupPersistedTagListener', () => {
     expect(applyPersistedTags).toHaveBeenCalledWith('e1', '|INBOX|read|');
   });
 
+  // Regression: an account B sync response must not overwrite account A's visible copy of a message.
+  it('applies named-account updates only to the owning visible account', async () => {
+    let deliver: ((u: unknown) => void) | null = null;
+    const { setupPersistedTagListener } = await load({
+      onTagsUpdated: (cb: (u: unknown) => void) => { deliver = cb; return () => {}; },
+    });
+    const applyPersistedTags = vi.fn();
+    setupPersistedTagListener({ getState: () => ({ applyPersistedTags, _accountIdFor: () => 'acct-a' }) });
+    deliver!({ emailId: 'same-id', accountId: 'acct-b', tags: '|important|' });
+    expect(applyPersistedTags).not.toHaveBeenCalled();
+    deliver!({ emailId: 'same-id', accountId: 'acct-a', tags: '|forums|important|' });
+    expect(applyPersistedTags).toHaveBeenCalledWith('same-id', '|forums|important|');
+    // Older hosts omit the account field; preserve that established channel contract.
+    deliver!({ emailId: 'same-id', tags: '|forums|' });
+    expect(applyPersistedTags).toHaveBeenLastCalledWith('same-id', '|forums|');
+  });
+
   // An update with no id names no row. Passing it on would be a store write
   // that can only miss, and the guard is what lets the payload shape change
   // without this throwing in the renderer.
