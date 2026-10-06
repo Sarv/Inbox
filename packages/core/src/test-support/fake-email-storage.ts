@@ -39,7 +39,8 @@
 import type { FilterRule } from '../types/filters';
 import type { EmailRecord, FolderRecord, PaginationOptions } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
-import { addTag, parseTags, removeTag } from '../utils/tags';
+import { providerCategorySelection } from '../utils/category-authority';
+import { addTag, hasTag, parseTags, removeTag } from '../utils/tags';
 
 export interface FakeFolderSeed extends Partial<FolderRecord> {
   path?: string;
@@ -258,19 +259,38 @@ export class FakeEmailStorage {
     return this.allRows().filter((e) => wanted.has(e.messageId)) as EmailRecord[];
   }
 
-  /** Same provider projection ownership as SQLite: provider state converges once pending operations have cleared. */
-  setServerCategories(id: string, categories: string[]): void {
+  /** Same provider projection ownership as SQLite: pending-operation protection happens in ingestion. */
+  setServerCategories(id: string, categories: string[], gmailImportant?: boolean | null): void {
     const row = this.emails.get(id);
     if (!row) return;
     const prior = row.serverCategories ?? [];
-    row.serverCategories = [...new Set(categories)];
-    if (!prior.length && !categories.length && row.manualCategories == null) return;
+    const native = gmailImportant === undefined ? row.gmailImportant : gmailImportant;
+    const selected = providerCategorySelection([...new Set(categories)], native);
+    const ordinaryRefresh = !prior.length && !selected.length && row.manualCategories == null;
+    row.serverCategories = selected;
+    row.gmailImportant = native;
+    if (typeof gmailImportant === 'boolean' && typeof row.manualImportant === 'boolean') row.manualImportant = gmailImportant;
     let tags = row.tags || '||';
-    for (const slug of new Set([...prior, ...(row.manualCategories ?? [])])) tags = removeTag(tags, slug);
-    for (const slug of categories) tags = addTag(tags, slug);
+    if (!ordinaryRefresh) {
+      for (const slug of new Set([...prior, ...(row.manualCategories ?? [])])) tags = removeTag(tags, slug);
+      for (const slug of selected) tags = addTag(tags, slug);
+      if (row.manualCategories != null) row.manualCategories = [...selected];
+    }
+    if (typeof native === 'boolean') {
+      const important = typeof row.manualImportant === 'boolean' ? row.manualImportant
+        : native || selected.includes('important') || (ordinaryRefresh && row.importanceSource === 'ai' && hasTag(row.tags, 'important'));
+      tags = important ? addTag(tags, 'important') : removeTag(tags, 'important');
+      row.importanceSource = typeof row.manualImportant === 'boolean' ? 'user' : native ? 'provider' : important ? 'ai' : 'none';
+    } else if (!ordinaryRefresh) row.importanceSource = selected.includes('important') ? 'provider' : 'none';
     row.tags = tags;
-    if (row.manualCategories != null) row.manualCategories = [...categories];
-    row.importanceSource = categories.includes('important') ? 'provider' : 'none';
+  }
+
+  setEmailManualImportance(id: string, important: boolean): void {
+    const row = this.emails.get(id);
+    if (!row) return;
+    row.manualImportant = important;
+    row.tags = important ? addTag(row.tags, 'important') : removeTag(row.tags, 'important');
+    row.importanceSource = 'user';
   }
 
   async updateEmail(id: string, updates: Partial<EmailRecord>): Promise<void> {
@@ -377,11 +397,11 @@ export class FakeEmailStorage {
       .map((e) => ({ id: e.id, uid: e.uid as number }));
   }
 
-  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }>> {
+  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean; manualCategories?: string[] | null; gmailImportant?: boolean | null; manualImportant?: boolean | null }>> {
     this.note('getEmailTagsInFolder');
     return this.allRows()
       .filter((e) => e.folderId === folderId)
-      .map((e) => ({ id: e.id, uid: e.uid ?? null, tags: e.tags, serverCategories: e.serverCategories, gmailCategoriesPending: e.gmailCategoriesPending }));
+      .map((e) => ({ id: e.id, uid: e.uid ?? null, tags: e.tags, serverCategories: e.serverCategories, manualCategories: e.manualCategories, gmailCategoriesPending: e.gmailCategoriesPending, gmailImportant: e.gmailImportant, manualImportant: e.manualImportant }));
   }
 
   async getOldestUidInFolder(folderId: string): Promise<number | null> {

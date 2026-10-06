@@ -85,23 +85,23 @@ describe('provider-native importance mutation', () => {
 
 describe('Gmail category discovery and mutation identity', () => {
   // Category tabs can be absent from X-GM-LABELS; bounded UID SEARCH is the authority.
-  it('discovers native categories without labels using UIDs, including Primary alias', async () => {
+  it('discovers only Promotions without labels using UIDs', async () => {
     const { client, inner } = setup({ gmail: true });
     inner.fetchAll.mockResolvedValue([{ uid: 1413, flags: new Set(), labels: new Set() }]);
     inner.search.mockImplementation(async (query) => query.gmraw === 'category:promotions' ? [1413] : []);
     const rows = await client.fetchFlagsOnly([1413], undefined, 'INBOX');
     expect(rows).toEqual([{ uid: 1413, flags: [], labels: [], categories: ['promotions'], gmailCategoriesKnown: true }]);
-    expect(inner.search).toHaveBeenCalledTimes(5);
-    expect(inner.search).toHaveBeenCalledWith({ uid: '1413', gmraw: 'category:primary' }, { uid: true });
-    expect(inner.search).not.toHaveBeenCalledWith(expect.objectContaining({ gmraw: 'category:personal' }), expect.anything());
+    expect(inner.search).toHaveBeenCalledTimes(1);
+    expect(inner.search).toHaveBeenCalledWith({ uid: '1413', gmraw: 'category:promotions' }, { uid: true });
+    expect(inner.search.mock.calls.map(([query]) => query.gmraw)).toEqual(['category:promotions']);
   });
 
-  // Five queries per batch retain bounded command sizes on large mailboxes.
+  // One Promotions query per bounded batch avoids querying tabs that should go through AI.
   it('bounds category queries to 500 UIDs and avoids searches for ordinary IMAP', async () => {
     const { client, inner } = setup({ gmail: true });
     inner.fetchAll.mockResolvedValue(Array.from({ length: 501 }, (_, i) => ({ uid: i + 1, flags: new Set(), labels: new Set() })));
     expect(await client.fetchAllFlags('INBOX')).toHaveLength(501);
-    expect(inner.search).toHaveBeenCalledTimes(10);
+    expect(inner.search).toHaveBeenCalledTimes(2);
     for (const [query] of inner.search.mock.calls) expect(query.uid.split(',').length).toBeLessThanOrEqual(500);
     const plain = setup();
     await plain.client.fetchAllFlags('INBOX');
@@ -112,8 +112,7 @@ describe('Gmail category discovery and mutation identity', () => {
   it('publishes no partial categories after a failed or out-of-batch result', async () => {
     for (const foreign of [false, true]) {
       const { client, inner } = setup({ gmail: true });
-      inner.search.mockImplementation(async (query) => {
-        if (query.gmraw === 'category:promotions') return [1];
+      inner.search.mockImplementation(async () => {
         if (foreign) return [384];
         throw new Error('temporary failure');
       });
@@ -173,8 +172,8 @@ describe('Gmail category safety boundaries', () => {
   // Label repair runs the same native discovery as ordinary flag reconciliation.
   it('includes category metadata in label-only repair rows', async () => {
     const { client, inner } = setup({ gmail: true });
-    inner.search.mockImplementation(async (query) => query.gmraw === 'category:social' ? [1] : []);
-    expect((await client.fetchAllLabels('INBOX'))[0]).toMatchObject({ categories: ['social'], gmailCategoriesKnown: true });
+    inner.search.mockImplementation(async (query) => query.gmraw === 'category:promotions' ? [1] : []);
+    expect((await client.fetchAllLabels('INBOX'))[0]).toMatchObject({ categories: ['promotions'], gmailCategoriesKnown: true });
     expect(await setup().client.fetchAllLabels('INBOX')).toEqual([]);
   });
 
@@ -209,9 +208,9 @@ describe('native category failure paths and read discovery variants', () => {
       const { client, inner } = setup({ gmail });
       (client as unknown as { capabilities: string[] }).capabilities = [...(gmail ? ['X-GM-EXT-1'] : []), 'CONDSTORE'];
       inner.fetchAll.mockResolvedValue([{ uid: 1, flags: new Set(), labels: new Set() }]);
-      inner.search.mockImplementation(async (q) => q.gmraw === 'category:updates' ? [1] : []);
-      expect((await client.fetchFlagsChangedSince(1))[0]).toMatchObject(gmail ? { categories: ['updates'], gmailCategoriesKnown: true } : { flags: [] });
-      expect((await client.fetchMessagesByUID([1], { fetchBody: false }))[0]).toMatchObject(gmail ? { categories: ['updates'], gmailCategoriesKnown: true } : { flags: [] });
+      inner.search.mockImplementation(async (q) => q.gmraw === 'category:promotions' ? [1] : []);
+      expect((await client.fetchFlagsChangedSince(1))[0]).toMatchObject(gmail ? { categories: ['promotions'], gmailCategoriesKnown: true } : { flags: [] });
+      expect((await client.fetchMessagesByUID([1], { fetchBody: false }))[0]).toMatchObject(gmail ? { categories: ['promotions'], gmailCategoriesKnown: true } : { flags: [] });
       const calls = inner.search.mock.calls.length;
       await client.fetchMessagesByUID([1], { discoverCategories: false });
       expect(inner.search).toHaveBeenCalledTimes(calls);
@@ -283,4 +282,19 @@ describe('native category failure paths and read discovery variants', () => {
     await client.setImportance([1], true, 7);
     expect(inner.messageFlagsAdd).toHaveBeenCalledWith([1], ['Important'], { uid: true });
   });
+});
+
+
+// Ignoring native tab classifications must not restrict explicit manual Gmail API capabilities.
+it('retains native Social/Updates/Forums/Primary manual API writes while reading Promotions only', async () => {
+  const { client, inner } = setup({ gmail: true });
+  (client as unknown as { gmailResolveBearer: () => Promise<string> }).gmailResolveBearer = async () => 'test-token';
+  inner.fetchAll.mockResolvedValue([{ uid: 1, flags: new Set(), labels: new Set(), emailId: '123' }] as any);
+  const request = vi.fn(async () => new Response(null, { status: 200 })); vi.stubGlobal('fetch', request);
+  try {
+    await client.modifyGmailCategories([1], ['social', 'updates', 'forums', 'personal'], [], 7);
+    expect(request).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ addLabelIds: ['CATEGORY_SOCIAL', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS', 'CATEGORY_PERSONAL'], removeLabelIds: [] }) }));
+    await client.fetchAllFlags('INBOX');
+    expect(inner.search.mock.calls.map(([query]) => query.gmraw)).toEqual(['category:promotions']);
+  } finally { vi.unstubAllGlobals(); }
 });

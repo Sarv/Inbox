@@ -102,3 +102,4 @@ export * from './favicon';
 export * from './asar-path';
 export * from './ai-provider-auth';
 export * from './server-classification';
+export * from './spam-protection';

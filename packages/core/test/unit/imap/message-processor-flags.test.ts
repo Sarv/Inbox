@@ -1715,3 +1715,39 @@ describe('provider discovery retry failures', () => {
     expect(row.serverCategories).toEqual([]); expect(row.gmailCategoriesPending).not.toBe(false);
   });
 });
+
+describe('Gmail native Importance projection', () => {
+  it('reconciles Gmail Important without creating category authority', async () => {
+    const ctx = setup({ gmail: true });
+    const uid = seedSynced(ctx, [], []);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0];
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue([{ uid, flags: [], labels: ['\\Important'], categories: [], gmailCategoriesKnown: true }] as any);
+    const setter = vi.spyOn(ctx.db, 'setServerCategories');
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(setter).toHaveBeenCalledWith(row.id, [], true);
+    expect(row.serverCategories).toEqual([]);
+    expect(row.gmailImportant).toBe(true);
+    expect(tagsAt(ctx, uid)).toContain('important');
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(tagsAt(ctx, uid)).toContain('important');
+    expect(row.gmailImportant).toBe(true);
+    row.manualImportant = false;
+    row.tags = '|INBOX|';
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(tagsAt(ctx, uid)).not.toContain('important');
+    expect(row.manualImportant).toBe(false);
+  });
+
+  it('drops obsolete Gmail tab authority on unknown Promotions while preserving Promotions and custom labels', async () => {
+    const ctx = setup({ gmail: true });
+    const uid = seedSynced(ctx, [], ['social', 'updates', 'personal', 'forums', 'promotions', 'finance']);
+    const row = ctx.db.rowsPrimaryIn(INBOX)[0];
+    row.serverCategories = ['social', 'updates', 'personal', 'forums', 'promotions', 'finance'];
+    await ctx.server.selectFolder(INBOX);
+    vi.spyOn(ctx.server, 'fetchAllFlags').mockResolvedValue([{ uid, flags: [], labels: [], categories: [], gmailCategoriesKnown: false }] as any);
+    await ctx.mp.syncFlags(ctx.server, ctx.folder(), ctx.storage);
+    expect(row.serverCategories).toEqual(['promotions', 'finance']);
+    expect(row.gmailCategoriesPending).toBe(true);
+  });
+});

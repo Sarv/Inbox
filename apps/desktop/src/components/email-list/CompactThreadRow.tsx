@@ -1,7 +1,7 @@
 import type { EmailRecord } from '@sarvinbox/core';
 import { format } from 'date-fns';
 import { Star, ChevronRight, Square, CheckSquare, Archive, Trash2, Mail, Clock, CheckCircle } from 'lucide-react';
-import { memo } from 'react';
+import { memo, useState } from 'react';
 
 import { formatCountdown } from '../../utils/format-time';
 import { threadTagsString } from '../../utils/thread-utils';
@@ -32,6 +32,8 @@ function formatCompactDate(d: Date) {
 }
 
 export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions, uiState, hoverActions, isHovered, showSnoozeDropdown, snippetLines, accountColor, accountLabel }: ThreadRowProps) {
+  const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
+  const showActions = isHovered || categoryMenuOpen;
   const { latestEmail, oldestEmail, hasUnread, messageCount, hasDraft, isImportant, isStarred } = thread;
   const isSelected = thread.emails.some((e: EmailRecord) => e.id === uiState.selectedEmailId);
   const isHighlighted = !isSelected && thread.emails.some((e: EmailRecord) => e.id === uiState.highlightedEmailId);
@@ -142,12 +144,9 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
             unmounted on hover, so the batched category IPC/effect doesn't
             re-fire every time the row is hovered. `contents` keeps the exact
             same flex layout when visible; `hidden` frees its space on hover. */}
-        <span className={isHovered ? 'hidden' : 'contents'}>
+        <span className={showActions ? 'hidden' : 'contents'}>
           <CategoryBadges emailId={thread.badgeEmailId} />
         </span>
-
-          <CategoryMenu emailId={thread.badgeEmailId} accountId={latestEmail.accountId ?? undefined}
-            buttonClassName="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground" />
 
         {/* Snoozed countdown badge */}
         {isSnoozed && (
@@ -173,13 +172,16 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
         )}
 
         {/* Date - hide on hover */}
-        <span className={`text-xs text-muted-foreground text-right transition-opacity ${isHovered ? 'opacity-0' : 'opacity-100'}`}>
+        <span className={`text-xs text-muted-foreground text-right transition-opacity ${showActions ? 'opacity-0' : 'opacity-100'}`}>
           {formatCompactDate(date)}
         </span>
 
         {/* Hover Actions - overlay on top */}
-        {isHovered && (
-          <div className="absolute right-0 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 bg-accent/90 rounded px-1">
+        <div aria-hidden={!showActions}
+          className={`absolute right-0 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 bg-accent/90 rounded px-1 ${showActions ? 'visible opacity-100' : 'invisible opacity-0 pointer-events-none'}`}>
+            <CategoryMenu emailId={thread.badgeEmailId} accountId={latestEmail.accountId ?? undefined}
+              onOpenChange={setCategoryMenuOpen}
+              buttonClassName="p-1.5 hover:bg-background/50 rounded text-muted-foreground hover:text-foreground" />
             <button
               onClick={(e) => { e.stopPropagation(); actions.onArchive(latestEmail.id, e); }}
               className="p-1.5 hover:bg-background/50 rounded"
@@ -222,8 +224,7 @@ export const CompactThreadRow = memo(function CompactThreadRow({ thread, actions
                 />
               )}
             </div>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );

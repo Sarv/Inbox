@@ -39,10 +39,10 @@ describe('server classification before AI', () => {
       .toEqual({ important: true, categories: ['promotions'], hasClassification: true });
   });
 
-  // Gmail's native categories are meaningful even before optional AI definitions exist.
-  it('recovers actual native bare and backslash categories without definitions', () => {
+  // Promotions stays meaningful without definitions; other native tabs must go through AI.
+  it('recovers only Promotions from native bare and backslash categories without definitions', () => {
     expect(mapServerClassification({ labels: ['\\Promotions', 'Updates', 'Forums', 'Personal', '\\Social'] }))
-      .toEqual({ important: false, categories: ['promotions', 'updates', 'forums', 'personal', 'social'], hasClassification: true });
+      .toEqual({ important: false, categories: ['promotions'], hasClassification: true });
   });
 
   // Quoted label normalization must agree with the existing Gmail label mapper.
@@ -54,6 +54,25 @@ describe('server classification before AI', () => {
 
 // Read-only native category metadata cannot turn the reserved Important slug into a category flag.
 it('preserves native category authority independently from importance and keyword aliases', () => {
-  expect(mapServerClassification({ categories: ['updates', 'important'], flags: ['$promotions', 'Important'], folderPath: 'Unknown', knownCategories })).toEqual({ important: true, categories: ['updates', 'promotions'], hasClassification: true });
+  expect(mapServerClassification({ categories: ['updates', 'important'], flags: ['$promotions', 'Important'], folderPath: 'Unknown', knownCategories })).toEqual({ important: true, categories: ['promotions'], hasClassification: true });
   expect(mapServerClassification({ categories: ['important'], flags: null, labels: null }).hasClassification).toBe(false);
+});
+
+
+describe('Gmail provider categories versus Sarv categories', () => {
+  // Ignored native tabs cannot retain authority through flags, folder names, mirrors or older discovery metadata.
+  it('allows only Gmail Promotions among native category names while preserving Important markers', () => {
+    const knownCategories = ['promotions', 'social', 'updates', 'forums', 'personal', 'primary'].map((slug) => ({ slug, name: slug }));
+    for (const slug of ['social', 'updates', 'forums', 'personal', 'primary']) {
+      expect(mapServerClassification({ providerHost: 'imap.gmail.com', folderPath: slug, flags: [slug], labels: [slug, `Sarv Inbox/${slug}`], categories: [slug], knownCategories })).toEqual({ important: false, categories: [], hasClassification: false });
+    }
+    expect(mapServerClassification({ labels: ['Important', '\\Spam'], categories: ['promotions', 'social'] })).toEqual({ important: true, categories: ['promotions'], hasClassification: true });
+  });
+
+  // Sarv's category flags/folders keep their existing classification semantics; the restriction is Gmail-specific.
+  it('retains Sarv Social/Updates and ordinary custom category authority', () => {
+    const knownCategories = ['social', 'updates', 'finance'].map((slug) => ({ slug, name: slug }));
+    expect(mapServerClassification({ providerHost: 'imap.sarv.com', folderPath: 'social', flags: ['updates', 'finance'], knownCategories })).toEqual({ important: false, categories: ['updates', 'finance', 'social'], hasClassification: true });
+    expect(mapServerClassification({ providerHost: 'imap.gmail.com', labels: ['Sarv Inbox/Finance'], knownCategories }).categories).toEqual(['finance']);
+  });
 });

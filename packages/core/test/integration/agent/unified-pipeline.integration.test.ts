@@ -288,13 +288,158 @@ describe('UnifiedPipeline — received-email → AI flow (integration)', () => {
   it('does not double-process an email already in flight (dedup)', async () => {
     const { pipeline, callAI } = makePipeline();
     let release!: () => void;
-    callAI.mockImplementation(() => new Promise<string>((r) => { release = () => r(aiResponse([])); }));
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    callAI.mockImplementation(() => new Promise<string>((r) => {
+      release = () => r(aiResponse([]));
+      markStarted();
+    }));
 
-    const first = pipeline.processEmail(mkEmail());      // starts, awaits callAI
+    const first = pipeline.processEmail(mkEmail());
+    // Folder/category authority checks may await storage before entering the model.
+    // Dedup must hold once processing is in flight, without relying on microtask order.
+    await started;
     const second = await pipeline.processEmail(mkEmail()); // same id, still in flight
     expect(second).toBeNull();                            // deduped
     release();
     await first;
     expect(callAI).toHaveBeenCalledTimes(1);              // only the first ran the AI
+  });
+});
+
+
+describe('known provider/filter Spam bypasses core intelligence', () => {
+  // Real storage adds the current verdict's local spam tag before prediction.
+  // That self-write must allow only its original Spam move, not lose auto-triage.
+  it.each([false, true])('files its own successfully saved Spam verdict, batch=%s', async (batch) => {
+    let row = mkEmail();
+    const { pipeline, callAI, saved } = makePipeline({
+      getEmail: async () => row,
+      saveEmailCategoriesBatch: (rows) => { row = mkEmail({ tags: '|INBOX|spam|' }); return rows.length; },
+    }, { autoTriage: true });
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'e1', categories: [], is_spam: true, confidence: 0.99 }]));
+    const result = batch ? (await pipeline.processBatch([mkEmail()]))[0] : await pipeline.processEmail(mkEmail());
+    expect(result).toMatchObject({ isSpam: true, predictedAction: 'spam', executed: true });
+    expect(result?.classificationSource).toBeUndefined();
+    expect(saved.actions).toEqual([{ id: 'e1', action: 'spam', value: undefined }]);
+  });
+
+  // Even a current saved model verdict cannot bypass a new provider membership
+  // or explicit Spam choice. Linked localized Junk is included in that authority.
+  it.each(['provider', 'linked', 'user'] as const)('protects %s Spam arriving after the current verdict save', async (source) => {
+    let row = mkEmail();
+    const { pipeline, callAI, saved } = makePipeline({
+      getEmail: async () => row,
+      getFolders: () => [{ path: 'Abfall', specialUse: '\\Junk' }],
+      saveEmailCategoriesBatch: (rows) => {
+        row = mkEmail({ tags: source === 'provider' ? '|INBOX|spam|\\Junk|' : source === 'linked' ? '|INBOX|spam|Abfall|' : '|INBOX|spam|', spamUserVerdict: source === 'user' ? 'spam' : null });
+        return rows.length;
+      },
+    }, { autoTriage: true });
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'e1', categories: [], is_spam: true, confidence: 0.99 }]));
+    expect(await pipeline.processEmail(mkEmail())).toMatchObject({ isSpam: true, predictedAction: null, executed: false, classificationSource: source === 'user' ? 'user' : 'provider' });
+    expect(saved.actions).toEqual([]); expect(saved.decisions).toEqual([]);
+  });
+
+  // A ham edit after the model request still overrides its own Spam prediction.
+  it('honors the latest explicit ham before filing a current model Spam verdict', async () => {
+    let row = mkEmail();
+    const { pipeline, callAI, saved } = makePipeline({
+      getEmail: async () => row,
+      saveEmailCategoriesBatch: (rows) => { row = mkEmail({ tags: '|INBOX|spam|', spamUserVerdict: 'ham' }); return rows.length; },
+    }, { autoTriage: true });
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'e1', categories: [], is_spam: true, confidence: 0.99 }]));
+    expect(await pipeline.processEmail(mkEmail())).toMatchObject({ isSpam: true, executed: false });
+    expect(saved.actions).toEqual([]);
+  });
+
+  // An external local Spam update that already blocked saving is not a self-write.
+  it('keeps externally assigned local Spam protected when a late model also predicts Spam', async () => {
+    let row = mkEmail();
+    const { pipeline, callAI, saved } = makePipeline({ getEmail: async () => row }, { autoTriage: true });
+    callAI.mockImplementation(async () => { row = mkEmail({ tags: '|INBOX|spam|' }); return aiResponse([{ emailId: 'e1', categories: [], is_spam: true, confidence: 0.99 }]); });
+    expect(await pipeline.processEmail(mkEmail())).toMatchObject({ isSpam: true, classificationSource: 'provider', predictedAction: null });
+    expect(saved.categories).toEqual([]); expect(saved.actions).toEqual([]);
+  });
+
+  // A rejected/partial save cannot prove ownership of any visible local Spam tag.
+  it.each([0, 1])('does not bypass local Spam after an unconfirmed batch save count %s', async (count) => {
+    let tags = '|INBOX|';
+    const { pipeline, callAI, saved } = makePipeline({
+      getEmail: async (id) => mkEmail({ id, tags }),
+      saveEmailCategoriesBatch: () => { tags = '|INBOX|spam|'; return count; },
+    }, { autoTriage: true });
+    callAI.mockResolvedValue(aiResponse(['e1', 'e2'].map((emailId) => ({ emailId, categories: [], is_spam: true, confidence: 0.99 }))));
+    const result = await pipeline.processBatch([mkEmail(), mkEmail({ id: 'e2' })]);
+    expect(result).toHaveLength(2);
+    expect(result.every((r) => r.isSpam && r.classificationSource === 'provider' && !r.executed)).toBe(true);
+    expect(saved.actions).toEqual([]);
+  });
+
+  // Existing Spam must remain Spam without model calls, contact notes, categories or autonomous actions.
+  it.each(['|spam|', '|Spam|', '|\\Junk|', '|[Gmail]/Spam|'])('bypasses single-email AI for %s', async (tags) => {
+    const { pipeline, callAI, saved } = makePipeline({}, { autoTriage: true });
+    const email = mkEmail({ tags });
+    expect(await pipeline.processEmail(email)).toMatchObject({ categories: ['spam'], isSpam: true, executed: false, proposed: false, predictedAction: null });
+    expect(await pipeline.processEmail(email)).toMatchObject({ isSpam: true });
+    expect(callAI).not.toHaveBeenCalled(); expect(saved.categories).toEqual([]); expect(saved.notes).toEqual([]); expect(saved.actions).toEqual([]);
+  });
+
+  // Provider Spam takes precedence over Promotions, manual category clears and stale ham until moved out.
+  it('recognizes localized/linked Junk folder metadata while keeping explicit ham eligible after unspam', async () => {
+    const row = mkEmail({ tags: '|All Mail|Abfall|', spamUserVerdict: 'ham', manualCategories: [] });
+    const protectedMail = makePipeline({ getFolder: async () => ({ type: 'archive' }), getFolders: () => [{ path: 'Abfall', specialUse: '\\Junk' }] });
+    expect(await protectedMail.pipeline.processEmail(row)).toMatchObject({ isSpam: true, categories: ['spam'], classificationSource: 'provider' });
+    expect(protectedMail.callAI).not.toHaveBeenCalled();
+    const ham = makePipeline(); ham.callAI.mockResolvedValue(aiResponse([{ emailId: 'e1', categories: ['invoice'], confidence: 0.9 }]));
+    expect(await ham.pipeline.processEmail(mkEmail({ tags: '|INBOX|spam|', spamUserVerdict: 'ham' }))).toMatchObject({ categories: ['invoice'], isSpam: false });
+    expect(ham.callAI).toHaveBeenCalledOnce();
+  });
+
+  // A mixed batch must categorize ordinary mail while retaining Spam and Promotions with no model assignment.
+  it('excludes Spam from batch prompts and categorizes the remaining eligible mail', async () => {
+    const { pipeline, callAI, saved } = makePipeline();
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'ordinary', categories: ['invoice'], confidence: 0.9 }]));
+    const result = await pipeline.processBatch([
+      mkEmail({ id: 'spam', tags: '|Spam|' }), mkEmail({ id: 'promo', serverCategories: ['promotions'] }), mkEmail({ id: 'ordinary' }),
+    ]);
+    expect(callAI.mock.calls[0][1]).toContain('ID: ordinary'); expect(callAI.mock.calls[0][1]).not.toContain('ID: spam'); expect(callAI.mock.calls[0][1]).not.toContain('ID: promo');
+    expect(saved.categories.map((row) => row.emailId)).toEqual(['ordinary']);
+    expect(result.map((row) => [row.emailId, row.isSpam])).toEqual([['spam', true], ['promo', false], ['ordinary', false]]);
+  });
+
+  // Spam arriving during the model call must discard its late category/action/contact-note output.
+  it('drops a single-email late result when the message becomes Spam in flight', async () => {
+    let row = mkEmail();
+    const { pipeline, callAI, saved } = makePipeline({ getEmail: async () => row }, { autoTriage: true });
+    callAI.mockImplementation(async () => {
+      row = mkEmail({ tags: '|Spam|' });
+      return aiResponse([{ emailId: 'e1', categories: ['needs_response'], confidence: 0.99, notes: [{ note: 'Do not save a scammer note', category: 'professional' }] }]);
+    });
+    expect(await pipeline.processEmail(mkEmail())).toMatchObject({ categories: ['spam'], isSpam: true, proposed: false, predictedAction: null });
+    expect(saved.categories).toEqual([]); expect(saved.notes).toEqual([]); expect(saved.decisions).toEqual([]); expect(saved.actions).toEqual([]);
+  });
+
+  // A late Spam change affects only its own batch row, leaving unrelated normal processing intact.
+  it('drops only the newly Spam row from batch saves and actions', async () => {
+    let spam = false;
+    const { pipeline, callAI, saved } = makePipeline({ getEmail: async (id) => mkEmail({ id, tags: id === 'late-spam' && spam ? '|\\Junk|' : '|INBOX|' }) });
+    callAI.mockImplementation(async () => {
+      spam = true;
+      return aiResponse([{ emailId: 'late-spam', categories: ['needs_response'], confidence: 0.99 }, { emailId: 'normal', categories: ['invoice'], confidence: 0.9 }]);
+    });
+    const result = await pipeline.processBatch([mkEmail({ id: 'late-spam' }), mkEmail({ id: 'normal' })]);
+    expect(saved.categories.map((row) => row.emailId)).toEqual(['normal']); expect(saved.decisions).toEqual([]);
+    expect(result.find((row) => row.emailId === 'late-spam')).toMatchObject({ isSpam: true, categories: ['spam'], predictedAction: null });
+  });
+
+  // A final action checkpoint prevents acting on mail moved to provider Spam after categories were saved.
+  it.each([false, true])('rechecks Spam immediately before action execution, batch=%s', async (batch) => {
+    let reads = 0;
+    const { pipeline, callAI, saved } = makePipeline({ getEmail: async () => mkEmail({ tags: ++reads >= 3 ? '|Spam|' : '|INBOX|' }) });
+    callAI.mockResolvedValue(aiResponse([{ emailId: 'e1', categories: ['needs_response'], confidence: 0.99 }]));
+    const result = batch ? (await pipeline.processBatch([mkEmail()]))[0] : await pipeline.processEmail(mkEmail());
+    expect(result).toMatchObject({ categories: ['spam'], isSpam: true, predictedAction: null, proposed: false });
+    expect(saved.decisions).toEqual([]); expect(saved.actions).toEqual([]);
   });
 });

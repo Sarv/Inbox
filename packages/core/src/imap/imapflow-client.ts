@@ -46,6 +46,7 @@ import {
   hasBulkHeaderSignal,
   headerValueFromText,
 } from '../utils/bulk-mail';
+import { GMAIL_CLASSIFICATION_CATEGORY_SLUGS } from '../utils/gmail-labels';
 import { logger } from '../utils/logger';
 import { messageIdKey } from '../utils/message-id';
 import { createMutex, type Mutex } from '../utils/mutex';
@@ -996,7 +997,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     return mapped;
   }
 
-  /** Five bounded Gmail category queries per UID batch, never one query per message. */
+  /** One bounded Promotions query per UID batch; other native Gmail tabs are categorized by AI. */
   private async attachGmailCategories<T extends { uid: number }>(rows: T[], folderPath: string, uidValidity?: number): Promise<Array<T & { categories?: string[]; gmailCategoriesKnown?: boolean }>> {
     if (!this.supportsGmailLabels() || rows.length === 0) return rows;
     const result = rows.map((row) => ({ ...row, gmailCategoriesKnown: false } as T & { categories?: string[]; gmailCategoriesKnown?: boolean }));
@@ -1009,10 +1010,10 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
         if (requested.size === 0) continue;
         const categoriesByUid = new Map([...requested].map((uid) => [uid, [] as string[]]));
         try {
-          for (const category of GMAIL_NATIVE_CATEGORY_SLUGS) {
+          for (const category of GMAIL_CLASSIFICATION_CATEGORY_SLUGS) {
             // ImapFlow's typed gmraw compiles to X-GM-RAW; UID criterion and
             // uid:true both matter (SEARCH sequence numbers are not message UIDs).
-            const matches = await this.op('UID SEARCH Gmail category', this.client!.search({ uid: [...requested].join(','), gmraw: `category:${category === 'personal' ? 'primary' : category}` }, { uid: true }));
+            const matches = await this.op('UID SEARCH Gmail category', this.client!.search({ uid: [...requested].join(','), gmraw: `category:${category}` }, { uid: true }));
             if (!Array.isArray(matches)) throw new IMAPError('Gmail category query did not return a UID set', 'GMAIL_CATEGORY_DISCOVERY_FAILED');
             this.ensureCurrentFolder(folderPath);
             if (this.getCurrentMailboxState()?.uidValidity !== uidValidity) throw new IMAPError('Mailbox identity changed during Gmail category discovery', 'UIDVALIDITY_MISMATCH');
@@ -1022,7 +1023,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
             }
           }
           // Publish only complete discovery: a partial/failing query is unknown,
-          // never evidence that the remaining messages lack native categories.
+          // never evidence that the remaining messages lack Promotions.
           for (const row of batch) {
             row.categories = categoriesByUid.get(row.uid) ?? [];
             row.gmailCategoriesKnown = true;

@@ -12,6 +12,8 @@ vi.mock('../../../../electron/shared', () => ({
   getMainWindow: () => null,
   requireStorage: () => ({
     getEmail: async (id: string) => h.emails.get(id),
+    getFolders: async () => [{ path: '[Gmail]/Correo no deseado', specialUse: '\\Junk' }],
+    getFolder: async (id: string) => id === 'junk' ? { path: '[Gmail]/Correo no deseado', specialUse: '\\Junk' } : { path: 'INBOX' },
     getEnabledCategoryDefinitions: () => [{ slug: 'important', name: 'Important', prompt: 'urgent' }, { slug: 'promotions', name: 'Promotions', prompt: 'marketing' }],
     getSenderContextBatch: () => ({}), getSenderRepetitionStats: () => ({ sameSubject: {}, totalEmails: 0 }), getThreadDepths: () => ({}),
     saveEmailCategoriesBatch: h.save,
@@ -28,6 +30,31 @@ beforeEach(() => {
 });
 
 describe('standalone categorization authority', () => {
+  // Regression: provider/local Spam is excluded even through the direct realtime entrypoint.
+  it.each([{ tags: '|spam|' }, { folderId: 'junk', tags: '||' }, { tags: '|INBOX|[Gmail]/Correo no deseado|spam|', spamUserVerdict: 'ham' as const }])('does not categorize protected Spam %j', async (overrides) => {
+    h.emails.set('plain', emailRecord({ id: 'plain', ...overrides }) as unknown as Record<string, unknown>);
+    await new AICategorizationService().start(config, 'realtime', { emailIds: ['plain'] });
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  // Regression: the native Important marker does not suppress AI for Gmail's remaining mail.
+  it('categorizes Gmail Important independently', async () => {
+    h.emails.set('plain', emailRecord({ id: 'plain', gmailImportant: true, tags: '|INBOX|important|' }) as unknown as Record<string, unknown>);
+    await new AICategorizationService().start(config, 'realtime', { emailIds: ['plain'] });
+    expect(h.fetch).toHaveBeenCalledOnce();
+    expect(h.save).toHaveBeenCalledOnce();
+  });
+
+  // Regression: an in-flight verdict cannot relabel a message moved to Junk while waiting for AI.
+  it('drops a late AI result after a provider Spam move', async () => {
+    h.emails.set('plain', emailRecord({ id: 'plain', tags: '|INBOX|' }) as unknown as Record<string, unknown>);
+    h.fetch.mockImplementationOnce(async () => { h.emails.get('plain')!.folderId = 'junk'; return response(); });
+    await new AICategorizationService().start(config, 'realtime', { emailIds: ['plain'] });
+    expect(h.fetch).toHaveBeenCalledOnce();
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
   // Regression: the legacy realtime entrypoint must follow the same provider/user gate as the background pipeline.
   it('does not send existing provider or user classifications to AI', async () => {
     h.emails.set('gmail', emailRecord({ id: 'gmail', serverCategories: ['promotions'], tags: '|INBOX|promotions|' }) as unknown as Record<string, unknown>);

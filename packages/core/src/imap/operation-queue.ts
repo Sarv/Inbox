@@ -2,10 +2,11 @@
 
 import { IMAPError, type IIMAPClient, type IMAPFolder } from '../types/imap';
 import type { IEmailStorage } from '../types/storage';
-import { categorySlugFromLabel, type KnownCategory } from '../utils/gmail-labels';
+import { existingCategoryClassification } from '../utils/category-authority';
+import { categorySlugFromLabel, GMAIL_CLASSIFICATION_CATEGORY_SLUGS, type KnownCategory } from '../utils/gmail-labels';
 import { logger } from '../utils/logger';
+import { isSpamProtectedEmail } from '../utils/spam-protection';
 
-import { GMAIL_NATIVE_CATEGORY_SLUGS } from './gmail-category-api';
 import { isConnectionError, isRateLimited, isQuotaError, extractOpFailureDetail } from './imap-errors';
 import { isSarvLabelPath, resolveLabelStrategy, SARV_LABEL_PARENT, type FolderLabelMode } from './label-strategy';
 import { withFolderSelected } from './with-folder';
@@ -978,7 +979,7 @@ export class OperationQueue {
             return;
           }
           const native = this.client!.supportsGmailLabels?.()
-            ? (data.categories ?? []).filter((category: { slug: string }) => (GMAIL_NATIVE_CATEGORY_SLUGS as readonly string[]).includes(category.slug)) : [];
+            ? (data.categories ?? []).filter((category: { slug: string }) => (GMAIL_CLASSIFICATION_CATEGORY_SLUGS as readonly string[]).includes(category.slug)) : [];
           if (native.length > 0) {
             if (!this.client!.modifyGmailCategories) throw new IMAPError('Connect Gmail with OAuth to change native categories', 'GMAIL_CATEGORY_OAUTH_REQUIRED');
             const slugs = native.map((category: { slug: string }) => category.slug);
@@ -1050,14 +1051,17 @@ export class OperationQueue {
       .sort((a, b) => a.id - b.id);
     const definitions = await (this.storage as unknown as { getCategoryDefinitions?: () => KnownCategory[] | Promise<KnownCategory[]> }).getCategoryDefinitions?.();
     const groups = new Map<string, { uids: number[]; data: any }>();
+    const folders = await this.storage!.getFolders?.();
     for (const uid of uids) {
       const email = await this.storage!.getEmailByFolderAndUid(folder.id, uid);
       // Unknown native discovery cannot authorize an older AI classification.
-      if (email?.gmailCategoriesPending) continue;
-      const selection = email?.manualCategories != null ? email.manualCategories
-        : email?.serverCategories?.length ? email.serverCategories : null;
+      if (email?.gmailCategoriesPending || (email && isSpamProtectedEmail(email, folder, folders))) continue;
+      const selection = email ? existingCategoryClassification(email)?.categories ?? null : null;
       let desired = selection === null ? null : new Set(selection.filter((slug) => slug !== 'important'));
-      let important: boolean | null = selection === null ? null : selection.includes('important');
+      // Gmail's native/manual marker is independent of category authority.
+      // A native false is still eligible for AI; an explicit manual false is not.
+      let important: boolean | null = email?.manualImportant ?? (email?.gmailImportant === true ? true
+        : email?.gmailImportant != null ? null : selection === null ? null : selection.includes('important'));
       // Persisted manual intent protects the interval before its local projection
       // commits, including restart replay and explicitly retried failed actions.
       for (const op of manualOps) {
@@ -1084,7 +1088,7 @@ export class OperationQueue {
           const slug = categorySlugFromLabel(label, SARV_LABEL_PARENT, definitions)
             ?? categorySlugFromLabel(label, SARV_LABEL_PARENT);
           // Old app Important mirrors are unrelated to the native Important flag.
-          return !slug || slug === 'important' || (GMAIL_NATIVE_CATEGORY_SLUGS as readonly string[]).includes(slug) || allowed(slug);
+          return !slug || slug === 'important' || (GMAIL_CLASSIFICATION_CATEGORY_SLUGS as readonly string[]).includes(slug) || allowed(slug);
         }),
       } : { ...data, categories: (data.categories ?? []).filter((category: { slug: string }) => allowed(category.slug)) };
       const payload = JSON.stringify(next);

@@ -305,6 +305,85 @@ describe('AI Assist off: new mail is not sent to the AI provider', () => {
 });
 
 describe('provider and manual classification avoids redundant AI', () => {
+  // Regression: realtime events must honor provider Spam even when the polling SQL already excludes it.
+  it('keeps provider Spam out of event categorization and still checks the next ordinary email', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    const storage = h.accounts[0].storage;
+    const spam = mail('provider-spam', 'Provider junk subject');
+    spam.tags = '|INBOX|spam|';
+    await storage.insertEmail(spam);
+    s.core.getEventBus().emit(s.core.createEvent.emailSynced(spam, 'INBOX', true));
+    s.core.getEventBus().emit(s.core.createEvent.emailBodyReady(spam.id));
+    await deliver(s, 'acct-a', 'ordinary-after-spam', 'event');
+    await until(() => wasSent('Subject of ordinary-after-spam'), 'ordinary email to be categorized');
+    expect(wasSent(spam.subject || '')).toBe(false);
+    expect((await storage.getEmail(spam.id)).tags).toContain('|spam|');
+    expect(row('acct-a', spam.id).ai_categories).toBeNull();
+  });
+
+  // Regression: the current model's own Spam verdict must finalize, without relabeling or notifying Junk.
+  it('finalizes ordinary mail newly classified as Spam by the current AI call', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    const storage = h.accounts[0].storage;
+    const done = vi.spyOn(storage.getRepositories().agent, 'markAgentDone');
+    const originalProvider = h.provider;
+    const provider = vi.spyOn(h, 'provider').mockImplementationOnce(async (url, init) => {
+      const response = await originalProvider(url, init);
+      const payload = await response.json();
+      const verdict = JSON.parse(payload.choices[0].message.content);
+      for (const result of verdict) result.is_spam = true;
+      payload.choices[0].message.content = JSON.stringify(verdict);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    try {
+      await deliver(s, 'acct-a', 'new-ai-spam', 'event');
+      await until(() => done.mock.calls.some(([id]) => id === 'new-ai-spam'), 'the current Spam verdict to finalize');
+      expect(wasSent('Subject of new-ai-spam')).toBe(true);
+      expect((await storage.getEmail('new-ai-spam')).tags).toContain('|spam|');
+    } finally { provider.mockRestore(); done.mockRestore(); }
+  });
+
+  // Regression: a message moved to Spam or deleted during AI must not receive the stale verdict's finalization.
+  it.each(['spam', 'missing'])('drops a late desktop verdict after an in-flight %s change', async (state) => {
+    seedMirror(established(true));
+    const s = await launch();
+    const storage = h.accounts[0].storage;
+    const done = vi.spyOn(storage.getRepositories().agent, 'markAgentDone');
+    const originalProvider = h.provider;
+    const provider = vi.spyOn(h, 'provider').mockImplementationOnce(async (url, init) => {
+      if (state === 'spam') await storage.updateEmail('late-verdict', { tags: '|INBOX|spam|' });
+      else await storage.deleteEmail('late-verdict');
+      return originalProvider(url, init);
+    });
+    try {
+      await deliver(s, 'acct-a', 'late-verdict', 'event');
+      await until(() => wasSent('Subject of late-verdict'), 'the original AI request to return');
+      await pollTick();
+      expect(done.mock.calls.some(([id]) => id === 'late-verdict')).toBe(false);
+      const current = await storage.getEmail('late-verdict');
+      if (state === 'spam') {
+        expect(current.tags).toContain('|spam|');
+        expect(row('acct-a', 'late-verdict').ai_categories).toBeNull();
+      } else expect(current).toBeNull();
+    } finally { provider.mockRestore(); done.mockRestore(); }
+  });
+
+  // Regression: native Gmail Important retains its marker while the remaining email goes through AI.
+  it('categorizes a Gmail Important message without stripping its native flag', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    const storage = h.accounts[0].storage;
+    const email = mail('gmail-important', 'Native important subject');
+    email.gmailImportant = true; email.tags = '|INBOX|important|';
+    await storage.insertEmail(email);
+    s.core.getEventBus().emit(s.core.createEvent.emailSynced(email, 'INBOX', true));
+    await until(decided([['acct-a', email.id]]), 'Gmail Important categorization');
+    expect(wasSent(email.subject || '')).toBe(true);
+    expect((await storage.getEmail(email.id)).tags).toContain('|important|');
+  });
+
   async function put(s: Session, accountId: string, id: string, serverCategories?: string[], manualCategories?: string[], messageId?: string, gmailCategoriesPending?: boolean): Promise<void> {
     const storage = h.accounts.find((a) => a.id === accountId)!.storage;
     const email = mail(id, `Subject of ${id}`);
@@ -485,7 +564,7 @@ describe('provider and manual classification avoids redundant AI', () => {
   });
 
   // Regression: a real AI verdict may propagate across accounts only when the other copy has no provider/user authority or unknown Gmail state.
-  it.each(['provider', 'pending discovery', 'unclassified'])('protects an existing %s sibling during AI propagation', async (state) => {
+  it.each(['provider', 'pending discovery', 'spam', 'linked spam', 'unclassified'])('protects an existing %s sibling during AI propagation', async (state) => {
     seedMirror(established(true));
     const s = await launch();
     const target = h.accounts[1].storage;
@@ -494,7 +573,11 @@ describe('provider and manual classification avoids redundant AI', () => {
     sibling.messageId = messageId;
     sibling.serverCategories = state === 'provider' ? ['promotions'] : null;
     sibling.gmailCategoriesPending = state === 'pending discovery';
-    sibling.tags = state === 'provider' ? '|INBOX|promotions|' : '|INBOX|';
+    sibling.tags = state === 'provider' ? '|INBOX|promotions|' : state === 'spam' ? '|INBOX|spam|' : '|INBOX|';
+    if (state === 'linked spam') {
+      await target.syncFolders([folder(Math.floor(Date.now() / 1000)), { ...folder(Math.floor(Date.now() / 1000)), id: 'linked-junk', name: 'Correo no deseado', path: '[Gmail]/Correo no deseado', specialUse: '\\Junk' }]);
+      sibling.tags = '|INBOX|[Gmail]/Correo no deseado|spam|'; sibling.spamUserVerdict = 'ham';
+    }
     await target.insertEmail(sibling);
     target.db.prepare("UPDATE emails SET extraction_status = 'done', agent_status = 'done' WHERE id = ?").run(sibling.id);
     const originalProvider = h.provider;

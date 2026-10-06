@@ -272,7 +272,7 @@ describe('AIRepository read side (listings + counts)', () => {
       // mailbox still exposes every view with a zero badge, never an absent key.
       expect(counts).toEqual({
         important: 0, reminders: 0, needs_response: 0, meeting: 0, invoice: 0,
-        finance: 0, promotions: 0, social: 0, forums: 0, updates: 0, personal: 0,
+        finance: 0, promotions: 0, social: 0,
         uncategorized: 0,
       });
     });

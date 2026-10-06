@@ -1,15 +1,17 @@
-import { addTag, NATIVE_PROVIDER_CATEGORY_SLUGS, parseTags, removeTag } from '@sarvinbox/core';
+import { addTag, GMAIL_CLASSIFICATION_CATEGORY_SLUGS, parseTags, removeTag } from '@sarvinbox/core';
 
 type SyncStatus = 'success' | 'queued' | 'local-only';
 type QueueResult = 'success' | 'queued' | 'failed';
 type Category = { slug: string; name?: string };
 
 export interface ClassificationStorage {
-  getEmail(id: string): Promise<{ id: string; uid?: number | null; folderId: string; tags?: string | null } | null>;
+  getEmail(id: string): Promise<{ id: string; uid?: number | null; folderId: string; tags?: string | null; gmailImportant?: boolean | null } | null>;
   getFolder(id: string): Promise<{ path: string } | null>;
   getCategoryDefinitions(): Category[];
   /** Atomically updates category tags and provenance, preserving all other tags. */
   setEmailManualCategories(id: string, categories: string[] | null): void;
+  /** Gmail importance is a flag override, independent of category authority. */
+  setEmailManualImportance?(id: string, on: boolean): void;
 }
 
 export interface ClassificationEngine {
@@ -52,9 +54,9 @@ async function performCategoryChange(
   const definitions = [...storage.getCategoryDefinitions()];
   // Native provider assignments remain editable even after the user removed
   // their optional AI category definition.
-  for (const native of NATIVE_PROVIDER_CATEGORY_SLUGS) {
+  for (const native of ['important', ...GMAIL_CLASSIFICATION_CATEGORY_SLUGS]) {
     if (!definitions.some((category) => category.slug === native)) {
-      definitions.push({ slug: native, name: native === 'personal' ? 'Primary' : native[0].toUpperCase() + native.slice(1) });
+      definitions.push({ slug: native, name: native[0].toUpperCase() + native.slice(1) });
     }
   }
   const known = new Set(definitions.map((category) => category.slug));
@@ -106,6 +108,16 @@ async function performCategoryChange(
     categories = categories.filter((tag) => tag !== 'important');
     if (parseTags(latest.tags || '||').includes('important')) categories.push('important');
   }
-  storage.setEmailManualCategories(emailId, categories);
+  if (latest.gmailImportant != null) {
+    // Changing Gmail's importance marker must not freeze its AI category.
+    if (slug === 'important') {
+      if (!storage.setEmailManualImportance) throw new Error('Importance storage is unavailable');
+      storage.setEmailManualImportance(emailId, on);
+    } else {
+      storage.setEmailManualCategories(emailId, categories.filter((tag) => tag !== 'important'));
+    }
+  } else {
+    storage.setEmailManualCategories(emailId, categories);
+  }
   return { categories, syncStatus };
 }

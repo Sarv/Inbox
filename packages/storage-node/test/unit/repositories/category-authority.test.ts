@@ -150,13 +150,13 @@ describe('persisted classification authority', () => {
     seed('template');
     const template = (await emails.get('template'))!;
     await emails.insert({ ...template, id: 'inserted', messageId: '<inserted@test>',
-      serverCategories: ['promotions'], manualCategories: [], gmailCategoriesPending: true });
+      serverCategories: ['promotions'], manualCategories: [], gmailCategoriesPending: true, gmailImportant:true, manualImportant:false });
     expect(await emails.get('inserted')).toMatchObject({
-      serverCategories: ['promotions'], manualCategories: [], gmailCategoriesPending: true,
+      serverCategories: ['promotions'], manualCategories: [], gmailCategoriesPending: true, gmailImportant:true, manualImportant:false,
     });
-    await emails.update('inserted', { serverCategories: null, manualCategories: ['finance'], gmailCategoriesPending: false });
+    await emails.update('inserted', { serverCategories: null, manualCategories: ['finance'], gmailCategoriesPending: false, gmailImportant:false, manualImportant:true });
     expect(await emails.get('inserted')).toMatchObject({
-      serverCategories: null, manualCategories: ['finance'], gmailCategoriesPending: false,
+      serverCategories: null, manualCategories: ['finance'], gmailCategoriesPending: false, gmailImportant:false, manualImportant:true,
     });
     await emails.update('inserted', { subject: 'Refreshed subject' });
     expect((await emails.get('inserted'))?.manualCategories).toEqual(['finance']);
@@ -187,4 +187,111 @@ describe('persisted classification authority', () => {
     emails.setServerCategories('acknowledged', ['promotions']);
     expect(row('acknowledged')).toEqual(acknowledged);
   });
+  // Regression: native Gmail Important/tab hints must not spend a second provider-category gate or erase the native flag during AI writes.
+  it('allows AI on native Gmail hints while preserving Important independently', async () => {
+    seed('native');
+    emails.setServerCategories('native', ['important','social','updates','forums','personal'], true);
+    expect((await emails.get('native'))?.gmailImportant).toBe(true);
+    expect(row('native').server_categories).toBe('[]');
+    expect(row('native').tags).toBe('|INBOX|starred|important|');
+    expect(ai.getEligibleEmailsForAI().map((email) => email.id)).toEqual(['native']);
+    expect(await ai.getUnprocessedEmailCount()).toBe(1);
+    expect((await ai.getEmailsWithoutCategory()).map((email) => email.id)).toEqual(['native']);
+    expect(ai.saveEmailCategoriesBatch([{ emailId: 'native', categories: [{ slug:'finance',confidence:1 }], isSpam:false, reasoning:'Finance',processedAt:2000,confidence:1 }])).toBe(1);
+    expect(row('native').tags).toContain('|important|');
+    expect(row('native').tags).toContain('|finance|');
+    ai.saveEmailCategories('native', [{ slug:'meeting',confidence:1 }], false, 'Meeting',3000,1);
+    expect(row('native').tags).toContain('|important|');
+    expect(row('native').tags).toContain('|meeting|');
+  });
+
+  // Regression: cached old Gmail native metadata must be ignored by every selector and in-flight writer, while Sarv keeps its folder classifications.
+  it('accepts stale Gmail hint metadata but blocks Promotions and custom label authority', async () => {
+    for (const id of ['hint','promos','custom','sarv']) seed(id);
+    db.prepare("UPDATE emails SET gmail_important=0, server_categories='[\"social\",\"updates\",\"important\"]' WHERE id='hint'").run();
+    emails.setServerCategories('promos',['social','promotions'],false);
+    emails.setServerCategories('custom',['finance'],false);
+    emails.setServerCategories('sarv',['social']);
+    expect(ai.getEligibleEmailsForAI().map((email) => email.id)).toEqual(['hint']);
+    expect(await ai.getUnprocessedEmailCount()).toBe(1);
+    expect((await ai.getEmailsWithoutCategory()).map((email) => email.id)).toEqual(['hint']);
+    expect(save('hint')).toBe(1);
+    expect(save('promos')).toBe(0); expect(save('custom')).toBe(0); expect(save('sarv')).toBe(0);
+  });
+
+  // Regression: toggling only Important must not freeze category AI or generate a competing label mirror; a later webmail edit must converge.
+  it('persists manual flag choices separately and honors positive and negative choices through AI writes', async () => {
+    seed('flag'); emails.setServerCategories('flag', [], true);
+    emails.setManualImportance('flag', false);
+    expect(row('flag').manual_categories).toBeNull();
+    expect(row('flag').manual_important).toBe(0);
+    expect(row('flag').label_status).toBeNull();
+    expect(save('flag')).toBe(1);
+    expect(row('flag').tags).not.toContain('|important|');
+    ai.saveEmailCategories('flag',[{slug:'important',confidence:1}],false,'Important',2000,1);
+    expect(row('flag').tags).not.toContain('|important|');
+    emails.setManualImportance('flag', true);
+    ai.saveEmailCategories('flag',[{slug:'finance',confidence:1}],false,'Finance',2000,1);
+    expect(row('flag').tags).toContain('|important|');
+    const beforeRefresh = row('flag');
+    emails.setServerCategories('flag', [], false);
+    expect(row('flag').manual_important).toBe(0);
+    expect(row('flag').tags).not.toContain('|important|');
+    expect(row('flag').ai_processed_at).toBe(beforeRefresh.ai_processed_at);
+    expect(row('flag').tags).toContain('|finance|');
+    const settled = row('flag'); emails.setServerCategories('flag',[],false);
+    expect(row('flag')).toEqual(settled);
+    expect((await emails.getTagsInFolder('f'))[0]).toMatchObject({ gmailImportant:false, manualImportant:false });
+    emails.setManualImportance('obsolete',true);
+  });
+
+  // Regression: category edits or provider removal cannot drop an independent native Important flag or revive obsolete hints.
+  it('keeps Gmail flag metadata through category reconciliation and nullable updates', async () => {
+    seed('separate'); emails.setServerCategories('separate',['promotions'],true);
+    emails.setManualCategories('separate',['finance']);
+    expect(row('separate').tags).toContain('|important|');
+    emails.setServerCategories('separate',[],true);
+    expect(row('separate').tags).toBe('|INBOX|starred|important|');
+    expect(row('separate').manual_categories).toBe('[]');
+    await emails.update('separate',{gmailImportant:null, manualImportant:null});
+    expect((await emails.get('separate'))?.gmailImportant).toBeNull();
+    emails.setServerCategories('separate',['important'],null);
+    expect((await emails.get('separate'))?.gmailImportant).toBeNull();
+    expect(row('separate').server_categories).toBe('["important"]');
+  });
+
+  // Regression: label-drain snapshots must carry independent on/off markers so a queued AI mirror cannot overwrite a newer manual flag.
+  it('includes nullable independent flag authority in pending label snapshots', () => {
+    seed('on'); seed('off');
+    db.prepare("UPDATE emails SET label_status='pending', agent_status='done', ai_categories='|finance|', gmail_important=1, manual_important=0 WHERE id='on'").run();
+    db.prepare("UPDATE emails SET label_status='pending', agent_status='done', ai_categories='|meeting|', gmail_important=0, manual_important=1 WHERE id='off'").run();
+    const snapshots = new AgentRepository(()=>db).getEmailsPendingLabel();
+    expect(snapshots.find((email)=>email.id === 'on')).toMatchObject({gmailImportant:true,manualImportant:false,manualCategories:null,aiCategories:'|finance|'});
+    expect(snapshots.find((email)=>email.id === 'off')).toMatchObject({gmailImportant:false,manualImportant:true,manualCategories:null,aiCategories:'|meeting|'});
+  });
+
+  // Regression: late/direct AI writes cannot strip known Spam/Junk, including localized provider roles and linked mailbox membership after a ham verdict.
+  it('blocks already-Spam writes on both save paths without blocking ordinary AI spam classification', () => {
+    db.prepare('INSERT INTO folders(id,name,path,special_use) VALUES (?,?,?,?)').run('localized','Unsolicited','[GoogleMail]/Unerwünscht','\\Junk');
+    for (const id of ['localSpam','userSpam','providerPrimary','providerLinked','ordinary','explicitHam','prefixLabel']) seed(id);
+    db.prepare("UPDATE emails SET tags='|INBOX|spam|' WHERE id IN ('localSpam','explicitHam')").run();
+    db.prepare("UPDATE emails SET spam_user_verdict='spam' WHERE id='userSpam'").run();
+    db.prepare("UPDATE emails SET folder_id='localized', spam_user_verdict='ham' WHERE id='providerPrimary'").run();
+    db.prepare("UPDATE emails SET tags='|INBOX|[GoogleMail]/Unerwünscht|', spam_user_verdict='ham' WHERE id='providerLinked'").run();
+    db.prepare("UPDATE emails SET spam_user_verdict='ham' WHERE id='explicitHam'").run();
+    db.prepare("UPDATE emails SET tags='|INBOX|[GoogleMail]/Unerwünscht-archive|' WHERE id='prefixLabel'").run();
+    for (const id of ['localSpam','userSpam','providerPrimary','providerLinked']) {
+      const before = row(id);
+      ai.saveEmailCategories(id,[{slug:'finance',confidence:1}],false,'Late result',2000,1);
+      expect(row(id)).toEqual(before);
+      expect(save(id)).toBe(0);
+      expect(row(id)).toEqual(before);
+    }
+    expect(save('prefixLabel')).toBe(1);
+    expect(save('explicitHam')).toBe(1);
+    expect(row('explicitHam').tags).not.toContain('|spam|');
+    ai.saveEmailCategories('ordinary',[],true,'Spam discovered by AI',2000,1);
+    expect(row('ordinary').tags).toContain('|spam|');
+  });
+
 });

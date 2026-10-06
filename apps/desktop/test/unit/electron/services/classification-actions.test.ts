@@ -13,13 +13,16 @@ const definitions = [
   { slug: 'finance', name: 'Finance' },
   ...nativeRest,
 ];
-let email: { id: string; uid: number | null; folderId: string; tags: string };
+let email: { id: string; uid: number | null; folderId: string; tags: string; gmailImportant?: boolean | null };
 const storage = {
   getEmail: vi.fn(async () => email),
   getFolder: vi.fn(async () => ({ path: 'INBOX' })),
   getCategoryDefinitions: vi.fn(() => definitions),
   updateEmail: vi.fn(async (_id: string, updates: { tags: string }) => { email.tags = updates.tags; }),
   setEmailManualCategories: vi.fn(),
+  setEmailManualImportance: vi.fn((_id: string, on: boolean) => {
+    email.tags = on ? addTag(email.tags, 'important') : removeTag(email.tags, 'important');
+  }),
 };
 const engine = {
   assertManualCategorySync: vi.fn(),
@@ -43,6 +46,32 @@ beforeEach(() => {
 });
 
 describe('manual classification sync', () => {
+  // Regression: Gmail importance toggles preserve its marker without stopping AI categorization.
+  it.each([true, false])('stores Gmail importance %s independently from category authority', async (on) => {
+    email.gmailImportant = false;
+    const result = await changeEmailCategory(storage, engine, 'message', 'important', on);
+    expect(engine.markImportant).toHaveBeenCalledWith('INBOX', 1413, on);
+    expect(storage.setEmailManualImportance).toHaveBeenCalledWith('message', on);
+    expect(storage.setEmailManualCategories).not.toHaveBeenCalled();
+    expect(result.categories.includes('important')).toBe(on);
+  });
+
+  // Regression: a manual Gmail category must not turn a native Important marker into category authority.
+  it('keeps Gmail importance out of a manual category snapshot', async () => {
+    email.gmailImportant = true;
+    email.tags = addTag(email.tags, 'important');
+    const result = await changeEmailCategory(storage, engine, 'message', 'finance', true);
+    expect(storage.setEmailManualCategories).toHaveBeenCalledWith('message', ['promotions', 'finance']);
+    expect(result.categories).toContain('important');
+    expect(storage.setEmailManualImportance).not.toHaveBeenCalled();
+  });
+
+  // Regression: an incomplete storage adapter cannot claim a Gmail flag override was persisted.
+  it('reports missing Gmail importance storage', async () => {
+    email.gmailImportant = false;
+    await expect(changeEmailCategory({ ...storage, setEmailManualImportance: undefined }, engine, 'message', 'important', true)).rejects.toThrow('Importance storage');
+  });
+
   // Regression: a Sarv importance click must reach its own UID and keep Promotions, stars and custom labels.
   it('queues native importance before saving its independent local projection', async () => {
     const result = await changeEmailCategory(storage, engine, 'message', 'important', true);
@@ -154,7 +183,7 @@ describe('manual classification sync', () => {
     storage.getCategoryDefinitions.mockReturnValueOnce([{ slug: 'finance', name: '' }]);
     await changeEmailCategory(storage, engine, 'message', 'finance', true);
     expect(engine.setCategorySelection).toHaveBeenCalledWith('INBOX', 1413, {
-      apply: [{ slug: 'finance', name: 'finance' }], remove: [definitions[1], ...nativeRest], host: '', mode: 'copy',
+      apply: [{ slug: 'finance', name: 'finance' }], remove: [definitions[1]], host: '', mode: 'copy',
     });
     email.tags = '';
     await changeEmailCategory(storage, engine, 'message', 'important', false);
@@ -167,11 +196,11 @@ describe('manual classification sync', () => {
   // Regression: deleting an AI definition must not make the provider's existing native category impossible to remove.
   it('keeps native provider assignments editable without AI definitions', async () => {
     storage.getCategoryDefinitions.mockReturnValueOnce([]);
-    email.tags = '|INBOX|read|forums|';
-    const result = await changeEmailCategory(storage, engine, 'message', 'forums', false);
+    email.tags = '|INBOX|read|promotions|';
+    const result = await changeEmailCategory(storage, engine, 'message', 'promotions', false);
     expect(result.categories).toEqual([]);
     expect(engine.setCategorySelection).toHaveBeenCalledWith('INBOX', 1413, {
-      apply: [], remove: [definitions[1], ...nativeRest], host: '', mode: 'copy',
+      apply: [], remove: [definitions[1]], host: '', mode: 'copy',
     });
   });
 });

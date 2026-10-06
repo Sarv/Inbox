@@ -120,6 +120,8 @@ export interface SQLiteStorageConfig {
    * (tests, tools), where provenance simply isn't tracked.
    */
   accountId?: string;
+  /** Provider host scopes provider-specific upgrades to this mailbox. */
+  providerHost?: string;
   /**
    * SQLite page-cache size in KiB (applied as `PRAGMA cache_size = -<kb>`).
    * IMPORTANT: this is PER open connection, and every account opens its OWN
@@ -320,7 +322,7 @@ export class SQLiteStorage implements IEmailStorage {
     // through `shared.` — so the schema has to exist before any of them runs.
     this.attachDirectory();
 
-    const migrationManager = createMigrationManager(this.db, { accountId: this.config.accountId });
+    const migrationManager = createMigrationManager(this.db, { accountId: this.config.accountId, providerHost: this.config.providerHost });
     migrationManager.migrate();
 
     this.initialized = true;
@@ -828,9 +830,15 @@ export class SQLiteStorage implements IEmailStorage {
     return this.emailRepo.get(id);
   }
 
-  setServerCategories(emailId: string, categories: string[]): void {
+  setServerCategories(emailId: string, categories: string[], gmailImportant?: boolean | null): void {
     this.ensureInitialized();
-    this.emailRepo.setServerCategories(emailId, categories);
+    this.emailRepo.setServerCategories(emailId, categories, gmailImportant);
+    this.scheduleReadModelDrain();
+  }
+
+  setEmailManualImportance(emailId: string, important: boolean): void {
+    this.ensureInitialized();
+    this.emailRepo.setManualImportance(emailId, important);
     this.scheduleReadModelDrain();
   }
 
@@ -1308,7 +1316,7 @@ export class SQLiteStorage implements IEmailStorage {
    * THREAD_META subqueries and no body columns, and yields the event loop
    * between pages so a big folder can't stall the main process.
    */
-  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean }>> {
+  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null; manualImportant?: boolean | null }>> {
     this.ensureInitialized();
     return this.emailRepo.getTagsInFolder(folderId);
   }

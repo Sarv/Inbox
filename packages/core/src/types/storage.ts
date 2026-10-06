@@ -57,7 +57,8 @@ export interface IEmailStorage {
   updateEmail(id: string, updates: Partial<EmailRecord>): Promise<void>;
 
   /** Reconcile provider classification without recording a fake AI verdict. */
-  setServerCategories?(emailId: string, categories: string[]): void;
+  setServerCategories?(emailId: string, categories: string[], gmailImportant?: boolean | null): void;
+  setEmailManualImportance?(emailId: string, important: boolean): void;
   /** Persist an explicit user selection (including no categories). */
   setEmailManualCategories?(emailId: string, categories: string[] | null): void;
 
@@ -279,7 +280,7 @@ export interface IEmailStorage {
    * `getEmailsByFolder` sweep was quadratic and materialised every message body
    * just to read a tag string.
    */
-  getEmailTagsInFolder?(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean }>>;
+  getEmailTagsInFolder?(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null; manualImportant?: boolean | null }>>;
 
   /**
    * Count every email carrying `folderPath` as a folder-membership TAG — the same

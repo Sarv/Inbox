@@ -370,16 +370,29 @@ describe('Gmail native category metadata on ingest and label repair', () => {
   // Additive membership repair cannot interpret failed native discovery as a category removal.
   it('preserves unknown native authority in repair and clears it only on successful discovery', async () => {
     const f = await fixture();
-    await f.processor.processBatch([{ ...f.message, categories: ['social'], gmailCategoriesKnown: true }], f.folder, f.storage as never, undefined, { quiet: true });
+    await f.processor.processBatch([{ ...f.message, categories: ['promotions'], gmailCategoriesKnown: true }], f.folder, f.storage as never, undefined, { quiet: true });
     const row = f.storage.allRows()[0];
     const fetch = vi.spyOn(f.server, 'fetchAllLabels');
     fetch.mockResolvedValue([{ uid: 1, labels: [], gmailCategoriesKnown: false }] as any);
     expect((await f.processor.repairGmailLabels(f.server, f.folder, f.storage as never)).updated).toBe(1);
-    expect(row.serverCategories).toEqual(['social']); expect(row.gmailCategoriesPending).toBe(true);
+    expect(row.serverCategories).toEqual(['promotions']); expect(row.gmailCategoriesPending).toBe(true);
     fetch.mockResolvedValue([{ uid: 1, labels: [], categories: [], gmailCategoriesKnown: true }] as any);
     await f.processor.repairGmailLabels(f.server, f.folder, f.storage as never);
     expect(row.serverCategories).toEqual([]); expect(row.gmailCategoriesPending).toBe(false);
   });
+
+  it('retires cached ignored native Social authority even while Promotions discovery is unknown', async () => {
+    const f = await fixture();
+    await f.processor.processBatch([{ ...f.message, categories: [], gmailCategoriesKnown: true }], f.folder, f.storage as never, undefined, { quiet: true });
+    const row = f.storage.allRows()[0];
+    row.serverCategories = ['social']; row.tags = `|${ALL_MAIL}|social|`;
+    vi.spyOn(f.server, 'fetchAllLabels').mockResolvedValue([{ uid: 1, labels: [], gmailCategoriesKnown: false }] as any);
+    await f.processor.repairGmailLabels(f.server, f.folder, f.storage as never);
+    expect(row.serverCategories).toEqual([]);
+    expect(parseTags(row.tags)).not.toContain('social');
+    expect(row.gmailCategoriesPending).toBe(true);
+  });
+
 });
 
 
@@ -392,10 +405,10 @@ describe('duplicate and repair pending operation safety', () => {
     const message = (await server.fetchMessages('1:*'))[0]; const folder = (await storage.getFolders())[0];
     const processor = new MessageProcessor();
     await processor.processBatch([message], folder, storage as never, undefined, { quiet: true });
-    const row = storage.allRows()[0]; expect(row.serverCategories).toEqual(['important']);
+    const row = storage.allRows()[0]; expect(row.serverCategories).toEqual([]); expect(row.gmailImportant).toBe(true);
     processor.setPendingUidsProvider(async () => new Set([1]));
     await processor.processBatch([{ ...message, flags: [], categories: [], gmailCategoriesKnown: true }], folder, storage as never, undefined, { quiet: true });
-    expect(row.serverCategories).toEqual(['important']); expect(parseTags(row.tags)).toContain('important');
+    expect(row.serverCategories).toEqual([]); expect(row.gmailImportant).toBe(true); expect(parseTags(row.tags)).toContain('important');
   });
 
   // An account's recreated folder invalidates label-repair UIDs just as it does a flag operation.

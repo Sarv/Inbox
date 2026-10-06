@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders, existingCategoryClassification, automaticCategorizationDeferred } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -777,7 +777,8 @@ Return JSON array:
       if ((email.tags || '').includes('|read|')) {
         continue;
       }
-      if (existingCategoryClassification(email) || automaticCategorizationDeferred(email)) continue;
+      if (existingCategoryClassification(email) || automaticCategorizationDeferred(email) ||
+          isSpamProtectedEmail(email, await storage.getFolder?.(email.folderId), await storage.getFolders?.())) continue;
       // Body for the LLM prompt — see categorizationBodyOf.
       const body = categorizationBodyOf(email);
       const fromAddr = (email.fromAddress || '').toLowerCase();
@@ -1205,7 +1206,8 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
     const eligibleResults: CategorizationResult[] = [];
     for (const result of results) {
       const current = await storage.getEmail(result.emailId);
-      if (current && !existingCategoryClassification(current) && !automaticCategorizationDeferred(current)) eligibleResults.push(result);
+      if (current && !existingCategoryClassification(current) && !automaticCategorizationDeferred(current) &&
+          !isSpamProtectedEmail(current, await storage.getFolder?.(current.folderId), await storage.getFolders?.())) eligibleResults.push(result);
     }
     results = eligibleResults;
     if (results.length === 0) return;

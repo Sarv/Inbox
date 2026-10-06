@@ -28,6 +28,7 @@ import {
   seedAccountRegistryFromDurableStores,
   getRegistryActiveAccountId,
   readRegistryAccounts,
+  listRegistryAccounts,
   cleanupMigratedLegacyFiles,
   resolveAccountEmail,
 } from './services/accounts-registry';
@@ -608,6 +609,7 @@ async function initializeStorage(): Promise<void> {
     // (accounts-runtime) get the modest default so N accounts don't multiply
     // into a huge footprint.
     cacheSizeKb: 32768, // 32 MB
+    providerHost: listRegistryAccounts().find((account) => account.id === loadPrimaryAccountId())?.imapConfig?.host,
   });
 
   await storage.initialize();

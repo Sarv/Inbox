@@ -1583,3 +1583,44 @@ describe('processBatch — Autocrypt sink', () => {
     expect(db.allRows()).toHaveLength(1);
   });
 });
+
+
+describe('provider spam and independent Gmail importance', () => {
+  it('keeps Gmail Important visible without category authority', async () => {
+    const { mp } = setup();
+    const row = await mp.convertMessage(msg({ uid: 1, labels: ['\\Important'], categories: [], gmailCategoriesKnown: true }), 'inbox', 'INBOX');
+    expect(row.tags).toContain('|important|');
+    expect(row.serverCategories).toEqual([]);
+    expect(row.gmailImportant).toBe(true);
+    const cleared = await mp.convertMessage(msg({ uid: 2, labels: [], gmailCategoriesKnown: false }), 'inbox', 'INBOX');
+    expect(cleared.gmailImportant).toBe(false);
+  });
+
+  it('retains Sarv Important as provider category authority', async () => {
+    const { mp } = setup();
+    const row = await mp.convertMessage(msg({ uid: 1, flags: ['Important'] }), 'inbox', 'INBOX');
+    expect(row.serverCategories).toEqual(['important']);
+    expect(row.gmailImportant).toBeNull();
+  });
+
+  it.each([
+    { path: '[Gmail]/Spam', specialUse: undefined, labels: [] },
+    { path: 'Courrier indesirable', specialUse: '\\Junk', labels: undefined },
+    { path: 'INBOX', specialUse: undefined, labels: ['\\Junk'] },
+    { path: '[Gmail]/Spam', specialUse: undefined, labels: [], trusted: true },
+  ])('keeps provider spam in $path despite a low score and automatic move rule', async ({ path, specialUse, labels, trusted }) => {
+    const { db, mp } = setup();
+    if (trusted) vi.spyOn(db, 'isTrustedSender').mockResolvedValue(true);
+    if (path !== INBOX) db.addFolder(path, { specialUse });
+    db.addFolder('Projects');
+    db.setFilterRules([{ id: 'move', name: 'move', enabled: true, priority: 1, matchType: 'all',
+      conditions: [{ field: 'subject', operator: 'contains', value: 'hello' }],
+      actions: [{ type: 'moveToFolder', value: 'Projects' }, { type: 'markRead' }] }]);
+    await mp.processBatch([msg({ uid: 1, envelope: { subject: 'hello' }, labels })], db.folder(path), db.asStorage());
+    const row = db.allRows()[0];
+    expect(row.spamScore ?? 0).toBeLessThan(80);
+    expect(row.tags).toContain('|spam|');
+    expect(row.tags).toContain('|read|');
+    expect(row.folderId).toBe(db.folder(path).id);
+  });
+});

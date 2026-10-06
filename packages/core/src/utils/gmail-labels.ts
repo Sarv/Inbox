@@ -33,9 +33,12 @@ import { SARV_LABEL_PARENT } from '../imap/label-strategy';
  * rest map to a folder ROLE the caller resolves to a real path (a mailbox's path
  * differs per account: `[Gmail]/Sent Mail` vs `Sent`).
  *
- * Provider importance is authoritative; it suppresses redundant AI
- * categorisation and is synchronised independently from category labels.
+ * Provider importance remains a separate flag, synchronized independently
+ * from categories. Native Promotions supplies category authority before AI.
  */
+/** Native Gmail tabs that map directly to app categories before AI; write capabilities remain separate. */
+export const GMAIL_CLASSIFICATION_CATEGORY_SLUGS = ['promotions'] as const;
+
 const SYSTEM_LABEL_FLAGS: Record<string, string> = {
   '\\starred': 'starred',
   '\\important': 'important',
@@ -179,10 +182,11 @@ export function mapGmailLabels(
     const label = normalizeLabel(raw);
     if (!label) continue;
 
-    const nativeSystemCategory = label.match(/^\\(?:category[_ ]?)?(promotions|social|updates|forums|personal)$/i);
+    const nativeSystemCategory = label.match(/^\\(?:category[_ ]?)?(promotions|social|updates|forums|personal|primary)$/i);
     if (nativeSystemCategory) {
-      const slug = matchKnownCategory(nativeSystemCategory[1], options.knownCategories)
-        ?? categoryNameSlug(nativeSystemCategory[1]);
+      // Only Promotions is an app classification; other native tabs still need AI.
+      if (nativeSystemCategory[1].toLowerCase() !== 'promotions') continue;
+      const slug = 'promotions';
       if (!categories.includes(slug)) categories.push(slug);
       continue;
     }
@@ -207,10 +211,14 @@ export function mapGmailLabels(
       if (!flags.includes('important')) flags.push('important');
       continue;
     }
-    const nativeCategory = label.match(/^(?:(?:\[gmail\]|\[googlemail\]|categories)\/)?(promotions|social|updates|forums|personal)$/i);
+    const nativeCategory = label.match(/^(?:(?:\[gmail\]|\[googlemail\]|categories)\/)?(promotions|social|updates|forums|personal|primary)$/i);
     if (nativeCategory) {
-      const nativeSlug = matchKnownCategory(nativeCategory[1], options.knownCategories)
-        ?? categoryNameSlug(nativeCategory[1]);
+      if (nativeCategory[1].toLowerCase() !== 'promotions') {
+        // Preserve plain label membership without turning tab names into categories.
+        if (!labels.includes(label)) labels.push(label);
+        continue;
+      }
+      const nativeSlug = 'promotions';
       if (!categories.includes(nativeSlug)) categories.push(nativeSlug);
       continue;
     }

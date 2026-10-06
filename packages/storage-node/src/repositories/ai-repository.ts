@@ -2,7 +2,7 @@
 // All category queries use instr(tags, '|slug|') — zero JOINs, no junction tables
 
 import type { EmailRecord } from '@sarvinbox/core';
-import { automaticCategorizationDeferred, createLogger, existingCategoryClassification, parseCategorySelection } from '@sarvinbox/core';
+import { automaticCategorizationDeferred, GMAIL_NON_AUTHORITATIVE_CATEGORY_SLUGS, createLogger, existingCategoryClassification, independentImportance, isSpamProtectedEmail, parseCategorySelection } from '@sarvinbox/core';
 
 import type {
   EmailAICategory,
@@ -18,13 +18,28 @@ import { BaseRepository, type DatabaseAccessor } from './base-repository';
 import { addTag, removeTag, parseTags, hasTag } from './email-repository';
 const logger = createLogger('ai-repository');
 
-function categoryWriteIsBlocked(row: { server_categories?: string | null; manual_categories?: string | null; gmail_categories_pending?: number }): boolean {
+type SpamFolderRecord = { id: string; path: string; specialUse: string | null };
+
+function categoryWriteIsBlocked(row: { tags?: string | null; folder_id?: string; spam_user_verdict?: 'spam' | 'ham' | null; server_categories?: string | null; manual_categories?: string | null; gmail_categories_pending?: number; gmail_important?: number | null }, spamFolders: readonly SpamFolderRecord[]): boolean {
   const email = {
     serverCategories: parseCategorySelection(row.server_categories), manualCategories: parseCategorySelection(row.manual_categories),
     gmailCategoriesPending: row.gmail_categories_pending === 1,
+    gmailImportant: row.gmail_important == null ? null : row.gmail_important === 1,
   };
+  if (isSpamProtectedEmail({ tags: row.tags, spamUserVerdict: row.spam_user_verdict })) return true;
+  const memberships = parseTags(row.tags || '');
+  // Provider membership remains protected even after a local ham verdict. Use
+  // exact folder paths so a similarly named custom label cannot masquerade as Spam.
+  if (spamFolders.some((folder) => row.folder_id === folder.id || memberships.includes(folder.path))) return true;
   return !!existingCategoryClassification(email) || automaticCategorizationDeferred(email);
 }
+
+// Same policy as the write-time helper, including cached pre-upgrade Gmail metadata.
+const automaticCategoryEligibilitySql = `manual_categories IS NULL AND gmail_categories_pending = 0
+  AND (server_categories IS NULL OR server_categories = '[]' OR (gmail_important IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM json_each(CASE WHEN json_valid(server_categories) THEN server_categories ELSE '[]' END)
+    WHERE value NOT IN (${GMAIL_NON_AUTHORITATIVE_CATEGORY_SLUGS.map((slug) => `'${slug}'`).join(',')})
+  )))`;
 
 /**
  * Whether the AI's spam call may tag the row. Not when the user has said
@@ -61,6 +76,12 @@ export class AIRepository extends BaseRepository {
     return `AND ${notInExcludedFolderClause().split(' AND ').join('\n      AND ')}`;
   }
 
+  /** Small role snapshot per transaction, never an extra folder query per email in a batch. */
+  private spamFolders(): SpamFolderRecord[] {
+    return (this.db.prepare('SELECT id, path, special_use AS specialUse FROM folders').all() as SpamFolderRecord[])
+      .filter((folder) => isSpamProtectedEmail({}, folder));
+  }
+
   // ========== AI Categories (via tags) ==========
 
   /**
@@ -76,8 +97,8 @@ export class AIRepository extends BaseRepository {
   ): void {
     const txn = this.db.transaction(() => {
       // Get current tags
-      const row = this.db.prepare('SELECT tags, spam_user_verdict, server_categories, manual_categories, gmail_categories_pending FROM emails WHERE id = ?').get(emailId) as any;
-      if (!row || categoryWriteIsBlocked(row)) return;
+      const row = this.db.prepare('SELECT tags, folder_id, spam_user_verdict, server_categories, manual_categories, gmail_categories_pending, gmail_important, manual_important FROM emails WHERE id = ?').get(emailId) as any;
+      if (!row || categoryWriteIsBlocked(row, this.spamFolders())) return;
 
       let tags = row.tags || '||';
 
@@ -95,6 +116,10 @@ export class AIRepository extends BaseRepository {
       if (aiMayTagSpam(isSpam, row.spam_user_verdict)) {
         tags = addTag(tags, 'spam');
       }
+
+      const marker = independentImportance({ gmailImportant: row.gmail_important == null ? null : row.gmail_important === 1,
+        manualImportant: row.manual_important == null ? null : row.manual_important === 1 });
+      if (marker !== null) tags = marker ? addTag(tags, 'important') : removeTag(tags, 'important');
 
       // Update email: tags + AI metadata
       this.db.prepare(`
@@ -124,7 +149,7 @@ export class AIRepository extends BaseRepository {
     const catSlugs = allCats.map(c => c.slug);
 
     const txn = this.db.transaction((items: typeof batch) => {
-      const selectStmt = this.db.prepare('SELECT tags, spam_user_verdict, server_categories, manual_categories, gmail_categories_pending FROM emails WHERE id = ?');
+      const selectStmt = this.db.prepare('SELECT tags, folder_id, spam_user_verdict, server_categories, manual_categories, gmail_categories_pending, gmail_important, manual_important FROM emails WHERE id = ?');
       // Also stamp agent_status='done' + agent_at (mirroring markAgentDone) so
       // the unified pipeline's poll — which selects agent_status='pending' —
       // treats bulk/propagated categorization as complete and does NOT re-send
@@ -138,12 +163,13 @@ export class AIRepository extends BaseRepository {
           agent_status = 'done', agent_at = ?, label_status = 'pending' WHERE id = ?
       `);
 
+      const spamFolders = this.spamFolders();
       let updated = 0;
       for (const item of items) {
         const row = selectStmt.get(item.emailId) as any;
         // Recheck inside the write transaction: sync/user edits may arrive while
         // a provider call is in flight, or a linked account may propagate later.
-        if (!row || categoryWriteIsBlocked(row)) continue;
+        if (!row || categoryWriteIsBlocked(row, spamFolders)) continue;
 
         let tags = row.tags || '||';
 
@@ -161,6 +187,9 @@ export class AIRepository extends BaseRepository {
           tags = addTag(tags, 'spam');
         }
 
+        const marker = independentImportance({ gmailImportant: row.gmail_important == null ? null : row.gmail_important === 1,
+          manualImportant: row.manual_important == null ? null : row.manual_important === 1 });
+        if (marker !== null) tags = marker ? addTag(tags, 'important') : removeTag(tags, 'important');
         const result = updateStmt.run(tags, item.reasoning || null, item.confidence, item.processedAt, item.processedAt, item.emailId);
         updated += result.changes;
       }
@@ -311,7 +340,7 @@ export class AIRepository extends BaseRepository {
       .prepare(`
         SELECT ${this.emailSelect()} FROM emails
         WHERE ai_processed_at IS NULL
-          AND manual_categories IS NULL AND (server_categories IS NULL OR server_categories = '[]') AND gmail_categories_pending = 0
+          AND ${automaticCategoryEligibilitySql}
           AND ${hasBodyClause('', this.bodyLengthsReady())}
         ORDER BY date DESC LIMIT ?
       `)
@@ -733,7 +762,7 @@ export class AIRepository extends BaseRepository {
       .prepare(`
         SELECT COUNT(*) as count FROM emails
         WHERE ai_processed_at IS NULL
-          AND manual_categories IS NULL AND (server_categories IS NULL OR server_categories = '[]') AND gmail_categories_pending = 0
+          AND ${automaticCategoryEligibilitySql}
           -- Cheap tag test first, body test last — see agent-eligibility.ts.
           AND ${notExcludedByTagsClause()}
           AND ${hasBodyClause('', this.bodyLengthsReady())}
@@ -870,7 +899,7 @@ export class AIRepository extends BaseRepository {
     const rows = this.db.prepare(`
       SELECT ${this.emailSelect()} FROM emails
       WHERE ai_processed_at IS NULL
-        AND manual_categories IS NULL AND (server_categories IS NULL OR server_categories = '[]') AND gmail_categories_pending = 0
+        AND ${automaticCategoryEligibilitySql}
         -- Tag test BEFORE the body test: the tags column is header-only, the
         -- body test reads the inline body. Term order is a performance
         -- contract, not style — see agent-eligibility.ts.
