@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inline forward reopened it with what you had written but left it unfocused,
   so typing went nowhere until you clicked into it. It now scrolls to the
   forward and puts the cursor in its To field, as undoing a reply already did.
+- **Attachments are no longer cut off after their first line.** Some mail
+  programs encode each line of an attachment separately, and everything after
+  the first line was dropped. The whole file now arrives.
+- **Attachments that mislabel their encoding open as what they contain.** Some
+  mail marks an attachment as encoded when it actually holds plain text or HTML.
+  The app recognised this only for HTML, and only through a quirk of its
+  decoder that the update above removes, so those files would have opened as
+  garbled bytes again. It now checks the attachment's own content: they open,
+  save and show their size correctly, plain-text ones included. With antivirus
+  scanning on, such an attachment shows the not-scanned warning instead of being
+  scanned as garbled bytes.
 
 ### Security
 - **Local scanner setup works in the development app.** The renamed development
