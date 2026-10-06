@@ -22,6 +22,8 @@ import type {
 import type { EmailRecord } from '../types/models';
 import { automaticCategorizationDeferred, existingCategoryClassification } from '../utils/category-authority';
 import { logger } from '../utils/logger';
+import { isSpamProtectedEmail, type SpamFolderMetadata } from '../utils/spam-protection';
+import { removeTag } from '../utils/tags';
 
 import {
   applySecurityGate,
@@ -43,6 +45,10 @@ export interface UnifiedPipelineDeps {
   userEmail: string;
   callAI: (systemPrompt: string, userMessage: string) => Promise<string>;
   getEmail: (id: string) => Promise<EmailRecord | null>;
+  /** Folder metadata recognizes provider Spam/Junk even when the mailbox uses a localized name. */
+  getFolder?: (id: string) => SpamFolderMetadata | null | Promise<SpamFolderMetadata | null>;
+  /** All folders identify linked provider Junk membership, including localized paths. */
+  getFolders?: () => readonly SpamFolderMetadata[] | Promise<readonly SpamFolderMetadata[]>;
   getSenderContextBatch: (emails: string[]) => Record<string, any>;
   getThreadDepths: (threadIds: string[]) => Record<string, number>;
   getSenderRepetitionStats: (emails: string[]) => { sameSubject: Record<string, Record<string, number>>; totalEmails: number };
@@ -157,6 +163,8 @@ const DEFAULT_CONFIG: UnifiedPipelineConfig = {
 export class UnifiedPipeline {
   private config: UnifiedPipelineConfig;
   private processingSet = new Set<string>();
+  /** A successful current verdict may file its own newly saved local Spam tag. */
+  private savedSpamVerdicts = new WeakSet<CategorizationResult>();
   private autoActionsThisHour = 0;
   private lastHourReset = 0;
 
@@ -192,7 +200,7 @@ export class UnifiedPipeline {
     if (this.processingSet.has(email.id)) return null;
     this.processingSet.add(email.id);
     try {
-      const existing = this.existingClassificationResult(email);
+      const existing = await this.existingClassificationResult(email);
       if (existing) return existing;
       const enriched = this.enrichEmail(email);
       let catResult: CategorizationResult | null = null;
@@ -219,10 +227,12 @@ export class UnifiedPipeline {
 
       // Sync/manual edits can arrive while the provider request is outstanding.
       const latest = await this.deps.getEmail(email.id);
-      const changed = latest && this.existingClassificationResult(latest);
+      const ownSpam = !!catResult && this.savedSpamVerdicts.has(catResult);
+      const changed = latest ? await this.existingClassificationResult(latest, ownSpam) : null;
       if (changed) return changed;
       const prediction = this.predictFromCategories(email, catResult);
-      const execution = await this.executeOrPropose(email, prediction);
+      const execution = await this.executeOrPropose(email, prediction, ownSpam);
+      if (execution.spam) return execution.spam;
 
       return {
         emailId: email.id,
@@ -257,7 +267,8 @@ export class UnifiedPipeline {
         // Fetch sender/thread/repetition stats ONCE for the whole chunk, then
         // enrich each email from those shared maps (was 3 storage calls per
         // email — 30 per 10-email chunk).
-        const unclassified = chunk.filter((email) => !existingCategoryClassification(email) && !automaticCategorizationDeferred(email));
+        const classifications = await Promise.all(chunk.map((email) => this.existingClassificationResult(email)));
+        const unclassified = chunk.filter((_email, index) => !classifications[index]);
         const context = this.buildEnrichmentContext(unclassified);
         const enriched = unclassified.map(e => this.enrichWithContext(e, context));
         let catResults: CategorizationResult[] = [];
@@ -266,11 +277,13 @@ export class UnifiedPipeline {
 
         for (const email of chunk) {
           const latest = await this.deps.getEmail(email.id);
-          const existing = this.existingClassificationResult(latest ?? email);
-          if (existing) { results.push(existing); continue; }
           const catResult = catMap.get(email.id) || null;
+          const ownSpam = !!catResult && this.savedSpamVerdicts.has(catResult);
+          const existing = await this.existingClassificationResult(latest ?? email, ownSpam);
+          if (existing) { results.push(existing); continue; }
           const prediction = this.predictFromCategories(email, catResult);
-          const execution = await this.executeOrPropose(email, prediction);
+          const execution = await this.executeOrPropose(email, prediction, ownSpam);
+          if (execution.spam) { results.push(execution.spam); continue; }
           results.push({
             emailId: email.id,
             categories: catResult?.categories || [],
@@ -296,7 +309,9 @@ export class UnifiedPipeline {
 
   // ========== Enrich ==========
 
-  private existingClassificationResult(email: EmailRecord): PipelineResult | null {
+  private async existingClassificationResult(email: EmailRecord, ownSpam = false): Promise<PipelineResult | null> {
+    const spam = await this.spamProtectedResult(email, ownSpam);
+    if (spam) return spam;
     const existing = existingCategoryClassification(email);
     const pending = automaticCategorizationDeferred(email);
     if (!existing && !pending) return null;
@@ -306,6 +321,20 @@ export class UnifiedPipeline {
       emailId: email.id, categories: existing?.categories ?? [], classificationSource: existing?.source,
       classificationPending: pending || undefined,
       isSpam: false, categorizationConfidence: 0, reasoning: '', predictedAction: null,
+      actionConfidence: 0, executed: false, proposed: false,
+    };
+  }
+
+  private async spamProtectedResult(email: EmailRecord, ownSpam = false): Promise<PipelineResult | null> {
+    const [folder, folders] = await Promise.all([this.deps.getFolder?.(email.folderId), this.deps.getFolders?.()]);
+    // Only this call's successfully saved model verdict may file its local Spam
+    // tag. Provider memberships and explicit user Spam still win at every seam.
+    const protectedEmail = ownSpam ? { ...email, tags: removeTag(email.tags ?? '||', 'spam') } : email;
+    if (!isSpamProtectedEmail(protectedEmail, folder, folders)) return null;
+    return {
+      emailId: email.id, categories: ['spam'], isSpam: true,
+      classificationSource: email.spamUserVerdict === 'spam' ? 'user' : 'provider',
+      categorizationConfidence: 0, reasoning: '', predictedAction: null,
       actionConfidence: 0, executed: false, proposed: false,
     };
   }
@@ -487,24 +516,34 @@ export class UnifiedPipeline {
       // Defense before the save seam, in addition to the storage transaction's
       // check: direct core consumers must respect updates received during AI.
       const stillEligible = [] as CategorizationResult[];
+      const spamBlocked = new Set<string>();
       for (const result of results) {
         const latest = await this.deps.getEmail(result.emailId);
-        if (!latest || (!existingCategoryClassification(latest) && !automaticCategorizationDeferred(latest))) stillEligible.push(result);
+        const protectedResult = latest ? await this.existingClassificationResult(latest) : null;
+        if (protectedResult?.isSpam) spamBlocked.add(result.emailId);
+        if (!protectedResult) stillEligible.push(result);
       }
       const processedAt = Math.floor(Date.now() / 1000);
-      if (stillEligible.length > 0) this.deps.saveEmailCategoriesBatch(stillEligible.map(r => ({
-        emailId: r.emailId,
-        categories: r.categories.map(slug => ({ slug, confidence: r.confidence })),
-        isSpam: r.isSpam,
-        reasoning: r.reasoning,
-        processedAt,
-        confidence: r.confidence,
-      })));
+      if (stillEligible.length > 0) {
+        const saved = this.deps.saveEmailCategoriesBatch(stillEligible.map(r => ({
+          emailId: r.emailId,
+          categories: r.categories.map(slug => ({ slug, confidence: r.confidence })),
+          isSpam: r.isSpam,
+          reasoning: r.reasoning,
+          processedAt,
+          confidence: r.confidence,
+        })));
+        // Partial/failed writes cannot prove which Spam verdict was persisted.
+        if (saved === stillEligible.length) {
+          for (const result of stillEligible) if (result.isSpam) this.savedSpamVerdicts.add(result);
+        }
+      }
 
       // Save extracted contact notes
       if (this.deps.saveNotes) {
         const allNotes: Array<{ email: string; note: string; category: string; sourceEmailId?: string }> = [];
         for (const result of results) {
+          if (spamBlocked.has(result.emailId)) continue;
           if (result.notes && result.notes.length > 0) {
             const enriched = emails.find(e => e.id === result.emailId);
             const senderEmail = enriched?.fromAddress || '';
@@ -588,10 +627,15 @@ export class UnifiedPipeline {
   private async executeOrPropose(
     email: EmailRecord,
     prediction: { action: UserActionType; confidence: number; reasoning: string } | null,
-  ): Promise<{ executed: boolean; proposed: boolean; decisionId?: string; predictedAction?: string }> {
+    ownSpam = false,
+  ): Promise<{ executed: boolean; proposed: boolean; decisionId?: string; predictedAction?: string; spam?: PipelineResult }> {
     if (!prediction) return { executed: false, proposed: false };
+    // Provider/local Spam can arrive after model output but before an action.
+    const latest = await this.deps.getEmail(email.id);
+    const spam = await this.spamProtectedResult(latest ?? email, ownSpam && prediction.action === 'spam');
+    if (spam) return { executed: false, proposed: false, spam };
     // 'enabled' only gates auto-execution, not proposals (suggestions are passive)
-    if (!this.isSafeToAct(email, prediction.action)) return { executed: false, proposed: false };
+    if (!this.isSafeToAct(latest ?? email, prediction.action)) return { executed: false, proposed: false };
 
     const now = Math.floor(Date.now() / 1000);
 

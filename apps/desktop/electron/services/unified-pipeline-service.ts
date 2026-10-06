@@ -15,7 +15,7 @@ import {
   BehaviorIntelligence,
   LogAggregator,
   MAX_API_RETRIES,
-  NATIVE_PROVIDER_CATEGORY_SLUGS,
+  GMAIL_CLASSIFICATION_CATEGORY_SLUGS,
   SARV_LABEL_PARENT,
   UnifiedPipeline,
   callAIWithRetry,
@@ -23,6 +23,7 @@ import {
   decideCategorizationAction,
   encodeAiCategories,
   existingCategoryClassification,
+  isSpamProtectedEmail,
   automaticCategorizationDeferred,
   parseCategorySelection,
   folderPathForCategory,
@@ -282,6 +283,14 @@ function findSiblingCategories(messageId: string | undefined, sourceStorage: any
 
 interface PropagatePriority { priorityScore?: number | null; priorityTier?: string | null; priorityReasoning?: string | null; recommendedAction?: string | null }
 
+/** Recheck the current mailbox role before sending or mirroring an AI verdict. */
+async function isStoredSpam(storage: any, email: any): Promise<boolean> {
+  if (isSpamProtectedEmail(email)) return true;
+  const folder = email.folderId ? await storage.getFolder?.(email.folderId) : null;
+  if (isSpamProtectedEmail(email, folder)) return true;
+  return isSpamProtectedEmail(email, folder, await storage.getFolders?.());
+}
+
 function propagateCategoriesToLinkedAccounts(messageId: string | undefined, categories: string[], sourceStorage: any, priority?: PropagatePriority): void {
   if (!messageId || categories.length === 0) return;
   const now = Math.floor(Date.now() / 1000);
@@ -289,9 +298,9 @@ function propagateCategoriesToLinkedAccounts(messageId: string | undefined, cate
   for (const [, rt] of getAllAccountRuntimes()) {
     if (!rt.storage || rt.storage === sourceStorage) continue;
     try {
-      const row = (rt.storage as any).db?.prepare?.('SELECT id, tags, agent_status, server_categories, manual_categories, gmail_categories_pending FROM emails WHERE message_id = ? LIMIT 1')?.get(messageId) as { id?: string; tags?: string; agent_status?: string; server_categories?: string | null; manual_categories?: string | null; gmail_categories_pending?: number } | undefined;
-      if (!row?.id) continue;
-      const classification = { serverCategories: parseCategorySelection(row.server_categories), manualCategories: parseCategorySelection(row.manual_categories), gmailCategoriesPending: row.gmail_categories_pending === 1 };
+      const row = (rt.storage as any).db?.prepare?.(`SELECT e.id, e.tags, e.agent_status, e.server_categories, e.manual_categories, e.gmail_categories_pending, e.gmail_important, e.spam_user_verdict, EXISTS (SELECT 1 FROM folders sf WHERE lower(sf.special_use) IN ('\\junk', '\\spam') AND instr(e.tags, '|' || sf.path || '|') > 0) AS linked_spam, f.path AS folder_path, f.special_use FROM emails e LEFT JOIN folders f ON f.id = e.folder_id WHERE e.message_id = ? LIMIT 1`)?.get(messageId) as { id?: string; tags?: string; agent_status?: string; server_categories?: string | null; manual_categories?: string | null; gmail_categories_pending?: number; gmail_important?: number | null; spam_user_verdict?: 'spam' | 'ham' | null; linked_spam?: number; folder_path?: string; special_use?: string } | undefined;
+      if (!row?.id || row.linked_spam === 1 || isSpamProtectedEmail({ tags: row.tags, spamUserVerdict: row.spam_user_verdict }, { path: row.folder_path, specialUse: row.special_use })) continue;
+      const classification = { serverCategories: parseCategorySelection(row.server_categories), manualCategories: parseCategorySelection(row.manual_categories), gmailCategoriesPending: row.gmail_categories_pending === 1, gmailImportant: row.gmail_important == null ? null : row.gmail_important === 1 };
       if (existingCategoryClassification(classification) || automaticCategorizationDeferred(classification)) continue;
       // Never CLOBBER a copy that was independently categorized in its own
       // account: saveEmailCategoriesBatch REPLACES all category tags, so a copy
@@ -692,6 +701,8 @@ export function initializeUnifiedPipeline(
       // (pStorage()/pRepos()), not the account that was active at init — so a
       // background account's email is read from and categorized into ITS OWN db.
       getEmail: (id: string) => pStorage().getEmail(id),
+      getFolder: (id: string) => pStorage().getFolder(id),
+      getFolders: () => pStorage().getFolders(),
       getSenderContextBatch: (emails: string[]) => { try { return (pStorage() as any).getSenderContextBatch(emails); } catch { return {}; } },
       getThreadDepths: (ids: string[]) => { try { return (pStorage() as any).getThreadDepths(ids); } catch { return {}; } },
       getSenderRepetitionStats: (emails: string[]) => { try { return (pStorage() as any).getSenderRepetitionStats(emails); } catch { return { sameSubject: {}, totalEmails: 0 }; } },
@@ -905,6 +916,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
   try {
     const email = await storage.getEmail(emailId);
     if (!email) return;
+    if (await isStoredSpam(storage, email)) return;
 
     // Defense-in-depth: never run AI on a read email. Callers should gate
     // before getting here (polling query does, event trigger does), but if
@@ -959,6 +971,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     let executed = false;
     let proposed = false;
     let categorizationFailed = false;
+    let modelDetectedSpam = false;
     // Deterministic parse failure only (LLM answered but dropped/mangled THIS
     // email) — distinct from a transient/terminal thrown error. Used to cap
     // retries so an unparseable email doesn't loop through the LLM forever.
@@ -1000,7 +1013,8 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
         // callbacks (esp. saveEmailCategoriesBatch) hit THIS email's account db.
         const result = await runCategorizeExclusive(async () => {
           const current = await storage.getEmail(emailId);
-          const authority = current && existingCategoryClassification(current);
+          if (!current || await isStoredSpam(storage, current)) return { categories: [], classificationPending: true, executed: false, proposed: false } as any;
+          const authority = existingCategoryClassification(current);
           if (authority) return { categories: authority.categories, classificationSource: authority.source, executed: false, proposed: false } as any;
           if (current && automaticCategorizationDeferred(current)) return { categories: [], classificationPending: true, executed: false, proposed: false } as any;
           // Dual-delivery de-dup: if the SAME message was already categorized in
@@ -1021,6 +1035,7 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
         });
         if (result) {
           categories = result.categories;
+          modelDetectedSpam = result.isSpam === true && !result.classificationSource;
           executed = result.executed;
           proposed = result.proposed;
           if (result.predictedAction) recommendedAction = result.predictedAction;
@@ -1059,6 +1074,13 @@ async function runPipeline2(emailId: string, storage: any = getStorage()): Promi
     // The authoritative classification may have arrived during an AI request.
     // Recheck before storing/mirroring an obsolete result or spreading it to siblings.
     const latest = await storage.getEmail(emailId);
+    if (!latest) return;
+    if (await isStoredSpam(storage, latest)) {
+      // The current AI verdict may just have filed ordinary mail as Spam.
+      // Finalize its score without relabeling, mirroring or notifying about Junk.
+      if (modelDetectedSpam) repos?.agent?.markAgentDone(emailId, { priorityScore, priorityTier, priorityReasoning, recommendedAction });
+      return;
+    }
     existingClassification = latest && existingCategoryClassification(latest);
     classificationPending = !!latest && automaticCategorizationDeferred(latest);
     if (existingClassification) {
@@ -2144,7 +2166,7 @@ async function applyEmailLabels(
   // cats.length === 0 is VALID here: the mail lost all its categories, so we skip
   // the apply and fall straight to stale-removal below (strip every label).
   const mirrorCats = isGmail
-    ? cats.filter((category) => !(NATIVE_PROVIDER_CATEGORY_SLUGS as readonly string[]).includes(category.slug))
+    ? cats.filter((category) => category.slug !== 'important' && !(GMAIL_CLASSIFICATION_CATEGORY_SLUGS as readonly string[]).includes(category.slug))
     : cats;
   let res: string = 'success';
   if (cats.length > 0) {
@@ -2222,7 +2244,7 @@ export async function mirrorCategoryLabels(storage: any, email: any, categorySlu
     const canApply = async (): Promise<boolean> => {
       const latest = await storage.getEmail(email.id);
       return !!latest && latest.uid === expectedUid && latest.folderId === expectedFolderId &&
-        !existingCategoryClassification(latest) && !automaticCategorizationDeferred(latest);
+        !existingCategoryClassification(latest) && !automaticCategorizationDeferred(latest) && !await isStoredSpam(storage, latest);
     };
     const accountId = getAccountIdForStorage(storage);
     const acct = accountId ?? 'active';
@@ -2233,7 +2255,7 @@ export async function mirrorCategoryLabels(storage: any, email: any, categorySlu
       if (!categoryLabelConfig.enabled || !email?.uid || !Array.isArray(categorySlugs)) return;
       const latest = await storage.getEmail(email.id);
       if (!latest || latest.uid !== expectedUid || latest.folderId !== expectedFolderId ||
-          existingCategoryClassification(latest) || automaticCategorizationDeferred(latest)) return;
+          existingCategoryClassification(latest) || automaticCategorizationDeferred(latest) || await isStoredSpam(storage, latest)) return;
       email = { ...latest };
 
       // Resolve the engine STRICTLY from THIS email's own storage — the account
@@ -2807,7 +2829,7 @@ function startPollingTrigger(): void {
           const slugSet = getCategorySlugSet(storage);
           const pendingLabel = repos.agent.getEmailsPendingLabel(LABEL_DRAIN_BATCH, AUTO_BACKLOG_RECENT_CAP());
           for (const e of pendingLabel) {
-            if (automaticCategorizationDeferred(e)) continue;
+            if (automaticCategorizationDeferred(e) || await isStoredSpam(storage, e)) continue;
             const authority = existingCategoryClassification(e);
             // Manual changes already have a durable native/full-selection
             // operation. A second AI mirror could overwrite a newer choice.

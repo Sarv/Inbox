@@ -1,13 +1,11 @@
 // Email Repository — Unified Tags System (v2)
 // All queries use instr(tags, '|tag|') — zero JOINs
 
-import type {
-  EmailRecord,
-  SearchQuery,
-  PaginationOptions,
-  ViewFilter,
-} from '@sarvinbox/core';
 import {
+  type EmailRecord,
+  type SearchQuery,
+  type PaginationOptions,
+  type ViewFilter,
   addTag,
   removeTag,
   parseTags,
@@ -23,6 +21,7 @@ import {
   isDraftRow,
   parseCategorySelection,
   NATIVE_PROVIDER_CATEGORY_SLUGS,
+  providerCategorySelection,
   type ConversationFolders,
   type FirstSplitKey,
 } from '@sarvinbox/core';
@@ -484,7 +483,7 @@ export class EmailRepository extends BaseRepository {
         priority,
         has_attachments, attachment_count, attachment_names, attachment_sizes,
         calendar_ics, calendar_added,
-        importance_score, importance_source, server_categories, manual_categories, gmail_categories_pending,
+        importance_score, importance_source, server_categories, manual_categories, gmail_categories_pending, gmail_important, manual_important,
         ai_processed_at, ai_confidence, ai_reasoning,
         snooze_until, snooze_original_tags,
         has_embedding, embedding_last_generated,
@@ -517,7 +516,7 @@ export class EmailRepository extends BaseRepository {
         @priority,
         @hasAttachments, @attachmentCount, @attachmentNames, @attachmentSizes,
         @calendarIcs, @calendarAdded,
-        @importanceScore, @importanceSource, @serverCategories, @manualCategories, @gmailCategoriesPending,
+        @importanceScore, @importanceSource, @serverCategories, @manualCategories, @gmailCategoriesPending, @gmailImportant, @manualImportant,
         @aiProcessedAt, @aiConfidence, @aiReasoning,
         @snoozeUntil, @snoozeOriginalTags,
         @hasEmbedding, @embeddingLastGenerated,
@@ -566,6 +565,8 @@ export class EmailRepository extends BaseRepository {
       serverCategories: email.serverCategories == null ? null : JSON.stringify(email.serverCategories),
       manualCategories: email.manualCategories == null ? null : JSON.stringify(email.manualCategories),
       gmailCategoriesPending: email.gmailCategoriesPending ? 1 : 0,
+      gmailImportant: email.gmailImportant == null ? null : Number(email.gmailImportant),
+      manualImportant: email.manualImportant == null ? null : Number(email.manualImportant),
       aiProcessedAt: email.aiProcessedAt || null,
       aiConfidence: email.aiConfidence || 0,
       aiReasoning: email.aiReasoning || null,
@@ -628,6 +629,9 @@ export class EmailRepository extends BaseRepository {
       if (patch[key] !== undefined && patch[key] !== null) {
         (patch as Record<string, unknown>)[key] = JSON.stringify(patch[key]);
       }
+    }
+    for (const key of ['gmailImportant', 'manualImportant'] as const) {
+      if (typeof patch[key] === 'boolean') (patch as Record<string, unknown>)[key] = Number(patch[key]);
     }
     if (updates.folderId !== undefined && updates.uid === undefined) {
       const cur = this.db
@@ -928,15 +932,17 @@ export class EmailRepository extends BaseRepository {
    * ahead of the body columns in the row, so SQLite never touches the body
    * overflow pages.
    */
-  async getTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean }>> {
-    const rows = await this.scanFolderByUid<{ id: string; uid: number; tags: string; server_categories: string | null; manual_categories: string | null; gmail_categories_pending: number }>(
+  async getTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null; manualImportant?: boolean | null }>> {
+    const rows = await this.scanFolderByUid<{ id: string; uid: number; tags: string; server_categories: string | null; manual_categories: string | null; gmail_categories_pending: number; gmail_important: number | null; manual_important: number | null }>(
       'getTagsInFolder',
-      'id, uid, tags, server_categories, manual_categories, gmail_categories_pending',
+      'id, uid, tags, server_categories, manual_categories, gmail_categories_pending, gmail_important, manual_important',
       folderId,
     );
-    return rows.map(({ id, uid, tags, server_categories, manual_categories, gmail_categories_pending }) => ({
+    return rows.map(({ id, uid, tags, server_categories, manual_categories, gmail_categories_pending, gmail_important, manual_important }) => ({
       id, uid, tags, serverCategories: parseCategorySelection(server_categories), manualCategories: parseCategorySelection(manual_categories),
       gmailCategoriesPending: gmail_categories_pending === 1,
+      gmailImportant: gmail_important == null ? null : gmail_important === 1,
+      manualImportant: manual_important == null ? null : manual_important === 1,
     }));
   }
 
@@ -1133,8 +1139,8 @@ export class EmailRepository extends BaseRepository {
    * Get emails by folder (via tags)
    */
   /** Called after pending local operations are protected; mirror acknowledged server state locally. */
-  setServerCategories(emailId: string, categories: string[]): void {
-    this.setCategoryAuthority(emailId, categories, 'server');
+  setServerCategories(emailId: string, categories: string[], gmailImportant?: boolean | null): void {
+    this.setCategoryAuthority(emailId, categories, 'server', gmailImportant);
   }
 
   /** Null releases the override; [] is an explicit choice to leave this mail unlabelled. */
@@ -1142,51 +1148,74 @@ export class EmailRepository extends BaseRepository {
     this.setCategoryAuthority(emailId, categories, 'manual');
   }
 
-  private setCategoryAuthority(emailId: string, categories: string[] | null, source: 'server' | 'manual'): void {
+  /** Independent Gmail flag choice must not turn into a category override or another label-drain writer. */
+  setManualImportance(emailId: string, important: boolean): void {
+    const row = this.db.prepare('SELECT tags FROM emails WHERE id = ?').get(emailId) as { tags: string } | undefined;
+    if (!row) return;
+    const tags = important ? addTag(row.tags, 'important') : removeTag(row.tags, 'important');
+    this.db.prepare(`UPDATE emails SET manual_important = ?, tags = ?, importance_source = 'user', updated_at = ? WHERE id = ?`)
+      .run(Number(important), tags, Math.floor(Date.now() / 1000), emailId);
+  }
+
+  private setCategoryAuthority(emailId: string, categories: string[] | null, source: 'server' | 'manual', gmailImportant?: boolean | null): void {
     this.db.transaction(() => {
       const row = this.db.prepare(`
-        SELECT tags, server_categories, manual_categories, importance_source FROM emails WHERE id = ?
-      `).get(emailId) as { tags: string; server_categories: string | null; manual_categories: string | null; importance_source: string } | undefined;
+        SELECT tags, server_categories, manual_categories, importance_source, gmail_important, manual_important, ai_categories FROM emails WHERE id = ?
+      `).get(emailId) as { tags: string; server_categories: string | null; manual_categories: string | null; importance_source: string;
+        gmail_important: number | null; manual_important: number | null; ai_categories: string | null } | undefined;
       if (!row) return;
+      const native = gmailImportant === undefined ? row.gmail_important : gmailImportant === null ? null : Number(gmailImportant);
+      // Core protects queued operations before reconciliation. Once acknowledged,
+      // a later webmail change updates the independent manual flag snapshot too.
+      const manualImportant = source === 'server' && typeof gmailImportant === 'boolean' && row.manual_important !== null
+        ? Number(gmailImportant) : row.manual_important;
       const definitions = this.db.prepare('SELECT slug FROM ai_category_definitions').all() as { slug: string }[];
-      const known = new Set(definitions.map((d) => d.slug));
-      known.add('important');
-      for (const slug of NATIVE_PROVIDER_CATEGORY_SLUGS) known.add(slug);
-      const selection = categories === null ? null : [...new Set(categories)].filter((slug) => known.has(slug));
-      const encoded = selection === null ? null : JSON.stringify(selection);
-      const column = source === 'server' ? 'server_categories' : 'manual_categories';
-      if (row[column] === encoded && (source === 'manual' || row.manual_categories === null || row.manual_categories === encoded)) return;
-
+      const known = new Set([...definitions.map((d) => d.slug), ...NATIVE_PROVIDER_CATEGORY_SLUGS]);
+      const accepted = categories === null ? null : [...new Set(categories)].filter((slug) => known.has(slug));
+      const selection = source === 'server' && accepted !== null
+        ? providerCategorySelection(accepted, native === null ? null : native === 1) : accepted;
       const previousServer = parseCategorySelection(row.server_categories);
       const previousManual = parseCategorySelection(row.manual_categories);
-      // A flags-only refresh of ordinary mail must not erase a real AI verdict;
-      // nor may provider reconciliation cancel an offline manual label operation.
-      if (source === 'server' && previousManual === null &&
-          ((previousServer?.length ?? 0) === 0 && (selection?.length ?? 0) === 0)) {
-        this.db.prepare('UPDATE emails SET server_categories = ? WHERE id = ?').run(encoded, emailId);
-        return;
-      }
-      const server = source === 'server' ? selection : parseCategorySelection(row.server_categories);
-      // Ingest waits for pending local operations before calling this setter.
-      // Once acknowledged, the server can change the user snapshot too (webmail
-      // and other clients must remain authoritative after a prior manual click).
+      const server = source === 'server' ? selection : previousServer;
       const manual = source === 'manual' ? selection : previousManual === null ? null : server;
+      const encodedServer = server === null ? null : JSON.stringify(server);
+      const encodedManual = manual === null ? null : JSON.stringify(manual);
+      if (row.server_categories === encodedServer && row.manual_categories === encodedManual &&
+          row.gmail_important === native && row.manual_important === manualImportant) return;
+      const categoriesChanged = row.server_categories !== encodedServer || row.manual_categories !== encodedManual;
+      const ordinaryRefresh = source === 'server' && previousManual === null &&
+        (previousServer?.length ?? 0) === 0 && (server?.length ?? 0) === 0;
       const selected = manual ?? server ?? [];
       let tags = row.tags || '||';
-      // Replace category projection only, preserving folder membership and ordinary flags.
-      for (const slug of known) tags = removeTag(tags, slug);
-      for (const slug of selected) tags = addTag(tags, slug);
-      const importanceSource = selected.includes('important') ? (manual ? 'user' : 'provider') : 'none';
+      if (categoriesChanged && !ordinaryRefresh) {
+        for (const slug of known) tags = removeTag(tags, slug);
+        for (const slug of selected) tags = addTag(tags, slug);
+      }
+      let importanceSource = row.importance_source;
+      if (native !== null) {
+        const important = manualImportant !== null ? manualImportant === 1
+          : native === 1 || selected.includes('important') || (ordinaryRefresh && hasTag(row.ai_categories || '||', 'important'));
+        tags = important ? addTag(tags, 'important') : removeTag(tags, 'important');
+        importanceSource = manualImportant !== null || (manual !== null && selected.includes('important')) ? 'user'
+          : native === 1 ? 'provider' : important ? 'ai' : 'none';
+      } else if (categoriesChanged && !ordinaryRefresh) {
+        importanceSource = selected.includes('important') ? (manual !== null ? 'user' : 'provider') : 'none';
+      }
       const authoritative = manual !== null || (server?.length ?? 0) > 0;
+      const resetsAI = categoriesChanged && !ordinaryRefresh;
       this.db.prepare(`
-        UPDATE emails SET server_categories = ?, manual_categories = ?, tags = ?, importance_source = ?,
-          agent_status = 'pending', ai_categories = NULL,
-          ai_processed_at = NULL, ai_confidence = 0, ai_reasoning = NULL,
-          ai_parse_failure_count = 0, ai_agent_failure_count = 0,
-          label_status = ?, updated_at = ?
-        WHERE id = ?
-      `).run(server === null ? null : JSON.stringify(server), manual === null ? null : JSON.stringify(manual), tags, importanceSource,
-        authoritative ? 'done' : null, Math.floor(Date.now() / 1000), emailId);
+        UPDATE emails SET server_categories = ?, manual_categories = ?, gmail_important = ?, manual_important = ?, tags = ?, importance_source = ?,
+          agent_status = CASE WHEN ? THEN 'pending' ELSE agent_status END,
+          ai_categories = CASE WHEN ? THEN NULL ELSE ai_categories END,
+          ai_processed_at = CASE WHEN ? THEN NULL ELSE ai_processed_at END,
+          ai_confidence = CASE WHEN ? THEN 0 ELSE ai_confidence END,
+          ai_reasoning = CASE WHEN ? THEN NULL ELSE ai_reasoning END,
+          ai_parse_failure_count = CASE WHEN ? THEN 0 ELSE ai_parse_failure_count END,
+          ai_agent_failure_count = CASE WHEN ? THEN 0 ELSE ai_agent_failure_count END,
+          label_status = CASE WHEN ? THEN ? ELSE label_status END, updated_at = ? WHERE id = ?
+      `).run(encodedServer, encodedManual, native, manualImportant, tags, importanceSource,
+        Number(resetsAI), Number(resetsAI), Number(resetsAI), Number(resetsAI), Number(resetsAI), Number(resetsAI), Number(resetsAI),
+        Number(resetsAI), authoritative ? 'done' : null, Math.floor(Date.now() / 1000), emailId);
     })();
   }
 
@@ -2390,6 +2419,8 @@ export class EmailRepository extends BaseRepository {
       serverCategories: parseCategorySelection(row.server_categories),
       manualCategories: parseCategorySelection(row.manual_categories),
       gmailCategoriesPending: row.gmail_categories_pending === 1,
+      gmailImportant: row.gmail_important == null ? null : row.gmail_important === 1,
+      manualImportant: row.manual_important == null ? null : row.manual_important === 1,
       authStatus: row.auth_status,
 
       // Spam filter (header stage) + origin IP for the reputation stage

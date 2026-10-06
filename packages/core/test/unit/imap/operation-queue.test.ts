@@ -52,7 +52,7 @@ interface OpRow {
   createdAt: number;
 }
 
-interface EmailRow { id: string; folderId: string; uid: number | null; messageId: string | null; manualCategories?: string[] | null; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }
+interface EmailRow { id: string; folderId: string; uid: number | null; messageId: string | null; manualCategories?: string[] | null; serverCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null; manualImportant?: boolean | null; tags?: string; spamUserVerdict?: 'spam' | 'ham' | null }
 
 /**
  * In-memory stand-in for the pending_operations / folders / emails methods the
@@ -65,7 +65,7 @@ interface EmailRow { id: string; folderId: string; uid: number | null; messageId
  */
 function makeFakeStorage() {
   const ops = new Map<number, OpRow>();
-  const folders = new Map<string, { id: string; path: string }>();
+  const folders = new Map<string, { id: string; path: string; specialUse?: string }>();
   const emails: EmailRow[] = [];
   let seq = 0;
   let createdSeq = 0;
@@ -170,6 +170,7 @@ function makeFakeStorage() {
         row.retryCount = 0;
       }
     },
+    async getFolders() { return [...folders.values()]; },
     async getFolderByPath(path: string) {
       return folders.get(path) ?? null;
     },
@@ -1751,6 +1752,21 @@ describe('complete category selection — one durable intent', () => {
 
 
 describe('Gmail native selection and legacy mirror cleanup', () => {
+  // Regression: app categories cannot clear or reassign ignored Gmail native tabs.
+  it('mirrors remaining app categories while leaving ignored native labels unchanged', async () => {
+    const server = await makeServer({ gmailLabels: true }); const h = await makeHarness({ server });
+    const modify = vi.fn(async () => undefined);
+    Object.assign(server, { canModifyGmailCategories: () => true, modifyGmailCategories: modify });
+    const uid = server.addMessage('INBOX', { labels: ['\\CategoryUpdates'] });
+    await server.selectFolder('INBOX');
+    await h.queue.setCategorySelection('INBOX', uid, { apply: [{ slug: 'social', name: 'Social' }], remove: [{ slug: 'updates', name: 'Updates' }, { slug: 'forums', name: 'Forums' }], host: 'imap.gmail.com', mode: 'copy' });
+    expect(modify).not.toHaveBeenCalled();
+    const row = (await server.fetchFlagsOnly([uid]))[0];
+    expect(row.labels).toEqual(['\\CategoryUpdates']);
+    expect(server.messageCount('Sarv Inbox/Social')).toBe(1);
+    expect(server.messageCount('INBOX')).toBe(4);
+  });
+
   // Native tab removal alone must not leave a legacy Sarv Inbox mirror that reintroduces the category.
   it('routes native tab mutations through OAuth API and clears the old mirror on removal', async () => {
     const server = await makeServer({ gmailLabels: true }); const h = await makeHarness({ server });
@@ -1761,7 +1777,8 @@ describe('Gmail native selection and legacy mirror cleanup', () => {
     const removeLabels = vi.spyOn(server, 'removeGmailLabels');
     expect(await h.queue.setCategorySelection('INBOX', 1, { apply: [{ slug: 'social', name: 'Social' }], remove: [{ slug: 'promotions', name: 'Promotions' }], host: 'imap.gmail.com', mode: 'copy' })).toBe('success');
     expect(modify).toHaveBeenCalledWith([1], [], ['promotions'], 1);
-    expect(modify).toHaveBeenCalledWith([1], ['social'], [], 1);
+    expect(modify).toHaveBeenCalledTimes(1);
+    expect(server.messageCount('Sarv Inbox/Social')).toBe(1);
     expect(removeLabels).toHaveBeenCalledWith([1], ['Sarv Inbox/Promotions']);
   });
 
@@ -1811,7 +1828,7 @@ describe('category and importance legacy replay failure boundaries', () => {
   // Older clients exposing Gmail labels alone may not claim native tab changes succeeded.
   it('retains native category operations when the client cannot call the Gmail API', async () => {
     const h = await makeHarness({ server: await makeServer({ gmailLabels: true }), maxRetries: 1 });
-    await expect(h.queue.applyCategoryLabels('INBOX', 1, { categories: [{ slug: 'social', name: 'Social' }], host: 'imap.gmail.com', mode: 'copy' })).rejects.toMatchObject({ code: 'GMAIL_CATEGORY_OAUTH_REQUIRED' });
+    await expect(h.queue.applyCategoryLabels('INBOX', 1, { categories: [{ slug: 'promotions', name: 'Promotions' }], host: 'imap.gmail.com', mode: 'copy' })).rejects.toMatchObject({ code: 'GMAIL_CATEGORY_OAUTH_REQUIRED' });
     expect(h.storage.statuses()).toEqual(['failed']); expect(h.server.callCount('copyMessages')).toBe(0);
   });
 });
@@ -1827,6 +1844,60 @@ describe('legacy mirrors cannot override later classification authority', () => 
     const row = h.storage.addEmail({ id: 'mail', folderId: 'f-INBOX', uid: 1, messageId: '<mail>' });
     return { ...h, row };
   }
+
+  // Regression: an explicit Gmail flag clear blocks stale AI without creating a manual category snapshot.
+  it('protects an independent manual Gmail importance clear from an old AI add', async () => {
+    const h = await setupAuthority(); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important]));
+    h.row.gmailImportant = false; h.row.manualImportant = false;
+    h.state.connected = true;
+    await h.queue.processQueue();
+    expect(h.server.flagsOf('INBOX', 1)).not.toContain('Important');
+  });
+
+  // Regression: a native Gmail Important flag survives a stale AI category cleanup.
+  it('preserves native Gmail importance independently of category selection', async () => {
+    const h = await setupAuthority();
+    await h.queue.markImportant('INBOX', 1, true);
+    h.row.gmailImportant = true; h.row.serverCategories = ['promotions'];
+    await h.queue.removeCategoryLabels('INBOX', 1, payload([important]));
+    expect(h.server.flagsOf('INBOX', 1)).toContain('Important');
+  });
+
+  // Regression: Gmail native false does not stop the app assigning an AI Important category.
+  it('allows AI importance when the Gmail marker has no manual override', async () => {
+    const h = await setupAuthority(); h.row.gmailImportant = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important]));
+    expect(h.server.flagsOf('INBOX', 1)).toContain('Important');
+  });
+
+  // Regression: a queued automatic mirror cannot relabel mail after it becomes Spam.
+  it('drops stale automatic categories for newly protected Spam', async () => {
+    const h = await setupAuthority(); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important, promotions]));
+    h.row.tags = '|spam|'; h.state.connected = true;
+    await h.queue.processQueue();
+    expect(h.server.flagsOf('INBOX', 1)).not.toContain('Important');
+    expect(h.server.flagsOf('INBOX', 1)).not.toContain('promotions');
+  });
+
+  // Regression: a localized linked Junk label protects a Gmail row whose primary mailbox is still INBOX.
+  it('protects linked localized provider Spam even with an old ham verdict', async () => {
+    const h = await setupAuthority(); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important]));
+    h.storage.folders.set('Junk role', { id: 'junk', path: '[Gmail]/Correo no deseado', specialUse: '\\Junk' });
+    h.row.tags = '|INBOX|[Gmail]/Correo no deseado|spam|'; h.row.spamUserVerdict = 'ham';
+    h.state.connected = true; await h.queue.processQueue();
+    expect(h.server.flagsOf('INBOX', 1)).not.toContain('Important');
+  });
+
+  // Regression: old ignored native metadata cannot block app mirrors before a cache repair runs.
+  it('treats stale ignored Gmail categories as eligible for an app classification', async () => {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+    h.storage.addEmail({ id: 'cached', folderId: 'f-INBOX', uid: 1, messageId: '<cached>', gmailImportant: false, serverCategories: ['social'] });
+    await h.queue.applyCategoryLabels('INBOX', 1, { categories: [finance], host: 'imap.gmail.com', mode: 'copy' });
+    expect(h.server.messageCount('Sarv Inbox/Finance')).toBe(1);
+  });
 
   // Different queued types still refer to one classification; the newer manual flag wins.
   it('filters an older Important add after a newer online manual clear', async () => {

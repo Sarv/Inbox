@@ -1,4 +1,4 @@
-import { addTag, NATIVE_PROVIDER_CATEGORY_SLUGS, SARV_LABEL_PARENT } from '@sarvinbox/core';
+import { addTag, GMAIL_CLASSIFICATION_CATEGORY_SLUGS, SARV_LABEL_PARENT } from '@sarvinbox/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -244,7 +244,7 @@ function addAccount(opts: AccountOptions) {
     ensureCategoryLabelsExist: vi.fn(async (cats: Array<{ name: string }>) =>
       cats.reduce((n, c) => n + ensure(label(c.name)), ensure(PARENT))),
     applyCategoryLabels: vi.fn(async (_folder: string, uid: number, op: { categories: Array<{ slug?: string; name: string }> }) => {
-      const mirrorCategories = op.categories.filter((category) => !gmail || !(NATIVE_PROVIDER_CATEGORY_SLUGS as readonly string[]).includes(category.slug ?? ''));
+      const mirrorCategories = op.categories.filter((category) => !gmail || (category.slug !== 'important' && !(GMAIL_CLASSIFICATION_CATEGORY_SLUGS as readonly string[]).includes(category.slug ?? '')));
       if (mirrorCategories.length) ensure(PARENT);
       const on = messageLabels.get(uid) ?? new Set<string>();
       for (const c of mirrorCategories) { ensure(label(c.name)); on.add(label(c.name)); }
@@ -675,6 +675,18 @@ describe('automatic mirrors respect explicit category mutations', () => {
     expect(b.markLabelDone).not.toHaveBeenCalled();
   });
 
+  // Regression: linked localized Spam is still provider Spam while its primary mailbox is INBOX.
+  it('skips a linked localized Junk message despite a previous ham verdict', async () => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    const row = b.emails[0] as any;
+    row.tags = '|INBOX|[Gmail]/Correo no deseado|spam|'; row.spamUserVerdict = 'ham';
+    const folders = await b.storage.getFolders();
+    vi.spyOn(b.storage, 'getFolders').mockResolvedValue([...folders, { id: 'junk', path: '[Gmail]/Correo no deseado', specialUse: '\\Junk' }]);
+    await mirrorCategoryLabels(b.storage, row, ['travel']);
+    expect(b.queue.applyCategoryLabels).not.toHaveBeenCalled();
+    expect(writesTo(b)).toBe(0);
+  });
+
   it('finishes a token-paused mirror before a later explicit clear, leaving the clear last', async () => {
     const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
     const entered = classificationDeferred();
@@ -718,7 +730,7 @@ describe('automatic mirrors respect explicit category mutations', () => {
     } finally { token.mockRestore(); }
   });
 
-  it.each(['manual-clear', 'provider', 'unknown', 'missing', 'moved', 'folder-moved'])('rechecks %s state after awaited Gmail colours and does not finalize a skipped mirror', async (state) => {
+  it.each(['manual-clear', 'provider', 'unknown', 'spam', 'missing', 'moved', 'folder-moved'])('rechecks %s state after awaited Gmail colours and does not finalize a skipped mirror', async (state) => {
     const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
     const row = b.emails[0] as any;
     const getEmail = vi.spyOn(b.storage, 'getEmail');
@@ -726,6 +738,7 @@ describe('automatic mirrors respect explicit category mutations', () => {
       if (state === 'manual-clear') row.manualCategories = [];
       else if (state === 'provider') row.serverCategories = ['invoices'];
       else if (state === 'unknown') row.gmailCategoriesPending = true;
+      else if (state === 'spam') row.tags = '|spam|';
       else if (state === 'missing') getEmail.mockResolvedValue(null);
       else if (state === 'folder-moved') row.folderId = 'different-folder';
       else row.uid = 999;
@@ -737,10 +750,11 @@ describe('automatic mirrors respect explicit category mutations', () => {
     expect(b.markLabelDone).not.toHaveBeenCalled();
   });
 
-  it('rechecks provider authority before stale-label removal after an awaited apply', async () => {
+  it.each(['provider', 'spam'])('rechecks %s protection before stale-label removal after an awaited apply', async (state) => {
     const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
     b.queue.applyCategoryLabels.mockImplementationOnce(async () => {
-      (b.emails[0] as any).serverCategories = ['invoices'];
+      if (state === 'provider') (b.emails[0] as any).serverCategories = ['invoices'];
+      else (b.emails[0] as any).tags = '|spam|';
       return 'success';
     });
     await mirrorCategoryLabels(b.storage, b.emails[0], ['travel']);
@@ -749,13 +763,14 @@ describe('automatic mirrors respect explicit category mutations', () => {
     expect(b.markLabelDone).not.toHaveBeenCalled();
   });
 
-  it.each(['manual', 'provider', 'unknown', 'missing', 'moved'])('skips already %s mail before Gmail or IMAP writes', async (state) => {
+  it.each(['manual', 'provider', 'unknown', 'spam', 'missing', 'moved'])('skips already %s mail before Gmail or IMAP writes', async (state) => {
     const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
     const row = b.emails[0] as any;
     const stale = { ...row };
     if (state === 'manual') row.manualCategories = [];
     else if (state === 'provider') row.serverCategories = ['invoices'];
     else if (state === 'unknown') row.gmailCategoriesPending = true;
+    else if (state === 'spam') row.tags = '|spam|';
     else if (state === 'missing') vi.spyOn(b.storage, 'getEmail').mockResolvedValue(null);
     else row.folderId = 'different-folder';
     await mirrorCategoryLabels(b.storage, stale, ['travel']);
@@ -767,7 +782,18 @@ describe('automatic mirrors respect explicit category mutations', () => {
 });
 
 describe('native Gmail categories do not create app mirrors', () => {
-  it.each([{ slugs: ['important'] }, { slugs: ['promotions', 'social', 'updates', 'forums', 'personal'] }])('queues native intent and removes old native mirrors for %j', async ({ slugs }) => {
+  // Regression: ignored Gmail native tabs must not be used when mirroring the app's Social classification.
+  it('colors and keeps an app Social mirror separately from native categories', async () => {
+    const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
+    vi.spyOn(b.storage, 'getCategoryDefinitions').mockReturnValue([{ slug: 'social', name: 'Social', color: '#123456', isEnabled: 1 }]);
+    await mirrorCategoryLabels(b.storage, b.emails[0], ['social']);
+    expect(names(b)).toEqual([PARENT, label('Social')]);
+    expect(coloured(b)).toEqual([label('Social')]);
+    expect([...b.messageLabels.get(201)!]).toEqual([label('Social')]);
+    expect(b.queue.removeGmailLabels).not.toHaveBeenCalled();
+  });
+
+  it.each([{ slugs: ['important'] }, { slugs: ['promotions'] }])('queues native intent and removes old native mirrors for %j', async ({ slugs }) => {
     const b = addAccount({ id: 'acct-b', email: 'b@gmail.com', auth: 'oauth', mail: [[201, 'travel']] });
     const definitions = slugs.map((slug) => ({ slug, name: slug, color: '#123456', isEnabled: 1 }));
     vi.spyOn(b.storage, 'getCategoryDefinitions').mockReturnValue(definitions);

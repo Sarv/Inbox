@@ -434,6 +434,10 @@ export class MessageProcessor {
     // The user's own outgoing mail is never spam-scored — see isOwnMailFolder,
     // which the header backfill consults for the same decision.
     const ownMail = isOwnMailFolder(folder);
+    const providerSpamFolder = classifyFolder(folder) === 'spam';
+    const providerSpamUids = new Set(messages.filter((message) => mapGmailLabels(message.labels ?? []).roles.includes('spam') ||
+      message.flags.some((flag) => /^(?:\\|\$)?(?:junk|spam)$/i.test(flag))).map((message) => message.uid));
+    const gmailSource = /^\[gmail\]|^\[google mail\]/i.test(folder.path);
 
     // UIDs in THIS folder with a pending/executing local op (move/delete/flag) not
     // yet confirmed by the server. Used to tell a genuine external move-BACK into
@@ -544,11 +548,12 @@ export class MessageProcessor {
             if (!pendingUids.has(message.uid) && !isRestoreRace && storage.setServerCategories) {
               const classified = mapServerClassification({ flags: message.flags, labels: message.labels, categories: message.categories,
                 folderPath, knownCategories: labelCtx.knownCategories });
-              const categories = this.mergeProviderCategories(labelCtx, existing.tags || '||', existing.serverCategories ?? [], classified.categories, message.labels !== undefined, message.gmailCategoriesKnown);
+              const categories = this.mergeProviderCategories(labelCtx, existing.tags || '||', existing.serverCategories ?? [], classified.categories, message.labels !== undefined || message.gmailCategoriesKnown !== undefined, message.gmailCategoriesKnown);
               if (message.gmailCategoriesKnown !== undefined && existing.gmailCategoriesPending !== !message.gmailCategoriesKnown) {
                 await storage.updateEmail(existing.id, { gmailCategoriesPending: !message.gmailCategoriesKnown });
               }
-              await storage.setServerCategories(existing.id, [...categories, ...(classified.important ? ['important'] : [])]);
+              const gmail = gmailSource || message.labels !== undefined || message.gmailCategoriesKnown !== undefined;
+              await storage.setServerCategories(existing.id, [...categories, ...(!gmail && classified.important ? ['important'] : [])], gmail ? classified.important : null);
             }
 
             // Update starred if in special folder
@@ -600,6 +605,8 @@ export class MessageProcessor {
             knownSpammer,
             trustedSender,
             ownMail,
+            providerSpamFolder,
+            gmailSource,
             // Withheld in quiet/backfill mode with the rest of the reactive
             // work: a sweep of old mail must not become thousands of DNS
             // queries sent to an operator on the user's behalf.
@@ -704,7 +711,7 @@ export class MessageProcessor {
               if (actions.length === 0) continue;
               // A message the spam filter already filed keeps its flag and
               // label actions but is not moved again: spam wins over a rule.
-              const applicable = spamFiled.has(email.id) ? actions.filter((a) => !MOVE_ACTIONS.has(a.type)) : actions;
+              const applicable = (spamFiled.has(email.id) || providerSpamFolder || providerSpamUids.has(email.uid) || (email.spamUserVerdict !== 'ham' && hasTag(email.tags || '||', 'spam'))) ? actions.filter((a) => !MOVE_ACTIONS.has(a.type)) : actions;
               const before = { folderId: email.folderId, tags: email.tags || '' };
               const { tags, folderId, changed } = computeFilterActionResult(email, applicable, folders);
               if (changed) await storage.updateEmail(email.id, { tags, folderId });
@@ -815,7 +822,7 @@ export class MessageProcessor {
   private mergeProviderCategories(context: GmailLabelContext, tags: string, previous: readonly string[], current: readonly string[], labelsAuthoritative: boolean, gmailCategoriesKnown?: boolean): string[] {
     if (labelsAuthoritative) {
       // Failed native discovery cannot erase an earlier Google category. Labels may omit category tabs.
-      return [...new Set([...current, ...(gmailCategoriesKnown === false ? previous.filter((slug) => slug !== 'important') : [])])];
+      return [...new Set([...current, ...(gmailCategoriesKnown === false ? previous.filter((slug) => !['important', 'social', 'updates', 'forums', 'personal'].includes(slug)) : [])])];
     }
     const folderCategories = context.categoryFolders?.filter((folder) => hasTag(tags, folder.path)).map((folder) => folder.slug) ?? [];
     // A failed definition read is unknown, never permission to remove a category.
@@ -858,15 +865,15 @@ export class MessageProcessor {
     // can't be repaired, which is better than throwing on a background pass.
     if (!storage.getEmailTagsInFolder || !storage.bulkUpdateTags) return { scanned: 0, updated: 0 };
     const localRows = await storage.getEmailTagsInFolder(folder.id);
-    const byUid = new Map<number, { id: string; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }>();
+    const byUid = new Map<number, { id: string; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null }>();
     for (const row of localRows) {
-      if (row.uid != null) byUid.set(row.uid, { id: row.id, tags: row.tags || '', serverCategories: row.serverCategories, gmailCategoriesPending: row.gmailCategoriesPending });
+      if (row.uid != null) byUid.set(row.uid, { id: row.id, tags: row.tags || '', serverCategories: row.serverCategories, gmailCategoriesPending: row.gmailCategoriesPending, gmailImportant: row.gmailImportant });
     }
 
     const ctx = await this.buildGmailLabelContext(storage);
     const pendingUids = (await this.pendingUidsProvider?.(folder.path)) ?? new Set<number>();
     let updates: Array<{ id: string; uid: number; tags: string }> = [];
-    const classificationUpdates: Array<{ id: string; uid: number; categories: string[]; pending?: boolean; categoriesChanged: boolean }> = [];
+    const classificationUpdates: Array<{ id: string; uid: number; categories: string[]; gmailImportant: boolean; pending?: boolean; categoriesChanged: boolean }> = [];
     // Every tag this repair actually ADDS, so the folders whose membership grew
     // can have their stored counts recomputed. Nothing else will: the repair
     // runs off the backfill scheduler, outside any sync whose end-of-run recount
@@ -876,11 +883,11 @@ export class MessageProcessor {
       const local = byUid.get(uid);
       if (!local || pendingUids.has(uid)) continue;
       const classification = mapServerClassification({ labels, categories, knownCategories: ctx.knownCategories });
-      const providerCategories = [...this.mergeProviderCategories(ctx, local.tags, local.serverCategories ?? [], classification.categories, true, gmailCategoriesKnown), ...(classification.important ? ['important'] : [])];
+      const providerCategories = this.mergeProviderCategories(ctx, local.tags, local.serverCategories ?? [], classification.categories, true, gmailCategoriesKnown);
       const categoriesChanged = JSON.stringify([...(local.serverCategories ?? [])].sort()) !== JSON.stringify([...providerCategories].sort());
       const pending = gmailCategoriesKnown === undefined ? undefined : !gmailCategoriesKnown;
-      if ((storage.setServerCategories && categoriesChanged) || (pending !== undefined && local.gmailCategoriesPending !== pending)) {
-        classificationUpdates.push({ id: local.id, uid, categories: providerCategories, pending, categoriesChanged });
+      if ((storage.setServerCategories && (categoriesChanged || local.gmailImportant !== classification.important)) || (pending !== undefined && local.gmailCategoriesPending !== pending)) {
+        classificationUpdates.push({ id: local.id, uid, categories: providerCategories, gmailImportant: classification.important, pending, categoriesChanged });
       }
       const mapped = mapGmailLabels(labels, { knownCategories: ctx.knownCategories });
       const additions = [
@@ -913,7 +920,7 @@ export class MessageProcessor {
       for (const update of classificationUpdates) {
         if (!stillPending.has(update.uid)) {
           if (update.pending !== undefined) await storage.updateEmail(update.id, { gmailCategoriesPending: update.pending });
-          if (update.categoriesChanged) storage.setServerCategories(update.id, update.categories);
+          await storage.setServerCategories(update.id, update.categories, update.gmailImportant);
         }
       }
     }
@@ -939,6 +946,8 @@ export class MessageProcessor {
       trustedSender?: boolean;
       /** The user's own outgoing mail (Sent / Drafts) — never spam-scored. */
       ownMail?: boolean;
+      providerSpamFolder?: boolean;
+      gmailSource?: boolean;
       /**
        * Blocklist lookups for this message's sender. Passed per call rather
        * than read from the field so the quiet/backfill path can withhold it:
@@ -1130,7 +1139,10 @@ export class MessageProcessor {
 
     // The classification tag the AI pipeline excludes on and the Spam filter
     // view lists — the same lowercase `spam` the AI's own verdict writes.
-    if (scored?.isSpam && !trusted) tagList.push('spam');
+    const providerSpam = opts?.providerSpamFolder || classifyFolder({ path: folderPath || '' }) === 'spam' ||
+      mapGmailLabels(message.labels ?? []).roles.includes('spam') ||
+      message.flags.some((flag) => /^(?:\\|\$)?(?:junk|spam)$/i.test(flag));
+    if (providerSpam || (scored?.isSpam && !trusted)) tagList.push('spam');
     const tags = buildTags([...new Set(tagList)]);
 
     return {
@@ -1141,7 +1153,8 @@ export class MessageProcessor {
       uid: message.uid,
 
       // Provider classification survives restart and suppresses duplicate AI work.
-      serverCategories: [...serverClassification.categories, ...(serverClassification.important ? ['important'] : [])],
+      serverCategories: [...serverClassification.categories, ...(!(opts?.gmailSource || message.labels !== undefined || message.gmailCategoriesKnown !== undefined) && serverClassification.important ? ['important'] : [])],
+      gmailImportant: (opts?.gmailSource || message.labels !== undefined || message.gmailCategoriesKnown !== undefined) ? serverClassification.important : null,
       gmailCategoriesPending: message.gmailCategoriesKnown === false,
       importanceSource: serverClassification.important ? 'provider' : 'none',
 
@@ -2185,7 +2198,7 @@ export class MessageProcessor {
     // through every email in the folder so bulk flag changes done
     // elsewhere always sync correctly.
     const FLAG_SYNC_BATCH = 500;
-    const flagTagNames = FLAG_TAG_NAMES as readonly string[];
+    const flagTagNames = (FLAG_TAG_NAMES as readonly string[]).filter((tag) => tag !== 'important');
     // UIDs with a pending local flag change — never let the server-wins pass
     // below overwrite them (the change hasn't round-tripped yet).
     const pendingUids = (await this.pendingUidsProvider?.(folder.path)) ?? new Set<number>();
@@ -2197,9 +2210,9 @@ export class MessageProcessor {
     // quadratic) AND Phase 2's separate `getEmailUidsInFolder` scan, which
     // re-read the very same rows moments later in the same tick. Loaded lazily
     // so a cycle that does neither phase reads nothing at all.
-    let folderRows: Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }> | null = null;
+    let folderRows: Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null }> | null = null;
     let folderRowsLoaded = false;
-    const loadFolderRows = async (): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }> | null> => {
+    const loadFolderRows = async (): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; gmailCategoriesPending?: boolean; gmailImportant?: boolean | null }> | null> => {
       if (!folderRowsLoaded) {
         folderRowsLoaded = true;
         if (typeof storage.getEmailTagsInFolder === 'function') {
@@ -2308,7 +2321,7 @@ export class MessageProcessor {
     // instead of an awaited updateEmail per row (each of which re-SELECTs the
     // row with its bodies and commits its own transaction).
     let tagUpdates: Array<{ id: string; uid: number; tags: string }> = [];
-    let classificationUpdates: Array<{ id: string; uid: number; categories: string[]; counted: boolean; pending?: boolean; categoriesChanged: boolean }> = [];
+    let classificationUpdates: Array<{ id: string; uid: number; categories: string[]; gmailImportant: boolean | null; counted: boolean; pending?: boolean; categoriesChanged: boolean }> = [];
     const flushTagUpdates = async (): Promise<void> => {
       if (tagUpdates.length === 0 && classificationUpdates.length === 0) return;
       // A correction can queue after this page was read. Protect BOTH the
@@ -2325,7 +2338,7 @@ export class MessageProcessor {
         for (const update of classificationUpdates) {
           if (stillPending.has(update.uid)) continue;
           if (update.pending !== undefined) await storage.updateEmail(update.id, { gmailCategoriesPending: update.pending });
-          if (update.categoriesChanged) await storage.setServerCategories?.(update.id, update.categories);
+          await storage.setServerCategories?.(update.id, update.categories, update.gmailImportant);
           if (!update.counted) {
             result.updated++;
             onFlagChange?.(update.id, update.uid, serverFlagsMap.get(update.uid) ?? []);
@@ -2336,7 +2349,7 @@ export class MessageProcessor {
     };
 
     /** Reconcile one local row against the server flags. Returns true if changed. */
-    const applyServerFlags = (id: string, uid: number, tags: string | null, providerCategories?: readonly string[] | null, gmailCategoriesPending?: boolean): boolean => {
+    const applyServerFlags = (id: string, uid: number, tags: string | null, providerCategories?: readonly string[] | null, gmailCategoriesPending?: boolean, gmailImportant?: boolean | null): boolean => {
       // Skip UIDs with an un-synced local flag change — otherwise the server
       // (which hasn't seen the change yet) would revert it.
       if (pendingUids.has(uid)) return false;
@@ -2346,18 +2359,21 @@ export class MessageProcessor {
       const classified = mapServerClassification({ flags: newFlags, labels: serverLabelsMap.get(uid), categories: serverCategoriesMap.get(uid),
         folderPath: folder.path, providerHost: client.host ?? undefined,
         knownCategories: classificationContext.knownCategories });
-      const merged = this.mergeProviderCategories(classificationContext, tags || '||', providerCategories ?? [], classified.categories, serverLabelsMap.has(uid), serverCategoryKnownMap.get(uid));
-      const categories = [...merged, ...(classified.important ? ['important'] : [])];
+      const merged = this.mergeProviderCategories(classificationContext, tags || '||', providerCategories ?? [], classified.categories, serverLabelsMap.has(uid) || serverCategoryKnownMap.has(uid), serverCategoryKnownMap.get(uid));
+      const gmail = /gmail|googlemail/i.test(client.host ?? '') || serverLabelsMap.has(uid) || serverCategoryKnownMap.has(uid);
+      const categories = [...merged, ...(!gmail && classified.important ? ['important'] : [])];
       const pending = serverCategoryKnownMap.has(uid) ? !serverCategoryKnownMap.get(uid)! : undefined;
       const categoriesChanged = JSON.stringify([...(providerCategories ?? [])].sort()) !== JSON.stringify([...categories].sort());
-      const classificationUpdate = { id, uid, counted: false, categories, pending, categoriesChanged };
-      if ((storage.setServerCategories && categoriesChanged) || (pending !== undefined && gmailCategoriesPending !== pending)) {
+      const classificationUpdate = { id, uid, counted: false, categories, gmailImportant: gmail ? classified.important : null, pending, categoriesChanged };
+      if ((storage.setServerCategories && (categoriesChanged || (gmail && gmailImportant !== classified.important))) || (pending !== undefined && gmailCategoriesPending !== pending)) {
         classificationUpdates.push(classificationUpdate);
       }
       const currentTags = parseTags(tags || '||');
       const isSnoozed = currentTags.includes('snoozed');
       const currentFlagTags = currentTags.filter(t => flagTagNames.includes(t));
       let newFlagTags = imapFlagsToTags(newFlags).filter((tag) => tag !== 'important');
+      const providerSpam = classifyFolder(folder) === 'spam' || mapGmailLabels(serverLabelsMap.get(uid) ?? []).roles.includes('spam') ||
+          newFlags.some((flag) => /^(?:\\|\$)?(?:junk|spam)$/i.test(flag));
 
       // Preserve local read/unread state for snoozed emails
       if (isSnoozed) {
@@ -2365,9 +2381,10 @@ export class MessageProcessor {
         if (currentTags.includes('read')) newFlagTags.push('read');
       }
 
-      if (currentFlagTags.sort().join(',') === newFlagTags.sort().join(',')) return false;
+      if (currentFlagTags.sort().join(',') === newFlagTags.sort().join(',') && (!providerSpam || currentTags.includes('spam'))) return false;
 
       const nonFlagTags = currentTags.filter(t => !flagTagNames.includes(t));
+      if (providerSpam && !nonFlagTags.includes('spam')) nonFlagTags.push('spam');
       tagUpdates.push({ id, uid, tags: buildTags([...nonFlagTags, ...newFlagTags]) });
       result.updated++;
       classificationUpdate.counted = true;
@@ -2393,7 +2410,7 @@ export class MessageProcessor {
         // Cheap path: one index-driven read of (id, uid, tags) for the folder.
         for (let i = 0; i < rows.length; i += FLAG_SYNC_BATCH) {
           for (const row of rows.slice(i, i + FLAG_SYNC_BATCH)) {
-            if (row.uid) applyServerFlags(row.id, row.uid, row.tags, row.serverCategories, row.gmailCategoriesPending);
+            if (row.uid) applyServerFlags(row.id, row.uid, row.tags, row.serverCategories, row.gmailCategoriesPending, row.gmailImportant);
           }
           await flushTagUpdates();
           if (i + FLAG_SYNC_BATCH < rows.length) await yieldToLoop();
@@ -2412,7 +2429,7 @@ export class MessageProcessor {
             // uid against this folder's UID space would apply flags from an
             // unrelated message. Only trust uids that came from this folder.
             if (email.folderId !== folder.id || !email.uid) continue;
-            applyServerFlags(email.id, email.uid, email.tags ?? null, email.serverCategories, email.gmailCategoriesPending);
+            applyServerFlags(email.id, email.uid, email.tags ?? null, email.serverCategories, email.gmailCategoriesPending, email.gmailImportant);
           }
           await flushTagUpdates();
           if (batch.length < FLAG_SYNC_BATCH) break;

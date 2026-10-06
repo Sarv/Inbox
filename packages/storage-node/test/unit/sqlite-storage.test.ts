@@ -157,6 +157,13 @@ describe('classification authority facade', () => {
     expect(await storage.getEmail('provider-classification')).toMatchObject({
       manualCategories: null, tags: '|INBOX|starred|promotions|',
     });
+    storage.setServerCategories('provider-classification', [], true);
+    storage.setEmailManualImportance('provider-classification', false);
+    expect(await storage.getEmail('provider-classification')).toMatchObject({
+      serverCategories: [], manualCategories: null, gmailImportant: true, manualImportant: false, tags: '|INBOX|starred|',
+    });
+    storage.setEmailManualImportance('provider-classification', true);
+    expect((await storage.getEmail('provider-classification'))?.tags).toContain('|important|');
   });
 });
 

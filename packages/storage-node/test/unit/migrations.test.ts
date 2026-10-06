@@ -124,7 +124,7 @@ describe('fresh install reaches the current production schema', () => {
     // Social category (v99); 99 -> 100 adds emails.pgp_status (v100); 100 ->
     // 101 with the authentication re-check queue (v101).
     // v102 tracks provider/manual authority separately from AI.
-    expect(CURRENT_VERSION).toBe(102);
+    expect(CURRENT_VERSION).toBe(103);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
     // v24 is stamped by schema.sql itself; the chain stamps 25..101 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));

@@ -52,7 +52,7 @@ const CONTACT_NOTES = SHARED('contact_notes');
  */
 type PendingLabelRow = {
   id: string; uid: number; folderId: string; tags: string;
-  aiCategories: string | null; manualCategories: string | null; serverCategories: string | null; gmailCategoriesPending: number; date: number;
+  aiCategories: string | null; manualCategories: string | null; serverCategories: string | null; gmailCategoriesPending: number; gmailImportant: number | null; manualImportant: number | null; date: number;
 };
 
 /**
@@ -66,7 +66,7 @@ const LABEL_EXCLUDED_TAGS = `instr(e.tags, '|Spam|') = 0
 
 const PENDING_LABEL_COLUMNS =
   `e.id, e.uid, e.folder_id AS folderId, e.tags, e.ai_categories AS aiCategories,
-   e.manual_categories AS manualCategories, e.server_categories AS serverCategories, e.gmail_categories_pending AS gmailCategoriesPending, e.date`;
+   e.manual_categories AS manualCategories, e.server_categories AS serverCategories, e.gmail_categories_pending AS gmailCategoriesPending, e.gmail_important AS gmailImportant, e.manual_important AS manualImportant, e.date`;
 
 /**
  * The recent-window floor, as a value rather than a correlated subquery — the
@@ -977,7 +977,7 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
   getEmailsPendingLabel(
     limit = 12,
     recentCount = 0,
-  ): Array<{ id: string; uid: number; folderId: string; tags: string; aiCategories: string | null; manualCategories: string[] | null; serverCategories: string[] | null; gmailCategoriesPending: boolean }> {
+  ): Array<{ id: string; uid: number; folderId: string; tags: string; aiCategories: string | null; manualCategories: string[] | null; serverCategories: string[] | null; gmailCategoriesPending: boolean; gmailImportant: boolean | null; manualImportant: boolean | null }> {
     // Index-only over idx_emails_date (LIMIT bounds it), so the window costs a
     // page-cache walk of the date index, never a record read.
     const cutoff = recentCount > 0
@@ -988,10 +988,12 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     const legacy = this.db.prepare(SQL_LABEL_PENDING_LEGACY).all(cutoff, limit) as PendingLabelRow[];
 
     return mergeNewestFirst(explicit, legacy, limit)
-      .map(({ id, uid, folderId, tags, aiCategories, manualCategories, serverCategories, gmailCategoriesPending }) => ({
+      .map(({ id, uid, folderId, tags, aiCategories, manualCategories, serverCategories, gmailCategoriesPending, gmailImportant, manualImportant }) => ({
         id, uid, folderId, tags, aiCategories,
         manualCategories: parseCategorySelection(manualCategories), serverCategories: parseCategorySelection(serverCategories),
         gmailCategoriesPending: gmailCategoriesPending === 1,
+        gmailImportant: gmailImportant === null ? null : gmailImportant === 1,
+        manualImportant: manualImportant === null ? null : manualImportant === 1,
       }));
   }
 

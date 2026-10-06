@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { MigrationManager, createMigrationManager, type Migration } from '../../src/migrations';
+import { MigrationManager, createMigrationManager, gmailPromotionsOnly, type Migration } from '../../src/migrations';
 import { AIRepository } from '../../src/repositories/ai-repository';
 import { EmailRepository } from '../../src/repositories/email-repository';
 import { attachSharedContacts, SHARED_SCHEMA } from '../../src/shared-contacts';
@@ -399,6 +399,76 @@ describe('upgrading a v24-era database to the current version', () => {
     expect((await emails.get('e-need-1'))?.gmailCategoriesPending).toBe(false);
     expect(scalar(db, 'SELECT COUNT(*) FROM emails WHERE gmail_categories_pending = 1')).toBe(0);
     expect(ai.getEligibleEmailsForAI().map((email) => email.id)).toContain('e-need-1');
+  });
+
+  // Regression: old Gmail provider-only hints must reopen AI only after Promotions rediscovery, retaining real manual/AI classifications and native Important.
+  it('upgrades cached native categories without laundering provider hints into AI or deleting user labels', async () => {
+    migrateRange(db,24,102);
+    db.prepare("UPDATE folders SET provider='gmail' WHERE id='f-inbox'").run();
+    const set = db.prepare('UPDATE emails SET server_categories=?, manual_categories=?, ai_categories=?, tags=?, importance_source=?, agent_status=\'done\', ai_processed_at=123, gmail_categories_pending=0 WHERE id=?');
+    set.run('["social","updates","forums","personal","important"]',null,null,'|INBOX|starred|social|updates|forums|personal|important|','provider','e-fresh');
+    set.run('["promotions","social","finance"]',null,null,'|INBOX|promotions|social|finance|','none','e-bogus-size');
+    set.run('["social"]','["social"]',null,'|INBOX|social|','user','e-placeholder');
+    set.run('["social","important"]',null,'|social|important|','|INBOX|social|important|','ai','e-named');
+    set.run('["important"]','["important"]',null,'|INBOX|important|','user','e-read');
+    migrateRange(db,102,CURRENT_VERSION);
+    const emails = new EmailRepository(() => db);
+    const fresh = await emails.get('e-fresh');
+    expect(fresh).toMatchObject({serverCategories:[],gmailImportant:true,manualCategories:null,gmailCategoriesPending:true,tags:'|INBOX|starred|important|',aiProcessedAt:null});
+    expect(scalar(db,"SELECT agent_status FROM emails WHERE id='e-fresh'")).toBe('pending');
+    expect(await emails.get('e-bogus-size')).toMatchObject({serverCategories:['promotions','finance'],gmailCategoriesPending:false,tags:'|INBOX|promotions|finance|'});
+    expect(await emails.get('e-placeholder')).toMatchObject({serverCategories:[],manualCategories:['social'],tags:'|INBOX|social|'});
+    expect(await emails.get('e-named')).toMatchObject({serverCategories:[],gmailImportant:true,tags:'|INBOX|social|important|',aiProcessedAt:123});
+    expect(await emails.get('e-read')).toMatchObject({manualCategories:['important'],manualImportant:null});
+    const ai = new AIRepository(() => db,(r)=>emails.rowToRecord(r));
+    expect(ai.getEligibleEmailsForAI().map((email)=>email.id)).not.toContain('e-fresh');
+    emails.setServerCategories('e-fresh',[],true);
+    await emails.update('e-fresh',{gmailCategoriesPending:false});
+    expect(ai.getEligibleEmailsForAI().map((email)=>email.id)).toContain('e-fresh');
+    const before = rows(db,'SELECT id,tags,server_categories,manual_categories,gmail_important,manual_important FROM emails ORDER BY id');
+    gmailPromotionsOnly.up(db,{});
+    expect(rows(db,'SELECT id,tags,server_categories,manual_categories,gmail_important,manual_important FROM emails ORDER BY id')).toEqual(before);
+  });
+
+  // Regression: a flag-only queued intent is proof of old marker provenance; ambiguous, corrupt and competing category intents must preserve the user snapshot.
+  it('migrates only provably independent manual Important choices', async () => {
+    migrateRange(db,24,102);
+    db.prepare("UPDATE folders SET provider='gmail' WHERE id='f-inbox'").run();
+    db.exec(`UPDATE emails SET server_categories='["important"]', manual_categories='["important"]', importance_source='user', ai_categories=NULL, tags='|INBOX|important|';
+      INSERT INTO pending_operations(type,folder_path,uid,data) VALUES
+        ('setImportance','INBOX',4324,'{"important":true}'),
+        ('setImportance','INBOX',4325,'{"important":false}'),
+        ('setImportance','INBOX',4326,'{'),
+        ('setImportance','INBOX',4327,'{"important":true}'),
+        ('setCategorySelection','INBOX',4327,'{}');`);
+    migrateRange(db,102,CURRENT_VERSION);
+    const emails = new EmailRepository(()=>db);
+    expect(await emails.get('e-fresh')).toMatchObject({manualCategories:null,manualImportant:true,gmailImportant:true});
+    expect(await emails.get('e-bogus-size')).toMatchObject({manualCategories:null,manualImportant:false,tags:'|INBOX|'});
+    expect(await emails.get('e-placeholder')).toMatchObject({manualCategories:['important'],manualImportant:null});
+    expect(await emails.get('e-named')).toMatchObject({manualCategories:['important'],manualImportant:null});
+    expect(await emails.get('e-read')).toMatchObject({manualCategories:['important'],manualImportant:null});
+  });
+
+  // Regression: host context outranks folder-name guesses and another provider's Important/folder categories remain authoritative.
+  it.each(['imap.gmail.com','mail.sarv.com'])('scopes cached category cleanup to account host %s', async (providerHost) => {
+    migrateRange(db,24,102);
+    db.prepare("UPDATE emails SET server_categories='[\"social\",\"important\"]', tags='|INBOX|social|important|' WHERE id='e-fresh'").run();
+    db.prepare("UPDATE folders SET provider='gmail' WHERE id='f-inbox'").run();
+    gmailPromotionsOnly.up(db,{providerHost});
+    const email = await new EmailRepository(()=>db).get('e-fresh');
+    expect(email?.serverCategories).toEqual(providerHost === 'imap.gmail.com' ? [] : ['social','important']);
+    expect(email?.gmailImportant).toBe(providerHost === 'imap.gmail.com' ? true : null);
+  });
+
+  // Regression: removing the added provider taxonomy choices must preserve edited/custom definitions and existing labels.
+  it('disables only pristine provider seeds and preserves customized definitions', () => {
+    migrateRange(db,24,102);
+    db.prepare("UPDATE ai_category_definitions SET prompt='My custom Updates prompt' WHERE slug='updates'").run();
+    db.prepare("UPDATE ai_category_definitions SET is_system=0 WHERE slug='forums'").run();
+    migrateRange(db,102,CURRENT_VERSION);
+    expect(rows(db,"SELECT slug,is_enabled FROM ai_category_definitions WHERE slug IN ('forums','updates','personal','social') ORDER BY slug"))
+      .toEqual([{slug:'forums',is_enabled:1},{slug:'personal',is_enabled:0},{slug:'social',is_enabled:1},{slug:'updates',is_enabled:1}]);
   });
 
   // The single most important property of the whole module: after the upgrade the

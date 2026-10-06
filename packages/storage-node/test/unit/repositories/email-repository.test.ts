@@ -609,7 +609,7 @@ describe('EmailRepository write paths', () => {
     await insert(repo, db, { folderId: 'f-trash', uid: 9, tags: '|Trash|INBOX|' }); // tagged INBOX, primary Trash
 
     expect(await repo.getUidsInFolder('f-inbox')).toEqual([{ id: real.id, uid: 5 }]);
-    expect(await repo.getTagsInFolder('f-inbox')).toEqual([{ id: real.id, uid: 5, tags: '|INBOX|read|', serverCategories: null, manualCategories: null, gmailCategoriesPending: false }]);
+    expect(await repo.getTagsInFolder('f-inbox')).toEqual([{ id: real.id, uid: 5, tags: '|INBOX|read|', serverCategories: null, manualCategories: null, gmailCategoriesPending: false, gmailImportant: null, manualImportant: null }]);
     expect(await repo.getUidsInFolder('f-empty')).toEqual([]);
   });
 

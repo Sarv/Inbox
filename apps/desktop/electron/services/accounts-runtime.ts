@@ -23,6 +23,7 @@ import type { AccountRuntime } from '../shared';
 import { claimDefaultRuntime, getAccountIdForStorage, getAccountRuntime, hasAccountRuntime, registerAccountRuntime, rekeyRuntime, sendToWindow, unregisterRuntime } from '../shared';
 
 
+import { listRegistryAccounts } from './accounts-registry';
 import { getMeta, setMeta } from './core-db';
 import { getDbEncryptionKey } from './db-key-store';
 import { wireFolderCountBroadcast } from './folder-count-broadcast';
@@ -98,7 +99,7 @@ export async function createAccountRuntime(
     // shared-contacts.ts); the id is what lets the directory record which
     // mailbox an address was actually seen in. Omitted only by callers that
     // genuinely have no account yet, which fall back to the DB file name.
-    ...(accountId ? { accountId } : {}),
+    ...(accountId ? { accountId, providerHost: listRegistryAccounts().find((account) => account.id === accountId)?.imapConfig?.host } : {}),
   });
   await storage.initialize();
   // The read-model drain repairs this account's badges on its own; this is what

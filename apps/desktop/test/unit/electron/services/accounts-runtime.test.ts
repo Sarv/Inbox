@@ -19,6 +19,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const h = vi.hoisted(() => ({
   userData: '',
+  registry: [] as Array<{ id: string; imapConfig: { host: string } | null }>,
   dbKey: 'deadbeef',
   storages: [] as Array<{
     opts: Record<string, unknown>; initialized: boolean; closed: boolean; closeThrows: boolean;
@@ -38,6 +39,8 @@ const h = vi.hoisted(() => ({
   secretsRekeyed: [] as Array<[string, string]>,
   secretsDeleteThrows: false,
 }));
+
+vi.mock('../../../../electron/services/accounts-registry', () => ({ listRegistryAccounts: () => h.registry }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
@@ -186,6 +189,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  h.registry = [];
   resetFakeCoreDb();
   h.storages.length = 0;
   h.engines.length = 0;
@@ -256,6 +260,15 @@ describe('dbFileForAccount', () => {
 });
 
 describe('createAccountRuntime', () => {
+  // Regression: cached Gmail cleanup must use this database owner's host, never the active account.
+  it('passes the owning account provider to its storage migration', async () => {
+    h.registry = [{ id: 'other', imapConfig: { host: 'imap.sarv.com' } }, { id: 'gmail', imapConfig: { host: 'imap.gmail.com' } }];
+    await createAccountRuntime('gmail.db', 'gmail');
+    await createAccountRuntime('unknown.db', 'unknown');
+    expect(h.storages[0].opts.providerHost).toBe('imap.gmail.com');
+    expect(h.storages[1].opts.providerHost).toBeUndefined();
+  });
+
   it('opens the DB under userData with the shared encryption key', async () => {
     const rt = await createAccountRuntime('sarvinbox-abc.db');
     expect(h.storages[0].opts).toMatchObject({

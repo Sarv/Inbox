@@ -52,13 +52,13 @@ describe('mapGmailLabels — system labels', () => {
     }
   });
 
-  // Native Gmail categories must avoid an unnecessary categorizer request.
-  it('recovers native category labels and known bare labels', () => {
+  // Only native Promotions bypasses AI; other Gmail tabs retain ordinary label membership.
+  it('maps native Promotions while leaving other tabs available for AI', () => {
     const m = mapGmailLabels(['\\Category_Promotions', '[Gmail]/Social', 'Updates'], {
       knownCategories: [{ slug: 'promotions', name: 'Promotions' }, { slug: 'social', name: 'Social' }, { slug: 'updates', name: 'Updates' }],
     });
-    expect(m.categories).toEqual(['promotions', 'social', 'updates']);
-    expect(m.labels).toEqual([]);
+    expect(m.categories).toEqual(['promotions']);
+    expect(m.labels).toEqual(['[Gmail]/Social', 'Updates']);
   });
 
   it('treats \\Drafts and \\Spam aliases the same as their canonical forms', () => {
@@ -276,5 +276,30 @@ describe('provider plural aliases retain the configured category slug', () => {
     expect(matchKnownCategory('Meetings', [{ slug: 'custom', name: 'Meeting' }])).toBe('custom');
     expect(matchKnownCategory('meeting', [{ slug: 'meetings' }])).toBe('meetings');
     expect(matchKnownCategory('Invoices', [{ slug: 'other' }])).toBeNull();
+  });
+});
+
+
+describe('Promotions-only Gmail native classification policy', () => {
+  // Ignored native tabs may share seeded category names; they still must not bypass AI.
+  it('preserves ordinary labels while refusing native Social, Updates, Forums, Personal and Primary authority', () => {
+    const knownCategories = ['social', 'updates', 'forums', 'personal', 'primary'].map((slug) => ({ slug, name: slug }));
+    const plain = ['Social', 'Updates', 'Forums', 'Personal', 'Primary', '[Gmail]/Social', '[GoogleMail]/Updates', 'Categories/Forums'];
+    const system = ['\\Social', '\\Updates', '\\Forums', '\\Personal', '\\Primary', '\\Category_Social', '\\Category_Updates'];
+    const mapped = mapGmailLabels([...plain, ...system, 'Social', '\\Inbox', 'Work/Clients'], { knownCategories });
+    expect(mapped.categories).toEqual([]); expect(mapped.labels).toEqual([...plain, 'Work/Clients']); expect(mapped.roles).toEqual(['inbox']);
+  });
+
+  // Spam/Junk and every ordinary system role retain their mapping when native tab policy changes.
+  it('keeps Spam/Junk roles, stars, Importance and ordinary user labels', () => {
+    const mapped = mapGmailLabels(['\\Junk', '\\Spam', '\\Inbox', '\\Sent', '\\Drafts', '\\Trash', '\\All', '\\Starred', 'Important', 'Receipts']);
+    expect(mapped.roles).toEqual(['spam', 'inbox', 'sent', 'drafts', 'trash', 'archive']);
+    expect(mapped.flags).toEqual(['starred', 'important']); expect(mapped.labels).toEqual(['Receipts']); expect(mapped.categories).toEqual([]);
+  });
+
+  // Native Promotions always resolves to the app's canonical Promotions category, independent of optional definitions.
+  it('maps every supported Promotions representation to one canonical category', () => {
+    const labels = ['Promotions', '\\Promotions', '\\Category_Promotions', '[Gmail]/Promotions', 'Categories/Promotions'];
+    expect(mapGmailLabels(labels, { knownCategories: [{ slug: 'promotion', name: 'Promotions' }] }).categories).toEqual(['promotions']);
   });
 });

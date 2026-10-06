@@ -11,6 +11,8 @@ import {
   contactNameForAddress,
   normalizeSubject,
   parseSpamReasons,
+  addTag, removeTag, hasTag, parseCategorySelection, detectProvider,
+  GMAIL_NON_AUTHORITATIVE_CATEGORY_SLUGS,
 } from '@sarvinbox/core';
 import type Database from 'better-sqlite3';
 
@@ -35,6 +37,7 @@ import { hasSharedContacts, SHARED } from './shared-contacts';
 export interface MigrationContext {
   /** Stable id of the account this database belongs to, when one is known. */
   accountId?: string;
+  providerHost?: string;
 }
 
 export interface Migration {
@@ -4075,6 +4078,15 @@ export const authResultsReverify: Migration = {
 /**
  * Create migration manager with the fresh schema
  */
+const SEEDED_PROVIDER_CATEGORIES = [
+      { slug: 'forums', name: 'Forums', icon: 'MessagesSquare', color: 'violet', order: 10,
+        prompt: 'Discussion groups, mailing lists, forums and community conversations. Use Forums for these rather than Social; Social is activity on social networks.' },
+      { slug: 'updates', name: 'Updates', icon: 'Bell', color: 'cyan', order: 11,
+        prompt: 'Automatic service notifications, status updates and account activity. Exclude marketing (Promotions), bills and receipts (Invoice or Finance), and social network activity (Social).' },
+      { slug: 'personal', name: 'Primary', icon: 'Mail', color: 'blue', order: 12,
+        prompt: 'Personal correspondence or direct work conversations that do not belong to Promotions, Social, Forums, Updates, Finance or Invoice. Primary is descriptive, not an Important or Needs Response judgment.' },
+];
+
 export const serverCategoryAuthority: Migration = {
   version: 102,
   name: 'server_category_authority',
@@ -4092,21 +4104,13 @@ export const serverCategoryAuthority: Migration = {
           OR lower(path) = '[gmail]' OR lower(path) LIKE '[gmail]/%'
           OR lower(path) = '[googlemail]' OR lower(path) LIKE '[googlemail]/%'
       )`);
-    const nativeCategories = [
-      { slug: 'forums', name: 'Forums', icon: 'MessagesSquare', color: 'violet', order: 10,
-        prompt: 'Discussion groups, mailing lists, forums and community conversations. Use Forums for these rather than Social; Social is activity on social networks.' },
-      { slug: 'updates', name: 'Updates', icon: 'Bell', color: 'cyan', order: 11,
-        prompt: 'Automatic service notifications, status updates and account activity. Exclude marketing (Promotions), bills and receipts (Invoice or Finance), and social network activity (Social).' },
-      { slug: 'personal', name: 'Primary', icon: 'Mail', color: 'blue', order: 12,
-        prompt: 'Personal correspondence or direct work conversations that do not belong to Promotions, Social, Forums, Updates, Finance or Invoice. Primary is descriptive, not an Important or Needs Response judgment.' },
-    ];
     const seed = db.prepare(`
       INSERT INTO ai_category_definitions (slug,name,description,prompt,icon,color,sort_order,is_system,is_enabled)
       SELECT ?,?,?,?,?,?,?,1,1 WHERE NOT EXISTS (
         SELECT 1 FROM ai_category_definitions WHERE slug = ? OR lower(trim(name)) = lower(?)
       )
     `);
-    for (const category of nativeCategories) {
+    for (const category of SEEDED_PROVIDER_CATEGORIES) {
       if (seed.run(category.slug, category.name, 'Provider category', category.prompt, category.icon, category.color, category.order, category.slug, category.name).changes) {
         enqueueThreadsTaggedWith(db, category.slug);
       }
@@ -4116,6 +4120,87 @@ export const serverCategoryAuthority: Migration = {
     db.exec('UPDATE emails SET server_categories = NULL, manual_categories = NULL, gmail_categories_pending = 0;');
     db.exec("DELETE FROM ai_category_definitions WHERE slug IN ('forums', 'updates', 'personal') AND is_system = 1 AND description = 'Provider category';");
   },
+};
+
+/** Gmail native categories are hints except Promotions; Important remains an independent flag. */
+export const gmailPromotionsOnly: Migration = {
+  version: 103,
+  name: 'gmail_promotions_only',
+  up: (db, context = {}) => {
+    addColumnIfMissing(db, 'emails', 'gmail_important', 'INTEGER DEFAULT NULL');
+    addColumnIfMissing(db, 'emails', 'manual_important', 'INTEGER DEFAULT NULL');
+    // Preserve customized taxonomy rows. Disabling pristine seeds hides the
+    // added choices without deleting manual labels already attached to mail.
+    const disableSeed = db.prepare(`UPDATE ai_category_definitions SET is_enabled = 0
+      WHERE slug = ? AND name = ? AND description = 'Provider category' AND prompt = ?
+        AND icon = ? AND color = ? AND sort_order = ? AND is_system = 1`);
+    for (const category of SEEDED_PROVIDER_CATEGORIES) {
+      disableSeed.run(category.slug, category.name, category.prompt, category.icon, category.color, category.order);
+    }
+    const gmail = context.providerHost !== undefined ? detectProvider(context.providerHost) === 'gmail'
+      : !!db.prepare(`SELECT 1 FROM folders WHERE lower(provider) = 'gmail'
+          OR lower(path) = '[gmail]' OR lower(path) LIKE '[gmail]/%'
+          OR lower(path) = '[googlemail]' OR lower(path) LIKE '[googlemail]/%' LIMIT 1`).get();
+    if (!gmail) return;
+    const pendingMarker = db.prepare(`SELECT p.data FROM pending_operations p JOIN folders f ON f.path = p.folder_path
+      WHERE f.id = ? AND p.uid = ? AND p.type = 'setImportance' ORDER BY p.id DESC LIMIT 1`);
+    const competingChoice = db.prepare(`SELECT 1 FROM pending_operations p JOIN folders f ON f.path = p.folder_path
+      WHERE f.id = ? AND p.uid = ? AND p.type IN ('setCategorySelection','applyCategoryLabel','removeCategoryLabel') LIMIT 1`);
+    const update = db.prepare(`UPDATE emails SET server_categories = ?, manual_categories = ?, gmail_important = ?, manual_important = ?, tags = ?,
+      gmail_categories_pending = CASE WHEN ? THEN 1 ELSE gmail_categories_pending END,
+      agent_status = CASE WHEN ? THEN 'pending' ELSE agent_status END,
+      ai_processed_at = CASE WHEN ? THEN NULL ELSE ai_processed_at END,
+      ai_confidence = CASE WHEN ? THEN 0 ELSE ai_confidence END,
+      ai_reasoning = CASE WHEN ? THEN NULL ELSE ai_reasoning END,
+      label_status = CASE WHEN ? THEN NULL ELSE label_status END WHERE id = ?`);
+    const ignored = new Set<string>(GMAIL_NON_AUTHORITATIVE_CATEGORY_SLUGS);
+    const scan = db.prepare(`SELECT rowid AS rowid, id, folder_id, uid, tags, server_categories, manual_categories, ai_categories,
+      importance_source, manual_important FROM emails WHERE gmail_important IS NULL AND rowid > ? ORDER BY rowid LIMIT 1000`);
+    type CachedCategoryRow = {
+      rowid: number; id: string; folder_id: string; uid: number; tags: string; server_categories: string | null; manual_categories: string | null;
+      ai_categories: string | null; importance_source: string; manual_important: number | null;
+    };
+    let cursor = 0;
+    let batch = scan.all(cursor) as CachedCategoryRow[];
+    while (batch.length) {
+      // Close each read before trigger-driven writes; bounded batches avoid body
+      // reads and unbounded memory for a large cached mailbox.
+      for (const row of batch) {
+        cursor = row.rowid;
+        const server = parseCategorySelection(row.server_categories);
+        let manual = parseCategorySelection(row.manual_categories);
+        let manualImportant = row.manual_important;
+        // A persisted flag-only intent provides provenance an old category
+        // snapshot alone cannot: ambiguous manual choices remain untouched.
+        if (manual !== null && manual.every((slug) => slug === 'important') && row.importance_source === 'user' &&
+            !competingChoice.get(row.folder_id, row.uid)) {
+          const op = pendingMarker.get(row.folder_id, row.uid) as { data: string | null } | undefined;
+          try {
+            const data: unknown = op?.data ? JSON.parse(op.data) : null;
+            if (data && typeof data === 'object' && 'important' in data && typeof data.important === 'boolean') {
+              manualImportant = Number(data.important); manual = null;
+            }
+          } catch { /* Malformed old intent cannot prove a marker-only choice. */ }
+        }
+        const nativeImportant = server?.includes('important') === true ||
+          (row.importance_source === 'provider' && hasTag(row.tags, 'important'));
+        const retained = server === null ? null : server.filter((slug) => !ignored.has(slug));
+        let tags = row.tags;
+        for (const slug of server ?? []) {
+          if (ignored.has(slug) && !manual?.includes(slug) && !hasTag(row.ai_categories || '||', slug)) tags = removeTag(tags, slug);
+        }
+        if (nativeImportant || manualImportant === 1) tags = addTag(tags, 'important');
+        if (manualImportant === 0) tags = removeTag(tags, 'important');
+        const requeue = (server?.length ?? 0) > 0 && (retained?.length ?? 0) === 0 && manual === null && row.ai_categories === null;
+        update.run(retained === null ? null : JSON.stringify(retained), manual === null ? null : JSON.stringify(manual),
+          Number(nativeImportant), manualImportant, tags, Number(requeue), Number(requeue), Number(requeue), Number(requeue), Number(requeue), Number(requeue), row.id);
+      }
+      batch = scan.all(cursor) as CachedCategoryRow[];
+    }
+  },
+  // Provider provenance repair cannot be reversed without inventing the old
+  // source. Retain nullable schema/markers and preserved user choices on rollback.
+  down: () => {},
 };
 
 export function createMigrationManager(
@@ -4202,5 +4287,6 @@ export function createMigrationManager(
   manager.register(emailPgpStatus);
   manager.register(authResultsReverify);
   manager.register(serverCategoryAuthority);
+  manager.register(gmailPromotionsOnly);
   return manager;
 }

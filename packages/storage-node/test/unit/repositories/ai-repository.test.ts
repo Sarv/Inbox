@@ -104,7 +104,7 @@ describe('AIRepository', () => {
   // every already-applied tag becomes "uncategorized". Pin the shipped set.
   // ==========================================================================
   describe('category definitions', () => {
-    it('ships the seeded system categories, all enabled, ordered by sort_order', () => {
+    it('ships seeded categories in order with pristine provider-only additions disabled', () => {
       const defs = repo.getCategoryDefinitions();
 
       // Exact set on purpose: adding/removing a category is a product decision
@@ -114,9 +114,9 @@ describe('AIRepository', () => {
         'important', 'needs_response', 'reminders', 'meeting', 'invoice', 'finance', 'promotions', 'social', 'forums', 'updates', 'personal',
       ]);
       expect(defs.every((d) => d.isSystem)).toBe(true);
-      expect(defs.every((d) => d.isEnabled)).toBe(true);
+      expect(defs.filter((d) => !d.isEnabled).map((d) => d.slug)).toEqual(['forums','updates','personal']);
       expect(defs.every((d) => d.prompt.length > 0)).toBe(true);
-      expect(repo.getEnabledCategoryDefinitions().map((d) => d.slug)).toEqual(defs.map((d) => d.slug));
+      expect(repo.getEnabledCategoryDefinitions().map((d) => d.slug)).toEqual(defs.filter((d) => d.isEnabled).map((d) => d.slug));
     });
 
     it('inserts a new definition with the documented defaults and round-trips NULL description', () => {
@@ -264,11 +264,12 @@ describe('AIRepository', () => {
       expect(tags).toContain('|INBOX|');
     });
 
-    it('sets and later clears the spam tag, and stores empty reasoning as NULL', () => {
+    it('sets spam and permits clearing it after explicit Not Spam, with empty reasoning as NULL', () => {
       repo.saveEmailCategories('e1', [], true, '', 10, 0.5);
       expect(tagsOf(db, 'e1')).toContain('|spam|');
       expect(emailRow(db, 'e1').ai_reasoning).toBeNull();
 
+      db.prepare("UPDATE emails SET spam_user_verdict='ham' WHERE id='e1'").run();
       repo.saveEmailCategories('e1', [{ slug: 'important', confidence: 1 }], false, 'ok', 11, 1);
       expect(tagsOf(db, 'e1')).not.toContain('|spam|');
     });

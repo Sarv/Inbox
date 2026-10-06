@@ -30,6 +30,10 @@ export interface EmailRecord {
   manualCategories?: string[] | null;
   /** Gmail category discovery failed/has not completed; retry sync before spending AI tokens. */
   gmailCategoriesPending?: boolean;
+  /** Gmail native Important marker; null/undefined identifies non-Gmail mail. */
+  gmailImportant?: boolean | null;
+  /** Explicit independent Important choice, separate from category selection. */
+  manualImportant?: boolean | null;
 
   // Headers
   subject: string | null;
