@@ -80,7 +80,6 @@
       "free-email-domains"
     ],
     "overrides": {
-      "source-map-js": "^1.2.2",
       "@babel/core@7": "^7.29.7",
       "@xmldom/xmldom": "^0.8.15",
       "ajv@6": "^6.14.0",
