@@ -8,6 +8,7 @@ neverBuiltDependencies:
   - free-email-domains
 
 overrides:
+  source-map-js: ^1.2.2
   '@babel/core@7': ^7.29.7
   '@xmldom/xmldom': ^0.8.15
   ajv@6: ^6.14.0
@@ -8099,7 +8100,7 @@ packages:
     dependencies:
       '@babel/parser': 7.29.9
       '@babel/types': 7.29.8
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
     dev: true
 
   /mailparser@3.9.28:
@@ -9369,7 +9370,7 @@ packages:
     dependencies:
       nanoid: 3.3.19
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
 
   /postject@1.0.0-alpha.6:
     resolution: {integrity: sha512-b9Eb8h2eVqNE8edvKdwqkrY6O7kAwmI8kcnBv1NScolYJbo59XUF0noFq+lxbC1yN20bmC0WBEbDC5H/7ASb0A==}
@@ -10323,8 +10324,8 @@ packages:
       atomic-sleep: 1.0.0
     dev: false
 
-  /source-map-js@1.2.1:
-    resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
+  /source-map-js@1.2.2:
+    resolution: {integrity: sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==}
     engines: {node: '>=0.10.0'}
 
   /source-map-support@0.5.21:
