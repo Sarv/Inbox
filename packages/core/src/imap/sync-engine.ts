@@ -5,7 +5,7 @@ import { simpleParser } from 'mailparser';
 
 import { buildStandardFolderAliasMap, describeDuplicateRoles, duplicateRoleCandidates } from '../config/folder-mapping';
 import { getEventBus, createEvent } from '../pipeline/event-bus';
-import type { IMAPConfig, IIMAPClient, IMAPFolder, IMAPMessage, SearchCriteria } from '../types/imap';
+import { IMAPError, type IMAPConfig, type IIMAPClient, type IMAPFolder, type IMAPMessage, type SearchCriteria } from '../types/imap';
 import type { EmailRecord, FolderRecord } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
@@ -17,7 +17,7 @@ import {
 } from '../utils/folder-counts';
 import { logger } from '../utils/logger';
 import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
-import type { EmailProvider } from '../utils/provider';
+import { detectProvider, type EmailProvider } from '../utils/provider';
 import { withStallTimeout, isTimeoutError } from '../utils/timeout';
 
 import {
@@ -35,6 +35,7 @@ import { isFolderSyncEnabled, folderHeadersOnly } from './folder-sync-policy';
 import { FolderSyncer, type FolderSyncResult } from './folder-syncer';
 import type { AutocryptSink } from './header-stage';
 import { getSuggestedBackoffMs } from './imap-errors';
+import { isSarvHost } from './label-strategy';
 import { MessageProcessor, isExpectedMessage, type IngestServerActions } from './message-processor';
 import { OperationQueue, type OperationResult } from './operation-queue';
 import { applyQresyncVanished } from './qresync-reconcile';
@@ -1758,6 +1759,44 @@ export class SyncEngine {
     }
   }
 
+  /** Capability preflight only; no token resolution or network request. */
+  assertManualCategorySync(slug: string): void {
+    if (slug === 'important') return;
+    const config = this.connectionManager.imapConfig;
+    if (!config) throw new IMAPError('Connect this email account before changing server categories', 'ACCOUNT_NOT_CONNECTED');
+    const gmail = detectProvider(config.host) === 'gmail' || this.connectionManager.client.supportsGmailLabels?.();
+    if (gmail) {
+      if (config.authMethod !== 'oauth2' || !config.resolveBearer) {
+        throw new IMAPError('Sign in with Gmail OAuth to sync categories', 'GMAIL_CATEGORY_OAUTH_REQUIRED');
+      }
+      return;
+    }
+    if (!isSarvHost(config.host)) throw new IMAPError('This server cannot sync category changes in place', 'CATEGORY_SYNC_NOT_SUPPORTED');
+  }
+
+  /** Persist one complete manual selection before any server category mutation. */
+  async setCategorySelection(folderPath: string, uid: number,
+    data: Parameters<OperationQueue['setCategorySelection']>[2]): Promise<OperationResult> {
+    for (const category of [...data.apply, ...data.remove]) this.assertManualCategorySync(category.slug);
+    return this.operationQueue.setCategorySelection(folderPath, uid, data);
+  }
+
+  /** Mirror the full category selection through the durable server queue. */
+  async applyCategoryLabels(folderPath: string, uid: number,
+    data: Parameters<OperationQueue['applyCategoryLabels']>[2]): Promise<OperationResult> {
+    return this.operationQueue.applyCategoryLabels(folderPath, uid, data);
+  }
+
+  async removeCategoryLabels(folderPath: string, uid: number,
+    data: Parameters<OperationQueue['removeCategoryLabels']>[2]): Promise<OperationResult> {
+    return this.operationQueue.removeCategoryLabels(folderPath, uid, data);
+  }
+
+  /** Synchronise the independent Important flag through the durable offline queue. */
+  async markImportant(folderPath: string, uid: number, important: boolean = true): Promise<OperationResult> {
+    return this.operationQueue.markImportant(folderPath, uid, important);
+  }
+
   /**
    * Star email
    */
@@ -2338,7 +2377,7 @@ export class SyncEngine {
     // Select-then-fetch is ONE mailbox section: a UID only means anything against
     // the mailbox it was issued in.
     const doFetch = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
-      const messages = await client.fetchMessagesByUID([uid], {
+      const messages = await client.fetchMessagesByUID([uid], { discoverCategories: false,
         fetchHeaders: false,
         fetchBody: true,
       });
@@ -2398,7 +2437,7 @@ export class SyncEngine {
   async listAttachmentScanParts(folderPath: string, uid: number): Promise<Array<{ partId: string; filename: string; byteLength: number | null }>> {
     if (!this.isConnected() || !uid) throw new Error('Connect this mailbox before scanning attachments');
     const run = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
-      const rows = await client.fetchMessagesByUID([uid], { fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
+      const rows = await client.fetchMessagesByUID([uid], { discoverCategories: false, fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
       const nodes = attachmentNodes(rows[0]?.bodyStructure);
       return nodes.map((node) => ({ partId: node.part!, filename: node.disposition?.params?.filename || node.params?.name || `Attachment ${node.part}`,
         byteLength: null })); // BODYSTRUCTURE sizes describe encoded bytes, not the bytes submitted.
@@ -2415,7 +2454,7 @@ export class SyncEngine {
     }
     const run = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
       if (signal?.aborted) throw new Error('Attachment scan cancelled');
-      const rows = await client.fetchMessagesByUID([uid], { fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
+      const rows = await client.fetchMessagesByUID([uid], { discoverCategories: false, fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
       if (signal?.aborted) throw new Error('Attachment scan cancelled');
       const node = attachmentNodes(rows[0]?.bodyStructure).find(n => n.part === partId);
       const name = node?.disposition?.params?.filename || node?.params?.name || `Attachment ${partId}`;
@@ -2451,7 +2490,7 @@ export class SyncEngine {
       // The structure FETCH and the part download are ONE section: the part
       // path it resolves is only meaningful against the mailbox it came from.
       return withFolderSelected(client, folderPath, async () => {
-        const msgs = await client.fetchMessagesByUID([uid], {
+        const msgs = await client.fetchMessagesByUID([uid], { discoverCategories: false,
           fetchHeaders: false, fetchBody: false, fetchBodyStructure: true,
         });
         const node = findAttachmentNodeByName(msgs[0]?.bodyStructure, filename);
@@ -2585,7 +2624,7 @@ export class SyncEngine {
     // select would make "Show Original" display somebody else's message.
     const expectedMessageId = (await this.storage.getEmail(emailId))?.messageId;
     const doFetch = async (client: IIMAPClient) => {
-      const messages = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID([uid], {
+      const messages = await withFolderSelected(client, folderPath, () => client.fetchMessagesByUID([uid], { discoverCategories: false,
         fetchHeaders: false,
         fetchBody: true,
         fetchBodyStructure: false,
@@ -2812,16 +2851,9 @@ export class SyncEngine {
    * Get selectable folders from folder tree
    */
   private getSelectableFolders(folders: IMAPFolder[]): IMAPFolder[] {
-    // Skip provider Important folders — this app's AI is the sole source of the
-    // `important` tag. Skipping the mailbox is only half of it: Gmail also puts
-    // `\Important` in X-GM-LABELS on messages we fetch from INBOX/All Mail, so
-    // `SYSTEM_LABEL_FLAGS` (gmail-labels.ts) drops that label for the same reason.
-    // Change one and you must change the other, or importance leaks back in.
-    const SKIP_FOLDERS = ['important', '[gmail]/important'];
-
     const result: IMAPFolder[] = [];
     const flatten = (folder: IMAPFolder) => {
-      if (folder.selectable && !SKIP_FOLDERS.includes(folder.path.toLowerCase())) {
+      if (folder.selectable) {
         result.push(folder);
       }
       folder.children?.forEach(flatten);

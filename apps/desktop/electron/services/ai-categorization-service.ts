@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders, existingCategoryClassification, automaticCategorizationDeferred } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -777,6 +777,7 @@ Return JSON array:
       if ((email.tags || '').includes('|read|')) {
         continue;
       }
+      if (existingCategoryClassification(email) || automaticCategorizationDeferred(email)) continue;
       // Body for the LLM prompt — see categorizationBodyOf.
       const body = categorizationBodyOf(email);
       const fromAddr = (email.fromAddress || '').toLowerCase();
@@ -1200,6 +1201,14 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
 
   private async saveBatch(results: CategorizationResult[], originalEmails: EmailForCategorization[]): Promise<void> {
     const storage = requireStorage();
+    // A provider refresh/manual edit received mid-request must win at save time.
+    const eligibleResults: CategorizationResult[] = [];
+    for (const result of results) {
+      const current = await storage.getEmail(result.emailId);
+      if (current && !existingCategoryClassification(current) && !automaticCategorizationDeferred(current)) eligibleResults.push(result);
+    }
+    results = eligibleResults;
+    if (results.length === 0) return;
     const processedAt = Math.floor(Date.now() / 1000);
 
     const batch = results.map(r => ({

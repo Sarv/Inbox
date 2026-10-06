@@ -214,6 +214,10 @@ beforeEach(() => {
 afterEach(() => {
   mounted?.unmount();
   mounted = undefined;
+  if (vi.isFakeTimers()) {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  }
 });
 
 describe('useEmailDetail — the first email\'s split', () => {
@@ -287,6 +291,9 @@ describe('useEmailDetail — the first email\'s split', () => {
   // composition when a usable split exists — the looped-in history as the
   // messages it quotes, newest last.
   it('builds the polish transcript from the AI composition once a reply opens', async () => {
+    // This hook-only harness has no composer to satisfy its scroll/focus
+    // retries. Keep them under test control and discard them before DOM teardown.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     await mount();
     expect(ctx().polishThreadContext).toBe('');
     act(() => ctx().handleReply());
@@ -301,6 +308,7 @@ describe('useEmailDetail — the first email\'s split', () => {
 
   // …and from Standard's turns without a split, in the List view too.
   it('builds it from Standard\'s turns without a split, list view included', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     settings.autoChatView = false;
     getFirstSplit.mockImplementation(async () => ({ success: true, data: answer(false) }));
     await mount();

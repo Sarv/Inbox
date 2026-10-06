@@ -2,6 +2,8 @@ import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MigrationManager, createMigrationManager, type Migration } from '../../src/migrations';
+import { AIRepository } from '../../src/repositories/ai-repository';
+import { EmailRepository } from '../../src/repositories/email-repository';
 import { attachSharedContacts, SHARED_SCHEMA } from '../../src/shared-contacts';
 import { createLegacyContactsTable } from '../../src/test-support/legacy-contacts';
 import { openTestDb } from '../../src/test-support/test-db';
@@ -367,6 +369,38 @@ describe('upgrading a v24-era database to the current version', () => {
 
   afterEach(() => db.close());
 
+  // Regression: cached Gmail mail has no native category metadata at upgrade. It must wait for the first successful query rather than cause an AI burst.
+  it.each([
+    ['Google namespace', '[Gmail]/All Mail', 'generic'],
+    ['localized Google namespace', '[gOoGlEmAiL]/Sent Mail', 'generic'],
+    ['explicit provider metadata', 'All Mail', 'gmail'],
+  ])('defers cached native categories identified by %s until successful discovery', async (_description, path, provider) => {
+    migrateRange(db, 24, 101);
+    db.prepare('INSERT INTO folders (id,name,path,provider) VALUES (?,?,?,?)').run('google-folder', 'All Mail', path, provider);
+    db.prepare("UPDATE emails SET ai_processed_at = NULL WHERE id = 'e-need-1'").run();
+    migrateRange(db, 101, CURRENT_VERSION);
+    const emails = new EmailRepository(() => db);
+    const ai = new AIRepository(() => db, (record) => emails.rowToRecord(record));
+    expect((await emails.get('e-need-1'))?.gmailCategoriesPending).toBe(true);
+    expect(scalar(db, 'SELECT COUNT(*) FROM emails WHERE gmail_categories_pending = 1')).toBe(7);
+    expect(ai.getEligibleEmailsForAI()).toEqual([]);
+    emails.setServerCategories('e-need-1', []);
+    await emails.update('e-need-1', { gmailCategoriesPending: false });
+    expect(ai.getEligibleEmailsForAI().map((email) => email.id)).toContain('e-need-1');
+  });
+
+  it.each(['generic', 'sarv'])('keeps cached %s mail eligible without mistaking Important for Gmail', async (provider) => {
+    migrateRange(db, 24, 101);
+    db.prepare('INSERT INTO folders (id,name,path,provider,special_use) VALUES (?,?,?,?,?)').run('important-folder', 'Important', 'Important', provider, '\\Important');
+    db.prepare("UPDATE emails SET ai_processed_at = NULL WHERE id = 'e-need-1'").run();
+    migrateRange(db, 101, CURRENT_VERSION);
+    const emails = new EmailRepository(() => db);
+    const ai = new AIRepository(() => db, (record) => emails.rowToRecord(record));
+    expect((await emails.get('e-need-1'))?.gmailCategoriesPending).toBe(false);
+    expect(scalar(db, 'SELECT COUNT(*) FROM emails WHERE gmail_categories_pending = 1')).toBe(0);
+    expect(ai.getEligibleEmailsForAI().map((email) => email.id)).toContain('e-need-1');
+  });
+
   // The single most important property of the whole module: after the upgrade the
   // user's mail, folders, contacts, sender stats and queued IMAP operations are
   // all still there, byte-for-byte, on top of the new schema.
@@ -554,7 +588,7 @@ describe('upgrading a v24-era database to the current version', () => {
       'SELECT slug FROM ai_category_definitions ORDER BY slug',
     ).map((r) => r.slug);
     // CHANGED: v99 adds Social on the upgrade path too.
-    expect(slugs).toEqual(['finance', 'invoice', 'needs_response', 'promotions', 'social']);
+    expect(slugs).toEqual(['finance', 'forums', 'invoice', 'needs_response', 'personal', 'promotions', 'social', 'updates']);
     expect(scalar(db, "SELECT prompt FROM ai_category_definitions WHERE slug = 'needs_response'")).toContain(
       'COLD SALES / PROMOTIONAL OUTREACH',
     );

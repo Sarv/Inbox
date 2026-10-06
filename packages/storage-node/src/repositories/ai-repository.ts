@@ -2,7 +2,7 @@
 // All category queries use instr(tags, '|slug|') — zero JOINs, no junction tables
 
 import type { EmailRecord } from '@sarvinbox/core';
-import { createLogger } from '@sarvinbox/core';
+import { automaticCategorizationDeferred, createLogger, existingCategoryClassification, parseCategorySelection } from '@sarvinbox/core';
 
 import type {
   EmailAICategory,
@@ -17,6 +17,14 @@ import { hasBodyClause, notExcludedByTagsClause, notInExcludedFolderClause } fro
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
 import { addTag, removeTag, parseTags, hasTag } from './email-repository';
 const logger = createLogger('ai-repository');
+
+function categoryWriteIsBlocked(row: { server_categories?: string | null; manual_categories?: string | null; gmail_categories_pending?: number }): boolean {
+  const email = {
+    serverCategories: parseCategorySelection(row.server_categories), manualCategories: parseCategorySelection(row.manual_categories),
+    gmailCategoriesPending: row.gmail_categories_pending === 1,
+  };
+  return !!existingCategoryClassification(email) || automaticCategorizationDeferred(email);
+}
 
 /**
  * Whether the AI's spam call may tag the row. Not when the user has said
@@ -68,8 +76,8 @@ export class AIRepository extends BaseRepository {
   ): void {
     const txn = this.db.transaction(() => {
       // Get current tags
-      const row = this.db.prepare('SELECT tags, spam_user_verdict FROM emails WHERE id = ?').get(emailId) as any;
-      if (!row) return;
+      const row = this.db.prepare('SELECT tags, spam_user_verdict, server_categories, manual_categories, gmail_categories_pending FROM emails WHERE id = ?').get(emailId) as any;
+      if (!row || categoryWriteIsBlocked(row)) return;
 
       let tags = row.tags || '||';
 
@@ -116,7 +124,7 @@ export class AIRepository extends BaseRepository {
     const catSlugs = allCats.map(c => c.slug);
 
     const txn = this.db.transaction((items: typeof batch) => {
-      const selectStmt = this.db.prepare('SELECT tags, spam_user_verdict FROM emails WHERE id = ?');
+      const selectStmt = this.db.prepare('SELECT tags, spam_user_verdict, server_categories, manual_categories, gmail_categories_pending FROM emails WHERE id = ?');
       // Also stamp agent_status='done' + agent_at (mirroring markAgentDone) so
       // the unified pipeline's poll — which selects agent_status='pending' —
       // treats bulk/propagated categorization as complete and does NOT re-send
@@ -133,7 +141,9 @@ export class AIRepository extends BaseRepository {
       let updated = 0;
       for (const item of items) {
         const row = selectStmt.get(item.emailId) as any;
-        if (!row) continue;
+        // Recheck inside the write transaction: sync/user edits may arrive while
+        // a provider call is in flight, or a linked account may propagate later.
+        if (!row || categoryWriteIsBlocked(row)) continue;
 
         let tags = row.tags || '||';
 
@@ -301,6 +311,7 @@ export class AIRepository extends BaseRepository {
       .prepare(`
         SELECT ${this.emailSelect()} FROM emails
         WHERE ai_processed_at IS NULL
+          AND manual_categories IS NULL AND (server_categories IS NULL OR server_categories = '[]') AND gmail_categories_pending = 0
           AND ${hasBodyClause('', this.bodyLengthsReady())}
         ORDER BY date DESC LIMIT ?
       `)
@@ -722,6 +733,7 @@ export class AIRepository extends BaseRepository {
       .prepare(`
         SELECT COUNT(*) as count FROM emails
         WHERE ai_processed_at IS NULL
+          AND manual_categories IS NULL AND (server_categories IS NULL OR server_categories = '[]') AND gmail_categories_pending = 0
           -- Cheap tag test first, body test last — see agent-eligibility.ts.
           AND ${notExcludedByTagsClause()}
           AND ${hasBodyClause('', this.bodyLengthsReady())}
@@ -858,6 +870,7 @@ export class AIRepository extends BaseRepository {
     const rows = this.db.prepare(`
       SELECT ${this.emailSelect()} FROM emails
       WHERE ai_processed_at IS NULL
+        AND manual_categories IS NULL AND (server_categories IS NULL OR server_categories = '[]') AND gmail_categories_pending = 0
         -- Tag test BEFORE the body test: the tags column is header-only, the
         -- body test reads the inline body. Term order is a performance
         -- contract, not style — see agent-eligibility.ts.

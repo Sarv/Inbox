@@ -431,7 +431,7 @@ export class FakeImapServer {
       // the backfill and envelope paths rely on that to stay cheap, and a fake
       // that always returns one would hide a regression there.
       ...(options?.fetchBody === false ? {} : { body: m.body }),
-      ...(this.opts.gmailLabels && m.labels.length ? { labels: m.labels } : {}),
+      ...(this.opts.gmailLabels ? { labels: m.labels } : {}),
     } as unknown as IMAPMessage;
   }
 
@@ -601,7 +601,7 @@ export class FakeImapServer {
     uids: number[],
     onBatch?: () => void,
     expectedPath?: string,
-  ): Promise<Array<{ uid: number; flags: string[] }>> {
+  ): Promise<Array<{ uid: number; flags: string[]; labels?: string[] }>> {
     this.note('fetchFlagsOnly');
     const folder = this.requireSelectedPath(expectedPath);
     // Mirror the real client's batched fetch (imapflow-client batches in 500s and
@@ -609,20 +609,20 @@ export class FakeImapServer {
     // heartbeat exercises the same shape here — otherwise a whole-mailbox re-read
     // would look like one indivisible step and the heartbeat would go untested.
     const BATCH = 500;
-    const out: Array<{ uid: number; flags: string[] }> = [];
+    const out: Array<{ uid: number; flags: string[]; labels?: string[] }> = [];
     for (let i = 0; i < uids.length; i += BATCH) {
       const slice = new Set(uids.slice(i, i + BATCH));
       for (const message of folder.messages) {
-        if (slice.has(message.uid)) out.push({ uid: message.uid, flags: [...message.flags] });
+        if (slice.has(message.uid)) out.push({ uid: message.uid, flags: [...message.flags], ...(this.opts.gmailLabels ? { labels: [...message.labels] } : {}) });
       }
       onBatch?.();
     }
     return out;
   }
 
-  async fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[] }>> {
+  async fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[]; labels?: string[] }>> {
     this.note('fetchAllFlags');
-    return this.requireSelectedPath(expectedPath).messages.map((m) => ({ uid: m.uid, flags: [...m.flags] }));
+    return this.requireSelectedPath(expectedPath).messages.map((m) => ({ uid: m.uid, flags: [...m.flags], ...(this.opts.gmailLabels ? { labels: [...m.labels] } : {}) }));
   }
 
   /** Labels for every message in the selected folder; empty without the ext. */
@@ -693,7 +693,7 @@ export class FakeImapServer {
     this.note('fetchFlagsChangedSince');
     return this.requireSelected()
       .messages.filter((m) => m.modseq > modseq)
-      .map((m) => ({ uid: m.uid, flags: [...m.flags], modseq: m.modseq })) as unknown as FlagChange[];
+      .map((m) => ({ uid: m.uid, flags: [...m.flags], modseq: m.modseq, ...(this.opts.gmailLabels ? { labels: [...m.labels] } : {}) })) as unknown as FlagChange[];
   }
 
   getCurrentMailboxState() {
@@ -740,6 +740,22 @@ export class FakeImapServer {
       for (const f of flags) m.flags.delete(f);
       folder.highestModseq += 1;
       m.modseq = folder.highestModseq;
+    }
+  }
+
+  async setImportance(uids: number[], important: boolean, expectedUidValidity: number): Promise<void> {
+    this.note('setImportance');
+    const folder = this.requireSelected();
+    if (folder.uidValidity !== expectedUidValidity) throw new Error('Mailbox UIDVALIDITY changed');
+    for (const message of folder.messages) {
+      if (!uids.includes(message.uid)) continue;
+      if (this.opts.gmailLabels) {
+        message.labels = message.labels.filter((label) => !['important', '\\important'].includes(label.toLowerCase()));
+        if (important) message.labels.push('Important');
+      } else if (important) message.flags.add('Important');
+      else message.flags.delete('Important');
+      folder.highestModseq++;
+      message.modseq = folder.highestModseq;
     }
   }
 

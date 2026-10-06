@@ -32,7 +32,7 @@ const h = vi.hoisted(() => {
   return {
     userData: '',
     handlers: new Map<string, (...args: any[]) => any>(),
-    accounts: [] as Array<{ id: string; storage: any }>,
+    accounts: [] as Array<{ id: string; storage: any; engine?: any }>,
     /** Every request that reached the AI provider, with its full prompt text. */
     sent: [] as Array<{ url: string; prompt: string }>,
     /** A stand-in provider: records the request, answers "no categories" for each email in it. */
@@ -67,13 +67,13 @@ vi.mock('../../../../electron/shared', () => {
   return {
     getStorage: () => h.accounts[0]?.storage ?? null,
     requireStorage: () => h.accounts[0]?.storage,
-    getAllAccountRuntimes: () => new Map(h.accounts.map((a) => [a.id, { storage: a.storage }])),
+    getAllAccountRuntimes: () => new Map(h.accounts.map((a) => [a.id, { storage: a.storage, syncEngine: a.engine }])),
     getAccountRuntime: (id: string) => (byId(id) ? { storage: byId(id) } : undefined),
     getStorageFor: (id: string) => byId(id),
     getCurrentAccountId: () => h.accounts[0]?.id ?? null,
     getSyncEngine: () => null,
     getSyncEngineFor: () => null,
-    getSyncEngineForStorage: () => null,
+    getSyncEngineForStorage: (storage: any) => h.accounts.find((account) => account.storage === storage)?.engine ?? null,
     getAccountIdForStorage: (s: any) => h.accounts.find((a) => a.storage === s)?.id ?? null,
     getMainWindow: () => null,
     getSmtpClient: () => null,
@@ -301,6 +301,225 @@ describe('AI Assist off: new mail is not sent to the AI provider', () => {
     for (const [acct, id] of mails) expect(row(acct, id).ai_categories).toBeNull();
     // Breaks: "off" is not written through, so the next launch forgets it.
     expect(mirror().enabled).toBe(false);
+  });
+});
+
+describe('provider and manual classification avoids redundant AI', () => {
+  async function put(s: Session, accountId: string, id: string, serverCategories?: string[], manualCategories?: string[], messageId?: string, gmailCategoriesPending?: boolean): Promise<void> {
+    const storage = h.accounts.find((a) => a.id === accountId)!.storage;
+    const email = mail(id, `Subject of ${id}`);
+    email.serverCategories = serverCategories;
+    email.manualCategories = manualCategories;
+    email.gmailCategoriesPending = gmailCategoriesPending;
+    if (messageId) email.messageId = messageId;
+    email.tags = `|INBOX|starred|${(manualCategories ?? serverCategories ?? []).join('|')}${(manualCategories ?? serverCategories ?? []).length ? '|' : ''}`;
+    await storage.insertEmail(email);
+    s.core.getEventBus().emit(s.core.createEvent.emailSynced(email, 'INBOX', true));
+  }
+
+  // Regression: native Promotions/Important must stay categorized locally in every account without classification cost, even after restart.
+  it('retains Gmail Promotions, Sarv Important and explicit unlabelled choices across restart', async () => {
+    seedMirror(established(true));
+    let s = await launch();
+    const { notifyNewMail } = await import('../../../../electron/services/notification-service');
+    vi.mocked(notifyNewMail).mockClear();
+    await put(s, 'acct-a', 'gmail-native', ['promotions']);
+    await put(s, 'acct-b', 'sarv-native', ['important']);
+    await put(s, 'acct-b', 'user-empty', ['promotions'], []);
+    await until(decided([['acct-a', 'gmail-native'], ['acct-b', 'sarv-native'], ['acct-b', 'user-empty']]), 'classified mail to finalize');
+    expect(h.sent).toEqual([]);
+    expect(notifyNewMail).toHaveBeenCalledWith(expect.objectContaining({ emailId: 'sarv-native', categories: ['important'] }));
+    for (const [acct, id] of [['acct-a', 'gmail-native'], ['acct-b', 'sarv-native'], ['acct-b', 'user-empty']]) expect(row(acct, id).ai_categories).toBeNull();
+    quit();
+    s = await launch();
+    await pollTick();
+    expect(h.sent).toEqual([]);
+    expect((await h.accounts[0].storage.getEmail('gmail-native')).serverCategories).toEqual(['promotions']);
+    expect((await h.accounts[1].storage.getEmail('user-empty')).manualCategories).toEqual([]);
+  });
+
+  // Regression: INBOX/Seen/Starred and removed server classifications cannot silently suppress useful AI categorization.
+  it('classifies ordinary mail and resumes after the server removes its category', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    await put(s, 'acct-a', 'star-only', []);
+    await put(s, 'acct-b', 'later-removal', ['promotions']);
+    await until(decided([['acct-a', 'star-only'], ['acct-b', 'later-removal']]), 'initial processing');
+    expect(wasSent('Subject of star-only')).toBe(true);
+    expect(wasSent('Subject of later-removal')).toBe(false);
+    h.accounts[1].storage.setServerCategories('later-removal', []);
+    await pollTick();
+    await until(() => wasSent('Subject of later-removal'), 'removed classification to reach AI');
+    await until(decided([['acct-b', 'later-removal']]), 'removed classification to finalize');
+    expect((await h.accounts[1].storage.getEmail('later-removal')).tags).not.toContain('|promotions|');
+  });
+
+  // Regression: server refresh received during an outstanding AI call must win rather than becoming a stale mirrored AI result.
+  it('rechecks provider authority before saving an in-flight result', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    const originalProvider = h.provider;
+    const spy = vi.spyOn(h, 'provider').mockImplementationOnce(async (url, init) => {
+      h.accounts[0].storage.setServerCategories('race', ['promotions']);
+      return originalProvider(url, init);
+    });
+    try {
+      await put(s, 'acct-a', 'race');
+      await until(decided([['acct-a', 'race']]), 'in-flight classification to finalize');
+      expect(row('acct-a', 'race').ai_categories).toBeNull();
+      expect((await h.accounts[0].storage.getEmail('race')).tags).toContain('|promotions|');
+    } finally { spy.mockRestore(); }
+  });
+
+  // Regression: linked-account AI propagation must not overwrite a provider's classification with a different account's guess.
+  it('does not spread a sibling AI verdict onto provider-classified mail', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    const messageId = '<same-message@test>';
+    const source = mail('linked-source', 'AI source');
+    source.messageId = messageId;
+    source.tags = '|INBOX|important|';
+    await h.accounts[0].storage.insertEmail(source);
+    h.accounts[0].storage.db.prepare("UPDATE emails SET extraction_status = 'done', agent_status = 'done', ai_categories = '|important|' WHERE id = ?").run(source.id);
+    await put(s, 'acct-b', 'linked-target', ['promotions'], undefined, messageId);
+    await until(decided([['acct-b', 'linked-target']]), 'provider target to finalize');
+    await pollTick();
+    expect((await h.accounts[1].storage.getEmail('linked-target')).tags).toContain('|promotions|');
+    expect(row('acct-b', 'linked-target').ai_categories).toBeNull();
+    expect(h.sent).toEqual([]);
+  });
+
+  // Regression: unknown native categories must remain pending across restart and recover after sync, without AI failure strikes or calls during the outage.
+  it('defers unknown Gmail categories across restart and resumes once discovery succeeds', async () => {
+    seedMirror(established(true));
+    const first = await launch();
+    await put(first, 'acct-a', 'unknown-gmail', [], undefined, undefined, true);
+    await until(() => h.accounts[0].storage.db.prepare('SELECT extraction_status FROM emails WHERE id = ?').get('unknown-gmail').extraction_status === 'done', 'unknown email local extraction');
+    await pollTick();
+    expect(row('acct-a', 'unknown-gmail').agent_status).toBe('pending');
+    expect(h.sent).toEqual([]);
+    quit();
+    await launch();
+    await pollTick();
+    expect(h.sent).toEqual([]);
+    await h.accounts[0].storage.updateEmail('unknown-gmail', { gmailCategoriesPending: false });
+    await pollTick();
+    await until(decided([['acct-a', 'unknown-gmail']]), 'successful discovery to resume classification');
+    expect(wasSent('Subject of unknown-gmail')).toBe(true);
+  });
+
+  // Regression: server metadata can arrive while another account holds the shared AI request queue; queued mail must recheck before spending tokens.
+  it.each(['provider', 'pending discovery'])('rechecks %s received while waiting behind another account', async (state) => {
+    seedMirror(established(true));
+    const s = await launch();
+    const originalProvider = h.provider;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    const provider = vi.spyOn(h, 'provider').mockImplementationOnce(async (url, init) => {
+      started = true;
+      await held;
+      return originalProvider(url, init);
+    });
+    try {
+      await put(s, 'acct-a', 'queue-blocker');
+      await until(() => started, 'the first account to hold the provider request');
+      const target: SQLiteStorage = h.accounts[1].storage;
+      const getEmail = target.getEmail.bind(target);
+      let targetRead = 0;
+      const reads = vi.spyOn(target, 'getEmail').mockImplementation(async (id: string) => {
+        const email = await getEmail(id);
+        if (id === 'queued-target') targetRead += 1;
+        return email;
+      });
+      await put(s, 'acct-b', 'queued-target');
+      await until(() => targetRead >= 2, 'the second account to enter processing');
+      await new Promise((resolve) => setImmediate(resolve));
+      if (state === 'provider') target.setServerCategories('queued-target', ['promotions']);
+      else await target.updateEmail('queued-target', { gmailCategoriesPending: true });
+      release();
+      await until(decided([['acct-a', 'queue-blocker']]), 'the first request to complete');
+      if (state === 'provider') await until(decided([['acct-b', 'queued-target']]), 'the provider-classified queued mail to finalize');
+      else await pollTick();
+      expect(wasSent('Subject of queued-target')).toBe(false);
+      expect(row('acct-b', 'queued-target').ai_categories).toBeNull();
+      if (state === 'pending discovery') expect(row('acct-b', 'queued-target').agent_status).toBe('pending');
+      reads.mockRestore();
+    } finally { release(); provider.mockRestore(); }
+  });
+
+  // Regression: manual choices already have a native operation; AI label retries must not compete with it or mirror provider guesses/unknown state.
+  it('drains AI labels while retiring manual/provider mirrors and waiting for unknown native state', async () => {
+    seedMirror(established(true));
+    const s = await launch();
+    const storage = h.accounts[0].storage;
+    const apply = vi.fn(async (_path: string, _uid: number, _data: { categories: Array<{ slug: string }> }) => 'success');
+    h.accounts[0].engine = { isConnected: () => true, operationQueue: {
+      applyCategoryLabels: apply, ensureCategoryLabelsExist: vi.fn(async () => 0), isGmailCapable: () => false,
+    } };
+    for (const id of ['manual-label', 'manual-important', 'provider-label', 'unknown-label', 'ai-label']) {
+      await storage.insertEmail(mail(id, id));
+      storage.db.prepare("UPDATE emails SET extraction_status = 'done', agent_status = 'done', label_status = 'pending' WHERE id = ?").run(id);
+    }
+    storage.setEmailManualCategories('manual-label', ['finance']);
+    storage.setEmailManualCategories('manual-important', ['important']);
+    storage.setEmailManualCategories('manual-important', []);
+    storage.setServerCategories('provider-label', ['promotions']);
+    // Simulate a stale mirror left pending before the native toggle superseded it.
+    storage.db.prepare("UPDATE emails SET agent_status = 'done', label_status = 'pending' WHERE id IN ('manual-label', 'manual-important', 'provider-label')").run();
+    storage.db.prepare("UPDATE emails SET ai_categories = '|important|' WHERE id = 'manual-important'").run();
+    await storage.updateEmail('unknown-label', { gmailCategoriesPending: true });
+    storage.db.prepare("UPDATE emails SET ai_categories = '|invoice|' WHERE id IN ('unknown-label', 'ai-label')").run();
+    const unknown = await storage.getEmail('unknown-label');
+    await s.svc.mirrorCategoryLabels(storage, unknown, ['invoice']);
+    expect(apply).not.toHaveBeenCalled();
+    await pollTick();
+    const labels = (id: string) => storage.db.prepare('SELECT label_status FROM emails WHERE id = ?').get(id).label_status;
+    await until(() => labels('manual-label') === 'done' && labels('ai-label') === 'done', 'eligible label retries to complete');
+    expect(labels('provider-label')).toBe('done');
+    expect(labels('manual-important')).toBe('done');
+    expect((await storage.getEmail('manual-important')).tags).not.toContain('|important|');
+    expect(labels('unknown-label')).toBe('pending');
+    expect(apply.mock.calls.map(([, , data]) => data.categories.map((category: { slug: string }) => category.slug))).toEqual([['invoice']]);
+    expect(h.sent).toEqual([]);
+  });
+
+  // Regression: a real AI verdict may propagate across accounts only when the other copy has no provider/user authority or unknown Gmail state.
+  it.each(['provider', 'pending discovery', 'unclassified'])('protects an existing %s sibling during AI propagation', async (state) => {
+    seedMirror(established(true));
+    const s = await launch();
+    const target = h.accounts[1].storage;
+    const messageId = '<propagated-message@test>';
+    const sibling = mail('propagation-target', 'Target copy');
+    sibling.messageId = messageId;
+    sibling.serverCategories = state === 'provider' ? ['promotions'] : null;
+    sibling.gmailCategoriesPending = state === 'pending discovery';
+    sibling.tags = state === 'provider' ? '|INBOX|promotions|' : '|INBOX|';
+    await target.insertEmail(sibling);
+    target.db.prepare("UPDATE emails SET extraction_status = 'done', agent_status = 'done' WHERE id = ?").run(sibling.id);
+    const originalProvider = h.provider;
+    const provider = vi.spyOn(h, 'provider').mockImplementationOnce(async (url, init) => {
+      const response = await originalProvider(url, init);
+      const payload = await response.json();
+      const verdict = JSON.parse(payload.choices[0].message.content);
+      for (const result of verdict) result.categories = ['invoice'];
+      payload.choices[0].message.content = JSON.stringify(verdict);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    try {
+      await put(s, 'acct-a', 'propagation-source', undefined, undefined, messageId);
+      await until(decided([['acct-a', 'propagation-source']]), 'the source AI verdict to save');
+      expect(h.sent).toHaveLength(1);
+      expect(row('acct-a', 'propagation-source').ai_categories).toBe('|invoice|');
+      const current = await target.getEmail(sibling.id);
+      if (state === 'unclassified') {
+        expect(current.tags).toContain('|invoice|');
+        expect(row('acct-b', sibling.id).ai_categories).toBe('|invoice|');
+      } else {
+        expect(current.tags).toBe(sibling.tags);
+        expect(row('acct-b', sibling.id).ai_categories).toBeNull();
+      }
+    } finally { provider.mockRestore(); }
   });
 });
 

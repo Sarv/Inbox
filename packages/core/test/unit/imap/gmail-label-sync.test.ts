@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageProcessor } from '../../../src/imap/message-processor';
 import { FakeEmailStorage } from '../../../src/test-support/fake-email-storage';
@@ -97,18 +97,14 @@ describe('Gmail label sync — folder membership from X-GM-LABELS', () => {
     expect(tags).toContain('Big Client 2026');
   });
 
-  // \Starred is a FLAG here. Tagging it as a folder would invent a "\Starred"
-  // folder AND leave the star missing in the UI. BEHAVIOUR CHANGE: the same
-  // message's \Important label no longer becomes an `important` tag — Gmail's
-  // importance guess must not reach the chip or the "Important and unread"
-  // section, which only this app's AI may fill.
-  it('turns \\Starred into a flag tag but drops \\Important', async () => {
+  // Provider importance and stars are independent, and both must appear without AI.
+  it('imports provider Starred and Important as independent flag tags', async () => {
     server.addMessage(ALL_MAIL, { labels: ['\\Inbox', '\\Starred', '\\Important'] });
 
     const tags = await tagsOfOnly(await syncAllMail(server, storage));
 
     expect(tags).toContain('starred');
-    expect(tags).not.toContain('important');
+    expect(tags).toContain('important');
     expect(tags.some((t) => t.startsWith('\\'))).toBe(false);
   });
 
@@ -235,22 +231,19 @@ describe('Gmail label sync — folder membership from X-GM-LABELS', () => {
 
     // The repair reads the SAME label mapping as ingest, so it is a second way
     // Gmail's importance could reach the chip — on old mail, long after the fact.
-    // It must file the message's folders and still leave `important` unset.
-    it('files a \\Important-labelled message without tagging it important', async () => {
+    // Repair must import provider importance along with mailbox membership.
+    it('files an Important-labelled message and imports importance', async () => {
       await storeWithoutLabels(1);
       server.addMessage(ALL_MAIL, { uid: 1, labels: ['\\Inbox', '\\Important'] });
 
       await repair();
 
       expect(await idsVisibleIn(storage, 'INBOX')).toHaveLength(1);
-      expect(await tagsOfOnly(storage)).not.toContain('important');
+      expect(await tagsOfOnly(storage)).toContain('important');
     });
 
-    // KNOWN GAP, deliberate: the repair is additive-only, so a row tagged
-    // `important` by the OLD label mapping keeps that tag. Nothing records who
-    // authored the tag (AI, the user, or Gmail), so a blanket strip would also
-    // erase genuine AI and manual marks. Existing chips clear when the AI
-    // re-classifies the mail, not on sync.
+    // A provider label confirming an existing importance mark keeps that mark
+    // while recording its provider provenance for future removals.
     it('leaves an already-stored important tag alone (pre-existing rows are not cleaned)', async () => {
       await storeWithoutLabels(1);
       const folder = (await storage.getFolders()).find((f) => f.path === ALL_MAIL)!;
@@ -346,5 +339,71 @@ describe('Gmail label sync — folder membership from X-GM-LABELS', () => {
     await new MessageProcessor().processBatch(messages, folder, store as never, undefined, { quiet: true });
 
     expect(await tagsOfOnly(store, 'INBOX')).toEqual(['INBOX', 'read']);
+  });
+});
+
+
+describe('Gmail native category metadata on ingest and label repair', () => {
+  async function fixture() {
+    const server = new FakeImapServer({ gmailLabels: true }); server.addFolder(ALL_MAIL);
+    const storage = new FakeEmailStorage(); storage.addFolder(ALL_MAIL, { uidValidity: 1 });
+    server.addMessage(ALL_MAIL, { uid: 1, subject: 'categorized', labels: [] });
+    await server.selectFolder(ALL_MAIL);
+    const message = (await server.fetchMessages('1:*'))[0];
+    const folder = (await storage.getFolders())[0];
+    return { server, storage, message, folder, processor: new MessageProcessor() };
+  }
+
+  // Initial sync records native category tabs even when Google exposes no category labels.
+  it('persists native authority and pending discovery on initial and duplicate ingestion', async () => {
+    const f = await fixture();
+    await f.processor.processBatch([{ ...f.message, categories: ['promotions'], gmailCategoriesKnown: true }], f.folder, f.storage as never, undefined, { quiet: true });
+    const row = f.storage.allRows()[0];
+    expect(row.serverCategories).toEqual(['promotions']); expect(row.gmailCategoriesPending).toBe(false);
+    await f.processor.processBatch([{ ...f.message, gmailCategoriesKnown: false }], f.folder, f.storage as never, undefined, { quiet: true });
+    expect(row.serverCategories).toEqual(['promotions']); expect(row.gmailCategoriesPending).toBe(true);
+    await f.processor.processBatch([{ ...f.message, categories: [], gmailCategoriesKnown: true }], f.folder, f.storage as never, undefined, { quiet: true });
+    expect(row.serverCategories).toEqual([]); expect(row.gmailCategoriesPending).toBe(false);
+    expect(parseTags(row.tags)).not.toContain('promotions');
+  });
+
+  // Additive membership repair cannot interpret failed native discovery as a category removal.
+  it('preserves unknown native authority in repair and clears it only on successful discovery', async () => {
+    const f = await fixture();
+    await f.processor.processBatch([{ ...f.message, categories: ['social'], gmailCategoriesKnown: true }], f.folder, f.storage as never, undefined, { quiet: true });
+    const row = f.storage.allRows()[0];
+    const fetch = vi.spyOn(f.server, 'fetchAllLabels');
+    fetch.mockResolvedValue([{ uid: 1, labels: [], gmailCategoriesKnown: false }] as any);
+    expect((await f.processor.repairGmailLabels(f.server, f.folder, f.storage as never)).updated).toBe(1);
+    expect(row.serverCategories).toEqual(['social']); expect(row.gmailCategoriesPending).toBe(true);
+    fetch.mockResolvedValue([{ uid: 1, labels: [], categories: [], gmailCategoriesKnown: true }] as any);
+    await f.processor.repairGmailLabels(f.server, f.folder, f.storage as never);
+    expect(row.serverCategories).toEqual([]); expect(row.gmailCategoriesPending).toBe(false);
+  });
+});
+
+
+describe('duplicate and repair pending operation safety', () => {
+  // Duplicate download must not overwrite a manual correction still waiting for the server.
+  it('preserves the pending local selection during duplicate ingestion', async () => {
+    const server = new FakeImapServer({ gmailLabels: true }); server.addFolder(ALL_MAIL);
+    const storage = new FakeEmailStorage(); storage.addFolder(ALL_MAIL, { uidValidity: 1 });
+    server.addMessage(ALL_MAIL, { uid: 1, labels: [], flags: ['Important'] }); await server.selectFolder(ALL_MAIL);
+    const message = (await server.fetchMessages('1:*'))[0]; const folder = (await storage.getFolders())[0];
+    const processor = new MessageProcessor();
+    await processor.processBatch([message], folder, storage as never, undefined, { quiet: true });
+    const row = storage.allRows()[0]; expect(row.serverCategories).toEqual(['important']);
+    processor.setPendingUidsProvider(async () => new Set([1]));
+    await processor.processBatch([{ ...message, flags: [], categories: [], gmailCategoriesKnown: true }], folder, storage as never, undefined, { quiet: true });
+    expect(row.serverCategories).toEqual(['important']); expect(parseTags(row.tags)).toContain('important');
+  });
+
+  // An account's recreated folder invalidates label-repair UIDs just as it does a flag operation.
+  it('refuses repair after UIDVALIDITY changed before fetching labels', async () => {
+    const server = new FakeImapServer({ gmailLabels: true }); server.addFolder(ALL_MAIL, { uidValidity: 2 });
+    const storage = new FakeEmailStorage(); storage.addFolder(ALL_MAIL, { uidValidity: 1 });
+    const folder = (await storage.getFolders())[0];
+    await expect(new MessageProcessor().repairGmailLabels(server, folder, storage as never)).rejects.toMatchObject({ code: 'UIDVALIDITY_MISMATCH' });
+    expect(server.callCount('fetchAllLabels')).toBe(0);
   });
 });

@@ -76,3 +76,13 @@ describe('ImapFlowClient.connect â€” teardown keeps an error sink for ImapFlowâ€
     expect(lastInstance!.listenerCount('close')).toBe(0); // manager 'close' handler detached
   });
 });
+
+
+// Native category API authorization must not survive an account reconnect using app-password authentication.
+it('clears the retained OAuth resolver before a password connection attempt', async () => {
+  const client = new ImapFlowClient(); const resolver = async () => 'unused';
+  const state = client as unknown as { gmailResolveBearer?: typeof resolver };
+  state.gmailResolveBearer = resolver; connectImpl = async () => { throw new Error('synthetic failure'); };
+  await expect(client.connect(cfg as never)).rejects.toThrow();
+  expect(state.gmailResolveBearer).toBeUndefined();
+});

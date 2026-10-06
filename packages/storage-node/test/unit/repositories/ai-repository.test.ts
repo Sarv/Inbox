@@ -111,7 +111,7 @@ describe('AIRepository', () => {
       // that must be made deliberately (update this list with the migration).
       // CHANGED: v99 added 'social' (sort_order 9, after promotions).
       expect(defs.map((d) => d.slug)).toEqual([
-        'important', 'needs_response', 'reminders', 'meeting', 'invoice', 'finance', 'promotions', 'social',
+        'important', 'needs_response', 'reminders', 'meeting', 'invoice', 'finance', 'promotions', 'social', 'forums', 'updates', 'personal',
       ]);
       expect(defs.every((d) => d.isSystem)).toBe(true);
       expect(defs.every((d) => d.isEnabled)).toBe(true);
@@ -222,8 +222,8 @@ describe('AIRepository', () => {
 
     it('toggling an unknown slug is a silent no-op', () => {
       expect(() => repo.toggleCategoryDefinition('nope', false)).not.toThrow();
-      // CHANGED: 7 -> 8 seeded categories with Social (v99).
-      expect(repo.getCategoryDefinitions()).toHaveLength(8);
+      // v102 adds Forums, Updates and Primary to the eight existing categories.
+      expect(repo.getCategoryDefinitions()).toHaveLength(11);
     });
   });
 

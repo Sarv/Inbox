@@ -41,27 +41,24 @@ describe('mapGmailLabels — system labels', () => {
     expect(m.roles).toEqual([]);
   });
 
-  // BEHAVIOUR CHANGE: \Important used to map to the `important` flag tag. This
-  // app's AI is the sole author of that tag, so Gmail's own guess must be
-  // dropped — otherwise mail synced while the AI is down still shows an
-  // "Important" chip, and disabling the AI never clears the section.
-  it('drops \\Important instead of tagging it important', () => {
-    const m = mapGmailLabels(['\\Inbox', '\\Starred', '\\Important']);
-    expect(m.flags).toEqual(['starred']);
-    expect(m.labels).toEqual([]);
-    expect(m.categories).toEqual([]);
-    expect(m.roles).toEqual(['inbox']);
+  // Provider importance is imported independently from category and star state.
+  it('maps Important in all server spellings to the importance flag', () => {
+    for (const spelling of ['Important', '\\Important', '\\IMPORTANT', '\\important', '"Important"']) {
+      const m = mapGmailLabels(['\\Inbox', '\\Starred', spelling]);
+      expect(m.flags).toEqual(['starred', 'important']);
+      expect(m.labels).toEqual([]);
+      expect(m.categories).toEqual([]);
+      expect(m.roles).toEqual(['inbox']);
+    }
   });
 
-  // Dropping it must not fall through to the user-label branch: a folder called
-  // "\Important" would be worse than the chip we removed.
-  it('never turns \\Important into a label or folder, in any casing', () => {
-    for (const spelling of ['\\Important', '\\IMPORTANT', '\\important']) {
-      const m = mapGmailLabels([spelling]);
-      expect(m.flags).toEqual([]);
-      expect(m.labels).toEqual([]);
-      expect(m.roles).toEqual([]);
-    }
+  // Native Gmail categories must avoid an unnecessary categorizer request.
+  it('recovers native category labels and known bare labels', () => {
+    const m = mapGmailLabels(['\\Category_Promotions', '[Gmail]/Social', 'Updates'], {
+      knownCategories: [{ slug: 'promotions', name: 'Promotions' }, { slug: 'social', name: 'Social' }, { slug: 'updates', name: 'Updates' }],
+    });
+    expect(m.categories).toEqual(['promotions', 'social', 'updates']);
+    expect(m.labels).toEqual([]);
   });
 
   it('treats \\Drafts and \\Spam aliases the same as their canonical forms', () => {
@@ -261,5 +258,23 @@ describe('matchKnownCategory', () => {
       .toBe('needs_response');
     expect(categorySlugFromLabel('Sarv Inbox/Newsletters', 'Sarv Inbox', categories))
       .toBeNull();
+  });
+});
+
+
+describe('native Gmail categories and provider display aliases', () => {
+  // Several native/mirrored representations of one category must remain one authority.
+  it('deduplicates bare, system and mirrored category/Important representations', () => {
+    expect(mapGmailLabels(['Important', '\\Important', 'Important', '\\Promotions', '\\Category_Promotions', 'Promotions', 'Promotions', 'Finance', 'Finance'], { knownCategories: [{ slug: 'promotions' }, { slug: 'finance', name: 'Finance' }] })).toMatchObject({ categories: ['promotions', 'finance'], flags: ['important'] });
+  });
+});
+
+
+describe('provider plural aliases retain the configured category slug', () => {
+  // Display names and slugs may differ; known plural/singular aliases resolve either direction only.
+  it('matches aliases by display name, reverse plural slug, and rejects unresolved aliases', () => {
+    expect(matchKnownCategory('Meetings', [{ slug: 'custom', name: 'Meeting' }])).toBe('custom');
+    expect(matchKnownCategory('meeting', [{ slug: 'meetings' }])).toBe('meetings');
+    expect(matchKnownCategory('Invoices', [{ slug: 'other' }])).toBeNull();
   });
 });

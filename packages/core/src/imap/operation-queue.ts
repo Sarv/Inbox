@@ -1,11 +1,13 @@
 // Operation Queue - Crash-safe persist-first batched pipeline for all IMAP operations
 
-import type { IIMAPClient, IMAPFolder } from '../types/imap';
+import { IMAPError, type IIMAPClient, type IMAPFolder } from '../types/imap';
 import type { IEmailStorage } from '../types/storage';
+import { categorySlugFromLabel, type KnownCategory } from '../utils/gmail-labels';
 import { logger } from '../utils/logger';
 
+import { GMAIL_NATIVE_CATEGORY_SLUGS } from './gmail-category-api';
 import { isConnectionError, isRateLimited, isQuotaError, extractOpFailureDetail } from './imap-errors';
-import { isSarvLabelPath, resolveLabelStrategy, type FolderLabelMode } from './label-strategy';
+import { isSarvLabelPath, resolveLabelStrategy, SARV_LABEL_PARENT, type FolderLabelMode } from './label-strategy';
 import { withFolderSelected } from './with-folder';
 
 /**
@@ -16,6 +18,7 @@ export type OperationType =
   | 'markUnread'
   | 'markStarred'
   | 'markUnstarred'
+  | 'setImportance'
   | 'move'
   | 'copy'
   | 'moveToTrash'
@@ -26,6 +29,7 @@ export type OperationType =
   | 'removeLabel'
   | 'applyCategoryLabel'
   | 'removeCategoryLabel'
+  | 'setCategorySelection'
   | 'removeGmailLabels';
 
 /**
@@ -226,6 +230,16 @@ export class OperationQueue {
     return this.persistAndExecute('markUnstarred', folderPath, uid, null);
   }
 
+  /** Persist mailbox identity with the action; offline replay must never flag a reused UID. */
+  async markImportant(folderPath: string, uid: number, important: boolean): Promise<OperationResult> {
+    const folder = await this.storage!.getFolderByPath(folderPath);
+    const uidValidity = folder?.uidValidity;
+    if (!Number.isSafeInteger(uidValidity) || !uidValidity || uidValidity <= 0) {
+      throw new IMAPError('Sync this folder before changing importance', 'UIDVALIDITY_UNKNOWN');
+    }
+    return this.persistAndExecute('setImportance', folderPath, uid, { uidValidity, important });
+  }
+
   async move(sourcePath: string, uid: number, destPath: string, emailId?: string): Promise<OperationResult> {
     const data = emailId === undefined ? { destPath } : { destPath, emailIdsByUid: { [uid]: emailId } };
     return this.persistAndExecute('move', sourcePath, uid, data);
@@ -270,7 +284,7 @@ export class OperationQueue {
     uid: number,
     data: { categories: Array<{ slug: string; name: string }>; host: string; mode: FolderLabelMode },
   ): Promise<OperationResult> {
-    return this.persistAndExecute('applyCategoryLabel', folderPath, uid, data);
+    return this.persistAndExecute('applyCategoryLabel', folderPath, uid, await this.categoryIdentity(folderPath, data));
   }
 
   async removeCategoryLabels(
@@ -278,7 +292,30 @@ export class OperationQueue {
     uid: number,
     data: { categories: Array<{ slug: string; name: string }>; host: string; mode: FolderLabelMode },
   ): Promise<OperationResult> {
-    return this.persistAndExecute('removeCategoryLabel', folderPath, uid, data);
+    return this.persistAndExecute('removeCategoryLabel', folderPath, uid, await this.categoryIdentity(folderPath, data));
+  }
+
+  /** A complete manual selection is one durable intent, never two independently persisted halves. */
+  async setCategorySelection(folderPath: string, uid: number,
+    data: { apply: Array<{ slug: string; name: string }>; remove: Array<{ slug: string; name: string }>; host: string; mode: FolderLabelMode },
+  ): Promise<OperationResult> {
+    const identity = await this.categoryIdentity(folderPath, data);
+    if (data.apply.some((category) => data.remove.some((other) => other.slug === category.slug))) {
+      throw new IMAPError('Category selection contains conflicting changes', 'CATEGORY_SELECTION_INVALID');
+    }
+    if (this.client?.supportsGmailLabels?.() && !this.client.canModifyGmailCategories?.()) {
+      throw new IMAPError('Sign in with Gmail OAuth to sync categories', 'GMAIL_CATEGORY_OAUTH_REQUIRED');
+    }
+    return this.persistAndExecute('setCategorySelection', folderPath, uid, identity);
+  }
+
+  private async categoryIdentity<T>(folderPath: string, data: T): Promise<T & { uidValidity: number }> {
+    const folder = await this.storage!.getFolderByPath(folderPath);
+    const uidValidity = folder?.uidValidity;
+    if (!Number.isSafeInteger(uidValidity) || !uidValidity || uidValidity <= 0) {
+      throw new IMAPError('Sync this folder before changing categories', 'UIDVALIDITY_UNKNOWN');
+    }
+    return { ...data, uidValidity };
   }
 
   /** Strip stale Gmail category labels from ONE message in a single
@@ -289,7 +326,7 @@ export class OperationQueue {
     uid: number,
     labels: string[],
   ): Promise<OperationResult> {
-    return this.persistAndExecute('removeGmailLabels', folderPath, uid, { labels });
+    return this.persistAndExecute('removeGmailLabels', folderPath, uid, await this.categoryIdentity(folderPath, { labels }));
   }
 
   /**
@@ -498,7 +535,7 @@ export class OperationQueue {
         try {
           await this.storage!.updatePendingOperationStatus(id, 'executing');
           const execStart = Date.now();
-          await this.runFlagOp(lease.client, type, folderPath, [uid]);
+          await this.runFlagOp(lease.client, type, folderPath, [uid], data);
           execMs = Date.now() - execStart;
         } catch (error) {
           lease.poison(); // its command may still be in-flight — never reuse it
@@ -792,7 +829,7 @@ export class OperationQueue {
     new Set<OperationType>(['markRead', 'markUnread', 'markStarred', 'markUnstarred']);
 
   /** Run a flag op on an arbitrary (leased) connection. */
-  private async runFlagOp(client: IIMAPClient, type: OperationType, folderPath: string, uids: number[]): Promise<void> {
+  private async runFlagOp(client: IIMAPClient, type: OperationType, folderPath: string, uids: number[], data?: { uidValidity?: number; important?: boolean }): Promise<void> {
     // Held for the STORE, not merely set before it: these UIDs mean one thing in
     // this mailbox and something else in the next, so a re-select landing between
     // the select and the STORE flags somebody else's mail. The section still uses
@@ -804,6 +841,12 @@ export class OperationQueue {
         case 'markUnread': await client.removeFlags(uids, ['\\Seen']); break;
         case 'markStarred': await client.addFlags(uids, ['\\Flagged']); break;
         case 'markUnstarred': await client.removeFlags(uids, ['\\Flagged']); break;
+        case 'setImportance': {
+          if (!client.setImportance) throw new IMAPError('This client does not support importance sync', 'IMPORTANCE_NOT_SUPPORTED');
+          if (!data?.uidValidity) throw new IMAPError('Pending importance operation has no mailbox identity', 'UIDVALIDITY_UNKNOWN');
+          await client.setImportance(uids, data.important === true, data.uidValidity);
+          break;
+        }
         default: throw new Error(`runFlagOp: ${type} is not a flag op`);
       }
     });
@@ -829,6 +872,7 @@ export class OperationQueue {
     folderPath: string,
     uids: number[],
     data: any,
+    authorityChecked = false,
   ): Promise<void> {
     switch (type) {
       case 'markRead': {
@@ -852,6 +896,10 @@ export class OperationQueue {
 
       case 'markUnstarred':
         await withFolderSelected(this.client!, folderPath, () => this.client!.removeFlags(uids, ['\\Flagged']));
+        break;
+
+      case 'setImportance':
+        await this.runFlagOp(this.client!, type, folderPath, uids, data);
         break;
 
       case 'move': {
@@ -903,18 +951,56 @@ export class OperationQueue {
         await withFolderSelected(this.client!, folderPath, () => this.client!.copyMessages(uids, data.label));
         break;
 
-      case 'applyCategoryLabel': {
-        // ALL of the email's categories travel in ONE op (the pending-ops unique
-        // index is (type, folder_path, uid), so one op per category would
-        // collide). Resolve the strategy once, apply each category.
-        const strategy = await resolveLabelStrategy(this.client!, this.client!.host ?? data.host ?? '', (data.mode as FolderLabelMode) || 'copy');
-        for (const c of (data.categories ?? [])) await strategy.apply(folderPath, uids, { slug: c.slug, name: c.name });
+      case 'setCategorySelection': {
+        // Both halves stay protected by the same persisted row and mailbox lock.
+        // A transient partial execution retries this idempotent complete snapshot.
+        await withFolderSelected(this.client!, folderPath, async () => {
+          if (!Number.isSafeInteger(data.uidValidity) || data.uidValidity <= 0) throw new IMAPError('Pending category selection has no mailbox identity', 'UIDVALIDITY_UNKNOWN');
+          if (this.client!.getCurrentMailboxState?.()?.uidValidity !== data.uidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed', 'UIDVALIDITY_MISMATCH');
+          if (this.client!.supportsGmailLabels?.() && !this.client!.canModifyGmailCategories?.()) throw new IMAPError('Sign in with Gmail OAuth to sync categories', 'GMAIL_CATEGORY_OAUTH_REQUIRED');
+          await this.executeBatchedOperation('removeCategoryLabel', folderPath, uids, { ...data, categories: data.remove ?? [] }, true);
+          await this.executeBatchedOperation('applyCategoryLabel', folderPath, uids, { ...data, categories: data.apply ?? [] }, true);
+        });
         break;
       }
 
+      case 'applyCategoryLabel':
       case 'removeCategoryLabel': {
         const strategy = await resolveLabelStrategy(this.client!, this.client!.host ?? data.host ?? '', (data.mode as FolderLabelMode) || 'copy');
-        for (const c of (data.categories ?? [])) await strategy.remove(folderPath, uids, { slug: c.slug, name: c.name });
+        await withFolderSelected(this.client!, folderPath, async () => {
+          if (!Number.isSafeInteger(data.uidValidity) || data.uidValidity <= 0) throw new IMAPError('Pending category operation has no mailbox identity', 'UIDVALIDITY_UNKNOWN');
+          if (this.client!.getCurrentMailboxState?.()?.uidValidity !== data.uidValidity) {
+            throw new IMAPError('Mailbox UIDVALIDITY changed; sync this folder before changing categories', 'UIDVALIDITY_MISMATCH');
+          }
+          if (!authorityChecked) {
+            const groups = await this.constrainLegacyClassification(type, folderPath, uids, data);
+            for (const group of groups) await this.executeBatchedOperation(type, folderPath, group.uids, group.data, true);
+            return;
+          }
+          const native = this.client!.supportsGmailLabels?.()
+            ? (data.categories ?? []).filter((category: { slug: string }) => (GMAIL_NATIVE_CATEGORY_SLUGS as readonly string[]).includes(category.slug)) : [];
+          if (native.length > 0) {
+            if (!this.client!.modifyGmailCategories) throw new IMAPError('Connect Gmail with OAuth to change native categories', 'GMAIL_CATEGORY_OAUTH_REQUIRED');
+            const slugs = native.map((category: { slug: string }) => category.slug);
+            await this.client!.modifyGmailCategories(uids, type === 'applyCategoryLabel' ? slugs : [], type === 'removeCategoryLabel' ? slugs : [], data.uidValidity);
+          }
+          for (const category of (data.categories ?? [])) {
+            if (native.some((entry: { slug: string }) => entry.slug === category.slug)) {
+              // Native removal must also clear an older Sarv Inbox mirror, or ingestion restores the category.
+              if (type === 'removeCategoryLabel') await strategy.remove(folderPath, uids, { slug: category.slug, name: category.name });
+              else await this.removeLegacyNativeMirrors(folderPath, uids, category, data.uidValidity);
+              continue;
+            }
+            if (category.slug === 'important') {
+              if (!data.uidValidity || !this.client!.setImportance) throw new IMAPError('Importance sync is not supported', 'IMPORTANCE_NOT_SUPPORTED');
+              await this.client!.setImportance(uids, type === 'applyCategoryLabel', data.uidValidity);
+            } else if (type === 'applyCategoryLabel') {
+              await strategy.apply(folderPath, uids, { slug: category.slug, name: category.name });
+            } else {
+              await strategy.remove(folderPath, uids, { slug: category.slug, name: category.name });
+            }
+          }
+        });
         break;
       }
 
@@ -923,13 +1009,90 @@ export class OperationQueue {
         if (!this.client!.removeGmailLabels) break;
         const labels: string[] = data.labels ?? [];
         if (labels.length === 0) break;
-        await withFolderSelected(this.client!, folderPath, () => this.client!.removeGmailLabels!(uids, labels));
+        await withFolderSelected(this.client!, folderPath, async () => {
+          if (!Number.isSafeInteger(data.uidValidity) || data.uidValidity <= 0) throw new IMAPError('Pending label cleanup has no mailbox identity', 'UIDVALIDITY_UNKNOWN');
+          if (this.client!.getCurrentMailboxState?.()?.uidValidity !== data.uidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed', 'UIDVALIDITY_MISMATCH');
+          const groups = await this.constrainLegacyClassification(type, folderPath, uids, data);
+          for (const group of groups) if (group.data.labels.length) await this.client!.removeGmailLabels!(group.uids, group.data.labels);
+        });
         break;
       }
 
       default:
         throw new Error(`Unknown operation type: ${type}`);
     }
+  }
+
+  /** Native category assignment retires only this app's old mirrors, preserving native labels. */
+  private async removeLegacyNativeMirrors(folderPath: string, uids: number[], category: { slug: string; name: string }, uidValidity: number): Promise<void> {
+    const requested = new Set(uids);
+    const rows = (await this.client!.fetchFlagsOnly(uids, undefined, folderPath)).filter((row) => requested.has(row.uid));
+    if (this.client!.getCurrentMailboxState?.()?.uidValidity !== uidValidity) throw new IMAPError('Mailbox UIDVALIDITY changed during native mirror cleanup', 'UIDVALIDITY_MISMATCH');
+    if (new Set(rows.map((row) => row.uid)).size !== requested.size) throw new IMAPError('The selected message no longer exists', 'MESSAGE_NOT_FOUND');
+    for (const row of rows) {
+      const labels = (row.labels ?? []).filter((label) => isSarvLabelPath(label) &&
+        (categorySlugFromLabel(label, SARV_LABEL_PARENT, [category]) ?? categorySlugFromLabel(label, SARV_LABEL_PARENT)) === category.slug);
+      if (!labels.length) continue;
+      if (!this.client!.removeGmailLabels) throw new IMAPError('This client cannot clean up legacy category mirrors', 'GMAIL_LABELS_NOT_SUPPORTED');
+      await this.client!.removeGmailLabels([row.uid], labels);
+    }
+  }
+
+  /** Older AI/backfill rows may replay only changes compatible with the latest authority. */
+  private async constrainLegacyClassification(
+    type: 'applyCategoryLabel' | 'removeCategoryLabel' | 'removeGmailLabels',
+    folderPath: string, uids: number[], data: any,
+  ): Promise<Array<{ uids: number[]; data: any }>> {
+    const folder = await this.storage!.getFolderByPath(folderPath);
+    if (!folder || folder.uidValidity !== data.uidValidity) throw new IMAPError('Stored mailbox identity changed', 'UIDVALIDITY_MISMATCH');
+    const [pending, failed] = await Promise.all([this.storage!.getPendingOperations(), this.storage!.getFailedOperations()]);
+    const manualOps = [...pending, ...failed].filter((op) => op.folderPath === folderPath && ['setImportance', 'setCategorySelection'].includes(op.type))
+      .sort((a, b) => a.id - b.id);
+    const definitions = await (this.storage as unknown as { getCategoryDefinitions?: () => KnownCategory[] | Promise<KnownCategory[]> }).getCategoryDefinitions?.();
+    const groups = new Map<string, { uids: number[]; data: any }>();
+    for (const uid of uids) {
+      const email = await this.storage!.getEmailByFolderAndUid(folder.id, uid);
+      // Unknown native discovery cannot authorize an older AI classification.
+      if (email?.gmailCategoriesPending) continue;
+      const selection = email?.manualCategories != null ? email.manualCategories
+        : email?.serverCategories?.length ? email.serverCategories : null;
+      let desired = selection === null ? null : new Set(selection.filter((slug) => slug !== 'important'));
+      let important: boolean | null = selection === null ? null : selection.includes('important');
+      // Persisted manual intent protects the interval before its local projection
+      // commits, including restart replay and explicitly retried failed actions.
+      for (const op of manualOps) {
+        if (op.uid !== uid) continue;
+        const intent = op.data as { uidValidity?: number; important?: boolean; apply?: Array<{ slug: string }>; remove?: Array<{ slug: string }> };
+        if (intent?.uidValidity !== data.uidValidity) continue;
+        if (op.type === 'setImportance') important = intent.important === true;
+        else {
+          desired = new Set((intent.apply ?? []).filter((category) => category.slug !== 'important').map((category) => category.slug));
+          if (intent.apply?.some((category) => category.slug === 'important')) important = true;
+          if (intent.remove?.some((category) => category.slug === 'important')) important = false;
+        }
+      }
+      const allowed = (slug: string): boolean => {
+        const selected = slug === 'important' ? important : desired?.has(slug) ?? null;
+        return selected === null || (type === 'applyCategoryLabel' ? selected : !selected);
+      };
+      const next = type === 'removeGmailLabels' ? {
+        ...data,
+        labels: (data.labels ?? []).filter((label: string) => {
+          // Only this app's category mirrors are stale AI cleanup. Ordinary
+          // user labels retain the explicit operation's existing semantics.
+          if (!isSarvLabelPath(label)) return true;
+          const slug = categorySlugFromLabel(label, SARV_LABEL_PARENT, definitions)
+            ?? categorySlugFromLabel(label, SARV_LABEL_PARENT);
+          // Old app Important mirrors are unrelated to the native Important flag.
+          return !slug || slug === 'important' || (GMAIL_NATIVE_CATEGORY_SLUGS as readonly string[]).includes(slug) || allowed(slug);
+        }),
+      } : { ...data, categories: (data.categories ?? []).filter((category: { slug: string }) => allowed(category.slug)) };
+      const payload = JSON.stringify(next);
+      const group = groups.get(payload);
+      if (group) group.uids.push(uid);
+      else groups.set(payload, { uids: [uid], data: next });
+    }
+    return [...groups.values()];
   }
 
   /**

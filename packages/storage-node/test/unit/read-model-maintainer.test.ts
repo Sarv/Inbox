@@ -254,7 +254,13 @@ describe('ReadModelMaintainer — catchUp', () => {
 
   // THE REGRESSION: the projection must be current when catchUp returns — no
   // tick, no pump — or the read right after it misses the new thread.
+  // The clock is frozen because catchUp's 8 ms budget is wall time: two thread
+  // rebuilds on a loaded CI runner can outlast it, leaving one queued and
+  // failing a test about draining, not speed (PR #65's CI). Frozen, the budget
+  // never runs out, so this checks that a queue which fits is drained before
+  // catchUp returns; running out is "stops at its budget" below.
   it('rebuilds a small queue synchronously, before returning', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
     const m = new ReadModelMaintainer(() => db);
     insertEmail(db, 't1', 'INBOX');
     insertEmail(db, 't2', 'INBOX|read');

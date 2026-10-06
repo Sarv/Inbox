@@ -25,7 +25,7 @@ describe('exact MIME attachment antivirus source', () => {
     expect(await engine.listAttachmentScanParts('INBOX', 42)).toEqual([
       { partId: '2', filename: 'same.txt', byteLength: null }, { partId: '3', filename: 'same.txt', byteLength: null },
     ]);
-    expect(client.fetchMessagesByUID).toHaveBeenCalledWith([42], { fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
+    expect(client.fetchMessagesByUID).toHaveBeenCalledWith([42], { discoverCategories: false, fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
     expect(client.downloadPart).not.toHaveBeenCalled(); expect(client.fetchSource).not.toHaveBeenCalled();
   });
 

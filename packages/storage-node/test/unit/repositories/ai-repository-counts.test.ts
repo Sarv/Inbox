@@ -268,10 +268,13 @@ describe('AIRepository read side (listings + counts)', () => {
     it('returns zero for every category on an empty mailbox', () => {
       db.prepare('DELETE FROM emails').run();
       const counts = repo.getDynamicCategoryCounts();
-      expect(counts.uncategorized).toBe(0);
-      expect(Object.values(counts).every((n) => n === 0)).toBe(true);
-      // CHANGED: 8 -> 9 when v99 seeded Social.
-      expect(Object.keys(counts)).toHaveLength(9); // 8 seeded categories + uncategorized
+      // v102 adds the provider's Forums, Updates and Primary views. An empty
+      // mailbox still exposes every view with a zero badge, never an absent key.
+      expect(counts).toEqual({
+        important: 0, reminders: 0, needs_response: 0, meeting: 0, invoice: 0,
+        finance: 0, promotions: 0, social: 0, forums: 0, updates: 0, personal: 0,
+        uncategorized: 0,
+      });
     });
   });
 

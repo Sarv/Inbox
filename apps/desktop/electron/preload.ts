@@ -347,8 +347,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     markStarred: (emailId: string, starred: boolean, accountId?: string) =>
       ipcRenderer.invoke('emails:markStarred', emailId, starred, accountId),
-    markImportant: (emailId: string, important: boolean) =>
-      ipcRenderer.invoke('emails:markImportant', emailId, important),
+    markImportant: (emailId: string, important: boolean, accountId?: string) =>
+      ipcRenderer.invoke('emails:markImportant', emailId, important, accountId),
     syncStarred: () => ipcRenderer.invoke('emails:syncStarred'),
     moveToFolder: (emailId: string, folderId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:moveToFolder', emailId, folderId, accountId),
@@ -654,8 +654,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getByCategory: (category: string, limit?: number, offset?: number, folderId?: string) =>
       ipcRenderer.invoke('ai:getByCategory', category, limit, offset, folderId),
     getCategoryCounts: (folderId?: string, mode?: 'unread' | 'total') => ipcRenderer.invoke('ai:getCategoryCounts', folderId, mode),
-    getCategoryDefinitions: () => ipcRenderer.invoke('ai:getCategoryDefinitions'),
-    getEmailCategoriesBatch: (emailIds: string[]) => ipcRenderer.invoke('ai:getEmailCategoriesBatch', emailIds),
+    getCategoryDefinitions: (accountId?: string) => ipcRenderer.invoke('ai:getCategoryDefinitions', accountId),
+    setEmailCategory: (emailId: string, slug: string, on: boolean, accountId?: string) =>
+      ipcRenderer.invoke('emails:setCategory', emailId, slug, on, accountId),
+    getEmailCategoriesBatch: (emailIds: string[], accountId?: string) => ipcRenderer.invoke('ai:getEmailCategoriesBatch', emailIds, accountId),
     upsertCategoryDefinition: (def: any) => ipcRenderer.invoke('ai:upsertCategoryDefinition', def),
     deleteCategoryDefinition: (slug: string) => ipcRenderer.invoke('ai:deleteCategoryDefinition', slug),
     toggleCategoryDefinition: (slug: string, enabled: boolean) => ipcRenderer.invoke('ai:toggleCategoryDefinition', slug, enabled),
@@ -1359,7 +1361,7 @@ export interface ElectronAPI {
       callback: (update: { emailId: string; accountId: string | null; tags: string }) => void
     ) => () => void;
     markStarred: (emailId: string, starred: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
-    markImportant: (emailId: string, important: boolean) => Promise<{ success: boolean; error?: string }>;
+    markImportant: (emailId: string, important: boolean, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     syncStarred: () => Promise<{ success: boolean; data?: { synced: number; total: number }; error?: string }>;
     moveToFolder: (emailId: string, folderId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     restoreFromTrash: (emailIds: string[], accountId?: string) => Promise<{ success: boolean; data?: { restoredIds: string[]; failedIds: string[] }; error?: string }>;
@@ -1584,9 +1586,11 @@ export interface ElectronAPI {
       Promise<{ success: boolean; data?: any[]; error?: string }>;
     getCategoryCounts: (folderId?: string, mode?: 'unread' | 'total') =>
       Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
-    getCategoryDefinitions: () =>
+    getCategoryDefinitions: (accountId?: string) =>
       Promise<{ success: boolean; data?: any[]; error?: string }>;
-    getEmailCategoriesBatch: (emailIds: string[]) =>
+    setEmailCategory: (emailId: string, slug: string, on: boolean, accountId?: string) =>
+      Promise<{ success: boolean; data?: string[]; syncStatus?: 'queued' | 'success' | 'local-only'; error?: string }>;
+    getEmailCategoriesBatch: (emailIds: string[], accountId?: string) =>
       Promise<{ success: boolean; data?: Record<string, string[]>; error?: string }>;
     upsertCategoryDefinition: (def: any) =>
       Promise<{ success: boolean; error?: string }>;

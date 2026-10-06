@@ -337,7 +337,9 @@ describe('SyncEngine.fetchAttachment (whole-message fallback)', () => {
     expect(downloadPartRaw).not.toHaveBeenCalled();
     expect(client.downloadPart).not.toHaveBeenCalled();
     expect(client.fetchMessagesByUID).toHaveBeenCalledTimes(1);
+    // Exact MIME retrieval must not run unrelated category discovery.
     expect(client.fetchMessagesByUID).toHaveBeenCalledWith([42], {
+      discoverCategories: false,
       fetchHeaders: false,
       fetchBody: true,
     });

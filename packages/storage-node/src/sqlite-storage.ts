@@ -828,6 +828,18 @@ export class SQLiteStorage implements IEmailStorage {
     return this.emailRepo.get(id);
   }
 
+  setServerCategories(emailId: string, categories: string[]): void {
+    this.ensureInitialized();
+    this.emailRepo.setServerCategories(emailId, categories);
+    this.scheduleReadModelDrain();
+  }
+
+  setEmailManualCategories(emailId: string, categories: string[] | null): void {
+    this.ensureInitialized();
+    this.emailRepo.setManualCategories(emailId, categories);
+    this.scheduleReadModelDrain();
+  }
+
   async getEmailByMessageId(messageId: string): Promise<EmailRecord | null> {
     this.ensureInitialized();
     return this.emailRepo.getByMessageId(messageId);
@@ -1296,7 +1308,7 @@ export class SQLiteStorage implements IEmailStorage {
    * THREAD_META subqueries and no body columns, and yields the event loop
    * between pages so a big folder can't stall the main process.
    */
-  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string }>> {
+  async getEmailTagsInFolder(folderId: string): Promise<Array<{ id: string; uid: number | null; tags: string; serverCategories?: string[] | null; manualCategories?: string[] | null; gmailCategoriesPending?: boolean }>> {
     this.ensureInitialized();
     return this.emailRepo.getTagsInFolder(folderId);
   }
@@ -3008,17 +3020,16 @@ export class SQLiteStorage implements IEmailStorage {
 
   async getPendingOperationUidsByFolder(folderPath: string): Promise<number[]> {
     this.ensureInitialized();
-    // Only IN-FLIGHT ops (pending/executing) protect the local optimistic change
-    // from the server-wins syncFlags reconciliation. A DEAD-LETTERED ('failed')
-    // op has permanently failed to reach the server, so its optimistic value is a
-    // lie — dropping it from the guard lets syncFlags revert the row to the
-    // server's truth (e.g. a markRead that never round-tripped springs back to
-    // unread). This is the "only stays read if the server accepted it" rule.
-    // (Transient failures now RE-QUEUE as 'pending' — see isConnectionError — so
-    // this fires only on genuine terminal failure. A user Retry re-arms the op to
-    // 'pending', re-protecting it.)
+    // Failed read/star operations revert to the actual server flag. A failed
+    // classification operation retains the user's explicit choice until they
+    // retry or discard it; otherwise a refresh could erase their choice and
+    // send the message back to AI while the failed action remains in the queue.
     const rows = this.db!.prepare(
-      "SELECT DISTINCT uid FROM pending_operations WHERE folder_path = ? AND status IN ('pending','executing') AND uid > 0"
+      `SELECT DISTINCT uid FROM pending_operations WHERE folder_path = ? AND uid > 0 AND (
+        status IN ('pending','executing') OR (status = 'failed' AND type IN (
+          'setImportance','setCategorySelection','applyCategoryLabel','removeCategoryLabel'
+        ))
+      )`
     ).all(folderPath) as Array<{ uid: number }>;
     return rows.map(row => row.uid);
   }
@@ -3548,4 +3559,3 @@ export interface CategoryDefinition {
   createdAt: number;
   updatedAt: number;
 }
-

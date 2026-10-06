@@ -178,13 +178,13 @@ export interface IIMAPClient {
     uids: number[],
     onBatch?: () => void,
     expectedPath?: string,
-  ): Promise<Array<{ uid: number; flags: string[] }>>;
+  ): Promise<Array<{ uid: number; flags: string[]; labels?: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>>;
 
   /**
    * Fetch flags for all messages in folder (efficient bulk fetch)
    * Returns array of { uid, flags }
    */
-  fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[] }>>;
+  fetchAllFlags(expectedPath?: string): Promise<Array<{ uid: number; flags: string[]; labels?: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>>;
 
   /**
    * Check if server supports CONDSTORE extension
@@ -226,7 +226,7 @@ export interface IIMAPClient {
    * before labels were fetched. Labels-only, so it costs a fraction of a
    * re-download. Returns `[]` on a server without the Gmail extension.
    */
-  fetchAllLabels?(expectedPath?: string): Promise<Array<{ uid: number; labels: string[] }>>;
+  fetchAllLabels?(expectedPath?: string): Promise<Array<{ uid: number; labels: string[]; categories?: string[]; gmailCategoriesKnown?: boolean }>>;
 
   /**
    * Fetch all UIDs in current folder (efficient for deletion detection)
@@ -284,6 +284,11 @@ export interface IIMAPClient {
    * message. Gmail-only (optional); used to strip stale category labels.
    */
   removeGmailLabels?(uids: number[], labels: string[]): Promise<void>;
+
+  /** Set provider-native importance on the selected mailbox, preserving stars and categories. */
+  setImportance?(uids: number[], important: boolean, expectedUidValidity: number): Promise<void>;
+  canModifyGmailCategories?(): boolean;
+  modifyGmailCategories?(uids: number[], add: string[], remove: string[], expectedUidValidity: number): Promise<void>;
 
   /**
    * Set flags (replace existing)
@@ -457,6 +462,10 @@ export interface FolderStatus {
 export interface FlagChange {
   uid: number;
   flags: string[];
+  /** Present only when the server supports native Gmail labels. */
+  labels?: string[];
+  categories?: string[];
+  gmailCategoriesKnown?: boolean;
   modseq: number;
 }
 
@@ -482,6 +491,10 @@ export interface IMAPMessage {
    * Absent on every non-Gmail server. See utils/gmail-labels for the mapping.
    */
   labels?: string[];
+  /** Read-only Gmail category tabs discovered by bounded category: searches. */
+  categories?: string[];
+  /** Undefined on other providers; false means discovery failed and AI must defer. */
+  gmailCategoriesKnown?: boolean;
 
   /**
    * The raw `Authentication-Results` / `Received-SPF` / `ARC-Authentication-Results`
@@ -594,6 +607,8 @@ export interface AttachmentInfo {
  */
 export interface FetchOptions {
   fetchBody?: boolean; // Fetch full body
+  /** Disable on body/attachment-only reads which are not an ingestion batch. */
+  discoverCategories?: boolean;
   fetchHeaders?: boolean; // Fetch headers
   fetchBodyStructure?: boolean; // Fetch MIME structure
   fetchAttachments?: boolean; // Fetch attachment metadata

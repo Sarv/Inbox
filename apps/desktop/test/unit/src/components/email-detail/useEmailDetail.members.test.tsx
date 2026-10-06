@@ -267,3 +267,80 @@ describe('useEmailDetail — the conversation is its members', () => {
     expect(idsOf(ctx().threadEmails)).toEqual(['sa', 'sb']);
   });
 });
+
+describe('useEmailDetail — scrolling the expanded card into view', () => {
+  /** A thread card as ThreadList renders it, recording every scroll it is asked for. */
+  const plantCard = (emailId: string) => {
+    const card = document.createElement('div');
+    card.id = `thread-${emailId}`;
+    const scrolls = vi.fn();
+    card.scrollIntoView = scrolls;
+    document.body.appendChild(card);
+    return scrolls;
+  };
+  afterEach(() => {
+    document.querySelectorAll('[id^="thread-"]').forEach((card) => card.remove());
+  });
+
+  // Opening a read thread must still bring its newest message into view.
+  it('scrolls to the newest message of a read thread once its card has rendered', async () => {
+    const scrolls = plantCard('b');
+    await mount();
+    expect(scrolls).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(100);
+    expect(scrolls).toHaveBeenCalledExactlyOnceWith({ behavior: 'smooth', block: 'center' });
+  });
+
+  // Opening a thread with unread replies must bring the first unread one into view.
+  it('scrolls to the first unread message of a thread', async () => {
+    const unreadB = { ...B, tags: '|INBOX|' };
+    state.emails = [A, unreadB];
+    state.threadEmails = [A, unreadB];
+    const scrolls = plantCard('b');
+    await mount();
+    vi.advanceTimersByTime(100);
+    expect(scrolls).toHaveBeenCalledExactlyOnceWith({ behavior: 'smooth', block: 'center' });
+  });
+
+  // A reply that folds into the open thread must be scrolled to, or it lands
+  // collapsed below the fold and the reader never sees it arrive.
+  it('scrolls to a message that folds into the open thread', async () => {
+    await mount();
+    vi.advanceTimersByTime(100);
+    const C = email({ id: 'c', date: ELEVEN_AM + 60, tags: '|INBOX|read|', rawBody: '<p>three</p>' });
+    const scrolls = plantCard('c');
+    state.threadEmails = [A, B, C];
+    mounted!.rerender(<Harness />);
+    await settle();
+    vi.advanceTimersByTime(100);
+    expect(scrolls).toHaveBeenCalledExactlyOnceWith({ behavior: 'smooth', block: 'center' });
+  });
+
+  // THE regression (main's CI, PR #54): the 100 ms scroll outlived the pane.
+  // Fired after a test file's DOM was torn down, it threw "document is not
+  // defined" and failed a run in which every assertion had passed; in the app
+  // it scrolled a pane that was no longer there.
+  it('drops the pending scroll when the pane closes first', async () => {
+    const scrolls = plantCard('b');
+    await mount();
+    mounted!.unmount();
+    mounted = undefined;
+    vi.advanceTimersByTime(1_000);
+    expect(scrolls).not.toHaveBeenCalled();
+  });
+
+  // Same leak, the folded-in-message path.
+  it('drops the pending scroll to a folded-in message when the pane closes first', async () => {
+    await mount();
+    vi.advanceTimersByTime(100);
+    const C = email({ id: 'c', date: ELEVEN_AM + 60, tags: '|INBOX|read|', rawBody: '<p>three</p>' });
+    const scrolls = plantCard('c');
+    state.threadEmails = [A, B, C];
+    mounted!.rerender(<Harness />);
+    await settle();
+    mounted!.unmount();
+    mounted = undefined;
+    vi.advanceTimersByTime(1_000);
+    expect(scrolls).not.toHaveBeenCalled();
+  });
+});

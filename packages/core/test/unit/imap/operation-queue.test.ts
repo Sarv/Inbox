@@ -52,7 +52,7 @@ interface OpRow {
   createdAt: number;
 }
 
-interface EmailRow { id: string; folderId: string; uid: number | null; messageId: string | null }
+interface EmailRow { id: string; folderId: string; uid: number | null; messageId: string | null; manualCategories?: string[] | null; serverCategories?: string[] | null; gmailCategoriesPending?: boolean }
 
 /**
  * In-memory stand-in for the pending_operations / folders / emails methods the
@@ -217,6 +217,7 @@ async function makeHarness(opts: {
 } = {}): Promise<Harness> {
   const server = opts.server ?? (await makeServer());
   const storage = makeFakeStorage();
+  storage.folders.set('INBOX', { id: 'f-INBOX', path: 'INBOX', uidValidity: 1 } as never);
   const state = { connected: true, syncing: false };
   const queue = new OperationQueue(opts.maxRetries === undefined ? {} : { maxRetries: opts.maxRetries });
   queue.initialize({
@@ -1599,5 +1600,418 @@ describe('OperationQueue — bookkeeping', () => {
     expect(h.queue.isEmpty).toBe(true);
     expect(h.queue.length).toBe(0);
     expect(h.storage.rows()).toHaveLength(1); // still recoverable via loadFromStorage
+  });
+});
+
+
+describe('importance — durable provider flag synchronization', () => {
+  async function importanceHarness() {
+    const h = await makeHarness({ server: await makeServer({ host: 'imap.sarv.com' }) });
+    h.storage.folders.set('INBOX', { id: 'f-INBOX', path: 'INBOX', uidValidity: 1 } as never);
+    return h;
+  }
+
+  // Offline correction is durable and the last toggle wins across messages/restart.
+  it('persists the latest desired state and replays after reconnect', async () => {
+    const h = await importanceHarness();
+    h.state.connected = false;
+    await h.queue.markImportant('INBOX', 2, true);
+    await h.queue.markImportant('INBOX', 1, false);
+    await h.queue.markImportant('INBOX', 1, true);
+    expect(h.storage.rows()).toHaveLength(2);
+    expect(h.storage.rows().find((row) => row.uid === 1)?.data).toEqual({ uidValidity: 1, important: true });
+    h.queue.clear();
+    await h.queue.loadFromStorage();
+    h.state.connected = true;
+    expect(await h.queue.processQueue()).toEqual({ success: 2, failed: 0 });
+    expect(h.server.flagsOf('INBOX', 1)).toContain('Important');
+    expect(h.server.flagsOf('INBOX', 2)).toContain('Important');
+    expect(h.storage.rows()).toHaveLength(0);
+  });
+
+  // A mailbox reset while offline must not apply the old UID to another message.
+  it('retains a failed operation and never STOREs after UIDVALIDITY changes', async () => {
+    const h = await importanceHarness();
+    h.state.connected = false;
+    await h.queue.markImportant('INBOX', 1, true);
+    h.server.bumpUidValidity('INBOX', 2);
+    h.state.connected = true;
+    expect((await h.queue.processQueue()).failed).toBe(1);
+    expect(h.server.flagsOf('INBOX', 1)).not.toContain('Important');
+    expect(h.storage.rows()).toHaveLength(1);
+  });
+
+  // Missing folder identity fails safely, and a transient network failure queues.
+  it('requires synced mailbox identity and queues a transient STORE failure', async () => {
+    const h = await importanceHarness();
+    await expect(h.queue.markImportant('Ghost', 1, true)).rejects.toMatchObject({ code: 'UIDVALIDITY_UNKNOWN' });
+    vi.spyOn(h.server, 'setImportance').mockRejectedValueOnce(connErr());
+    expect(await h.queue.markImportant('INBOX', 1, true)).toBe('queued');
+    expect(h.storage.statuses()).toEqual(['pending']);
+    expect((await h.queue.getPendingUids('INBOX')).has(1)).toBe(true);
+    await h.queue.processQueue();
+    expect(h.server.flagsOf('INBOX', 1)).toContain('Important');
+  });
+
+  // AI-category Important uses the same native flag path as an explicit click.
+  it('routes an Important category through canonical importance, preserving Promotions', async () => {
+    const h = await importanceHarness();
+    expect(await h.queue.applyCategoryLabels('INBOX', 1, { host: 'imap.sarv.com', mode: 'copy', categories: [{ slug: 'important', name: 'Important' }, { slug: 'promotions', name: 'Promotions' }] })).toBe('success');
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['Important', 'promotions']);
+    expect(await h.queue.removeCategoryLabels('INBOX', 1, { host: 'imap.sarv.com', mode: 'copy', categories: [{ slug: 'important', name: 'Important' }] })).toBe('success');
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['promotions']);
+  });
+});
+
+
+describe('category operations — UID identity safety', () => {
+  // Every new category action needs the UID namespace the local row was synced under.
+  it('rejects unknown/zero UIDVALIDITY before persisting or copying', async () => {
+    const h = await makeHarness();
+    const payload = { categories: [{ slug: 'finance', name: 'Finance' }], host: 'imap.gmail.com', mode: 'copy' as const };
+    h.storage.folders.clear();
+    await expect(h.queue.applyCategoryLabels('INBOX', 1, payload)).rejects.toMatchObject({ code: 'UIDVALIDITY_UNKNOWN' });
+    h.storage.folders.set('INBOX', { id: 'f-INBOX', path: 'INBOX', uidValidity: 0 } as never);
+    await expect(h.queue.removeCategoryLabels('INBOX', 1, payload)).rejects.toMatchObject({ code: 'UIDVALIDITY_UNKNOWN' });
+    expect(h.server.callCount('copyMessages')).toBe(0);
+    expect(h.storage.rows()).toHaveLength(0);
+  });
+
+  // Replay may not treat a recycled UID as the original mail, including legacy queue rows.
+  it('dead-letters reset or legacy identity-less category operations without STORE/COPY', async () => {
+    for (const legacy of [false, true]) {
+      const h = await makeHarness({ maxRetries: 1 });
+      h.state.connected = false;
+      const payload = { categories: [{ slug: 'finance', name: 'Finance' }], host: 'imap.gmail.com', mode: 'copy' as const };
+      if (legacy) {
+        await h.storage.savePendingOperation({ type: 'applyCategoryLabel', folderPath: 'INBOX', uid: 1, data: payload, retryCount: 0 });
+        await h.queue.loadFromStorage();
+      } else {
+        await h.queue.applyCategoryLabels('INBOX', 1, payload);
+        h.server.bumpUidValidity('INBOX', 2);
+      }
+      h.state.connected = true;
+      expect((await h.queue.processQueue()).failed).toBe(1);
+      expect(h.storage.statuses()).toEqual(['failed']);
+      expect(h.server.callCount('copyMessages')).toBe(0);
+      expect(h.server.callCount('addFlags')).toBe(0);
+    }
+  });
+});
+
+
+describe('complete category selection — one durable intent', () => {
+  const importanceHarness = async () => makeHarness({ server: await makeServer({ host: 'imap.sarv.com' }) });
+  const finance = { slug: 'finance', name: 'Finance' };
+  const promotions = { slug: 'promotions', name: 'Promotions' };
+  const selection = (apply: Array<{ slug: string; name: string }>, remove: Array<{ slug: string; name: string }>) => ({ apply, remove, host: 'imap.sarv.com', mode: 'copy' as const });
+
+  // A later offline correction replaces the ENTIRE previous selection, including opposite removals.
+  it('coalesces and replays the full last selection after restart', async () => {
+    const h = await importanceHarness(); h.state.connected = false;
+    await h.queue.setCategorySelection('INBOX', 1, selection([finance], [promotions]));
+    await h.queue.setCategorySelection('INBOX', 1, selection([promotions], [finance]));
+    expect(h.storage.rows()).toHaveLength(1);
+    expect(h.storage.rows()[0].type).toBe('setCategorySelection');
+    h.queue.clear(); await h.queue.loadFromStorage(); h.state.connected = true;
+    expect(await h.queue.processQueue()).toEqual({ success: 1, failed: 0 });
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['promotions']);
+  });
+
+  // Persist failure is before BOTH server mutations, with no destructive accepted half.
+  it('performs no server category command when saving the full intent fails', async () => {
+    const h = await importanceHarness();
+    vi.spyOn(h.storage, 'savePendingOperation').mockRejectedValueOnce(new Error('disk full'));
+    await expect(h.queue.setCategorySelection('INBOX', 1, selection([finance], [promotions]))).rejects.toThrow('disk full');
+    expect(h.server.callCount('removeFlags')).toBe(0); expect(h.server.callCount('addFlags')).toBe(0);
+  });
+
+  // A lost connection between remove and add leaves one durable snapshot, protecting optimistic UI state.
+  it('retries a transient partial selection idempotently without discarding intent', async () => {
+    const h = await importanceHarness();
+    h.server.setFlagsOnServer('INBOX', 1, ['promotions']);
+    vi.spyOn(h.server, 'addFlags').mockRejectedValueOnce(connErr());
+    expect(await h.queue.setCategorySelection('INBOX', 1, selection([finance], [promotions]))).toBe('queued');
+    expect(h.storage.rows()).toHaveLength(1);
+    expect((await h.queue.getPendingUids('INBOX')).has(1)).toBe(true);
+    expect(await h.queue.processQueue()).toEqual({ success: 1, failed: 0 });
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['finance']);
+  });
+
+  // Conflicting snapshots and reused UID namespaces must never reach the server.
+  it('rejects conflicting intent and refuses replay after a mailbox reset', async () => {
+    const h = await importanceHarness();
+    await expect(h.queue.setCategorySelection('INBOX', 1, selection([finance], [finance]))).rejects.toMatchObject({ code: 'CATEGORY_SELECTION_INVALID' });
+    h.state.connected = false; await h.queue.setCategorySelection('INBOX', 1, selection([finance], [promotions]));
+    h.server.bumpUidValidity('INBOX', 2); h.state.connected = true;
+    expect((await h.queue.processQueue()).failed).toBe(1);
+    expect(h.server.callCount('removeFlags')).toBe(0); expect(h.server.callCount('addFlags')).toBe(0);
+  });
+});
+
+
+describe('Gmail native selection and legacy mirror cleanup', () => {
+  // Native tab removal alone must not leave a legacy Sarv Inbox mirror that reintroduces the category.
+  it('routes native tab mutations through OAuth API and clears the old mirror on removal', async () => {
+    const server = await makeServer({ gmailLabels: true }); const h = await makeHarness({ server });
+    const modify = vi.fn(async () => undefined);
+    Object.assign(server, { canModifyGmailCategories: () => true, modifyGmailCategories: modify });
+    server.addFolder('Sarv Inbox/Promotions'); await server.selectFolder('INBOX');
+    await server.copyMessages([1], 'Sarv Inbox/Promotions');
+    const removeLabels = vi.spyOn(server, 'removeGmailLabels');
+    expect(await h.queue.setCategorySelection('INBOX', 1, { apply: [{ slug: 'social', name: 'Social' }], remove: [{ slug: 'promotions', name: 'Promotions' }], host: 'imap.gmail.com', mode: 'copy' })).toBe('success');
+    expect(modify).toHaveBeenCalledWith([1], [], ['promotions'], 1);
+    expect(modify).toHaveBeenCalledWith([1], ['social'], [], 1);
+    expect(removeLabels).toHaveBeenCalledWith([1], ['Sarv Inbox/Promotions']);
+  });
+
+  // Even a custom category's full snapshot can modify native tabs, so OAuth is required before persistence.
+  it('rejects all Gmail manual selections with app passwords before saving', async () => {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+    await expect(h.queue.setCategorySelection('INBOX', 1, { apply: [{ slug: 'finance', name: 'Finance' }], remove: [], host: 'imap.gmail.com', mode: 'copy' })).rejects.toMatchObject({ code: 'GMAIL_CATEGORY_OAUTH_REQUIRED' });
+    expect(h.storage.rows()).toHaveLength(0);
+  });
+});
+
+
+describe('category and importance legacy replay failure boundaries', () => {
+  // Old or damaged queue rows without a UID namespace must dead-letter without any message mutation.
+  it('rejects legacy importance and complete selections without mailbox identity', async () => {
+    for (const type of ['setImportance', 'setCategorySelection']) {
+      const h = await makeHarness({ maxRetries: 1 }); h.state.connected = false;
+      await h.storage.savePendingOperation({ type, folderPath: 'INBOX', uid: 1, data: { important: true, apply: [], remove: [] }, retryCount: 0 });
+      await h.queue.loadFromStorage(); h.state.connected = true;
+      expect((await h.queue.processQueue()).failed).toBe(1);
+      expect(h.storage.statuses()).toEqual(['failed']);
+      expect(h.server.callCount('addFlags')).toBe(0);
+    }
+  });
+
+  // Clients without native importance support must retain a visible failed action instead of inventing a folder.
+  it('rejects unsupported importance in direct and category operation replay', async () => {
+    for (const category of [false, true]) {
+      const h = await makeHarness({ maxRetries: 1 }); h.state.connected = false;
+      Object.assign(h.server, { setImportance: undefined });
+      if (category) await h.queue.applyCategoryLabels('INBOX', 1, { host: 'imap.sarv.com', mode: 'copy', categories: [{ slug: 'important', name: 'Important' }] });
+      else await h.queue.markImportant('INBOX', 1);
+      h.state.connected = true; expect((await h.queue.processQueue()).failed).toBe(1);
+      expect(h.server.callCount('copyMessages')).toBe(0);
+    }
+  });
+
+  // Replay after credentials lose OAuth capability cannot retire a manual category selection as success.
+  it('fails a queued Gmail complete selection if OAuth native capability was removed', async () => {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }), maxRetries: 1 });
+    Object.assign(h.server, { canModifyGmailCategories: () => true }); h.state.connected = false;
+    await h.queue.setCategorySelection('INBOX', 1, { apply: [], remove: [], host: 'imap.gmail.com', mode: 'copy' });
+    Object.assign(h.server, { canModifyGmailCategories: () => false }); h.state.connected = true;
+    expect((await h.queue.processQueue()).failed).toBe(1); expect(h.storage.statuses()).toEqual(['failed']);
+  });
+
+  // Older clients exposing Gmail labels alone may not claim native tab changes succeeded.
+  it('retains native category operations when the client cannot call the Gmail API', async () => {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }), maxRetries: 1 });
+    await expect(h.queue.applyCategoryLabels('INBOX', 1, { categories: [{ slug: 'social', name: 'Social' }], host: 'imap.gmail.com', mode: 'copy' })).rejects.toMatchObject({ code: 'GMAIL_CATEGORY_OAUTH_REQUIRED' });
+    expect(h.storage.statuses()).toEqual(['failed']); expect(h.server.callCount('copyMessages')).toBe(0);
+  });
+});
+
+
+describe('legacy mirrors cannot override later classification authority', () => {
+  const important = { slug: 'important', name: 'Important' };
+  const finance = { slug: 'finance', name: 'Finance' };
+  const promotions = { slug: 'promotions', name: 'Promotions' };
+  const payload = (categories: Array<{ slug: string; name: string }>) => ({ categories, host: 'imap.sarv.com', mode: 'copy' as const });
+  async function setupAuthority() {
+    const h = await makeHarness({ server: await makeServer({ host: 'imap.sarv.com' }) });
+    const row = h.storage.addEmail({ id: 'mail', folderId: 'f-INBOX', uid: 1, messageId: '<mail>' });
+    return { ...h, row };
+  }
+
+  // Different queued types still refer to one classification; the newer manual flag wins.
+  it('filters an older Important add after a newer online manual clear', async () => {
+    const h = await setupAuthority(); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important]));
+    h.state.connected = true; await h.queue.markImportant('INBOX', 1, false); h.row.manualCategories = [];
+    expect(await h.queue.processQueue()).toEqual({ success: 1, failed: 0 });
+    expect(h.server.flagsOf('INBOX', 1)).not.toContain('Important');
+  });
+
+  // A queued promotional mirror cannot restore a category the user replaced with Finance.
+  it('keeps a newer complete manual Finance selection after the old Promotions row drains', async () => {
+    const h = await setupAuthority(); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([promotions]));
+    h.state.connected = true;
+    await h.queue.setCategorySelection('INBOX', 1, { apply: [finance], remove: [promotions], host: 'imap.sarv.com', mode: 'copy' });
+    h.row.manualCategories = ['finance'];
+    await h.queue.processQueue(); expect(h.server.flagsOf('INBOX', 1)).toEqual(['finance']);
+  });
+
+  // Re-arming an old failed AI row must apply the same current-authority guard as a normal drain.
+  it('does not restore Important when an older failed AI write is explicitly retried', async () => {
+    const h = await setupAuthority();
+    vi.spyOn(h.server, 'setImportance').mockRejectedValueOnce(permErr());
+    await expect(h.queue.applyCategoryLabels('INBOX', 1, payload([important]))).rejects.toThrow();
+    const failedId = h.storage.rows()[0].id;
+    await h.queue.markImportant('INBOX', 1, false); h.row.manualCategories = [];
+    expect(await h.queue.retryFailedOne(failedId)).toBe(true);
+    await h.queue.processQueue(); expect(h.server.flagsOf('INBOX', 1)).not.toContain('Important');
+  });
+
+  // Explicit backfill of the user's CURRENT selection remains useful and compatible.
+  it('retains matching backfill and only applies compatible items within a mixed payload', async () => {
+    for (const provider of [false, true]) {
+      const h = await setupAuthority();
+      if (provider) h.row.serverCategories = ['finance']; else h.row.manualCategories = ['finance'];
+      await h.queue.applyCategoryLabels('INBOX', 1, payload([finance, promotions, important]));
+      expect(h.server.flagsOf('INBOX', 1)).toEqual(['finance']);
+      await h.queue.removeCategoryLabels('INBOX', 1, payload([finance, promotions]));
+      expect(h.server.flagsOf('INBOX', 1)).toEqual(['finance']);
+    }
+  });
+
+  // New manual snapshots must execute before their local projection is saved, even against an older provider state.
+  it('overlays pending manual intents before local metadata exists and bypasses the manual inner writes', async () => {
+    const h = await setupAuthority(); h.row.serverCategories = ['promotions']; h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([promotions, important]));
+    await h.queue.setCategorySelection('INBOX', 1, { apply: [finance], remove: [promotions], host: 'imap.sarv.com', mode: 'copy' });
+    await h.queue.markImportant('INBOX', 1, false);
+    h.state.connected = true; await h.queue.processQueue();
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['finance']);
+  });
+
+  // A failed manual action still owns its desired flag until retry/discard; an older automatic row cannot reverse it.
+  it('also honors a newer failed manual intent awaiting retry', async () => {
+    const h = await setupAuthority(); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important]));
+    h.state.connected = true;
+    const store = vi.spyOn(h.server, 'setImportance').mockRejectedValueOnce(permErr());
+    await expect(h.queue.markImportant('INBOX', 1, false)).rejects.toThrow();
+    await h.queue.processQueue();
+    expect(store).toHaveBeenCalledTimes(1); expect(store).toHaveBeenCalledWith([1], false, 1);
+    expect(h.storage.statuses()).toEqual(['failed']);
+  });
+
+  // A primary AI command already on the wire completes before the primary manual command, even with a flag pool configured.
+  it('serializes a manual Important clear after an already-running legacy Important add', async () => {
+    const server = await makeServer({ host: 'imap.sarv.com' });
+    const acquire = vi.fn(async () => ({ client: server, release: vi.fn(), poison: vi.fn() }));
+    const h = await makeHarness({ server, acquireConnection: acquire }); h.state.connected = false;
+    await h.queue.applyCategoryLabels('INBOX', 1, payload([important])); h.state.connected = true;
+    const original = server.setImportance.bind(server); let entered!: () => void; let release!: () => void;
+    const onEnter = new Promise<void>((resolve) => { entered = resolve; }); const barrier = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(server, 'setImportance').mockImplementation(async (uids, on, validity) => { if (on) { entered(); await barrier; } await original(uids, on, validity); });
+    const draining = h.queue.processQueue(); await onEnter;
+    const manual = h.queue.markImportant('INBOX', 1, false); await Promise.resolve();
+    expect(acquire).not.toHaveBeenCalled(); release(); await Promise.all([draining, manual]);
+    expect(server.flagsOf('INBOX', 1)).not.toContain('Important');
+  });
+
+  // Multiple messages with one payload may have different authorities, so batching must split by filtered intent.
+  it('keeps account and UID authority isolated while batching compatible snapshots', async () => {
+    const h = await setupAuthority(); h.row.manualCategories = ['finance'];
+    h.storage.addEmail({ id: 'second', folderId: 'f-INBOX', uid: 2, messageId: '<second>', manualCategories: ['promotions'] });
+    h.storage.addEmail({ id: 'third', folderId: 'f-INBOX', uid: 3, messageId: '<third>', manualCategories: ['finance'] });
+    h.state.connected = false;
+    for (const uid of [1, 2, 3]) await h.queue.applyCategoryLabels('INBOX', uid, payload([finance, promotions]));
+    h.state.connected = true; await h.queue.processQueue();
+    expect(h.server.flagsOf('INBOX', 1)).toEqual(['finance']); expect(h.server.flagsOf('INBOX', 2)).toEqual(['promotions']); expect(h.server.flagsOf('INBOX', 3)).toEqual(['finance']);
+    const other = await setupAuthority();
+    await other.queue.applyCategoryLabels('INBOX', 1, payload([promotions]));
+    expect(other.server.flagsOf('INBOX', 1)).toEqual(['promotions']);
+  });
+});
+
+describe('stale Gmail mirror cleanup authority and identity', () => {
+  async function fixture() {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+    const row = h.storage.addEmail({ id: 'gmail', folderId: 'f-INBOX', uid: 1, messageId: '<gmail>' });
+    h.server.addFolder('Sarv Inbox/Finance'); await h.server.selectFolder('INBOX'); await h.server.copyMessages([1], 'Sarv Inbox/Finance');
+    const remove = vi.spyOn(h.server, 'removeGmailLabels');
+    return { ...h, row, remove };
+  }
+
+  // The stale cleanup was computed before the user selected Finance; it may no longer strip that mirror.
+  it('preserves a mirror in the newer selection while retaining explicit ordinary-label removal', async () => {
+    const h = await fixture(); h.state.connected = false;
+    await h.queue.removeGmailLabels('INBOX', 1, ['Sarv Inbox/Finance', 'ordinary-user-label']);
+    h.row.manualCategories = ['finance']; h.state.connected = true; await h.queue.processQueue();
+    expect(h.remove).toHaveBeenCalledWith([1], ['ordinary-user-label']);
+  });
+
+  // Removing an unselected app mirror remains compatible with the current user/provider assignment.
+  it('permits stale unselected mirror cleanup and skips all automatic writes when discovery is unknown', async () => {
+    const h = await fixture(); h.row.manualCategories = [];
+    await h.queue.removeGmailLabels('INBOX', 1, ['Sarv Inbox/Finance']);
+    expect(h.remove).toHaveBeenCalledWith([1], ['Sarv Inbox/Finance']); h.remove.mockClear();
+    h.row.gmailCategoriesPending = true;
+    await h.queue.removeGmailLabels('INBOX', 1, ['Sarv Inbox/Finance']);
+    await h.queue.applyCategoryLabels('INBOX', 1, { categories: [{ slug: 'finance', name: 'Finance' }], host: 'imap.gmail.com', mode: 'copy' });
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  // A cleanup's UID cannot be reused after mailbox reset, including an old identity-less cleanup row.
+  it('rejects reset, missing and stale stored identities before label cleanup', async () => {
+    for (const phase of ['reset', 'legacy', 'stored']) {
+      const h = await fixture(); h.state.connected = false;
+      if (phase === 'legacy') {
+        await h.storage.savePendingOperation({ type: 'removeGmailLabels', folderPath: 'INBOX', uid: 1, data: { labels: ['Sarv Inbox/Finance'] }, retryCount: 0 }); await h.queue.loadFromStorage();
+      } else await h.queue.removeGmailLabels('INBOX', 1, ['Sarv Inbox/Finance']);
+      if (phase === 'reset') h.server.bumpUidValidity('INBOX', 2);
+      if (phase === 'stored') h.storage.folders.set('INBOX', { id: 'f-INBOX', path: 'INBOX', uidValidity: 2 } as never);
+      h.state.connected = true; expect((await h.queue.processQueue()).failed).toBe(1); expect(h.remove).not.toHaveBeenCalled();
+    }
+  });
+});
+
+
+// Native Important must not protect an obsolete app-created Important mirror from cleanup.
+it('cleans a legacy Important mirror without clearing Gmail native Important', async () => {
+  const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+  h.storage.addEmail({ id: 'gmail-important', folderId: 'f-INBOX', uid: 1, messageId: '<gmail-important>', manualCategories: ['important'] });
+  h.server.addFolder('Sarv Inbox/Important'); await h.server.selectFolder('INBOX');
+  await h.server.copyMessages([1], 'Sarv Inbox/Important'); await h.server.setImportance([1], true, 1);
+  await h.queue.removeGmailLabels('INBOX', 1, ['Sarv Inbox/Important']);
+  const labels = (await h.server.fetchFlagsOnly([1]))[0].labels;
+  expect(labels).toContain('Important'); expect(labels).not.toContain('Sarv Inbox/Important');
+});
+
+
+describe('native Gmail assignments retire obsolete app mirrors', () => {
+  // Native CATEGORY_* state must be editable in Gmail without an old app mirror restoring it.
+  it('removes a selected native-category app mirror while preserving custom category mirrors', async () => {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+    h.storage.addEmail({ id: 'native', folderId: 'f-INBOX', uid: 1, messageId: '<native>', manualCategories: ['promotions', 'finance'] });
+    const remove = vi.spyOn(h.server, 'removeGmailLabels');
+    await h.queue.removeGmailLabels('INBOX', 1, ['Sarv Inbox/Promotions', 'Sarv Inbox/Finance']);
+    expect(remove).toHaveBeenCalledWith([1], ['Sarv Inbox/Promotions']);
+  });
+
+  // After native APPLY, cleanup must remove only Sarv Inbox mirrors, never bare/backslash native labels.
+  it('cleans native app mirrors after API apply without undoing native labels or touching other UIDs', async () => {
+    const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+    const modify = vi.fn(async () => undefined); Object.assign(h.server, { canModifyGmailCategories: () => true, modifyGmailCategories: modify });
+    vi.spyOn(h.server, 'fetchFlagsOnly').mockResolvedValue([
+      { uid: 1, flags: [], labels: ['Sarv Inbox/Promotions', 'Promotions', '\\Promotions', 'Sarv Inbox/Finance'] },
+      { uid: 2, flags: [], labels: ['Sarv Inbox/Promotions'] },
+    ]);
+    const remove = vi.spyOn(h.server, 'removeGmailLabels');
+    await h.queue.applyCategoryLabels('INBOX', 1, { categories: [{ slug: 'promotions', name: 'Promotions' }], host: 'imap.gmail.com', mode: 'copy' });
+    expect(modify).toHaveBeenCalledWith([1], ['promotions'], [], 1);
+    expect(remove).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledWith([1], ['Sarv Inbox/Promotions']);
+  });
+
+  // Lost or recycled UIDs must never receive legacy mirror cleanup after a native API request.
+  it('fails safely on missing identities or UID reset during native mirror cleanup', async () => {
+    for (const phase of ['missing', 'reset', 'unsupported']) {
+      const h = await makeHarness({ server: await makeServer({ gmailLabels: true }) });
+      Object.assign(h.server, { canModifyGmailCategories: () => true, modifyGmailCategories: vi.fn(async () => undefined) });
+      vi.spyOn(h.server, 'fetchFlagsOnly').mockImplementation(async () => {
+        if (phase === 'reset') h.server.bumpUidValidity('INBOX', 2);
+        return phase === 'missing' ? [] : [{ uid: 1, flags: [], labels: ['Sarv Inbox/Promotions'] }];
+      });
+      if (phase === 'unsupported') Object.assign(h.server, { removeGmailLabels: undefined });
+      await expect(h.queue.applyCategoryLabels('INBOX', 1, { categories: [{ slug: 'promotions', name: 'Promotions' }], host: 'imap.gmail.com', mode: 'copy' })).rejects.toMatchObject({ code: phase === 'missing' ? 'MESSAGE_NOT_FOUND' : phase === 'reset' ? 'UIDVALIDITY_MISMATCH' : 'GMAIL_LABELS_NOT_SUPPORTED' });
+    }
   });
 });
