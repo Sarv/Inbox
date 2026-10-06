@@ -49,6 +49,29 @@ describe('exact MIME attachment antivirus source', () => {
     expect(bad.every(byte => byte === 0)).toBe(true); expect(client.downloadPartRaw).not.toHaveBeenCalled(); expect(client.fetchSource).not.toHaveBeenCalled();
   });
 
+  // The libbase64 1.3.1 regression on this path: text mislabelled base64 now
+  // decodes to just over half its size (34 of 64), past the old "under half"
+  // refusal. Breaks if that slides back: the scan passes 34 junk bytes while the
+  // open path serves the raw text it never inspected.
+  it('refuses the just-over-half decode libbase64 1.3.1 makes of mislabelled text', async () => {
+    const { engine, client } = fixture(); const bodyStructure = structure(); bodyStructure.parts![2].encoding = 'base64'; bodyStructure.parts![2].size = 64;
+    client.fetchMessagesByUID.mockResolvedValue([{ bodyStructure }]); const bad = Buffer.alloc(34, 0xa6); client.downloadPart.mockResolvedValue(bad);
+    await expect(engine.fetchAttachmentScanPart('INBOX', 42, '3', 'same.txt', 128)).rejects.toThrow(/encoding/);
+    expect(bad.every(byte => byte === 0)).toBe(true); expect(client.downloadPartRaw).not.toHaveBeenCalled();
+  });
+
+  // Breaks if padding on a tiny file reads as a short decode: a 1-byte file is
+  // "AQ==" (25%) and a 10-byte one 16 characters (62%), and both would be
+  // refused as uninspectable — the old "under half" test refused the first.
+  it('scans a tiny genuine base64 part instead of refusing it', async () => {
+    const { engine, client } = fixture(); const bodyStructure = structure(); bodyStructure.parts![2].encoding = 'base64';
+    for (const [declared, file] of [[4, Buffer.from('A')], [16, Buffer.from('0123456789')]] as const) {
+      bodyStructure.parts![2].size = declared;
+      client.fetchMessagesByUID.mockResolvedValue([{ bodyStructure }]); client.downloadPart.mockResolvedValue(Buffer.from(file));
+      expect(await engine.fetchAttachmentScanPart('INBOX', 42, '3', 'same.txt', 128)).toEqual(file);
+    }
+  });
+
   it('refuses missing, zero-byte, oversized, or invalid part selection', async () => {
     const { engine, client } = fixture();
     await expect(engine.fetchAttachmentScanPart('INBOX', 42, '3/path', 'same.txt', 128)).rejects.toThrow(/cannot be scanned/);

@@ -2,39 +2,34 @@ version: 2
 updates:
   # JavaScript/TypeScript dependencies (pnpm workspace — Dependabot reads the
   # root pnpm-lock.yaml and updates all workspace packages).
+  #
+  # Quiet by design: one grouped PR a month for every minor and patch release,
+  # and no major versions at all. A major is an upgrade to plan, not a bump to
+  # merge: in October 2026 one weekly run opened 12 PRs, and TypeScript 7,
+  # @types/node 26 and lru-cache 11 each needed real work (#55, #60, #63).
+  # Security is covered separately: Dependabot alerts stay on, and CI's audit
+  # gate fails the build on any high or critical advisory, whatever this file
+  # says.
+  #
+  # No `labels`: Dependabot only applies labels that already exist in the repo,
+  # so a configured one that is missing turns into a warning on every PR.
+  # Without the key it uses its default `dependencies` label and creates it.
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
+      interval: monthly
+    open-pull-requests-limit: 5
     ignore:
-      # TypeScript 7 is the native (Go) compiler. typescript-eslint and tsup's
-      # declaration build both need the JavaScript compiler API it removes, so
-      # lint, type-check and the core build all fail on it (#55). Move to it
-      # deliberately once both support it.
-      - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
-      # The types must match the oldest Node the code runs on: engines say
-      # >= 22, and Electron 44 ships Node 24. A newer major types APIs that do
-      # not exist at runtime, so code using them type-checks and then crashes
-      # (#60). Bump it by hand when the supported runtime moves.
-      - dependency-name: "@types/node"
+      # Every major, for every package. Some that must stay held back even when
+      # upgrading by hand:
+      # - typescript: 7 is the native (Go) compiler, and typescript-eslint and
+      #   tsup's declaration build need the JavaScript compiler API it removes.
+      # - @types/node: must match the oldest Node the code runs on (engines
+      #   >= 22; Electron 44 ships Node 24), or code type-checks against APIs
+      #   that crash at runtime.
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
     groups:
-      # Batch low-risk dev/build tooling into a single PR to cut noise.
-      dev-tooling:
-        patterns:
-          - "@types/*"
-          - "eslint*"
-          - "prettier"
-          - "typescript"
-          - "vite*"
-          - "turbo"
-          - "vitest"
-      # Keep type-check/runtime deps grouped by minor+patch bumps.
       minor-and-patch:
         update-types:
           - minor
@@ -44,8 +39,8 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-    labels:
-      - dependencies
-      - ci
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"
