@@ -207,6 +207,10 @@ Established shared helpers (extend this list as you add more):
 - `withTimeout(promise, ms, message)` — `packages/core/src/utils/timeout.ts`.
   The single source for the "race a promise against a timeout" pattern; it also
   clears the timer. Use it instead of hand-rolling `Promise.race([p, setTimeout(reject)])`.
+- `useMountedTimeout()` — `apps/desktop/src/hooks/useMountedTimeout.ts`. A
+  renderer component's delayed DOM work (scroll into view, focus once mounted)
+  that is skipped if the component has unmounted by then. Use it instead of a bare
+  `setTimeout` that touches `document`.
 
 ## Prefer a mature library over hand-rolled / regex logic
 
