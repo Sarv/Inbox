@@ -15,10 +15,11 @@ interface CategoryMenuProps {
   buttonClassName?: string;
   label?: string;
   showIcon?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /** Manual assignment changes only the selected category, including independent Important. */
-export function CategoryMenu({ emailId, accountId, buttonClassName, label, showIcon = true }: CategoryMenuProps) {
+export function CategoryMenu({ emailId, accountId, buttonClassName, label, showIcon = true, onOpenChange }: CategoryMenuProps) {
   const [open, setOpen] = useState(false);
   const [definitions, setDefinitions] = useState<CategoryDefinition[]>([]);
   const [applied, setApplied] = useState<Set<string>>(new Set());
@@ -31,6 +32,8 @@ export function CategoryMenu({ emailId, accountId, buttonClassName, label, showI
   const menuRef = useRef<HTMLDivElement>(null);
   const ref = useRef<HTMLDivElement>(null);
   const generation = useRef(0);
+
+  useEffect(() => { onOpenChange?.(open); }, [open, onOpenChange]);
 
   useEffect(() => {
     generation.current += 1;
@@ -104,7 +107,7 @@ export function CategoryMenu({ emailId, accountId, buttonClassName, label, showI
       <Tooltip content="Categories" delayMs={40}>
         <button aria-label="Categories" aria-expanded={open} onClick={() => setOpen(!open)} disabled={saving}
           className={buttonClassName ?? 'p-2 rounded-md hover:bg-muted/50 text-muted-foreground hover:text-foreground'}>
-          {showIcon && <Tags className="h-4 w-4" />}{label && <span>{label}</span>}
+          {showIcon && <Tags className="h-4 w-4 scale-125" strokeWidth={1.6} />}{label && <span>{label}</span>}
         </button>
       </Tooltip>
       {open && createPortal(<div ref={menuRef} style={coords} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'Escape' && !saving) setOpen(false); }} className="fixed z-[100] w-64 rounded-md border border-border bg-background shadow-lg p-2" role="dialog" aria-label="Assign categories">
