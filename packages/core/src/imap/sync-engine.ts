@@ -1,6 +1,6 @@
 // Sync Engine - Main orchestrator for IMAP sync
 
-import LRUCache from 'lru-cache';
+import { LRUCache } from 'lru-cache';
 import { simpleParser } from 'mailparser';
 
 import { buildStandardFolderAliasMap, describeDuplicateRoles, duplicateRoleCandidates } from '../config/folder-mapping';
