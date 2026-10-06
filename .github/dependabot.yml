@@ -10,6 +10,19 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - dependencies
+    ignore:
+      # TypeScript 7 is the native (Go) compiler. typescript-eslint and tsup's
+      # declaration build both need the JavaScript compiler API it removes, so
+      # lint, type-check and the core build all fail on it (#55). Move to it
+      # deliberately once both support it.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # The types must match the oldest Node the code runs on: engines say
+      # >= 22, and Electron 44 ships Node 24. A newer major types APIs that do
+      # not exist at runtime, so code using them type-checks and then crashes
+      # (#60). Bump it by hand when the supported runtime moves.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       # Batch low-risk dev/build tooling into a single PR to cut noise.
       dev-tooling:
