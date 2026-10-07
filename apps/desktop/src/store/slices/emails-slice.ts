@@ -1831,7 +1831,16 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       viewingSnoozed,
       searchQuery,
     } = get();
-    if (viewingAICategory || selectedVirtualFolder || viewingSnoozed || searchQuery) {
+    // A search owns its own results and pagination, even when scoped to a
+    // category. A category-only view, however, must re-read its CURRENT page:
+    // background categorization already changed its badges, and leaving the
+    // old rows in place showed Promotions mail under Needs Response.
+    if (searchQuery) return;
+    if (viewingAICategory) {
+      await get().loadAICategoryEmails(viewingAICategory);
+      return;
+    }
+    if (selectedVirtualFolder || viewingSnoozed) {
       // Curated view — leave `emails` alone. Realtime delete/flag events
       // still update rows in place; the user can pull-to-refresh or leave
       // and re-enter the view to see new items.

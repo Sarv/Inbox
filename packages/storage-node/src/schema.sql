@@ -726,53 +726,36 @@ Mark FALSE for:
 'Star', 'yellow', 1, 1, 1),
 
 ('needs_response', 'Needs Response', 'Emails that require your reply',
-'TRUE only when the sender genuinely needs something back from the user AND
-is part of an existing relationship or a transaction the user is already in.
-A question in the email is NOT enough on its own — cold sales pitches also
-end with questions.
+'TRUE when a person genuinely expects the user''s reply, information, decision,
+approval, or confirmation. Judge the actual request, who it is addressed to,
+and the conversation context. A question mark or marketing call to action
+alone does not establish a reply obligation.
 
-TRUE when:
-  * Direct question or request from a known/ongoing contact (colleague,
-    existing customer, vendor the user already works with, friend, family)
-  * Task, review, decision, or information request tied to work the user
-    is actively doing
-  * User is in the "To" field AND the email continues a conversation the
-    user initiated or is actively part of
-  * Personal / human message (not a template) where a reply is expected
+TRUE for:
+  * Customer or prospect asking a real product, service, availability,
+    pricing, quotation, or support question, including a genuine first inquiry
+  * Requested quotes, proposals, negotiations, order changes, or vendor
+    discussions where the user owes a reply or decision
+  * Internal approvals, project work, reviews, handoffs, or colleagues''
+    questions addressed to the user
+  * Active personal or business conversations with a concrete human request
+  * A direct request naming the user in a CC''d conversation
 
-FALSE when:
-  * User is only CC''d (informational copy, almost never needs a reply)
-  * Automated / no-reply senders (noreply@, donotreply@, do-not-reply@,
-    notifications@, alerts@, mailer@, bounces@, support-bot@, system@)
-  * Newsletters, product announcements, release notes, marketing blasts
-    (these go in "promotions" category)
-  * COLD SALES / PROMOTIONAL OUTREACH — even when it is personalized, even
-    when it ends with a question. The question is a sales prompt, not a
-    real ask. These go in the "promotions" category, NOT here.
-    Strong signals (any combination = promotional):
-      - Sender role is Sales / BD / Account Manager / Growth / Partner /
-        Channel / Reseller / SDR / BDR / Outbound / Marketing
-      - Sender company has no prior two-way correspondence with the user
-      - Classic pitch structure: intro → benefits list → ask for a meeting
-      - Promotional language: "special offer", "best rates", "limited time",
-        "save X%", "free trial", "exclusive pricing", "discount", "promo"
-      - Generic openers: "I hope this email finds you well", "hope your
-        [month/week] is going great", "I wanted to reach out", "quick
-        question for you"
-      - Unsolicited follow-up / nag: "just following up on my previous
-        email", "circling back", "bumping this", "did you get a chance to…"
-      - Vague/generic ask: "Would you have 10-15 minutes?", "Open to a
-        brief chat/demo?", "Are you the right person for this?", "Can I
-        share a short deck?"
-      - Pitches a product/service/partnership the user never requested
-      - Bulk/template content (same body to many recipients, variables
-        like "{firstname}" or obvious mail-merge phrasing)
-  * Drip / cadence emails — if the user never replied and the sender keeps
-    sending follow-ups of their own pitch, still promotional, not needs_response
-  * Surveys, feedback requests, and NPS emails from vendors
-  * Event / webinar / conference invitations from vendors
-  * Recruiter / cold-hiring outreach unless the user is actively job hunting
-  * Partnership / guest-post / link-exchange / SEO pitches',
+FALSE for:
+  * Newsletters, marketing announcements, discounts, or cold sales pitches
+    whose only question is a meeting/demo CTA or an invitation to buy
+  * Unsolicited follow-ups repeating a pitch with no actual engagement
+  * Automated/no-reply alerts, receipts, billing reminders, surveys, and
+    calendar notifications that expect a click or action rather than a reply
+  * Team FYIs, requests addressed to someone else, or informational CC copies
+
+Commercial language is not evidence against a genuine reply obligation:
+"price", "quote", "product", "offer", "proposal", or "follow up" can be normal
+business work. Sales/BD/Account Manager roles, company signatures, generic
+greetings, or absent reply history are not sufficient to reject a real request.
+Use the message''s primary purpose and actual relationship/context, not those
+isolated cues. Promotional content can coexist with a separate genuine human
+request; evaluate that request instead of treating all commercial mail alike.',
 'MessageCircle', 'orange', 2, 1, 1),
 
 ('reminders', 'Reminders', 'Action items, deadlines, and tasks',
@@ -820,46 +803,38 @@ NOT finance:
 'CreditCard', 'emerald', 7, 1, 1),
 
 ('promotions', 'Promotions', 'Sales outreach, newsletters, product marketing',
-'TRUE for any email whose primary purpose is to sell, market, or promote —
-including personalized outreach that looks like a real message but is really
-a pitch. Do NOT be fooled by a question at the end; cold sales always asks
-for a meeting or demo.
+'TRUE when the email''s primary purpose is unsolicited marketing, promotion,
+audience-building, or selling a product/service the user did not request.
+Judge the actual message and conversation context, not isolated words,
+the sender''s job title, or their signature.
 
 TRUE for:
-  * Cold sales outreach / prospecting — unsolicited intro from a vendor the
-    user has no prior relationship with, pitching a product, service, or
-    partnership
-  * Follow-up / drip / cadence emails chasing a prior pitch ("just
-    following up", "circling back", "bumping this", "did you get a chance")
-  * Newsletters, product announcements, release notes, blog digests
-  * Webinar / conference / event invitations from vendors
-  * Surveys, feedback requests, NPS from vendors
-  * Discount / promo / deal emails ("X% off", "limited time", "best rates")
-  * Recruiter / cold-hiring outreach (unless the user is actively job hunting)
-  * Partnership / guest-post / link-exchange / SEO / backlink pitches
-  * Template / mass-send emails (variables, mail-merge phrasing, identical
-    body sent to many recipients)
-  * "Are you the right person for this?" / "Who handles X at your company?"
-    type discovery emails
+  * Unsolicited cold sales pitches and outreach asking for a meeting/demo
+    to sell something, rather than continuing actual business work
+  * Drip/cadence follow-ups repeating an unengaged sales pitch
+  * Newsletters, product launches, marketing announcements, and blog digests
+  * Discount campaigns, deals, mass invitations, webinars, or promotional
+    surveys intended to market a vendor or product
+  * Unsolicited partnership, SEO, guest-post, or recruiting pitches unrelated
+    to work or a conversation the user is actively participating in
 
-Strong signals (any combination → promotions):
-  * Sender role: Sales / BD / Account Manager / Growth / SDR / BDR /
-    Partner Manager / Channel / Reseller / Marketing
-  * Pitch structure: intro → benefits list → CTA (meeting/demo/call)
-  * Generic openers: "I hope this email finds you well", "hope your
-    [month/week] is going great", "I wanted to reach out", "quick question"
-  * Vague ask: "Would you have 10-15 minutes?", "Open to a brief chat?",
-    "Can I share a short deck?"
-  * Promotional phrases: "special offer", "exclusive pricing", "free trial",
-    "save X%", "limited time"
-  * Sender domain has no prior two-way email history with the user
+FALSE when the primary purpose is genuine business or personal work:
+  * A requested quote/proposal, pricing negotiation, purchase, order,
+    invoice, renewal discussion, or service/support conversation
+  * A customer/prospect asking a real product, pricing, availability, or
+    support question, including a genuine first inquiry
+  * Internal approvals, project work, operational coordination, or a
+    colleague''s request, even if it mentions a product, price, or offer
+  * Personal messages, transaction confirmations, and financial notices
 
-FALSE for:
-  * Emails from ongoing vendors about orders/invoices/support the user
-    has actually transacted with (those go in invoice / needs_response)
-  * Personal messages from known contacts even if they mention a product
-  * Transactional confirmations (order, shipping, receipt — those are
-    invoice or finance)',
+Sales/BD/Account Manager titles, commercial signatures, a generic greeting,
+words such as "pricing", "quote", "offer", "product", "proposal", or "follow up",
+and no recorded two-way history are NOT sufficient evidence of Promotions.
+An existing contact can send a marketing blast; a new sender can ask a genuine
+business question. Decide from primary purpose and the actual relationship.
+For mixed content, choose only categories supported by distinct content;
+do not turn an ongoing business request into Promotions merely because a
+signature or quoted message contains advertising.',
 'Megaphone', 'pink', 8, 1, 1);
 
 -- ============================================================
