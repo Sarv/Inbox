@@ -36,7 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanning token is stored in the device keychain. Existing scanner connections
   are preserved, and Skip retains the unscanned attachment warning.
 
+### Changed
+- **Settings uses the same setup steps as onboarding.** Adding an email
+  account or an AI provider in Settings now walks through the same provider,
+  connection and model steps as first-run setup. Editing an existing account
+  or provider keeps it as it was, including which one is the default, and
+  Cancel changes nothing. Keyboard focus returns to where you were after a
+  confirmation dialog closes.
+
 ### Fixed
+- **AI features work with OpenAI and other providers.** Every request carried
+  options meant only for Sarv's models, which OpenAI rejects, so connecting an
+  OpenAI key or using it for sorting and drafting could fail. Other providers
+  now receive only standard request fields, and an error names the provider
+  that actually failed.
 - **Business conversations are classified by purpose.** Requested quotes,
   customer questions, negotiations and internal approvals are distinguished
   from promotional outreach. Categorization uses outgoing correspondence as
