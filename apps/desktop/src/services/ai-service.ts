@@ -1,6 +1,6 @@
 // AI Service - Handles AI provider configuration and API calls
 
-import { buildAIAuthHeaders } from '@sarvinbox/core/ai-provider-auth';
+import { buildAIAuthHeaders, buildAIChatRequestOptions } from '@sarvinbox/core/ai-provider-auth';
 
 // Canonical AI feature defaults live in settings/types (a types+consts
 // leaf module — safe to import here, no component code, no cycle).
@@ -252,6 +252,9 @@ export interface AIProvider {
   oauthProvider?: 'sarv';
   /** OAuth account email — lets main-process fetch the right refresh token. */
   oauthEmail?: string;
+  /** Sarv catalog identities retained for explicit settings edits. */
+  sarvZoneCode?: string;
+  sarvProviderCode?: string;
 }
 
 export interface AISettings {
@@ -467,39 +470,64 @@ export function addProvider(
 }
 
 /**
- * Onboarding saves only a tested, consented selection. Await the secret vault
- * before publishing metadata; a cancelled save must never create a default.
+ * Save a tested, consented selection after its secret reaches the vault.
+ * Settings can add a distinct entry or edit an identity without changing the
+ * default; onboarding retains its idempotent default-selection behavior.
  * Keys remain in memory and safeStorage, never renderer localStorage.
  */
 export async function addValidatedProvider(
   draft: Omit<AIProvider, 'id' | 'isDefault'>,
   isCurrent: () => boolean,
+  options: { existingId?: string; createNew?: boolean; makeDefault?: boolean } = {},
 ): Promise<(AIProvider & { keyStorageEncrypted?: boolean }) | null> {
-  const existing = loadAISettings().providers.find((provider) =>
+  const stored = loadAISettings().providers;
+  const existing = options.existingId ? stored.find((provider) => provider.id === options.existingId)
+    : options.createNew ? undefined : stored.find((provider) =>
     provider.type === draft.type && provider.model === draft.model
     && provider.baseUrl === draft.baseUrl && provider.apiKey === draft.apiKey
     && (provider.authMethod || 'apiKey') === (draft.authMethod || 'apiKey')
     && provider.oauthEmail === draft.oauthEmail,
   );
+  if (options.existingId && !existing) throw new Error('This AI provider was removed. Add it again to save this connection.');
   const id = existing?.id ?? generateId();
   let keyStorageEncrypted = existing ? aiKeyStorageEncrypted : undefined;
+  const keyChanged = draft.apiKey !== (existing?.apiKey || '');
+  const restoreSecret = async () => {
+    try {
+      const live = existing ? loadAISettings().providers.find((provider) => provider.id === id) : undefined;
+      const result = live?.apiKey
+        ? await window.electronAPI.aiSecrets.set(id, live.apiKey)
+        : await window.electronAPI.aiSecrets.delete(id);
+      if (!result.success) throw new Error('Credential restoration failed');
+    } catch {
+      throw new Error('Could not restore your saved API key. Please retry the edit.');
+    }
+  };
   if (!isCurrent()) return null;
-  if (draft.apiKey && !existing) {
-    let result: Awaited<ReturnType<typeof window.electronAPI.aiSecrets.set>>;
-    try { result = await window.electronAPI.aiSecrets.set(id, draft.apiKey); }
+  if (keyChanged) {
+    let result: Awaited<ReturnType<typeof window.electronAPI.aiSecrets.set>> | Awaited<ReturnType<typeof window.electronAPI.aiSecrets.delete>>;
+    try { result = draft.apiKey ? await window.electronAPI.aiSecrets.set(id, draft.apiKey) : await window.electronAPI.aiSecrets.delete(id); }
     catch { throw new Error('Could not save your API key securely. Please try again.'); }
     if (!isCurrent()) {
-      await window.electronAPI.aiSecrets.delete(id).catch(() => {});
+      await restoreSecret();
       return null;
     }
     if (!result.success) throw new Error('Could not save your API key securely. Please try again.');
-    keyStorageEncrypted = result.encrypted;
-    aiKeyStorageEncrypted = result.encrypted;
+    if ('encrypted' in result) {
+      keyStorageEncrypted = result.encrypted;
+      aiKeyStorageEncrypted = result.encrypted;
+    }
   }
   if (!isCurrent()) return null;
   const settings = loadAISettings();
-  const provider: AIProvider = { ...draft, id, isDefault: true };
-  const providers = settings.providers.map((entry) => ({ ...entry, isDefault: false }));
+  const liveExisting = settings.providers.find((provider) => provider.id === id);
+  if (options.existingId && !liveExisting) {
+    await restoreSecret();
+    throw new Error('This AI provider was removed. Add it again to save this connection.');
+  }
+  const makeDefault = options.makeDefault ?? true;
+  const provider: AIProvider = { ...draft, id, isDefault: makeDefault || Boolean(liveExisting?.isDefault) || settings.providers.length === 0 };
+  const providers = settings.providers.map((entry) => ({ ...entry, isDefault: makeDefault ? false : entry.isDefault }));
   const index = providers.findIndex((entry) => entry.id === id);
   if (index < 0) providers.push(provider);
   else providers[index] = provider;
@@ -508,10 +536,11 @@ export async function addValidatedProvider(
   try {
     persistStripped({ ...settings, providers });
   } catch {
-    if (!existing && draft.apiKey) await window.electronAPI.aiSecrets.delete(id).catch(() => {});
+    if (keyChanged) await restoreSecret();
     throw new Error('Could not save AI settings. Please try again.');
   }
   if (draft.apiKey) aiKeyCache[id] = draft.apiKey;
+  else delete aiKeyCache[id];
   return { ...provider, keyStorageEncrypted: draft.apiKey ? keyStorageEncrypted : undefined };
 }
 
@@ -697,12 +726,7 @@ export async function testProvider(provider: AIProvider, options?: { signal?: Ab
           model: provider.model,
           messages: [{ role: 'user', content: testPrompt }],
           max_completion_tokens: 128,
-          ...(provider.type === 'sarv' ? {
-            chat_template_kwargs: { enable_thinking: false },
-            reasoning_effort: 'minimal',
-          } : /^(gpt-5|o\d)/.test(provider.model) ? {
-            reasoning_effort: provider.model.startsWith('gpt-5') ? 'minimal' : 'low',
-          } : {}),
+          ...buildAIChatRequestOptions(provider),
         }),
       });
 
@@ -993,28 +1017,9 @@ async function callOpenAICompatibleAPI(
       { role: 'user', content: userMessage },
     ],
     max_completion_tokens: maxTokens || 16000,
-    // Disable thinking on vLLM-hosted reasoning models (Gemma 3/4,
-    // Qwen3) so they don't burn the token budget on an inline <think>
-    // block before emitting the structured answer. Ignored by
-    // backends that don't recognise the field.
-    chat_template_kwargs: { enable_thinking: false },
-    // OpenAI-spec reasoning models (gpt-oss-*, gpt-5-*, o-series) use
-    // a separate `reasoning_effort` field — the chat_template_kwargs
-    // above doesn't reach them. Without this, gpt-oss-120b will
-    // consume the entire token budget on internal reasoning_content
-    // and return finish_reason='length' with empty content. We don't
-    // need deep reasoning for any of our structured-extraction calls;
-    // the prompt is the constraint, not chain-of-thought. Backends
-    // that don't recognise the field ignore it.
-    //
-    // `minimal` is the gpt-oss-specific shortest-reasoning mode (some
-    // deployments accept it, others only allow low/medium/high). We
-    // also send `reasoning: { effort: ... }` as the new OpenAI
-    // reasoning-API shape — proxies that translate to /responses API
-    // pick that up while older /chat/completions paths use the flat
-    // field above.
-    reasoning_effort: 'minimal',
-    reasoning: { effort: 'minimal' },
+    // Vendor extensions are restricted to their provider, using the same
+    // policy as model verification and background categorization.
+    ...buildAIChatRequestOptions(provider),
   };
   // OpenAI / vLLM / llama.cpp / Sarv-proxy all honor this — forces the
   // backend to constrain output to valid JSON. Servers that don't know

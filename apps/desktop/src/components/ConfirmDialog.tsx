@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+import { dialogControls, trapDialogTab } from '../utils/modal-focus';
 
 /**
  * Which button the user pressed. `cancel` also covers Escape and a backdrop
@@ -90,10 +92,42 @@ export function ConfirmDialogView({
   onCancel: () => void;
   onSecondary?: () => void;
 }) {
+  const dialog = useRef<HTMLDivElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    // Capture before focusing: React's autoFocus would already have lost the
+    // originating setup control by the time this effect runs.
+    const opener = document.activeElement;
+    const parentDialog = (opener instanceof HTMLElement ? opener.closest<HTMLElement>('[role="dialog"]') : null)
+      ?? [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].reverse()
+        .find((candidate) => candidate !== dialog.current && !candidate.contains(dialog.current));
+    confirmButton.current?.focus({ preventScroll: true });
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) {
+        opener.focus({ preventScroll: true });
+        if (document.activeElement === opener && opener !== document.body) return;
+      }
+      // Connection controls can still be disabled until the awaiting promise
+      // resumes. Keep focus in the parent setup while it finishes that work.
+      if (parentDialog?.isConnected) {
+        const heading = parentDialog.querySelector<HTMLElement>('h1[tabindex="-1"], h2[tabindex="-1"], h3[tabindex="-1"]');
+        (heading ?? dialogControls(parentDialog)[0])?.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A nested confirmation owns the key even when it closes synchronously;
+      // it must never dismiss its parent or reach mailbox shortcuts afterward.
+      e.stopPropagation();
       if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
-      else if (e.key === 'Enter') { e.preventDefault(); onConfirm(); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (e.target instanceof HTMLButtonElement && dialog.current?.contains(e.target)) e.target.click();
+        else onConfirm();
+      } else trapDialogTab(e, dialog.current);
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
@@ -104,6 +138,7 @@ export function ConfirmDialogView({
   // rather than tie with them and depend on DOM order to paint on top.
   return (
     <div
+      ref={dialog}
       className="fixed inset-0 z-[300] flex items-center justify-center bg-black/50 p-4"
       onClick={onCancel}
       role="dialog"
@@ -119,6 +154,7 @@ export function ConfirmDialogView({
         <p className="text-sm text-muted-foreground whitespace-pre-line">{message}</p>
         <div className="mt-5 flex justify-end gap-2">
           <button
+            type="button"
             onClick={onCancel}
             className="px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted/50 transition-colors"
           >
@@ -126,6 +162,7 @@ export function ConfirmDialogView({
           </button>
           {secondaryLabel && onSecondary && (
             <button
+              type="button"
               onClick={onSecondary}
               className="px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted/50 transition-colors"
             >
@@ -133,8 +170,9 @@ export function ConfirmDialogView({
             </button>
           )}
           <button
+            type="button"
+            ref={confirmButton}
             onClick={onConfirm}
-            autoFocus
             className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
               destructive
                 ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'

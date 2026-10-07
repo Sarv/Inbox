@@ -1,6 +1,6 @@
 import { aiFailureReason, PROVIDER_CONFIGS, type AIProvider, type AIProviderType } from './ai-service';
 import {
-  listCaiModels, listCaiProviders, loadZoneSelection, pickRecommendedModel, pickRecommendedProvider,
+  buildSarvEdgeBaseUrl, listCaiModels, listCaiProviders, loadZoneSelection, pickRecommendedModel, pickRecommendedProvider,
   type SarvLLMModel, type SarvLLMProvider, type SarvZone,
 } from './sarv-cai-api';
 import { buildSarvProviderDraft } from './sarv-llm-provider';
@@ -30,6 +30,9 @@ export interface OnboardingAIConnection {
   verified: boolean;
   manualModel: boolean;
   sarv?: SarvConnection;
+  /** An explicit settings edit restores this identity before choosing defaults. */
+  savedSarvProvider?: Pick<AIProvider, 'name' | 'baseUrl' | 'model' | 'oauthEmail' | 'sarvZoneCode' | 'sarvProviderCode'>;
+  modelWarning?: string;
 }
 
 export function makeAIConnection(type: AIProviderType): OnboardingAIConnection {
@@ -68,6 +71,7 @@ export function providerFromConnection(connection: OnboardingAIConnection): AIPr
       id: 'onboarding-test', type: 'sarv', name: result.draft.name, model: connection.model,
       baseUrl: normalizeAIEndpoint(result.draft.baseUrl), apiKey: '', isDefault: false,
       authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: sarv.email,
+      sarvZoneCode: sarv.zoneCode, sarvProviderCode: sarv.providerCode,
     };
   }
   return {
@@ -157,29 +161,70 @@ export async function loadSarvAIConnection(
   if (!config?.apiBaseUrl || !config.llmBaseUrl) throw new Error('Sarv AI is unavailable in this app configuration.');
   const zoneSelection = await loadZoneSelection(config.apiBaseUrl, account.email);
   signal.throwIfAborted();
+  const saved = !previous.sarv && previous.savedSarvProvider?.oauthEmail?.toLowerCase() === account.email.toLowerCase()
+    ? previous.savedSarvProvider : undefined;
+  const savedZones = saved?.baseUrl ? zoneSelection.zones.filter((zone) =>
+    normalizeAIEndpoint(buildSarvEdgeBaseUrl(zone.api_domain, config.llmBaseUrl)) === normalizeAIEndpoint(saved.baseUrl!),
+  ) : [];
+  const savedZone = savedZones.find((zone) => zone.code === saved?.sarvZoneCode) || savedZones[0];
   const previousZone = previous.sarv?.email === account.email ? previous.sarv.zoneCode : undefined;
+  const protectedZone = previousZone ?? saved?.sarvZoneCode;
+  if (protectedZone && !selection?.zoneCode && zoneSelection.zones.length
+    && !zoneSelection.zones.some((zone) => zone.code === protectedZone)) {
+    throw new Error('Your saved Sarv region is no longer available. Choose a new Sarv connection to continue.');
+  }
   const zoneCode = selection?.zoneCode
-    ?? (zoneSelection.zones.some((zone) => zone.code === previousZone) ? previousZone : undefined)
-    ?? zoneSelection.zoneCode;
+    ?? previousZone
+    ?? saved?.sarvZoneCode
+    ?? savedZone?.code
+    ?? (saved ? '' : zoneSelection.zoneCode);
   const providers = await listCaiProviders(config.apiBaseUrl, account.email, zoneCode);
   signal.throwIfAborted();
   if (!providers.length) throw new Error('No AI backends are available on your Sarv account.');
-  const oldCode = selection?.providerCode ?? previous.sarv?.providerCode;
-  const providerCode = providers.find((entry) => entry.code === oldCode)?.code || pickRecommendedProvider(providers)!.code;
-  const models = await listCaiModels(config.apiBaseUrl, account.email, providerCode, zoneCode);
+  const protectedBackend = previous.sarv?.email === account.email ? previous.sarv.providerCode : saved?.sarvProviderCode;
+  const oldCode = selection?.providerCode ?? protectedBackend;
+  if (protectedBackend && !selection?.providerCode && !providers.some((entry) => entry.code === protectedBackend)) {
+    throw new Error('Your saved Sarv backend is no longer available. Choose a new Sarv connection to continue.');
+  }
+  let providerCode = providers.find((entry) => entry.code === oldCode)?.code || pickRecommendedProvider(providers)!.code;
+  let models: SarvLLMModel[];
+  if (saved && !selection?.providerCode && !providers.some((entry) => entry.code === oldCode)) {
+    // Older entries did not store a backend code. Restore their model's backend,
+    // preferring the exact generated name if the same model appears twice.
+    const ordered = [...providers].sort((left, right) => Number(saved.name.startsWith(`Sarv · ${right.name} · `)) - Number(saved.name.startsWith(`Sarv · ${left.name} · `)));
+    let restored: { code: string; models: SarvLLMModel[] } | undefined;
+    let available: { code: string; models: SarvLLMModel[] } | undefined;
+    for (const provider of ordered) {
+      const catalog = await listCaiModels(config.apiBaseUrl, account.email, provider.code, zoneCode);
+      signal.throwIfAborted();
+      if (!available && catalog.length) available = { code: provider.code, models: catalog };
+      if (!catalog.some((model) => model.code === saved.model)) continue;
+      restored = { code: provider.code, models: catalog };
+      break;
+    }
+    const result = restored || available;
+    if (!result) throw new Error('No models are available for this Sarv backend. Choose another backend or try again.');
+    providerCode = result.code;
+    models = result.models;
+  } else models = await listCaiModels(config.apiBaseUrl, account.email, providerCode, zoneCode);
   signal.throwIfAborted();
   if (!models.length) throw new Error('No models are available for this Sarv backend. Choose another backend or try again.');
   const sarv: SarvConnection = {
-    email: account.email, apiBaseUrl: config.apiBaseUrl, edgeBaseUrl: config.llmBaseUrl,
+    email: account.email, apiBaseUrl: config.apiBaseUrl, edgeBaseUrl: previous.sarv?.email === account.email ? previous.sarv.edgeBaseUrl : saved?.baseUrl || config.llmBaseUrl,
     accounts, zones: zoneSelection.zones, zoneCode, providers, providerCode, models,
   };
-  const model = models.some((entry) => entry.code === previous.model)
+  const sameConnection = previous.sarv?.email === account.email && previous.sarv.zoneCode === zoneCode && previous.sarv.providerCode === providerCode;
+  const missingSavedModel = (Boolean(previous.model) && !models.some((entry) => entry.code === previous.model)
+    || Boolean(previous.modelWarning) && !previous.model)
+    && (Boolean(saved) && !selection?.providerCode || sameConnection);
+  const model = missingSavedModel ? '' : models.some((entry) => entry.code === previous.model)
     ? previous.model : pickRecommendedModel(models, providerCode)?.code || '';
   const connection: OnboardingAIConnection = {
     ...previous, authMethod: 'oauth', model, verified: true, sarv,
     models: models.map((entry) => ({ id: entry.code, name: entry.display_name || entry.code })),
+    modelWarning: missingSavedModel ? 'Your previous model is no longer available. Choose an available model before saving.' : undefined,
   };
   // Validate that there is an edge endpoint before offering a valid selection.
-  providerFromConnection(connection);
+  providerFromConnection({ ...connection, model: model || models[0].code });
   return connection;
 }

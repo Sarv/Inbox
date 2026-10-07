@@ -375,3 +375,124 @@ describe('AI onboarding', () => {
     expect(onComplete).toHaveBeenLastCalledWith({ enabled: true, providerName: 'OpenAI', modelName: 'Demo model', keyStorageEncrypted: false });
   });
 });
+
+describe('AI setup reused from settings', () => {
+  // Add must be a blank draft, never an implicit edit of an existing connection.
+  it('starts new settings providers with blank credentials despite stored providers', () => {
+    vi.mocked(loadAISettings).mockReturnValue({ providers: [{ id: 'stored', type: 'openai', name: 'OpenAI', apiKey: 'stored-key', model: 'stored-model', isDefault: true }] });
+    const view = render(<Harness context="settings" />);
+    fire(button(view, 'OpenAI'), 'click');
+    expect(view.container.textContent).toContain('Connect OpenAI');
+    expect(view.find('input[type="password"]')).toHaveProperty('value', '');
+    expect(checkAIConnection).not.toHaveBeenCalled();
+  });
+
+  // Cancel/back in Settings must leave existing AI consent and enablement intact.
+  it('cancels settings without declining AI consent or creating a provider', () => {
+    const view = render(<Harness context="settings" />);
+    fire(button(view, 'Cancel'), 'click');
+    expect(onComplete).toHaveBeenCalledWith({ enabled: false });
+    expect(setAiConsent).not.toHaveBeenCalled();
+    expect(addValidatedProvider).not.toHaveBeenCalled();
+    fire(button(view, 'Back'), 'click');
+    expect(onBackToEmail).toHaveBeenCalledOnce();
+  });
+
+  // Settings addition must create a distinct entry without switching a user's existing default.
+  it('tests and saves a new settings provider with explicit creation and default preservation', async () => {
+    const view = render(<Harness context="settings" />);
+    await configureOpenAI(view); selectModel(view); toggle(view.find('input[type="checkbox"]'));
+    fire(button(view, 'Test model and save provider'), 'click'); await settle();
+    expect(addValidatedProvider).toHaveBeenCalledWith(expect.objectContaining({ type: 'openai', model: 'demo-model' }), expect.any(Function), { existingId: undefined, createNew: true, makeDefault: false });
+    expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({ enabled: true, provider: expect.objectContaining({ id: 'saved' }) }));
+  });
+
+  // Editing uses only the selected entry's credentials and revalidates its connection before saving.
+  it('prefills and saves an explicit edit with its identity rather than adding a duplicate', async () => {
+    const editing = { id: 'edit-me', type: 'openai' as const, name: 'My OpenAI', apiKey: 'original-key', model: 'demo-model', isDefault: false };
+    const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />);
+    expect(view.find('input[type="password"]')).toHaveProperty('value', 'original-key');
+    typeInto(view.find('input[type="password"]'), 'replacement-key');
+    fire(button(view, 'Check connection'), 'click'); await settle(); selectModel(view);
+    toggle(view.find('input[type="checkbox"]')); fire(button(view, 'Test model and save provider'), 'click'); await settle();
+    expect(addValidatedProvider).toHaveBeenCalledWith(expect.objectContaining({ name: 'My OpenAI' }), expect.any(Function), { existingId: 'edit-me', createNew: false, makeDefault: false });
+  });
+
+  // An OAuth provider edit must reuse its account, not force another browser login.
+  it('reuses the edited Sarv identity and its existing session', async () => {
+    const editing = { id: 'sarv-entry', type: 'sarv' as const, name: 'Sarv AI', apiKey: '', model: 'gpt-oss-120b', isDefault: true, authMethod: 'oauth' as const, oauthProvider: 'sarv' as const, oauthEmail: 'demo@sarv.example' };
+    const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />); await settle();
+    expect(loadSarvAIConnection).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-oss-120b', savedSarvProvider: editing }), expect.any(AbortSignal), { email: 'demo@sarv.example' });
+    expect(startFlow).not.toHaveBeenCalled();
+    expect(view.container.textContent).toContain('Choose your model');
+  });
+
+  // A durable credential save cannot be interrupted by Cancel after model validation succeeds.
+  it('blocks closing/navigation only during the credential save and reports its completion', async () => {
+    let resolveSave!: (value: Awaited<ReturnType<typeof addValidatedProvider>>) => void;
+    vi.mocked(addValidatedProvider).mockReturnValueOnce(new Promise((resolve) => { resolveSave = resolve; }));
+    const savingChanged = vi.fn();
+    const view = render(<Harness context="settings" onSavingChange={savingChanged} />);
+    await configureOpenAI(view); selectModel(view); toggle(view.find('input[type="checkbox"]'));
+    fire(button(view, 'Test model and save provider'), 'click'); await settle();
+    expect(savingChanged).toHaveBeenLastCalledWith(true);
+    for (const label of ['Cancel', 'Back', 'Change AI provider', 'Connection settings']) expect(button(view, label)).toHaveProperty('disabled', true);
+    resolveSave({ id: 'saved', type: 'openai', name: 'OpenAI', apiKey: 'test-key', model: 'demo-model', isDefault: false }); await settle();
+    expect(savingChanged).toHaveBeenLastCalledWith(false);
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  // Failed saves must unlock cancellation and preserve the editable tested selection.
+  it('unlocks settings after a vault failure without changing AI consent', async () => {
+    vi.mocked(addValidatedProvider).mockRejectedValueOnce(new Error('Vault unavailable'));
+    const savingChanged = vi.fn();
+    const view = render(<Harness context="settings" onSavingChange={savingChanged} />);
+    await configureOpenAI(view); selectModel(view); toggle(view.find('input[type="checkbox"]'));
+    fire(button(view, 'Test model and save provider'), 'click'); await settle();
+    expect(view.find('[role="alert"]')?.textContent).toContain('Vault unavailable');
+    expect(savingChanged).toHaveBeenLastCalledWith(false);
+    expect(button(view, 'Cancel')).toHaveProperty('disabled', false);
+    expect(setAiConsent).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider edit authentication choices', () => {
+  // An unavailable vault credential must remain replaceable instead of hiding the API-key field.
+  it('keeps API-key inputs available when editing a stored provider with no hydrated key', () => {
+    const editing = { id: 'no-key', type: 'openai' as const, name: 'OpenAI', apiKey: '', model: 'stored-model', isDefault: true };
+    const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />);
+    expect(view.find('input[type="password"]')).toHaveProperty('value', '');
+  });
+
+  // Switching an OAuth Sarv edit to API-key authentication must actually offer a required key input.
+  it('offers an API key when changing an edited Sarv OAuth connection', async () => {
+    const editing = { id: 'sarv-edit', type: 'sarv' as const, name: 'Sarv', apiKey: '', model: 'gpt-oss-120b', isDefault: true, authMethod: 'oauth' as const, oauthEmail: 'demo@sarv.example' };
+    const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />); await settle();
+    fire(button(view, 'Connection settings'), 'click'); fire(button(view, 'Use an API key instead'), 'click');
+    expect(view.find('input[type="password"]')).toHaveProperty('value', '');
+    expect(startFlow).not.toHaveBeenCalled();
+  });
+});
+
+describe('recovering changed Sarv edit catalogs', () => {
+  // A missing edited region/backend needs an explicit way to choose a new connection without repeating OAuth.
+  it('offers a deliberate connection reset after saved-identity restoration fails', async () => {
+    vi.mocked(loadSarvAIConnection).mockRejectedValueOnce(new Error('Your saved Sarv backend is no longer available'));
+    const editing = { id: 'sarv-entry', type: 'sarv' as const, name: 'Sarv', apiKey: '', model: 'gpt-oss-120b', isDefault: true, authMethod: 'oauth' as const, oauthEmail: 'demo@sarv.example' };
+    const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />); await settle();
+    fire(button(view, 'Choose a new Sarv connection'), 'click'); await settle();
+    expect(loadSarvAIConnection).toHaveBeenLastCalledWith(expect.objectContaining({ savedSarvProvider: undefined, sarv: undefined, model: '' }), expect.any(AbortSignal), { email: 'demo@sarv.example' });
+    expect(view.container.textContent).toContain('Choose your model'); expect(startFlow).not.toHaveBeenCalled(); expect(view.find('input[type="checkbox"]')).toHaveProperty('checked', false);
+  });
+
+  // A refreshed catalog must clear prior agreement and require a selected model instead of saving a silent substitution.
+  it('shows an unavailable model warning and resets consent on a same-connection refresh', async () => {
+    const editing = { id: 'sarv-entry', type: 'sarv' as const, name: 'Sarv', apiKey: '', model: 'gpt-oss-120b', isDefault: true, authMethod: 'oauth' as const, oauthEmail: 'demo@sarv.example' };
+    const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />); await settle(); toggle(view.find('input[type="checkbox"]'));
+    vi.mocked(loadSarvAIConnection).mockResolvedValueOnce({ ...sarvConnected(), model: '', modelWarning: 'Your previous model is no longer available. Choose an available model before saving.' });
+    fire(button(view, 'Connection settings'), 'click'); fire(button(view, 'Use current Sarv connection'), 'click'); await settle();
+    expect(view.byLabel('Model')).toHaveProperty('value', ''); expect(view.find('input[type="checkbox"]')).toHaveProperty('checked', false);
+    expect(view.find('[role="status"]')?.textContent).toContain('no longer available'); expect(button(view, 'Test model and save provider')).toHaveProperty('disabled', true);
+    selectModel(view, 'gpt-oss-120b'); toggle(view.find('input[type="checkbox"]')); expect(button(view, 'Test model and save provider')).toHaveProperty('disabled', false);
+  });
+});

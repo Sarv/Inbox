@@ -15,7 +15,7 @@ import {
 } from '@sarv-in/mailguard/verdict';
 import pRetry, { AbortError } from 'p-retry';
 
-import { buildAIAuthHeaders } from '../utils/ai-provider-auth';
+import { buildAIAuthHeaders, buildAIChatRequestOptions } from '../utils/ai-provider-auth';
 import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
@@ -1053,16 +1053,7 @@ async function callOpenAICompatibleAPI(
             { role: 'user', content: userMessage },
           ],
           max_completion_tokens: 16000,
-          // Disable chain-of-thought when the backend is a vLLM-hosted model
-          // with thinking mode enabled by default (Gemma 3/4, Qwen3, etc.).
-          // vLLM's OpenAI-compatible server forwards chat_template_kwargs to
-          // the tokenizer's chat template, which branches on enable_thinking.
-          // Ignored by backends that don't recognise the field (OpenAI,
-          // Anthropic proxies, Sarv edge for non-thinking models).
-          // Why off for categorization/drafting: these produce structured
-          // JSON output. A thinking pass burns the token budget on reasoning
-          // and often truncates before the JSON even starts.
-          chat_template_kwargs: { enable_thinking: false },
+          ...buildAIChatRequestOptions(config),
         }),
         signal: timeoutCtl.signal,
       });
@@ -1081,7 +1072,7 @@ async function callOpenAICompatibleAPI(
     }
 
     if (!response.ok) {
-      throw await parseSarvApiError(response);
+      throw await parseSarvApiError(response, config.type);
     }
 
     const data: any = await response.json();
@@ -1121,10 +1112,8 @@ async function callGeminiAPI(
   });
 
   if (!response.ok) {
-    // Gemini / other non-Sarv providers don't emit the Sarv error-code JSON
-    // shape, so ``parseSarvApiError`` will fall through to ``upstream_error``
-    // — which is correct. Keeps the retry loop's type discrimination uniform.
-    throw await parseSarvApiError(response);
+    // Keep shared status/retry classification while naming the actual provider.
+    throw await parseSarvApiError(response, config.type);
   }
 
   const data: any = await response.json();

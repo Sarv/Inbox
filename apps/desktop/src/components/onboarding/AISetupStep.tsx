@@ -2,7 +2,7 @@ import { ArrowLeft, ArrowRight, CheckCircle2, Loader2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { SARV_AI_DISCLOSURE, setAiConsent } from '../../services/ai-consent';
-import { addValidatedProvider, loadAISettings, testProvider, type AIProviderType } from '../../services/ai-service';
+import { addValidatedProvider, loadAISettings, testProvider, type AIProvider, type AIProviderType } from '../../services/ai-service';
 import {
   checkAIConnection, loadSarvAIConnection, makeAIConnection, providerFromConnection,
   type OnboardingAIConnection,
@@ -12,13 +12,17 @@ import { ProviderIcon } from './ProviderIcon';
 
 export type AISetupStage = 'provider' | 'connection' | 'model';
 export interface AISetupStepProps {
+  /** Settings uses the same connection flow without changing onboarding or AI enablement. */
+  context?: 'onboarding' | 'settings';
+  editingProvider?: AIProvider;
+  onSavingChange?: (saving: boolean) => void;
   stage: AISetupStage;
   active: boolean;
   preferSarv: boolean;
   preferSarvEmail?: string;
   onStageChange: (stage: AISetupStage) => void;
   onBackToEmail: () => void;
-  onComplete: (result: { enabled: boolean; providerName?: string; modelName?: string; keyStorageEncrypted?: false }) => void;
+  onComplete: (result: { enabled: boolean; providerName?: string; modelName?: string; keyStorageEncrypted?: false; provider?: AIProvider }) => void;
 }
 
 const choices: Array<{ type: AIProviderType; icon: string; name: string; detail: string }> = [
@@ -30,27 +34,29 @@ const choices: Array<{ type: AIProviderType; icon: string; name: string; detail:
 const fieldClass = 'w-full rounded-xl border border-input bg-background px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60';
 const primaryClass = 'flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50';
 
-function initialConnections(): Record<AIProviderType, OnboardingAIConnection> {
+function initialConnections(context: 'onboarding' | 'settings', editingProvider?: AIProvider): Record<AIProviderType, OnboardingAIConnection> {
   const connections = Object.fromEntries(choices.map(({ type }) => [type, makeAIConnection(type)])) as Record<AIProviderType, OnboardingAIConnection>;
   // Stored provider metadata is reused, and keys come from the hydrated vault
   // cache. Draft edits remain only in this mounted component's memory.
-  for (const stored of loadAISettings().providers) {
+  for (const stored of context === 'settings' ? editingProvider ? [editingProvider] : [] : loadAISettings().providers) {
     if (!connections[stored.type] || connections[stored.type].model) continue;
     connections[stored.type] = {
       ...connections[stored.type], name: stored.name, baseUrl: stored.baseUrl || connections[stored.type].baseUrl,
-      apiKey: stored.apiKey, useApiKey: Boolean(stored.apiKey), model: stored.model,
+      apiKey: stored.apiKey, useApiKey: stored.type === 'custom' ? Boolean(stored.apiKey) : stored.authMethod !== 'oauth', model: stored.model,
       authMethod: stored.authMethod || 'apiKey',
       models: [{ id: stored.model, name: stored.model }],
-      verified: stored.authMethod !== 'oauth' && (Boolean(stored.apiKey) || stored.type === 'custom'),
+      verified: context === 'onboarding' && stored.authMethod !== 'oauth' && (Boolean(stored.apiKey) || stored.type === 'custom'),
+      ...(context === 'settings' && stored.type === 'sarv' && stored.authMethod === 'oauth' ? { savedSarvProvider: stored } : {}),
     };
   }
   return connections;
 }
 
-export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStageChange, onBackToEmail, onComplete }: AISetupStepProps) {
-  const [connections, setConnections] = useState(initialConnections);
-  const [selected, setSelected] = useState<AIProviderType | null>(null);
+export function AISetupStep({ context = 'onboarding', editingProvider, onSavingChange, stage, active, preferSarv, preferSarvEmail, onStageChange, onBackToEmail, onComplete }: AISetupStepProps) {
+  const [connections, setConnections] = useState(() => initialConnections(context, editingProvider));
+  const [selected, setSelected] = useState<AIProviderType | null>(editingProvider?.type || null);
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [consent, setConsent] = useState(false);
   const [rememberedSarvShortcut, setRememberedSarvShortcut] = useState<string | null>(null);
@@ -144,6 +150,7 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
     }
     const connected = await loadSarvAIConnection(previous, signal, selection);
     if (!isCurrent()) return;
+    if (connected.model !== previous.model) setConsent(false);
     saveConnection(connected);
     onStageChange('model');
   });
@@ -157,9 +164,18 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
     if (chosen.verified) onStageChange('model');
     else {
       onStageChange('connection');
-      if (type === 'sarv' && chosen.authMethod === 'oauth') void loadSarv(chosen);
+      if (type === 'sarv' && chosen.authMethod === 'oauth') void loadSarv(chosen, editingProvider ? { email: editingProvider.oauthEmail } : undefined);
     }
   };
+
+  useEffect(() => {
+    if (!active || editingProvider?.type !== 'sarv' || editingProvider.authMethod !== 'oauth'
+      || rememberedSarvShortcut === editingProvider.id) return;
+    setRememberedSarvShortcut(editingProvider.id);
+    void loadSarv(connections.sarv, { email: editingProvider.oauthEmail });
+    // Editing reuses that entry's signed-in identity before offering models.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, editingProvider, rememberedSarvShortcut]);
 
   useEffect(() => {
     const identity = preferSarvEmail || 'sarv';
@@ -180,12 +196,12 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
     invalidate();
     setError('');
     setConsent(false);
-    saveConnection({ ...connection, ...patch, verified: false, models: [], manualModel: false });
+    saveConnection({ ...connection, ...patch, verified: false, models: [], manualModel: false, modelWarning: undefined });
   };
 
   const skip = () => {
     invalidate();
-    setAiConsent('declined');
+    if (context === 'onboarding') setAiConsent('declined');
     onComplete({ enabled: false });
   };
 
@@ -215,7 +231,17 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
       if (!isCurrent()) return;
       if (!test.success) throw new Error(test.message);
       const { id: _id, isDefault: _default, ...draft } = provider;
-      const saved = await addValidatedProvider(draft, isCurrent);
+      setSaving(true);
+      onSavingChange?.(true);
+      let saved;
+      try {
+        saved = context === 'settings'
+          ? await addValidatedProvider(draft, isCurrent, { existingId: editingProvider?.id, createNew: !editingProvider, makeDefault: false })
+          : await addValidatedProvider(draft, isCurrent);
+      } finally {
+        setSaving(false);
+        onSavingChange?.(false);
+      }
       if (!saved || !isCurrent()) return;
       setAiConsent('granted');
       // Registration is now explicit, tested and consented. The mailbox has
@@ -223,6 +249,7 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
       onComplete({
         enabled: true, providerName: selected === 'custom' ? saved.name : choices.find((entry) => entry.type === selected)?.name,
         modelName: connection.models.find((model) => model.id === connection.model)?.name || connection.model,
+        ...(context === 'settings' ? { provider: saved } : {}),
         ...(saved.keyStorageEncrypted === false ? { keyStorageEncrypted: false as const } : {}),
       });
     });
@@ -239,9 +266,9 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">{stage === 'provider' ? 'Choose your AI provider' : stage === 'connection' ? `Connect ${label}` : 'Choose your model'}</h2>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">{stage === 'provider'
-          ? 'Make your inbox smarter with the AI service you prefer. You can also set this up later.'
+          ? context === 'settings' ? 'Choose an AI service, connect it, then select and test a model.' : 'Make your inbox smarter with the AI service you prefer. You can also set this up later.'
           : stage === 'connection' ? 'Connect your account to see which models are available.'
-            : 'Pick the model Inbox will use. We will test it before enabling AI.'}</p>
+            : context === 'settings' ? 'Choose and test a model before saving this provider.' : 'Pick the model Inbox will use. We will test it before enabling AI.'}</p>
       </div>
       {error && <div role="alert" className="rounded-xl border border-destructive/20 bg-destructive/10 p-3.5 text-sm text-destructive">{error}</div>}
       {stage === 'provider' ? (
@@ -259,14 +286,20 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
           <div className="flex items-center gap-3 rounded-xl bg-muted/40 p-3">
             <ProviderIcon id={choices.find((entry) => entry.type === selected)!.icon} className="h-8 w-8" />
             <span className="flex-1 text-sm font-medium">{label}</span>
-            <button type="button" onClick={() => { invalidate(); setError(''); onStageChange('provider'); }} className="text-xs font-medium text-primary hover:underline">Change AI provider</button>
+            <button type="button" disabled={saving} onClick={() => { invalidate(); setError(''); onStageChange('provider'); }} className="text-xs font-medium text-primary hover:underline disabled:opacity-50">Change AI provider</button>
           </div>
           {stage === 'connection' && (isOAuth ? (
             <div className="space-y-4 rounded-2xl border border-input p-5">
               <p className="text-sm leading-6 text-muted-foreground">Your Sarv sign-in also connects AI. An existing Sarv session is reused without another sign-in.</p>
               <button type="button" onClick={connect} disabled={busy} className={`${primaryClass} w-full`}>{busy && <Loader2 className="h-4 w-4 animate-spin" />}{connection.sarv ? 'Use current Sarv connection' : 'Sign in with Sarv'}</button>
               {connection.sarv && <button type="button" onClick={() => { void loadSarv(connection, undefined, true); }} disabled={busy} className="block text-sm text-primary hover:underline">Sign in with a different Sarv account</button>}
-              <button type="button" onClick={() => edit({ authMethod: 'apiKey' })} disabled={busy} className="text-sm text-primary hover:underline">Use an API key instead</button>
+              {error && (connection.savedSarvProvider || connection.sarv) && <button type="button" onClick={() => {
+                setConsent(false);
+                const fresh = { ...connection, savedSarvProvider: undefined, sarv: undefined, model: '' };
+                saveConnection(fresh);
+                void loadSarv(fresh, { email: connection.sarv?.email || editingProvider?.oauthEmail });
+              }} disabled={busy} className="block text-sm font-medium text-primary hover:underline">Choose a new Sarv connection</button>}
+              <button type="button" onClick={() => edit({ authMethod: 'apiKey', useApiKey: true })} disabled={busy} className="text-sm text-primary hover:underline">Use an API key instead</button>
             </div>
           ) : (
             <form onSubmit={(event) => { event.preventDefault(); connect(); }} className="space-y-4">
@@ -281,9 +314,10 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
           ))}
           {stage === 'model' && (
             <>
+              {connection.modelWarning && <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">{connection.modelWarning}</p>}
               <div className="flex items-center justify-between gap-3 text-xs">
                 <span className="flex items-center gap-1.5 text-muted-foreground"><CheckCircle2 className="h-4 w-4 text-green-600" />{(isOAuth && sarv?.email) || 'Connection configured'}</span>
-                <button type="button" onClick={() => { invalidate(); setError(''); onStageChange('connection'); }} className="shrink-0 font-medium text-primary hover:underline">Connection settings</button>
+                <button type="button" disabled={saving} onClick={() => { invalidate(); setError(''); onStageChange('connection'); }} className="shrink-0 font-medium text-primary hover:underline disabled:opacity-50">Connection settings</button>
               </div>
               {isOAuth && sarv && (sarv.accounts.length > 1 || sarv.zones.length > 1 || sarv.providers.length > 1) && <details className="rounded-xl border border-input p-3 text-sm"><summary className="cursor-pointer font-medium">Advanced connection options</summary><div className="mt-3 space-y-3">
                 {sarv.accounts.length > 1 && <label className="block space-y-1 text-sm">Sarv account<select aria-label="Sarv account" value={sarv.email} disabled={busy} onChange={(event) => { setConsent(false); void loadSarv(connection, { email: event.target.value }); }} className={fieldClass}>{sarv.accounts.map((account) => <option key={account.email} value={account.email}>{account.email}</option>)}</select></label>}
@@ -293,7 +327,7 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
               {connection.manualModel ? <label className="block space-y-2 text-sm font-medium">Model ID<input value={connection.model} disabled={busy} onChange={(event) => { setConsent(false); saveConnection({ ...connection, model: event.target.value }); }} className={fieldClass} placeholder="Enter the exact model ID" /><span className="block text-xs font-normal text-muted-foreground">This server does not publish a catalog. Enter its exact model ID; the next step verifies it.</span></label>
                 : <label className="block space-y-2 text-sm font-medium">Model<select aria-label="Model" value={connection.model} disabled={busy} onChange={(event) => { setConsent(false); saveConnection({ ...connection, model: event.target.value }); }} className={fieldClass}><option value="">Select an available model</option>{connection.models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>}
               <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-input p-4"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={busy} className="mt-1" /><span className="text-xs leading-6"><span className="block text-sm font-medium">Allow AI to process my email</span>{disclosure}</span></label>
-              <button type="button" disabled={busy || !connection.verified || !connection.model.trim() || !consent} onClick={enableAI} className={`${primaryClass} w-full`}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}{busy ? 'Testing and saving…' : 'Test model and enable AI'}</button>
+              <button type="button" disabled={busy || !connection.verified || !connection.model.trim() || !consent} onClick={enableAI} className={`${primaryClass} w-full`}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}{busy ? 'Testing and saving…' : context === 'settings' ? 'Test model and save provider' : 'Test model and enable AI'}</button>
               <p className="text-xs leading-5 text-muted-foreground">The test sends a short sample prompt. Your provider may charge for this request.</p>
             </>
           )}
@@ -301,8 +335,8 @@ export function AISetupStep({ stage, active, preferSarv, preferSarvEmail, onStag
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-        <button type="button" onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" />Back</button>
-        <button type="button" onClick={skip} className="text-sm font-medium text-primary hover:underline">Set up AI later</button>
+        <button type="button" disabled={saving} onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50"><ArrowLeft className="h-4 w-4" />Back</button>
+        <button type="button" disabled={saving} onClick={skip} className="text-sm font-medium text-primary hover:underline disabled:opacity-50">{context === 'settings' ? 'Cancel' : 'Set up AI later'}</button>
       </div>
     </section>
   );

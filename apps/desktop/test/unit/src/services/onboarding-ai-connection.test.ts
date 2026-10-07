@@ -290,3 +290,295 @@ describe('tested provider persistence', () => {
     expect(await addValidatedProvider(draft, () => true)).toMatchObject({ keyStorageEncrypted: false });
   });
 });
+
+describe('validated provider additions and edits in settings', () => {
+  const draft = { ...testProviderDraft, id: undefined, isDefault: undefined } as unknown as Omit<AIProvider, 'id' | 'isDefault'>;
+
+  // The settings Add action is a new identity even when connection/model values coincide.
+  it('creates a distinct same-configuration entry without replacing the existing default', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const second = await addValidatedProvider(draft, () => true, { createNew: true, makeDefault: false });
+    expect(second?.id).not.toBe(first?.id);
+    expect(second?.isDefault).toBe(false);
+    expect(loadAISettings().providers).toHaveLength(2);
+    expect(loadAISettings().providers.find((provider) => provider.isDefault)?.id).toBe(first?.id);
+  });
+
+  // First added settings provider still needs a usable default for the application's provider resolver.
+  it('makes the first settings provider default and retains that identity through edits', async () => {
+    const first = await addValidatedProvider(draft, () => true, { createNew: true, makeDefault: false });
+    expect(first?.isDefault).toBe(true);
+    const changed = await addValidatedProvider({ ...draft, apiKey: 'edited-secret', model: 'edited-model' }, () => true, { existingId: first!.id, makeDefault: false });
+    expect(changed).toMatchObject({ id: first!.id, isDefault: true, model: 'edited-model' });
+    expect(loadAISettings().providers).toHaveLength(1);
+    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'edited-secret');
+    expect(localStorage.getItem('sarvinbox-ai-settings')).not.toContain('edited-secret');
+  });
+
+  // Editing a non-default entry must preserve the user's existing default and independent configuration.
+  it('updates only the explicitly selected non-default entry', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const second = await addValidatedProvider({ ...draft, model: 'other-model' }, () => true, { createNew: true, makeDefault: false });
+    const changed = await addValidatedProvider({ ...draft, model: 'changed-model' }, () => true, { existingId: second!.id, makeDefault: false });
+    expect(changed).toMatchObject({ id: second!.id, isDefault: false });
+    expect(loadAISettings().providers.find((provider) => provider.isDefault)?.id).toBe(first!.id);
+    expect(loadAISettings().providers[0].model).toBe('gpt-test');
+  });
+
+  // A deleted selected entry cannot silently turn into an unrelated new provider.
+  it('rejects an edit whose selected identity no longer exists', async () => {
+    await expect(addValidatedProvider(draft, () => true, { existingId: 'deleted', makeDefault: false })).rejects.toThrow('was removed');
+    expect(vaultSet).not.toHaveBeenCalled();
+    expect(loadAISettings().providers).toHaveLength(0);
+  });
+
+  // A cancelled edit must restore the old shared key rather than deleting an existing provider's secret.
+  it('restores an edited key when the save becomes stale before publication', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    let current = true;
+    vaultSet.mockImplementationOnce(async () => { current = false; return { success: true, encrypted: true }; });
+    expect(await addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => current, { existingId: first!.id, makeDefault: false })).toBeNull();
+    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'synthetic-key');
+    expect(vaultDelete).not.toHaveBeenCalled();
+    expect(loadAISettings().providers[0].apiKey).toBe('synthetic-key');
+  });
+
+  // Metadata failure must roll an existing secret back and leave its saved model/default untouched.
+  it('restores an existing key if edited metadata cannot be persisted', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const storage = localStorage;
+    vi.stubGlobal('localStorage', { getItem: storage.getItem.bind(storage), setItem: () => { throw new Error('quota exceeded'); } });
+    await expect(addValidatedProvider({ ...draft, apiKey: 'replacement-key', model: 'changed-model' }, () => true, { existingId: first!.id, makeDefault: false })).rejects.toThrow('Could not save AI settings');
+    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'synthetic-key');
+    expect(loadAISettings().providers[0]).toMatchObject({ apiKey: 'synthetic-key', model: 'gpt-test', isDefault: true });
+  });
+
+  // Switching an explicitly edited local service to no authentication removes the obsolete key before publication.
+  it('removes a saved key when an edit no longer needs authentication', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    await addValidatedProvider({ ...draft, type: 'custom', apiKey: '', model: 'local-model' }, () => true, { existingId: first!.id, makeDefault: false });
+    expect(vaultDelete).toHaveBeenCalledWith(first!.id);
+    expect(loadAISettings().providers[0]).toMatchObject({ apiKey: '', type: 'custom', model: 'local-model' });
+  });
+
+  // Failed key removal cannot publish an unauthenticated edit that left its secret state inconsistent.
+  it('keeps old settings if removing the existing key fails', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    vaultDelete.mockRejectedValueOnce(new Error('unavailable'));
+    await expect(addValidatedProvider({ ...draft, apiKey: '' }, () => true, { existingId: first!.id, makeDefault: false })).rejects.toThrow('securely');
+    expect(loadAISettings().providers[0].apiKey).toBe('synthetic-key');
+  });
+});
+
+describe('validated save interruption and rollback failures', () => {
+  const { id: _id, isDefault: _default, ...draft } = testProviderDraft;
+
+  // Legacy API-key metadata without authMethod must remain idempotent when saved again.
+  it('reuses a legacy entry whose authentication method is implicit', async () => {
+    const legacy = { ...draft, authMethod: undefined };
+    const first = await addValidatedProvider(legacy, () => true);
+    const second = await addValidatedProvider(legacy, () => true);
+    expect(second?.id).toBe(first?.id); expect(loadAISettings().providers).toHaveLength(1);
+  });
+
+  // Cancellation before metadata publication must work even for a keyless OAuth save.
+  it('drops a keyless save that becomes stale at the publication check', async () => {
+    let checks = 0;
+    expect(await addValidatedProvider({ ...draft, apiKey: '', authMethod: 'oauth' }, () => ++checks === 1)).toBeNull();
+    expect(loadAISettings().providers).toHaveLength(0); expect(vaultSet).not.toHaveBeenCalled();
+  });
+
+  // A keyless metadata failure needs no secret cleanup and still stays recoverable in the model screen.
+  it('reports a failed keyless metadata save without touching the vault', async () => {
+    const storage = localStorage;
+    vi.stubGlobal('localStorage', { getItem: storage.getItem.bind(storage), setItem: () => { throw new Error('quota exceeded'); } });
+    await expect(addValidatedProvider({ ...draft, apiKey: '', authMethod: 'oauth' }, () => true)).rejects.toThrow('Could not save AI settings');
+    expect(vaultSet).not.toHaveBeenCalled(); expect(vaultDelete).not.toHaveBeenCalled();
+  });
+
+  // A failed rollback must be reported instead of silently claiming the existing credential is usable.
+  it('reports restoration failure without exposing the vault error or edited secret', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const storage = localStorage;
+    vi.stubGlobal('localStorage', { getItem: storage.getItem.bind(storage), setItem: () => { throw new Error('quota exceeded'); } });
+    vaultSet.mockResolvedValueOnce({ success: true, encrypted: true }).mockResolvedValueOnce({ success: false, encrypted: true });
+    await expect(addValidatedProvider({ ...draft, apiKey: 'edited-secret' }, () => true, { existingId: first!.id, makeDefault: false })).rejects.toThrow('Could not restore your saved API key');
+    expect(loadAISettings().providers[0].model).toBe('gpt-test');
+  });
+});
+
+describe('restoring an explicitly edited Sarv connection', () => {
+  const saved = () => ({ name: 'Sarv · Saved backend · Saved model', model: 'saved-model', baseUrl: 'https://other-region.example/edge/v1/llm/', oauthEmail: 'selected@example.com' });
+  const edit = () => ({ ...makeAIConnection('sarv'), baseUrl: saved().baseUrl, model: saved().model, savedSarvProvider: saved() });
+  const zones = [{ code: 'default', api_domain: 'https://default-region.example' }, { code: 'saved-region', api_domain: 'https://other-region.example/' }];
+  const backends = [{ code: 'sarv_partners', name: 'Recommended backend' }, { code: 'saved-backend', name: 'Saved backend' }];
+
+  // Opening Edit cannot move an existing model to the default region/backend.
+  it('restores the saved nondefault region and nonrecommended backend before listing models', async () => {
+    vi.mocked(loadZoneSelection).mockResolvedValue({ zones, zoneCode: 'default' });
+    vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockImplementation(async (_base, _email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', display_name: 'Saved model', provider_code: backend || '' }] : [{ code: 'recommended-model', provider_code: backend || '' }]);
+    const restored = await loadSarvAIConnection(edit(), signal(), { email: 'selected@example.com' });
+    expect(listCaiProviders).toHaveBeenLastCalledWith('https://cai.example', 'selected@example.com', 'saved-region');
+    expect(restored).toMatchObject({ model: 'saved-model', sarv: { zoneCode: 'saved-region', providerCode: 'saved-backend' } });
+    const provider = (await import('../../../../src/services/onboarding-ai-connection')).providerFromConnection(restored);
+    expect(provider).toMatchObject({ model: 'saved-model', baseUrl: 'https://other-region.example/edge/v1/llm', sarvProviderCode: 'saved-backend', sarvZoneCode: 'saved-region' });
+    expect(listCaiModels).toHaveBeenCalledOnce();
+  });
+
+  // Legacy entries whose friendly name changed still restore the backend that has their exact model.
+  it('searches catalogs for a legacy saved model when its old backend name does not match', async () => {
+    vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockImplementation(async (_base, _email, backend) => backend === 'saved-backend' ? [{ code: 'saved-model', provider_code: backend || '' }] : [{ code: 'different-model', provider_code: backend || '' }]);
+    const previous = edit(); previous.savedSarvProvider.name = 'Legacy custom name';
+    const restored = await loadSarvAIConnection(previous, signal(), { email: 'selected@example.com' });
+    expect(restored.sarv?.providerCode).toBe('saved-backend'); expect(restored.model).toBe('saved-model');
+    expect(listCaiModels).toHaveBeenCalledTimes(2);
+  });
+
+  // Persisted backend/zone codes resolve identical model names without choosing another backend.
+  it('uses retained catalog identities when models occur in multiple backends or regions', async () => {
+    vi.mocked(loadZoneSelection).mockResolvedValue({ zones: [{ code: 'first', api_domain: 'https://other-region.example' }, ...zones], zoneCode: 'first' });
+    vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockResolvedValue([{ code: 'saved-model', provider_code: 'saved-backend' }]);
+    const previous = { ...edit(), savedSarvProvider: { ...saved(), sarvZoneCode: 'saved-region', sarvProviderCode: 'saved-backend' } };
+    const restored = await loadSarvAIConnection(previous, signal(), { email: 'selected@example.com' });
+    expect(restored.sarv).toMatchObject({ providerCode: 'saved-backend', zoneCode: 'saved-region' });
+    expect(listCaiModels).toHaveBeenCalledOnce();
+  });
+
+  // Unavailable saved models must offer a fresh catalog while requiring an explicit model choice.
+  it.each([false, true])('clears an unavailable saved model with retained identity=%s', async (retainIdentity) => {
+    vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockResolvedValue([{ code: 'different-model', provider_code: 'saved-backend' }]);
+    const previous = { ...edit(), savedSarvProvider: { ...saved(), ...(retainIdentity ? { sarvProviderCode: 'saved-backend' } : {}) } };
+    const result = await loadSarvAIConnection(previous, signal(), { email: 'selected@example.com' });
+    expect(result.model).toBe(''); expect(result.modelWarning).toContain('no longer available'); expect(result.models[0].id).toBe('different-model');
+  });
+
+  // No-zone accounts retain their registered endpoint even if the app's global fallback later changes.
+  it('preserves the saved edge fallback on both initial edit and subsequent refresh', async () => {
+    vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockResolvedValue([{ code: 'saved-model', provider_code: 'saved-backend' }]);
+    const restored = await loadSarvAIConnection(edit(), signal(), { email: 'selected@example.com' });
+    const refreshed = await loadSarvAIConnection(restored, signal());
+    const { providerFromConnection } = await import('../../../../src/services/onboarding-ai-connection');
+    expect(providerFromConnection(refreshed).baseUrl).toBe('https://other-region.example/edge/v1/llm');
+    expect(refreshed.sarv?.zoneCode).toBe('');
+  });
+
+  // Explicit region/backend changes must supersede preserved settings; switching accounts must use that account's defaults.
+  it('honors deliberate region and backend choices, and drops old identity for another account', async () => {
+    vi.mocked(loadZoneSelection).mockResolvedValue({ zones, zoneCode: 'default' });
+    vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockResolvedValue([{ code: 'new-model', provider_code: 'sarv_partners' }]);
+    const changed = await loadSarvAIConnection(edit(), signal(), { email: 'selected@example.com', zoneCode: 'default', providerCode: 'sarv_partners' });
+    expect(changed.sarv).toMatchObject({ zoneCode: 'default', providerCode: 'sarv_partners' }); expect(changed.model).toBe('new-model');
+    const other = await loadSarvAIConnection(edit(), signal(), { email: 'first@example.com' });
+    expect(other.sarv).toMatchObject({ email: 'first@example.com', zoneCode: 'default', providerCode: 'sarv_partners' });
+  });
+
+  // Abort during a legacy backend search must stop before another catalog fetch or settings save.
+  it('cancels a pending catalog restoration without checking later backends', async () => {
+    const controller = new AbortController(); vi.mocked(listCaiProviders).mockResolvedValue(backends);
+    vi.mocked(listCaiModels).mockImplementationOnce(async () => { controller.abort(); return []; });
+    await expect(loadSarvAIConnection(edit(), controller.signal, { email: 'selected@example.com' })).rejects.toThrow();
+    expect(listCaiModels).toHaveBeenCalledOnce();
+  });
+});
+
+describe('provider edits racing current settings during a vault write', () => {
+  const { id: _id, isDefault: _default, ...draft } = testProviderDraft;
+  function deferWrite() {
+    let resolve!: (value: { success: boolean; encrypted: boolean }) => void;
+    vaultSet.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    return () => resolve({ success: true, encrypted: true });
+  }
+
+  // Removing an account/provider while a key writes must never resurrect the provider or its orphan secret.
+  it('rejects a removed edit target after the vault resolves and deletes its newly written key', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const complete = deferWrite();
+    const saving = addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => true, { existingId: first!.id, makeDefault: false });
+    const { removeProvider } = await import('../../../../src/services/ai-service'); removeProvider(first!.id);
+    complete(); await expect(saving).rejects.toThrow('was removed');
+    expect(loadAISettings().providers).toHaveLength(0); expect(vaultDelete).toHaveBeenLastCalledWith(first!.id);
+    expect(vaultSet).not.toHaveBeenLastCalledWith(first!.id, 'synthetic-key');
+  });
+
+  // Cancellation after removal must clean the written key, not restore a removed provider's original credential.
+  it('deletes the orphan edited key if its provider was removed before cancellation', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const complete = deferWrite(); let current = true;
+    const saving = addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => current, { existingId: first!.id, makeDefault: false });
+    const { removeProvider } = await import('../../../../src/services/ai-service'); removeProvider(first!.id); current = false;
+    complete(); expect(await saving).toBeNull(); expect(loadAISettings().providers).toHaveLength(0);
+    expect(vaultDelete).toHaveBeenLastCalledWith(first!.id); expect(vaultSet).not.toHaveBeenLastCalledWith(first!.id, 'synthetic-key');
+  });
+
+  // A default changed while editing must remain the only default after the asynchronous key save finishes.
+  it('preserves the latest default instead of restoring the edited target old default state', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const second = await addValidatedProvider({ ...draft, model: 'second-model' }, () => true, { createNew: true, makeDefault: false });
+    const complete = deferWrite();
+    const saving = addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => true, { existingId: first!.id, makeDefault: false });
+    const { setDefaultProvider } = await import('../../../../src/services/ai-service'); setDefaultProvider(second!.id);
+    complete(); expect(await saving).toMatchObject({ id: first!.id, isDefault: false });
+    expect(loadAISettings().providers.filter((provider) => provider.isDefault).map((provider) => provider.id)).toEqual([second!.id]);
+  });
+
+  // Rolling back a stale edit must restore the latest live key if another edit changed it during the pending vault write.
+  it('rolls back to the current saved key rather than the stale edit snapshot', async () => {
+    const first = await addValidatedProvider(draft, () => true);
+    const complete = deferWrite(); let current = true;
+    const saving = addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => current, { existingId: first!.id, makeDefault: false });
+    const { updateProvider } = await import('../../../../src/services/ai-service'); updateProvider(first!.id, { apiKey: 'newer-key' }); current = false;
+    complete(); expect(await saving).toBeNull(); expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'newer-key');
+    expect(loadAISettings().providers[0].apiKey).toBe('newer-key');
+  });
+});
+
+describe('Sarv catalog disappearance while editing', () => {
+  const saved = { name: 'Sarv · Saved · Original', baseUrl: 'https://saved.example/edge/v1/llm', model: 'original-model', oauthEmail: 'selected@example.com', sarvProviderCode: 'saved', sarvZoneCode: 'region' };
+  const edit = () => ({ ...makeAIConnection('sarv'), model: saved.model, savedSarvProvider: saved });
+
+  // A previously selected model disappearing on refresh must clear selection and remain cleared on further refreshes.
+  it('requires a fresh model choice on same-identity refresh instead of recommending a replacement', async () => {
+    vi.mocked(loadZoneSelection).mockResolvedValue({ zones: [{ code: 'region', api_domain: 'https://saved.example' }], zoneCode: 'region' });
+    vi.mocked(listCaiProviders).mockResolvedValue([{ code: 'saved', name: 'Saved' }]);
+    vi.mocked(listCaiModels).mockResolvedValueOnce([{ code: 'original-model', provider_code: 'saved' }]).mockResolvedValue([{ code: 'replacement-model', provider_code: 'saved' }]);
+    const initial = await loadSarvAIConnection(edit(), signal(), { email: saved.oauthEmail });
+    const refreshed = await loadSarvAIConnection(initial, signal());
+    expect(refreshed.model).toBe(''); expect(refreshed.modelWarning).toContain('no longer available'); expect(refreshed.models[0].id).toBe('replacement-model');
+    const again = await loadSarvAIConnection(refreshed, signal()); expect(again.model).toBe('');
+  });
+
+  // Missing retained backend identities must not silently switch to another backend sharing the same model ID.
+  it('requires an explicit reset when a retained backend disappears', async () => {
+    vi.mocked(listCaiProviders).mockResolvedValue([{ code: 'different', name: 'Different' }]);
+    vi.mocked(listCaiModels).mockResolvedValue([{ code: 'original-model', provider_code: 'different' }]);
+    await expect(loadSarvAIConnection(edit(), signal(), { email: saved.oauthEmail })).rejects.toThrow('saved Sarv backend is no longer available');
+    expect(listCaiModels).not.toHaveBeenCalled();
+  });
+
+  // Missing retained region identities must not silently choose another region with the same endpoint.
+  it('requires an explicit reset when the retained region disappears', async () => {
+    vi.mocked(loadZoneSelection).mockResolvedValue({ zones: [{ code: 'different', api_domain: 'https://saved.example' }], zoneCode: 'different' });
+    await expect(loadSarvAIConnection(edit(), signal(), { email: saved.oauthEmail })).rejects.toThrow('saved Sarv region is no longer available');
+    expect(listCaiProviders).not.toHaveBeenCalled();
+  });
+
+  // An org-gated empty zone list must not erase a known region while that region's model catalog remains usable.
+  it('retains a saved region when the zone catalog is unavailable', async () => {
+    vi.mocked(listCaiProviders).mockResolvedValue([{ code: 'saved', name: 'Saved' }]);
+    vi.mocked(listCaiModels).mockResolvedValue([{ code: 'original-model', provider_code: 'saved' }]);
+    const restored = await loadSarvAIConnection(edit(), signal(), { email: saved.oauthEmail });
+    expect(restored.sarv?.zoneCode).toBe('region'); expect(listCaiProviders).toHaveBeenLastCalledWith('https://cai.example', saved.oauthEmail, 'region');
+  });
+
+  // No-model legacy catalogs remain an honest failure rather than a fabricated verified model selection.
+  it('fails an empty legacy restoration catalog without enabling AI', async () => {
+    vi.mocked(listCaiModels).mockResolvedValue([]);
+    await expect(loadSarvAIConnection({ ...edit(), savedSarvProvider: { ...saved, sarvProviderCode: undefined } }, signal(), { email: saved.oauthEmail })).rejects.toThrow('No models are available');
+  });
+});

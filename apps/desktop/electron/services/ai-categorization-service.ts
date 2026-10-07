@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders, buildAIChatRequestOptions, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -998,11 +998,8 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
             { role: 'user', content: userMessage },
           ],
           max_completion_tokens: 16000,
-          // See packages/core/src/agent/categorization-utils.ts for the
-          // full rationale: vLLM-hosted thinking models (Gemma 3/4, Qwen3)
-          // burn the token budget on inline <think> blocks and truncate
-          // before emitting the JSON. Disable via the chat-template kwarg.
-          chat_template_kwargs: { enable_thinking: false },
+          // Keep background requests consistent with onboarding model tests.
+          ...buildAIChatRequestOptions(config),
         }),
         signal: this.abortController?.signal,
       });

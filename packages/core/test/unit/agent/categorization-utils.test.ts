@@ -468,7 +468,40 @@ describe('callAIProvider — OpenAI-compatible transport', () => {
     // Thinking must be OFF: a reasoning pass burns the budget and truncates the
     // JSON these callers need.
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(body.reasoning_effort).toBe('minimal');
+    expect(body).not.toHaveProperty('reasoning');
     expect(body.max_completion_tokens).toBe(16000);
+  });
+
+  // Regression: OpenAI returns 400 for the Sarv/vLLM chat-template extension.
+  it.each([
+    ['openai', 'gpt-4o-mini'],
+    ['openai', 'gpt-5-mini'],
+    ['openai', 'gpt-5.1'],
+    ['openai', 'gpt-6'],
+    ['openai', 'o3-mini'],
+    ['custom', 'gpt-5-mini'],
+  ] as const)('sends only supported Chat Completions fields to %s/%s', async (type, model) => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      const allowed = new Set(['model', 'messages', 'max_completion_tokens']);
+      const unknown = Object.keys(body).find((key) => !allowed.has(key));
+      return unknown
+        ? jsonResponse({ error: { message: `Unknown parameter: '${unknown}'.`, code: 'unknown_parameter' } }, { status: 400 })
+        : chatCompletion('classified');
+    });
+    const baseUrl = type === 'openai' ? undefined : 'https://custom.example/v1';
+    expect(await callAIProvider(config({ type, model, baseUrl, fetchImpl }), 's', 'u')).toBe('classified');
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(type === 'openai'
+      ? 'https://api.openai.com/v1/chat/completions'
+      : 'https://custom.example/v1/chat/completions');
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer key-123');
+    const body = JSON.parse(init?.body as string);
+    expect(body).not.toHaveProperty('chat_template_kwargs');
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body).not.toHaveProperty('reasoning_effort');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('returns an empty string when the model returns no content', async () => {
@@ -662,10 +695,10 @@ describe('callAIProvider — Gemini transport', () => {
     expect(fetchImpl.mock.calls[0][0]).toContain('https://proxy.example/v1/models/');
   });
 
-  it('classifies a Gemini failure through the same SarvApiError path', async () => {
+  it('classifies a Gemini failure through the shared provider-error path', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ error: { message: 'quota' } }, { status: 429 }));
     await expect(callAIProvider(config({ type: 'gemini', fetchImpl }), 's', 'u'))
-      .rejects.toMatchObject({ name: 'SarvApiError', code: 'rate_limit_exceeded' });
+      .rejects.toMatchObject({ name: 'AIProviderApiError', code: 'rate_limit_exceeded', provider: 'gemini' });
   });
 });
 
@@ -740,6 +773,22 @@ describe('callAIWithRetry — only transient failures are retried', () => {
     await drainBackoff();
     await assertion;
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // A rejected OpenAI parameter is permanent; repeated requests only stall the queue.
+  it('does not retry a strict OpenAI invalid-parameter response', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      error: { message: "Unknown parameter: 'unsupported_option'.", type: 'invalid_request_error', code: 'unknown_parameter' },
+    }, { status: 400 }));
+    await expect(callAIWithRetry(config({ type: 'openai', model: 'gpt-4o-mini', baseUrl: undefined, fetchImpl }), 's', 'u'))
+      .rejects.toMatchObject({
+        status: 400,
+        code: 'upstream_error',
+        name: 'AIProviderApiError',
+        provider: 'openai',
+        message: "OpenAI API 400: Unknown parameter: 'unsupported_option'.",
+      });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('gives up after MAX_API_RETRIES retries', async () => {

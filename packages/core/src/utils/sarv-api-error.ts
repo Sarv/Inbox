@@ -19,6 +19,8 @@ export type SarvErrorCode =
   | 'upstream_error';      // anything else
 
 export class SarvApiError extends Error {
+  /** Actual request provider; the legacy class remains shared by retry handlers. */
+  readonly provider: string;
   readonly status: number;
   readonly code: SarvErrorCode;
   readonly retryAfterSec?: number;
@@ -26,10 +28,11 @@ export class SarvApiError extends Error {
 
   constructor(
     message: string,
-    opts: { status: number; code: SarvErrorCode; retryAfterSec?: number; detail?: unknown },
+    opts: { status: number; code: SarvErrorCode; retryAfterSec?: number; detail?: unknown; provider?: string },
   ) {
     super(message);
-    this.name = 'SarvApiError';
+    this.provider = opts.provider ?? 'sarv';
+    this.name = this.provider === 'sarv' ? 'SarvApiError' : 'AIProviderApiError';
     this.status = opts.status;
     this.code = opts.code;
     this.retryAfterSec = opts.retryAfterSec;
@@ -62,8 +65,10 @@ const KNOWN_CODES: ReadonlySet<SarvErrorCode> = new Set<SarvErrorCode>([
  * ``error`` field is absent — non-Sarv providers (Gemini, a proxy's HTML error
  * page) land there by design, which keeps caller-side type discrimination
  * uniform.
+ * AI transports pass their provider so logs name the actual destination;
+ * the default preserves existing Sarv catalog callers and retry contracts.
  */
-export async function parseSarvApiError(response: Response): Promise<SarvApiError> {
+export async function parseSarvApiError(response: Response, provider = 'sarv'): Promise<SarvApiError> {
   const raw = await response.text().catch(() => '');
   let body: any = undefined;
   try { body = JSON.parse(raw); } catch { /* not JSON */ }
@@ -90,10 +95,17 @@ export async function parseSarvApiError(response: Response): Promise<SarvApiErro
   // an HTML proxy interstitial in the log. Omitted entirely for an empty body
   // so the message never ends in a dangling colon.
   const snippet = raw.trim().slice(0, 200);
-  const message =
+  const sarvMessage =
     (typeof payload === 'object' && payload && typeof payload.message === 'string')
       ? payload.message
       : `Sarv API ${response.status}${snippet ? `: ${snippet}` : ''}`;
+  // The same transport parses OpenAI, Gemini and custom-server failures. Its
+  // compatibility error type must not claim that those requests went to Sarv.
+  const label = provider === 'openai' ? 'OpenAI' : provider === 'gemini' ? 'Gemini' : 'AI';
+  const providerMessage = typeof payload?.message === 'string' ? payload.message
+    : typeof payload?.error?.message === 'string' ? payload.error.message : snippet;
+  const message = provider === 'sarv' ? sarvMessage
+    : `${label} API ${response.status}${providerMessage ? `: ${providerMessage}` : ''}`;
 
-  return new SarvApiError(message, { status: response.status, code, retryAfterSec, detail: payload });
+  return new SarvApiError(message, { status: response.status, code, retryAfterSec, detail: payload, provider });
 }

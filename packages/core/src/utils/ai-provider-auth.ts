@@ -10,3 +10,21 @@ export function buildAIAuthHeaders(
     && (bearer === '' || bearer === undefined || bearer === null)) return {};
   throw new Error(`empty bearer token for AI provider '${provider.type}': API key or OAuth token is missing.`);
 }
+
+/** Options for Chat Completions, restricted to each provider's supported fields. */
+export function buildAIChatRequestOptions(
+  provider: { type: string; model?: string },
+): Record<string, unknown> {
+  // Sarv's vLLM-backed models use this extension to avoid spending a
+  // structured-output budget on inline thinking. OpenAI rejects the extension.
+  if (provider.type === 'sarv') {
+    return {
+      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: 'minimal',
+    };
+  }
+  // Reasoning support varies by model, including within the OpenAI families.
+  // Leave those providers' defaults intact rather than guessing from a name.
+  // The Responses API's `reasoning` object is not a Chat Completions parameter.
+  return {};
+}
