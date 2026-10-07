@@ -15,7 +15,7 @@ import {
 } from '@sarv-in/mailguard/verdict';
 import pRetry, { AbortError } from 'p-retry';
 
-import { buildAIAuthHeaders } from '../utils/ai-provider-auth';
+import { buildAIAuthHeaders, buildAIChatRequestOptions } from '../utils/ai-provider-auth';
 import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
@@ -484,13 +484,16 @@ sweep it out in one go.
 Each email includes behavioral data about the sender. USE IT:
 
 SENDER BEHAVIOR DATA:
-- "Behavior:" line shows how the user historically handles this sender's emails
+- "Behavior:" (or "Sender:") line shows the user's history with this sender
 - "Read: X%" = what % of this sender's emails the user actually opens
 - "Keep: X%" = what % the user keeps (doesn't delete)
 - "Replied: N" = how many times user replied to this sender
+- "Outbound history (lifetime):" (or "Sent-to:") = mail the user sent, including
+  requests the user initiated before the sender's first reply
 - Low Read% + Low Keep% = user doesn't care about this sender → NOT important
 - High Replied count = user values this relationship → likely important
-- If user NEVER replies to this sender → probably not needs_response
+- No recorded replies is only a supporting signal. Do not reject a genuine
+  new customer's request or a response to the user's first outgoing request.
 
 SENDER MEMORY:
 - "Memory:" line shows how the user communicates with this sender
@@ -508,9 +511,44 @@ CONTACT TYPE:
   never means "no category"
 - "unknown" = use the behavioral data to judge
 
+PROMOTIONS: CLASSIFY THE CURRENT MESSAGE'S PRIMARY PURPOSE
+- Promotions means marketing, a newsletter, or an unsolicited sales pitch.
+  Commercial subject matter alone does not make an email promotional.
+- Requested quotations, procurement, active negotiations, order/support work,
+  customer questions about the user's products or pricing, project requirements,
+  and internal reviews/approvals are genuine business conversations. Do not add
+  "promotions" just because they discuss prices, products, services, or discounts.
+- A Sales/BD/Account Manager title, a generic greeting, a company signature,
+  or promotional wording in quoted older messages is not sufficient evidence.
+  Classify the newest message and what it asks for, not its signature or quotes.
+- Use sender memory, contact type, outbound history, and the actual content to
+  distinguish a requested business exchange from an unsolicited pitch. Missing
+  history means unknown, not proof of cold outreach. A new customer can have a
+  genuine request; a known vendor can still send an unrelated marketing blast.
+- Thread length or repeated follow-ups alone do not prove a two-way conversation:
+  unanswered sales drips remain Promotions. A question or meeting CTA in a cold
+  pitch does not create a reply obligation and is not "needs_response".
+- Before assigning Promotions to a business conversation, identify a marketing
+  purpose in the CURRENT message. If its purpose is fulfilling a requested quote,
+  resolving an existing matter, or asking for the user's work/decision, leave
+  Promotions off and assess the other category definitions independently.
+
+Examples (assess recipient role and urgency separately):
+- A vendor replies with a requested GPU quote and asks which configuration to
+  reserve: needs_response, not promotions. Their sales signature is incidental.
+- A customer asks for revised pricing for an active renewal: needs_response,
+  not promotions. They are requesting the user's service, not marketing to them.
+- A colleague asks the user to approve a project requirement: needs_response,
+  not promotions, even if the attached discussion includes product descriptions.
+- An unsolicited vendor offers a demo and asks "Can we meet tomorrow?":
+  promotions, not needs_response. Personalization does not change its purpose.
+- A supplier sends an invoice and asks the user to confirm a disputed amount:
+  invoice + needs_response can both apply. Multiple categories remain allowed
+  when the current message independently satisfies each definition.
+
 WHO IS THE EMAIL ACTUALLY FOR? (MOST CRITICAL RULE)
 - Check TO: and CC: fields carefully against user's email ({{userEmail}})
-- "Role: CC" = user is just looped in, NOT the primary recipient
+- "Role: CC" (or "User-Role: CC") = user is looped in, NOT the primary recipient
 - If email body greets someone by name who is NOT the user → user is NOT the target
 - If task/request is for someone in TO: field and user is in CC: → NOT user's task
 - CC emails: DEFAULT is NOT important, NOT needs_response
@@ -526,18 +564,18 @@ WHAT MAKES AN EMAIL "IMPORTANT"?
 - NOT important: team loops, general announcements, tasks for others, newsletters
 
 WHAT "NEEDS_RESPONSE"?
-- A direct question to the user
+- A genuine direct question to the user in a personal or business exchange,
+  including a new customer's request; a sales CTA alone is not enough
 - A request that only the user can fulfill
 - A customer/client waiting for the user's reply
-- HARD RULE: a HUMAN must be waiting for a HUMAN reply. Bills, ticket
-  updates, bank confirmations, billing reminders, status alerts,
-  marketing platforms, and any sender whose address looks automated
-  (noreply / mail. / notifications. / alerts. / billing. / etc.) are
-  NEVER needs_response — replies to those addresses bounce or vanish
-  into a shared mailbox. They might still need the user's attention →
-  use "important" for that, NOT needs_response.
+- HARD RULE: a HUMAN must be waiting for a HUMAN reply. Automated bill/ticket
+  notifications, bank confirmations, billing reminders, status alerts, and
+  explicit no-reply senders are not needs_response. A notification requiring
+  a click/payment is not a request for a reply. A human discussing an invoice
+  discrepancy or requesting confirmation can still need a response. A shared
+  billing/support address alone does not prove the message is automated.
 - NOT needs_response: team FYI, newsletters, automated alerts, tasks
-  assigned to others, billing/payment reminders, ticket auto-updates,
+  assigned to others, automated billing/payment reminders, ticket auto-updates,
   bank confirmations, calendar invites, "verify your email" prompts.
 
 SHOULD_AUTO_DRAFT — single authoritative decision for the reply-drafting pipeline
@@ -546,9 +584,9 @@ This field supersedes the legacy heuristic pipeline. Return TRUE only when
 EVERY one of the following is true:
   1. The user is DIRECTLY addressed (sole or primary TO recipient, OR clearly
      named in the body even if on CC)
-  2. A human response is genuinely expected — the email asks a question,
-     requests an action, awaits confirmation, or is a personal/business
-     conversation that normally gets a reply
+  2. A human response is genuinely expected in a personal or requested/ongoing
+     business exchange — the email requests an action, awaits confirmation,
+     or asks a genuine question. An unsolicited sales CTA is not enough
   3. The sender is a real person or organization that REPLIES to replies —
      NOT a no-reply address, notifications bot, mailer-daemon, bounce,
      alerts system, ticketing auto-responder, or marketing blast
@@ -566,10 +604,11 @@ needs_response without also considering should_auto_draft. If you can't
 justify needs_response for this email, you cannot justify a draft either —
 set should_auto_draft=false.
 
-Return FALSE for: newsletters, transactional notifications (invoices,
+Return FALSE for: newsletters, automated transactional notifications (invoices,
 receipts, shipping, password resets, login alerts), team-wide FYIs where
 the user isn't named, calendar invites (they get accepted, not replied to),
-bounces, auto-responders, spam-adjacent promotional mail, and anything
+bounces, auto-responders, unsolicited sales pitches (including personalized
+meeting/demo questions), spam-adjacent promotional mail, and anything
 from a sender whose local-part matches noreply / no-reply / notifications
 / mailer-daemon / postmaster / bounce / alerts / automated.
 
@@ -606,7 +645,10 @@ CATEGORY ASSIGNMENT RULES (STRICT):
 - An invoice is just "invoice", NOT also "important" unless payment is overdue TODAY.
 - A finance email is just "finance", NOT also "important" unless it's a fraud alert.
 - A meeting invite is just "meeting", NOT also "important" unless the meeting is in the next hour.
-- "needs_response" + another category is OK if the email clearly asks a question AND fits another category.
+- "needs_response" + another category is OK only when a human genuinely awaits
+  the user's reply AND the current message independently fits that category's
+  full definition. A question, commercial wording, or sales signature alone
+  does not justify adding "promotions" to a genuine work conversation.
 - When in doubt about a JUDGEMENT category, leave it off.
 - But do NOT reach for [] as the safe answer. Empty means "this email matches
   none of the definitions above" — not "I am unsure" and not "the user probably
@@ -740,12 +782,14 @@ export function buildEmailText(emails: EnrichedEmail[], userEmail: string, categ
       const scopeLabel = useRecent ? `90d` : 'lifetime';
       const repliedInfo = src.repliedCount > 0
         ? `User replied ${src.repliedCount} times${ctx.lastReplied ? ` (last ${Math.max(1, Math.round((nowSec - ctx.lastReplied) / 86400))}d ago)` : ''}`
-        : 'User NEVER replied to this sender';
+        : `No recorded replies in ${scopeLabel} history`;
       const sameSubj = email.sameSubjectCount && email.sameSubjectCount > 5 ? ` | Same-Subject: ${email.sameSubjectCount} (repetitive)` : '';
       const volume = email.volumePercent && email.volumePercent > 2 ? ` | Volume: ${email.volumePercent}% of inbox` : '';
       const flags = [ctx.isVip ? 'VIP' : '', ctx.isBlocked ? 'BLOCKED' : ''].filter(Boolean).join(' ');
 
-      behaviorBlock = `Behavior (${scopeLabel}): Read ${readPct}% | Keep ${keepPct}% | ${repliedInfo} | Received: ${src.receivedCount}${sameSubj}${volume}${flags ? ' | ' + flags : ''}`;
+      // A requested quote may be the sender's first inbound message. Exposing
+      // outgoing history prevents "never replied" from implying cold outreach.
+      behaviorBlock = `Behavior (${scopeLabel}): Read ${readPct}% | Keep ${keepPct}% | ${repliedInfo} | Received: ${src.receivedCount}${sameSubj}${volume}${flags ? ' | ' + flags : ''}\nOutbound history (lifetime): User sent ${ctx.sentToCount} emails to this sender`;
     } else {
       behaviorBlock = 'Behavior: First-time sender, no history';
     }
@@ -1053,16 +1097,7 @@ async function callOpenAICompatibleAPI(
             { role: 'user', content: userMessage },
           ],
           max_completion_tokens: 16000,
-          // Disable chain-of-thought when the backend is a vLLM-hosted model
-          // with thinking mode enabled by default (Gemma 3/4, Qwen3, etc.).
-          // vLLM's OpenAI-compatible server forwards chat_template_kwargs to
-          // the tokenizer's chat template, which branches on enable_thinking.
-          // Ignored by backends that don't recognise the field (OpenAI,
-          // Anthropic proxies, Sarv edge for non-thinking models).
-          // Why off for categorization/drafting: these produce structured
-          // JSON output. A thinking pass burns the token budget on reasoning
-          // and often truncates before the JSON even starts.
-          chat_template_kwargs: { enable_thinking: false },
+          ...buildAIChatRequestOptions(config),
         }),
         signal: timeoutCtl.signal,
       });
@@ -1081,7 +1116,7 @@ async function callOpenAICompatibleAPI(
     }
 
     if (!response.ok) {
-      throw await parseSarvApiError(response);
+      throw await parseSarvApiError(response, config.type);
     }
 
     const data: any = await response.json();
@@ -1121,10 +1156,8 @@ async function callGeminiAPI(
   });
 
   if (!response.ok) {
-    // Gemini / other non-Sarv providers don't emit the Sarv error-code JSON
-    // shape, so ``parseSarvApiError`` will fall through to ``upstream_error``
-    // — which is correct. Keeps the retry loop's type discrimination uniform.
-    throw await parseSarvApiError(response);
+    // Keep shared status/retry classification while naming the actual provider.
+    throw await parseSarvApiError(response, config.type);
   }
 
   const data: any = await response.json();

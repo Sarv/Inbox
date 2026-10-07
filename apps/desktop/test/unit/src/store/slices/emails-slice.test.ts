@@ -10,6 +10,7 @@ vi.mock('../../../../../src/components/email-list/CategoryBadges', () => ({
 
 import { getPageSizeForView } from '../../../../../src/store/helpers';
 import { buildEmailReplacementPatch, createEmailsSlice, sectionRowsPatch, selectLoadedEmailIds } from '../../../../../src/store/slices/emails-slice';
+import { createSearchAISlice } from '../../../../../src/store/slices/search-ai-slice';
 
 /** The vitest env is 'node'; buildThreads (called through the patch) reads the
  *  Smart-Prioritize flag from localStorage on every rebuild. */
@@ -1105,6 +1106,174 @@ describe('Starred/Important/All Email page in CONVERSATIONS, not messages', () =
     for (const e of h.state.emails) byThread.set(e.threadId, (byThread.get(e.threadId) ?? 0) + 1);
     expect(byThread.size).toBe(starredSize);
     expect([...byThread.values()].every((n) => n === 3)).toBe(true);
+  });
+});
+
+describe('_reloadCurrentView — live AI category membership', () => {
+  // Exercise BOTH slices: a mocked loadAICategoryEmails hid the old no-op, so
+  // the regression must observe the actual category query and replaced rows.
+  const harness = (over: Record<string, any> = {}) => {
+    const fresh = [row('still-needs-response', { tags: '|INBOX|needs_response|' })];
+    const getByCategory = vi.fn(async () => ({ success: true, data: fresh }));
+    const list = vi.fn(async () => ({ success: true, data: [row('unfiltered-inbox')] }));
+    const unifiedInbox = vi.fn(async () => ({ success: true, data: { emails: fresh } }));
+    (globalThis as any).window = {
+      electronAPI: {
+        ai: {
+          getByCategory,
+          getCategoryCounts: vi.fn(async () => ({ success: true, data: { needs_response: 101 } })),
+        },
+        emails: { list },
+        accounts: {
+          unifiedInbox,
+          unifiedCategoryCounts: vi.fn(async () => ({ success: true, data: { needs_response: 101 } })),
+        },
+      },
+    };
+    const store = createStore<any>()((set, get, api) => ({
+      ...createEmailsSlice(set, get, api),
+      ...createSearchAISlice(set, get, api),
+    }));
+    store.setState({
+      accounts: [{ id: 'acct-a' }],
+      folders: [{ id: 'inbox', path: 'INBOX' }],
+      selectedFolderId: 'inbox',
+      selectedVirtualFolder: null,
+      viewingAICategory: 'needs_response',
+      emails: [row('newly-promotional', { tags: '|INBOX|promotions|' })],
+      emailsPage: 2,
+      emailsTotal: 200,
+      loadingMoreEmails: false,
+      ...over,
+    });
+    return { store, fresh, getByCategory, list, unifiedInbox };
+  };
+
+  afterEach(() => {
+    delete (globalThis as any).window;
+    vi.restoreAllMocks();
+  });
+
+  // Breaks: the badge changes to Promotions but the Needs Response list keeps
+  // its old row, since the generic reload used to return for every category.
+  it('replaces stale membership on the current category page and remains idempotent', async () => {
+    const h = harness();
+    const pageSize = getPageSizeForView({ aiCategory: 'needs_response' });
+
+    await h.store.getState()._reloadCurrentView();
+    await h.store.getState()._reloadCurrentView();
+
+    expect(h.getByCategory).toHaveBeenCalledTimes(2);
+    expect(h.getByCategory).toHaveBeenCalledWith('needs_response', pageSize, 2 * pageSize, 'inbox');
+    expect(h.store.getState().emails.map((email: any) => email.id)).toEqual(['still-needs-response']);
+    expect(h.store.getState().emailsPage).toBe(2);
+    expect(h.store.getState().emailsTotal).toBe(101);
+    expect(h.store.getState().viewingAICategory).toBe('needs_response');
+    expect(h.list).not.toHaveBeenCalled();
+  });
+
+  // Breaks: reclassification removes the last row of a later page and strands
+  // the user there, even though the category still has mail on its first page.
+  it('returns to the first page only when the current category page became empty', async () => {
+    const h = harness();
+    h.getByCategory.mockResolvedValueOnce({ success: true, data: [] });
+
+    await h.store.getState()._reloadCurrentView();
+
+    const pageSize = getPageSizeForView({ aiCategory: 'needs_response' });
+    expect(h.getByCategory.mock.calls).toEqual([
+      ['needs_response', pageSize, 2 * pageSize, 'inbox'],
+      ['needs_response', pageSize, 0, 'inbox'],
+    ]);
+    expect(h.store.getState().emailsPage).toBe(0);
+    expect(h.store.getState().emails).toEqual(h.fresh);
+  });
+
+  // Breaks: the same refresh over All Inboxes reads only the active account or
+  // loads all inbox mail instead of the selected category across opted-in users.
+  it('keeps a unified category scoped across the participating accounts', async () => {
+    const h = harness({
+      selectedFolderId: null,
+      selectedVirtualFolder: 'virtual-unified',
+      accounts: [{ id: 'acct-a' }, { id: 'acct-b' }, { id: 'excluded', includeInUnified: false }],
+    });
+
+    await h.store.getState()._reloadCurrentView();
+
+    const pageSize = getPageSizeForView({ aiCategory: 'needs_response' });
+    expect(h.unifiedInbox).toHaveBeenCalledWith({
+      accountIds: ['acct-a', 'acct-b'], limit: pageSize, offset: 2 * pageSize, aiCategory: 'needs_response',
+    });
+    expect(h.store.getState().emails).toEqual(h.fresh);
+    expect(h.store.getState().emailsPage).toBe(2);
+    expect(h.getByCategory).not.toHaveBeenCalled();
+    expect(h.list).not.toHaveBeenCalled();
+  });
+
+  // Breaks: a category refresh resets a narrowed search to the broad category,
+  // or a background inbox reload injects unrelated rows into other curated views.
+  it.each([
+    { searchQuery: 'invoice', viewingAICategory: 'needs_response' },
+    { searchQuery: 'invoice', viewingAICategory: null },
+    { viewingAICategory: null, selectedVirtualFolder: 'virtual-starred' },
+    { viewingAICategory: null, viewingSnoozed: true },
+  ])('preserves search and non-category curated views: %j', async (over) => {
+    const h = harness(over);
+    const previous = h.store.getState().emails;
+
+    await h.store.getState()._reloadCurrentView();
+
+    expect(h.store.getState().emails).toBe(previous);
+    expect(h.getByCategory).not.toHaveBeenCalled();
+    expect(h.unifiedInbox).not.toHaveBeenCalled();
+    expect(h.list).not.toHaveBeenCalled();
+  });
+
+  // Breaks: routing category refreshes must not prevent an ordinary folder from
+  // refreshing its existing page through the folder list query.
+  it('still refreshes the current page of an ordinary folder', async () => {
+    const h = harness({ viewingAICategory: null, inboxType: 'default', inboxSections: [] });
+
+    await h.store.getState()._reloadCurrentView();
+
+    const pageSize = getPageSizeForView({ folder: { path: 'INBOX' } });
+    expect(h.list).toHaveBeenCalledWith('inbox', pageSize, 2 * pageSize);
+    expect(h.getByCategory).not.toHaveBeenCalled();
+    expect(h.store.getState().emailsPage).toBe(2);
+  });
+
+  // Breaks: a slow Needs Response query paints over a folder the user selected
+  // while it ran. The shared category pager's view guard must remain in effect.
+  it('does not overwrite navigation while a category refresh is in flight', async () => {
+    const h = harness();
+    let resolve!: (value: { success: boolean; data: typeof h.fresh }) => void;
+    h.getByCategory.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+
+    const reload = h.store.getState()._reloadCurrentView();
+    const folderRows = [row('other-folder')];
+    h.store.setState({ viewingAICategory: null, selectedFolderId: 'other', emails: folderRows, emailsPage: 0 });
+    resolve({ success: true, data: h.fresh });
+    await reload;
+
+    expect(h.store.getState().emails).toBe(folderRows);
+    expect(h.store.getState().selectedFolderId).toBe('other');
+    expect(h.store.getState().emailsPage).toBe(0);
+  });
+
+  // Breaks: a failed storage IPC leaves the page spinner stuck or discards the
+  // readable snapshot; a subsequent successful refresh must still replace it.
+  it.each(['storage request timed out', 'storage unavailable'])('recovers after a failed category refresh: %s', async (message) => {
+    const h = harness();
+    const previous = h.store.getState().emails;
+    h.getByCategory.mockRejectedValueOnce(new Error(message));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await h.store.getState()._reloadCurrentView();
+
+    expect(h.store.getState().emails).toBe(previous);
+    expect(h.store.getState().loadingMoreEmails).toBe(false);
+    await h.store.getState()._reloadCurrentView();
+    expect(h.store.getState().emails).toEqual(h.fresh);
   });
 });
 

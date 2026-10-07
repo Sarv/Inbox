@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are preserved, and Skip retains the unscanned attachment warning.
 
 ### Fixed
+- **Business conversations are classified by purpose.** Requested quotes,
+  customer questions, negotiations and internal approvals are distinguished
+  from promotional outreach. Categorization uses outgoing correspondence as
+  context and applies the same guidance to automatic and manual processing.
+  Category lists also refresh their membership after background classification.
 - **Undo send on a forward puts you back in it.** Undoing the send of an
   inline forward reopened it with what you had written but left it unfocused,
   so typing went nowhere until you clicked into it. It now scrolls to the

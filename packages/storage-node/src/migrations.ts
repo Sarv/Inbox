@@ -782,16 +782,8 @@ export const removeWaitingReplyCategory: Migration = {
   },
 };
 
-/**
- * v36: Add "promotions" category and tighten "needs_response" so cold sales
- * pitches (personalized outreach with a fake CTA question) stop being
- * misclassified as needing a reply.
- */
-export const promotionsCategory: Migration = {
-  version: 36,
-  name: 'promotions_category',
-  up: (db) => {
-    const needsResponsePrompt = `TRUE only when the sender genuinely needs something back from the user AND
+// Preserve the exact v36 defaults so later migrations can recognize untouched built-in prompts.
+export const LEGACY_NEEDS_RESPONSE_PROMPT = `TRUE only when the sender genuinely needs something back from the user AND
 is part of an existing relationship or a transaction the user is already in.
 A question in the email is NOT enough on its own — cold sales pitches also
 end with questions.
@@ -839,7 +831,7 @@ FALSE when:
   * Recruiter / cold-hiring outreach unless the user is actively job hunting
   * Partnership / guest-post / link-exchange / SEO pitches`;
 
-    const promotionsPrompt = `TRUE for any email whose primary purpose is to sell, market, or promote —
+export const LEGACY_PROMOTIONS_PROMPT = `TRUE for any email whose primary purpose is to sell, market, or promote —
 including personalized outreach that looks like a real message but is really
 a pitch. Do NOT be fooled by a question at the end; cold sales always asks
 for a meeting or demo.
@@ -880,10 +872,19 @@ FALSE for:
   * Transactional confirmations (order, shipping, receipt — those are
     invoice or finance)`;
 
+/**
+ * v36: Add "promotions" category and tighten "needs_response" so cold sales
+ * pitches (personalized outreach with a fake CTA question) stop being
+ * misclassified as needing a reply.
+ */
+export const promotionsCategory: Migration = {
+  version: 36,
+  name: 'promotions_category',
+  up: (db) => {
     // Tighten existing needs_response prompt
     db.prepare(
       'UPDATE ai_category_definitions SET prompt = ?, updated_at = unixepoch() WHERE slug = ?'
-    ).run(needsResponsePrompt, 'needs_response');
+    ).run(LEGACY_NEEDS_RESPONSE_PROMPT, 'needs_response');
 
     // Insert promotions (ignore if it already exists, e.g. from a fresh
     // schema.sql seed on a clean install that ran before migrations)
@@ -895,7 +896,7 @@ FALSE for:
       'promotions',
       'Promotions',
       'Sales outreach, newsletters, product marketing',
-      promotionsPrompt,
+      LEGACY_PROMOTIONS_PROMPT,
       'Megaphone',
       'pink',
       8,
@@ -4203,6 +4204,89 @@ export const gmailPromotionsOnly: Migration = {
   down: () => {},
 };
 
+/** Reply obligations depend on the actual conversation, not commercial vocabulary or a sender's job title. */
+export const NEEDS_RESPONSE_PROMPT = `TRUE when a person genuinely expects the user's reply, information, decision,
+approval, or confirmation. Judge the actual request, who it is addressed to,
+and the conversation context. A question mark or marketing call to action
+alone does not establish a reply obligation.
+
+TRUE for:
+  * Customer or prospect asking a real product, service, availability,
+    pricing, quotation, or support question, including a genuine first inquiry
+  * Requested quotes, proposals, negotiations, order changes, or vendor
+    discussions where the user owes a reply or decision
+  * Internal approvals, project work, reviews, handoffs, or colleagues'
+    questions addressed to the user
+  * Active personal or business conversations with a concrete human request
+  * A direct request naming the user in a CC'd conversation
+
+FALSE for:
+  * Newsletters, marketing announcements, discounts, or cold sales pitches
+    whose only question is a meeting/demo CTA or an invitation to buy
+  * Unsolicited follow-ups repeating a pitch with no actual engagement
+  * Automated/no-reply alerts, receipts, billing reminders, surveys, and
+    calendar notifications that expect a click or action rather than a reply
+  * Team FYIs, requests addressed to someone else, or informational CC copies
+
+Commercial language is not evidence against a genuine reply obligation:
+"price", "quote", "product", "offer", "proposal", or "follow up" can be normal
+business work. Sales/BD/Account Manager roles, company signatures, generic
+greetings, or absent reply history are not sufficient to reject a real request.
+Use the message's primary purpose and actual relationship/context, not those
+isolated cues. Promotional content can coexist with a separate genuine human
+request; evaluate that request instead of treating all commercial mail alike.`;
+
+export const PROMOTIONS_PROMPT = `TRUE when the email's primary purpose is unsolicited marketing, promotion,
+audience-building, or selling a product/service the user did not request.
+Judge the actual message and conversation context, not isolated words,
+the sender's job title, or their signature.
+
+TRUE for:
+  * Unsolicited cold sales pitches and outreach asking for a meeting/demo
+    to sell something, rather than continuing actual business work
+  * Drip/cadence follow-ups repeating an unengaged sales pitch
+  * Newsletters, product launches, marketing announcements, and blog digests
+  * Discount campaigns, deals, mass invitations, webinars, or promotional
+    surveys intended to market a vendor or product
+  * Unsolicited partnership, SEO, guest-post, or recruiting pitches unrelated
+    to work or a conversation the user is actively participating in
+
+FALSE when the primary purpose is genuine business or personal work:
+  * A requested quote/proposal, pricing negotiation, purchase, order,
+    invoice, renewal discussion, or service/support conversation
+  * A customer/prospect asking a real product, pricing, availability, or
+    support question, including a genuine first inquiry
+  * Internal approvals, project work, operational coordination, or a
+    colleague's request, even if it mentions a product, price, or offer
+  * Personal messages, transaction confirmations, and financial notices
+
+Sales/BD/Account Manager titles, commercial signatures, a generic greeting,
+words such as "pricing", "quote", "offer", "product", "proposal", or "follow up",
+and no recorded two-way history are NOT sufficient evidence of Promotions.
+An existing contact can send a marketing blast; a new sender can ask a genuine
+business question. Decide from primary purpose and the actual relationship.
+For mixed content, choose only categories supported by distinct content;
+do not turn an ongoing business request into Promotions merely because a
+signature or quoted message contains advertising.`;
+
+/** Upgrade only untouched built-in definitions; preserve customized taxonomy and every existing message choice. */
+export const businessConversationCategories: Migration = {
+  version: 104,
+  name: 'business_conversation_categories',
+  up: (db) => {
+    const update = db.prepare(`UPDATE ai_category_definitions SET prompt = ?, updated_at = unixepoch()
+      WHERE slug = ? AND prompt = ? AND name = ? AND description = ? AND icon = ?
+        AND color = ? AND sort_order = ? AND is_system = 1`);
+    update.run(NEEDS_RESPONSE_PROMPT, 'needs_response', LEGACY_NEEDS_RESPONSE_PROMPT,
+      'Needs Response', 'Emails that require your reply', 'MessageCircle', 'orange', 2);
+    update.run(PROMOTIONS_PROMPT, 'promotions', LEGACY_PROMOTIONS_PROMPT,
+      'Promotions', 'Sales outreach, newsletters, product marketing', 'Megaphone', 'pink', 8);
+  },
+  // These defaults do not rewrite existing mail. A downgrade must not overwrite
+  // prompts the user may have edited after the upgrade.
+  down: () => {},
+};
+
 export function createMigrationManager(
   db: Database.Database,
   context: MigrationContext = {},
@@ -4288,5 +4372,6 @@ export function createMigrationManager(
   manager.register(authResultsReverify);
   manager.register(serverCategoryAuthority);
   manager.register(gmailPromotionsOnly);
+  manager.register(businessConversationCategories);
   return manager;
 }

@@ -204,6 +204,9 @@ duplication and repeated patterns:
 Prefer small, pure, single-responsibility helpers that are easy to unit test.
 
 Established shared helpers (extend this list as you add more):
+- `buildAIChatRequestOptions(provider)` — `packages/core/src/utils/ai-provider-auth.ts`.
+  Restricts Chat Completions vendor options to the configured provider; reused
+  by model verification, renderer completions and both background categorizers.
 - `withTimeout(promise, ms, message)` — `packages/core/src/utils/timeout.ts`.
   The single source for the "race a promise against a timeout" pattern; it also
   clears the timer. Use it instead of hand-rolling `Promise.race([p, setTimeout(reject)])`.

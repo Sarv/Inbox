@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, PHISHING_PROMPT, SPAM_PROMPT, buildAIAuthHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -165,12 +165,8 @@ const AUTO_BACKOFF_MAX_MS = 30 * 60_000;
 const BULK_RESTART_BASE_MS = 15_000;
 const BULK_RESTART_MAX_MS = 5 * 60_000;
 
-// The spam and phishing guidance is shared with the pipeline in core
-// (`SPAM_PROMPT`, `PHISHING_PROMPT` in categorization-utils) so both prompts
-// teach the model the same rules — the Adobe Sign lure of 2026-09-23 was
-// marked important by a prompt that had never been told authentication is
-// not identity, and a second copy of the text here is how one prompt learns
-// a lesson the other does not.
+// The complete classification guidance is shared with the background pipeline
+// in core, so manual processing follows the same purpose and reply rules.
 
 // ========== Service Class ==========
 
@@ -204,62 +200,12 @@ export class AICategorizationService {
    * Build the categorization prompt dynamically from category definitions
    */
   private buildPrompt(categories: LoadedCategoryDef[], userEmail: string): string {
-    const userName = userEmail.split('@')[0] || '';
-    const categorySection = categories.map((cat, i) =>
-      `${i + 1}. ${cat.slug}:\n${cat.prompt}`
-    ).join('\n\n');
-
-    return `You are an email intelligence agent for "${userEmail}" (${userName}).
-Classify each email — but ONLY assign categories when the email actually matters to this user.
-
-CATEGORIES:
-${categorySection}
-
-SPAM:
-${SPAM_PROMPT}
-
-${PHISHING_PROMPT}
-
-═══════════════════════════════════════════
-KEY RULE: Think from ${userName}'s perspective.
-"Would ${userName} need to ACT on this email?"
-═══════════════════════════════════════════
-
-WHO IS THE EMAIL FOR? (MOST IMPORTANT CHECK)
-- Look at TO: vs CC: fields
-- "User-Role: CC" = ${userName} is just looped in — DEFAULT: NOT important, NOT needs_response
-- If email body greets someone else ("Hello Hrishi") but ${userName} is CC → NOT for ${userName}
-- If task is for someone in TO: and ${userName} is CC → NOT ${userName}'s task
-- ONLY mark CC as important if body EXPLICITLY asks for ${userName}'s input by name
-
-BEHAVIORAL SIGNALS (use these — they show what ${userName} actually cares about):
-- "Read: X%" = how often ${userName} opens this sender's emails. Low% = doesn't care
-- "Keep: X%" = how often ${userName} keeps vs deletes. Low% = noise
-- "Replied: N" = how often ${userName} replied. 0 = never replied = probably not needs_response
-- User NEVER replying to a sender = that sender is NOT important enough for needs_response
-
-WHAT IS "IMPORTANT"?
-- ${userName} is in TO: (not CC:) AND email asks for their action/decision
-- From someone ${userName} consistently replies to
-- Customer/client emails directly to ${userName}
-- NOT important: team loops, FYIs, tasks for others, newsletters, automated alerts
-
-CATEGORY ASSIGNMENT RULES (STRICT):
-- Prefer ONE category per email. Only assign 2+ if genuinely applicable.
-- "important" is RARE — means URGENT, needs action TODAY. Not just "relevant".
-- An invoice is just "invoice", NOT also "important" unless payment is overdue TODAY.
-- A finance email is just "finance", NOT also "important" unless fraud alert.
-- A meeting invite is just "meeting", NOT also "important" unless meeting is in the next hour.
-- When in doubt, assign FEWER categories. Empty [] is valid.
-
-SENDER MEMORY (optional — extract if visible):
-- How the sender or user greets/addresses in this email
-- Conversation tone and key topic
-- Include "sender_memory" only when meaningful
-
-Return JSON array:
-[{"emailId":"...","categories":[],"is_spam":false,"confidence":0.8,"reasoning":"...","sender_memory":{"greeting":"Hi Advik","tone":"formal","key_context":"Invoice follow-up"}}]
-- Single email (depth 1) from occasional sender = likely lower priority unless content signals otherwise`;
+    // Read the same account's editable template as the background pipeline.
+    // An absent template uses the default; a failed read must stop the request
+    // rather than silently disregard the user's customized instructions.
+    const promptRepo = requireStorage().getRepositories?.()?.prompts;
+    const override = promptRepo?.getContent('categorization_system') || undefined;
+    return buildCategorizationPrompt(categories, userEmail, override);
   }
 
   /**
@@ -998,11 +944,8 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
             { role: 'user', content: userMessage },
           ],
           max_completion_tokens: 16000,
-          // See packages/core/src/agent/categorization-utils.ts for the
-          // full rationale: vLLM-hosted thinking models (Gemma 3/4, Qwen3)
-          // burn the token budget on inline <think> blocks and truncate
-          // before emitting the JSON. Disable via the chat-template kwarg.
-          chat_template_kwargs: { enable_thinking: false },
+          // Keep background requests consistent with onboarding model tests.
+          ...buildAIChatRequestOptions(config),
         }),
         signal: this.abortController?.signal,
       });

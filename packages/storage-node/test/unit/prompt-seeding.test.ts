@@ -1,3 +1,4 @@
+import { DEFAULT_CATEGORIZATION_TEMPLATE, buildCategorizationPrompt } from '@sarvinbox/core';
 import { describe, it, expect } from 'vitest';
 
 import { PromptRepository } from '../../src/repositories/prompt-repository';
@@ -29,6 +30,25 @@ const row = (db: ReturnType<typeof newMigratedDb>) =>
     .get() as { content: string; default_content: string; label: string };
 
 describe('seedDefault', () => {
+  // Regression: the business-vs-promotion fix must reach existing installs;
+  // editing the bundled string alone leaves a stored override on the hot path.
+  it('adopts the current business-conversation guidance and keeps custom overrides on startup', () => {
+    const { db, prompts } = repo();
+    seed(prompts, 'Old bundled template: a question can combine any categories.');
+
+    seed(prompts, DEFAULT_CATEGORIZATION_TEMPLATE);
+    const active = buildCategorizationPrompt([], 'me@example.com', prompts.getContent('categorization_system')!);
+    expect(active).toContain("CLASSIFY THE CURRENT MESSAGE'S PRIMARY PURPOSE");
+    expect(active).toContain('Their sales signature is incidental');
+    expect(row(db).content).toBe(DEFAULT_CATEGORIZATION_TEMPLATE);
+
+    prompts.update('categorization_system', 'My custom policy for {{userEmail}}');
+    seed(prompts, DEFAULT_CATEGORIZATION_TEMPLATE);
+    expect(buildCategorizationPrompt([], 'me@example.com', prompts.getContent('categorization_system')!))
+      .toBe('My custom policy for me@example.com');
+    expect(row(db).default_content).toBe(DEFAULT_CATEGORIZATION_TEMPLATE);
+  });
+
   it('creates the row on a fresh install with content and default in step', () => {
     const { db, prompts } = repo();
     seed(prompts, 'v1 prompt');

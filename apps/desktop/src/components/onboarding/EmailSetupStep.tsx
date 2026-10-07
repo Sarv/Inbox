@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { EMAIL_PROVIDERS, defaultPort, type ConnectionSecurity } from '../../config/email-providers';
 import { getOnboardingEmailProgress, isOnboardingPending } from '../../services/onboarding-progress';
+import { requestConfirm } from '../../store/confirm-service';
 import { useEmailStore } from '../../store/email-store';
 import { findAccountByEmailHost } from '../../store/helpers';
 import { GmailPrivacyNotice } from '../GmailPrivacyNotice';
@@ -25,7 +26,11 @@ interface EmailSetupStepProps {
   active: boolean;
   onStageChange: (stage: 'provider' | 'connection') => void;
   onConnected: (result: EmailSetupResult) => void;
+  purpose?: 'onboarding' | 'add-account';
+  onBusyChange?: (busy: EmailSetupBusy) => void;
 }
+
+export type EmailSetupBusy = 'oauth' | 'receiving' | 'sending' | null;
 
 type EmailOAuthProvider = 'sarv' | 'gmail';
 type OAuthProviderInfo = NonNullable<Awaited<ReturnType<typeof window.electronAPI.oauth.listProviders>>['data']>[number];
@@ -35,6 +40,7 @@ type OAuthAccount = NonNullable<Awaited<ReturnType<typeof window.electronAPI.oau
 type MailConfig = Omit<IMAPConfig, 'oauthProvider'> & { oauthProvider?: EmailOAuthProvider };
 interface FormValues {
   email: string;
+  username: string;
   password: string;
   imapHost: string;
   imapPort: string;
@@ -78,7 +84,7 @@ function savedForm(connection: ConnectedEmail): FormValues {
   const initial = initialForm(connection.result.providerId);
   const imap = useEmailStore.getState().accounts.find((item) => item.id === connection.result.accountId)?.imapConfig;
   return {
-    ...initial, email: connection.result.email, imapHost: imap?.host ?? initial.imapHost,
+    ...initial, email: connection.result.email, username: imap?.username ?? '', imapHost: imap?.host ?? initial.imapHost,
     imapPort: String(imap?.port ?? initial.imapPort),
     imapSecurity: imap?.security ?? (imap?.secure === false ? 'starttls' : initial.imapSecurity),
     smtpHost: connection.smtp.host, smtpPort: String(connection.smtp.port),
@@ -95,7 +101,7 @@ const textButtonClass = 'rounded-md px-2 py-2 text-sm text-muted-foreground hove
 function initialForm(providerId: string): FormValues {
   const preset = EMAIL_PROVIDERS.find((item) => item.id === providerId);
   return {
-    email: '', password: '', imapHost: preset?.imapHost ?? '',
+    email: '', username: '', password: '', imapHost: preset?.imapHost ?? '',
     imapPort: String(preset?.imapPort ?? 993), imapSecurity: preset?.imapSecurity ?? 'ssl',
     smtpHost: preset?.smtpHost ?? '', smtpPort: String(preset?.smtpPort ?? 465),
     smtpSecurity: preset?.smtpSecurity === 'starttls' ? 'starttls' : 'ssl',
@@ -114,8 +120,10 @@ function errorMessage(error: unknown): string {
 }
 
 /** Email provider selection, credential verification and independent sending check. */
-export function EmailSetupStep({ stage, active, onStageChange, onConnected }: EmailSetupStepProps) {
-  const [initialConnection] = useState(activeConnection);
+export function EmailSetupStep({ stage, active, onStageChange, onConnected, purpose = 'onboarding', onBusyChange }: EmailSetupStepProps) {
+  // Adding a second mailbox must start fresh, even when first-run setup is
+  // pending. Only onboarding resumes the existing active mailbox.
+  const [initialConnection] = useState(() => purpose === 'add-account' ? null : activeConnection());
   const [providerId, setProviderId] = useState(initialConnection?.result.providerId ?? '');
   const [method, setMethod] = useState<'oauth2' | 'password'>(initialConnection?.result.authMethod ?? 'oauth2');
   const [form, setForm] = useState<FormValues>(() => {
@@ -125,7 +133,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
   const [providers, setProviders] = useState<OAuthProviderInfo[]>([]);
   const [sessions, setSessions] = useState<OAuthAccount[]>([]);
   const [loadingProviders, setLoadingProviders] = useState(true);
-  const [busy, setBusy] = useState<'oauth' | 'receiving' | 'sending' | null>(null);
+  const [busy, setBusy] = useState<EmailSetupBusy>(null);
   const [error, setError] = useState('');
   const [connected, setConnected] = useState<ConnectedEmail | null>(initialConnection);
   const [editing, setEditing] = useState(false);
@@ -168,13 +176,21 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
     }
   }, [active]);
 
+  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+
   const isCurrent = (id: number) => mounted.current && activeRef.current && operation.current === id;
   const setLoading = (value: typeof busy) => { busyRef.current = value; setBusy(value); };
   const providerName = EMAIL_PROVIDERS.find((item) => item.id === providerId)?.name ?? 'Other email';
   const supportsOAuth = providerId === 'sarv' || providerId === 'gmail';
   const oauthInfo = providers.find((item) => item.id === providerId);
-  const existingSession = sessions.find((item) => item.provider === providerId && item.email === connected?.result.email)
-    ?? sessions.find((item) => item.provider === providerId);
+  const availableSessions = purpose === 'add-account'
+    ? sessions.filter((item) => item.email === connected?.result.email || !findAccountByEmailHost(
+      useEmailStore.getState().accounts, item.email,
+      EMAIL_PROVIDERS.find((preset) => preset.id === item.provider)?.imapHost ?? '',
+    ))
+    : sessions;
+  const existingSession = availableSessions.find((item) => item.provider === providerId && item.email === connected?.result.email)
+    ?? availableSessions.find((item) => item.provider === providerId);
   const showingSummary = connected !== null && !editing;
 
   const selectProvider = (id: string) => {
@@ -242,9 +258,32 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
   const connectMailbox = async (config: MailConfig, smtp: SMTPConfig, id: number, skipSending: boolean) => {
     if (!isCurrent(id)) return;
     setLoading('receiving');
+    if (purpose === 'add-account') {
+      // Probe in isolation before replacing a working account. OAuth identity
+      // alone does not prove that the receiving server accepts its token.
+      const probe = await window.electronAPI.imap.probeCredentials(config as IMAPConfig);
+      if (!isCurrent(id)) return;
+      if (!probe.success) throw new Error(probe.error || 'Receiving authentication failed. Check your connection details and retry.');
+      const existing = findAccountByEmailHost(useEmailStore.getState().accounts, config.username, config.host);
+      if (existing) {
+        const replacingPassword = config.authMethod === 'oauth2' && existing.imapConfig.authMethod !== 'oauth2';
+        const confirmed = await requestConfirm({
+          title: 'Mailbox already connected',
+          message: replacingPassword
+            ? `${config.username} on ${config.host} is already connected using an app password. Replace it with this browser sign-in? Your saved mail is preserved.`
+            : `${config.username} on ${config.host} is already connected. Reconnect it using these settings? Your saved mail is preserved.`,
+          confirmLabel: replacingPassword ? 'Replace' : 'Reconnect',
+          cancelLabel: 'Keep existing connection',
+          destructive: replacingPassword,
+        });
+        if (!isCurrent(id) || !confirmed) return;
+      }
+      if (!isCurrent(id)) return;
+    }
     // addAccount verifies receiving before persistence, reuses email+host
     // identity, and starts the initial sync without awaiting its completion.
-    await useEmailStore.getState().addAccount(config);
+    if (purpose === 'add-account') await useEmailStore.getState().addAccount(config, { alreadyVerified: true });
+    else await useEmailStore.getState().addAccount(config);
     if (!isCurrent(id)) return;
     const account = findAccountByEmailHost(useEmailStore.getState().accounts, config.username, config.host);
     if (!account) throw new Error('The mailbox connected but its account was not saved. Please retry.');
@@ -319,7 +358,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
       if (!form.skipSending && !smtp.host) throw new Error('Enter the sending server or choose to set up sending later.');
       await connectMailbox({
         host: form.imapHost.trim(), port: validPort(form.imapPort), security: form.imapSecurity,
-        secure: form.imapSecurity === 'ssl', username: email, password: form.password,
+        secure: form.imapSecurity === 'ssl', username: form.username.trim() || email, password: form.password,
         authMethod: 'password', allowInsecureTLS: form.allowInsecure || undefined,
       }, smtp, id, form.skipSending);
     } catch (failure) {
@@ -375,7 +414,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
   if (!active) return null;
   if (stage === 'provider') return (
     <div className="space-y-6">
-      <div><h2 className="text-2xl font-semibold">Where is your email?</h2><p className="mt-2 text-sm text-muted-foreground">Choose your provider to connect your first account.</p></div>
+      <div><h2 className="text-2xl font-semibold">Where is your email?</h2><p className="mt-2 text-sm text-muted-foreground">{purpose === 'add-account' ? 'Choose the provider for the mailbox you want to add.' : 'Choose your provider to connect your first account.'}</p></div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {EMAIL_CHOICES.map((id) => (
           <button key={id} type="button" onClick={() => selectProvider(id)} className="flex items-center gap-3 rounded-xl border border-border p-4 text-left hover:border-primary hover:bg-primary/5">
@@ -384,7 +423,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
           </button>
         ))}
       </div>
-      <p className="text-xs text-muted-foreground">Your mail is stored in an encrypted database on this device. You can add more accounts later.</p>
+      <p className="text-xs text-muted-foreground">Your mail is stored in an encrypted database on this device.{purpose === 'onboarding' ? ' You can add more accounts later.' : ''}</p>
     </div>
   );
 
@@ -405,7 +444,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
           {supportsOAuth && <div className="flex gap-2 rounded-lg bg-muted/60 p-1"><button type="button" disabled={busy !== null} onClick={() => { setMethod('oauth2'); setError(''); }} className={`flex-1 rounded-md px-3 py-2 text-sm ${method === 'oauth2' ? 'bg-background shadow-sm' : 'text-muted-foreground'}`}>Browser sign-in</button><button type="button" disabled={busy !== null} onClick={() => { setMethod('password'); setError(''); }} className={`flex-1 rounded-md px-3 py-2 text-sm ${method === 'password' ? 'bg-background shadow-sm' : 'text-muted-foreground'}`}>Manual setup</button></div>}
           {method === 'oauth2' && supportsOAuth ? (
             <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">{providerId === 'sarv' ? 'Sarv connects your mailbox and AI access in one sign-in. You choose a model and approve AI processing in the next step.' : 'Sign in securely in your browser. You do not need to enter your Gmail password here.'}</p>
+              <p className="text-sm text-muted-foreground">{providerId === 'sarv' ? purpose === 'add-account' ? 'Sign in to connect your Sarv mailbox. This sign-in also provides Sarv AI access, which you can configure in AI settings.' : 'Sarv connects your mailbox and AI access in one sign-in. You choose a model and approve AI processing in the next step.' : 'Sign in securely in your browser. You do not need to enter your Gmail password here.'}</p>
               {existingSession && <p className="text-sm">Already signed in as <strong className="break-all">{existingSession.email}</strong>.</p>}
               <button type="button" disabled={busy !== null || loadingProviders || !oauthInfo?.configured} onClick={() => void startOAuth(Boolean(existingSession))} className={`${primaryClass} w-full`}>{busy ? <><Loader2 className="h-4 w-4 animate-spin" /> {busy === 'oauth' ? 'Waiting for browser…' : busy === 'receiving' ? 'Checking receiving…' : 'Checking sending…'}</> : existingSession ? `Connect as ${existingSession.email}` : `Sign in with ${providerName}`}</button>
               {!loadingProviders && !oauthInfo?.configured && <p className="text-sm text-muted-foreground">Browser sign-in is unavailable in this build. Use Manual setup to connect.</p>}
@@ -417,6 +456,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected }: Em
             <form onSubmit={(event) => void connectManual(event)} className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1.5 text-sm font-medium">Email address<input aria-label="Email address" type="email" autoComplete="username" value={form.email} onChange={(event) => changeField('email', event.target.value)} required disabled={busy !== null} className={inputClass} /><span className="block text-xs font-normal text-muted-foreground">Also used as your login and sending address.</span></label><label className="space-y-1.5 text-sm font-medium">Password or app password<div className="relative"><input aria-label="Password or app password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={form.password} onChange={(event) => changeField('password', event.target.value)} required disabled={busy !== null} className={`${inputClass} pr-10`} /><Tooltip content={showPassword ? 'Hide password' : 'Show password'} delayMs={40} className="absolute inset-y-0 right-0 flex items-center"><button type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} disabled={busy !== null} onClick={() => setShowPassword((value) => !value)} className="p-3 text-muted-foreground">{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></Tooltip></div><span className="block text-xs font-normal text-muted-foreground">Use an app password if your provider requires one.</span></label></div>
               <details open={providerId === 'other' || undefined} className="rounded-lg border border-border p-3"><summary className="cursor-pointer text-sm font-medium">Incoming & sending server settings{providerId !== 'other' ? ' · prefilled' : ''}</summary><div className="mt-4 space-y-4">
+                <label className="block space-y-1 text-sm">Incoming login username (optional)<input aria-label="Incoming login username" autoComplete="username" value={form.username} onChange={(event) => changeField('username', event.target.value)} placeholder={form.email || 'Defaults to your email address'} disabled={busy !== null} className={inputClass} /><span className="block text-xs text-muted-foreground">Only needed if your server uses a login different from your email address.</span></label>
                 <div className="grid gap-3 sm:grid-cols-[1fr_90px_130px]"><label className="space-y-1 text-sm">IMAP server<input aria-label="IMAP server" value={form.imapHost} onChange={(event) => changeField('imapHost', event.target.value)} required disabled={busy !== null} className={inputClass} /></label><label className="space-y-1 text-sm">Port<input aria-label="IMAP port" type="number" min="1" max="65535" value={form.imapPort} onChange={(event) => changeField('imapPort', event.target.value)} required disabled={busy !== null} className={inputClass} /></label><label className="space-y-1 text-sm">Security<select aria-label="IMAP security" value={form.imapSecurity} disabled={busy !== null} onChange={(event) => { const value = event.target.value as ConnectionSecurity; setForm((old) => ({ ...old, imapSecurity: value, imapPort: String(defaultPort('imap', value)) })); }} className={inputClass}><option value="ssl">SSL / TLS</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></label></div>
                 <div className="grid gap-3 sm:grid-cols-[1fr_90px_130px]"><label className="space-y-1 text-sm">SMTP server<input aria-label="SMTP server" value={form.smtpHost} onChange={(event) => changeField('smtpHost', event.target.value)} required={!form.skipSending} disabled={busy !== null || form.skipSending} className={inputClass} /></label><label className="space-y-1 text-sm">Port<input aria-label="SMTP port" type="number" min="1" max="65535" value={form.smtpPort} onChange={(event) => changeField('smtpPort', event.target.value)} required={!form.skipSending} disabled={busy !== null || form.skipSending} className={inputClass} /></label><label className="space-y-1 text-sm">Security<select aria-label="SMTP security" value={form.smtpSecurity} disabled={busy !== null || form.skipSending} onChange={(event) => { const value = event.target.value as 'ssl' | 'starttls'; setForm((old) => ({ ...old, smtpSecurity: value, smtpPort: String(defaultPort('smtp', value)) })); }} className={inputClass}><option value="ssl">SSL / TLS</option><option value="starttls">STARTTLS</option></select></label></div>
                 <p className="text-xs text-muted-foreground">Sending uses the same email and password. Separate sending credentials can be added in Settings.</p>

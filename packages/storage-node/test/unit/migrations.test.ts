@@ -124,7 +124,8 @@ describe('fresh install reaches the current production schema', () => {
     // Social category (v99); 99 -> 100 adds emails.pgp_status (v100); 100 ->
     // 101 with the authentication re-check queue (v101).
     // v102 tracks provider/manual authority separately from AI.
-    expect(CURRENT_VERSION).toBe(103);
+    // v104 improves built-in business/reply prompts without overwriting user edits.
+    expect(CURRENT_VERSION).toBe(104);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
     // v24 is stamped by schema.sql itself; the chain stamps 25..101 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
@@ -377,7 +378,7 @@ describe('fresh install reaches the current production schema', () => {
 
   // The category rows ARE the AI classifier's taxonomy: a missing/duplicated
   // slug silently changes how every incoming mail is categorized.
-  it('seeds the AI category taxonomy exactly once, with the v33/v35/v36/v99/v102 edits applied', () => {
+  it('seeds the AI category taxonomy exactly once, including the v104 business conversation definitions', () => {
     const slugs = (
       db.prepare('SELECT slug FROM ai_category_definitions ORDER BY slug').all() as Array<{
         slug: string;
@@ -407,12 +408,17 @@ describe('fresh install reaches the current production schema', () => {
     expect(invoice.description).toBe('Invoices and bills from vendors');
     expect(invoice.prompt).toContain('NOT invoice');
 
-    // v36 tightened needs_response so cold sales pitches stop demanding replies.
+    // v104 excludes sales CTAs while preserving genuine first inquiries and requested business replies.
     const needsResponse = scalar(
       db,
       "SELECT prompt FROM ai_category_definitions WHERE slug = 'needs_response'",
     ) as string;
-    expect(needsResponse).toContain('COLD SALES / PROMOTIONAL OUTREACH');
+    expect(needsResponse).toContain('whose only question is a meeting/demo CTA or an invitation to buy');
+    expect(needsResponse).toContain('Requested quotes, proposals, negotiations');
+    expect(needsResponse).toContain('including a genuine first inquiry');
+    const promotions = scalar(db, "SELECT prompt FROM ai_category_definitions WHERE slug = 'promotions'") as string;
+    expect(promotions).toContain('FALSE when the primary purpose is genuine business or personal work');
+    expect(promotions).toContain('A requested quote/proposal, pricing negotiation');
   });
 
   // Reads stay on the legacy path until the backfill marks itself complete;

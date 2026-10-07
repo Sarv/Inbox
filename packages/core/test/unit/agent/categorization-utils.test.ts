@@ -86,6 +86,28 @@ describe('buildCategorizationPrompt', () => {
     const prompt = buildCategorizationPrompt([], 'weird-address', '{{userName}}|{{userDomain}}|{{categorySection}}|');
     expect(prompt).toBe('weird-address||' + '|');
   });
+
+  // Regression: pricing/product language and Sales signatures caused genuine
+  // quote/approval threads to acquire Promotions alongside Needs Response.
+  it('distinguishes requested work from cold sales without forbidding multiple categories', () => {
+    const prompt = buildCategorizationPrompt([
+      ...CATEGORIES,
+      { slug: 'promotions', name: 'Promotions', prompt: 'marketing and unsolicited pitches' },
+    ], 'me@sarv.com');
+
+    expect(prompt).toContain("CLASSIFY THE CURRENT MESSAGE'S PRIMARY PURPOSE");
+    expect(prompt).toContain('Missing\n  history means unknown, not proof of cold outreach');
+    expect(prompt).toContain('Their sales signature is incidental');
+    expect(prompt).toContain("A customer asks for revised pricing for an active renewal: needs_response,\n  not promotions");
+    expect(prompt).toContain('A colleague asks the user to approve a project requirement: needs_response');
+    expect(prompt).toContain('An unsolicited vendor offers a demo');
+    expect(prompt).toContain('An unsolicited sales CTA is not enough');
+    expect(prompt).toContain('unsolicited sales pitches (including personalized\nmeeting/demo questions)');
+    expect(prompt).toContain('invoice + needs_response can both apply');
+    expect(prompt).toContain('A human discussing an invoice\n  discrepancy or requesting confirmation can still need a response');
+    expect(prompt).not.toContain('OK if the email clearly asks a question');
+    expect(prompt).toContain('the current message independently fits that category');
+  });
 });
 
 describe('buildEmailText — the facts handed to the model', () => {
@@ -116,6 +138,23 @@ describe('buildEmailText — the facts handed to the model', () => {
     expect(buildEmailText([email()], 'me@sarv.com', [])).toContain('Behavior: First-time sender, no history');
   });
 
+  // Regression: the first answer to a user-initiated quotation was represented
+  // only as "NEVER replied", hiding evidence that the exchange was requested.
+  it.each([0, 3])('supplies %i outgoing emails even with no recorded replies', sentToCount => {
+    const text = buildEmailText([email({
+      subject: 'Re: Requested quote',
+      body: 'Here are the prices you asked for. Which configuration should we reserve?',
+      senderContext: {
+        tier: 'new', receivedCount: 1, sentToCount, repliedCount: 0,
+        readCount: 1, deletedCount: 0, isVip: false, isFavorite: false, isBlocked: false,
+      },
+    })], 'me@sarv.com', ['needs_response', 'promotions']);
+
+    expect(text).toContain(`Outbound history (lifetime): User sent ${sentToCount} emails to this sender`);
+    expect(text).toContain('Here are the prices you asked for');
+    expect(text).toContain('No recorded replies in lifetime history');
+  });
+
   it('reports lifetime stats when the recent window is too sparse to trust', () => {
     const text = buildEmailText([email({
       senderContext: {
@@ -125,7 +164,7 @@ describe('buildEmailText — the facts handed to the model', () => {
       },
     })], 'me@sarv.com', []);
 
-    expect(text).toContain('Behavior (lifetime): Read 50% | Keep 80% | User NEVER replied to this sender | Received: 10');
+    expect(text).toContain('Behavior (lifetime): Read 50% | Keep 80% | No recorded replies in lifetime history | Received: 10');
   });
 
   it('prefers the 90d window once it has enough signal, and shows the last-reply age', () => {
@@ -146,6 +185,22 @@ describe('buildEmailText — the facts handed to the model', () => {
     expect(text).toContain('Same-Subject: 9 (repetitive)');
     expect(text).toContain('Volume: 12% of inbox');
     expect(text).toContain('VIP BLOCKED');
+  });
+
+  // Regression: zero replies in the recent window was described as NEVER,
+  // incorrectly implying no relationship despite lifetime correspondence.
+  it('scopes missing replies to the recent window without hiding lifetime outbound history', () => {
+    const text = buildEmailText([email({
+      senderContext: {
+        tier: 'known', receivedCount: 20, sentToCount: 8, repliedCount: 7,
+        readCount: 15, deletedCount: 0, isVip: false, isFavorite: false, isBlocked: false,
+        recent: { windowDays: 90, receivedCount: 3, readCount: 2, deletedCount: 0, repliedCount: 0 },
+      },
+    })], 'me@sarv.com', ['needs_response']);
+
+    expect(text).toContain('No recorded replies in 90d history');
+    expect(text).toContain('Outbound history (lifetime): User sent 8 emails');
+    expect(text).not.toContain('NEVER');
   });
 
   it('does not divide by zero when the sender has no received count', () => {
@@ -261,6 +316,19 @@ describe('validateCategorizationResponse — well-formed output', () => {
       JSON.stringify([{ emailId: 'e1', categories: ['invoice', 'important'], is_spam: true }]), SLUGS);
     expect(result.isSpam).toBe(true);
     expect(result.categories).toEqual([]);
+  });
+
+  // Fix the classification guidance, not a label blacklist: customized or
+  // genuinely mixed classifications must survive the response parser intact.
+  it('preserves independently assigned multiple categories, including Promotions', () => {
+    const categories = [...CATEGORIES, { slug: 'promotions', name: 'Promotions', prompt: 'marketing' }];
+    const [result] = validateCategorizationResponse(JSON.stringify([{
+      emailId: 'mixed-purpose', categories: ['needs_response', 'promotions'],
+      should_auto_draft: true, reasoning: 'Both definitions independently apply',
+    }]), new Set(categories.map(category => category.slug)), categories);
+
+    expect(result.categories).toEqual(['needs_response', 'promotions']);
+    expect(result.shouldAutoDraft).toBe(true);
   });
 
   it('maps display names, casing and spacing variants back to the canonical slug', () => {
@@ -468,7 +536,40 @@ describe('callAIProvider — OpenAI-compatible transport', () => {
     // Thinking must be OFF: a reasoning pass burns the budget and truncates the
     // JSON these callers need.
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(body.reasoning_effort).toBe('minimal');
+    expect(body).not.toHaveProperty('reasoning');
     expect(body.max_completion_tokens).toBe(16000);
+  });
+
+  // Regression: OpenAI returns 400 for the Sarv/vLLM chat-template extension.
+  it.each([
+    ['openai', 'gpt-4o-mini'],
+    ['openai', 'gpt-5-mini'],
+    ['openai', 'gpt-5.1'],
+    ['openai', 'gpt-6'],
+    ['openai', 'o3-mini'],
+    ['custom', 'gpt-5-mini'],
+  ] as const)('sends only supported Chat Completions fields to %s/%s', async (type, model) => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      const allowed = new Set(['model', 'messages', 'max_completion_tokens']);
+      const unknown = Object.keys(body).find((key) => !allowed.has(key));
+      return unknown
+        ? jsonResponse({ error: { message: `Unknown parameter: '${unknown}'.`, code: 'unknown_parameter' } }, { status: 400 })
+        : chatCompletion('classified');
+    });
+    const baseUrl = type === 'openai' ? undefined : 'https://custom.example/v1';
+    expect(await callAIProvider(config({ type, model, baseUrl, fetchImpl }), 's', 'u')).toBe('classified');
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(type === 'openai'
+      ? 'https://api.openai.com/v1/chat/completions'
+      : 'https://custom.example/v1/chat/completions');
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer key-123');
+    const body = JSON.parse(init?.body as string);
+    expect(body).not.toHaveProperty('chat_template_kwargs');
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body).not.toHaveProperty('reasoning_effort');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('returns an empty string when the model returns no content', async () => {
@@ -662,10 +763,10 @@ describe('callAIProvider — Gemini transport', () => {
     expect(fetchImpl.mock.calls[0][0]).toContain('https://proxy.example/v1/models/');
   });
 
-  it('classifies a Gemini failure through the same SarvApiError path', async () => {
+  it('classifies a Gemini failure through the shared provider-error path', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ error: { message: 'quota' } }, { status: 429 }));
     await expect(callAIProvider(config({ type: 'gemini', fetchImpl }), 's', 'u'))
-      .rejects.toMatchObject({ name: 'SarvApiError', code: 'rate_limit_exceeded' });
+      .rejects.toMatchObject({ name: 'AIProviderApiError', code: 'rate_limit_exceeded', provider: 'gemini' });
   });
 });
 
@@ -740,6 +841,22 @@ describe('callAIWithRetry — only transient failures are retried', () => {
     await drainBackoff();
     await assertion;
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // A rejected OpenAI parameter is permanent; repeated requests only stall the queue.
+  it('does not retry a strict OpenAI invalid-parameter response', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      error: { message: "Unknown parameter: 'unsupported_option'.", type: 'invalid_request_error', code: 'unknown_parameter' },
+    }, { status: 400 }));
+    await expect(callAIWithRetry(config({ type: 'openai', model: 'gpt-4o-mini', baseUrl: undefined, fetchImpl }), 's', 'u'))
+      .rejects.toMatchObject({
+        status: 400,
+        code: 'upstream_error',
+        name: 'AIProviderApiError',
+        provider: 'openai',
+        message: "OpenAI API 400: Unknown parameter: 'unsupported_option'.",
+      });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('gives up after MAX_API_RETRIES retries', async () => {

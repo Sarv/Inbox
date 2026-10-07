@@ -2,14 +2,16 @@
 import { useState, StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AddAccountModal } from '../../../../../src/components/AddAccountModal';
 import { EmailSetupStep, type EmailSetupResult } from '../../../../../src/components/onboarding/EmailSetupStep';
 import { EMAIL_PROVIDERS } from '../../../../../src/config/email-providers';
 import { saveOnboardingEmailProgress } from '../../../../../src/services/onboarding-progress';
 import type { EmailStore, StoredAccount } from '../../../../../src/store/types';
 import { act, cleanup, fire, render, settle, toggle, typeInto, type Mounted } from '../../../../helpers/render';
 
-const mocks = vi.hoisted(() => ({ getState: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getState: vi.fn(), confirm: vi.fn() }));
 vi.mock('../../../../../src/store/email-store', () => ({ useEmailStore: { getState: mocks.getState } }));
+vi.mock('../../../../../src/store/confirm-service', () => ({ requestConfirm: mocks.confirm }));
 
 const listProviders = vi.fn();
 const listAccounts = vi.fn();
@@ -20,6 +22,8 @@ const connectSmtp = vi.fn();
 const markSmtpConfigured = vi.fn();
 const selectAccount = vi.fn();
 const connect = vi.fn();
+const probeCredentials = vi.fn();
+const onClose = vi.fn();
 const onConnected = vi.fn<(result: EmailSetupResult) => void>();
 const onStageChange = vi.fn();
 let state: EmailStore;
@@ -75,9 +79,11 @@ beforeEach(() => {
     state.connected = true;
   });
   connectSmtp.mockResolvedValue(undefined);
+  probeCredentials.mockResolvedValue({ success: true });
+  mocks.confirm.mockResolvedValue(true);
   connect.mockImplementation(async () => { state.connected = true; });
   selectAccount.mockImplementation(async (id: string) => { state.activeAccountId = id; });
-  window.electronAPI = { oauth: { listProviders, listAccounts, startFlow, cancel } } as unknown as typeof window.electronAPI;
+  window.electronAPI = { oauth: { listProviders, listAccounts, startFlow, cancel }, imap: { probeCredentials } } as unknown as typeof window.electronAPI;
 });
 
 afterEach(() => { cleanup(); document.body.innerHTML = ''; vi.restoreAllMocks(); });
@@ -650,5 +656,161 @@ describe('email setup form resilience', () => {
     typeInto(view.byLabel('SMTP port'), ''); submit(view); await settle();
     expect(addAccount.mock.calls[0][0]).toMatchObject({ security: 'none', secure: false, port: 143 });
     expect(connectSmtp).not.toHaveBeenCalled();
+  });
+});
+
+describe('adding another mailbox with the onboarding flow', () => {
+  const savedAccount = (provider: 'sarv' | 'gmail' = 'sarv', authMethod = 'oauth2') => {
+    const preset = EMAIL_PROVIDERS.find((item) => item.id === provider)!;
+    state.accounts = [{ id: 'existing-mail', email: `person@${provider}.example`,
+      imapConfig: { host: preset.imapHost, username: `person@${provider}.example`, authMethod },
+      smtpConfig: null, smtpConfigured: false }];
+    state.activeAccountId = 'existing-mail'; state.connected = true;
+  };
+
+  // Regression: adding an account must not resume onboarding or reuse an already linked mailbox's OAuth session.
+  it.each(['sarv', 'gmail'] as const)('starts a fresh %s connection with provider cards and leaves onboarding and AI preferences intact', async (provider) => {
+    savedAccount(provider);
+    localStorage.setItem('sarvinbox-onboarding-pending', 'true');
+    localStorage.setItem('sarvinbox-onboarding-complete', 'true');
+    localStorage.setItem('sarvinbox-ai-enabled', 'true');
+    const before = { ...localStorage };
+    listAccounts.mockResolvedValue({ success: true, data: [{ provider, email: `person@${provider}.example` }] });
+    const view = render(<AddAccountModal onClose={onClose} />);
+    await settle();
+    expect(view.find('[role="dialog"]')).not.toBeNull();
+    expect(view.container.textContent).toContain('mailbox you want to add');
+    expect(view.container.querySelectorAll('img').length).toBeGreaterThan(1);
+    await choose(view, provider === 'sarv' ? 'Sarv' : 'Gmail');
+    expect(view.container.textContent).toContain(`Connect ${provider === 'sarv' ? 'Sarv' : 'Gmail'}`);
+    expect(view.container.textContent).not.toContain('Receiving connected');
+    expect(view.container.textContent).not.toContain('Already signed in as');
+    expect(button(view, `Sign in with ${provider === 'sarv' ? 'Sarv' : 'Gmail'}`)).not.toBeNull();
+    expect(button(view, 'Manual setup')).not.toBeNull();
+    expect(addAccount).not.toHaveBeenCalled();
+    expect(startFlow).not.toHaveBeenCalled();
+    expect({ ...localStorage }).toEqual(before);
+  });
+
+  // Regression: a saved but unlinked Sarv login should connect another mailbox without a redundant browser sign-in.
+  it('reuses an unused Sarv session, verifies both connections and closes without changing existing accounts', async () => {
+    savedAccount();
+    listAccounts.mockResolvedValue({ success: true, data: [
+      { provider: 'sarv', email: 'person@sarv.example' },
+      { provider: 'sarv', email: 'second@sarv.example' },
+    ] });
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
+    expect(view.container.textContent).toContain('Already signed in as second@sarv.example');
+    expect(view.container.textContent).toContain('configure in AI settings');
+    fire(button(view, 'Connect as second@sarv.example'), 'click'); await settle();
+    expect(startFlow).not.toHaveBeenCalled(); expect(mocks.confirm).not.toHaveBeenCalled();
+    expect(probeCredentials).toHaveBeenCalledWith(expect.objectContaining({ username: 'second@sarv.example', authMethod: 'oauth2' }));
+    expect(addAccount).toHaveBeenCalledWith(expect.objectContaining({ username: 'second@sarv.example' }), { alreadyVerified: true });
+    expect(state.accounts).toHaveLength(2);
+    expect(state.accounts.find((item) => item.id === 'existing-mail')?.email).toBe('person@sarv.example');
+    expect(connectSmtp).toHaveBeenCalledOnce(); expect(onClose).toHaveBeenCalledOnce();
+    expect(localStorage.length).toBe(0);
+  });
+
+  // Regression: an OAuth identity must not replace a working account if receiving rejects its token or times out.
+  it.each([{ success: false, error: 'Connection timed out' }, { success: false, error: 'Access token rejected' }, { success: false }])('keeps the previous mailbox and permits retry when the isolated probe fails: %j', async (probe) => {
+    savedAccount('sarv', 'password');
+    probeCredentials.mockResolvedValueOnce(probe);
+    const original = state.accounts[0];
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
+    fire(button(view, 'Sign in with Sarv'), 'click'); await settle();
+    expect(view.container.textContent).toContain(probe.error ?? 'Receiving authentication failed');
+    expect(state.accounts[0]).toBe(original); expect(addAccount).not.toHaveBeenCalled();
+    expect(mocks.confirm).not.toHaveBeenCalled(); expect(connectSmtp).not.toHaveBeenCalled(); expect(onClose).not.toHaveBeenCalled();
+    expect((view.byLabel('Close setup') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // Regression: password-to-OAuth replacement must require confirmation after proof and never silently overwrite a working mailbox.
+  it('keeps a declined password connection and only replaces it after a verified, explicit retry', async () => {
+    savedAccount('sarv', 'password'); mocks.confirm.mockResolvedValueOnce(false);
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
+    fire(button(view, 'Sign in with Sarv'), 'click'); await settle();
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ confirmLabel: 'Replace', destructive: true }));
+    expect(probeCredentials.mock.invocationCallOrder[0]).toBeLessThan(mocks.confirm.mock.invocationCallOrder[0]);
+    expect(addAccount).not.toHaveBeenCalled(); expect(onClose).not.toHaveBeenCalled(); expect(state.accounts).toHaveLength(1);
+    fire(button(view, 'Sign in with Sarv'), 'click'); await settle();
+    expect(addAccount).toHaveBeenCalledWith(expect.objectContaining({ authMethod: 'oauth2' }), { alreadyVerified: true });
+    expect(state.accounts).toHaveLength(1); expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  // Regression: reconnecting an OAuth mailbox must be intentional even though email+host deduplication prevents a duplicate row.
+  it('confirms reconnecting an existing OAuth mailbox', async () => {
+    savedAccount();
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
+    fire(button(view, 'Sign in with Sarv'), 'click'); await settle();
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ confirmLabel: 'Reconnect', destructive: false }));
+    expect(state.accounts).toHaveLength(1); expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  // Regression: closing the modal while an OAuth popup is pending must cancel it and suppress every late network/persistence step.
+  it('cancels an unfinished browser sign-in when the modal unmounts', async () => {
+    const pending = deferred<ReturnType<typeof oauthResult>>(); startFlow.mockReturnValueOnce(pending.promise);
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
+    fire(button(view, 'Sign in with Sarv'), 'click');
+    expect((view.byLabel('Close setup') as HTMLButtonElement).disabled).toBe(false);
+    view.unmount(); pending.resolve(oauthResult()); await settle();
+    expect(cancel).toHaveBeenCalledOnce(); expect(probeCredentials).not.toHaveBeenCalled(); expect(addAccount).not.toHaveBeenCalled(); expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // Regression: an external unmount during a probe or confirmation must prevent stale replacement of another mailbox.
+  it.each(['probe', 'confirmation'] as const)('ignores a stale %s result after the add-account modal unmounts', async (phase) => {
+    savedAccount('sarv', 'password');
+    const probe = deferred<{ success: boolean }>(); const confirm = deferred<boolean>();
+    if (phase === 'probe') probeCredentials.mockReturnValueOnce(probe.promise);
+    else mocks.confirm.mockReturnValueOnce(confirm.promise);
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
+    fire(button(view, 'Sign in with Sarv'), 'click'); await settle();
+    expect((view.byLabel('Close setup') as HTMLButtonElement).disabled).toBe(true);
+    view.unmount(); probe.resolve({ success: true }); confirm.resolve(true); await settle();
+    expect(addAccount).not.toHaveBeenCalled(); expect(connectSmtp).not.toHaveBeenCalled(); expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // Regression: manual credentials must be preserved exactly, receiving-only must stay optional and two accounts must coexist.
+  it('adds a manual mailbox with prefilled servers and explicit sending skip', async () => {
+    savedAccount();
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Outlook');
+    enterManual(view, 'second@example.com'); toggle(view.byLabel('Set up sending later')); submit(view); await settle();
+    expect(probeCredentials).toHaveBeenCalledWith(expect.objectContaining({ host: 'outlook.office365.com', password: ' a secret password ' }));
+    expect(addAccount).toHaveBeenCalledWith(expect.objectContaining({ username: 'second@example.com', password: ' a secret password ' }), { alreadyVerified: true });
+    expect(connectSmtp).not.toHaveBeenCalled(); expect(state.accounts).toHaveLength(2); expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  // Regression: IMAP servers with a separate login must still receive that login without changing the SMTP sender address.
+  it('supports an incoming username different from the sending address', async () => {
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Outlook');
+    enterManual(view, 'person@example.com'); typeInto(view.byLabel('Incoming login username'), ' mailbox-login ');
+    submit(view); await settle();
+    expect(addAccount).toHaveBeenCalledWith(expect.objectContaining({ username: 'mailbox-login' }), { alreadyVerified: true });
+    expect(connectSmtp).toHaveBeenCalledWith(expect.objectContaining({ username: 'person@example.com', from: 'person@example.com' }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  // Regression: a manual reconnect can replace saved secrets too, so declining it must preserve the old mailbox just like OAuth.
+  it('requires confirmation before reconnecting the same mailbox manually', async () => {
+    savedAccount('gmail', 'password'); mocks.confirm.mockResolvedValueOnce(false);
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Gmail');
+    enterManual(view, 'person@gmail.example'); submit(view); await settle();
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ confirmLabel: 'Reconnect', destructive: false }));
+    expect(addAccount).not.toHaveBeenCalled(); expect(connectSmtp).not.toHaveBeenCalled();
+    submit(view); await settle();
+    expect(addAccount).toHaveBeenCalledOnce(); expect(state.accounts).toHaveLength(1); expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  // Regression: a sending outage must retain the newly added receiving account and offer a retry without creating it twice.
+  it('keeps sending failure recoverable, locks closing during a retry and closes after recovery', async () => {
+    connectSmtp.mockRejectedValueOnce(new Error('SMTP temporarily offline'));
+    const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Yahoo'); enterManual(view); submit(view); await settle();
+    expect(view.container.textContent).toContain('Receiving works. Sending needs attention');
+    expect((view.byLabel('Close setup') as HTMLButtonElement).disabled).toBe(false);
+    const pending = deferred<void>(); connectSmtp.mockReturnValueOnce(pending.promise);
+    fire(button(view, 'Retry sending check'), 'click');
+    expect((view.byLabel('Close setup') as HTMLButtonElement).disabled).toBe(true);
+    pending.resolve(); await settle();
+    expect(addAccount).toHaveBeenCalledOnce(); expect(state.accounts).toHaveLength(1); expect(onClose).toHaveBeenCalledOnce();
   });
 });
