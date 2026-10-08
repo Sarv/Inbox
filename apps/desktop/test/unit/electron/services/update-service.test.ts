@@ -40,6 +40,8 @@ const h = vi.hoisted(() => ({
     quitAndInstall: vi.fn(),
   },
   sent: [] as Array<{ channel: string; payload: unknown }>,
+  /** The signed-manifest check every found update must pass before download. */
+  verify: vi.fn(async (_info: unknown) => ({ ok: true }) as { ok: true } | { ok: false; reason: string }),
   /** Overridable so a build whose version lookup throws can be exercised. */
   getVersion: (): string => '1.2.1',
   /** Null models a closed window; a throwing send models a torn-down one. */
@@ -62,6 +64,7 @@ vi.mock('electron', () => ({
 }));
 
 vi.mock('electron-updater', () => ({ autoUpdater: h.updater }));
+vi.mock('../../../../electron/services/update-manifest', () => ({ verifyUpdate: (info: unknown) => h.verify(info) }));
 
 vi.mock('@sarvinbox/core', async () => {
   // The REAL withTimeout, not a stand-in: the timeout is the behaviour under
@@ -99,6 +102,15 @@ const readPrefs = () => JSON.parse(readFileSync(join(h.userData, PREFS), 'utf8')
 const writePrefs = (prefs: Record<string, unknown>) =>
   writeFileSync(join(h.userData, PREFS), JSON.stringify(prefs));
 
+/**
+ * electron-updater found `version`: emit it and let the signed-manifest
+ * verification (async) settle, as a real check awaits it.
+ */
+const offer = async (version: string) => {
+  h.updater.emit('update-available', { version, files: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+};
+
 /** Start with automatic updates OFF — the mode where the dialog does the work. */
 const manualMode = () => writePrefs({ skippedVersion: null, remindAfter: null, autoUpdate: false });
 
@@ -129,6 +141,7 @@ beforeEach(() => {
   h.updater.checkForUpdates = vi.fn(async () => ({}));
   h.updater.downloadUpdate = vi.fn(async () => [] as string[]);
   h.updater.quitAndInstall = vi.fn();
+  h.verify = vi.fn(async () => ({ ok: true }) as const);
   h.getVersion = () => '1.2.1';
   h.window = true;
   h.send = (channel, payload) => {
@@ -157,11 +170,16 @@ afterEach(() => {
 describe('startUpdateService', () => {
   // If the silent path were not armed, updates would only ever apply when the
   // user happened to press a button - which is not "automatic" at all.
+  // Changed deliberately (CASA M-3): electron-updater never downloads on its
+  // own any more — the service starts each download after verifying the update
+  // against the release's signed manifest — so autoDownload stays false and
+  // "automatic" is the service's autoUpdate.
   it('arms background download and install-on-quit for a supported build', async () => {
     const service = await load();
     service.startUpdateService();
 
-    expect(h.updater.autoDownload).toBe(true);
+    expect(h.updater.autoDownload).toBe(false);
+    expect(service.getUpdateState().autoUpdate).toBe(true);
     expect(h.updater.autoInstallOnAppQuit).toBe(true);
     service.stopUpdateService();
   });
@@ -251,7 +269,7 @@ describe('startUpdateService', () => {
     process.env['APPIMAGE'] = '/tmp/Sarv Inbox.AppImage';
     const appImage = await load();
     appImage.startUpdateService();
-    expect(h.updater.autoDownload).toBe(true);
+    expect(appImage.getUpdateState().phase).not.toBe('unsupported');
     appImage.stopUpdateService();
   });
 });
@@ -352,7 +370,7 @@ describe('checkForUpdates timeout', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
     expect(service.getUpdateState().phase).toBe('downloading');
 
     await service.checkForUpdates('manual');
@@ -371,8 +389,11 @@ describe('automatic updates ON', () => {
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
 
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
     expect(service.getUpdateState()).toMatchObject({ phase: 'downloading', prompt: false });
+    // Started by the service, once verified — not by electron-updater itself.
+    expect(h.verify).toHaveBeenCalledWith(expect.objectContaining({ version: '1.3.0' }));
+    expect(h.updater.downloadUpdate).toHaveBeenCalledTimes(1);
 
     h.updater.emit('download-progress', { percent: 42.4 });
     expect(service.getUpdateState()).toMatchObject({ percent: 42, prompt: false });
@@ -391,7 +412,7 @@ describe('automatic updates ON', () => {
     service.startUpdateService();
     await service.checkForUpdates('manual');
 
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
 
     expect(service.getUpdateState()).toMatchObject({ phase: 'downloading', prompt: true });
     service.stopUpdateService();
@@ -408,7 +429,7 @@ describe('automatic updates OFF', () => {
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
 
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
 
     expect(service.getUpdateState()).toMatchObject({
       phase: 'available',
@@ -426,7 +447,7 @@ describe('automatic updates OFF', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
 
     expect(service.downloadUpdate()).toBe(true);
 
@@ -447,7 +468,7 @@ describe('automatic updates OFF', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
     service.downloadUpdate();
 
     expect(service.dismissUpdateDialog().prompt).toBe(false);
@@ -484,13 +505,14 @@ describe('setAutoUpdateEnabled', () => {
     service.startUpdateService();
 
     service.setAutoUpdateEnabled(false);
-    expect(h.updater.autoDownload).toBe(false);
     expect(readPrefs().autoUpdate).toBe(false);
     expect(service.getUpdateState().autoUpdate).toBe(false);
 
     service.setAutoUpdateEnabled(true);
-    expect(h.updater.autoDownload).toBe(true);
     expect(readPrefs().autoUpdate).toBe(true);
+    expect(service.getUpdateState().autoUpdate).toBe(true);
+    // Either way electron-updater never downloads on its own (see above).
+    expect(h.updater.autoDownload).toBe(false);
     service.stopUpdateService();
   });
 
@@ -502,7 +524,7 @@ describe('setAutoUpdateEnabled', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
 
     service.setAutoUpdateEnabled(true);
 
@@ -520,7 +542,7 @@ describe('setAutoUpdateEnabled', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
     service.downloadUpdate();
     h.updater.emit('update-downloaded', { version: '1.3.0' });
 
@@ -752,7 +774,7 @@ describe('preference file handling', () => {
 
     const service = await load();
     expect(() => service.startUpdateService()).not.toThrow();
-    expect(h.updater.autoDownload).toBe(true);
+    expect(service.getUpdateState().autoUpdate).toBe(true);
     await service.checkForUpdates('manual');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
 
@@ -879,7 +901,7 @@ describe('resilience', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
-    h.updater.emit('update-available', { version: '1.3.0' });
+    await offer('1.3.0');
 
     expect(() => service.downloadUpdate()).not.toThrow();
     await Promise.resolve();
@@ -908,5 +930,90 @@ describe('resilience', () => {
     service.stopUpdateService();
     await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
     expect(h.updater.checkForUpdates).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('signed update manifest (CASA M-3)', () => {
+  // THE protection. Breaks: an update that isn't vouched for by the release's
+  // signed manifest — e.g. a binary swapped into the GitHub release — is
+  // downloaded and installed on every copy within the hour.
+  it('downloads nothing for an update that fails verification, and says why on a manual check', async () => {
+    h.verify = vi.fn(async () => ({ ok: false, reason: 'not signed' }) as const);
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('manual');
+    await offer('1.3.0');
+
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    expect(service.getUpdateState()).toMatchObject({
+      phase: 'error',
+      version: null,
+      prompt: true,
+      error: 'Version 1.3.0 could not be verified as a genuine Sarv Inbox release, so it was not downloaded.',
+    });
+    service.stopUpdateService();
+  });
+
+  // A background check never interrupts the user — a refusal included.
+  it('refuses silently on a background check', async () => {
+    h.verify = vi.fn(async () => ({ ok: false, reason: 'not signed' }) as const);
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    await offer('1.3.0');
+
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    expect(service.getUpdateState()).toMatchObject({ phase: 'error', prompt: false });
+    service.stopUpdateService();
+  });
+
+  // Breaks: the "Download" button (or turning automatic updates on) becomes a
+  // way round the verification.
+  it('refuses a requested download of an unverified version', async () => {
+    manualMode();
+    h.verify = vi.fn(async () => ({ ok: false, reason: 'bad signature' }) as const);
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    await offer('1.3.0');
+    // Even if the state were somehow 'available', the download is refused.
+    expect(service.downloadUpdate()).toBe(false);
+    service.setAutoUpdateEnabled(true);
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    service.stopUpdateService();
+  });
+
+  // Breaks: a check reports "available" before verification finished, so the
+  // dialog offers an update that is about to be refused.
+  it('counts the check as finished only once the found update is verified', async () => {
+    let release!: () => void;
+    h.verify = vi.fn(() => new Promise((resolve) => { release = () => resolve({ ok: true }); }));
+    h.updater.checkForUpdates = vi.fn(async () => {
+      h.updater.emit('update-available', { version: '1.3.0', files: [] });
+      return {};
+    });
+    manualMode();
+    const service = await load();
+    service.startUpdateService();
+    const check = service.checkForUpdates('manual');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(service.getUpdateState().phase).not.toBe('available');
+    release();
+    expect((await check).phase).toBe('available');
+    service.stopUpdateService();
+  });
+
+  // A verified update for one version must not license another.
+  it('verifies each version separately', async () => {
+    manualMode();
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    await offer('1.3.0');
+    h.verify = vi.fn(async () => ({ ok: false, reason: 'not signed' }) as const);
+    await offer('1.3.1');
+    expect(service.downloadUpdate()).toBe(false);
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    service.stopUpdateService();
   });
 });

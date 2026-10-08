@@ -28,6 +28,7 @@ import { autoUpdater } from 'electron-updater';
 
 import { getMainWindow } from '../shared';
 
+import { verifyUpdate } from './update-manifest';
 import {
   CHECK_INTERVAL_MS,
   DEFAULT_UPDATE_PREFS,
@@ -90,6 +91,15 @@ let downloadRequested = false;
  * begins: a dismissal answers this check, not every future one.
  */
 let dialogDismissed = false;
+/**
+ * The version whose files the release's SIGNED manifest vouched for (see
+ * update-manifest.ts). Nothing is downloaded unless it equals the version on
+ * offer — electron-updater no longer downloads on its own (autoDownload is
+ * always false); this service starts every download after verification.
+ */
+let verifiedVersion: string | null = null;
+/** The verification started by the last 'update-available', so a check awaits it. */
+let pendingVerification: Promise<void> | null = null;
 
 const loadPrefs = (): UpdatePrefs => {
   try {
@@ -178,22 +188,41 @@ const wireEvents = (): void => {
   });
 
   autoUpdater.on('update-available', (info) => {
-    // Logged with its cost: a check that takes 15 seconds and a check that
-    // hangs are indistinguishable in a log that only records the outcome, and
-    // that is precisely the gap that made "Checking for updates..." impossible
-    // to diagnose from app.log.
-    logger.info(
-      `[Update] Update available: ${info.version} (check took ${checkDurationMs()}ms,`,
-      prefs.autoUpdate ? 'downloading now)' : 'waiting for the user to ask)',
-    );
-    // With automatic updates on, electron-updater is already fetching it — say
-    // so. With them off nothing is moving until the user presses the button,
-    // and 'available' is the phase that asks.
-    setState(
-      shouldAutoDownload(prefs)
-        ? { phase: 'downloading', version: info.version, percent: 0, error: null }
-        : { phase: 'available', version: info.version, percent: 0, error: null },
-    );
+    // Verify BEFORE anything is downloaded: the found update must be one the
+    // release's signed manifest vouches for, file for file (CASA M-3). The
+    // check that found it awaits this, so the dialog never shows an
+    // unverified update as available.
+    pendingVerification = (async () => {
+      verifiedVersion = null;
+      const verdict = await verifyUpdate(info);
+      if (!verdict.ok) {
+        logger.warn(`[Update] Refused ${info.version}: could not verify it against the signed release manifest (${verdict.reason})`);
+        setState({
+          phase: 'error',
+          version: null,
+          error: `Version ${info.version} could not be verified as a genuine Sarv Inbox release, so it was not downloaded.`,
+          checkedAt: Date.now(),
+        });
+        return;
+      }
+      verifiedVersion = info.version;
+      // Logged with its cost: a check that takes 15 seconds and a check that
+      // hangs are indistinguishable in a log that only records the outcome, and
+      // that is precisely the gap that made "Checking for updates..." impossible
+      // to diagnose from app.log.
+      logger.info(
+        `[Update] Update available and verified: ${info.version} (check took ${checkDurationMs()}ms,`,
+        prefs.autoUpdate ? 'downloading now)' : 'waiting for the user to ask)',
+      );
+      if (shouldAutoDownload(prefs)) {
+        setState({ phase: 'downloading', version: info.version, percent: 0, error: null });
+        startVerifiedDownload();
+      } else {
+        // With automatic updates off nothing moves until the user presses the
+        // button, and 'available' is the phase that asks.
+        setState({ phase: 'available', version: info.version, percent: 0, error: null });
+      }
+    })();
   });
 
   autoUpdater.on('update-not-available', () => {
@@ -304,11 +333,15 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
     // defaults to a 60s socket timeout and retries server errors three times,
     // so an unbounded await can leave the dialog on "Checking for updates..."
     // for minutes. An honest failure at 20s is a better answer than a spinner.
+    pendingVerification = null;
     await withTimeout(
       autoUpdater.checkForUpdates(),
       UPDATE_CHECK_TIMEOUT_MS,
       `The update server did not respond within ${Math.round(UPDATE_CHECK_TIMEOUT_MS / 1000)} seconds.`,
     );
+    // An update found is verified before the check counts as finished (the
+    // verification bounds its own requests and never throws).
+    if (pendingVerification) await pendingVerification;
   } catch (error) {
     // Two different failures land here. A rejection from electron-updater has
     // already fired the 'error' event, so the state is set and there is nothing
@@ -349,17 +382,27 @@ export const downloadUpdate = (): boolean => {
     return false;
   }
 
+  if (verifiedVersion !== state.version) {
+    logger.warn('[Update] Download refused: version', state.version, 'was not verified against a signed manifest');
+    return false;
+  }
+
   logger.info('[Update] User asked to download', state.version);
   downloadRequested = true;
   dialogDismissed = false;
   setState({ phase: 'downloading', percent: 0, error: null });
+  startVerifiedDownload();
+  return true;
+};
+
+/** Start electron-updater's download of the update just verified. */
+function startVerifiedDownload(): void {
   // The rejection path is the 'error' event, which is already wired; this
   // catch only stops an unhandled rejection from reaching the process.
   void autoUpdater.downloadUpdate().catch((error) => {
     logger.warn('[Update] Download rejected:', error);
   });
-  return true;
-};
+}
 
 /**
  * Turn background downloading on or off.
@@ -371,7 +414,6 @@ export const downloadUpdate = (): boolean => {
  */
 export const setAutoUpdateEnabled = (enabled: boolean): UpdateState => {
   savePrefs(setAutoUpdate(prefs, enabled));
-  autoUpdater.autoDownload = shouldAutoDownload(prefs);
   logger.info('[Update] Automatic updates', enabled ? 'enabled' : 'disabled');
 
   if (enabled && state.phase === 'available' && state.version) {
@@ -467,7 +509,10 @@ export const startUpdateService = (): void => {
     return;
   }
 
-  autoUpdater.autoDownload = shouldAutoDownload(prefs);
+  // Never let electron-updater download on its own: every download starts in
+  // this service, after the update is verified against the release's signed
+  // manifest. "Install updates automatically" is honoured there instead.
+  autoUpdater.autoDownload = false;
   // Updates are automatic by default: downloaded in the background, then
   // applied during the next ordinary quit, so a user who never touches the
   // dialog still ends up on the new version without doing anything. The
@@ -516,4 +561,6 @@ export const __resetUpdateServiceForTests = (): void => {
   downloadRequested = false;
   dialogDismissed = false;
   wired = false;
+  verifiedVersion = null;
+  pendingVerification = null;
 };

@@ -296,8 +296,11 @@ jobs:
             EXTRA+=(-c.mac.notarize=true)
             echo "Signing and notarizing with the Developer ID certificate."
           elif [[ "${{ matrix.platform }}" == "mac" ]]; then
-            echo "WARN: APPLE_CERTIFICATE_P12 is not set — building an UNSIGNED app."
-            echo "      Gatekeeper will block it. See docs/RELEASING.md."
+            # Fail closed (CASA M-3): an unsigned macOS build used to be
+            # published with a warning, which Gatekeeper then blocked on every
+            # user's Mac. Nothing unsigned reaches a release.
+            echo "::error::APPLE_CERTIFICATE_P12 is not set — refusing to build an unsigned macOS release. See docs/RELEASING.md."
+            exit 1
           fi
           pnpm exec electron-builder ${{ matrix.args }} "${EXTRA[@]}" --publish never
         env:
@@ -453,6 +456,47 @@ jobs:
       # if the version has no section, rather than publishing empty notes.
       - name: Extract release notes
         run: node scripts/changelog.mjs notes "${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+
+      # Only for the signer below (it parses latest*.yml); the artifacts
+      # themselves were built and verified in the `build` jobs.
+      - uses: ./.github/actions/setup-workspace
+
+      # The update feed (latest*.yml) sits in the SAME release as the binaries
+      # it vouches for, and Windows/Linux builds aren't OS-signed — so anyone
+      # who could alter a release could ship every installed copy anything.
+      # The app now refuses any update whose files aren't in a manifest signed
+      # by UPDATE_SIGNING_KEY (CASA M-3). The script fails — nothing is
+      # published — if the key is missing, isn't the key the app trusts, or the
+      # feed disagrees with the artifacts.
+      - name: Sign the update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs artifacts "${{ steps.version.outputs.version }}"
+
+      # SHA256SUMS + a detached GPG signature, for anyone verifying a download
+      # by hand (and Linux package tooling). The public key is
+      # docs/release-signing-key.asc; the fingerprint is pinned here so a
+      # wrong key in the secret fails the release instead of signing it.
+      - name: Write and GPG-sign SHA256SUMS
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_GPG_FINGERPRINT: 97EA7E45F5EF280A9EF4B72F99955D8F79A76EF2
+        run: |
+          set -euo pipefail
+          if [[ -z "${GPG_SIGNING_KEY}" || -z "${GPG_PASSPHRASE}" ]]; then
+            echo "::error::GPG_SIGNING_KEY / GPG_PASSPHRASE are not set — refusing to publish unsigned checksums."
+            exit 1
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s' "${GPG_SIGNING_KEY}" | gpg --batch --import
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --local-user "${RELEASE_GPG_FINGERPRINT}" --armor --detach-sign SHA256SUMS
+          gpg --batch --status-fd 1 --verify SHA256SUMS.asc SHA256SUMS | grep -q "VALIDSIG ${RELEASE_GPG_FINGERPRINT}" \
+            || { echo "::error::SHA256SUMS.asc is not signed by ${RELEASE_GPG_FINGERPRINT}"; exit 1; }
+          rm -rf "${GNUPGHOME}"
 
       - name: List artifacts
         run: ls -lh artifacts/
