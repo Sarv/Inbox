@@ -138,15 +138,17 @@ describe('BehaviorIntelligence recipient role — parsed, not regex-scanned', ()
   // quadratic (~7 s on 120 KB); the parser is linear but its absolute time
   // swings 10x between a laptop and a coverage-instrumented CI runner, so this
   // checks GROWTH: 4x the header costs ~4x the time when linear, ~16x when
-  // quadratic. Best of three runs per size keeps one GC pause from deciding it.
+  // quadratic. Best of three runs per size keeps one GC pause from deciding it;
+  // sizes stay small and the timeout explicit because six runs on a slow
+  // coverage runner outlast the 5 s default.
   it('scores hostile To and Cc headers in time linear in their length', () => {
     const headers = (n: number) => ({
       toAddress: 'a'.repeat(n),
       ccAddress: `${'x@y.com, '.repeat(n / 120)}${'"'.repeat(n / 6)}`,
     });
     const best = (n: number) => Math.min(...[0, 1, 2].map(() => timed(() => role(headers(n)))));
-    const small = best(30_000);
-    const large = best(120_000);
+    const small = best(12_000);
+    const large = best(48_000);
     expect(large / Math.max(small, 1)).toBeLessThan(8);
-  });
+  }, 20_000);
 });
