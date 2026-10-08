@@ -81,6 +81,7 @@ import { installNativeAttachmentDownloadGuard } from './services/native-attachme
 import { startNotificationService, stopNotificationService } from './services/notification-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
 import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
+import { isOsBackedEncryption, secretStorageDescription } from './services/os-encryption';
 import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
 import { attachAutocrypt } from './services/pgp-service';
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
@@ -660,6 +661,11 @@ async function initializeAccountRegistry(): Promise<void> {
   } catch (e) {
     logger.warn('[Main] Secure-credentials migration deferred (keychain locked?):', (e as Error)?.message);
   }
+
+  // Say once where secrets live. On Linux without a keyring this is the line
+  // that explains why the "not encrypted" banner is showing.
+  if (isOsBackedEncryption()) logger.info(`[Security] secret storage: ${secretStorageDescription()}`);
+  else logger.warn(`[Security] secret storage: ${secretStorageDescription()}`);
 
   // The last three standalone settings/secret stores (agent config, AI API keys,
   // pipeline AI config) migrate file→core-DB on first read. Force those reads NOW

@@ -18,8 +18,9 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
-import { app, safeStorage } from 'electron';
+import { app } from 'electron';
 
+import { isOsBackedEncryption } from './os-encryption';
 import { isPlaintextEnvelope, openString, sealString, type EnvelopeErrors } from './safe-storage-envelope';
 const logger = createLogger('db-key-store');
 
@@ -35,6 +36,8 @@ function serialize(hexKey: string): Buffer {
   const sealed = sealString(hexKey);
   if (isPlaintextEnvelope(sealed)) {
     logger.warn('[DbKeyStore] safeStorage unavailable — DB key stored UNENCRYPTED (no OS keychain)');
+  } else if (!isOsBackedEncryption()) {
+    logger.warn('[DbKeyStore] no system keyring (Linux basic_text) — DB key is only obfuscated with a publicly known key');
   }
   return sealed;
 }
@@ -70,7 +73,7 @@ export function getDbEncryptionKey(): string {
   return hex;
 }
 
-/** Whether the DB key is (or would be) protected by the OS keychain. */
+/** Whether the DB key is (or would be) protected by the OS keychain — not Linux `basic_text`. */
 export function isDbKeyEncryptionAvailable(): boolean {
-  return safeStorage.isEncryptionAvailable();
+  return isOsBackedEncryption();
 }

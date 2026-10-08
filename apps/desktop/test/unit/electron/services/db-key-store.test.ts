@@ -4,6 +4,8 @@ import { join } from 'path';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { asPlatform } from '../../../helpers/as-platform';
+
 /**
  * The SQLCipher key store. Losing/regenerating this key makes every encrypted DB
  * unreadable, so the invariants are: mint ONCE, cache for the process lifetime,
@@ -11,12 +13,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * key file by minting a new one — it throws instead.
  */
 
-const h = vi.hoisted(() => ({ userData: '', encAvailable: true }));
+const h = vi.hoisted(() => ({ userData: '', encAvailable: true, backend: 'gnome_libsecret' }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => h.encAvailable,
+    // Linux only in Electron; a real keyring unless a test says otherwise.
+    getSelectedStorageBackend: () => h.backend,
     encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
       const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
@@ -46,6 +50,7 @@ beforeAll(() => { h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-dbkey-')); 
 
 beforeEach(() => {
   h.encAvailable = true;
+  h.backend = 'gnome_libsecret';
   rmSync(h.userData, { recursive: true, force: true });
   mkdirSync(h.userData, { recursive: true });
 });
@@ -114,5 +119,26 @@ describe('isDbKeyEncryptionAvailable', () => {
     expect(store.isDbKeyEncryptionAvailable()).toBe(true);
     h.encAvailable = false;
     expect(store.isDbKeyEncryptionAvailable()).toBe(false);
+  });
+
+  // Breaks: on Linux without a keyring the key to every mail database is
+  // reported as protected while it's sealed with a published key (CASA M-1).
+  it('reports the key as NOT protected under Linux basic_text', async () => {
+    const store = await load();
+    asPlatform('linux', () => {
+      h.backend = 'basic_text';
+      expect(store.isDbKeyEncryptionAvailable()).toBe(false);
+      h.backend = 'gnome_libsecret';
+      expect(store.isDbKeyEncryptionAvailable()).toBe(true);
+    });
+  });
+
+  // Elsewhere the backend question doesn't arise (Keychain / DPAPI).
+  it('ignores the Linux backend on other platforms', async () => {
+    const store = await load();
+    asPlatform('darwin', () => {
+      h.backend = 'basic_text';
+      expect(store.isDbKeyEncryptionAvailable()).toBe(true);
+    });
   });
 });

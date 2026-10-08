@@ -4,6 +4,7 @@ import { join } from 'path';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+
 /**
  * AI provider API-key vault. Same envelope rules as the mail credential vault
  * (ENC1 with a keychain, clearly-marked PLAIN1 without), read-modify-write
@@ -11,12 +12,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * than persisting a blank string.
  */
 
-const h = vi.hoisted(() => ({ userData: '', encAvailable: true }));
+const h = vi.hoisted(() => ({ userData: '', encAvailable: true, backend: 'gnome_libsecret' }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => h.encAvailable,
+    // Linux only in Electron; a real keyring unless a test says otherwise.
+    getSelectedStorageBackend: () => h.backend,
     encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
       const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
@@ -45,6 +48,7 @@ import {
   isSecureStorageAvailable,
   setAiSecret,
 } from '../../../../electron/services/ai-secret-store';
+import { asPlatform } from '../../../helpers/as-platform';
 
 const BLOB_KEY = 'ai-secrets';
 const LEGACY = 'ai-secrets.json';
@@ -56,6 +60,7 @@ beforeAll(() => { h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-aisecrets-'
 beforeEach(() => {
   resetFakeCoreDb();
   h.encAvailable = true;
+  h.backend = 'gnome_libsecret';
   rmSync(h.userData, { recursive: true, force: true });
   mkdirSync(h.userData, { recursive: true });
 });
@@ -306,4 +311,17 @@ describe('revertAiSecret (undo one write)', () => {
     await revertAiSecret('', 1);
     await expect(getAllAiSecrets()).resolves.toEqual({ p1: 'k' });
   });
+});
+
+describe('Linux without a system keyring (basic_text)', () => {
+  // Chromium's basic_text backend "encrypts" with a key published in its
+  // source, and isEncryptionAvailable() still says true. Breaks if reported as
+  // encrypted: the user is never warned that saved AI keys are readable by anyone
+  // who copies the profile (CASA M-1).
+  it('reports storage as NOT secure on basic_text', () => asPlatform('linux', () => {
+    h.backend = 'basic_text';
+    expect(isSecureStorageAvailable()).toBe(false);
+    h.backend = 'kwallet5';
+    expect(isSecureStorageAvailable()).toBe(true);
+  }));
 });

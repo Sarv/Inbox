@@ -4,6 +4,7 @@ import { join } from 'path';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+
 /**
  * The per-account credential vault. The dangerous failure mode here is a
  * read-modify-write that reads an unreadable vault as EMPTY and then persists
@@ -14,12 +15,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  *   - blank fields are dropped rather than persisted as empty strings.
  */
 
-const h = vi.hoisted(() => ({ userData: '', encAvailable: true }));
+const h = vi.hoisted(() => ({ userData: '', encAvailable: true, backend: 'gnome_libsecret' }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => h.encAvailable,
+    // Linux only in Electron; a real keyring unless a test says otherwise.
+    getSelectedStorageBackend: () => h.backend,
     encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
       const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
@@ -49,6 +52,7 @@ import {
   rekeyAccountSecrets,
   setAccountSecrets,
 } from '../../../../electron/services/secure-credential-store';
+import { asPlatform } from '../../../helpers/as-platform';
 
 const BLOB_KEY = 'secure-credentials';
 const LEGACY = 'secure-credentials.json';
@@ -60,6 +64,7 @@ beforeAll(() => { h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-vault-')); 
 beforeEach(() => {
   resetFakeCoreDb();
   h.encAvailable = true;
+  h.backend = 'gnome_libsecret';
   rmSync(h.userData, { recursive: true, force: true });
   mkdirSync(h.userData, { recursive: true });
 });
@@ -302,4 +307,17 @@ describe('bindAccountSecretHost', () => {
     expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' } });
     expect(await getAccountSecrets('acct-missing')).toBeNull();
   });
+});
+
+describe('Linux without a system keyring (basic_text)', () => {
+  // Chromium's basic_text backend "encrypts" with a key published in its
+  // source, and isEncryptionAvailable() still says true. Breaks if reported as
+  // encrypted: the user is never warned that saved mailbox passwords are readable by anyone
+  // who copies the profile (CASA M-1).
+  it('reports storage as NOT secure on basic_text', () => asPlatform('linux', () => {
+    h.backend = 'basic_text';
+    expect(isSecureStorageAvailable()).toBe(false);
+    h.backend = 'kwallet5';
+    expect(isSecureStorageAvailable()).toBe(true);
+  }));
 });

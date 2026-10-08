@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => true),
+    // Linux only in Electron; a real keyring unless a test says otherwise.
+    getSelectedStorageBackend: vi.fn(() => 'gnome_libsecret'),
     encryptString: vi.fn((text: string) => Buffer.from(`sealed(${text})`)),
     decryptString: vi.fn((buf: Buffer) => buf.toString().replace(/^sealed\(|\)$/g, '')),
   },
@@ -18,6 +20,7 @@ import {
   unseal,
   type Keychain,
 } from '../../../../electron/services/pgp-secret-seal';
+import { asPlatform } from '../../../helpers/as-platform';
 
 /**
  * Private keys at rest. What this protects: a key written in the clear on a
@@ -71,6 +74,22 @@ describe('pgp secret seal', () => {
     expect(() => protectionOf(Buffer.from('PLAIN:key'))).toThrow(/Unknown/);
     expect(() => unseal(fakeKeychain(), Buffer.from(''))).toThrow(SealError);
   });
+
+  // basic_text "encrypts" with a published key, so sealing a private key with
+  // it is the plaintext form this module refuses. Breaks if it counts as a
+  // keychain: whoever copies the profile reads the user's encrypted mail
+  // (CASA M-1). Keys already sealed under it must still open.
+  it('does not seal new keys under basic_text, but still opens old ones', () => asPlatform('linux', () => {
+    h.safeStorage.getSelectedStorageBackend.mockReturnValue('basic_text');
+    try {
+      expect(electronKeychain.isAvailable()).toBe(false);
+      expect(() => sealWithKeychain(electronKeychain, 'k')).toThrow(SealError);
+      const old = Buffer.concat([Buffer.from('ENC1:'), h.safeStorage.encryptString('old-key')]);
+      expect(unseal(electronKeychain, old)).toEqual({ protection: 'keychain', armoredPrivateKey: 'old-key' });
+    } finally {
+      h.safeStorage.getSelectedStorageBackend.mockReturnValue('gnome_libsecret');
+    }
+  }));
 
   // Breaks: the production keychain was not wired to Electron's safeStorage.
   it('electronKeychain delegates to safeStorage', () => {
