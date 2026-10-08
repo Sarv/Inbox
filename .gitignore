@@ -103,6 +103,8 @@ apps/mobile/ios/
 *.mobileprovision
 *.p7b
 *.asc
+# PUBLIC release-signing key (verifies SHA256SUMS.asc); the private half is a GitHub secret.
+!docs/release-signing-key.asc
 *.gpg
 
 # SQLite databases (local dev) and their journals / backups
@@ -167,3 +169,5 @@ apps/desktop/build/*
 !apps/desktop/build/afterPack.js
 !apps/desktop/build/beforeBuild.js
 !apps/desktop/build/entitlements.mac.plist
+# PUBLIC keys the app trusts for signed update manifests (update-manifest.ts).
+!apps/desktop/build/update-signing-keys.json
