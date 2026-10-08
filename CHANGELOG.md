@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned as garbled bytes.
 
 ### Security
+- **Blocked remote images now stay blocked in every email, and when printing.**
+  An email could be built so the image-blocking rule never applied, letting a
+  tracking pixel report when and where you opened it without you clicking
+  "Load images". The rule now applies to every message whatever its HTML looks
+  like. Printing used to load remote images regardless of your choice; it now
+  follows the same image settings as the message view, and a crafted subject
+  or sender name can no longer add content to the printout.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

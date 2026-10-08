@@ -19,6 +19,7 @@ import {
   type ReadingTypography,
 } from '../appearance';
 import { DARK_PAPER, applyEmailDarkMode } from '../utils/email-dark-mode';
+import { withLeadingCsp } from '../utils/email-frame-csp';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
 import { openExternalLink, opensExternally } from '../utils/open-external';
 import { rememberSenderImagesAllowed, useRemoteImageAutoLoad, type RemoteImageMessage } from '../utils/remote-images';
@@ -597,21 +598,13 @@ function peelTrailingDeadSpace(html: string): string {
   return out;
 }
 
-function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRemoteImages: boolean): string {
-  // CSP meta belt-and-suspenders: block any remote resource fetch the
-  // regex stripper missed. Allows inline styles (we inject our own),
-  // data: URIs (image-cache base64), and same-origin (about:srcdoc).
-  // No remote fonts, stylesheets, scripts, or image hotlinks.
-  //
-  // Remote images (http/https) are BLOCKED BY DEFAULT — they're the classic
-  // tracking-pixel vector (the sender learns you opened the mail + your IP/
-  // approx location). The user opts in per-message via "Load images", which
-  // re-renders with http/https added back to img-src. Cached images (data:/blob:)
-  // always render since they involve no network fetch.
-  const imgSrc = allowRemoteImages ? 'data: blob: https: http:' : 'data: blob:';
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; font-src data:;">`;
+export function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRemoteImages: boolean): string {
+  // The CSP (email-frame-csp.ts) blocks every remote fetch the regex stripper
+  // missed: no remote fonts, stylesheets, scripts or frames, and remote images
+  // only after the user's "Load images" (or an auto-load rule). It is placed
+  // FIRST, before any email bytes, by withLeadingCsp below — never spliced in
+  // at the email's own </head>, which the email controls.
   const themeStyle = `<style data-sarv-theme>${themeCss}</style>`;
-  const headInjection = `${csp}${themeStyle}`;
   // Strip blocking resources, then normalize fonts + classes + whitespace
   // before injection.
   // stripBlockingResources is ALWAYS applied (drops <script>/<style>/MSO
@@ -639,19 +632,20 @@ function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRe
   const hasBodyTag = /<body\b/i.test(cleaned);
 
   if (hasHtmlTag) {
-    // Inject into existing <head> if present, else create one.
+    // The theme goes at the end of an existing <head> when there is a real
+    // one; otherwise right after the CSP. Either way the CSP itself is first.
     if (/<head\b/i.test(cleaned)) {
-      return cleaned.replace(/<\/head>/i, `${headInjection}</head>`);
+      const themed = cleaned.replace(/<\/head>/i, `${themeStyle}</head>`);
+      return withLeadingCsp(themed, allowRemoteImages, themed === cleaned ? themeStyle : '');
     }
-    // No <head>: inject one right after <html>.
-    return cleaned.replace(/<html\b[^>]*>/i, (m) => `${m}<head>${headInjection}</head>`);
+    return withLeadingCsp(cleaned.replace(/<html\b[^>]*>/i, (m) => `${m}<head>${themeStyle}</head>`), allowRemoteImages);
   }
   if (hasBodyTag) {
     // Has <body> but no <html>/<head>. Wrap.
-    return `<!DOCTYPE html><html><head>${headInjection}</head>${cleaned}</html>`;
+    return withLeadingCsp(`<!DOCTYPE html><html><head>${themeStyle}</head>${cleaned}</html>`, allowRemoteImages);
   }
   // Plain fragment.
-  return `<!DOCTYPE html><html><head>${headInjection}</head><body>${cleaned}</body></html>`;
+  return withLeadingCsp(`<!DOCTYPE html><html><head>${themeStyle}</head><body>${cleaned}</body></html>`, allowRemoteImages);
 }
 
 /**
