@@ -13,7 +13,7 @@ import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImage
 import { ipcMain, dialog } from 'electron';
 
 import { ensureAccountRuntime } from '../services/accounts-runtime';
-import { getValidAccessToken } from '../services/oauth-service';
+import { getAccessTokenForMailHost } from '../services/oauth-service';
 import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
 import { sendTransformFor } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
@@ -81,7 +81,7 @@ export function registerSmtpHandlers(): void {
         }
         config = {
           ...config,
-          accessToken: await getValidAccessToken(config.oauthProvider, config.username),
+          accessToken: await getAccessTokenForMailHost(config.oauthProvider, config.username, 'smtp', config.host),
         };
       }
 
@@ -159,7 +159,7 @@ export function registerSmtpHandlers(): void {
       let cfg = config;
       if (cfg.authMethod === 'oauth2') {
         if (!cfg.oauthProvider) throw new Error('authMethod=oauth2 requires oauthProvider');
-        cfg = { ...cfg, accessToken: await getValidAccessToken(cfg.oauthProvider, cfg.username) };
+        cfg = { ...cfg, accessToken: await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'smtp', cfg.host) };
       }
       const client = new SMTPClient();
       await client.connect({ ...cfg, tlsOptions: resolveTlsOptions(cfg) });
@@ -428,7 +428,7 @@ export async function sendEmailFromMain(
   if (!result.success && cfg?.authMethod === 'oauth2' && cfg.oauthProvider && isAuthTokenError(result.error)) {
     logger.warn(`[SMTP] Send failed with an auth/token error for ${cfg.username} — refreshing token and retrying`);
     try {
-      const accessToken = await getValidAccessToken(cfg.oauthProvider, cfg.username, true /* forceRefresh */);
+      const accessToken = await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'smtp', cfg.host, true /* forceRefresh */);
       await smtpClient.connect({ ...cfg, accessToken });
       result = await smtpClient.sendEmail(options, transformMime);
     } catch (refreshErr) {

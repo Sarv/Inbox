@@ -23,7 +23,7 @@ import { kickBackfillScheduler } from '../services/backfill-scheduler';
 import { kickBodyPrefetchScheduler } from '../services/body-prefetch-scheduler';
 import { markConnectionUnstable } from '../services/connection-health';
 import { saveImapAccount, loadImapAccount, clearImapAccount } from '../services/imap-account-store';
-import { getValidAccessToken, attachImapBearer } from '../services/oauth-service';
+import { getAccessTokenForMailHost, attachImapBearer } from '../services/oauth-service';
 import { createQuotaBackoff } from '../services/quota-backoff';
 import { getAccountSecrets } from '../services/secure-credential-store';
 import {
@@ -443,7 +443,7 @@ export function registerSyncHandlers(): void {
         try {
           config = {
             ...config,
-            accessToken: await getValidAccessToken(config.oauthProvider, config.username),
+            accessToken: await getAccessTokenForMailHost(config.oauthProvider, config.username, 'imap', config.host),
           };
           if (vaultPw) {
             const probe = await probeImapCredentials(config);
@@ -737,7 +737,7 @@ export function registerSyncHandlers(): void {
       try {
         probeConfig = {
           ...config,
-          accessToken: await getValidAccessToken(config.oauthProvider, config.username),
+          accessToken: await getAccessTokenForMailHost(config.oauthProvider, config.username, 'imap', config.host),
         };
       } catch (error) {
         return { success: false, error: (error as Error).message };
@@ -1292,7 +1292,7 @@ export function registerSyncHandlers(): void {
       if (!engine.isConnected()) {
         let cfg = config;
         if (cfg.authMethod === 'oauth2' && cfg.oauthProvider) {
-          cfg = { ...cfg, accessToken: await getValidAccessToken(cfg.oauthProvider, cfg.username) };
+          cfg = { ...cfg, accessToken: await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'imap', cfg.host) };
         } else if (!cfg.password) {
           // Password auth: the renderer no longer ships the password (stripped
           // from localStorage), so inject it from the encrypted vault via the
