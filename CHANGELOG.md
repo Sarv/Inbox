@@ -79,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal is logged. Accounts set up normally are unaffected. An account that
   was switched to OAuth on a different server falls back to its saved app
   password, as before.
+- **A crafted email can no longer freeze the app.** Priority scoring checked
+  every email's subject, body and To/Cc with patterns that slowed down sharply
+  on specially built input: one message could stall the app for seconds to
+  minutes, and again after each restart. Scoring now reads at most the first
+  20,000 characters, uses patterns whose cost grows only with the text's
+  length, and reads To/Cc with the app's standard address parser. Priority
+  scores for ordinary mail are unchanged.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still
