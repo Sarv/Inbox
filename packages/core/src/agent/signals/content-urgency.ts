@@ -23,10 +23,15 @@ const URGENCY_PATTERNS = [
   /\b(please respond|please reply|awaiting your|waiting for your)\b/i,
 ];
 
+// The question-word patterns bound the gap to the `?` (`[^?\n]{0,200}`, not
+// `.*`). With `.*`, a long line of question words and no `?` made every match
+// attempt rescan to the end of the line — quadratic, so one crafted email
+// stalled the main process for seconds. A question word 200+ characters before
+// its `?` is not a direct question anyway.
 const QUESTION_PATTERNS = [
   /\?\s*$/m, // Line ending with ?
-  /\b(can you|could you|would you|will you|do you|are you|have you|did you)\b.*\?/i,
-  /\b(what|when|where|how|why|which)\b.*\?/i,
+  /\b(can you|could you|would you|will you|do you|are you|have you|did you)\b[^?\n]{0,200}\?/i,
+  /\b(what|when|where|how|why|which)\b[^?\n]{0,200}\?/i,
   /\b(please (let me know|confirm|advise|share|update|send))\b/i,
 ];
 
@@ -44,12 +49,36 @@ const FINANCIAL_PATTERNS = [
   /\b\d+\s*(USD|INR|EUR|GBP)\b/i,
 ];
 
+/**
+ * How much of the subject + body is scored. Bodies are attacker-controlled and
+ * this runs synchronously in the main process for every scored email, so the
+ * work must be bounded whatever arrives. Deadlines, asks and approvals sit at
+ * the top of a message; past this point is quoted history and footers.
+ */
+export const MAX_URGENCY_TEXT_CHARS = 20_000;
+
+/**
+ * Drop every `<…>` tag and any stray `<`, in one linear pass. A split rather
+ * than a regex: `/<[^>]+>/` scanned to the end of the text once per `<` (80 KB
+ * of `<` took 3 s), and no `<` survives to form a tag, whatever the text is
+ * later used for.
+ */
+function stripTags(s: string): string {
+  const parts = s.split('<');
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    const gt = parts[i].indexOf('>');
+    out += gt < 0 ? parts[i] : parts[i].slice(gt + 1);
+  }
+  return out;
+}
+
 export function computeContentUrgency(
   subject: string,
   body: string,
   userName: string,
 ): ContentUrgencySignal {
-  const text = `${subject}\n${body}`.replace(/<[^>]+>/g, ''); // Strip HTML
+  const text = stripTags(`${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS));
   const textLower = text.toLowerCase();
 
   const hasDeadline = DEADLINE_PATTERNS.some(p => p.test(text));
