@@ -64,7 +64,9 @@ export function computeContentUrgency(
 ): ContentUrgencySignal {
   // Strip tags with `[^<>]*`, not `[^>]+`: on a run of `<` with no `>`, the old
   // class let every attempt scan to the end of the text (80 KB of `<` took 3 s).
-  const text = `${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS).replace(/<[^<>]*>/g, '');
+  // Any `<` left over (`<<b>`, `a < b`) is dropped too: no pattern reads it, and
+  // the text then holds no tag whatever it is later used for.
+  const text = `${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS).replace(/<[^<>]*>/g, '').replace(/</g, '');
   const textLower = text.toLowerCase();
 
   const hasDeadline = DEADLINE_PATTERNS.some(p => p.test(text));

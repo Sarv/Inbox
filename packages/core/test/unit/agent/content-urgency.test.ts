@@ -38,6 +38,13 @@ describe('computeContentUrgency — bounded work on hostile bodies', () => {
     expect(timed(() => computeContentUrgency('s', body, 'Ann'))).toBeLessThan(50);
   });
 
+  // Breaks: markup the tag strip can't pair up (`<<b>`, a bare `<`) hides a
+  // signal from scoring.
+  it('scores through stray "<" and still sees the signals', () => {
+    const signal = computeContentUrgency('s', '<<b>URGENT</b> a < b, <i>can you confirm?', 'Ann');
+    expect(signal).toMatchObject({ hasUrgencyMarkers: true, hasDirectQuestion: true });
+  });
+
   // Breaks: a signal that sits past the cap leaks the full-body cost back in,
   // or the cap stops applying to the subject + body together.
   it('only scores the first MAX_URGENCY_TEXT_CHARS of subject + body', () => {
@@ -128,9 +135,11 @@ describe('BehaviorIntelligence recipient role — parsed, not regex-scanned', ()
   });
 
   // Breaks: a crafted To/Cc header stalls the main process. The old regex took
-  // ~7 s on 120 KB; the parser is linear (~0.1 s), hence the 1 s budget.
+  // ~7 s on 120 KB without coverage; the parser is linear (~0.2 s plain, ~0.4 s
+  // under coverage locally, ~1.8 s on a coverage-instrumented CI runner), so
+  // 3 s still tells the two apart without failing on a slow runner.
   it('scores an email with hostile 120 KB To and Cc headers quickly', () => {
     const ms = timed(() => role({ toAddress: 'a'.repeat(120_000), ccAddress: `${'x@y.com, '.repeat(1000)}${'"'.repeat(20_000)}` }));
-    expect(ms).toBeLessThan(1_000);
+    expect(ms).toBeLessThan(3_000);
   });
 });
