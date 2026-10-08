@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned as garbled bytes.
 
 ### Security
+- **Sign-in tokens only go to their own provider's servers.** A Gmail,
+  Outlook, Yahoo or Sarv mail sign-in is now used only with that provider's own
+  IMAP and SMTP servers, and a Sarv sign-in authenticates only Sarv AI
+  endpoints. Any other destination is refused before the token is read, and the
+  refusal is logged. Accounts set up normally are unaffected. An account that
+  was switched to OAuth on a different server falls back to its saved app
+  password, as before.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

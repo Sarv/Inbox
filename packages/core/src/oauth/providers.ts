@@ -194,7 +194,17 @@ const REGISTRY: Record<OAuthProviderId, OAuthProviderConfig> = {
   gmail: GMAIL,
   microsoft: MICROSOFT,
   // revokeEndpoint cleared: Google's endpoint must never receive a Yahoo token.
-  yahoo: { ...cloneProviderConfig(GMAIL), id: 'yahoo', label: 'Yahoo Mail', clientId: '', revokeEndpoint: undefined },
+  // imap/smtp replaced for the same reason: they are the hosts a Yahoo bearer
+  // may be sent to (token-destinations.ts), so Gmail's must not leak through.
+  yahoo: {
+    ...cloneProviderConfig(GMAIL),
+    id: 'yahoo',
+    label: 'Yahoo Mail',
+    clientId: '',
+    revokeEndpoint: undefined,
+    imap: { host: 'imap.mail.yahoo.com', port: 993, secure: true },
+    smtp: { host: 'smtp.mail.yahoo.com', port: 465, secure: true },
+  },
   sarv: buildSarvProvider(),
 };
 

@@ -22,7 +22,9 @@ import {
   generatePkcePair,
   generateState,
   getOAuthProvider,
+  isOAuthMailHostAllowed,
   isOAuthProviderConfigured,
+  isSarvAIEndpointAllowed,
   OAuthError,
   refreshAccessToken,
   revokeToken,
@@ -35,6 +37,7 @@ import {
   setSarvBaseUrl,
   userInfoFromIdToken,
   type OAuthAccount,
+  type OAuthMailProtocol,
   type OAuthProviderId,
   type OAuthProviderConfig,
   type OAuthUserInfo,
@@ -263,10 +266,46 @@ export function attachImapBearer(config: IMAPConfig): IMAPConfig {
   if (config.authMethod !== 'oauth2' || !config.oauthProvider) return config;
   const provider = config.oauthProvider as unknown as OAuthProviderId;
   const email = config.username;
+  const host = config.host;
+  // Checked HERE, not only inside the closure, so a refused host fails the
+  // connect up front instead of handing the pool a resolver that throws later.
+  assertOAuthMailHost(provider, 'imap', host);
   return {
     ...config,
-    resolveBearer: (forceRefresh?: boolean) => getValidAccessToken(provider, email, forceRefresh),
+    resolveBearer: (forceRefresh?: boolean) => getAccessTokenForMailHost(provider, email, 'imap', host, forceRefresh),
   };
+}
+
+/**
+ * Refuse to mint a mail bearer for a host that is not one of `providerId`'s own
+ * IMAP/SMTP servers. The IMAP/SMTP config (host included) arrives from the
+ * renderer, so without this a compromised renderer could have main send the
+ * user's Gmail token to a server of its choosing (see token-destinations.ts).
+ * Refused BEFORE the token store is read, and logged as a security event.
+ */
+function assertOAuthMailHost(providerId: string, protocol: OAuthMailProtocol, host: string | undefined): void {
+  if (isOAuthMailHostAllowed(providerId, protocol, host)) return;
+  logger.warn(`[OAuth] Refused a ${providerId} token for ${protocol.toUpperCase()} host "${host ?? ''}" — not one of that provider's mail servers`);
+  throw new OAuthError(
+    `A ${providerId} sign-in can only be used with ${providerId}'s own mail servers, not ${host || 'an unspecified host'}.`,
+    'TOKEN_DESTINATION_REFUSED',
+  );
+}
+
+/**
+ * `getValidAccessToken` for a bearer that is about to be sent to a mail server.
+ * Every IMAP/SMTP connect path goes through this (or `attachImapBearer`), never
+ * through `getValidAccessToken` directly.
+ */
+export async function getAccessTokenForMailHost(
+  providerId: OAuthProviderId,
+  email: string,
+  protocol: OAuthMailProtocol,
+  host: string | undefined,
+  forceRefresh = false,
+): Promise<string> {
+  assertOAuthMailHost(providerId, protocol, host);
+  return getValidAccessToken(providerId, email, forceRefresh);
 }
 
 export async function getValidAccessToken(
@@ -545,6 +584,7 @@ export function attachOAuthBearer<
     authMethod?: 'apiKey' | 'oauth';
     oauthProvider?: OAuthProviderId;
     oauthEmail?: string;
+    baseUrl?: string;
     resolveBearer?: (forceRefresh?: boolean) => Promise<string>;
   },
 >(config: C): C {
@@ -553,6 +593,17 @@ export function attachOAuthBearer<
     config.oauthProvider &&
     config.oauthEmail
   ) {
+    // Only a Sarv session powers an AI provider, and only toward Sarv's own AI
+    // endpoints. Both fields arrive from the renderer, so without this a
+    // config naming 'gmail' and its own baseUrl would be POSTed the user's
+    // Gmail token. Refused configs pass through with no bearer: the request
+    // then fails as unauthenticated rather than leaking a credential.
+    if (config.oauthProvider !== 'sarv' || !isSarvAIEndpointAllowed(config.baseUrl)) {
+      logger.warn(
+        `[OAuth] Refused a ${String(config.oauthProvider)} token for AI endpoint "${config.baseUrl ?? ''}" — only a Sarv sign-in may authenticate Sarv AI endpoints`,
+      );
+      return config;
+    }
     const providerId = config.oauthProvider;
     const email = config.oauthEmail;
     // The closure forwards `forceRefresh` so a call site can force a fresh

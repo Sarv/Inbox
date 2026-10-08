@@ -105,6 +105,16 @@ describe('setOAuthClientId / setOAuthClientSecret', () => {
     expect(providers.getOAuthProvider('yahoo').clientId).toBe('');
   });
 
+  // Yahoo is spread from the Gmail template and used to keep Gmail's mail
+  // hosts — which are also where a Yahoo bearer is allowed to go. Breaks: a
+  // Yahoo token is presented to Google's servers and Yahoo accounts can't sync.
+  it('gives Yahoo its own mail hosts, not the Gmail template\'s', () => {
+    const yahoo = providers.getOAuthProvider('yahoo');
+    expect(yahoo.imap).toEqual({ host: 'imap.mail.yahoo.com', port: 993, secure: true });
+    expect(yahoo.smtp).toEqual({ host: 'smtp.mail.yahoo.com', port: 465, secure: true });
+    expect(providers.getOAuthProvider('gmail').imap?.host).toBe('imap.gmail.com');
+  });
+
   // Microsoft used to be a clone of the Gmail template: "Sign in with Outlook"
   // opened accounts.google.com, asked Google for its scopes and would have
   // pointed SMTP at smtp.gmail.com. Pins the real Microsoft identity platform.

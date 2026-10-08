@@ -7,3 +7,4 @@ export * from './oauth-errors';
 export * from './sarv-catalog';
 export * from './scope-diff';
 export * from './id-token';
+export * from './token-destinations';
