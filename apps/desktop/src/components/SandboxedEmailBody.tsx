@@ -405,12 +405,35 @@ export function buildIframeCss(
  *   - \`<link rel="prefetch">\`
  *   - \`<script>\` (defense-in-depth — sandbox already blocks scripts)
  */
-function stripBlockingResources(html: string): string {
+/**
+ * `html.replace(re, fn)` for a pattern that can only match text ending in
+ * `close` (e.g. `<style …>…</style>`), applied ONLY up to the last `close`.
+ *
+ * Identical result: no match can start after the last closing tag, because it
+ * would need one later. And it is what keeps the pattern linear: on a run of
+ * unclosed openers (`<style><style>…`) every attempt in the tail used to scan
+ * to the end of the input and fail — quadratic, and a frozen window for one
+ * crafted email.
+ */
+function replaceUpToLastClose(
+  html: string,
+  close: string,
+  re: RegExp,
+  fn: (match: string, ...groups: string[]) => string,
+): string {
+  const end = html.toLowerCase().lastIndexOf(close);
+  if (end < 0) return html;
+  const cut = end + close.length;
+  return html.slice(0, cut).replace(re, fn) + html.slice(cut);
+}
+
+/** Exported for tests (pure HTML transform). */
+export function stripBlockingResources(html: string): string {
   let out = html;
 
   // 1. Inline <style>: drop @font-face blocks + @import lines, and neutralize
   //    dark-mode media queries.
-  out = out.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (_, css) => {
+  out = replaceUpToLastClose(out, '</style>', /<style\b[^<>]*>([\s\S]*?)<\/style>/gi, (_, css) => {
     const cleaned = css
       // @font-face { ... } — handle nested braces minimally; one level is enough for fonts.
       .replace(/@font-face\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g, '')
@@ -428,14 +451,14 @@ function stripBlockingResources(html: string): string {
 
   // 2. <link rel="stylesheet|preload|prefetch|preconnect|dns-prefetch">.
   out = out.replace(
-    /<link\b[^>]*\brel\s*=\s*["']?(?:stylesheet|preload|prefetch|preconnect|dns-prefetch|modulepreload)["']?[^>]*>/gi,
+    /<link\b[^<>]*\brel\s*=\s*["']?(?:stylesheet|preload|prefetch|preconnect|dns-prefetch|modulepreload)["']?[^<>]*>/gi,
     '',
   );
 
   // 3. <script>...</script> — sandbox blocks execution but the parser
   // still spends time tokenizing them and can stall on src= fetches.
-  out = out.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
-  out = out.replace(/<script\b[^>]*\/?>/gi, '');
+  out = replaceUpToLastClose(out, '</script>', /<script\b[^<>]*>[\s\S]*?<\/script>/gi, () => '');
+  out = out.replace(/<script\b[^<>]*\/?>/gi, '');
 
   return out;
 }
@@ -468,7 +491,8 @@ function stripBlockingResources(html: string): string {
  *   • Collapse runs of 3+ newlines in the HTML source to 2 (cosmetic,
  *     keeps the cached body compact).
  */
-function normalizeHtmlForBubble(html: string): string {
+/** Exported for tests (pure HTML transform). */
+export function normalizeHtmlForBubble(html: string): string {
   let out = html;
 
   // Strip the inline-style declarations that fight our normalized
@@ -507,7 +531,7 @@ function normalizeHtmlForBubble(html: string): string {
   // font-size + font-family); just delete its sizing attributes.
   // KEEP `color=` because the user wants sender's color emphasis to
   // survive — only kill face/size.
-  out = out.replace(/<font\b([^>]*)>/gi, (_full, attrs: string) => {
+  out = out.replace(/<font\b([^<>]*)>/gi, (_full, attrs: string) => {
     const cleanedAttrs = attrs
       .replace(/\s(face|size)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
     return `<font${cleanedAttrs}>`;
@@ -518,7 +542,7 @@ function normalizeHtmlForBubble(html: string): string {
 
   // Drop Outlook's namespaced <o:p> tags entirely — they render as
   // empty paragraphs in non-Office viewers and add bogus gaps.
-  out = out.replace(/<\/?o:p\b[^>]*>/gi, '');
+  out = out.replace(/<\/?o:p\b[^<>]*>/gi, '');
 
   // Drop `<br>` tags that come right after a block-closing tag.
   // `</div><br>` and `</p><br>` produce a DOUBLE line break (the
@@ -538,8 +562,10 @@ function normalizeHtmlForBubble(html: string): string {
   out = out.replace(/(?:<br\s*\/?>\s*){2,}/gi, '<br>');
 
   // Drop empty paragraphs / divs (any combo of whitespace + <br> inside).
-  out = out.replace(/<p[^>]*>\s*(?:<br\s*\/?>\s*)*\s*<\/p>/gi, '');
-  out = out.replace(/<div[^>]*>\s*(?:<br\s*\/?>\s*)*\s*<\/div>/gi, '');
+  // `(?:\s|<br>)*` matches exactly what `\s*(?:<br>\s*)*\s*` did, without
+  // the ambiguity that made a long run of spaces quadratic.
+  out = out.replace(/<p[^<>]*>(?:\s|<br\s*\/?>)*<\/p>/gi, '');
+  out = out.replace(/<div[^<>]*>(?:\s|<br\s*\/?>)*<\/div>/gi, '');
 
   // Collapse 2+ source newlines → single newline (HTML ignores
   // these for rendering, but keeping them tight avoids subtle
@@ -558,10 +584,37 @@ function normalizeHtmlForBubble(html: string): string {
  * but still counts trailing empty ELEMENTS as layout, which is the "too much
  * blank space" the raw single-email view otherwise shows.
  */
-function trimTrailingDeadSpace(html: string): string {
+/** Exported for tests (pure HTML transform). */
+export function trimTrailingDeadSpace(html: string): string {
   // Bounded to a tail window so a large body can't turn the anchored `$`
   // regexes below into O(n^2). See trimTrailingWindowed.
   return trimTrailingWindowed(html, peelTrailingDeadSpace);
+}
+
+/** Trailing entities that render as nothing visible. */
+const BLANK_ENTITIES = ['&nbsp;', '&#xa0;', '&#160;', '&zwnj;', '&zwj;'];
+const TRAILING_BREAK_TAG = /^<(?:br|hr)\s*\/?>$/i;
+
+/**
+ * Remove the trailing run of whitespace, blank entities and `<br>`/`<hr>` tags
+ * — exactly what `/(?:\s|&nbsp;|&#xA0;|&#160;|&zwnj;|&zwj;|<br\s*\/?>|<hr\s*\/?>)+$/i`
+ * removed, in one backwards pass. The three kinds end in different characters
+ * (whitespace, `;`, `>`), so peeling from the end is unambiguous.
+ */
+function stripTrailingBlankTokens(html: string): string {
+  let end = html.length;
+  for (;;) {
+    if (end > 0 && /\s/.test(html[end - 1])) { end -= 1; continue; }
+    if (html[end - 1] === ';') {
+      const entity = BLANK_ENTITIES.find((e) => html.slice(Math.max(0, end - e.length), end).toLowerCase() === e);
+      if (entity) { end -= entity.length; continue; }
+    }
+    if (html[end - 1] === '>') {
+      const start = html.lastIndexOf('<', end - 1);
+      if (start >= 0 && TRAILING_BREAK_TAG.test(html.slice(start, end))) { end = start; continue; }
+    }
+    return html.slice(0, end);
+  }
 }
 
 function peelTrailingDeadSpace(html: string): string {
@@ -574,13 +627,11 @@ function peelTrailingDeadSpace(html: string): string {
   do {
     prev = out;
     // 1. Strip the trailing run of whitespace / &nbsp; & zero-width entities /
-    //    <br> / <hr> in ONE pass. These alternatives are disjoint on their
-    //    first character (whitespace vs '&' vs '<'), so the engine matches
-    //    them deterministically — linear time, no backtracking.
-    out = out.replace(
-      /(?:\s|&nbsp;|&#xA0;|&#160;|&zwnj;|&zwj;|<br\s*\/?>|<hr\s*\/?>)+$/i,
-      '',
-    );
+    //    <br> / <hr>. Scanned BACKWARDS (stripTrailingBlankTokens): the
+    //    anchored `(?:…)+$` regex this replaces restarted at every position of
+    //    a long whitespace run that didn't reach the end — quadratic within the
+    //    tail window, ~60 ms of main-thread time per crafted email.
+    out = stripTrailingBlankTokens(out);
     // 2. Strip ONE trailing empty <p>/<div>/<span>/<font> (inner content of
     //    whitespace / <br> / entities only). Kept as a SEPARATE regex from
     //    step 1 on purpose: combining the container alternative with the plain
@@ -590,14 +641,15 @@ function peelTrailingDeadSpace(html: string): string {
     //    first char, so it stays linear. The loop peels nested wrappers one
     //    layer per pass.
     out = out.replace(
-      /<(p|div|span|font)\b[^>]*>(?:<br\s*\/?>|&nbsp;|&#xA0;|&#160;|&zwnj;|&zwj;|\s)*<\/\1>$/i,
+      /<(p|div|span|font)\b[^<>]*>(?:<br\s*\/?>|&nbsp;|&#xA0;|&#160;|&zwnj;|&zwj;|\s)*<\/\1>$/i,
       '',
     );
   } while (out !== prev && ++guard < 10000);
   return out;
 }
 
-function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRemoteImages: boolean): string {
+/** Exported for tests (pure HTML transform). */
+export function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRemoteImages: boolean): string {
   // CSP meta belt-and-suspenders: block any remote resource fetch the
   // regex stripper missed. Allows inline styles (we inject our own),
   // data: URIs (image-cache base64), and same-origin (about:srcdoc).
@@ -644,7 +696,7 @@ function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRe
       return cleaned.replace(/<\/head>/i, `${headInjection}</head>`);
     }
     // No <head>: inject one right after <html>.
-    return cleaned.replace(/<html\b[^>]*>/i, (m) => `${m}<head>${headInjection}</head>`);
+    return cleaned.replace(/<html\b[^<>]*>/i, (m) => `${m}<head>${headInjection}</head>`);
   }
   if (hasBodyTag) {
     // Has <body> but no <html>/<head>. Wrap.
@@ -686,8 +738,9 @@ export function frameLinkToOpen(target: EventTarget | null): string | null {
  * common in plaintext-converted-to-HTML output. Done on the source
  * string before srcdoc so the iframe sees correct anchors.
  */
-function fixBareLinks(html: string): string {
-  return html.replace(/<a(?![^>]*href)([^>]*)>(https?:\/\/[^<]+)<\/a>/gi, '<a href="$2"$1>$2</a>');
+/** Exported for tests (pure HTML transform). */
+export function fixBareLinks(html: string): string {
+  return html.replace(/<a(?![^<>]*href)([^<>]*)>(https?:\/\/[^<]+)<\/a>/gi, '<a href="$2"$1>$2</a>');
 }
 
 /**
@@ -725,7 +778,7 @@ export function forceLinksExternal(html: string): string {
   // setWindowOpenHandler then denied, which silently broke jump links inside an
   // email; a `target` appearing after `href` was also missed, emitting a second
   // one. Matching the full tag is what makes the rules below actually apply.
-  return html.replace(/<a\s([^>]*?)(\/?)>/gi, (tag, attrs: string, selfClose: string) => {
+  return html.replace(/<a\s([^<>]*?)(\/?)>/gi, (tag, attrs: string, selfClose: string) => {
     const href = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs);
     const url = (href?.[1] ?? href?.[2] ?? href?.[3] ?? '').trim();
     // No href: nothing to navigate, leave the markup untouched.
@@ -774,8 +827,9 @@ export function forceLinksExternal(html: string): string {
  * longer waits on offscreen images, so DOMContentLoaded happens
  * within milliseconds of srcdoc being set.
  */
-function makeImagesNonBlocking(html: string): string {
-  return html.replace(/<img\b([^>]*)>/gi, (_, attrs: string) => {
+/** Exported for tests (pure HTML transform). */
+export function makeImagesNonBlocking(html: string): string {
+  return html.replace(/<img\b([^<>]*)>/gi, (_, attrs: string) => {
     let a = attrs;
     if (!/\bloading\s*=/i.test(a)) a += ' loading="lazy"';
     if (!/\bdecoding\s*=/i.test(a)) a += ' decoding="async"';
@@ -793,10 +847,10 @@ function makeImagesNonBlocking(html: string): string {
  * the snap from estimate to measured height happens while the content
  * is still transparent.
  */
-function estimateInitialHeight(html: string): number {
-  const text = html
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]*>/g, ' ')
+/** Exported for tests (pure HTML transform). */
+export function estimateInitialHeight(html: string): number {
+  const text = replaceUpToLastClose(html, '</style>', /<style[\s\S]*?<\/style>/gi, () => ' ')
+    .replace(/<[^<>]*>/g, ' ')
     .replace(/&[a-z#0-9]+;/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -868,7 +922,7 @@ export function SandboxedEmailBody({ html, className = '', styledTables = false,
   const autoLoadImages = useRemoteImageAutoLoad(remoteImagesFrom, blockRemoteImages);
   const effectiveBlock = blockRemoteImages && !autoLoadImages;
   const hasRemoteImages = useMemo(
-    () => /<img\b[^>]*\ssrc\s*=\s*["']?\s*https?:/i.test(html) || /url\(\s*["']?\s*https?:/i.test(html),
+    () => /<img\b[^<>]*\ssrc\s*=\s*["']?\s*https?:/i.test(html) || /url\(\s*["']?\s*https?:/i.test(html),
     [html],
   );
 

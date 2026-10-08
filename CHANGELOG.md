@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmation dialog closes.
 
 ### Fixed
+- **A specially built email can no longer freeze the app when you open it.**
+  Some unusual (or deliberately malformed) email markup made the message
+  viewer do work that grew with the square of the email's size — a large one
+  could lock the window for minutes, every time it was opened. Opening any
+  email is now fast regardless of its content, and ordinary emails look
+  exactly as before.
 - **AI features work with OpenAI and other providers.** Every request carried
   options meant only for Sarv's models, which OpenAI rejects, so connecting an
   OpenAI key or using it for sorting and drafting could fail. Other providers
