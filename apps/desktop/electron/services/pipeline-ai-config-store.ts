@@ -26,17 +26,16 @@ import { join } from 'path';
 
 import type { AIProviderConfig } from '@sarvinbox/core';
 import { createLogger } from '@sarvinbox/core';
-import { app, safeStorage } from 'electron';
+import { app } from 'electron';
 
 import { getBlob, setBlob, deleteBlob } from './core-db';
+import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 
 const logger = createLogger('pipeline-ai-config-store');
 
 const LEGACY_FILE_NAME = 'pipeline-ai-config.json';
 const BLOB_KEY = 'pipeline-ai-config';
-const MAGIC_ENC = 'ENC1:';
-const MAGIC_PLAIN = 'PLAIN1:';
 
 /** The subset of AIProviderConfig that is serializable and worth persisting. */
 export interface PersistedPipelineAIConfig {
@@ -73,26 +72,17 @@ function pick(config: AIProviderConfig): PersistedPipelineAIConfig | null {
 }
 
 function serialize(config: PersistedPipelineAIConfig): Buffer {
-  const payload = JSON.stringify(config);
-  if (safeStorage.isEncryptionAvailable()) {
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), safeStorage.encryptString(payload)]);
-  }
-  return Buffer.from(MAGIC_PLAIN + payload, 'utf8');
+  return sealJson(config);
 }
 
+/** This store's wording for an envelope it can't open (tests pin these). */
+const ENVELOPE_ERRORS: EnvelopeErrors = {
+  locked: 'Pipeline AI config is encrypted but safeStorage is unavailable',
+  unknownFormat: 'Unknown pipeline-ai-config format',
+};
+
 function deserialize(buf: Buffer): PersistedPipelineAIConfig {
-  const enc = buf.subarray(0, MAGIC_ENC.length).toString('utf8');
-  if (enc === MAGIC_ENC) {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('Pipeline AI config is encrypted but safeStorage is unavailable');
-    }
-    return JSON.parse(safeStorage.decryptString(buf.subarray(MAGIC_ENC.length)));
-  }
-  const plain = buf.subarray(0, MAGIC_PLAIN.length).toString('utf8');
-  if (plain === MAGIC_PLAIN) {
-    return JSON.parse(buf.subarray(MAGIC_PLAIN.length).toString('utf8'));
-  }
-  throw new Error('Unknown pipeline-ai-config format');
+  return openJson<PersistedPipelineAIConfig>(buf, ENVELOPE_ERRORS);
 }
 
 const writeQueue = createWriteQueue();

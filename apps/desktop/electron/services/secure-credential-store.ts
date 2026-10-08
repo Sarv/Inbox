@@ -22,13 +22,12 @@ import { createLogger } from '@sarvinbox/core';
 import { app, safeStorage } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
+import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 const logger = createLogger('secure-credential-store');
 
 const LEGACY_FILE_NAME = 'secure-credentials.json';
 const BLOB_KEY = 'secure-credentials';
-const MAGIC_ENC = 'ENC1:';
-const MAGIC_PLAIN = 'PLAIN1:';
 
 /** The secret fields we pull out of a config so they never touch renderer disk. */
 export interface AccountSecrets {
@@ -48,29 +47,17 @@ export function isSecureStorageAvailable(): boolean {
 }
 
 function serialize(vault: Vault): Buffer {
-  const payload = JSON.stringify(vault);
-  if (safeStorage.isEncryptionAvailable()) {
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), safeStorage.encryptString(payload)]);
-  }
-  // No keychain (e.g. Linux without a Secret Service): fall back to a clearly
-  // MARKED plaintext blob rather than silently dropping creds. The caller is
-  // warned via isSecureStorageAvailable() so it can surface this to the user.
-  return Buffer.from(MAGIC_PLAIN + payload, 'utf8');
+  return sealJson(vault);
 }
 
+/** This store's wording for an envelope it can't open (tests pin these). */
+const ENVELOPE_ERRORS: EnvelopeErrors = {
+  locked: 'Credentials are encrypted but safeStorage is unavailable',
+  unknownFormat: 'Unknown secure-credentials blob format',
+};
+
 function deserialize(buf: Buffer): Vault {
-  const enc = buf.subarray(0, MAGIC_ENC.length).toString('utf8');
-  if (enc === MAGIC_ENC) {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('Credentials are encrypted but safeStorage is unavailable');
-    }
-    return JSON.parse(safeStorage.decryptString(buf.subarray(MAGIC_ENC.length)));
-  }
-  const plain = buf.subarray(0, MAGIC_PLAIN.length).toString('utf8');
-  if (plain === MAGIC_PLAIN) {
-    return JSON.parse(buf.subarray(MAGIC_PLAIN.length).toString('utf8'));
-  }
-  throw new Error('Unknown secure-credentials blob format');
+  return openJson<Vault>(buf, ENVELOPE_ERRORS);
 }
 
 /** One-time migration of the legacy secure-credentials.json into the core DB. */

@@ -19,16 +19,15 @@ import { join } from 'path';
 
 import type { OAuthAccount, OAuthProviderId } from '@sarvinbox/core';
 import { createLogger } from '@sarvinbox/core';
-import { app, safeStorage } from 'electron';
+import { app } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
+import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 const logger = createLogger('oauth-token-store');
 
 const LEGACY_FILE_NAME = 'oauth-accounts.json';
 const BLOB_KEY = 'oauth-accounts';
-const MAGIC_ENC = 'ENC1:';
-const MAGIC_PLAIN = 'PLAIN1:';
 
 let cache: OAuthAccount[] | null = null;
 
@@ -37,28 +36,17 @@ function legacyFilePath(): string {
 }
 
 function serialize(accounts: OAuthAccount[]): Buffer {
-  const payload = JSON.stringify(accounts);
-  if (safeStorage.isEncryptionAvailable()) {
-    const enc = safeStorage.encryptString(payload);
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), enc]);
-  }
-  return Buffer.from(MAGIC_PLAIN + payload, 'utf8');
+  return sealJson(accounts);
 }
 
+/** This store's wording for an envelope it can't open (tests pin these). */
+const ENVELOPE_ERRORS: EnvelopeErrors = {
+  locked: 'Stored tokens are encrypted but safeStorage is unavailable',
+  unknownFormat: 'Unknown oauth-accounts blob format',
+};
+
 function deserialize(buf: Buffer): OAuthAccount[] {
-  const enc = buf.subarray(0, MAGIC_ENC.length).toString('utf8');
-  if (enc === MAGIC_ENC) {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('Stored tokens are encrypted but safeStorage is unavailable');
-    }
-    const plain = safeStorage.decryptString(buf.subarray(MAGIC_ENC.length));
-    return JSON.parse(plain) as OAuthAccount[];
-  }
-  const plain = buf.subarray(0, MAGIC_PLAIN.length).toString('utf8');
-  if (plain === MAGIC_PLAIN) {
-    return JSON.parse(buf.subarray(MAGIC_PLAIN.length).toString('utf8')) as OAuthAccount[];
-  }
-  throw new Error('Unknown oauth-accounts blob format');
+  return openJson<OAuthAccount[]>(buf, ENVELOPE_ERRORS);
 }
 
 /**
