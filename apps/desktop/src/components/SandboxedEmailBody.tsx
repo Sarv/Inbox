@@ -406,8 +406,9 @@ export function buildIframeCss(
  *   - \`<script>\` (defense-in-depth — sandbox already blocks scripts)
  */
 /**
- * `html.replace(re, fn)` for a pattern that can only match text ending in
- * `close` (e.g. `<style …>…</style>`), applied ONLY up to the last `close`.
+ * `html.replace(re, fn)` for a pattern that can only match text ending in a
+ * closing tag that starts with `close` (e.g. `</style` for `<style …>…</style >`),
+ * applied ONLY up to the end of the last such tag.
  *
  * Identical result: no match can start after the last closing tag, because it
  * would need one later. And it is what keeps the pattern linear: on a run of
@@ -423,7 +424,8 @@ function replaceUpToLastClose(
 ): string {
   const end = html.toLowerCase().lastIndexOf(close);
   if (end < 0) return html;
-  const cut = end + close.length;
+  const gt = html.indexOf('>', end + close.length - 1);
+  const cut = gt < 0 ? html.length : gt + 1;
   return html.slice(0, cut).replace(re, fn) + html.slice(cut);
 }
 
@@ -433,7 +435,7 @@ export function stripBlockingResources(html: string): string {
 
   // 1. Inline <style>: drop @font-face blocks + @import lines, and neutralize
   //    dark-mode media queries.
-  out = replaceUpToLastClose(out, '</style>', /<style\b[^<>]*>([\s\S]*?)<\/style>/gi, (_, css) => {
+  out = replaceUpToLastClose(out, '</style', /<style\b[^<>]*>([\s\S]*?)<\/style\b[^<>]*>/gi, (_, css) => {
     const cleaned = css
       // @font-face { ... } — handle nested braces minimally; one level is enough for fonts.
       .replace(/@font-face\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g, '')
@@ -457,8 +459,13 @@ export function stripBlockingResources(html: string): string {
 
   // 3. <script>...</script> — sandbox blocks execution but the parser
   // still spends time tokenizing them and can stall on src= fetches.
-  out = replaceUpToLastClose(out, '</script>', /<script\b[^<>]*>[\s\S]*?<\/script>/gi, () => '');
+  // The parser also ends a script at `</script >` or `</script foo>`. Deleting
+  // tags can splice the text around them into a new `<script` (`<scr<script>
+  // </script>ipt>`), and an opener with a `<` inside an attribute matches
+  // neither pattern — so any `<script` that survives is escaped to text.
+  out = replaceUpToLastClose(out, '</script', /<script\b[^<>]*>[\s\S]*?<\/script\b[^<>]*>/gi, () => '');
   out = out.replace(/<script\b[^<>]*\/?>/gi, '');
+  out = out.replace(/<(\/?script)\b/gi, '&lt;$1');
 
   return out;
 }

@@ -74,6 +74,30 @@ describe('ordinary mail is transformed exactly as before', () => {
     expect(out).toBe('<style> .a{color:red}</style><link rel="icon" href="f.ico"><p>hi</p>');
   });
 
+  // Breaks: a script survives the strip (defense in depth behind the sandbox
+  // and CSP) — closed by `</script >`, spliced together by the deletion, or
+  // hidden behind a `<` in an attribute.
+  it('leaves no <script tag behind, however the markup is bent', () => {
+    expect(stripBlockingResources('<p>a</p><script>x()</script ><p>b</p>')).toBe('<p>a</p><p>b</p>');
+    expect(stripBlockingResources('<p>a</p><SCRIPT>x()</script foo="1"><p>b</p>')).toBe('<p>a</p><p>b</p>');
+    for (const hostile of [
+      '<scr<script></script>ipt>alert(1)</script>',
+      '<script x="<">alert(1)</script>',
+      '<<script>x</script>script>',
+      '<script>unterminated',
+    ]) {
+      expect(stripBlockingResources(hostile)).not.toMatch(/<\/?script/i);
+    }
+    // Ordinary text that mentions scripts is untouched.
+    expect(stripBlockingResources('<p>a subscript, a scripted reply</p>')).toBe('<p>a subscript, a scripted reply</p>');
+  });
+
+  // Breaks: a `</style >` closer is not recognised, so its style block is left
+  // unprocessed (web fonts load, dark-mode CSS fires).
+  it('processes a style block closed with </style >', () => {
+    expect(stripBlockingResources('<style>@font-face{font-family:X} .a{}</style ><p>x</p>')).toBe('<style> .a{}</style><p>x</p>');
+  });
+
   // The "up to the last closing tag" bound must not change what is matched.
   it('treats a <style> after the last </style> exactly as before (left alone)', () => {
     expect(stripBlockingResources('<style>a</style><p>x</p><style>unterminated')).toBe('<style>a</style><p>x</p><style>unterminated');
