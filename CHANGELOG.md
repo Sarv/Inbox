@@ -119,6 +119,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protected" and explains how to fix it: back up the secret key, then import
   that backup with its passphrase. macOS, Windows and Linux with a keyring are
   unchanged.
+- **Other programs on your computer can no longer run code as Sarv Inbox.**
+  Release builds now switch off the ways a local program could start the app
+  in a debugging or scripting mode (and so reach its saved passwords and keys
+  without asking you), and the app refuses to start if its own files have been
+  modified. On macOS the app also no longer allows other code to be loaded into
+  it through environment variables. Every release checks these settings in the
+  built app before it is published.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still
