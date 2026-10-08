@@ -85,9 +85,13 @@ describe('ordinary mail is transformed exactly as before', () => {
       '<script x="<">alert(1)</script>',
       '<<script>x</script>script>',
       '<script>unterminated',
+      '<<script>script>',
     ]) {
       expect(stripBlockingResources(hostile)).not.toMatch(/<\/?script/i);
     }
+    // A self-closed or unpaired opener is dropped, not shown as text.
+    expect(stripBlockingResources('<p>a</p><script src="x.js"/><p>b</p>')).toBe('<p>a</p><p>b</p>');
+    expect(stripBlockingResources('<p>a</p><script src="x.js"><p>b</p>')).toBe('<p>a</p><p>b</p>');
     // Ordinary text that mentions scripts is untouched.
     expect(stripBlockingResources('<p>a subscript, a scripted reply</p>')).toBe('<p>a subscript, a scripted reply</p>');
   });

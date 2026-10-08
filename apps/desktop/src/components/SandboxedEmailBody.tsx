@@ -430,6 +430,22 @@ function replaceUpToLastClose(
 }
 
 /**
+ * Drop every complete `<script …>` opener (up to its first `>`) left in `html`
+ * — a self-closed or unpaired one. A split, not a regex replace, like
+ * {@link escapeScriptTags}, which must run after it: dropping a tag can splice
+ * the text around it into a new `<script`.
+ */
+function dropScriptOpeners(html: string): string {
+  const parts = html.split('<');
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    const gt = parts[i].indexOf('>');
+    out += /^script\b/i.test(parts[i]) && gt >= 0 ? parts[i].slice(gt + 1) : `<${parts[i]}`;
+  }
+  return out;
+}
+
+/**
  * Escape the `<` of every `<script` / `</script` left in `html` to `&lt;`, so
  * none can open or close a script. A split, not a regex replace: one linear
  * pass, and every `<` is checked against what actually follows it.
@@ -478,8 +494,7 @@ export function stripBlockingResources(html: string): string {
   // </script>ipt>`), and an opener with a `<` inside an attribute matches
   // neither pattern — so any `<script` that survives is escaped to text.
   out = replaceUpToLastClose(out, '</script', /<script\b[^<>]*>[\s\S]*?<\/script\b[^<>]*>/gi, () => '');
-  out = out.replace(/<script\b[^<>]*\/?>/gi, '');
-  out = escapeScriptTags(out);
+  out = escapeScriptTags(dropScriptOpeners(out));
 
   return out;
 }
