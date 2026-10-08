@@ -105,6 +105,36 @@ and runs fine, so this failure is invisible until a user tries to sign in.
 > effectively public once you ship. Use a client dedicated to the desktop app,
 > never one shared with a web property.
 
+#### Release signing secrets (required — a release fails without them)
+
+Every release is signed twice in the `publish` job (CASA M-3). Both fail closed:
+with a secret missing or wrong, **nothing is published**.
+
+| Secret | What it signs | Checked against |
+| --- | --- | --- |
+| `UPDATE_SIGNING_KEY` | `update-manifest.json` — every artifact's sha512. The installed app refuses any update whose files aren't in a manifest signed by this key. | `apps/desktop/build/update-signing-keys.json` (public key shipped in the app) |
+| `GPG_SIGNING_KEY`, `GPG_PASSPHRASE` | `SHA256SUMS` → `SHA256SUMS.asc`, for verifying downloads by hand | the fingerprint pinned in `release.yml` (`97EA7E45F5EF280A9EF4B72F99955D8F79A76EF2`); public key at `docs/release-signing-key.asc` |
+
+`UPDATE_SIGNING_KEY` is an Ed25519 private key in PKCS#8 PEM; paste the whole
+file (`-----BEGIN PRIVATE KEY-----` … `-----END PRIVATE KEY-----`).
+`GPG_SIGNING_KEY` is the ASCII-armoured secret key (`gpg --armor
+--export-secret-keys <fingerprint>`).
+
+> **Back up both private keys offline (password manager or hardware).** Losing
+> `UPDATE_SIGNING_KEY` means every installed copy refuses every future update —
+> users would have to reinstall by hand. It must never be committed or put
+> anywhere but the GitHub secret and the backup.
+
+**Rotating the update key** (planned, or after a suspected leak):
+
+1. Generate a new key pair; add the new PUBLIC key to the `ed25519` list in
+   `apps/desktop/build/update-signing-keys.json` (keep the old one).
+2. Release with the OLD key still in the secret. Installed copies verify it with
+   the old key and receive an app that trusts both.
+3. Switch `UPDATE_SIGNING_KEY` to the new key; a later release can drop the old
+   public key. After a leak, do step 2 immediately and treat any release signed
+   in between as suspect.
+
 ### 1b. Your local `.env` vs. repository secrets
 
 Your `.env` is **not** what CI builds from — it is gitignored and never leaves
@@ -250,9 +280,17 @@ Three things make that work, and each is a way to break it:
    (`gh release edit vX --draft`) before users update.
 3. **macOS updates require the build to be signed.** Squirrel.Mac validates the
    signature of the downloaded `.zip` against the running app, so an unsigned
-   release installs for nobody. If `APPLE_CERTIFICATE_P12` was missing, the
-   macOS build warns rather than failing (see above) — publishing that release
-   ships a Mac app that can never update itself again.
+   release installs for nobody. The macOS build therefore FAILS when
+   `APPLE_CERTIFICATE_P12` is missing, rather than shipping an app that can
+   never update itself again.
+4. **Every update is checked against the signed manifest before it downloads.**
+   `latest*.yml` lives in the same release as the binaries it vouches for, and
+   Windows/Linux builds aren't OS-signed, so the app also fetches
+   `update-manifest.json` + `.sig` from the release and refuses the update unless
+   every file it would download matches a hash signed by `UPDATE_SIGNING_KEY`
+   (`electron/services/update-manifest.ts`). A release without them is refused
+   by every copy that has this check — which is why the publish job won't create
+   one.
 
 ### What each platform gets
 
@@ -270,8 +308,11 @@ same way — there is no `app-update.yml` in a `pnpm dev` tree.
 ### If a user says updates never arrive
 
 Check, in this order: the release is published rather than draft; `latest.yml`
-(or `latest-mac.yml`/`latest-linux.yml`) is attached to it; the version in that
-file is higher than theirs; and their build is not a `.deb`/`.rpm`. The app logs
+(or `latest-mac.yml`/`latest-linux.yml`) is attached to it, and so are
+`update-manifest.json` and `update-manifest.json.sig`; the version in that file
+is higher than theirs; and their build is not a `.deb`/`.rpm`. A refused
+verification logs `[Update] Refused <version>: could not verify it …` with the
+reason. The app logs
 every check to `app.log` with the `[Update]` prefix, including the reason a check
 was refused.
 
