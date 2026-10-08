@@ -6,7 +6,7 @@ import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
 import { isOnboardingPending } from '../../services/onboarding-progress';
 import { forgetImageTrustAccount, setImageTrustAccount } from '../../utils/remote-images';
-import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
+import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, vaultEntryFor, vaultHasPassword, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
 import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
 
 // Concurrent connects to the SAME account join one run.
@@ -61,20 +61,12 @@ async function doConnect(
   get: () => EmailStore,
 ): Promise<void> {
   console.log('[Store] connect() called with:', { host: config.host, username: config.username });
-  // Rehydrate secrets from the encrypted vault when handed a stripped config
-  // (loaded from localStorage after migration). In-memory only — never re-saved
-  // to disk. If the caller already supplied a secret (login form), use it as-is.
+  // A saved account's config arrives stripped of its password. The renderer
+  // never reads it back: main injects the vaulted password itself (only for the
+  // host it was saved for), keyed by the account id passed here. A password the
+  // user just typed (login / edit form) is sent as-is and re-vaulted below.
   let connectConfig = config;
-  const hasSecret = !!(config.password || config.accessToken || config.refreshToken);
-  if (!hasSecret) {
-    // Try the registry id AND the host-derived id — a legacy account's secret
-    // may be vaulted under either (its id can predate host-keying).
-    const secrets = await fetchVaultSecrets([acctId, accountIdFor(config.username, config.host)]);
-    if (secrets?.imap) connectConfig = { ...config, ...secrets.imap };
-  }
   try {
-    // Pass the account id so main can inject the vault password itself if the
-    // renderer-side rehydration missed it (belt-and-suspenders — main owns the vault).
     const result = await window.electronAPI.imap.connect(connectConfig, acctId);
     console.log('[Store] IPC connect result:', result);
 
@@ -113,7 +105,7 @@ async function doConnect(
       // Persist the secret to the encrypted vault (keyed by account id), then
       // save the NON-secret config to localStorage (saveCredentials strips).
       try {
-        await window.electronAPI.secureCreds.set(acctId, { imap: extractSecrets(connectConfig) });
+        await window.electronAPI.secureCreds.set(acctId, { imap: vaultEntryFor(connectConfig) });
       } catch (e) {
         console.warn('[Store] Failed to store IMAP secret in vault:', (e as Error)?.message);
       }
@@ -372,19 +364,10 @@ const connectionSlice = (
     set({ connectionStatus: 'reconnecting' });
 
     try {
-      // Rehydrate the secret from the vault if the in-memory config is stripped
-      // (e.g. a manual reconnect on a cold start that never ran connect()).
-      let cfg = imapConfig;
-      if (!(imapConfig.password || (imapConfig as any).accessToken || (imapConfig as any).refreshToken)) {
-        const secrets = await fetchVaultSecrets([
-          findAccountByEmailHost(get().accounts, imapConfig.username, imapConfig.host)?.id,
-          accountIdFor(imapConfig.username, imapConfig.host),
-        ]);
-        if (secrets?.imap) cfg = { ...imapConfig, ...secrets.imap };
-      }
+      // Main injects the vaulted password for this account (see doConnect).
       const reconnectAcctId = findAccountByEmailHost(get().accounts, imapConfig.username, imapConfig.host)?.id
         ?? accountIdFor(imapConfig.username, imapConfig.host);
-      const result = await window.electronAPI.imap.connect(cfg, reconnectAcctId);
+      const result = await window.electronAPI.imap.connect(imapConfig, reconnectAcctId);
       if (result.success) {
         console.log('[Store] Reconnection successful');
         set({
@@ -474,33 +457,27 @@ const connectionSlice = (
     const { imapConfig, smtpConfig, activeAccountId } = get();
     // Prefer an explicitly supplied config (from the SMTP setup form), then the
     // saved SMTP config, then a best-effort derivation from IMAP.
-    let config: SMTPConfig | null =
+    const config: SMTPConfig | null =
       explicit ?? smtpConfig ?? (imapConfig ? deriveSmtpFromImap(imapConfig) : null);
     if (!config) throw new Error('No IMAP or SMTP config available');
 
     // SMTP secrets are stored in the vault under the OWNING account's id.
     const acctId = activeAccountId
       ?? (imapConfig ? accountIdFor(imapConfig.username, imapConfig.host) : null);
-    // Rehydrate the SMTP secret from the vault when the config is stripped and
-    // the caller didn't supply one (e.g. reconnecting a saved account).
-    if (acctId && !(config.password || (config as any).accessToken || (config as any).refreshToken)) {
-      const secrets = await fetchVaultSecrets([
-        acctId,
-        imapConfig ? accountIdFor(imapConfig.username, imapConfig.host) : null,
-      ]);
-      if (secrets?.smtp) config = { ...config, ...secrets.smtp };
-    }
 
     // Nothing to authenticate with. nodemailer turns this into
     // `Missing credentials for "LOGIN"` plus a full stack trace — and because
     // SmtpConnector re-runs on every IMAP connect, that fired on every startup.
     // Fail fast and quietly instead: sending genuinely isn't set up, so the
     // "Set up sending" affordance is the real fix, not a doomed connection.
+    // A saved account's config is stripped; main injects the vaulted password
+    // (for this host only), so here we only need to know one exists.
     const hasSmtpCredential = !!(
       config.password
       || (config as any).accessToken
       || (config as any).refreshToken
       || config.authMethod === 'oauth2'
+      || (await vaultHasPassword([acctId, imapConfig ? accountIdFor(imapConfig.username, imapConfig.host) : null], 'smtp'))
     );
     if (!hasSmtpCredential) {
       throw new Error(`No sending credentials stored for ${config.host} — set up sending for this account.`);
@@ -508,12 +485,12 @@ const connectionSlice = (
 
     try {
       console.log('[Store] Connecting to SMTP server:', config.host);
-      const result = await window.electronAPI.smtp.connect(config);
+      const result = await window.electronAPI.smtp.connect(config, acctId ?? undefined);
 
       if (result.success) {
         // Store the SMTP secret in the encrypted vault; state/disk keep metadata only.
         if (acctId) {
-          try { await window.electronAPI.secureCreds.set(acctId, { smtp: extractSecrets(config as any) }); }
+          try { await window.electronAPI.secureCreds.set(acctId, { smtp: vaultEntryFor(config as any) }); }
           catch (e) { console.warn('[Store] Failed to store SMTP secret in vault:', (e as Error)?.message); }
         }
         set({ smtpConnected: true, smtpConfig: config });

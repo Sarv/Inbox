@@ -25,7 +25,8 @@ import {
   extractSecrets,
   fetchAICategoryTotal,
   fetchVirtualFolderTotal,
-  fetchVaultSecrets,
+  vaultEntryFor,
+  vaultHasPassword,
   findAccountByEmailHost,
   getBodyDownloadLimit,
   getEmailsPerPage,
@@ -593,42 +594,56 @@ describe('stripSecrets / extractSecrets', () => {
   });
 });
 
-describe('fetchVaultSecrets', () => {
-  // Legacy accounts may have their secret filed under the host-less id or the
-  // host-suffixed one, so a reconnect has to try both — otherwise the user is
-  // asked to re-enter a password that IS stored.
-  it('returns null when the vault bridge is unavailable', async () => {
+describe('vaultEntryFor', () => {
+  // Main only injects a saved secret for the host it was saved for. Breaks if
+  // the host is dropped: every secret saved from now on is unbound and gets
+  // bound to whatever host is asked for first.
+  it('carries the config\'s host alongside its secrets', () => {
+    expect(vaultEntryFor({ host: 'imap.x.com', username: 'u', password: 'p' })).toEqual({ password: 'p', host: 'imap.x.com' });
+  });
+
+  // Breaks: a host-only write could re-point an existing password elsewhere.
+  it('writes nothing — not even a host — when the config carries no secret', () => {
+    expect(vaultEntryFor({ host: 'imap.x.com', username: 'u' })).toBeUndefined();
+    expect(vaultEntryFor(null)).toBeUndefined();
+  });
+
+  it('omits an empty host rather than binding to ""', () => {
+    expect(vaultEntryFor({ host: '', password: 'p' })).toEqual({ password: 'p' });
+  });
+});
+
+describe('vaultHasPassword', () => {
+  // The renderer may only ASK whether a password is saved — it never receives
+  // one. Legacy accounts may have it under the host-less or the host-suffixed
+  // id, so every candidate is asked; otherwise "Set up sending" appears for an
+  // account whose password IS stored.
+  it('is false when the vault bridge is unavailable', async () => {
     installElectronAPI({});
-    await expect(fetchVaultSecrets(['acct-a'])).resolves.toBeNull();
+    await expect(vaultHasPassword(['acct-a'], 'smtp')).resolves.toBe(false);
   });
 
-  it('returns the first candidate id that has secrets', async () => {
-    const get = vi
-      .fn()
-      .mockResolvedValueOnce({ success: true, data: {} }) // present but empty ⇒ keep looking
-      .mockResolvedValueOnce({ success: true, data: { imap: { password: 'p' } } });
-    installElectronAPI({ secureCreds: { get } });
-    await expect(fetchVaultSecrets(['acct-a', 'acct-a--imap-x-com'])).resolves.toEqual({ imap: { password: 'p' } });
-    expect(get).toHaveBeenCalledTimes(2);
+  it('is true when any candidate id holds a password of that kind', async () => {
+    const hasPassword = vi.fn()
+      .mockResolvedValueOnce({ success: true, data: false })
+      .mockResolvedValueOnce({ success: true, data: true });
+    installElectronAPI({ secureCreds: { hasPassword } });
+    await expect(vaultHasPassword(['acct-a', 'acct-a--imap-x-com'], 'smtp')).resolves.toBe(true);
+    expect(hasPassword).toHaveBeenNthCalledWith(2, 'acct-a--imap-x-com', 'smtp');
   });
 
-  it('skips nullish ids and never queries the same id twice', async () => {
-    const get = vi.fn().mockResolvedValue({ success: false });
-    installElectronAPI({ secureCreds: { get } });
-    await fetchVaultSecrets([null, undefined, 'acct-a', 'acct-a', '']);
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith('acct-a');
+  it('skips nullish ids and never asks about the same id twice', async () => {
+    const hasPassword = vi.fn().mockResolvedValue({ success: false });
+    installElectronAPI({ secureCreds: { hasPassword } });
+    await vaultHasPassword([null, undefined, 'acct-a', 'acct-a', ''], 'imap');
+    expect(hasPassword).toHaveBeenCalledTimes(1);
+    expect(hasPassword).toHaveBeenCalledWith('acct-a', 'imap');
   });
 
   it('moves on to the next candidate when one lookup throws', async () => {
-    const get = vi.fn().mockRejectedValueOnce(new Error('locked')).mockResolvedValueOnce({ success: true, data: { smtp: { password: 'p' } } });
-    installElectronAPI({ secureCreds: { get } });
-    await expect(fetchVaultSecrets(['bad', 'good'])).resolves.toEqual({ smtp: { password: 'p' } });
-  });
-
-  it('returns null when no candidate holds anything', async () => {
-    installElectronAPI({ secureCreds: { get: vi.fn().mockResolvedValue({ success: true, data: null }) } });
-    await expect(fetchVaultSecrets(['a', 'b'])).resolves.toBeNull();
+    const hasPassword = vi.fn().mockRejectedValueOnce(new Error('locked')).mockResolvedValueOnce({ success: true, data: true });
+    installElectronAPI({ secureCreds: { hasPassword } });
+    await expect(vaultHasPassword(['bad', 'good'], 'smtp')).resolves.toBe(true);
   });
 });
 
@@ -648,7 +663,8 @@ describe('migrateCredentialsToVault', () => {
 
     await migrateCredentialsToVault([withSecret]);
 
-    expect(set).toHaveBeenCalledWith(withSecret.id, { imap: { password: 'imap-pw' }, smtp: { password: 'smtp-pw' } });
+    // Each secret is vaulted WITH the host it belongs to (main injects it only there).
+    expect(set).toHaveBeenCalledWith(withSecret.id, { imap: { password: 'imap-pw', host: 'imap.x.com' }, smtp: { password: 'smtp-pw', host: 'smtp.x.com' } });
     // localStorage now holds the STRIPPED snapshot.
     const stored = JSON.parse(localStorage.getItem('sarvinbox-accounts')!);
     expect(stored[0].imapConfig.password).toBeUndefined();
@@ -672,7 +688,7 @@ describe('migrateCredentialsToVault', () => {
 
     await migrateCredentialsToVault([legacyIdAccount]);
 
-    expect(set).toHaveBeenCalledWith('acct-a-x-com', { imap: { password: 'legacy-pw' }, smtp: undefined });
+    expect(set).toHaveBeenCalledWith('acct-a-x-com', { imap: { password: 'legacy-pw', host: 'imap.x.com' }, smtp: undefined });
   });
 
   it('derives the id when no registry account matches the legacy credentials', async () => {
@@ -682,7 +698,7 @@ describe('migrateCredentialsToVault', () => {
 
     await migrateCredentialsToVault([]);
 
-    expect(set).toHaveBeenCalledWith(accountIdFor('z@y.com', 'imap.other.com'), { imap: { password: 'pw' }, smtp: undefined });
+    expect(set).toHaveBeenCalledWith(accountIdFor('z@y.com', 'imap.other.com'), { imap: { password: 'pw', host: 'imap.other.com' }, smtp: undefined });
   });
 
   it('LEAVES plaintext in place when any vault write failed (never strip on a half-migration)', async () => {

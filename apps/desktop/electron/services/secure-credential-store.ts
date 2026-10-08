@@ -30,9 +30,16 @@ const LEGACY_FILE_NAME = 'secure-credentials.json';
 const BLOB_KEY = 'secure-credentials';
 
 /** The secret fields we pull out of a config so they never touch renderer disk. */
+/**
+ * One credential kind. `host` is the server the secret was saved FOR: main only
+ * ever sends the secret to that host (see vault-credentials.ts). Entries written
+ * before host binding have none and are bound on first use.
+ */
+export interface VaultCredential { password?: string; accessToken?: string; refreshToken?: string; host?: string }
+
 export interface AccountSecrets {
-  imap?: { password?: string; accessToken?: string; refreshToken?: string };
-  smtp?: { password?: string; accessToken?: string; refreshToken?: string };
+  imap?: VaultCredential;
+  smtp?: VaultCredential;
 }
 
 type Vault = Record<string, AccountSecrets>;
@@ -113,13 +120,17 @@ async function writeVault(mutate: (vault: Vault) => void): Promise<void> {
  *  keep current" preserves the stored password). No-op if there's nothing new. */
 export async function setAccountSecrets(accountId: string, secrets: AccountSecrets): Promise<void> {
   if (!accountId) return;
-  const pick = (o?: Record<string, string | undefined>) => {
+  const pick = (o?: VaultCredential) => {
     if (!o) return undefined;
     const out: Record<string, string> = {};
     for (const k of ['password', 'accessToken', 'refreshToken'] as const) {
       if (o[k]) out[k] = o[k] as string;
     }
-    return Object.keys(out).length ? out : undefined;
+    if (!Object.keys(out).length) return undefined;
+    // The host travels WITH a secret, never alone: a call carrying only a host
+    // must not be able to re-point an existing password at another server.
+    if (typeof o.host === 'string' && o.host.trim()) out.host = o.host.trim();
+    return out;
   };
   const imap = pick(secrets.imap);
   const smtp = pick(secrets.smtp);
@@ -140,6 +151,20 @@ export async function getAccountSecrets(accountId: string): Promise<AccountSecre
   if (!accountId) return null;
   const vault = await readVault();
   return vault[accountId] ?? null;
+}
+
+/**
+ * Record the host an UNBOUND (pre-binding) credential belongs to. Never
+ * overwrites an existing binding — re-pointing a bound secret takes a new
+ * secret via `setAccountSecrets`.
+ */
+export async function bindAccountSecretHost(accountId: string, kind: 'imap' | 'smtp', host: string): Promise<void> {
+  if (!accountId || !host) return;
+  await writeVault((v) => {
+    const entry = v[accountId]?.[kind];
+    if (!entry || entry.host) return;
+    entry.host = host;
+  });
 }
 
 /**

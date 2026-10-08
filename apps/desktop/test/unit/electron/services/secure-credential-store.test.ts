@@ -39,6 +39,7 @@ vi.mock('@sarvinbox/core', () => ({
 
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {
+  bindAccountSecretHost,
   deleteAccountSecrets,
   getAccountSecrets,
   hasAccountSecrets,
@@ -258,5 +259,47 @@ describe('legacySecureCredFilesExist', () => {
       expect(legacySecureCredFilesExist()).toBe(true);
       rmSync(join(h.userData, LEGACY + suffix));
     }
+  });
+});
+
+describe('host binding on the vault entry', () => {
+  // A secret is stored with the host it was saved for; main only injects it
+  // there. Breaks if the host is dropped: new secrets are written unbound.
+  it('stores the host alongside the secret', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw', host: 'imap.x.com' } });
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' } });
+  });
+
+  // Breaks: a call carrying only a host re-points a saved password at another server.
+  it('ignores a host that arrives without a secret', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw', host: 'imap.x.com' } });
+    await setAccountSecrets('acct-a', { imap: { host: 'imap.evil.example' } });
+    expect((await getAccountSecrets('acct-a'))?.imap?.host).toBe('imap.x.com');
+  });
+
+  // Breaks: a legitimate password change on a new server keeps the OLD binding.
+  it('re-binds when a new secret is saved with a new host', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'old', host: 'imap.x.com' } });
+    await setAccountSecrets('acct-a', { imap: { password: 'new', host: 'imap.y.com' } });
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'new', host: 'imap.y.com' });
+  });
+});
+
+describe('bindAccountSecretHost', () => {
+  // Legacy (pre-binding) entries are bound on first use.
+  it('binds an unbound entry, leaving the other kind alone', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw' }, smtp: { password: 's' } });
+    await bindAccountSecretHost('acct-a', 'imap', 'imap.x.com');
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' }, smtp: { password: 's' } });
+  });
+
+  // Breaks: a later "first use" for a different host steals an existing binding.
+  it('never overwrites an existing binding, and is a no-op for missing entries', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw', host: 'imap.x.com' } });
+    await bindAccountSecretHost('acct-a', 'imap', 'imap.evil.example');
+    await bindAccountSecretHost('acct-missing', 'imap', 'imap.x.com');
+    await bindAccountSecretHost('acct-a', 'smtp', 'smtp.x.com');
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' } });
+    expect(await getAccountSecrets('acct-missing')).toBeNull();
   });
 });
