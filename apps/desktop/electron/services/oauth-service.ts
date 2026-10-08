@@ -41,6 +41,7 @@ import {
   type RevokeOutcome,
   type IMAPConfig,
   createLogger,
+  escapeHtml,
 } from '@sarvinbox/core';
 import { shell } from 'electron';
 
@@ -862,6 +863,3 @@ h1{font-size:22px;margin:0 0 12px}p{color:#4b5563}</style></head>
   res.end(html);
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-}

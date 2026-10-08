@@ -33,6 +33,7 @@ import {
   parseTags,
   setEmailReadFlag,
   createLogger,
+  escapeHtml,
   type AIProviderConfig,
   type ContactType,
   type FolderLabelMode,
@@ -2070,14 +2071,6 @@ async function tryAutoSendReply(params: {
   }
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 // ========== Category-label mirroring ==========
 // Reflect AI categories onto the mail server so they're visible in the

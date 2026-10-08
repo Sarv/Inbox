@@ -101,5 +101,6 @@ export * from './bimi';
 export * from './favicon';
 export * from './asar-path';
 export * from './ai-provider-auth';
+export * from './html-escape';
 export * from './server-classification';
 export * from './spam-protection';
