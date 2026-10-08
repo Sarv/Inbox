@@ -19,11 +19,11 @@ import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
 import { app, safeStorage } from 'electron';
+
+import { isPlaintextEnvelope, openString, sealString, type EnvelopeErrors } from './safe-storage-envelope';
 const logger = createLogger('db-key-store');
 
 const FILE_NAME = 'db-key.bin';
-const MAGIC_ENC = 'ENC1:';
-const MAGIC_PLAIN = 'PLAIN1:';
 
 let cachedKey: string | null = null;
 
@@ -32,24 +32,21 @@ function filePath(): string {
 }
 
 function serialize(hexKey: string): Buffer {
-  if (safeStorage.isEncryptionAvailable()) {
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), safeStorage.encryptString(hexKey)]);
+  const sealed = sealString(hexKey);
+  if (isPlaintextEnvelope(sealed)) {
+    logger.warn('[DbKeyStore] safeStorage unavailable — DB key stored UNENCRYPTED (no OS keychain)');
   }
-  logger.warn('[DbKeyStore] safeStorage unavailable — DB key stored UNENCRYPTED (no OS keychain)');
-  return Buffer.from(MAGIC_PLAIN + hexKey, 'utf8');
+  return sealed;
 }
 
+/** This store's wording for an envelope it can't open (tests pin these). */
+const ENVELOPE_ERRORS: EnvelopeErrors = {
+  locked: 'DB key is encrypted but safeStorage is unavailable',
+  unknownFormat: 'Unknown db-key file format',
+};
+
 function deserialize(buf: Buffer): string {
-  const enc = buf.subarray(0, MAGIC_ENC.length).toString('utf8');
-  if (enc === MAGIC_ENC) {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('DB key is encrypted but safeStorage is unavailable');
-    }
-    return safeStorage.decryptString(buf.subarray(MAGIC_ENC.length));
-  }
-  const plain = buf.subarray(0, MAGIC_PLAIN.length).toString('utf8');
-  if (plain === MAGIC_PLAIN) return buf.subarray(MAGIC_PLAIN.length).toString('utf8');
-  throw new Error('Unknown db-key file format');
+  return openString(buf, ENVELOPE_ERRORS);
 }
 
 /**

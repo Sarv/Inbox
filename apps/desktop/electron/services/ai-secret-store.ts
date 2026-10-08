@@ -24,14 +24,13 @@ import { createLogger } from '@sarvinbox/core';
 import { app, safeStorage } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
+import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 
 const logger = createLogger('ai-secret-store');
 
 const LEGACY_FILE_NAME = 'ai-secrets.json';
 const BLOB_KEY = 'ai-secrets';
-const MAGIC_ENC = 'ENC1:';
-const MAGIC_PLAIN = 'PLAIN1:';
 
 type Vault = Record<string, string>;
 
@@ -45,26 +44,17 @@ export function isSecureStorageAvailable(): boolean {
 }
 
 function serialize(vault: Vault): Buffer {
-  const payload = JSON.stringify(vault);
-  if (safeStorage.isEncryptionAvailable()) {
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), safeStorage.encryptString(payload)]);
-  }
-  return Buffer.from(MAGIC_PLAIN + payload, 'utf8');
+  return sealJson(vault);
 }
 
+/** This store's wording for an envelope it can't open (tests pin these). */
+const ENVELOPE_ERRORS: EnvelopeErrors = {
+  locked: 'AI secrets are encrypted but safeStorage is unavailable',
+  unknownFormat: 'Unknown ai-secrets format',
+};
+
 function deserialize(buf: Buffer): Vault {
-  const enc = buf.subarray(0, MAGIC_ENC.length).toString('utf8');
-  if (enc === MAGIC_ENC) {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('AI secrets are encrypted but safeStorage is unavailable');
-    }
-    return JSON.parse(safeStorage.decryptString(buf.subarray(MAGIC_ENC.length)));
-  }
-  const plain = buf.subarray(0, MAGIC_PLAIN.length).toString('utf8');
-  if (plain === MAGIC_PLAIN) {
-    return JSON.parse(buf.subarray(MAGIC_PLAIN.length).toString('utf8'));
-  }
-  throw new Error('Unknown ai-secrets format');
+  return openJson<Vault>(buf, ENVELOPE_ERRORS);
 }
 
 async function readVault(): Promise<Vault> {
