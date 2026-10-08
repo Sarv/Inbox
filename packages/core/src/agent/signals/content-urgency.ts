@@ -57,16 +57,28 @@ const FINANCIAL_PATTERNS = [
  */
 export const MAX_URGENCY_TEXT_CHARS = 20_000;
 
+/**
+ * Drop every `<…>` tag and any stray `<`, in one linear pass. A split rather
+ * than a regex: `/<[^>]+>/` scanned to the end of the text once per `<` (80 KB
+ * of `<` took 3 s), and no `<` survives to form a tag, whatever the text is
+ * later used for.
+ */
+function stripTags(s: string): string {
+  const parts = s.split('<');
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    const gt = parts[i].indexOf('>');
+    out += gt < 0 ? parts[i] : parts[i].slice(gt + 1);
+  }
+  return out;
+}
+
 export function computeContentUrgency(
   subject: string,
   body: string,
   userName: string,
 ): ContentUrgencySignal {
-  // Strip tags with `[^<>]*`, not `[^>]+`: on a run of `<` with no `>`, the old
-  // class let every attempt scan to the end of the text (80 KB of `<` took 3 s).
-  // Any `<` left over (`<<b>`, `a < b`) is dropped too: no pattern reads it, and
-  // the text then holds no tag whatever it is later used for.
-  const text = `${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS).replace(/<[^<>]*>/g, '').replace(/</g, '');
+  const text = stripTags(`${subject}\n${body}`.slice(0, MAX_URGENCY_TEXT_CHARS));
   const textLower = text.toLowerCase();
 
   const hasDeadline = DEADLINE_PATTERNS.some(p => p.test(text));
