@@ -429,6 +429,20 @@ function replaceUpToLastClose(
   return html.slice(0, cut).replace(re, fn) + html.slice(cut);
 }
 
+/**
+ * Escape the `<` of every `<script` / `</script` left in `html` to `&lt;`, so
+ * none can open or close a script. A split, not a regex replace: one linear
+ * pass, and every `<` is checked against what actually follows it.
+ */
+function escapeScriptTags(html: string): string {
+  const parts = html.split('<');
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    out += (/^\/?script\b/i.test(parts[i]) ? '&lt;' : '<') + parts[i];
+  }
+  return out;
+}
+
 /** Exported for tests (pure HTML transform). */
 export function stripBlockingResources(html: string): string {
   let out = html;
@@ -465,7 +479,7 @@ export function stripBlockingResources(html: string): string {
   // neither pattern — so any `<script` that survives is escaped to text.
   out = replaceUpToLastClose(out, '</script', /<script\b[^<>]*>[\s\S]*?<\/script\b[^<>]*>/gi, () => '');
   out = out.replace(/<script\b[^<>]*\/?>/gi, '');
-  out = out.replace(/<(?=\/?script\b)/gi, '&lt;');
+  out = escapeScriptTags(out);
 
   return out;
 }
