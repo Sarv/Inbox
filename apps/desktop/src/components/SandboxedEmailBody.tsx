@@ -465,7 +465,7 @@ export function stripBlockingResources(html: string): string {
   // neither pattern — so any `<script` that survives is escaped to text.
   out = replaceUpToLastClose(out, '</script', /<script\b[^<>]*>[\s\S]*?<\/script\b[^<>]*>/gi, () => '');
   out = out.replace(/<script\b[^<>]*\/?>/gi, '');
-  out = out.replace(/<(\/?script)\b/gi, '&lt;$1');
+  out = out.replace(/<(?=\/?script\b)/gi, '&lt;');
 
   return out;
 }
