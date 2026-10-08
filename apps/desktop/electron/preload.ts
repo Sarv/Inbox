@@ -34,6 +34,21 @@ interface InAppToast {
   threadId?: string;
 }
 
+/** A request to an AI provider that needs its saved key (see ai-provider-proxy.ts). */
+interface AiProviderFetchRequest {
+  requestId: string;
+  providerId: string;
+  type: string;
+  url: string;
+  method?: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+type AiProviderFetchResult =
+  | { ok: true; status: number; statusText: string; contentType: string | null; body: string }
+  | { ok: false; reason: 'no-key' | 'origin-mismatch' | 'invalid-request' | 'network' | 'aborted'; error: string };
+
 /** Per-account secrets kept in the main-process vault (never renderer disk). */
 /** Write-only: secrets go INTO the vault with the host they're for; nothing
  *  here reads one back out (main injects them when it connects). */
@@ -842,11 +857,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // AI-provider API keys kept in the main-process safeStorage vault (never in
-  // renderer localStorage). Renderer holds only non-secret provider metadata.
+  // renderer localStorage). Write-only for the renderer: it learns which
+  // providers have a key, and main attaches keys to requests itself.
   aiSecrets: {
-    getAll: () => ipcRenderer.invoke('aiSecrets:getAll'),
-    set: (providerId: string, apiKey: string) => ipcRenderer.invoke('aiSecrets:set', providerId, apiKey),
+    list: () => ipcRenderer.invoke('aiSecrets:list'),
+    set: (providerId: string, apiKey: string, baseUrl?: string) => ipcRenderer.invoke('aiSecrets:set', providerId, apiKey, baseUrl),
     delete: (providerId: string) => ipcRenderer.invoke('aiSecrets:delete', providerId),
+    revert: (providerId: string, writeId: number) => ipcRenderer.invoke('aiSecrets:revert', providerId, writeId),
+  },
+
+  // AI provider requests that need a saved key — main adds it (for the
+  // endpoint it was saved for only) and makes the request.
+  aiProxy: {
+    fetch: (request: AiProviderFetchRequest) => ipcRenderer.invoke('ai:providerFetch', request),
+    abort: (requestId: string) => ipcRenderer.invoke('ai:providerFetchAbort', requestId),
   },
 
   // User-defined inbox filter rules
@@ -997,7 +1021,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     draftReply: (emailId: string, accountId?: string) =>
       ipcRenderer.invoke('agent:draftReply', emailId, accountId),
     // Pipeline control
-    setAIConfig: (config: { type: string; apiKey: string; model: string; baseUrl?: string; authMethod?: 'apiKey' | 'oauth'; oauthProvider?: 'sarv'; oauthEmail?: string }) =>
+    setAIConfig: (config: { type: string; apiKey: string; providerId?: string; model: string; baseUrl?: string; authMethod?: 'apiKey' | 'oauth'; oauthProvider?: 'sarv'; oauthEmail?: string }) =>
       ipcRenderer.invoke('pipeline:setAIConfig', config),
     setCategoryLabels: (cfg: { enabled: boolean; folderMode: 'copy' | 'move' }) =>
       ipcRenderer.invoke('pipeline:setCategoryLabels', cfg),
@@ -1734,9 +1758,16 @@ export interface ElectronAPI {
     onReauthOpenSettings: (cb: (data: { provider: string; email: string }) => void) => () => void;
   };
   aiSecrets: {
-    getAll: () => Promise<{ success: boolean; data?: Record<string, string>; encrypted?: boolean; error?: string }>;
-    set: (providerId: string, apiKey: string) => Promise<{ success: boolean; encrypted?: boolean; error?: string }>;
-    delete: (providerId: string) => Promise<{ success: boolean; error?: string }>;
+    list: () => Promise<{ success: boolean; data?: string[]; encrypted?: boolean; error?: string }>;
+    /** `writeId` identifies this write, for `revert`. */
+    set: (providerId: string, apiKey: string, baseUrl?: string) => Promise<{ success: boolean; encrypted?: boolean; writeId?: number; error?: string }>;
+    delete: (providerId: string) => Promise<{ success: boolean; writeId?: number; error?: string }>;
+    /** Undo write `writeId` if it is still the latest for this provider. */
+    revert: (providerId: string, writeId: number) => Promise<{ success: boolean; error?: string }>;
+  };
+  aiProxy: {
+    fetch: (request: AiProviderFetchRequest) => Promise<AiProviderFetchResult>;
+    abort: (requestId: string) => Promise<void>;
   };
   filters: {
     list: () => Promise<{ success: boolean; data?: FilterRule[]; error?: string }>;
@@ -1876,7 +1907,9 @@ export interface ElectronAPI {
     removeCategoryLabels: () => Promise<{ success: boolean; data?: { accounts: number; removed: number }; error?: string }>;
     setAIConfig: (config: {
       type: string;
+      /** Empty for a saved key — main fills it in by `providerId`. */
       apiKey: string;
+      providerId?: string;
       model: string;
       baseUrl?: string;
       authMethod?: 'apiKey' | 'oauth';

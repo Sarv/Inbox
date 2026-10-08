@@ -57,12 +57,13 @@ import { registryAccountEmail, resolveAccountEmail, resolveAccountIdentity } fro
 import { loadAgentConfig } from './agent-config-store';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
+import { prepareAIProviderConfig } from './ai-provider-config';
 import { runClassificationMutation } from './classification-actions';
 import { getMeta, setMeta } from './core-db';
 import { ensureGmailLabelColor, renameGmailLabel, deleteGmailLabelsUnder } from './gmail-label-api';
 import { chromiumFetch } from './net-fetch';
 import { notifyNewMail } from './notification-service';
-import { attachOAuthBearer, getValidAccessToken } from './oauth-service';
+import { getValidAccessToken } from './oauth-service';
 import { getAccount as getOAuthAccount, listAccounts } from './oauth-token-store';
 import { savePipelineAIConfig, loadPipelineAIConfigSync, clearPipelineAIConfig } from './pipeline-ai-config-store';
 import { isAIAssistOn, resolveDeferredPipelineConfig } from './pipeline-init-config';
@@ -100,6 +101,24 @@ const traceEnabled = (): boolean => logger.isLevelEnabled('trace');
  * just like it does in the renderer. Applied wherever the pipeline's aiConfig is
  * (re)assigned. Idempotent — safe to call on an already-wrapped config.
  */
+/**
+ * Bring the last renderer-pushed AI config back after a main restart, with its
+ * saved key filled in from the vault. Skipped if a config arrived meanwhile.
+ */
+async function restorePersistedAIConfig(persisted: AIProviderConfig): Promise<void> {
+  const prepared = await prepareAIProviderConfig(persisted);
+  if (aiConfig) return;
+  aiConfig = prepared;
+  logger.info(`[Pipeline] AI config restored from disk (${persisted.type}/${persisted.model})`);
+  emitAiPipelineStatus();
+  // If that config is OAuth-backed but its account was removed in a PREVIOUS
+  // session (e.g. the Sarv mailbox that also powered the LLM), it would
+  // categorize-fail forever. Revalidate and disable it here so a stale config
+  // never resumes the error spam on restart. It clears aiConfig + re-emits
+  // status when the account is gone.
+  void disablePipelineAIIfProviderRemoved();
+}
+
 function withChromiumFetch(config: AIProviderConfig | null): AIProviderConfig | null {
   return config ? { ...config, fetchImpl: chromiumFetch } : null;
 }
@@ -630,19 +649,16 @@ export function initializeUnifiedPipeline(
     // was handed in. Restore the last provider config the renderer pushed,
     // persisted encrypted on disk, so the pipeline comes up AI-ready WITHOUT
     // waiting for the renderer to re-push — the durable fix for "AI silently
-    // off after a restart" and the 30s categorization skip-loop. Re-apply
-    // attachOAuthBearer (exactly as the pipeline:setAIConfig handler does) so
-    // OAuth providers get their fresh-token resolver back.
+    // off after a restart" and the 30s categorization skip-loop. Re-prepare it
+    // exactly as the pipeline:setAIConfig handler does: saved key filled in,
+    // OAuth fresh-token resolver re-attached.
     const persisted = loadPipelineAIConfigSync();
     if (persisted) {
-      aiConfig = attachOAuthBearer(persisted as unknown as AIProviderConfig);
-      logger.info(`[Pipeline] AI config restored from disk (${persisted.type}/${persisted.model})`);
-      // If that config is OAuth-backed but its account was removed in a PREVIOUS
-      // session (e.g. the Sarv mailbox that also powered the LLM), it would
-      // categorize-fail forever. Revalidate and disable it here so a stale config
-      // never resumes the error spam on restart. Fire-and-forget (init isn't
-      // async); it clears aiConfig + re-emits status when the account is gone.
-      void disablePipelineAIIfProviderRemoved();
+      // Async: the saved API key comes from the vault (the persisted config
+      // names it by providerId, never carries it). aiConfig stays unset until
+      // it's ready — the same "AI not ready" state as before any restore —
+      // and is not applied if the renderer pushed a fresh config meanwhile.
+      void restorePersistedAIConfig(persisted as unknown as AIProviderConfig);
     }
   }
   // Emit the "available" edge only when we actually have a config — never a
@@ -2962,9 +2978,9 @@ function registerPipelineIPC(): void {
   });
 
   ipcMain.handle('pipeline:setAIConfig', async (_e, config: AIProviderConfig) => {
-    // Wrap oauth-backed configs so every LLM call fetches a fresh bearer.
-    // No-op for plain-apiKey configs.
-    aiConfig = attachOAuthBearer(config);
+    // Fill in the saved API key (the renderer sends only its providerId) and
+    // wrap oauth-backed configs so every LLM call fetches a fresh bearer.
+    aiConfig = await prepareAIProviderConfig(config);
     // Mirror the RAW (pre-bearer, serializable) config to disk so a later main
     // restart can restore it without the renderer re-pushing. Best-effort.
     void savePipelineAIConfig(config);

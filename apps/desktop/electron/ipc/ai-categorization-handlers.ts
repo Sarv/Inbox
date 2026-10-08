@@ -9,7 +9,7 @@ import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 import { AICategorizationService } from '../services/ai-categorization-service';
-import { attachOAuthBearer } from '../services/oauth-service';
+import { prepareAIProviderConfig } from '../services/ai-provider-config';
 import { getAICategorizationService, setAICategorizationService } from '../shared';
 const logger = createLogger('ai-categorization-handlers');
 
@@ -35,9 +35,9 @@ export function registerAICategorizationHandlers(): void {
         return { success: false, error: 'Already running' };
       }
 
-      // Attach fresh-bearer resolver for oauth-backed providers — the
-      // renderer can't send a function over IPC, so we wrap here.
-      const wrapped = attachOAuthBearer(config);
+      // Fill in the saved API key (the renderer never holds it) and attach the
+      // fresh-bearer resolver for oauth-backed providers — main-only steps.
+      const wrapped = await prepareAIProviderConfig(config);
       service.start(wrapped, mode, options).catch(err => {
         logger.error('[AI Categorization IPC] Background processing error:', err);
       });
@@ -87,7 +87,7 @@ export function registerAICategorizationHandlers(): void {
   ipcMain.handle('ai-categorization:startAuto', async (_event, config, options) => {
     try {
       const service = ensureService();
-      service.startAutoProcess(attachOAuthBearer(config), options);
+      service.startAutoProcess(await prepareAIProviderConfig(config), options);
       return { success: true };
     } catch (error) {
       logger.error('[AI Categorization IPC] startAuto error:', error);

@@ -18,7 +18,8 @@ import { ipcMain } from 'electron';
 import { openAccountStorages, requireAccountStorage, requireNamedOrActiveStorage } from '../services/account-target';
 import { readRegistryAccounts } from '../services/accounts-registry';
 import { getAutoBacklogCap, setAutoBacklogCap } from '../services/ai-backlog-cap';
-import { getAllAiSecrets, setAiSecret, deleteAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
+import { abortAiProviderFetch, proxyAiProviderFetch, type AiProviderFetchRequest } from '../services/ai-provider-proxy';
+import { listAiSecretIds, setAiSecret, deleteAiSecret, revertAiSecret, isSecureStorageAvailable } from '../services/ai-secret-store';
 import { setAIProviderConfigured, setBackgroundSplitEnabled } from '../services/conversation-extraction-scheduler';
 import { clearPipelineAIConfig } from '../services/pipeline-ai-config-store';
 import { onCategoryDefinitionUpserted } from '../services/unified-pipeline-service';
@@ -124,30 +125,50 @@ export async function clearFirstSplitsInEveryAccount(): Promise<FirstSplitClearA
 
 export function registerAIHandlers(): void {
   // ── AI provider API keys — safeStorage vault (never renderer localStorage) ──
-  ipcMain.handle('aiSecrets:getAll', async () => {
+  // Deliberately NO handler returns a saved key (there was `aiSecrets:getAll`).
+  // The renderer also renders untrusted email HTML; it learns only WHICH
+  // providers have a key, and main attaches keys to requests itself
+  // (`ai:providerFetch`, prepareAIProviderConfig) — CASA H-1.
+  ipcMain.handle('aiSecrets:list', async () => {
     try {
-      return { success: true, data: await getAllAiSecrets(), encrypted: isSecureStorageAvailable() };
+      return { success: true, data: await listAiSecretIds(), encrypted: isSecureStorageAvailable() };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
   });
-  ipcMain.handle('aiSecrets:set', async (_event, providerId: string, apiKey: string) => {
+  ipcMain.handle('aiSecrets:set', async (_event, providerId: string, apiKey: string, baseUrl?: string) => {
     try {
       if (typeof providerId !== 'string' || !providerId) throw new Error('providerId required');
-      await setAiSecret(providerId, typeof apiKey === 'string' ? apiKey : '');
-      return { success: true, encrypted: isSecureStorageAvailable() };
+      // Bound to the endpoint the user configured it for: main only ever sends
+      // it to that origin.
+      const writeId = await setAiSecret(providerId, typeof apiKey === 'string' ? apiKey : '', typeof baseUrl === 'string' ? baseUrl : undefined);
+      return { success: true, encrypted: isSecureStorageAvailable(), writeId };
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  });
+  // Undo one set/delete of this provider's key (by the writeId it returned) —
+  // main kept the old key; a no-op if a newer write has landed since.
+  ipcMain.handle('aiSecrets:revert', async (_event, providerId: string, writeId: number) => {
+    try {
+      await revertAiSecret(providerId, writeId);
+      return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
   });
   ipcMain.handle('aiSecrets:delete', async (_event, providerId: string) => {
     try {
-      await deleteAiSecret(providerId);
-      return { success: true };
+      const writeId = await deleteAiSecret(providerId);
+      return { success: true, writeId };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
   });
+  // A request to an AI provider that needs its SAVED key: main attaches it,
+  // for the origin it was saved for only (ai-provider-proxy.ts).
+  ipcMain.handle('ai:providerFetch', (_event, request: AiProviderFetchRequest) => proxyAiProviderFetch(request));
+  ipcMain.handle('ai:providerFetchAbort', (_event, requestId: string) => { abortAiProviderFetch(requestId); });
 
   /**
    * Get emails by AI category (uses dynamic junction table)

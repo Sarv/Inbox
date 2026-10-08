@@ -15,6 +15,18 @@ beforeEach(() => {
     electronAPI: {
       aiSecrets: { set: vi.fn().mockResolvedValue({ success: true }), delete: vi.fn() },
       oauth: { getAccessToken: oauthToken },
+      // A saved key never reaches the renderer: requests that need it go
+      // through main, which adds the key header (Bearer, or x-goog-api-key for
+      // Gemini) and makes the request. Stand-in for that proxy, so the
+      // payload assertions below still see the request on the wire.
+      aiProxy: {
+        abort: vi.fn(),
+        fetch: vi.fn(async (request: { url: string; method?: string; type: string; headers?: Record<string, string>; body?: string }) => {
+          const auth = request.type === 'gemini' ? { 'x-goog-api-key': 'synthetic-key' } : { Authorization: 'Bearer synthetic-key' };
+          const response = await fetchMock(request.url, { method: request.method, headers: { ...request.headers, ...auth }, body: request.body });
+          return { ok: true, status: response.status, statusText: response.statusText, contentType: 'application/json', body: await response.text() };
+        }),
+      },
     },
   });
   vi.stubGlobal('fetch', fetchMock);

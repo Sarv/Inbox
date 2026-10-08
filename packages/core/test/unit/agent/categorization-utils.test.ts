@@ -749,7 +749,10 @@ describe('callAIProvider — Gemini transport', () => {
 
     expect(out).toBe('gemini says hi');
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=gkey');
+    // Changed deliberately: the key travels in the x-goog-api-key header, not
+    // the ?key= query string, which ends up in logs and error messages.
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+    expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('gkey');
     const body = JSON.parse(init.body as string);
     expect(body.contents[0].parts[0].text).toBe('SYS\n\nUSR');
     expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });

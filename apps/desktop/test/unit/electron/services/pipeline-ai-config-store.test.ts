@@ -93,6 +93,14 @@ describe('savePipelineAIConfig', () => {
     expect(stored).not.toContain('fetchImpl');
   });
 
+  // The renderer names a saved key by providerId; main fills it in from the AI
+  // key vault (bound to its endpoint) on restore. Breaks if the id is lost:
+  // AI is silently off after every restart.
+  it('persists the providerId and never a second copy of a vaulted key', async () => {
+    await savePipelineAIConfig(config({ apiKey: 'should-not-persist', providerId: 'p1' } as never));
+    expect(loadPipelineAIConfigSync()).toMatchObject({ providerId: 'p1', apiKey: '' });
+  });
+
   it('keeps an OAuth (Sarv) provider identifiable with an empty apiKey', async () => {
     await savePipelineAIConfig(config({
       apiKey: undefined, authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'me@sarv.com',

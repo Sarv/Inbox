@@ -219,14 +219,30 @@ describe('AI onboarding', () => {
     expect(onComplete).toHaveBeenCalledOnce();
   });
 
-  // Native provider metadata plus hydrated vault credentials skips config.
+  // Native provider metadata plus a key saved in the vault skips config.
+  // (Changed shape: the renderer learns only that a key is saved — CASA H-1.)
   it('opens models immediately for a previously stored provider', () => {
-    vi.mocked(loadAISettings).mockReturnValue({ providers: [{ id: 'stored', type: 'openai', name: 'OpenAI', apiKey: 'vault-synthetic-key', model: 'stored-model', baseUrl: 'https://api.openai.com/v1', isDefault: true }] });
+    vi.mocked(loadAISettings).mockReturnValue({ providers: [{ id: 'stored', type: 'openai', name: 'OpenAI', apiKey: '', hasStoredKey: true, model: 'stored-model', baseUrl: 'https://api.openai.com/v1', isDefault: true }] });
     const view = render(<Harness />);
     fire(button(view, 'OpenAI'), 'click');
     expect(view.container.textContent).toContain('Choose your model');
     expect(view.byLabel('Model')).toHaveProperty('value', 'stored-model');
     expect(checkAIConnection).not.toHaveBeenCalled();
+  });
+
+  // Breaks: resuming with a saved key saves a NEW provider with no key (when
+  // the model changes), or asks the renderer to hold the saved key.
+  it('enables a stored provider by updating it in place with its saved key', async () => {
+    vi.mocked(loadAISettings).mockReturnValue({ providers: [{ id: 'stored', type: 'openai', name: 'OpenAI', apiKey: '', hasStoredKey: true, model: 'stored-model', baseUrl: 'https://api.openai.com/v1', isDefault: true }] });
+    vi.mocked(testProvider).mockResolvedValue({ success: true, message: 'ok' });
+    vi.mocked(addValidatedProvider).mockResolvedValue({ id: 'stored', type: 'openai', name: 'OpenAI', apiKey: '', model: 'stored-model', isDefault: true });
+    const view = render(<Harness />);
+    fire(button(view, 'OpenAI'), 'click');
+    toggle(view.find('input[type="checkbox"]'));
+    fire(button(view, 'Test model and enable AI'), 'click');
+    await settle();
+    expect(testProvider).toHaveBeenCalledWith(expect.objectContaining({ id: 'stored', apiKey: '', hasStoredKey: true }), expect.anything());
+    expect(addValidatedProvider).toHaveBeenCalledWith(expect.objectContaining({ apiKey: '', hasStoredKey: true }), expect.any(Function), { existingId: 'stored' });
   });
 
   // Custom/local services may use no authentication and an exact model ID.
@@ -409,9 +425,12 @@ describe('AI setup reused from settings', () => {
 
   // Editing uses only the selected entry's credentials and revalidates its connection before saving.
   it('prefills and saves an explicit edit with its identity rather than adding a duplicate', async () => {
-    const editing = { id: 'edit-me', type: 'openai' as const, name: 'My OpenAI', apiKey: 'original-key', model: 'demo-model', isDefault: false };
+    const editing = { id: 'edit-me', type: 'openai' as const, name: 'My OpenAI', apiKey: '', hasStoredKey: true, model: 'demo-model', isDefault: false };
     const view = render(<Harness context="settings" editingProvider={editing} stage="connection" />);
-    expect(view.find('input[type="password"]')).toHaveProperty('value', 'original-key');
+    // Changed deliberately (CASA H-1): the saved key is never put back into the
+    // form; the field starts blank, and a blank field keeps the saved key.
+    expect(view.find('input[type="password"]')).toHaveProperty('value', '');
+    expect(view.find('input[type="password"]')).toHaveProperty('placeholder', 'Saved — leave blank to keep it');
     typeInto(view.find('input[type="password"]'), 'replacement-key');
     fire(button(view, 'Check connection'), 'click'); await settle(); selectModel(view);
     toggle(view.find('input[type="checkbox"]')); fire(button(view, 'Test model and save provider'), 'click'); await settle();

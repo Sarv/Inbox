@@ -1,4 +1,4 @@
-import { aiFailureReason, PROVIDER_CONFIGS, type AIProvider, type AIProviderType } from './ai-service';
+import { aiFailureReason, aiProviderFetch, PROVIDER_CONFIGS, type AIProvider, type AIProviderType } from './ai-service';
 import {
   buildSarvEdgeBaseUrl, listCaiModels, listCaiProviders, loadZoneSelection, pickRecommendedModel, pickRecommendedProvider,
   type SarvLLMModel, type SarvLLMProvider, type SarvZone,
@@ -33,6 +33,12 @@ export interface OnboardingAIConnection {
   /** An explicit settings edit restores this identity before choosing defaults. */
   savedSarvProvider?: Pick<AIProvider, 'name' | 'baseUrl' | 'model' | 'oauthEmail' | 'sarvZoneCode' | 'sarvProviderCode'>;
   modelWarning?: string;
+  /**
+   * Resumed from a saved provider whose key is in the vault. With the key field
+   * left blank, requests use that saved key — through main, which only sends
+   * it to the address it was saved for. The renderer never holds it.
+   */
+  storedProviderId?: string;
 }
 
 export function makeAIConnection(type: AIProviderType): OnboardingAIConnection {
@@ -74,10 +80,13 @@ export function providerFromConnection(connection: OnboardingAIConnection): AIPr
       sarvZoneCode: sarv.zoneCode, sarvProviderCode: sarv.providerCode,
     };
   }
+  const typedKey = connection.useApiKey ? connection.apiKey.trim() : '';
+  const savedKey = connection.useApiKey && !typedKey && !!connection.storedProviderId;
   return {
-    id: 'onboarding-test', type: connection.type, name: connection.name.trim(),
-    baseUrl: normalizeAIEndpoint(connection.baseUrl), apiKey: connection.useApiKey ? connection.apiKey.trim() : '',
+    id: savedKey ? connection.storedProviderId! : 'onboarding-test', type: connection.type, name: connection.name.trim(),
+    baseUrl: normalizeAIEndpoint(connection.baseUrl), apiKey: typedKey,
     model: connection.model.trim(), isDefault: false, authMethod: 'apiKey',
+    ...(savedKey ? { hasStoredKey: true } : {}),
   };
 }
 
@@ -87,15 +96,15 @@ export async function checkAIConnection(
 ): Promise<OnboardingAIConnection> {
   const baseUrl = normalizeAIEndpoint(connection.baseUrl);
   if (!connection.name.trim()) throw new Error('Enter a name for your AI provider.');
-  if (connection.useApiKey && !connection.apiKey.trim()) throw new Error('Enter your API key.');
+  if (connection.useApiKey && !connection.apiKey.trim() && !connection.storedProviderId) throw new Error('Enter your API key.');
+  // Typed key, saved key (via main) or none — aiProviderFetch attaches the right one.
+  const provider = providerFromConnection({ ...connection, baseUrl, model: connection.model || 'catalog' });
   const headers: Record<string, string> = { Accept: 'application/json' };
-  if (connection.type === 'gemini') headers['x-goog-api-key'] = connection.apiKey.trim();
-  else if (connection.useApiKey && connection.apiKey.trim()) headers.Authorization = `Bearer ${connection.apiKey.trim()}`;
   const models: OnboardingModel[] = [];
   let pageToken = '';
   for (let page = 0; page < 20; page++) {
     const suffix = pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : '';
-    const response = await fetch(`${baseUrl}/models${suffix}`, { headers, signal, redirect: 'error' });
+    const response = await aiProviderFetch(provider, `${baseUrl}/models${suffix}`, { method: 'GET', headers, signal });
     // Some local OpenAI-compatible servers support generation but no catalog.
     // They still need a specific model test; an auth/network failure never
     // masquerades as a successful connection or fallback.
