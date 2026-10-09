@@ -592,27 +592,37 @@ export const extractSecrets = (config: Record<string, any> | null | undefined): 
 };
 
 /**
- * Fetch an account's secrets from the vault, trying each candidate id in order.
- * A legacy account whose registry id predates host-keying (e.g. `acct-foo`) may
- * have had its secret stored under the host-suffixed derived id (`acct-foo--host`)
- * or vice-versa, so callers pass BOTH and we return the first hit. Returns null
- * if nothing is stored under any candidate.
+ * The vault entry for a config: its secret fields plus the host they're for
+ * (main only ever sends a saved secret to that host), or undefined when the
+ * config carries no secret — a host is never written without one.
  */
-export const fetchVaultSecrets = async (
+export const vaultEntryFor = (
+  config: Record<string, any> | null | undefined,
+): (SecretBag & { host?: string }) | undefined => {
+  const secrets = extractSecrets(config);
+  if (!secrets) return undefined;
+  return typeof config?.host === 'string' && config.host ? { ...secrets, host: config.host } : secrets;
+};
+
+/**
+ * Whether the vault holds a `kind` password under any of the candidate ids
+ * (a legacy account may be vaulted under its registry id or the host-derived
+ * one). A yes/no only: the renderer never receives a stored password — main
+ * injects it when it connects.
+ */
+export const vaultHasPassword = async (
   candidateIds: (string | undefined | null)[],
-): Promise<{ imap?: SecretBag; smtp?: SecretBag } | null> => {
+  kind: 'imap' | 'smtp',
+): Promise<boolean> => {
   const api = (window as any)?.electronAPI?.secureCreds;
-  if (!api) return null;
-  const seen = new Set<string>();
-  for (const id of candidateIds) {
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
+  if (!api?.hasPassword) return false;
+  for (const id of new Set(candidateIds.filter(Boolean) as string[])) {
     try {
-      const res = await api.get(id);
-      if (res?.success && res.data && (res.data.imap || res.data.smtp)) return res.data;
+      const res = await api.hasPassword(id, kind);
+      if (res?.success && res.data) return true;
     } catch { /* try next candidate */ }
   }
-  return null;
+  return false;
 };
 
 /**
@@ -638,7 +648,7 @@ export const migrateCredentialsToVault = async (accounts: StoredAccount[]): Prom
     };
 
     for (const a of accounts) {
-      await store(a.id, extractSecrets(a.imapConfig), extractSecrets(a.smtpConfig as any));
+      await store(a.id, vaultEntryFor(a.imapConfig), vaultEntryFor(a.smtpConfig as any));
     }
 
     // Legacy single-account keys (pre multi-account, or if they still hold a
@@ -651,8 +661,8 @@ export const migrateCredentialsToVault = async (accounts: StoredAccount[]): Prom
         ?? accountIdFor(legacyImap.username, legacyImap.host);
       await store(
         matchId,
-        extractSecrets(legacyImap),
-        extractSecrets(loadSavedSmtpCredentials() as any),
+        vaultEntryFor(legacyImap),
+        vaultEntryFor(loadSavedSmtpCredentials() as any),
       );
     }
 

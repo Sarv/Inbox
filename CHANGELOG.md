@@ -92,6 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   20,000 characters, uses patterns whose cost grows only with the text's
   length, and reads To/Cc with the app's standard address parser. Priority
   scores for ordinary mail are unchanged.
+- **Saved mailbox passwords never leave the app's background process.** The
+  window no longer has any way to read a saved IMAP or SMTP password back; the
+  app supplies it itself when it connects, and only to the server it was saved
+  for. Changing an account's server now asks you to re-enter the password, and
+  showing a saved password still requires Touch ID. Developer Tools are no
+  longer available in release builds.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

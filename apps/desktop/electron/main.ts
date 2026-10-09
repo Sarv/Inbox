@@ -305,7 +305,7 @@ const viewMenu = buildViewMenu((clickedWindow, command) => {
     BrowserWindow.getFocusedWindow() ??
     BrowserWindow.getAllWindows()[0];
   target?.webContents.send('appearance:zoom-command', command);
-});
+}, { devTools: isDev });
 
 const checkForUpdatesItem: Electron.MenuItemConstructorOptions = {
   // The ellipsis is the platform convention for "this opens something".
@@ -471,6 +471,10 @@ function createWindow(): void {
       // email-content surface: the sandboxed email-body iframe runs under
       // `default-src 'none'`, which already blocks <embed>/<object>.
       plugins: true,
+      // No DevTools in release builds: it is a console onto the full IPC
+      // bridge for anyone at an unlocked machine. Off here (not just hidden
+      // from the menu) so the keyboard shortcut can't open it either.
+      devTools: isDev,
     },
     title: 'Sarv Inbox',
     show: false,

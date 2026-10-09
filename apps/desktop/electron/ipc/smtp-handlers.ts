@@ -18,6 +18,7 @@ import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAc
 import { sendTransformFor } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
 import { getPipelineUserName } from '../services/unified-pipeline-service';
+import { hostMismatchMessage, resolveVaultPassword, vaultIdCandidates } from '../services/vault-credentials';
 import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
 
 // Static import (not require()): the bundled main.js has no on-disk services
@@ -60,12 +61,29 @@ function getMimeType(filename: string): string {
   return MIME_TYPES[ext] || 'application/octet-stream';
 }
 
+/**
+ * A password-auth SMTP config with its password filled in from the vault.
+ * The renderer never holds stored passwords, so a saved account's config
+ * arrives without one; main injects it — but only for the host it was saved
+ * for (vault-credentials.ts), since the host comes from the renderer.
+ * Configs that already carry a password (the user just typed it) or use
+ * OAuth pass through unchanged.
+ */
+export async function withVaultSmtpPassword(config: SMTPConfig, accountId: string | undefined): Promise<SMTPConfig> {
+  if (config.authMethod === 'oauth2' || config.password) return config;
+  const vaulted = await resolveVaultPassword(vaultIdCandidates(accountId, config.username, config.host), 'smtp', config.host);
+  if (vaulted.status === 'host-mismatch') throw new Error(hostMismatchMessage('smtp', config.host, vaulted.boundHost));
+  if (vaulted.status === 'none') throw new Error(`No sending password saved for ${config.host} — set up sending for this account.`);
+  return { ...config, password: vaulted.password };
+}
+
 export function registerSmtpHandlers(): void {
   /**
    * Connect to SMTP server
    */
-  ipcMain.handle('smtp:connect', async (_event, config: SMTPConfig) => {
+  ipcMain.handle('smtp:connect', async (_event, config: SMTPConfig, accountId?: string) => {
     try {
+      config = await withVaultSmtpPassword(config, accountId);
       let smtpClient = getSmtpClient();
 
       // Create new client if needed
@@ -156,7 +174,7 @@ export function registerSmtpHandlers(): void {
       if (!accountId || !config) return { success: false, error: 'accountId + config required' };
       if (getSmtpClientFor(accountId)?.isConnected()) return { success: true };
       await ensureAccountRuntime(accountId); // ensure the runtime slot exists
-      let cfg = config;
+      let cfg = await withVaultSmtpPassword(config, accountId);
       if (cfg.authMethod === 'oauth2') {
         if (!cfg.oauthProvider) throw new Error('authMethod=oauth2 requires oauthProvider');
         cfg = { ...cfg, accessToken: await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'smtp', cfg.host) };

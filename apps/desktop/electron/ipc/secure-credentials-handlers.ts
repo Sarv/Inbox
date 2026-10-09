@@ -1,8 +1,8 @@
 /**
  * IPC surface for the secure per-account credential vault (safeStorage-backed).
  * The renderer uses these to stash secrets in the main process instead of
- * writing IMAP/SMTP passwords to plaintext localStorage, and to rehydrate them
- * in-memory just before connecting.
+ * writing IMAP/SMTP passwords to plaintext localStorage. It is write-only for
+ * the renderer: main reads the vault itself when it connects.
  */
 import { createLogger } from '@sarvinbox/core';
 import { ipcMain, systemPreferences } from 'electron';
@@ -28,14 +28,11 @@ export function registerSecureCredentialsHandlers(): void {
     }
   });
 
-  ipcMain.handle('secureCreds:get', async (_e, accountId: string) => {
-    try {
-      return { success: true, data: await getAccountSecrets(accountId) };
-    } catch (error) {
-      logger.error('[SecureCreds] get failed:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
+  // Deliberately NO `secureCreds:get`. Returning decrypted passwords to the
+  // renderer (which also renders untrusted email HTML) bypassed the Touch ID
+  // gate on `secureCreds:reveal` and let anything with renderer access — a
+  // script, DevTools — read every mailbox password. Main injects the password
+  // itself when it connects (vault-credentials.ts).
 
   ipcMain.handle('secureCreds:delete', async (_e, accountId: string) => {
     try {

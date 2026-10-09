@@ -35,9 +35,11 @@ interface InAppToast {
 }
 
 /** Per-account secrets kept in the main-process vault (never renderer disk). */
+/** Write-only: secrets go INTO the vault with the host they're for; nothing
+ *  here reads one back out (main injects them when it connects). */
 interface SecureAccountSecrets {
-  imap?: { password?: string; accessToken?: string; refreshToken?: string };
-  smtp?: { password?: string; accessToken?: string; refreshToken?: string };
+  imap?: { password?: string; accessToken?: string; refreshToken?: string; host?: string };
+  smtp?: { password?: string; accessToken?: string; refreshToken?: string; host?: string };
 }
 
 interface AntivirusConfigureRequest {
@@ -532,7 +534,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // SMTP operations (sending emails)
   smtp: {
-    connect: (config: SMTPConfig) => ipcRenderer.invoke('smtp:connect', config),
+    connect: (config: SMTPConfig, accountId?: string) => ipcRenderer.invoke('smtp:connect', config, accountId),
     // Connect a specific account's SMTP on demand (send-as another account).
     connectFor: (accountId: string, config: SMTPConfig) => ipcRenderer.invoke('smtp:connectFor', accountId, config),
     disconnect: () => ipcRenderer.invoke('smtp:disconnect'),
@@ -788,7 +790,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // uses this instead of persisting IMAP/SMTP passwords in plaintext localStorage.
   secureCreds: {
     set: (accountId: string, secrets: SecureAccountSecrets) => ipcRenderer.invoke('secureCreds:set', accountId, secrets),
-    get: (accountId: string) => ipcRenderer.invoke('secureCreds:get', accountId),
     delete: (accountId: string) => ipcRenderer.invoke('secureCreds:delete', accountId),
     has: (accountId: string) => ipcRenderer.invoke('secureCreds:has', accountId),
     hasPassword: (accountId: string, kind?: 'imap' | 'smtp') => ipcRenderer.invoke('secureCreds:hasPassword', accountId, kind),
@@ -1499,7 +1500,7 @@ export interface ElectronAPI {
     triggerNow: () => Promise<{ success: boolean; data?: { queued: number }; error?: string }>;
   };
   smtp: {
-    connect: (config: SMTPConfig) => Promise<{ success: boolean; error?: string }>;
+    connect: (config: SMTPConfig, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     connectFor: (accountId: string, config: SMTPConfig) => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
     isConnected: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
@@ -1716,7 +1717,6 @@ export interface ElectronAPI {
   };
   secureCreds: {
     set: (accountId: string, secrets: SecureAccountSecrets) => Promise<{ success: boolean; encrypted?: boolean; error?: string }>;
-    get: (accountId: string) => Promise<{ success: boolean; data?: SecureAccountSecrets | null; error?: string }>;
     delete: (accountId: string) => Promise<{ success: boolean; error?: string }>;
     has: (accountId: string) => Promise<{ success: boolean; data?: boolean; error?: string }>;
     hasPassword: (accountId: string, kind?: 'imap' | 'smtp') => Promise<{ success: boolean; data?: boolean; error?: string }>;

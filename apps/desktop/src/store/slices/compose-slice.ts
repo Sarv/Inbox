@@ -1,7 +1,7 @@
 import type { EmailRecord } from '@sarvinbox/core';
 
 import { readUndoSendDelayMs } from '../../utils/app-settings';
-import { fetchVaultSecrets, accountIdFor, effectiveSmtpConfig } from '../helpers';
+import { effectiveSmtpConfig } from '../helpers';
 import type { ComposeSlice, SliceCreator } from '../types';
 
 /** A Message-ID is `<...>`; a row id is `<base36>-<hex>` (see core's generateId). */
@@ -187,19 +187,12 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
     if (crossAccount) {
       // OAuth accounts derive their SMTP (smtp.gmail.com + token, immune to the
       // same-email crossing); password accounts use their verified stored config.
-      let smtpCfg = effectiveSmtpConfig(sendingAccount) as any;
+      const smtpCfg = effectiveSmtpConfig(sendingAccount) as any;
       if (smtpCfg) {
         try {
-          // Rehydrate the sending account's SMTP secret from the vault — the
-          // in-memory config is stripped for non-active accounts loaded from disk.
-          // OAuth configs carry no password (the main process injects the token).
-          if (smtpCfg.authMethod !== 'oauth2' && !(smtpCfg.password || smtpCfg.accessToken || smtpCfg.refreshToken)) {
-            const secrets = await fetchVaultSecrets([
-              sendAsId,
-              accountIdFor(sendingAccount!.email, sendingAccount!.imapConfig?.host as string | undefined),
-            ]);
-            if (secrets?.smtp) smtpCfg = { ...smtpCfg, ...secrets.smtp };
-          }
+          // The sending account's config is stripped of its password; main
+          // injects the vaulted one for this account (only for its saved host),
+          // and the OAuth token for OAuth accounts.
           await window.electronAPI.smtp.connectFor(sendAsId!, smtpCfg);
         } catch (error) {
           console.warn('[Store] Cross-account SMTP connect failed; send will be queued:', error);

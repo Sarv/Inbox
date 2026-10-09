@@ -133,11 +133,11 @@ describe('imap:connect', () => {
   });
 
   // An account converted to oauth2 IN PLACE on a non-provider server keeps its
-  // vaulted app password. Breaks: the refusal strands it instead of letting the
-  // existing self-heal fall back to that password — and the token is still
-  // never sent there.
+  // vaulted app password, saved for that server. Breaks: the refusal strands it
+  // instead of letting the existing self-heal fall back to that password — and
+  // the token is still never sent there.
   it('lets a converted account on a non-provider host self-heal to its vaulted password', async () => {
-    h.getAccountSecrets.mockResolvedValue({ imap: { password: 'app-pw' } });
+    h.getAccountSecrets.mockResolvedValue({ imap: { password: 'app-pw', host: 'mail.example.org' } });
     const res = await h.handlers.get('imap:connect')!({}, { ...GMAIL, host: 'mail.example.org' }, 'acct-1');
     expect(h.getToken).toHaveBeenCalledWith('gmail', 'me@gmail.com', 'imap', 'mail.example.org');
     // The rest of the connect (pool, sync) is outside this harness; reaching
@@ -146,6 +146,16 @@ describe('imap:connect', () => {
     expect(h.engine.connect).toHaveBeenCalledWith(expect.objectContaining({
       host: 'mail.example.org', authMethod: 'password', password: 'app-pw', accessToken: undefined,
     }));
+  });
+  // The fallback password is bound to its server too. Breaks: a refused token
+  // falls back to a password saved for ANOTHER server, so a renderer-chosen
+  // host receives the user's real password instead of their token.
+  it('does not fall back to a vaulted password saved for another server', async () => {
+    h.getAccountSecrets.mockResolvedValue({ imap: { password: 'app-pw', host: 'mail.example.org' } });
+    const res = await h.handlers.get('imap:connect')!({}, EVIL, 'acct-1');
+    expect(res.success).toBe(false);
+    expect(h.engine.connect).not.toHaveBeenCalled();
+    expect(h.probeConnect).not.toHaveBeenCalled();
   });
 });
 

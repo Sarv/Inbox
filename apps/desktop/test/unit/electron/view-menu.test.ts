@@ -14,9 +14,18 @@ const click = (item: Electron.MenuItemConstructorOptions) =>
   (item.click as (...args: any[]) => void)(undefined, undefined, undefined);
 
 describe('buildViewMenu', () => {
-  it('keeps the stock View menu items alongside the zoom ones', () => {
+  // Changed deliberately: Toggle Developer Tools is no longer in the release
+  // menu (CASA H-1 — DevTools is a console onto the whole IPC bridge for anyone
+  // at an unlocked machine). Breaks if it returns to release builds.
+  it('keeps the stock View menu items alongside the zoom ones, without DevTools by default', () => {
     const items = submenuOf(buildViewMenu(vi.fn()));
     const roles = items.map((item) => item.role).filter(Boolean);
+    expect(roles).toEqual(['reload', 'forceReload', 'togglefullscreen']);
+  });
+
+  // Breaks: developers lose the DevTools menu item in dev builds.
+  it('adds Toggle Developer Tools only when asked (dev builds)', () => {
+    const roles = submenuOf(buildViewMenu(vi.fn(), { devTools: true })).map((item) => item.role).filter(Boolean);
     expect(roles).toEqual(['reload', 'forceReload', 'toggleDevTools', 'togglefullscreen']);
   });
 
