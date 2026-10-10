@@ -19,9 +19,10 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
-import { app, safeStorage } from 'electron';
+import { app } from 'electron';
 
 import { getBlob, setBlob } from './core-db';
+import { isOsBackedEncryption } from './os-encryption';
 import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 const logger = createLogger('secure-credential-store');
@@ -48,9 +49,9 @@ function legacyFilePath(): string {
   return join(app.getPath('userData'), LEGACY_FILE_NAME);
 }
 
-/** True when the OS keychain is usable — callers can refuse to store plaintext. */
+/** True only when the OS key store protects the vault (not Linux `basic_text`). */
 export function isSecureStorageAvailable(): boolean {
-  return safeStorage.isEncryptionAvailable();
+  return isOsBackedEncryption();
 }
 
 function serialize(vault: Vault): Buffer {

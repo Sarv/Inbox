@@ -3,8 +3,8 @@
  *
  *   ENC1:<safeStorage ciphertext>   sealed by the OS key store (Keychain, DPAPI,
  *                                   Secret Service / KWallet — or Linux
- *                                   `basic_text`, see os-encryption on branches
- *                                   that have it).
+ *                                   `basic_text`, which is NOT protected at
+ *                                   rest: see os-encryption.ts).
  *   PLAIN1:<utf-8 payload>          no safeStorage at all: a clearly MARKED
  *                                   plaintext fallback rather than silently
  *                                   dropping the secret.

@@ -219,6 +219,10 @@ Established shared helpers (extend this list as you add more):
   renderer component's delayed DOM work (scroll into view, focus once mounted)
   that is skipped if the component has unmounted by then. Use it instead of a bare
   `setTimeout` that touches `document`.
+- `useSecureStorageProtected()` — `apps/desktop/src/hooks/useSecureStorageProtected.ts`.
+  Whether the OS key store really protects saved secrets on this device (false on
+  Linux `basic_text`). Use it for any renderer wording that says a secret is
+  "saved securely" or "in the keychain", instead of asking `secureCreds` again.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

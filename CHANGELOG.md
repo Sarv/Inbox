@@ -106,6 +106,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changing a provider's address asks for the key again. Gemini keys are sent in
   a request header rather than in the URL. A temporarily locked keychain can no
   longer wipe saved AI keys.
+- **Linux without a system keyring now gets an honest warning.** When no
+  keyring (gnome-keyring, KWallet) is running, Linux falls back to a storage
+  mode whose "encryption" key is public, but the app used to treat it as
+  encrypted. It now shows the warning banner, which also names what is
+  exposed: passwords, sign-in tokens, AI keys, OpenPGP keys kept without a
+  passphrase, and the key to your stored mail. Nothing else claims otherwise:
+  a saved mailbox password no longer says "Saved securely", and Security's
+  "Encrypted mail cache" no longer says its key is in the keychain. New
+  OpenPGP private keys there are protected with your passphrase instead. Keys
+  saved earlier still open, but Settings → Encryption now marks them "Not
+  protected" and explains how to fix it: back up the secret key, then import
+  that backup with its passphrase. macOS, Windows and Linux with a keyring are
+  unchanged.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

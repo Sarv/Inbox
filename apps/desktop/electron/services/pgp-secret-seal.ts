@@ -15,6 +15,7 @@
  */
 import { safeStorage } from 'electron';
 
+import { isOsBackedEncryption } from './os-encryption';
 import type { OwnKeyProtection } from './pgp-key-store';
 
 const MAGIC_KEYCHAIN = 'ENC1:';
@@ -22,13 +23,24 @@ const MAGIC_PASSPHRASE = 'LOCK1:';
 
 /** The keychain operations sealing needs — injectable so tests run without Electron. */
 export interface Keychain {
+  /** A real OS key store protects what we seal now (never Linux `basic_text`). */
   isAvailable(): boolean;
+  /**
+   * Whether an EXISTING keychain envelope can be opened. Wider than
+   * `isAvailable`: keys sealed under Linux `basic_text` before it stopped
+   * counting as a keychain must keep opening. Defaults to `isAvailable`.
+   */
+  canOpen?(): boolean;
   encrypt(plaintext: string): Buffer;
   decrypt(sealed: Buffer): string;
 }
 
 export const electronKeychain: Keychain = {
-  isAvailable: () => safeStorage.isEncryptionAvailable(),
+  // basic_text "encrypts" with a published key — sealing a private key with it
+  // is the plaintext form this module refuses, so new keys take the
+  // passphrase path there instead.
+  isAvailable: () => isOsBackedEncryption(),
+  canOpen: () => safeStorage.isEncryptionAvailable(),
   encrypt: (plaintext) => safeStorage.encryptString(plaintext),
   decrypt: (sealed) => safeStorage.decryptString(sealed),
 };
@@ -78,7 +90,7 @@ export function unseal(keychain: Keychain, sealed: Buffer): SealedSecret {
   if (protectionOf(sealed) === 'passphrase') {
     return { protection: 'passphrase', armoredProtectedKey: sealed.subarray(MAGIC_PASSPHRASE.length).toString('utf8') };
   }
-  if (!keychain.isAvailable()) {
+  if (!(keychain.canOpen ? keychain.canOpen() : keychain.isAvailable())) {
     throw new SealError('This key is sealed by the OS keychain, which is not available', 'keychain-unavailable');
   }
   return { protection: 'keychain', armoredPrivateKey: keychain.decrypt(sealed.subarray(MAGIC_KEYCHAIN.length)) };
