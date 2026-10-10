@@ -9,8 +9,9 @@
   <true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
   <true/>
-  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-  <true/>
+  <!-- Deliberately NOT allow-dyld-environment-variables: it lets any local
+       process inject a library into the signed app (DYLD_INSERT_LIBRARIES) and
+       read its Keychain secrets. Nothing here needs it. -->
 
   <!-- better-sqlite3-multiple-ciphers loads as an unpacked .node outside the
        app bundle's signed library set; library validation would reject it. -->
