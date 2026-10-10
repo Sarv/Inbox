@@ -15,7 +15,7 @@ import {
 } from '@sarv-in/mailguard/verdict';
 import pRetry, { AbortError } from 'p-retry';
 
-import { buildAIAuthHeaders, buildAIChatRequestOptions } from '../utils/ai-provider-auth';
+import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl } from '../utils/ai-provider-auth';
 import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
@@ -1044,11 +1044,7 @@ async function callOpenAICompatibleAPI(
   // ``config.baseUrl``; in prod that's the zone edge (e.g.
   // https://jpr1-ai-edge.sarv.com/edge/v1/llm), in dev it's
   // http://localhost:<port>/edge/v1/llm.
-  const defaultBaseUrls: Record<string, string | undefined> = {
-    openai: 'https://api.openai.com/v1',
-    sarv: undefined,
-  };
-  const baseUrl = config.baseUrl || defaultBaseUrls[config.type];
+  const baseUrl = effectiveAIBaseUrl(config);
   if (!baseUrl) {
     throw new Error(
       `callOpenAICompatibleAPI: no baseUrl configured for provider '${config.type}'. ` +
@@ -1133,12 +1129,12 @@ async function callGeminiAPI(
   userMessage: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
+  const baseUrl = effectiveAIBaseUrl(config);
 
   const doFetch = config.fetchImpl || fetch;
-  const response = await doFetch(`${baseUrl}/models/${config.model}:generateContent?key=${config.apiKey}`, {
+  const response = await doFetch(`${baseUrl}/models/${config.model}:generateContent`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...aiApiKeyHeaders('gemini', config.apiKey) },
     body: JSON.stringify({
       contents: [
         { parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] },

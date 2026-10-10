@@ -1,6 +1,6 @@
 // AI Service - Handles AI provider configuration and API calls
 
-import { buildAIAuthHeaders, buildAIChatRequestOptions } from '@sarvinbox/core/ai-provider-auth';
+import { aiApiKeyHeaders, buildAIAuthHeaders, buildAIChatRequestOptions, effectiveAIBaseUrl } from '@sarvinbox/core/ai-provider-auth';
 
 // Canonical AI feature defaults live in settings/types (a types+consts
 // leaf module — safe to import here, no component code, no cycle).
@@ -255,6 +255,13 @@ export interface AIProvider {
   /** Sarv catalog identities retained for explicit settings edits. */
   sarvZoneCode?: string;
   sarvProviderCode?: string;
+  /**
+   * A key for this provider is saved in the main-process vault. Runtime only,
+   * never persisted. The renderer never holds a saved key — `apiKey` is set
+   * only while the user is typing a new one — so requests that need the saved
+   * key go through main (`aiProviderFetch`).
+   */
+  hasStoredKey?: boolean;
 }
 
 export interface AISettings {
@@ -309,26 +316,28 @@ export const PROVIDER_CONFIGS: Record<AIProviderType, {
 
 const AI_SETTINGS_KEY = 'sarvinbox-ai-settings';
 
-// Provider API keys live in the main-process safeStorage vault, NOT localStorage.
-// This in-memory cache is hydrated once at startup (hydrateAiSecrets) so the
-// synchronous loadAISettings() can still return providers with their keys.
-let aiKeyCache: Record<string, string> = {};
+// Provider API keys live in the main-process safeStorage vault, NOT localStorage,
+// and the renderer never reads one back (CASA H-1: it also renders untrusted
+// email HTML). It learns only WHICH providers have a key; main attaches the key
+// to requests itself, and only for the endpoint it was saved for.
+const storedKeyIds = new Set<string>();
 let aiKeyStorageEncrypted: boolean | undefined;
 
 /**
- * Pull provider API keys from the main-process vault into memory, and MIGRATE any
- * legacy plaintext keys still sitting in localStorage into the vault (then strip
- * them off disk). Call once at startup, before any AI feature runs.
+ * Learn which providers have a saved key, and MIGRATE any legacy plaintext keys
+ * still sitting in localStorage into the vault (then strip them off disk). Call
+ * once at startup, before any AI feature runs.
  */
 export async function hydrateAiSecrets(): Promise<void> {
   try {
-    const res = await window.electronAPI?.aiSecrets?.getAll?.();
+    const res = await window.electronAPI?.aiSecrets?.list?.();
     if (res?.success && res.data) {
-      aiKeyCache = { ...res.data };
+      storedKeyIds.clear();
+      for (const id of res.data) storedKeyIds.add(id);
       aiKeyStorageEncrypted = res.encrypted;
     }
   } catch (error) {
-    console.error('Failed to load AI secrets from vault:', error);
+    console.error('Failed to load AI key status from vault:', error);
   }
 
   // One-time migration of any plaintext key still on disk → vault, then strip.
@@ -339,8 +348,8 @@ export async function hydrateAiSecrets(): Promise<void> {
     let migrated = false;
     for (const p of parsed.providers ?? []) {
       if (p.apiKey) {
-        aiKeyCache[p.id] = p.apiKey;
-        await window.electronAPI?.aiSecrets?.set?.(p.id, p.apiKey);
+        await window.electronAPI?.aiSecrets?.set?.(p.id, p.apiKey, effectiveAIBaseUrl(p));
+        storedKeyIds.add(p.id);
         migrated = true;
       }
     }
@@ -354,12 +363,12 @@ export async function hydrateAiSecrets(): Promise<void> {
 function persistStripped(settings: AISettings): void {
   const stripped: AISettings = {
     ...settings,
-    providers: (settings.providers ?? []).map((p) => ({ ...p, apiKey: '' })),
+    providers: (settings.providers ?? []).map(({ hasStoredKey: _hasStoredKey, ...p }) => ({ ...p, apiKey: '' })),
   };
   localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(stripped));
 }
 
-// Load AI settings — metadata from localStorage, keys merged from the vault cache.
+// Load AI settings — metadata from localStorage, plus whether each has a saved key.
 export function loadAISettings(): AISettings {
   try {
     const stored = localStorage.getItem(AI_SETTINGS_KEY);
@@ -369,7 +378,8 @@ export function loadAISettings(): AISettings {
         ...parsed,
         providers: (parsed.providers ?? []).map((p) => ({
           ...p,
-          apiKey: p.apiKey || aiKeyCache[p.id] || '',
+          apiKey: p.apiKey || '',
+          hasStoredKey: storedKeyIds.has(p.id),
         })),
       };
     }
@@ -385,9 +395,10 @@ export function saveAISettings(settings: AISettings): void {
   try {
     for (const p of settings.providers ?? []) {
       if (p.apiKey) {
-        aiKeyCache[p.id] = p.apiKey;
-        // Vault write is async/best-effort; the cache keeps this session consistent.
-        void window.electronAPI?.aiSecrets?.set?.(p.id, p.apiKey);
+        // A newly typed key: into the vault, bound to this provider's endpoint.
+        // IPC order means main sees it before any config push that follows.
+        storedKeyIds.add(p.id);
+        void window.electronAPI?.aiSecrets?.set?.(p.id, p.apiKey, effectiveAIBaseUrl(p));
       }
     }
     persistStripped(settings);
@@ -405,7 +416,7 @@ export function getDefaultProvider(): AIProvider | null {
 /**
  * Push the CURRENT default AI provider to BOTH consumers in the main process:
  *  - the extraction scheduler gate (`ai:setProviderConfigured`), and
- *  - the categorization/agent pipeline (`agent:setAIConfig`, with the resolved key).
+ *  - the categorization/agent pipeline (`agent:setAIConfig`, naming the key by providerId).
  *
  * Call this on EVERY provider-state change — startup (after `hydrateAiSecrets`
  * resolves, so the key is real), add/switch/edit/remove provider, and after
@@ -420,7 +431,9 @@ export async function syncAIProviderToMain(): Promise<void> {
   try {
     await (window as any).electronAPI?.agent?.setAIConfig?.({
       type: prov.type,
+      // Empty for a saved key — main fills it in from the vault by providerId.
       apiKey: prov.apiKey,
+      providerId: prov.id,
       model: prov.model,
       baseUrl: prov.baseUrl,
       authMethod: prov.authMethod,
@@ -466,7 +479,8 @@ export function addProvider(
 
   settings.providers.push(newProvider);
   saveAISettings(settings);
-  return newProvider;
+  // The key is in the vault now; callers' state must not keep a copy of it.
+  return { ...newProvider, apiKey: '', hasStoredKey: !!apiKey };
 }
 
 /**
@@ -481,22 +495,37 @@ export async function addValidatedProvider(
   options: { existingId?: string; createNew?: boolean; makeDefault?: boolean } = {},
 ): Promise<(AIProvider & { keyStorageEncrypted?: boolean }) | null> {
   const stored = loadAISettings().providers;
+  // Same provider = same endpoint, model and sign-in. A saved key can't be
+  // compared (the renderer never reads it back), so a newly typed key for the
+  // same provider REPLACES its saved key rather than adding a duplicate.
   const existing = options.existingId ? stored.find((provider) => provider.id === options.existingId)
     : options.createNew ? undefined : stored.find((provider) =>
     provider.type === draft.type && provider.model === draft.model
-    && provider.baseUrl === draft.baseUrl && provider.apiKey === draft.apiKey
+    && provider.baseUrl === draft.baseUrl
     && (provider.authMethod || 'apiKey') === (draft.authMethod || 'apiKey')
     && provider.oauthEmail === draft.oauthEmail,
   );
   if (options.existingId && !existing) throw new Error('This AI provider was removed. Add it again to save this connection.');
   const id = existing?.id ?? generateId();
   let keyStorageEncrypted = existing ? aiKeyStorageEncrypted : undefined;
-  const keyChanged = draft.apiKey !== (existing?.apiKey || '');
+  // What happens to the key, from the draft alone (the renderer never holds a
+  // saved key): a typed key replaces it; `hasStoredKey` (field left blank)
+  // keeps it; neither, when one was saved, removes it (e.g. a custom service
+  // switched to no authentication).
+  const keyAction: 'set' | 'keep' | 'delete' | 'none' = draft.apiKey ? 'set'
+    : draft.hasStoredKey ? 'keep'
+      : existing?.hasStoredKey ? 'delete' : 'none';
+  const keyChanged = keyAction === 'set' || keyAction === 'delete';
+  let writeId: number | undefined;
+  // Undo our key change. If the provider still exists, main puts back the key
+  // our write replaced (the renderer never had it) — unless a newer write has
+  // landed since, which then stands. If the provider was removed meanwhile,
+  // the key goes too: never resurrect a removed provider's credential.
   const restoreSecret = async () => {
     try {
-      const live = existing ? loadAISettings().providers.find((provider) => provider.id === id) : undefined;
-      const result = live?.apiKey
-        ? await window.electronAPI.aiSecrets.set(id, live.apiKey)
+      const live = existing ? loadAISettings().providers.some((provider) => provider.id === id) : false;
+      const result = live && writeId !== undefined
+        ? await window.electronAPI.aiSecrets.revert(id, writeId)
         : await window.electronAPI.aiSecrets.delete(id);
       if (!result.success) throw new Error('Credential restoration failed');
     } catch {
@@ -506,8 +535,13 @@ export async function addValidatedProvider(
   if (!isCurrent()) return null;
   if (keyChanged) {
     let result: Awaited<ReturnType<typeof window.electronAPI.aiSecrets.set>> | Awaited<ReturnType<typeof window.electronAPI.aiSecrets.delete>>;
-    try { result = draft.apiKey ? await window.electronAPI.aiSecrets.set(id, draft.apiKey) : await window.electronAPI.aiSecrets.delete(id); }
-    catch { throw new Error('Could not save your API key securely. Please try again.'); }
+    try {
+      // Bound to the endpoint it was entered for: main only ever sends it there.
+      result = keyAction === 'set'
+        ? await window.electronAPI.aiSecrets.set(id, draft.apiKey, effectiveAIBaseUrl(draft))
+        : await window.electronAPI.aiSecrets.delete(id);
+    } catch { throw new Error('Could not save your API key securely. Please try again.'); }
+    writeId = result.writeId;
     if (!isCurrent()) {
       await restoreSecret();
       return null;
@@ -522,11 +556,15 @@ export async function addValidatedProvider(
   const settings = loadAISettings();
   const liveExisting = settings.providers.find((provider) => provider.id === id);
   if (options.existingId && !liveExisting) {
-    await restoreSecret();
+    if (keyChanged) await restoreSecret();
     throw new Error('This AI provider was removed. Add it again to save this connection.');
   }
   const makeDefault = options.makeDefault ?? true;
-  const provider: AIProvider = { ...draft, id, isDefault: makeDefault || Boolean(liveExisting?.isDefault) || settings.providers.length === 0 };
+  const hasStoredKey = keyAction === 'set' || (keyAction === 'keep' && Boolean(existing?.hasStoredKey ?? draft.hasStoredKey));
+  const provider: AIProvider = {
+    ...draft, id, apiKey: '', hasStoredKey,
+    isDefault: makeDefault || Boolean(liveExisting?.isDefault) || settings.providers.length === 0,
+  };
   const providers = settings.providers.map((entry) => ({ ...entry, isDefault: makeDefault ? false : entry.isDefault }));
   const index = providers.findIndex((entry) => entry.id === id);
   if (index < 0) providers.push(provider);
@@ -539,9 +577,9 @@ export async function addValidatedProvider(
     if (keyChanged) await restoreSecret();
     throw new Error('Could not save AI settings. Please try again.');
   }
-  if (draft.apiKey) aiKeyCache[id] = draft.apiKey;
-  else delete aiKeyCache[id];
-  return { ...provider, keyStorageEncrypted: draft.apiKey ? keyStorageEncrypted : undefined };
+  if (hasStoredKey) storedKeyIds.add(id);
+  else storedKeyIds.delete(id);
+  return { ...provider, apiKey: draft.apiKey, keyStorageEncrypted: keyAction === 'set' ? keyStorageEncrypted : undefined };
 }
 
 // Remove a provider
@@ -557,8 +595,8 @@ export function removeProvider(id: string): void {
       settings.providers[0].isDefault = true;
     }
 
-    // Forget the key in both the vault and the in-memory cache.
-    delete aiKeyCache[id];
+    // Forget the key in the vault.
+    storedKeyIds.delete(id);
     void window.electronAPI?.aiSecrets?.delete?.(id);
 
     saveAISettings(settings);
@@ -676,6 +714,56 @@ export function aiFailureReason(status: number): string {
   return `The AI provider rejected the request (HTTP ${status}).`;
 }
 
+/**
+ * The one way the renderer calls an AI provider. A request that needs a SAVED
+ * key goes through main (`aiProxy.fetch`), which attaches the key for the
+ * endpoint it was saved for — the renderer never holds it. Everything else is a
+ * direct fetch with its own auth: a Sarv OAuth bearer, a key the user has just
+ * typed (onboarding / Settings test), or no auth for a keyless Custom service.
+ * Returns a standard Response either way, so callers treat both alike.
+ */
+export async function aiProviderFetch(
+  provider: Pick<AIProvider, 'id' | 'type' | 'name' | 'apiKey' | 'hasStoredKey' | 'authMethod' | 'oauthProvider' | 'oauthEmail'>,
+  url: string,
+  init: { method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+): Promise<Response> {
+  const method = init.method ?? 'POST';
+  const usesSavedKey = provider.authMethod !== 'oauth' && !provider.apiKey && !!provider.hasStoredKey;
+  if (!usesSavedKey) {
+    const auth = provider.authMethod === 'oauth'
+      ? buildAIAuthHeaders(provider, await resolveBearerToken(provider as AIProvider))
+      : provider.apiKey
+        ? aiApiKeyHeaders(provider.type, provider.apiKey)
+        : buildAIAuthHeaders(provider, ''); // keyless Custom, or a clear "key missing" error
+    return fetch(url, { method, headers: { ...init.headers, ...auth }, body: init.body, signal: init.signal, redirect: 'error' });
+  }
+
+  init.signal?.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  const onAbort = () => { void window.electronAPI.aiProxy.abort(requestId); };
+  init.signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    const res = await window.electronAPI.aiProxy.fetch({
+      requestId, providerId: provider.id, type: provider.type, url, method, headers: init.headers, body: init.body,
+    });
+    if (res.ok) {
+      // Null-body statuses can't carry a body in a Response.
+      const body = [101, 204, 205, 304].includes(res.status) ? null : res.body;
+      return new Response(body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.contentType ? { 'content-type': res.contentType } : undefined,
+      });
+    }
+    // Mirror fetch's own failure shapes so callers' retry/abort logic still applies.
+    if (res.reason === 'aborted') throw new DOMException(res.error, 'AbortError');
+    if (res.reason === 'network') throw new TypeError(res.error);
+    throw new Error(res.error);
+  } finally {
+    init.signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 // Test provider connection
 export async function testProvider(provider: AIProvider, options?: { signal?: AbortSignal }): Promise<{ success: boolean; message: string }> {
   try {
@@ -686,10 +774,9 @@ export async function testProvider(provider: AIProvider, options?: { signal?: Ab
       const baseUrl = provider.baseUrl || PROVIDER_CONFIGS.gemini.baseUrl;
       const endpoint = `${baseUrl}/models/${encodeURIComponent(provider.model)}:generateContent`;
 
-      const response = await fetch(endpoint, {
+      const response = await aiProviderFetch(provider, endpoint, {
         method: 'POST',
-        redirect: 'error',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': provider.apiKey },
+        headers: { 'Content-Type': 'application/json' },
         signal: options?.signal,
         body: JSON.stringify({
           contents: [{ parts: [{ text: testPrompt }] }],
@@ -711,16 +798,11 @@ export async function testProvider(provider: AIProvider, options?: { signal?: Ab
       // OpenAI and Sarv use OpenAI-compatible API
       const baseUrl = provider.baseUrl || PROVIDER_CONFIGS[provider.type].baseUrl;
       const endpoint = `${baseUrl}/chat/completions`;
-      const bearer = await resolveBearerToken(provider);
       options?.signal?.throwIfAborted();
 
-      const response = await fetch(endpoint, {
+      const response = await aiProviderFetch(provider, endpoint, {
         method: 'POST',
-        redirect: 'error',
-        headers: {
-          'Content-Type': 'application/json',
-          ...buildAIAuthHeaders(provider, bearer),
-        },
+        headers: { 'Content-Type': 'application/json' },
         signal: options?.signal,
         body: JSON.stringify({
           model: provider.model,
@@ -1006,10 +1088,6 @@ async function callOpenAICompatibleAPI(
   const baseUrl = provider.baseUrl || PROVIDER_CONFIGS[provider.type].baseUrl;
   const endpoint = `${baseUrl}/chat/completions`;
 
-  // Resolve the bearer — either the stored apiKey, or a fresh OAuth access
-  // token (Sarv). The main process manages the OAuth refresh lifecycle.
-  const bearer = await resolveBearerToken(provider);
-
   const requestBody: Record<string, unknown> = {
     model: provider.model,
     messages: [
@@ -1040,12 +1118,11 @@ async function callOpenAICompatibleAPI(
   const abortTimer = setTimeout(() => abortController.abort(), LLM_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    // Auth is attached by aiProviderFetch: a fresh OAuth bearer (Sarv), or the
+    // saved key — added by main, which the renderer never holds.
+    response = await aiProviderFetch(provider, endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAIAuthHeaders(provider, bearer),
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody),
       signal: abortController.signal,
     });
@@ -1313,7 +1390,9 @@ async function callGeminiAPI(
   maxTokens?: number
 ): Promise<string> {
   const baseUrl = provider.baseUrl || PROVIDER_CONFIGS.gemini.baseUrl;
-  const endpoint = `${baseUrl}/models/${provider.model}:generateContent?key=${provider.apiKey}`;
+  // The key goes in a header (added by aiProviderFetch / main), never in the
+  // URL's query string, where it ends up in logs and error messages.
+  const endpoint = `${baseUrl}/models/${provider.model}:generateContent`;
 
   // Same per-attempt timeout as the OpenAI-compatible path — a hung
   // connection otherwise blocks the caller forever.
@@ -1321,7 +1400,7 @@ async function callGeminiAPI(
   const abortTimer = setTimeout(() => abortController.abort(), LLM_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await aiProviderFetch(provider, endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

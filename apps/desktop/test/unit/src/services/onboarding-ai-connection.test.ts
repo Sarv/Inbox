@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { addValidatedProvider, loadAISettings, testProvider, type AIProvider } from '../../../../src/services/ai-service';
-import { checkAIConnection, loadSarvAIConnection, makeAIConnection, normalizeAIEndpoint } from '../../../../src/services/onboarding-ai-connection';
+import { checkAIConnection, loadSarvAIConnection, makeAIConnection, normalizeAIEndpoint, providerFromConnection } from '../../../../src/services/onboarding-ai-connection';
 import { listCaiModels, listCaiProviders, loadZoneSelection } from '../../../../src/services/sarv-cai-api';
 
 vi.mock('../../../../src/services/sarv-cai-api', async (importOriginal) => {
@@ -11,8 +11,11 @@ vi.mock('../../../../src/services/sarv-cai-api', async (importOriginal) => {
 });
 
 const fetchMock = vi.fn();
-const vaultSet = vi.fn(async () => ({ success: true, encrypted: true }));
+const vaultSet = vi.fn(async (): Promise<{ success: boolean; encrypted: boolean; writeId?: number }> => ({ success: true, encrypted: true }));
 const vaultDelete = vi.fn(async () => ({ success: true }));
+// Main undoes a write by its id (the renderer never holds the old key).
+const vaultRevert = vi.fn(async () => ({ success: true }));
+let nextWriteId = 0;
 const providers = vi.fn();
 const accounts = vi.fn();
 const testProviderDraft: AIProvider = {
@@ -26,8 +29,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   vi.stubGlobal('fetch', fetchMock);
-  vaultSet.mockResolvedValue({ success: true, encrypted: true });
-  window.electronAPI = { aiSecrets: { set: vaultSet, delete: vaultDelete }, oauth: { listProviders: providers, listAccounts: accounts } } as unknown as typeof window.electronAPI;
+  vaultSet.mockImplementation(async () => ({ success: true, encrypted: true, writeId: ++nextWriteId }));
+  vaultRevert.mockResolvedValue({ success: true });
+  window.electronAPI = { aiSecrets: { set: vaultSet, delete: vaultDelete, revert: vaultRevert }, oauth: { listProviders: providers, listAccounts: accounts } } as unknown as typeof window.electronAPI;
   providers.mockResolvedValue({ success: true, data: [{ id: 'sarv', apiBaseUrl: 'https://cai.example', llmBaseUrl: 'https://edge.example/edge/v1/llm', configured: true }] });
   accounts.mockResolvedValue({ success: true, data: [{ provider: 'sarv', email: 'first@example.com' }, { provider: 'sarv', email: 'selected@example.com' }] });
   vi.mocked(loadZoneSelection).mockResolvedValue({ zones: [], zoneCode: '' });
@@ -162,6 +166,31 @@ describe('AI configuration catalogs', () => {
   });
 });
 
+describe('resuming with a saved key', () => {
+  // The renderer never holds a saved key (CASA H-1). Breaks: resuming setup
+  // demands the key again, or the saved key is pulled into the renderer.
+  const resumed = () => ({ ...makeAIConnection('openai'), useApiKey: true, apiKey: '', storedProviderId: 'p-saved' });
+
+  it('lists models through main with the saved key, sending nothing directly', async () => {
+    const proxyFetch = vi.fn(async () => ({ ok: true, status: 200, statusText: 'OK', contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'gpt-test' }] }) }));
+    (window.electronAPI as any).aiProxy = { fetch: proxyFetch, abort: vi.fn() };
+    const checked = await checkAIConnection(resumed(), new AbortController().signal);
+    expect(checked.models).toEqual([{ id: 'gpt-test', name: 'gpt-test' }]);
+    expect(proxyFetch).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'p-saved', method: 'GET', url: 'https://api.openai.com/v1/models' }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('tests and saves as the saved provider when the key field is left blank', () => {
+    expect(providerFromConnection({ ...resumed(), model: 'gpt-test' })).toMatchObject({ id: 'p-saved', apiKey: '', hasStoredKey: true });
+    // A newly typed key wins over the saved one.
+    expect(providerFromConnection({ ...resumed(), apiKey: 'typed', model: 'gpt-test' })).toMatchObject({ id: 'onboarding-test', apiKey: 'typed' });
+  });
+
+  it('still asks for a key when there is no saved one', async () => {
+    await expect(checkAIConnection({ ...resumed(), storedProviderId: undefined }, new AbortController().signal)).rejects.toThrow('Enter your API key.');
+  });
+});
+
 describe('tested provider persistence', () => {
   // The vault must succeed before the provider can become active/default.
   it('awaits the vault and never writes the key to localStorage', async () => {
@@ -173,7 +202,10 @@ describe('tested provider persistence', () => {
     resolve({ success: true, encrypted: true });
     const saved = await saving;
     expect(saved?.isDefault).toBe(true);
-    expect(loadAISettings().providers[0].apiKey).toBe('synthetic-key');
+    // Changed deliberately (CASA H-1): once saved, the key lives only in the
+    // main-process vault — the renderer keeps a "has a saved key" flag, not the key.
+    expect(loadAISettings().providers[0]).toMatchObject({ apiKey: '', hasStoredKey: true });
+    expect(saved?.apiKey).toBe('synthetic-key'); // the draft the user just typed
     expect(localStorage.getItem('sarvinbox-ai-settings')).not.toContain('synthetic-key');
   });
 
@@ -203,7 +235,11 @@ describe('tested provider persistence', () => {
     const second = await addValidatedProvider(draft, () => true);
     expect(first?.id).toBe(second?.id);
     expect(loadAISettings().providers).toHaveLength(1);
-    expect(vaultSet).toHaveBeenCalledOnce();
+    // Changed deliberately: the renderer can't compare a typed key with the
+    // saved one (it never reads it back), so a retest re-saves it under the
+    // SAME id — still one provider, never a duplicate.
+    expect(vaultSet).toHaveBeenCalledTimes(2);
+    expect(vaultSet.mock.calls.map((call) => (call as unknown[])[0])).toEqual([first?.id, first?.id]);
     await addValidatedProvider({ ...draft, model: 'second-model' }, () => true);
     expect(loadAISettings().providers.filter((provider) => provider.isDefault).map((provider) => provider.model)).toEqual(['second-model']);
   });
@@ -282,7 +318,8 @@ describe('tested provider persistence', () => {
 
   // Linux keyring fallback must be visible to onboarding without storing a key in renderer metadata.
   it('returns an unencrypted-storage warning only when reported by the native vault', async () => {
-    vaultSet.mockResolvedValueOnce({ success: true, encrypted: false });
+    // Every save reports the vault's real state (a retest saves again).
+    vaultSet.mockResolvedValue({ success: true, encrypted: false });
     const { id: _id, isDefault: _default, ...draft } = testProviderDraft;
     expect(await addValidatedProvider(draft, () => true)).toMatchObject({ keyStorageEncrypted: false });
     expect(localStorage.getItem('sarvinbox-ai-settings')).not.toContain('synthetic-key');
@@ -311,7 +348,8 @@ describe('validated provider additions and edits in settings', () => {
     const changed = await addValidatedProvider({ ...draft, apiKey: 'edited-secret', model: 'edited-model' }, () => true, { existingId: first!.id, makeDefault: false });
     expect(changed).toMatchObject({ id: first!.id, isDefault: true, model: 'edited-model' });
     expect(loadAISettings().providers).toHaveLength(1);
-    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'edited-secret');
+    // Saved bound to the endpoint it was entered for.
+    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'edited-secret', 'https://api.example/v1');
     expect(localStorage.getItem('sarvinbox-ai-settings')).not.toContain('edited-secret');
   });
 
@@ -336,11 +374,13 @@ describe('validated provider additions and edits in settings', () => {
   it('restores an edited key when the save becomes stale before publication', async () => {
     const first = await addValidatedProvider(draft, () => true);
     let current = true;
-    vaultSet.mockImplementationOnce(async () => { current = false; return { success: true, encrypted: true }; });
+    vaultSet.mockImplementationOnce(async () => { current = false; return { success: true, encrypted: true, writeId: 41 }; });
     expect(await addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => current, { existingId: first!.id, makeDefault: false })).toBeNull();
-    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'synthetic-key');
+    // Changed with the key moving to main: main reverts exactly the write that
+    // was cancelled (the renderer never held the old key to re-set it).
+    expect(vaultRevert).toHaveBeenCalledWith(first!.id, 41);
     expect(vaultDelete).not.toHaveBeenCalled();
-    expect(loadAISettings().providers[0].apiKey).toBe('synthetic-key');
+    expect(loadAISettings().providers[0]).toMatchObject({ apiKey: '', hasStoredKey: true });
   });
 
   // Metadata failure must roll an existing secret back and leave its saved model/default untouched.
@@ -349,8 +389,9 @@ describe('validated provider additions and edits in settings', () => {
     const storage = localStorage;
     vi.stubGlobal('localStorage', { getItem: storage.getItem.bind(storage), setItem: () => { throw new Error('quota exceeded'); } });
     await expect(addValidatedProvider({ ...draft, apiKey: 'replacement-key', model: 'changed-model' }, () => true, { existingId: first!.id, makeDefault: false })).rejects.toThrow('Could not save AI settings');
-    expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'synthetic-key');
-    expect(loadAISettings().providers[0]).toMatchObject({ apiKey: 'synthetic-key', model: 'gpt-test', isDefault: true });
+    const replacementWrite = (await vaultSet.mock.results.at(-1)!.value) as { writeId: number };
+    expect(vaultRevert).toHaveBeenCalledWith(first!.id, replacementWrite.writeId);
+    expect(loadAISettings().providers[0]).toMatchObject({ hasStoredKey: true, model: 'gpt-test', isDefault: true });
   });
 
   // Switching an explicitly edited local service to no authentication removes the obsolete key before publication.
@@ -366,7 +407,7 @@ describe('validated provider additions and edits in settings', () => {
     const first = await addValidatedProvider(draft, () => true);
     vaultDelete.mockRejectedValueOnce(new Error('unavailable'));
     await expect(addValidatedProvider({ ...draft, apiKey: '' }, () => true, { existingId: first!.id, makeDefault: false })).rejects.toThrow('securely');
-    expect(loadAISettings().providers[0].apiKey).toBe('synthetic-key');
+    expect(loadAISettings().providers[0]).toMatchObject({ hasStoredKey: true });
   });
 });
 
@@ -401,7 +442,7 @@ describe('validated save interruption and rollback failures', () => {
     const first = await addValidatedProvider(draft, () => true);
     const storage = localStorage;
     vi.stubGlobal('localStorage', { getItem: storage.getItem.bind(storage), setItem: () => { throw new Error('quota exceeded'); } });
-    vaultSet.mockResolvedValueOnce({ success: true, encrypted: true }).mockResolvedValueOnce({ success: false, encrypted: true });
+    vaultRevert.mockResolvedValueOnce({ success: false });
     await expect(addValidatedProvider({ ...draft, apiKey: 'edited-secret' }, () => true, { existingId: first!.id, makeDefault: false })).rejects.toThrow('Could not restore your saved API key');
     expect(loadAISettings().providers[0].model).toBe('gpt-test');
   });
@@ -490,9 +531,9 @@ describe('restoring an explicitly edited Sarv connection', () => {
 describe('provider edits racing current settings during a vault write', () => {
   const { id: _id, isDefault: _default, ...draft } = testProviderDraft;
   function deferWrite() {
-    let resolve!: (value: { success: boolean; encrypted: boolean }) => void;
+    let resolve!: (value: { success: boolean; encrypted: boolean; writeId?: number }) => void;
     vaultSet.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
-    return () => resolve({ success: true, encrypted: true });
+    return () => resolve({ success: true, encrypted: true, writeId: 77 });
   }
 
   // Removing an account/provider while a key writes must never resurrect the provider or its orphan secret.
@@ -533,8 +574,12 @@ describe('provider edits racing current settings during a vault write', () => {
     const complete = deferWrite(); let current = true;
     const saving = addValidatedProvider({ ...draft, apiKey: 'replacement-key' }, () => current, { existingId: first!.id, makeDefault: false });
     const { updateProvider } = await import('../../../../src/services/ai-service'); updateProvider(first!.id, { apiKey: 'newer-key' }); current = false;
-    complete(); expect(await saving).toBeNull(); expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'newer-key');
-    expect(loadAISettings().providers[0].apiKey).toBe('newer-key');
+    // The newer key was written after ours; main's revert of OUR write (77)
+    // is then a no-op (pinned in ai-secret-store.test.ts), so the newer key
+    // stands — the renderer never re-sets an older key over it.
+    complete(); expect(await saving).toBeNull(); expect(vaultSet).toHaveBeenLastCalledWith(first!.id, 'newer-key', 'https://api.example/v1');
+    expect(vaultRevert).toHaveBeenCalledWith(first!.id, 77);
+    expect(loadAISettings().providers[0]).toMatchObject({ hasStoredKey: true });
   });
 });
 

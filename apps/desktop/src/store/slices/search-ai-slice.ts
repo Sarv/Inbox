@@ -500,7 +500,9 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     await window.electronAPI.aiCategorization.start(
       {
         type: provider.type,
+        // Empty for a saved key — main fills it in from the vault by providerId.
         apiKey: provider.apiKey,
+        providerId: provider.id,
         model: provider.model,
         baseUrl: provider.baseUrl,
         authMethod: provider.authMethod,
@@ -553,6 +555,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     const aiPayload = {
       type: provider.type,
       apiKey: provider.apiKey,
+      providerId: provider.id,
       model: provider.model,
       baseUrl: provider.baseUrl,
       authMethod: provider.authMethod,

@@ -66,7 +66,8 @@ vi.mock('../../../../electron/services/accounts-registry', () => ({
 }));
 vi.mock('../../../../electron/services/ai-backlog-cap', () => ({ getAutoBacklogCap: vi.fn(), setAutoBacklogCap: vi.fn() }));
 vi.mock('../../../../electron/services/ai-secret-store', () => ({
-  getAllAiSecrets: vi.fn(), setAiSecret: vi.fn(), deleteAiSecret: vi.fn(), isSecureStorageAvailable: vi.fn(),
+  listAiSecretIds: vi.fn(async () => ['p1']), setAiSecret: vi.fn(), deleteAiSecret: vi.fn(), isSecureStorageAvailable: vi.fn(() => true),
+  resolveAiKey: vi.fn(),
 }));
 vi.mock('../../../../electron/services/conversation-extraction-scheduler', () => ({
   setAIProviderConfigured: vi.fn(),
@@ -367,5 +368,30 @@ describe('ai:setBackgroundSplitEnabled', () => {
     await call('ai:setBackgroundSplitEnabled', 'yes');
     await call('ai:setBackgroundSplitEnabled');
     expect(setter.mock.calls).toEqual([[true], [false], [false], [false]]);
+  });
+});
+
+describe('AI key IPC surface', () => {
+  // CASA H-1. Breaks: any renderer script (the renderer also renders untrusted
+  // email HTML) can read every saved AI provider key again.
+  it('has no handler that returns saved keys', () => {
+    expect(h.handlers.has('aiSecrets:getAll')).toBe(false);
+  });
+
+  // The renderer may learn WHICH providers have a key — nothing more.
+  it('lists provider ids only', async () => {
+    expect(await call<string[]>('aiSecrets:list')).toEqual({ success: true, data: ['p1'], encrypted: true });
+  });
+
+  // Breaks: keys are saved unbound, so they can be sent anywhere on first use.
+  it('saves a key bound to the endpoint it was entered for', async () => {
+    const { setAiSecret } = await import('../../../../electron/services/ai-secret-store');
+    await call('aiSecrets:set', 'p1', 'sk-1', 'https://api.openai.com/v1');
+    expect(setAiSecret).toHaveBeenCalledWith('p1', 'sk-1', 'https://api.openai.com/v1');
+  });
+
+  it('registers the proxy for requests that need a saved key', () => {
+    expect(h.handlers.has('ai:providerFetch')).toBe(true);
+    expect(h.handlers.has('ai:providerFetchAbort')).toBe(true);
   });
 });

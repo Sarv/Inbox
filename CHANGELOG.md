@@ -98,6 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for. Changing an account's server now asks you to re-enter the password, and
   showing a saved password still requires Touch ID. Developer Tools are no
   longer available in release builds.
+- **Saved AI API keys never leave the app's background process.** The window
+  no longer has a way to read a saved OpenAI, Gemini or custom-provider key;
+  requests that need one are made by the background process, which sends the
+  key only to the address it was saved for. Settings shows "API key saved"
+  instead of part of the key, a blank key field keeps the saved key, and
+  changing a provider's address asks for the key again. Gemini keys are sent in
+  a request header rather than in the URL. A temporarily locked keychain can no
+  longer wipe saved AI keys.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

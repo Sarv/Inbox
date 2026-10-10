@@ -20,7 +20,8 @@ vi.mock('../../../../../../src/services/onboarding-ai-connection', async (import
 
 const button = (view: Mounted, label: string) => view.all('button').find((element) => element.textContent?.includes(label)) || null;
 let stored: AIProvider[];
-const existing = (): AIProvider => ({ id: 'existing', name: 'Existing OpenAI', type: 'openai', apiKey: 'existing-key', model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1', isDefault: true });
+// A saved provider as the renderer sees it: the key stays in main (hasStoredKey).
+const existing = (): AIProvider => ({ id: 'existing', name: 'Existing OpenAI', type: 'openai', apiKey: '', hasStoredKey: true, model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1', isDefault: true });
 function Harness() {
   const [providers, setProviders] = useState(stored);
   return <ProvidersTab aiProviders={providers} setAiProviders={setProviders} />;
@@ -88,7 +89,10 @@ describe('AI Providers settings onboarding flow', () => {
   it('edits a saved provider using the same connection/model flow', async () => {
     stored = [existing()]; const view = render(<Harness />);
     fire(view.byLabel('Edit Existing OpenAI'), 'click');
-    expect(view.container.textContent).toContain('Edit Existing OpenAI'); expect(view.find('input[type="password"]')).toHaveProperty('value', 'existing-key');
+    // Changed deliberately (CASA H-1): the saved key is never put back into the
+    // form — the field starts blank and says a key is saved.
+    expect(view.container.textContent).toContain('Edit Existing OpenAI'); expect(view.find('input[type="password"]')).toHaveProperty('value', '');
+    expect(view.find('input[type="password"]')).toHaveProperty('placeholder', 'Saved — leave blank to keep it');
     typeInto(view.find('input[type="password"]'), 'replacement-key'); fire(button(view, 'Check connection'), 'click'); await settle();
     toggle(view.find('input[type="checkbox"]')); fire(button(view, 'Test model and save provider'), 'click'); await settle();
     expect(stored).toHaveLength(1); expect(stored[0]).toMatchObject({ id: 'existing', apiKey: 'replacement-key', model: 'available-model', isDefault: true });

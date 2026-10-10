@@ -46,6 +46,8 @@ export interface PersistedPipelineAIConfig {
   authMethod?: 'apiKey' | 'oauth';
   oauthProvider?: string;
   oauthEmail?: string;
+  /** Names the saved API key (filled in from the vault on restore). */
+  providerId?: string;
 }
 
 function legacyPath(): string {
@@ -59,10 +61,15 @@ function pick(config: AIProviderConfig): PersistedPipelineAIConfig | null {
     authMethod?: 'apiKey' | 'oauth';
     oauthProvider?: string;
     oauthEmail?: string;
+    providerId?: string;
   };
   return {
     type: c.type,
-    apiKey: c.apiKey || '',
+    // Keys live in the AI key vault, bound to their endpoint; the persisted
+    // config only names them. (A key from an older build is kept until the
+    // renderer next pushes a config.)
+    apiKey: c.providerId ? '' : c.apiKey || '',
+    providerId: c.providerId,
     model: c.model,
     baseUrl: c.baseUrl,
     authMethod: c.authMethod,
