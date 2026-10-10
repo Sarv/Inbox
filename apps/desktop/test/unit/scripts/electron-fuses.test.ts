@@ -70,8 +70,20 @@ describe('the fuses the build asks for', () => {
       const effective = key in config ? config[key] : ELECTRON_DEFAULTS[name];
       expect([name, effective]).toEqual([name, expected]);
     }
-    // No stray keys the list doesn't know about.
-    expect(Object.keys(config).every((key) => Object.values(BUILDER_KEYS).includes(key as never))).toBe(true);
+    // No stray keys the list doesn't know about (beyond the signing option below).
+    expect(Object.keys(config).filter((key) => key !== 'resetAdHocDarwinSignature')
+      .every((key) => Object.values(BUILDER_KEYS).includes(key as never))).toBe(true);
+  });
+
+  // Flipping a fuse rewrites bytes inside Electron Framework, which breaks its
+  // ad-hoc signature. A release built without a Developer ID (documented in
+  // release.yml and docs/RELEASING.md: warn, ship unsigned) is never re-signed
+  // after the flip, and Apple Silicon kills an app with a broken signature at
+  // launch. Breaks: that unsigned arm64 app no longer starts, the release's
+  // smoke launch fails, and publishing is blocked. Harmless when signed:
+  // electron-builder re-signs with --force straight after.
+  it('re-signs ad hoc after flipping, so an unsigned macOS build still launches', () => {
+    expect((packageJson.build.electronFuses ?? {}).resetAdHocDarwinSignature).toBe(true);
   });
 
   it('turns off every way to run code as the app, and turns on asar integrity', () => {
