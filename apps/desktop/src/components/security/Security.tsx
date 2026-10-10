@@ -3,6 +3,7 @@ import { describeImageAllowEntry, type ImageAllowEntry } from '@sarvinbox/core/i
 import { ShieldCheck, Shield, ShieldQuestion, ShieldAlert, ShieldX, Trash2, Link2, AtSign, Globe, Plus, Info, Loader2, BadgeCheck, RefreshCw, Ban, Check } from 'lucide-react';
 import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 
+import { useSecureStorageProtected } from '../../hooks/useSecureStorageProtected';
 import { useEmailStore } from '../../store/email-store';
 import { accountDisplayLabel } from '../../store/helpers';
 import { LEVEL_COPY, type SecurityLevel } from '../../utils/email-security';
@@ -100,6 +101,13 @@ export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
 
 /* ---------------------------------------------------------------- Overview */
 
+const MAIL_CACHE_TITLE = 'Encrypted mail cache';
+
+/** The mail cache card where no keyring protects its key (Linux `basic_text`): still encrypted, but the key is readable. */
+const MAIL_CACHE_UNPROTECTED_DETAIL =
+  'The local mailbox database is encrypted, but this system has no keyring, so the key to it is only obfuscated: anyone who '
+  + 'copies your profile can read your stored mail. Install and unlock a keyring (e.g. gnome-keyring or KWallet), then restart Sarv Inbox.';
+
 const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Isolated message rendering', detail: 'Every email body renders inside a sandboxed frame. Scripts, stylesheets, fonts and imports are stripped before it loads.' },
   { title: 'Links open in your browser', detail: 'Clicking a link never navigates inside the app — it hands the address to your system browser with referrer and opener stripped.' },
@@ -108,7 +116,7 @@ const PROTECTIONS: Array<{ title: string; detail: string }> = [
   { title: 'Brand verification (BIMI)', detail: 'A sender domain’s published logo is shown only on mail that passed DMARC, and the blue verified tick only when its Verified Mark Certificate chains to a pinned Mark Verifying Authority for that exact logo and domain. Details per domain under Sender identity.' },
   { title: 'Sender reputation', detail: 'As a message arrives, its sending server’s address and its sender domains are checked against spam blocklists — through this computer’s DNS, or Sarv’s reputation service with your own sign-in — and a listing adds to the spam score before the message is filed. The domains a message links to can be checked too, and how recently its domains were registered. All of it under Security → Blocklists.' },
   { title: 'Spam filter', detail: 'Every arriving message is scored from its headers before the AI sees it — failed authentication, a spoofed sender name, a forged reply, missing or mis-dated headers, bulk mail with no unsubscribe, your mail server’s own spam verdict, and senders you have reported. A message over the line is filed as spam with its reasons shown on the shield.' },
-  { title: 'Encrypted mail cache', detail: 'The local mailbox database is encrypted at rest; the key lives in the operating system keychain.' },
+  { title: MAIL_CACHE_TITLE, detail: 'The local mailbox database is encrypted at rest; the key lives in the operating system keychain.' },
   { title: 'Verified TLS to your mail server', detail: 'Certificates are verified and TLS 1.2 is the floor, unless you explicitly allow a self-signed server per account.' },
 ];
 
@@ -218,6 +226,7 @@ function ReputationStatus() {
 }
 
 function OverviewTab() {
+  const secretsProtected = useSecureStorageProtected();
   return (
     <div className="p-6 max-w-4xl space-y-8">
       <HeaderBackfillStatus />
@@ -246,15 +255,20 @@ function OverviewTab() {
       <section>
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">What is always on</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          {PROTECTIONS.map((p) => (
-            <div key={p.title} className="rounded-lg border border-border bg-card p-3">
-              <div className="flex items-center gap-2 font-medium">
-                <ShieldCheck className="h-4 w-4 text-green-600 dark:text-green-400" />
-                {p.title}
+          {PROTECTIONS.map((p) => {
+            const exposed = p.title === MAIL_CACHE_TITLE && secretsProtected === false;
+            return (
+              <div key={p.title} data-protection={p.title} className="rounded-lg border border-border bg-card p-3">
+                <div className="flex items-center gap-2 font-medium">
+                  {exposed
+                    ? <ShieldAlert className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                    : <ShieldCheck className="h-4 w-4 text-green-600 dark:text-green-400" />}
+                  {p.title}
+                </div>
+                <div className="mt-1 text-sm text-muted-foreground">{exposed ? MAIL_CACHE_UNPROTECTED_DETAIL : p.detail}</div>
               </div>
-              <div className="mt-1 text-sm text-muted-foreground">{p.detail}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
     </div>

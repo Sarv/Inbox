@@ -23,10 +23,17 @@ export function keyWarnings(key: KeyState): string[] {
   ].filter((warning): warning is string => warning !== null);
 }
 
-export const protectionText = (protection: OwnKeySummary['protection']): string =>
-  protection === 'keychain'
-    ? 'Protected by your system keychain — no passphrase to type.'
-    : 'Protected by its passphrase — asked for once per session.';
+/**
+ * Where a key's secret lives. `keychainProtects` is false where the system has
+ * no real keychain (Linux `basic_text`): a key sealed there earlier — before
+ * the app could tell — is only obfuscated, and must not be called protected.
+ */
+export const protectionText = (protection: OwnKeySummary['protection'], keychainProtects = true): string => {
+  if (protection === 'passphrase') return 'Protected by its passphrase — asked for once per session.';
+  if (keychainProtects) return 'Protected by your system keychain — no passphrase to type.';
+  return 'Not protected: kept without a passphrase, and this system has no keychain, so anyone who copies your profile can read it. '
+    + 'To protect it, back up the secret key, then import that backup with its passphrase.';
+};
 
 const SOURCE_LABELS: Record<ContactKeySummary['source'], string> = {
   manual: 'Imported by you',

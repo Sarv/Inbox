@@ -147,6 +147,18 @@ describe('EncryptionTab', () => {
     expect(view.container.textContent).toContain('No keys yet');
   });
 
+  // Linux without a keyring, with a key sealed there before the app could
+  // tell. Breaks: the row says "Protected by your system keychain" under a
+  // notice that says keys are passphrase-protected — both false for it.
+  it('flags a keychain-sealed key as not protected when there is no keychain', async () => {
+    api.status.mockResolvedValue(ok({ keychainAvailable: false }));
+    const view = await mount();
+    const own = view.find(`[data-own-key="${FP}"]`)?.textContent ?? '';
+    expect(own).toContain('Not protected');
+    expect(own).not.toContain('Protected by your system keychain');
+    expect(view.container.textContent).toContain('new keys are protected by their own passphrase');
+  });
+
   // Breaks: a failing key list reads as "no keys" with no hint anything went wrong.
   it('shows a list failure, and a rejected bridge', async () => {
     api.listOwnKeys.mockResolvedValue(fail('Keyring unreadable'));

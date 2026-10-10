@@ -154,6 +154,26 @@ describe('own keys', () => {
     expect(() => keyring.exportOwnPublicKey('NOPE')).toThrow(PgpKeyringError);
   });
 
+  // Linux without a keyring (basic_text): a key sealed there before the app
+  // could tell is only obfuscated, but still opens. The Encryption tab tells the
+  // user to back it up and import the backup. Breaks: that advice leaves the
+  // key keychain-sealed (still exposed), or loses its settings.
+  it('re-protects a basic_text-sealed key with its backup passphrase on re-import', async () => {
+    const { keyring, store, deps } = setup();
+    const summary = await keyring.generateOwnKey({ name: 'Me', email: 'me@example.org' });
+    keyring.setSignByDefault(summary.fingerprint, true);
+    const basicText: Keychain = { ...fakeKeychain(false), canOpen: () => true };
+    const later = new PgpKeyring({ ...deps, keychain: basicText });
+    expect((await later.listOwnKeys())[0]).toMatchObject({ protection: 'keychain', unlocked: true });
+
+    const backup = await later.exportOwnKey(summary.fingerprint, 'backup-pw');
+    const [reimported] = await later.importOwnKey(backup, 'backup-pw');
+    expect(reimported).toMatchObject({ fingerprint: summary.fingerprint, protection: 'passphrase', signByDefault: true });
+    const secret = store.getOwnKey(summary.fingerprint)!.secret.toString('utf8');
+    expect(secret.startsWith('LOCK1:')).toBe(true);
+    expect((await inspectKey(secret.slice('LOCK1:'.length))).isPassphraseProtected).toBe(true);
+  });
+
   // Breaks: a deleted key kept decrypting from the session cache.
   it('deletes a key from the store and from memory', async () => {
     const { keyring } = setup();

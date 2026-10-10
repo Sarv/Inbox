@@ -1,5 +1,7 @@
 import { ShieldAlert, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+
+import { useSecureStorageProtected } from '../hooks/useSecureStorageProtected';
 
 import { Tooltip } from './Tooltip';
 
@@ -7,29 +9,16 @@ import { Tooltip } from './Tooltip';
  * Inline warning shown ONLY when no OS key store protects secrets at rest:
  * Linux without a Secret Service / KWallet (where Chromium falls back to its
  * `basic_text` backend, whose key is public), or a locked/unavailable
- * keychain. Passwords, sign-in tokens, AI keys and the mail database key are
- * then readable by anyone who copies the profile — the user should know.
+ * keychain. Passwords, sign-in tokens, AI keys, OpenPGP keys kept without a
+ * passphrase and the mail database key are then readable by anyone who copies
+ * the profile — the user should know.
  *
  * On macOS (Keychain) and Windows (DPAPI) this renders nothing.
  */
 export function SecurityStatusBanner() {
   // null = not yet checked; true/false = keychain-backed encryption available.
-  const [available, setAvailable] = useState<boolean | null>(null);
+  const available = useSecureStorageProtected();
   const [dismissed, setDismissed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await window.electronAPI?.secureCreds?.available?.();
-        if (!cancelled) setAvailable(res?.success ? res.data === true : true);
-      } catch {
-        // If we can't even check, don't alarm the user — assume fine.
-        if (!cancelled) setAvailable(true);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
   if (available !== false || dismissed) return null;
 
@@ -39,7 +28,7 @@ export function SecurityStatusBanner() {
       <span className="flex-1 min-w-0 truncate">
         <span className="font-semibold">Saved sign-ins aren&apos;t protected on this device.</span>{' '}
         <span className="opacity-90">
-          No system keyring was found, so passwords, sign-in tokens, AI keys and the key to your stored mail can be read by anyone who copies your profile.
+          No system keyring was found, so passwords, sign-in tokens, AI keys, OpenPGP keys kept without a passphrase and the key to your stored mail can be read by anyone who copies your profile.
         </span>{' '}
         <span className="opacity-70">
           Install and unlock a keyring (e.g. gnome-keyring or KWallet), then restart Sarv Inbox.
