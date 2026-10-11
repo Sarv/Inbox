@@ -216,7 +216,45 @@ describe('SyncEngine body-fetch queue — connection-cap park (drain-storm guard
   });
 });
 
+describe('SyncEngine body-fetch queue — a pooled socket refused STARTTLS (CASA M-5)', () => {
+  // The server would not encrypt a new pooled socket. Breaks: each queued
+  // message takes a strike and its opener is told the STARTTLS text as a
+  // per-message failure — good mail drifts into the give-up cooldown — and the
+  // drain keeps pulling items against a refused account.
+  it('re-queues without a strike or a rejection, and stops draining', async () => {
+    const { engine } = makeEngine();
+    const refusal = Object.assign(new Error('The incoming mail server did not agree to encrypt this session (STARTTLS)'), { code: 'STARTTLS_UNAVAILABLE' });
+    const withConnection = vi.fn(async () => { throw refusal; });
+    (engine as any).connectionPool = { isInitialized: () => true, remainingParkMs: () => 0, withConnection };
+    const reject = vi.fn();
+    const items = ['a', 'b'].map((id, i) => ({ emailId: id, folderPath: 'INBOX', uid: i + 1, listeners: [{ resolve: vi.fn(), reject }], onStart: [] }));
+    (engine as any).bodyFetchQueue = [...items];
+    (engine as any).bodyFetchQueueIndex = new Map(items.map((it) => [it.emailId, it]));
+
+    await (engine as any).processBodyFetchQueue();
+
+    expect(withConnection).toHaveBeenCalledTimes(2);  // one batch, then it stopped
+    expect(reject).not.toHaveBeenCalled();
+    expect((engine as any).bodyFetchFailures.get('a') ?? 0).toBe(0);
+    expect((engine as any).bodyFetchQueue.map((i: any) => i.emailId).sort()).toEqual(['a', 'b']);
+  });
+});
+
 describe('SyncEngine.initializePool — shared back-off wiring', () => {
+  // Breaks: a pooled refusal stays inside the pool — the account keeps looking
+  // connected and the user is never shown the security banner.
+  it('reports a pooled STARTTLS refusal to the connection manager', async () => {
+    const engine = new SyncEngine({} as any);
+    const report = vi.spyOn((engine as any).connectionManager, 'reportSecurityFailure').mockImplementation(() => {});
+    vi.spyOn(IMAPConnectionPool.prototype, 'initialize').mockResolvedValue(undefined as any);
+    await engine.initializePool({ host: 'mail.example.org' } as any);
+
+    const refusal = new Error('refused');
+    (engine as any).connectionPool.config.onSecurityError(refusal);
+
+    expect(report).toHaveBeenCalledWith(refusal);
+  });
+
   it('forwards the pool connect-gate hooks to the reconnect ladder too', async () => {
     // Regression: the primary reconnect ladder was the last connect path that
     // ignored the shared cap back-off. initializePool must hand the SAME

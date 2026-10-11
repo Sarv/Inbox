@@ -135,7 +135,8 @@ describe('provider-first onboarding email', () => {
     expect(addAccount).toHaveBeenCalledWith({ host: 'outlook.office365.com', port: 993,
       security: 'ssl', secure: true, username: 'person@example.com', password: ' a secret password ',
       authMethod: 'password', allowInsecureTLS: undefined });
-    expect(connectSmtp).toHaveBeenCalledWith({ host: 'smtp.office365.com', port: 587, secure: false,
+    // Carries the sending security itself (CASA M-5), not just `secure`.
+    expect(connectSmtp).toHaveBeenCalledWith({ host: 'smtp.office365.com', port: 587, security: 'starttls', secure: false,
       username: 'person@example.com', from: 'person@example.com', password: ' a secret password ',
       authMethod: 'password', allowInsecureTLS: undefined });
     expect(addAccount.mock.invocationCallOrder[0]).toBeLessThan(connectSmtp.mock.invocationCallOrder[0]);
@@ -245,7 +246,22 @@ describe('provider-first onboarding email', () => {
     submit(view);
     await settle();
     expect(addAccount.mock.calls[0][0]).toMatchObject({ port: 143, secure: false, security: 'starttls', allowInsecureTLS: true });
-    expect(connectSmtp.mock.calls[0][0]).toMatchObject({ port: 587, secure: false, allowInsecureTLS: true });
+    expect(connectSmtp.mock.calls[0][0]).toMatchObject({ port: 587, secure: false, security: 'starttls', allowInsecureTLS: true });
+  });
+
+  // CASA M-5: sending can be set to None too, and the choice is sent as such.
+  // Breaks: None collapses to `secure: false`, which now means STARTTLS
+  // required, so a server without encryption can never be used for sending.
+  it('offers None for sending and sends it as the choice, on port 25', async () => {
+    const view = render(<Wizard />);
+    await choose(view, 'Other email');
+    enterManual(view);
+    typeInto(view.byLabel('IMAP server'), 'imap.private.example');
+    typeInto(view.byLabel('SMTP server'), 'smtp.private.example');
+    setSelect(view.byLabel('SMTP security'), 'none');
+    submit(view);
+    await settle();
+    expect(connectSmtp.mock.calls[0][0]).toMatchObject({ port: 25, secure: false, security: 'none' });
   });
 
   // Regression: returning to a connected account must not duplicate the account or erase its sync.

@@ -76,6 +76,8 @@ describe('first-run email connection', () => {
       port: 9993,
       username: 'demo@example.com',
       password: 'testpassword',
+      // The choice itself (CASA M-5): `secure` alone stored STARTTLS and None alike.
+      security: 'ssl',
       secure: true,
       allowInsecureTLS: undefined,
     });

@@ -4,7 +4,7 @@ import type { IMAPConfig, IIMAPClient } from '../types/imap';
 import { logger } from '../utils/logger';
 import { isTimeoutError, withTimeout } from '../utils/timeout';
 
-import { isConnectionError } from './imap-errors';
+import { isConnectionError, isStartTlsUnavailableError } from './imap-errors';
 import { ImapFlowClient } from './imapflow-client';
 
 // A pooled connection that has sat unused longer than this is REVALIDATED with a
@@ -59,6 +59,14 @@ export interface ConnectionPoolConfig {
    * {@link connectGate} — one records the park, the other honours it.
    */
   onConnectError?: (error: unknown) => void;
+  /**
+   * Optional: a new pooled socket's server would not encrypt a STARTTLS account
+   * (CASA M-5). Called ONCE per pool; the owner treats the account as refused —
+   * the primary may still be up on an older encrypted session while the network
+   * strips encryption from new ones. The pool itself stops dialling (see
+   * createConnection), so a drain can't turn into one refused connect per item.
+   */
+  onSecurityError?: (error: Error) => void;
 }
 
 // Max time a connection can be in-use before considered stuck (2 minutes)
@@ -94,6 +102,10 @@ export class IMAPConnectionPool {
   // acquires all see the same pre-push length and over-provision past
   // maxConnections — dangerous against Gmail's ~15-connection cap.
   private pendingCreations = 0;
+  // Set by the first STARTTLS refusal (see ConnectionPoolConfig.onSecurityError).
+  // Every later createConnection() fails with it WITHOUT dialling: retrying
+  // re-runs the identical refusal. A fresh pool (new settings) starts clear.
+  private securityRefusal: Error | null = null;
 
   constructor(private config: ConnectionPoolConfig = {
     maxConnections: 4,
@@ -107,6 +119,7 @@ export class IMAPConnectionPool {
   async initialize(imapConfig: IMAPConfig): Promise<void> {
     this.imapConfig = imapConfig;
     this.closed = false;
+    this.securityRefusal = null;
 
     // Best-effort warm-up. The pool is a THROUGHPUT optimization layered on top of
     // the already-established primary connection — the caller connects AND validates
@@ -296,6 +309,8 @@ export class IMAPConnectionPool {
           // info so it doesn't read as a connect-error storm during a long drain.
           if (error instanceof PoolConnectionParkedError) {
             logger.info(`Pool: not opening a new connection — ${Math.round(error.remainingMs / 1000)}s of server-connection-cap back-off left`);
+          } else if (isStartTlsUnavailableError(error)) {
+            // Already said once, when the pool latched it (createConnection).
           } else if (isConnectionError(error)) {
             // A TRANSIENT connect failure under load (Gmail rate/cap: "connect
             // timed out", "in required time", socket blip) is EXPECTED and
@@ -363,6 +378,7 @@ export class IMAPConnectionPool {
     if (!this.imapConfig) {
       throw new Error('No IMAP config available');
     }
+    if (this.securityRefusal) throw this.securityRefusal;
 
     // Shared back-off gate: if this account recently hit the server's connection
     // cap (or a connect timeout, the same saturated condition), do NOT open
@@ -383,6 +399,11 @@ export class IMAPConnectionPool {
       // Let the owner park the account on a quota/timeout failure so the very
       // next pool acquire (and every other connect path) sees the gate closed.
       this.config.onConnectError?.(error);
+      if (isStartTlsUnavailableError(error) && !this.securityRefusal) {
+        this.securityRefusal = error as Error;
+        logger.warn('Pool: the server did not encrypt a new connection (STARTTLS required) — no more pooled connections until the account reconnects');
+        this.config.onSecurityError?.(error as Error);
+      }
       throw error;
     }
 

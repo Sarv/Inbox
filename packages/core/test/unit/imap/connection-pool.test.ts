@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { IMAPConnectionPool, PoolConnectionParkedError } from '../../../src/imap/connection-pool';
 import { FakeImapServer } from '../../../src/test-support/fake-imap-server';
 import type { IIMAPClient } from '../../../src/types/imap';
+import { logger } from '../../../src/utils/logger';
 import { TimeoutError } from '../../../src/utils/timeout';
 
 // The pool is what stands between us and Gmail's ~15-connections-per-account cap,
@@ -473,6 +474,65 @@ describe('IMAPConnectionPool — shared connect back-off gate', () => {
     expect(clients).toHaveLength(2);
     held.release();
     second.release();
+  });
+});
+
+// CASA M-5: a STARTTLS account whose server will not encrypt a NEW pooled
+// socket — the network started stripping encryption mid-session while the
+// primary's older TLS session survives, or one backend behind a load balancer
+// has none. Breaks: every queued body fetch dials (and is refused) once, each
+// with an ERROR and stack, nothing tells the owner, and the account looks
+// connected while bodies fail one by one.
+describe('IMAPConnectionPool — a required STARTTLS the server will not do (CASA M-5)', () => {
+  const refusal = () => Object.assign(new Error('The incoming mail server did not agree to encrypt this session (STARTTLS)'), { code: 'STARTTLS_UNAVAILABLE' });
+  const refusingClients = () => {
+    makeClient = () => {
+      const client = new FakeImapServer();
+      client.failNextConnect(refusal());
+      return client;
+    };
+  };
+
+  it('tells the owner once and never dials again, without an error log per attempt', async () => {
+    const onSecurityError = vi.fn();
+    const pool = new IMAPConnectionPool({ maxConnections: 3, connectionTimeout: 1000, idleTimeout: 60000, onSecurityError });
+    await pool.initialize(CONFIG);
+    const held = await pool.acquire();   // the warm socket is busy, so the next acquire dials
+    const errorLog = vi.spyOn(logger, 'error');
+    refusingClients();
+
+    await expect(pool.acquire()).rejects.toMatchObject({ code: 'STARTTLS_UNAVAILABLE' });
+    const dialled = clients.length;
+    await expect(pool.acquire()).rejects.toMatchObject({ code: 'STARTTLS_UNAVAILABLE' });
+
+    expect(clients).toHaveLength(dialled);            // the second acquire did not dial
+    expect(onSecurityError).toHaveBeenCalledTimes(1);
+    expect(onSecurityError.mock.calls[0][0]).toMatchObject({ code: 'STARTTLS_UNAVAILABLE' });
+    expect(errorLog).not.toHaveBeenCalled();
+    held.release();
+  });
+
+  // Breaks: a refused warm-up on (re)connect leaves the primary up while
+  // imap:connect reports the refusal, so the app and main disagree.
+  it('reports a refused warm-up to the owner as well as to the caller', async () => {
+    const onSecurityError = vi.fn();
+    refusingClients();
+    const pool = new IMAPConnectionPool({ maxConnections: 2, connectionTimeout: 1000, idleTimeout: 60000, onSecurityError });
+    await expect(pool.initialize(CONFIG)).rejects.toMatchObject({ code: 'STARTTLS_UNAVAILABLE' });
+    expect(onSecurityError).toHaveBeenCalledTimes(1);
+  });
+
+  // Breaks: an account whose settings were fixed (or that moved to a safe
+  // network) can never use pooled connections again.
+  it('starts clear when initialized again', async () => {
+    const pool = new IMAPConnectionPool({ maxConnections: 2, connectionTimeout: 1000, idleTimeout: 60000, onSecurityError: vi.fn() });
+    refusingClients();
+    await expect(pool.initialize(CONFIG)).rejects.toMatchObject({ code: 'STARTTLS_UNAVAILABLE' });
+    makeClient = () => new FakeImapServer();
+    await pool.initialize(CONFIG);
+    const conn = await pool.acquire();
+    expect(conn.client).toBeDefined();
+    conn.release();
   });
 });
 

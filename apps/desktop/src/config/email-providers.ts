@@ -5,7 +5,10 @@
 // prefill every step from a single pill. `oauthProviderId` links to an OAuth
 // provider id from `window.electronAPI.oauth.listProviders()` when available.
 
-export type ConnectionSecurity = 'ssl' | 'starttls' | 'none';
+import type { ConnectionSecurity } from '@sarvinbox/core/connection-security';
+
+// The one definition, shared with the IMAP/SMTP clients.
+export type { ConnectionSecurity };
 
 export interface EmailProviderPreset {
   id: string;

@@ -5,7 +5,7 @@
  */
 
 import type { IMAPConfig, SyncEngineOptions } from '@sarvinbox/core';
-import { withTimeout, resolveTlsOptions, ImapFlowClient, isAuthError, isQuotaError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift } from '@sarvinbox/core';
+import { withTimeout, resolveTlsOptions, ImapFlowClient, isAuthError, isQuotaError, isStartTlsUnavailableError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift, STARTTLS_UNAVAILABLE } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 // Per-account connection back-off after a "too many simultaneous connections"
@@ -515,13 +515,21 @@ export function registerSyncHandlers(): void {
       // same client instance whose internal state may be corrupted
       // by the dead socket; forceReconnect builds a fresh client
       // (and tears down the pool's stale sockets).
-      if (syncEngine.isConnected()) {
+      // Also while a forceReconnect is already running (a focus/online reset, a
+      // sync timeout): a plain connect() would meet its 'connecting' state and
+      // return without dialling these settings at all.
+      if (syncEngine.isConnected() || syncEngine.isForceReconnecting()) {
         logger.info('[Main] connect: already connected — forcing fresh socket via forceReconnect');
         try {
           // 35s outer > forceReconnect's own ~30s budget (resolveBearer ≤10s +
           // connect ≤22s) so this wrapper doesn't preempt a legit slow reconnect;
           // the client still force-closes any stalled socket on its inner timeout.
-          await withTimeout(syncEngine.forceReconnect(), 35000, 'Force-reconnect timed out (35s)');
+          // With THIS config: the renderer may have just saved new settings
+          // (e.g. a different connection security), which a reconnect on the
+          // latched config would silently ignore until restart. Behind a run
+          // already in flight it waits for that one first, so it can outlast
+          // the 35s; the fall-through below then connects with this config.
+          await withTimeout(syncEngine.forceReconnect(connectConfig), 35000, 'Force-reconnect timed out (35s)');
         } catch (frErr) {
           logger.warn('[Main] connect: forceReconnect failed, falling through to plain connect:', frErr);
           // Try a clean teardown then fall through to plain connect
@@ -633,6 +641,16 @@ export function registerSyncHandlers(): void {
             win.webContents.send('imap:auth-error');
           }
         });
+        // The server stopped encrypting a STARTTLS account mid-session (CASA
+        // M-5): reconnects have stopped. Tell the renderer what to change. The
+        // saved config is KEPT — the credentials were never rejected.
+        syncEngine.onSecurityError((error) => {
+          if (!isActiveEngine()) return;
+          const win = getMainWindow();
+          if (win && !win.isDestroyed()) {
+            win.webContents.send('imap:security-error', error.message);
+          }
+        });
       }
 
       // Process any pending operations from previous session
@@ -672,6 +690,11 @@ export function registerSyncHandlers(): void {
           authMethod: config.authMethod,
           oauthProvider: config.oauthProvider,
           tlsOptions: (config as any).tlsOptions,
+          // Connection security and the self-signed opt-in are part of the
+          // account: dropping them here made a recovered 'none' account dial
+          // as STARTTLS-required, and a self-signed one fail verification.
+          security: config.security,
+          allowInsecureTLS: (config as any).allowInsecureTLS,
         }).catch((e) => logger.error('[Main] saveImapAccount failed:', e));
       }
 
@@ -689,6 +712,13 @@ export function registerSyncHandlers(): void {
       if (isTerminalOAuthError(error)) {
         logger.warn(`[Main] connect refused — ${(error as Error).message}; only an interactive sign-in can fix this`);
         return { success: false, error: (error as Error).message, retryable: false };
+      }
+      // A STARTTLS account whose server would not encrypt (CASA M-5): settled
+      // until the user changes the account's connection security. One line,
+      // not retryable, and the saved config is kept (nothing was rejected).
+      if (isStartTlsUnavailableError(error)) {
+        logger.warn(`[Main] connect refused — STARTTLS is required for ${config.host} but the server did not encrypt the session`);
+        return { success: false, error: (error as Error).message, retryable: false, code: STARTTLS_UNAVAILABLE };
       }
       logger.error('IMAP connect error:', error);
       const quotaKey = accountId ?? getCurrentAccountId();

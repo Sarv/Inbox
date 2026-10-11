@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   probeConnect: vi.fn(async () => {}),
   engine: {
     isConnected: vi.fn(() => false),
+    isForceReconnecting: vi.fn(() => false),
     connect: vi.fn(async () => {}),
     isRealTimeActive: vi.fn(() => false),
   },
@@ -36,6 +37,8 @@ vi.mock('@sarvinbox/core', () => ({
   },
   isAuthError: (e: Error) => /auth/i.test(e?.message ?? ''),
   isQuotaError: () => false,
+  isStartTlsUnavailableError: (e: { code?: string } | undefined) => e?.code === 'STARTTLS_UNAVAILABLE',
+  STARTTLS_UNAVAILABLE: 'STARTTLS_UNAVAILABLE',
   isTerminalOAuthError: () => true,
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   LogAggregator: class { note() { /* no-op */ } },

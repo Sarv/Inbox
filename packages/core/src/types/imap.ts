@@ -1,3 +1,5 @@
+import type { ConnectionSecurity } from '../utils/connection-security';
+
 // IMAP client interface for Sarv Inbox
 
 /**
@@ -391,10 +393,13 @@ export interface IMAPConfig {
   host: string;
   port: number;
   secure: boolean; // Use TLS/SSL (legacy boolean; `security` is authoritative when set)
-  /** First-class connection security. 'ssl' = implicit TLS (993); 'starttls' =
-   *  upgrade on 143; 'none' = plain (best-effort STARTTLS if offered). Persisted
-   *  so the choice round-trips on reconnect/edit instead of collapsing to `secure`. */
-  security?: 'ssl' | 'starttls' | 'none';
+  /** First-class connection security (resolveConnectionSecurity, CASA M-5):
+   *  'ssl' = implicit TLS (993); 'starttls' = upgrade on 143, REQUIRED — the
+   *  connect stops before sending credentials if the server will not encrypt;
+   *  'none' = the user's explicit opt-out (upgrades only if offered). Absent:
+   *  secure true → 'ssl', false → 'starttls'. Persisted so the choice
+   *  round-trips on reconnect/edit instead of collapsing to `secure`. */
+  security?: ConnectionSecurity;
   username: string;
   password: string; // ignored when authMethod === 'oauth2'
   authMethod?: 'password' | 'oauth2';

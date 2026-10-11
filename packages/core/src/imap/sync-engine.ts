@@ -34,7 +34,7 @@ import { mapEnvelopeFields } from './envelope-mapper';
 import { isFolderSyncEnabled, folderHeadersOnly } from './folder-sync-policy';
 import { FolderSyncer, type FolderSyncResult } from './folder-syncer';
 import type { AutocryptSink } from './header-stage';
-import { getSuggestedBackoffMs } from './imap-errors';
+import { getSuggestedBackoffMs, isStartTlsUnavailableError } from './imap-errors';
 import { isSarvHost } from './label-strategy';
 import { MessageProcessor, isExpectedMessage, type IngestServerActions } from './message-processor';
 import { OperationQueue, type OperationResult } from './operation-queue';
@@ -551,6 +551,9 @@ export class SyncEngine {
           // desktop layer, which knows the accountId). Undefined here = no gate.
           connectGate: poolConfig?.connectGate,
           onConnectError: poolConfig?.onConnectError,
+          // A pooled socket refused STARTTLS (CASA M-5): the whole account is
+          // refused, not just that socket — see reportSecurityFailure.
+          onSecurityError: (error) => this.connectionManager.reportSecurityFailure(error),
         });
         await pool.initialize(config);
         this.connectionPool = pool;
@@ -651,6 +654,11 @@ export class SyncEngine {
     return this.connectionManager.isConnecting();
   }
 
+  /** See ConnectionManager.isForceReconnecting. */
+  isForceReconnecting(): boolean {
+    return this.connectionManager.isForceReconnecting();
+  }
+
   /**
    * Resolve once the connection is usable, or false on timeout. Never rejects.
    * Used to wait out an in-flight connect instead of racing it.
@@ -692,10 +700,11 @@ export class SyncEngine {
    * request hangs until timeout). Plain `connect()` won't help — its
    * "already connected" guard short-circuits on the zombie state.
    * Also re-initializes the connection pool so parallel fetches use
-   * fresh sockets.
+   * fresh sockets. `config` (an explicit reconnect with saved settings) replaces
+   * the latched one, for the primary and the rebuilt pool alike.
    */
-  async forceReconnect(): Promise<void> {
-    await this.connectionManager.forceReconnect();
+  async forceReconnect(config?: IMAPConfig): Promise<void> {
+    await this.connectionManager.forceReconnect(undefined, config);
 
     // Clear the body-fetch failure ledger. Emails that hit 5 timeouts
     // against the zombie connection were blacklisted ("Body fetch
@@ -2193,6 +2202,14 @@ export class SyncEngine {
               this.requeueBodyFetch(item);
               return 'connection_error';
             }
+            // The server would not encrypt a new connection (CASA M-5). Not this
+            // message's fault: no strike, keep it queued, and stop draining —
+            // the account is now refused (no reconnects) until it connects
+            // again, which resumes the queue like any reconnect.
+            if (isStartTlsUnavailableError(error)) {
+              this.requeueBodyFetch(item);
+              return 'security_error';
+            }
             // Folder-level SELECT rejection: the server won't open this folder
             // (e.g. an unselectable [Gmail]/* duplicate). Retrying every message
             // on it just churns. Blacklist the folder and drop all its queued
@@ -2248,7 +2265,7 @@ export class SyncEngine {
           break;
         }
         // If any had connection errors, pause queue
-        if (results.includes('connection_error')) {
+        if (results.includes('connection_error') || results.includes('security_error')) {
           break;
         }
         // If auth failed, the queue has been drained + all listeners
@@ -2762,6 +2779,15 @@ export class SyncEngine {
    */
   onAuthError(callback: (error: Error) => void): void {
     this.connectionManager.on('auth-error', callback);
+  }
+
+  /**
+   * Register the STARTTLS-refusal callback (CASA M-5): a STARTTLS account's
+   * server would not encrypt, so reconnects stopped until its connection
+   * security changes. Not an auth failure — the credentials are untouched.
+   */
+  onSecurityError(callback: (error: Error) => void): void {
+    this.connectionManager.on('security-error', callback);
   }
 
   /**

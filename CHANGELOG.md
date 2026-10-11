@@ -78,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned as garbled bytes.
 
 ### Security
+- **Accounts set to STARTTLS now refuse to connect without encryption.** The
+  app used to carry on unencrypted when a mail server did not offer STARTTLS, so
+  anyone on the same network could hide it and read your password or sign-in.
+  Now it stops before sending the password and tells you why, for both incoming
+  (IMAP) and sending (SMTP) mail. "Allow self-signed certificates" no longer
+  turns this off either; it only relaxes the certificate check. If your server
+  really has no encryption, choose Connection security: None, which is now
+  offered and remembered everywhere you set up or edit an account, including
+  Settings → Accounts. Accounts that already use SSL/TLS are unchanged.
 - **Sign-in tokens only go to their own provider's servers.** A Gmail,
   Outlook, Yahoo or Sarv mail sign-in is now used only with that provider's own
   IMAP and SMTP servers, and a Sarv sign-in authenticates only Sarv AI

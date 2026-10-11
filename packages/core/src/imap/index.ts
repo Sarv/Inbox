@@ -82,6 +82,8 @@ export {
   isAuthError,
   isQuotaError,
   isRateLimited,
+  isStartTlsUnavailableError,
+  STARTTLS_UNAVAILABLE,
   getSuggestedBackoffMs,
   describeNetworkError,
 } from './imap-errors';

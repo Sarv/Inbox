@@ -46,6 +46,7 @@ import {
   hasBulkHeaderSignal,
   headerValueFromText,
 } from '../utils/bulk-mail';
+import { resolveConnectionSecurity, starttlsUnavailableMessage } from '../utils/connection-security';
 import { GMAIL_CLASSIFICATION_CATEGORY_SLUGS } from '../utils/gmail-labels';
 import { logger } from '../utils/logger';
 import { messageIdKey } from '../utils/message-id';
@@ -54,7 +55,7 @@ import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout'
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { GMAIL_NATIVE_CATEGORY_SLUGS, modifyGmailNativeCategories, type GmailNativeCategory } from './gmail-category-api';
-import { isConnectionError, isAuthError } from './imap-errors';
+import { isConnectionError, isAuthError, STARTTLS_UNAVAILABLE } from './imap-errors';
 import { isSarvHost } from './label-strategy';
 import { receivingAuthserv } from './receiving-authserv';
 
@@ -87,14 +88,39 @@ interface IdleHandlers {
 }
 
 /**
- * Whether to open an IMPLICIT-TLS connection (SSL on port 993). The first-class
- * `security` field is authoritative when present; otherwise fall back to the
- * legacy `secure` boolean. Only 'ssl' means implicit TLS — 'starttls'/'none'
- * connect plain and ImapFlow upgrades via STARTTLS when the server offers it.
- * Pure + exported so the ssl/starttls/none mapping is unit-testable.
+ * Whether to open an IMPLICIT-TLS connection (SSL on port 993): only for
+ * 'ssl' (see resolveConnectionSecurity — `security` wins, else legacy `secure`).
  */
-export function resolveImplicitTls(config: { security?: 'ssl' | 'starttls' | 'none'; secure: boolean }): boolean {
-  return config.security ? config.security === 'ssl' : config.secure;
+export function resolveImplicitTls(config: { security?: 'ssl' | 'starttls' | 'none'; secure: boolean; authMethod?: string }): boolean {
+  return resolveConnectionSecurity(config) === 'ssl';
+}
+
+/**
+ * The ImapFlow options for a config's connection security (CASA M-5):
+ *   ssl      → secure:true (doSTARTTLS must stay unset: ImapFlow throws
+ *              "Misconfiguration" for secure + doSTARTTLS).
+ *   starttls → secure:false, doSTARTTLS:true — the upgrade is REQUIRED. Without
+ *              it ImapFlow continued in cleartext when STARTTLS was missing, so
+ *              anyone on the path could strip the capability and read the
+ *              password or OAuth token. ImapFlow checks this after CAPABILITY
+ *              and before authenticating, so nothing secret is sent on failure.
+ *   none     → secure:false, doSTARTTLS unset — opportunistic: upgrade when
+ *              offered (false would refuse even an offered upgrade).
+ */
+export function imapFlowSecurityOptions(config: { security?: 'ssl' | 'starttls' | 'none'; secure: boolean; authMethod?: string }): {
+  secure: boolean;
+  doSTARTTLS?: true;
+} {
+  const security = resolveConnectionSecurity(config);
+  if (security === 'ssl') return { secure: true };
+  return security === 'starttls' ? { secure: false, doSTARTTLS: true } : { secure: false };
+}
+
+/** ImapFlow's refusal of a required STARTTLS (not advertised, or refused). */
+function isImapFlowStarttlsRefusal(err: unknown): boolean {
+  return err instanceof Error
+    && (err as { tlsFailed?: unknown }).tlsFailed === true
+    && /does not support STARTTLS/i.test(err.message);
 }
 
 export class ImapFlowClient extends EventEmitter implements IIMAPClient {
@@ -211,18 +237,15 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     this.gmailResolveBearer = config.authMethod === 'oauth2' ? config.resolveBearer : undefined;
     this.connectionState = 'connecting';
 
-    // Connection security: when the first-class `security` field is set it is
-    // authoritative; otherwise fall back to the legacy `secure` boolean. Only
-    // 'ssl' means implicit TLS (port 993). For 'starttls'/'none' we pass
-    // secure:false — ImapFlow then upgrades via STARTTLS when the server
-    // advertises it (a plain-TCP connect for a server that doesn't). We never
-    // downgrade below what the user asked for.
-    const useImplicitTls = resolveImplicitTls(config);
+    // Connection security (imapFlowSecurityOptions): implicit TLS for 'ssl', a
+    // REQUIRED STARTTLS upgrade for 'starttls' (and legacy secure:false), an
+    // opportunistic one only for the user's explicit 'none'.
+    const security = imapFlowSecurityOptions(config);
 
     const options: ImapFlowOptions = {
       host: config.host,
       port: config.port,
-      secure: useImplicitTls,
+      ...security,
       auth: config.authMethod === 'oauth2'
         ? { user: config.username, accessToken: oauthAccessToken }
         : { user: config.username, pass: config.password },
@@ -258,7 +281,8 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       host: options.host,
       port: options.port,
       secure: options.secure,
-      security: config.security ?? (config.secure ? 'ssl' : 'starttls'),
+      security: resolveConnectionSecurity(config),
+      starttls: options.doSTARTTLS ? 'required' : options.secure ? 'n/a' : 'if offered',
     });
 
     const client = new ImapFlow(options);
@@ -355,6 +379,13 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // never leak its slot against the account's budget.
       this.releaseBudget?.();
       this.releaseBudget = null;
+      // A required STARTTLS the server would not do (or that was stripped on the
+      // way) is a settled configuration fact, not a blip: say what happened and
+      // what the user can do, under its own code so nothing retries it as a
+      // network error or treats it as a rejected password.
+      if (isImapFlowStarttlsRefusal(err)) {
+        throw new IMAPError(starttlsUnavailableMessage('incoming', config.host), STARTTLS_UNAVAILABLE, (err as Error).message);
+      }
       // The connect sequence runs several commands (CAPABILITY, LOGIN, ENABLE
       // QRESYNC/CONDSTORE, NAMESPACE, ID…). A bare "Command failed" hides WHICH
       // one — route through toImapError so the message carries the server's

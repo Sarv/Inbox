@@ -21,6 +21,10 @@ import {
 const clients: FakeImapServer[] = [];
 const connectScript: FakeConnectOutcome[] = [];
 let clientOptions: FakeImapServerOptions = {};
+/** Every config a client was asked to connect with, in order. */
+const connectedWith: unknown[] = [];
+/** Run at the start of the next dial(s), while it is in flight. */
+const duringDial: Array<() => void> = [];
 
 vi.mock('../../../src/imap/imapflow-client', () => ({
   ImapFlowClient: class {
@@ -30,6 +34,8 @@ vi.mock('../../../src/imap/imapflow-client', () => ({
       // reuses its constructor-built client for the very first connect.
       const connect = client.connect.bind(client);
       client.connect = async (config?: any) => {
+        connectedWith.push(config);
+        duringDial.shift()?.();
         const outcome = connectScript.shift();
         if (outcome) client.scriptConnect(outcome);
         return connect(config);
@@ -45,7 +51,7 @@ const GMAIL_CONFIG = { ...CONFIG, host: 'imap.gmail.com' };
 
 const EVENT_NAMES = [
   'state-change', 'connected', 'disconnected', 'reconnecting', 'reconnected',
-  'error', 'max-attempts-reached', 'quota-exceeded', 'auth-error',
+  'error', 'max-attempts-reached', 'quota-exceeded', 'auth-error', 'security-error',
 ] as const;
 
 type Recorded = Array<[string, ...unknown[]]>;
@@ -77,10 +83,14 @@ const lastClient = () => clients[clients.length - 1];
 const authError = () => Object.assign(new Error('Invalid credentials (Failure)'), { textCode: 'AUTHENTICATIONFAILED' });
 const quotaError = () => new Error('Too many simultaneous connections');
 const socketError = () => new Error('connect ECONNREFUSED 1.2.3.4:993');
+/** The IMAP client's refusal of a required STARTTLS (code STARTTLS_UNAVAILABLE). */
+const starttlsError = () => Object.assign(new Error('The incoming mail server did not agree to encrypt this session (STARTTLS)'), { code: 'STARTTLS_UNAVAILABLE' });
 
 beforeEach(() => {
   clients.length = 0;
   connectScript.length = 0;
+  connectedWith.length = 0;
+  duringDial.length = 0;
   clientOptions = {};
   vi.useFakeTimers();
   // Jitter is ±25% of the backoff; pin it to exactly 1.0 so delays are assertable.
@@ -559,6 +569,255 @@ describe('ConnectionManager — terminal failures', () => {
     // …but it does expire by itself.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     expect(manager.isInQuotaCooldown()).toBe(false);
+  });
+});
+
+describe('ConnectionManager — a required STARTTLS the server will not do (CASA M-5)', () => {
+  // Terminal like auth: every retry is refused identically. Breaks: the ladder
+  // re-dials forever (10 attempts, a cooldown, again) and the periodic
+  // reconnects keep hitting a server that will never encrypt.
+  it('stops the ladder on a STARTTLS refusal and refuses every automatic retry', async () => {
+    const { manager, events } = makeManager();
+    await manager.connect(CONFIG);
+    connectScript.push(starttlsError());
+
+    clients[0].emitSocketEvent('end');
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(countOf(events, 'security-error')).toBe(1);
+    expect(manager.state).toBe('error');
+    expect(manager.securityFailed).toBe(true);
+    expect(manager.isInSecurityCooldown()).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    lastClient().emitSocketEvent('end');
+    await manager.forceReconnect();
+    expect(await manager.ensureConnection()).toBe(false);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(clients).toHaveLength(2);
+  });
+
+  // Not an auth failure: the password was never sent. Breaks: the renderer is
+  // told the password was rejected, and main forgets the saved account.
+  it('never reports it as an auth failure', async () => {
+    const { manager, events } = makeManager();
+    connectScript.push(starttlsError());
+    await expect(manager.connect(CONFIG)).rejects.toThrow('did not agree to encrypt');
+
+    expect(countOf(events, 'security-error')).toBe(1);
+    expect(countOf(events, 'auth-error')).toBe(0);
+    expect(manager.authFailed).toBe(false);
+    expect(manager.securityFailed).toBe(true);
+  });
+
+  // The way out: the user changes the account's security (or moves to a
+  // trustworthy network, where the renderer reconnects) — an explicit
+  // connect() clears the latch and dials again.
+  it('clears the latch on an explicit connect(), which then succeeds', async () => {
+    const { manager } = makeManager();
+    connectScript.push(starttlsError());
+    await expect(manager.connect(CONFIG)).rejects.toThrow();
+    await manager.forceReconnect();
+    expect(clients).toHaveLength(1);
+
+    await manager.connect({ ...CONFIG, security: 'none' } as never);
+    expect(manager.securityFailed).toBe(false);
+    expect(manager.isInSecurityCooldown()).toBe(false);
+    expect(manager.state).toBe('connected');
+  });
+
+  // After the window, one automatic retry is allowed (the network may have
+  // changed); it re-latches if refused again.
+  it('allows an automatic retry once the cooldown has passed', async () => {
+    const { manager } = makeManager();
+    connectScript.push(starttlsError());
+    await expect(manager.connect(CONFIG)).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(15 * 60_000 + 1);
+    expect(manager.isInSecurityCooldown()).toBe(false);
+    await manager.forceReconnect();
+    expect(clients).toHaveLength(2);
+  });
+});
+
+describe('ConnectionManager — forceReconnect with saved settings', () => {
+  // The user saved new settings for an account that is already connected
+  // (imap:connect → forceReconnect). Breaks: the reconnect dials with the OLD
+  // latched settings — e.g. keeps an unencrypted session after the user
+  // switched the account to STARTTLS — until the app restarts.
+  it('dials with the config it is given, and keeps it for later reconnects', async () => {
+    const { manager } = makeManager();
+    await manager.connect({ ...CONFIG, security: 'none' } as never);
+    await manager.forceReconnect(undefined, { ...CONFIG, security: 'starttls' } as never);
+
+    expect(connectedWith.at(-1)).toMatchObject({ security: 'starttls' });
+    expect(manager.imapConfig).toMatchObject({ security: 'starttls' });
+  });
+
+  // A focus/online reset (no config) is still tearing down when the user saves
+  // new settings. Breaks: the save is coalesced onto the run dialling the OLD
+  // settings, imap:connect reports success, and the old (e.g. unencrypted)
+  // session stays live until the next restart.
+  it('does not fold new settings into a reconnect that is already running', async () => {
+    const { manager } = makeManager();
+    await manager.connect({ ...CONFIG, security: 'none' } as never);
+    clients[0].setDisconnectBehavior('hang');        // the reset sits in its 3s teardown
+
+    const reset = manager.forceReconnect();
+    expect(manager.isForceReconnecting()).toBe(true);
+    const save = manager.forceReconnect(undefined, { ...CONFIG, security: 'starttls' } as never);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.all([reset, save]);
+
+    expect(connectedWith.map((c) => (c as { security?: string }).security)).toEqual(['none', 'none', 'starttls']);
+    expect(manager.imapConfig).toMatchObject({ security: 'starttls' });
+    expect(manager.isConnected()).toBe(true);
+    expect(manager.isForceReconnecting()).toBe(false);
+  });
+
+  // Breaks: switching a refused STARTTLS account to None while it is latched
+  // is skipped as "a security change is required" — the very change made.
+  it('dials explicit settings even while the old ones are latched as refused', async () => {
+    const { manager } = makeManager();
+    connectScript.push(starttlsError());
+    await expect(manager.connect(CONFIG)).rejects.toThrow();
+    expect(manager.isInSecurityCooldown()).toBe(true);
+
+    await manager.forceReconnect(undefined, { ...CONFIG, security: 'none' } as never);
+
+    expect(manager.isConnected()).toBe(true);
+    expect(manager.securityFailed).toBe(false);
+  });
+
+  // Same for rejected credentials: the explicit settings carry the new password.
+  it('dials explicit settings even while the old credentials are latched as rejected', async () => {
+    const { manager } = makeManager();
+    connectScript.push(authError());
+    await expect(manager.connect(CONFIG)).rejects.toThrow();
+    expect(manager.isInAuthCooldown()).toBe(true);
+
+    await manager.forceReconnect(undefined, { ...CONFIG, password: 'new' } as never);
+
+    expect(manager.isConnected()).toBe(true);
+    expect(connectedWith.at(-1)).toMatchObject({ password: 'new' });
+  });
+});
+
+describe('ConnectionManager — a pooled socket refused STARTTLS (CASA M-5)', () => {
+  // The primary's older TLS session survives while new sockets are stripped.
+  // Breaks: the account stays "connected" while every body fetch fails, and
+  // the user is never shown why.
+  it('treats the account as refused: closes the primary, says so once, and stops reconnecting', async () => {
+    const { manager, events } = makeManager();
+    await manager.connect(CONFIG);
+    const primary = clients[0];
+
+    manager.reportSecurityFailure(starttlsError());
+    manager.reportSecurityFailure(starttlsError());     // a second pooled refusal
+
+    expect(countOf(events, 'security-error')).toBe(1);
+    expect(countOf(events, 'disconnected')).toBe(1);
+    expect(manager.state).toBe('error');
+    expect(manager.securityFailed).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(primary.callCount('disconnect')).toBe(1);
+
+    // The closed socket's own 'end' must not start a ladder or re-emit.
+    primary.emitSocketEvent('end');
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(clients).toHaveLength(1);
+    expect(countOf(events, 'disconnected')).toBe(1);
+  });
+
+  // Breaks: the account can never connect again in this session.
+  it('lets an explicit connect() dial a fresh client afterwards', async () => {
+    const { manager } = makeManager();
+    await manager.connect(CONFIG);
+    manager.reportSecurityFailure(starttlsError());
+
+    await manager.connect(CONFIG);
+
+    expect(clients).toHaveLength(2);
+    expect(manager.isConnected()).toBe(true);
+    expect(manager.securityFailed).toBe(false);
+  });
+
+  // Nothing up and nothing dialling: latch and tell, nothing to close.
+  it('only latches when the primary is not up', async () => {
+    const { manager, events } = makeManager();
+    manager.reportSecurityFailure(starttlsError());
+    expect(countOf(events, 'security-error')).toBe(1);
+    expect(countOf(events, 'disconnected')).toBe(0);
+    expect(manager.securityFailed).toBe(true);
+  });
+
+  // The refusal lands while the reconnect ladder is dialling (one backend
+  // behind a load balancer has no STARTTLS). Breaks: the dial still lands as
+  // "reconnected" — the renderer clears the banner — while the account stays
+  // latched and the pool keeps refusing every new socket, so bodies stop
+  // downloading on an account shown as connected.
+  it('fails the reconnect ladder\'s dial that was in flight', async () => {
+    const { manager, events } = makeManager();
+    await manager.connect(CONFIG);
+    duringDial.push(() => manager.reportSecurityFailure(starttlsError()));
+
+    clients[0].emitSocketEvent('end');
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(countOf(events, 'reconnected')).toBe(0);
+    expect(countOf(events, 'security-error')).toBe(1);
+    expect(manager.state).toBe('error');
+    expect(manager.isConnected()).toBe(false);
+    expect(lastClient().callCount('disconnect')).toBe(1);   // the session it got is closed
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(clients).toHaveLength(2);                          // and nothing re-dials
+  });
+
+  // Breaks: the stopped ladder goes round again after an unrelated dial
+  // failure, re-dialling (and re-emitting 'reconnecting') on a refused account.
+  it('stops the ladder when its in-flight dial fails for another reason', async () => {
+    const { manager, events } = makeManager();
+    await manager.connect(CONFIG);
+    duringDial.push(() => manager.reportSecurityFailure(starttlsError()));
+    connectScript.push(socketError());
+
+    clients[0].emitSocketEvent('end');
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(manager.state).toBe('error');
+    expect(clients).toHaveLength(2);
+    expect(countOf(events, 'reconnecting')).toBe(1);
+  });
+
+  // The same during an explicit connect (the renderer's reconnect, or
+  // forceReconnect's own dial). Breaks: connect() reports success on a latched
+  // account, so imap:connect says "connected" and the banner is cleared.
+  it('fails an explicit connect whose dial was in flight, with the refusal', async () => {
+    const { manager, events } = makeManager();
+    duringDial.push(() => manager.reportSecurityFailure(starttlsError()));
+
+    await expect(manager.connect(CONFIG)).rejects.toMatchObject({ code: 'STARTTLS_UNAVAILABLE' });
+
+    expect(countOf(events, 'connected')).toBe(0);
+    expect(countOf(events, 'security-error')).toBe(1);
+    expect(manager.state).toBe('error');
+    expect(clients[0].callCount('disconnect')).toBe(1);
+  });
+
+  // Reported in the ladder's back-off wait (no dial yet). Breaks: the ladder
+  // is stopped but the state stays 'reconnecting' for good.
+  it('ends a reconnect that has not dialled yet', async () => {
+    const { manager, events } = makeManager();
+    await manager.connect(CONFIG);
+    clients[0].emitSocketEvent('end');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(manager.state).toBe('reconnecting');
+
+    manager.reportSecurityFailure(starttlsError());
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(manager.state).toBe('error');
+    expect(clients).toHaveLength(1);
+    expect(countOf(events, 'reconnected')).toBe(0);
   });
 });
 
