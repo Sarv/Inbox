@@ -24,6 +24,7 @@ import { claimDefaultRuntime, getAccountIdForStorage, getAccountRuntime, hasAcco
 
 
 import { listRegistryAccounts } from './accounts-registry';
+import { deleteAccountAttachments, rekeyAccountAttachments } from './attachment-cache';
 import { getMeta, setMeta } from './core-db';
 import { getDbEncryptionKey } from './db-key-store';
 import { wireFolderCountBroadcast } from './folder-count-broadcast';
@@ -313,6 +314,8 @@ export async function rekeyAccount(oldId: string, newId: string): Promise<void> 
   if (!hasAccountRuntime(oldId)) {
     renameAccountDbFiles(oldId, newId);
   }
+  // Its cached attachments follow (an unsynced draft's files live only there).
+  try { await rekeyAccountAttachments(oldId, newId); } catch (e) { logger.warn('[AccountMigration] attachment cache rekey failed', e); }
   await rekeyAccountSecrets(oldId, newId);
   if (loadPrimaryAccountId() === oldId) savePrimaryAccountId(newId);
   rekeyRuntime(oldId, newId);
@@ -401,6 +404,8 @@ export async function deleteAccountData(accountId: string): Promise<void> {
     if (isPrimary) clearPrimaryAccountId();
 
     try { await deleteAccountSecrets(accountId); } catch (e) { logger.warn('[Accounts] vault delete failed', e); }
+    // Its cached attachments too (CASA M-7): they used to outlive the account.
+    try { await deleteAccountAttachments(accountId); } catch (e) { logger.warn('[Accounts] attachment cache delete failed', e); }
     logger.info('[Accounts] wiped account data', accountId, isPrimary ? '(primary/sarvinbox.db)' : `(${dbFile})`);
   } finally {
     // The account is gone, but the id must not stay marked: re-adding the same

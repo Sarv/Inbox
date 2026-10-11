@@ -16,12 +16,15 @@ import {
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from './attachment-cache';
 import {
   AttachmentOperationProtection,
-  readUnscannedAttachment,
   type ProtectedAttachmentOperation,
   type ProtectedDownloadContent,
 } from './attachment-download-protection';
 
 const MAX_PREVIEWS = 4;
+// Private copies handed to other apps, each kept for the TTL below. Every open
+// makes one now (the cache is sealed, CASA M-7), not only the scanned ones, so
+// the bound is wider than the in-memory previews'.
+const MAX_OPEN_COPIES = 16;
 const MAX_PREVIEW_TTL_MS = 300_000;
 const logger = createLogger('attachment-preview-protection');
 const BLOCKED_PREVIEW = 'Preview blocked: scan this attachment again before viewing.';
@@ -36,7 +39,10 @@ interface PreviewLease {
 
 export interface AttachmentPreviewDependencies {
   operations: AttachmentOperationProtection;
+  /** The cache entry for an attachment (sealed — never a readable file). */
   resolveLegacy(messageId: string, filename: string, accountId: string): Promise<string>;
+  /** The plaintext of a cache entry from resolveLegacy; `maxBytes` bounds an unscanned snapshot. */
+  readLegacy(filePath: string, signal: AbortSignal, maxBytes?: number): Promise<Buffer>;
   openPath(filePath: string): Promise<string>;
   temporaryRoot(): string;
   now?: () => number;
@@ -106,7 +112,7 @@ export class AttachmentPreviewProtection {
           }
           // The warning authorizes only this attachment. Retain its local bytes
           // behind a lease rather than allowing raw cache URLs to bypass AV.
-          if (operation.notScanned) unscanned = await this.readUnscanned(ref, operation);
+          if (operation.notScanned) unscanned = await this.readCached(ref, operation);
           const receipt = operation.content ?? unscanned!;
           await operation.assertCurrent();
           // Concurrent scans may finish together; bound retained bytes at completion too.
@@ -144,7 +150,7 @@ export class AttachmentPreviewProtection {
   }
 
   /** A bounded private snapshot; continuing never uploads or labels it clean. */
-  private async readUnscanned(
+  private async readCached(
     ref: AttachmentRef,
     operation: ProtectedAttachmentOperation
   ): Promise<ProtectedDownloadContent> {
@@ -152,7 +158,13 @@ export class AttachmentPreviewProtection {
     await operation.assertCurrent();
     let content: Buffer | undefined;
     try {
-      content = await readUnscannedAttachment(filePath, operation.signal, MAX_ATTACHMENT_BYTES);
+      // Bounded only when it is a warning-approved snapshot, as before; with
+      // scanning off the file is the user's to open whatever its size.
+      content = await this.deps.readLegacy(
+        filePath,
+        operation.signal,
+        operation.notScanned ? MAX_ATTACHMENT_BYTES : undefined
+      );
       await operation.assertCurrent();
       const retained = content;
       return {
@@ -264,64 +276,84 @@ export class AttachmentPreviewProtection {
       accountId,
       filename,
       async (operation) => {
-        let directory: string | undefined;
-        let keep = false;
-        let reserved = false;
-        let unscanned: ProtectedDownloadContent | undefined;
+        // Every open is a private copy: a scanned receipt is in memory, and the
+        // cache is sealed (CASA M-7), so there is no plaintext file to hand over.
+        this.reserveOpenCopy();
+        let local: ProtectedDownloadContent | undefined;
         try {
           if (operation.notScanned) onUnscanned?.();
-          let filePath: string;
-          if (operation.content || operation.notScanned) {
-            if (this.opened.size + this.pendingOpened >= MAX_PREVIEWS)
-              throw new AttachmentError('Too many attachment previews. Try again shortly.', 429);
-            this.pendingOpened++;
-            reserved = true;
-            if (operation.notScanned) {
-              unscanned = await this.readUnscanned(
-                { emailId: messageId, accountId, filename },
-                operation
-              );
-            }
-            const content = operation.content ?? unscanned!;
-            const root = await this.prepareTemporaryRoot();
-            directory = await fs.mkdtemp(path.join(root, 'preview-'));
-            filePath = path.join(directory, safeFilename(filename));
-            await operation.assertCurrent();
-            await fs.writeFile(filePath, content.content, {
-              mode: 0o600,
-              flag: 'wx',
-              signal: operation.signal,
-            });
-          } else filePath = await this.deps.resolveLegacy(messageId, filename, accountId);
-          await operation.assertCurrent();
-          const error = await waitForAbortableOperation(
-            this.deps.openPath(filePath),
-            operation.signal
-          );
-          await operation.assertCurrent();
+          if (!operation.content)
+            local = await this.readCached({ emailId: messageId, accountId, filename }, operation);
+          const error = await this.openReserved(filename, (operation.content ?? local!).content, operation);
           if (error) throw new Error(error);
-          if (directory) {
-            // External apps read after openPath resolves. Retain only this clean private copy briefly.
-            const ownedDirectory = directory;
-            const timer = setTimeout(() => {
-              void this.removeOpened(ownedDirectory).catch((error) =>
-                logger.warn('Could not remove temporary attachment preview:', error)
-              );
-            }, this.ttlMs);
-            timer.unref?.();
-            this.opened.set(ownedDirectory, timer);
-            keep = true;
-          }
         } finally {
-          unscanned?.dispose();
-          if (reserved) this.pendingOpened--;
-          if (directory && !keep) await fs.rm(directory, { recursive: true, force: true });
+          local?.dispose();
+          this.pendingOpened--;
         }
       },
       requestId,
       undefined,
       'open'
     );
+  }
+
+  /**
+   * Open bytes that are not an attachment of their own (a calendar invite built
+   * from the message) in the system app the same way: a private copy, removed
+   * after the TTL. Returns openPath's error text ('' when it opened).
+   */
+  async openTemporaryCopy(
+    filename: string,
+    content: Buffer,
+    operation: Pick<ProtectedAttachmentOperation, 'signal' | 'assertCurrent'>
+  ): Promise<string> {
+    this.requireAvailable();
+    this.reserveOpenCopy();
+    try {
+      return await this.openReserved(filename, content, operation);
+    } finally {
+      this.pendingOpened--;
+    }
+  }
+
+  private reserveOpenCopy(): void {
+    if (this.opened.size + this.pendingOpened >= MAX_OPEN_COPIES)
+      throw new AttachmentError('Too many attachment previews. Try again shortly.', 429);
+    this.pendingOpened++;
+  }
+
+  /** Write a private copy, open it, and keep it only for the TTL. The slot is reserved. */
+  private async openReserved(
+    filename: string,
+    content: Buffer,
+    operation: Pick<ProtectedAttachmentOperation, 'signal' | 'assertCurrent'>
+  ): Promise<string> {
+    let directory: string | undefined;
+    let keep = false;
+    try {
+      const root = await this.prepareTemporaryRoot();
+      directory = await fs.mkdtemp(path.join(root, 'preview-'));
+      const filePath = path.join(directory, safeFilename(filename));
+      await operation.assertCurrent();
+      await fs.writeFile(filePath, content, { mode: 0o600, flag: 'wx', signal: operation.signal });
+      await operation.assertCurrent();
+      const error = await waitForAbortableOperation(this.deps.openPath(filePath), operation.signal);
+      await operation.assertCurrent();
+      if (error) return error;
+      // External apps read after openPath resolves. Retain only this private copy briefly.
+      const ownedDirectory = directory;
+      const timer = setTimeout(() => {
+        void this.removeOpened(ownedDirectory).catch((error) =>
+          logger.warn('Could not remove temporary attachment preview:', error)
+        );
+      }, this.ttlMs);
+      timer.unref?.();
+      this.opened.set(ownedDirectory, timer);
+      keep = true;
+      return '';
+    } finally {
+      if (directory && !keep) await fs.rm(directory, { recursive: true, force: true });
+    }
   }
 
   private prepareTemporaryRoot(): Promise<string> {

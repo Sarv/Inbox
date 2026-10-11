@@ -179,22 +179,44 @@ describe('requireNamedOrActiveStorage — strict when named, active when not', (
 describe('resolveAccountTarget — lenient, unchanged', () => {
   // Breaks: a row action on another account's message (unified view) hits the
   // active account's database — the mark-read "Email not found" loop.
+  // Changed deliberately (CASA M-7): the result also names the account whose
+  // storage it is, which the per-account attachment store keys by.
   it("returns the named account's storage and engine, opening its runtime when needed", async () => {
-    await expect(resolveAccountTarget('acct-b')).resolves.toEqual({ storage: B, syncEngine: { name: 'engine-b' } });
+    await expect(resolveAccountTarget('acct-b')).resolves.toEqual({
+      storage: B, syncEngine: { name: 'engine-b' }, accountId: 'acct-b',
+    });
     await expect(resolveAccountTarget('acct-c')).resolves.toEqual({
-      storage: { name: 'storage-acct-c' }, syncEngine: { name: 'engine-acct-c' },
+      storage: { name: 'storage-acct-c' }, syncEngine: { name: 'engine-acct-c' }, accountId: 'acct-c',
     });
     expect(readRegistryAccounts).not.toHaveBeenCalled();
   });
 
   // Pinned as the documented contract of the LENIENT resolver (row actions),
   // which is why the cache handlers must not use it.
+  // Changed deliberately (CASA M-7): the result also names its account. After a
+  // fallback that is the ACTIVE account, never the id that was asked for —
+  // otherwise an attachment read from the active account's mail would be filed
+  // under (and removed with) an account it does not belong to.
   it('falls back to the active account for no id, the active id, or an unresolvable one', async () => {
-    const active = { storage: h.active, syncEngine: h.activeEngine };
+    const active = { storage: h.active, syncEngine: h.activeEngine, accountId: 'acct-a' };
     vi.mocked(ensureAccountRuntime).mockResolvedValueOnce(null);
     await expect(resolveAccountTarget()).resolves.toEqual(active);
     await expect(resolveAccountTarget('acct-a')).resolves.toEqual(active);
     await expect(resolveAccountTarget('acct-gone')).resolves.toEqual(active);
+  });
+
+  // Breaks: on the pre-account default slot (no active id yet) the fallback
+  // invents an owner — the requested id, or the literal "undefined" — for
+  // storage that belongs to no account.
+  it('names no account for the default slot before an account is active', async () => {
+    h.current = null;
+    vi.mocked(ensureAccountRuntime).mockResolvedValueOnce(null);
+    await expect(resolveAccountTarget()).resolves.toEqual({
+      storage: h.active, syncEngine: h.activeEngine, accountId: null,
+    });
+    await expect(resolveAccountTarget('acct-gone')).resolves.toMatchObject({ storage: h.active, accountId: null });
+    // A named account that resolves keeps its own id even then.
+    await expect(resolveAccountTarget('acct-b')).resolves.toMatchObject({ storage: B, accountId: 'acct-b' });
   });
 });
 

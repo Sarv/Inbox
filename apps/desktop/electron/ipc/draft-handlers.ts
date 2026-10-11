@@ -202,7 +202,7 @@ export async function saveDraftToIMAP(draft: {
 }, options: { messageId?: string } = {}): Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }> {
   // Resolve the TARGET account's storage + sync engine (falls back to the active
   // account when no accountId is given).
-  const { storage, syncEngine } = await resolveAccountTarget(draft.accountId);
+  const { storage, syncEngine, accountId: owner } = await resolveAccountTarget(draft.accountId);
   if (!syncEngine) {
     return { success: false, error: 'No sync engine for account' };
   }
@@ -304,7 +304,7 @@ export async function saveDraftToIMAP(draft: {
     // encrypted draft: its files come back from the ciphertext, never from disk.
     if (localRowId && attachments.length > 0 && !encrypted) {
       try {
-        await seedAttachmentCache(localRowId, attachments);
+        await seedAttachmentCache(owner, localRowId, attachments);
       } catch (err) {
         logger.warn('[Drafts] Could not cache draft attachments locally:', err);
       }

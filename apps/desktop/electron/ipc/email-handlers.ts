@@ -4,17 +4,16 @@
  * Handles email operations: listing, getting, searching, marking, moving, deleting.
  */
 
-import * as fs from 'fs';
 import path from 'path';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, type ParsedSearchQuery } from '@sarvinbox/core';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, type ParsedSearchQuery } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
 import { resolveAccountTarget, resolveNamedOrActiveAccountTarget, requireTargetAccountId } from '../services/account-target';
 import { getAntivirusScanService } from '../services/antivirus-scan-service';
-import { attachmentCacheDir, attachmentErrorMessage, MAX_ATTACHMENT_BYTES, resolveAttachmentFile } from '../services/attachment-cache';
-import { AttachmentDownloadProtection, downloadScanners, readUnscannedAttachment, setAttachmentOperationProtection, writeProtectedAttachment } from '../services/attachment-download-protection';
+import { attachmentErrorMessage, MAX_ATTACHMENT_BYTES, readCachedAttachment, resolveAttachmentFile } from '../services/attachment-cache';
+import { AttachmentDownloadProtection, downloadScanners, setAttachmentOperationProtection, writeProtectedAttachment } from '../services/attachment-download-protection';
 import { AttachmentPreviewProtection, setAttachmentPreviewProtection } from '../services/attachment-preview-protection';
 import { confirmUnscannedAttachment } from '../services/attachment-unscanned-warning';
 import {
@@ -507,6 +506,17 @@ function reportVerdictsOnce(emails: Array<{ fromAddress?: string | null; originI
   }
 }
 
+/** A sealed cache entry's plaintext, for a read that can be cancelled. */
+async function readCachedAttachmentFor(source: string, signal: AbortSignal, maxBytes?: number): Promise<Buffer> {
+  signal.throwIfAborted();
+  const content = await readCachedAttachment(source, maxBytes);
+  if (signal.aborted) {
+    content.fill(0);
+    signal.throwIfAborted();
+  }
+  return content;
+}
+
 export function registerEmailHandlers(): void {
   const requireDownloadCaller = (event: IpcMainInvokeEvent) => {
     const window = getMainWindow();
@@ -533,8 +543,17 @@ export function registerEmailHandlers(): void {
       return result.canceled || !result.filePath ? null : result.filePath;
     },
     writeContent: writeProtectedAttachment,
-    readLegacy: (source, signal) => readUnscannedAttachment(source, signal, MAX_ATTACHMENT_BYTES),
-    copyLegacy: (source, destination) => fs.promises.copyFile(source, destination),
+    // The cache is sealed (attachment-cache.ts): every read decrypts. This one
+    // is only the warning-approved unscanned save, a bounded snapshot.
+    readLegacy: (source, signal) => readCachedAttachmentFor(source, signal, MAX_ATTACHMENT_BYTES),
+    copyLegacy: async (source, destination) => {
+      const content = await readCachedAttachment(source);
+      try {
+        await writeProtectedAttachment(destination, content, new AbortController().signal, async () => {});
+      } finally {
+        content.fill(0);
+      }
+    },
     progress: (requestId, phase) => getMainWindow()?.webContents.send('emails:attachmentDownloadProgress', { requestId, phase }),
   });
   setAttachmentOperationProtection(downloads.operations);
@@ -542,6 +561,7 @@ export function registerEmailHandlers(): void {
     operations: downloads.operations,
     resolveLegacy: async (emailId, filename, accountId) =>
       (await resolveAttachmentFile({ emailId, filename, accountId })).filePath,
+    readLegacy: (source, signal, maxBytes) => readCachedAttachmentFor(source, signal, maxBytes),
     openPath: filePath => shell.openPath(filePath),
     temporaryRoot: () => path.join(app.getPath('userData'), 'attachment-previews'),
   });
@@ -1852,9 +1872,12 @@ export function registerEmailHandlers(): void {
     async (_event, emailId: string, filename: string, accountId?: string) => {
       try {
         const { filePath } = await resolveAttachmentFile({ emailId, filename, accountId });
-        const buffer = await fs.promises.readFile(filePath);
-
-        return { success: true, base64: buffer.toString('base64') };
+        const buffer = await readCachedAttachment(filePath);
+        try {
+          return { success: true, base64: buffer.toString('base64') };
+        } finally {
+          buffer.fill(0);
+        }
       } catch (error) {
         logger.error('Get attachment base64 error:', error);
         return { success: false, error: attachmentErrorMessage(error) };
@@ -1975,17 +1998,9 @@ export function registerEmailHandlers(): void {
         const crlf = published.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
         const body = crlf.endsWith('\r\n') ? crlf : `${crlf}\r\n`;
 
-        const cacheDir = attachmentCacheDir(emailId);
-        await fs.promises.mkdir(cacheDir, { recursive: true, mode: 0o700 });
-        await operation.assertCurrent();
-        // Dedicated filename (not the attachment's invite.ics) so a stale/corrupt
-        // cached attachment is never reused; always overwrite with fresh text.
-        const icsPath = resolveWithinDir(cacheDir, 'calendar-event.ics');
-        await fs.promises.writeFile(icsPath, body, { mode: 0o600, signal: operation.signal });
-        await operation.assertCurrent();
-
-        const errMsg = await shell.openPath(icsPath);
-        await operation.assertCurrent();
+        // A short-lived private copy for the calendar app, like any attachment
+        // opened elsewhere — never a file left in the attachment cache (CASA M-7).
+        const errMsg = await previews.openTemporaryCopy('calendar-event.ics', Buffer.from(body, 'utf8'), operation);
         if (errMsg) {
           return { success: false, error: errMsg, noHandler: true };
         }

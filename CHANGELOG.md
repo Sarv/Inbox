@@ -78,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned as garbled bytes.
 
 ### Security
+- **Opened attachments are now encrypted on disk and removed with their
+  account.** Attachments you open, save or forward are kept in a local cache so
+  they don't download again. That cache used to hold plain copies, shared by all
+  accounts, that stayed after you removed an account. Cached attachments are now
+  encrypted with the same key as your mail, kept per account, and deleted when
+  you remove the account; their file names on disk no longer reveal what they
+  are. Opening an attachment in another app always uses a short-lived private
+  copy. The old unencrypted cache is cleared on the first launch after updating,
+  and the attachments of drafts you saved offline are kept.
 - **Local files can no longer open inside the app.** The app treated any file
   on your computer as part of itself, so a link in an email could load a saved
   web page (for example an HTML attachment in Downloads) into the reading pane,
