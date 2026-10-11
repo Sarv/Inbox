@@ -4,7 +4,8 @@ import { describe, it, expect } from 'vitest';
 import { classifyNavigation } from '../../../../electron/utils/navigation-policy';
 
 const DEV_ORIGIN = 'http://localhost:5173';
-const PROD_ORIGIN = 'file://';
+/** The production app: the bundled entry, as main builds it (pathToFileURL). */
+const PROD_APP = 'file:///Applications/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/index.html';
 
 describe('classifyNavigation', () => {
   // Breaks: the app's own pages stop loading. `will-navigate` fires for the
@@ -12,7 +13,7 @@ describe('classifyNavigation', () => {
   // window entirely.
   it.each([
     [DEV_ORIGIN, `${DEV_ORIGIN}/index.html`],
-    [PROD_ORIGIN, 'file:///Applications/Sarv.app/dist/index.html'],
+    [PROD_APP, PROD_APP],
   ])('allows the app origin %s at both scopes', (origin, url) => {
     expect(classifyNavigation(url, origin, 'top')).toBe('allow');
     expect(classifyNavigation(url, origin, 'frame')).toBe('allow');
@@ -91,5 +92,67 @@ describe('classifyNavigation', () => {
         'top'
       )
     ).toBe('block');
+  });
+
+  // CASA M-6. In production the app is ONE file. Changed deliberately: any
+  // file: URL used to count as the app. Breaks: an email's image-map link
+  // loads a saved HTML attachment into the reading pane outside the email CSP,
+  // or a local page takes over the window with the preload bridge.
+  describe('production: only the bundled entry is the app', () => {
+    it.each([
+      'file:///Users/me/Downloads/invoice.html',
+      'file:///Applications/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/other.html',
+      'file:///Applications/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/index.html.evil',
+      'file:///Applications/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/index.html/x',
+      'file:///etc/passwd',
+      'file://evil-host/Applications/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/index.html',
+    ])('blocks %s at both scopes', (url) => {
+      expect(classifyNavigation(url, PROD_APP, 'top')).toBe('block');
+      expect(classifyNavigation(url, PROD_APP, 'frame')).toBe('block');
+    });
+
+    // Breaks: a reload that carries a query or fragment would be refused.
+    it('ignores the query and fragment of the entry', () => {
+      expect(classifyNavigation(`${PROD_APP}?t=1#inbox`, PROD_APP, 'top')).toBe('allow');
+    });
+
+    // Breaks: the app's own document is refused on an install path that
+    // Chromium and Node spell differently: Chromium leaves some characters
+    // raw that pathToFileURL percent-encodes, and upper-cases a Windows drive
+    // letter that __dirname may carry in lower case.
+    it('matches the entry however the path is spelled', () => {
+      const pipe = 'file:///opt/Sarv%20Inbox%7Cbeta/resources/app.asar/dist/index.html';
+      expect(classifyNavigation('file:///opt/Sarv%20Inbox|beta/resources/app.asar/dist/index.html', pipe, 'top')).toBe('allow');
+      const lowerDrive = 'file:///c:/Program%20Files/Sarv%20Inbox/resources/app.asar/dist/index.html';
+      expect(classifyNavigation('file:///C:/Program%20Files/Sarv%20Inbox/resources/app.asar/dist/index.html', lowerDrive, 'top')).toBe('allow');
+      expect(classifyNavigation('file:///C:/Program%20Files/Sarv%20Inbox/resources/app.asar/dist/other.html', lowerDrive, 'top')).toBe('block');
+    });
+
+    // A '%' that starts no valid escape stays raw in Chromium's URL but is
+    // %25 in pathToFileURL's. Breaks: on an install path like "50% off" the
+    // app's own reload (the crash screen's Reload button, the reload after
+    // Re-thread) is blocked as a foreign page.
+    it('matches the entry when the install path holds a stray %', () => {
+      const entry = 'file:///Users/me/50%25%20off/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/index.html';
+      const chromium = 'file:///Users/me/50%%20off/Sarv%20Inbox.app/Contents/Resources/app.asar/dist/index.html';
+      expect(classifyNavigation(chromium, entry, 'top')).toBe('allow');
+      expect(classifyNavigation(chromium.replace('index.html', 'other.html'), entry, 'top')).toBe('block');
+      // Non-ASCII, raw on one side and escaped on the other, is the same path.
+      expect(classifyNavigation('file:///opt/Inb%C3%B4x/dist/index.html', 'file:///opt/Inbôx/dist/index.html', 'top')).toBe('allow');
+    });
+
+    // Breaks: the old prod origin ('file://', no path) would count nothing as
+    // the app, or everything. Neither: only the entry itself.
+    it('does not let the dev rule (same host) admit files', () => {
+      expect(classifyNavigation('file:///Users/me/x.html', 'file:///', 'top')).toBe('block');
+    });
+  });
+
+  // A changed Electron event (no url, or not a string) must never let a
+  // navigation through. Breaks: the guard throws before it can preventDefault,
+  // and the navigation proceeds.
+  it.each([undefined, null, 42, {}])('fails closed on a url of %s', (url) => {
+    expect(classifyNavigation(url as never, PROD_APP, 'top')).toBe('block');
+    expect(classifyNavigation(url as never, DEV_ORIGIN, 'frame')).toBe('block');
   });
 });

@@ -78,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned as garbled bytes.
 
 ### Security
+- **Local files can no longer open inside the app.** The app treated any file
+  on your computer as part of itself, so a link in an email could load a saved
+  web page (for example an HTML attachment in Downloads) into the reading pane,
+  where the email's protections did not apply. Only the app's own page is
+  allowed now; anything else is blocked. Dropping a file onto the window still
+  does nothing, and that is now set explicitly rather than left to a default.
 - **Accounts set to STARTTLS now refuse to connect without encryption.** The
   app used to carry on unencrypted when a mail server did not offer STARTTLS, so
   anyone on the same network could hide it and read your password or sign-in.

@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from 'fs';
 import netModule from 'net';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 
 import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
@@ -140,7 +141,8 @@ import { resolveAppIconPath } from './utils/app-icon';
 import { isDevBuild } from './utils/dev-mode';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
-import { classifyNavigation, type NavigationScope } from './utils/navigation-policy';
+import { mainWindowWebPreferences } from './utils/main-window-preferences';
+import { installNavigationGuards } from './utils/navigation-guards';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -388,6 +390,12 @@ app.commandLine.appendSwitch('log-level', '3');
 
 // App paths
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'] || (isDev ? 'http://localhost:5173' : null);
+// The bundled renderer entry, and the one URL the window counts as the app:
+// the dev server in development, this exact file in production (CASA M-6 —
+// see navigation-policy.ts). Built once, so the window, its navigation guards
+// and the two protocol handlers all agree on it.
+const APP_ENTRY_FILE = join(__dirname, '../dist/index.html');
+const APP_URL = VITE_DEV_SERVER_URL ?? pathToFileURL(APP_ENTRY_FILE).href;
 
 // Tee the main-process console to a rolling app.log (dev AND release).
 initFileLogger();
@@ -455,28 +463,7 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 600,
     center: true,
-    webPreferences: {
-      preload: join(__dirname, 'preload.js'),
-      nodeIntegration: false,
-      contextIsolation: true,
-      // Chromium OS sandbox ON: a compromised renderer (e.g. via malicious email
-      // HTML) is confined to the process and can only reach main through the
-      // explicit contextBridge IPC. Safe here because the bundled preload only
-      // `require("electron")` (contextBridge/ipcRenderer) — no fs/os/stream/etc.,
-      // which the sandbox would forbid. If a future preload dep pulls a Node
-      // builtin, the app blank-screens at launch and this must go back to false.
-      sandbox: true,
-      // Chromium's built-in PDF viewer is a plugin; without this an <iframe>
-      // pointing at a PDF downloads instead of rendering, which is the exact
-      // behaviour the in-app viewer exists to remove. This does NOT widen the
-      // email-content surface: the sandboxed email-body iframe runs under
-      // `default-src 'none'`, which already blocks <embed>/<object>.
-      plugins: true,
-      // No DevTools in release builds: it is a console onto the full IPC
-      // bridge for anyone at an unlocked machine. Off here (not just hidden
-      // from the menu) so the keyboard shortcut can't open it either.
-      devTools: isDev,
-    },
+    webPreferences: mainWindowWebPreferences({ preload: join(__dirname, 'preload.js'), isDev }),
     title: 'Sarv Inbox',
     show: false,
     icon: resolveAppIconPath(__dirname, isDev),
@@ -523,7 +510,7 @@ function createWindow(): void {
       logger.error('[Main] Page failed to load:', errorCode, errorDescription);
     });
   } else {
-    mainWindow.loadFile(join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(APP_ENTRY_FILE);
   }
 
   // Open all external links in the default browser
@@ -534,41 +521,11 @@ function createWindow(): void {
     return { action: 'deny' };
   });
 
-  // Both guards below share one decision (electron/utils/navigation-policy.ts)
-  // so a rule can never be added to one and forgotten in the other.
-  const applyNavigationPolicy = (event: Electron.Event, url: string, scope: NavigationScope) => {
-    const verdict = classifyNavigation(url, VITE_DEV_SERVER_URL || 'file://', scope);
-    if (verdict === 'allow') return;
-    event.preventDefault();
-    if (verdict === 'external') {
-      shell.openExternal(url).catch((err) => logger.warn('[Main] openExternal failed:', err));
-    } else {
-      logger.warn(`[Main] Blocked ${scope}-level navigation to an unsupported scheme:`, url);
-    }
-  };
-
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    applyNavigationPolicy(event, url, 'top');
+  // Both navigation guards share one decision (electron/utils/navigation-policy.ts).
+  installNavigationGuards(mainWindow.webContents, APP_URL, {
+    openExternal: (url) => shell.openExternal(url),
+    warn: (message, ...args) => logger.warn(message, ...args),
   });
-
-  // Same rule for a navigation started INSIDE a frame. `will-navigate` fires
-  // for the top-level frame only, so an email body's iframe could navigate
-  // itself to a remote page and render it inside the inbox — the sandbox
-  // (`allow-same-origin allow-popups`, no `allow-top-navigation`) stops it
-  // taking over the window but not from replacing its own content. The renderer
-  // rewrites anchors to target="_blank" so they route through the
-  // setWindowOpenHandler above, and it also intercepts clicks at runtime; this
-  // is the backstop that cannot be raced or bypassed by markup neither of those
-  // anticipated. Guarded because `will-frame-navigate` is Electron 25+.
-  if (typeof (mainWindow.webContents as { on?: unknown }).on === 'function') {
-    try {
-      mainWindow.webContents.on('will-frame-navigate' as never, ((event: Electron.Event, url: string) => {
-        applyNavigationPolicy(event, url, 'frame');
-      }) as never);
-    } catch (err) {
-      logger.warn('[Main] will-frame-navigate unavailable on this Electron:', err);
-    }
-  }
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -1034,7 +991,7 @@ app.whenReady().then(async () => {
     // request; before the window loads, so the first render can already fetch.
     // Given the SAME url the window loads, so the handler allows exactly our own
     // renderer's origin to fetch attachment bytes and nothing else.
-    registerAttachmentProtocol(VITE_DEV_SERVER_URL ?? `file://${join(__dirname, '../dist/index.html')}`);
+    registerAttachmentProtocol(APP_URL);
     await initializeSyncEngine();
     // Seed the durable accounts registry + auto-activate the persisted account
     // so main is self-sufficient (survives a lost renderer localStorage and
@@ -1044,10 +1001,7 @@ app.whenReady().then(async () => {
     // After the manager, because the handler asks it which extensions may serve
     // panels at all. The lookup is evaluated per request, so an extension
     // disabled later stops serving immediately.
-    registerPanelProtocol(
-      VITE_DEV_SERVER_URL ?? `file://${join(__dirname, '../dist/index.html')}`,
-      resolvePanelExtensionDir
-    );
+    registerPanelProtocol(APP_URL, resolvePanelExtensionDir);
 
     // Start background services
     startSnoozeChecker();
