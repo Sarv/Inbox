@@ -251,6 +251,7 @@
       "packageName": "sarv-inbox"
     },
     "nsis": {
+      "artifactName": "Sarv-Inbox-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

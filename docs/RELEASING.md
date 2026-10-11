@@ -64,9 +64,10 @@ openSUSE; the AppImage runs on anything else without installing.
 
 #### macOS signing and notarization
 
-Without these the macOS build still runs but produces an **unsigned** app that
-Gatekeeper blocks. The workflow warns loudly in the log rather than failing, so
-check the log on your first run.
+Without these the macOS build **fails**: the workflow refuses to build an
+unsigned macOS release (one that Gatekeeper would block on every user's Mac),
+and since publishing waits for every platform, no release is published at all
+until they are set.
 
 | Secret | How to get it |
 | --- | --- |

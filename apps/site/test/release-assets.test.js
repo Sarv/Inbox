@@ -28,6 +28,8 @@ describe('classifyAsset', () => {
     ['sarv-inbox-1.2.2-x86_64.rpm', OS.LINUX, PACKAGE.RPM, ARCH.X64],
     ['sarv-inbox-1.2.2-aarch64.rpm', OS.LINUX, PACKAGE.RPM, ARCH.ARM64],
     ['Sarv Inbox Setup 1.3.0-x64.exe', OS.WINDOWS, PACKAGE.EXE, ARCH.X64],
+    // The name releases use from the signed-manifest change on (nsis.artifactName).
+    ['Sarv-Inbox-Setup-1.3.2.exe', OS.WINDOWS, PACKAGE.EXE, ANY_ARCH],
   ])('%s', (name, os, kind, arch) => {
     expect(classifyAsset({ name, size: 1, browser_download_url: 'u' })).toEqual({
       os,

@@ -199,6 +199,51 @@ describe('scripts/sign-release.mjs (as the release workflow runs it)', () => {
     expect(run({ UPDATE_SIGNING_KEY: ours.priv }, dir, '1.3.0').status).toBe(1);
     expect(run({ UPDATE_SIGNING_KEY: ours.priv }).status).toBe(2);
   });
+
+  // The names electron-builder really produces (from package.json), not
+  // invented ones. Breaks: the Windows installer is named with spaces on disk
+  // while latest.yml carries a dashed name, so this step fails every release.
+  it('signs a release laid out with the real artifact names', () => {
+    const exe = expandArtifactName(build.nsis.artifactName, { version: '1.3.0', ext: 'exe' });
+    writeFileSync(join(dir, exe), 'installer');
+    writeFileSync(join(dir, `${exe}.blockmap`), 'blockmap');
+    // latest.yml carries electron-builder's GitHub-safe name for it
+    // (computeSafeArtifactNameIfNeeded: spaces become dashes).
+    const feedName = /^[0-9A-Za-z._-]+$/.test(exe) ? exe : exe.replace(/ /g, '-');
+    writeFileSync(join(dir, 'latest.yml'), `version: 1.3.0\nfiles:\n  - url: ${feedName}\n    sha512: ${sha512Base64(Buffer.from('installer'))}\n    size: 9\npath: ${feedName}\n`);
+    const result = run({ UPDATE_SIGNING_KEY: ours.priv }, dir, '1.3.0');
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+});
+
+// electron-builder writes into latest*.yml a GitHub-safe version of each file
+// name (spaces become dashes), the release is uploaded with the name on disk
+// (GitHub turns spaces into dots), and both the signer and the app look files
+// up by name. Breaks if any artifact name is not already GitHub-safe: three
+// names for one file, the signer refuses the release (nothing publishes), and
+// every installed app refuses the update.
+const build = require('../../../../package.json').build as {
+  mac: { artifactName: string };
+  linux: { artifactName: string };
+  nsis: { artifactName: string };
+};
+const expandArtifactName = (pattern: string, values: Record<string, string>) =>
+  pattern.replace(/\$\{(\w+)\}/g, (whole, key: string) => values[key] ?? whole);
+
+describe('release artifact names', () => {
+  it('gives every platform an artifact name that is already GitHub-safe', () => {
+    const names = [
+      expandArtifactName(build.nsis.artifactName, { version: '1.3.0', ext: 'exe' }),
+      expandArtifactName(build.mac.artifactName, { version: '1.3.0', ext: 'dmg' }),
+      ...['x86_64', 'arm64', 'amd64'].map((arch) => expandArtifactName(build.linux.artifactName, { version: '1.3.0', arch, ext: 'AppImage' })),
+    ];
+    for (const name of names) {
+      expect(name).toMatch(/^[0-9A-Za-z._-]+$/);
+      expect(name).not.toContain('${');
+    }
+    expect(names[0]).toBe('Sarv-Inbox-Setup-1.3.0.exe');
+  });
 });
 
 describe('ymlProblems', () => {
