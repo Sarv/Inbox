@@ -38,11 +38,13 @@ import {
   getUpdateSupport,
   parseUpdatePrefs,
   remindLater,
+  sameUpdate,
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
   shouldShowDialog,
   skipVersion,
+  type UpdateIdentity,
   type UpdatePrefs,
   type UpdateState,
   type UpdateTrigger,
@@ -92,12 +94,19 @@ let downloadRequested = false;
  */
 let dialogDismissed = false;
 /**
- * The version whose files the release's SIGNED manifest vouched for (see
- * update-manifest.ts). Nothing is downloaded unless it equals the version on
- * offer — electron-updater no longer downloads on its own (autoDownload is
- * always false); this service starts every download after verification.
+ * The update (version AND files) the release's SIGNED manifest vouched for (see
+ * update-manifest.ts). electron-updater never downloads on its own (autoDownload
+ * is forced off before any check, in wireEvents); this service starts every
+ * download, only for this update, and stages only a download that matches it.
  */
-let verifiedVersion: string | null = null;
+let verifiedInfo: UpdateIdentity | null = null;
+/**
+ * The update the most recent check offered — what electron-updater would now
+ * download. Cleared when a new check starts. A verification that finishes after
+ * its update was replaced must not start (or approve) a download, because the
+ * download would be of the newer, unverified update.
+ */
+let offeredInfo: UpdateIdentity | null = null;
 /** The verification started by the last 'update-available', so a check awaits it. */
 let pendingVerification: Promise<void> | null = null;
 
@@ -180,21 +189,34 @@ const checkDurationMs = (): number => (checkStartedAt === 0 ? 0 : Date.now() - c
  * listeners live for the process lifetime.
  */
 const wireEvents = (): void => {
+  // Before ANY check, not just the scheduled ones: electron-updater starts with
+  // autoDownload on, and a "Check for Updates..." click can arrive before
+  // startUpdateService runs. A download it started on its own would skip the
+  // signed-manifest verification below.
+  autoUpdater.autoDownload = false;
   if (wired) return;
   wired = true;
 
   autoUpdater.on('checking-for-update', () => {
+    // Whatever was on offer is being replaced; an older verification still in
+    // flight must not download the result of this check.
+    offeredInfo = null;
     setState({ phase: 'checking', error: null });
   });
 
   autoUpdater.on('update-available', (info) => {
+    offeredInfo = info;
     // Verify BEFORE anything is downloaded: the found update must be one the
     // release's signed manifest vouches for, file for file (CASA M-3). The
     // check that found it awaits this, so the dialog never shows an
     // unverified update as available.
     pendingVerification = (async () => {
-      verifiedVersion = null;
+      verifiedInfo = null;
       const verdict = await verifyUpdate(info);
+      if (offeredInfo !== info) {
+        logger.info(`[Update] Verification of ${info.version} finished after a newer check replaced it; ignoring it`);
+        return;
+      }
       if (!verdict.ok) {
         logger.warn(`[Update] Refused ${info.version}: could not verify it against the signed release manifest (${verdict.reason})`);
         setState({
@@ -205,7 +227,7 @@ const wireEvents = (): void => {
         });
         return;
       }
-      verifiedVersion = info.version;
+      verifiedInfo = info;
       // Logged with its cost: a check that takes 15 seconds and a check that
       // hangs are indistinguishable in a log that only records the outcome, and
       // that is precisely the gap that made "Checking for updates..." impossible
@@ -226,6 +248,8 @@ const wireEvents = (): void => {
   });
 
   autoUpdater.on('update-not-available', () => {
+    offeredInfo = null;
+    verifiedInfo = null;
     logger.info(`[Update] No update available (check took ${checkDurationMs()}ms)`);
     setState({ phase: 'up-to-date', version: null, checkedAt: Date.now(), error: null });
   });
@@ -235,6 +259,20 @@ const wireEvents = (): void => {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    // Stage only what was verified, file for file. Anything else (a download
+    // electron-updater started of a newer check's result) is never installed:
+    // install-on-quit is disarmed and 'Restart now' needs phase 'downloaded'.
+    if (!verifiedInfo || !sameUpdate(info, verifiedInfo)) {
+      autoUpdater.autoInstallOnAppQuit = false;
+      logger.warn(`[Update] Refused to stage ${info.version}: it is not the update verified against the signed manifest`);
+      setState({
+        phase: 'error',
+        version: null,
+        error: `Version ${info.version} could not be verified as a genuine Sarv Inbox release, so it will not be installed.`,
+        checkedAt: Date.now(),
+      });
+      return;
+    }
     // Re-evaluated per version, not once at startup: a user who skipped 1.2.0
     // must still receive 1.2.1 automatically.
     autoUpdater.autoInstallOnAppQuit = shouldAutoInstallOnQuit(prefs, info.version);
@@ -382,7 +420,7 @@ export const downloadUpdate = (): boolean => {
     return false;
   }
 
-  if (verifiedVersion !== state.version) {
+  if (verifiedInfo?.version !== state.version) {
     logger.warn('[Update] Download refused: version', state.version, 'was not verified against a signed manifest');
     return false;
   }
@@ -509,10 +547,10 @@ export const startUpdateService = (): void => {
     return;
   }
 
-  // Never let electron-updater download on its own: every download starts in
-  // this service, after the update is verified against the release's signed
-  // manifest. "Install updates automatically" is honoured there instead.
-  autoUpdater.autoDownload = false;
+  // electron-updater never downloads on its own (wireEvents, below, forces
+  // autoDownload off before any check): every download starts in this service,
+  // after the update is verified against the release's signed manifest.
+  // "Install updates automatically" is honoured there instead.
   // Updates are automatic by default: downloaded in the background, then
   // applied during the next ordinary quit, so a user who never touches the
   // dialog still ends up on the new version without doing anything. The
@@ -561,6 +599,7 @@ export const __resetUpdateServiceForTests = (): void => {
   downloadRequested = false;
   dialogDismissed = false;
   wired = false;
-  verifiedVersion = null;
+  verifiedInfo = null;
+  offeredInfo = null;
   pendingVerification = null;
 };

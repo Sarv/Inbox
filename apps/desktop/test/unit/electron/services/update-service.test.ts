@@ -104,7 +104,9 @@ const writePrefs = (prefs: Record<string, unknown>) =>
 
 /**
  * electron-updater found `version`: emit it and let the signed-manifest
- * verification (async) settle, as a real check awaits it.
+ * verification (async) settle, as a real check awaits it. A download is only
+ * staged for an update offered and verified this way, so tests that stage one
+ * offer it first, exactly as electron-updater would.
  */
 const offer = async (version: string) => {
   h.updater.emit('update-available', { version, files: [] });
@@ -562,6 +564,7 @@ describe('state broadcasting', () => {
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
 
+    await offer('1.2.0');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
 
     const last = h.sent.at(-1);
@@ -611,6 +614,7 @@ describe('skipCurrentVersion', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
+    await offer('1.2.0');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
     expect(h.updater.autoInstallOnAppQuit).toBe(true);
 
@@ -633,6 +637,7 @@ describe('skipCurrentVersion', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
+    await offer('1.2.0');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
 
     expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', prompt: false });
@@ -648,6 +653,7 @@ describe('skipCurrentVersion', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
+    await offer('1.2.1');
     h.updater.emit('update-downloaded', { version: '1.2.1' });
 
     expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', prompt: true });
@@ -664,6 +670,7 @@ describe('remindAboutUpdateLater', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
+    await offer('1.2.0');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
 
     service.remindAboutUpdateLater();
@@ -751,12 +758,14 @@ describe('installUpdateAndRestart', () => {
   // isForceRunAfter must be true or the app installs and never comes back,
   // which reads to the user as the update having crashed it.
   it('quits, installs and relaunches once an update is staged', async () => {
-    vi.useFakeTimers();
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
+    await offer('1.2.0');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
 
+    // Faked only now: staging needs the real setImmediate (see offer()).
+    vi.useFakeTimers();
     expect(service.installUpdateAndRestart()).toBe(true);
     vi.runOnlyPendingTimers();
 
@@ -788,6 +797,7 @@ describe('preference file handling', () => {
     const service = await load();
     service.startUpdateService();
     await service.checkForUpdates('scheduled');
+    await offer('1.2.0');
     h.updater.emit('update-downloaded', { version: '1.2.0' });
 
     service.skipCurrentVersion();
@@ -864,6 +874,7 @@ describe('resilience', () => {
 
     h.window = false;
     await expect(service.checkForUpdates('scheduled')).resolves.toBeTruthy();
+    await offer('1.3.0');
 
     h.window = true;
     h.send = () => {
@@ -1014,6 +1025,87 @@ describe('signed update manifest (CASA M-3)', () => {
     await offer('1.3.1');
     expect(service.downloadUpdate()).toBe(false);
     expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    service.stopUpdateService();
+  });
+
+  // electron-updater starts with autoDownload ON. A "Check for Updates..."
+  // click can land before startUpdateService has run (it waits on storage and
+  // the sync engine). Breaks: that check downloads — and stages for install on
+  // quit — an update no signed manifest has vouched for.
+  it('turns electron-updater\'s own downloading off before any check, even one before the service starts', async () => {
+    h.updater.autoDownload = true;
+    let autoDownloadDuringCheck: boolean | undefined;
+    h.updater.checkForUpdates = vi.fn(async () => {
+      autoDownloadDuringCheck = h.updater.autoDownload;
+      return {};
+    });
+    const service = await load();
+    await service.checkForUpdates('manual');
+    expect(autoDownloadDuringCheck).toBe(false);
+  });
+
+  // electron-updater downloads its LATEST check's result. Breaks: a slow
+  // verification of an earlier update finishes after a newer check and starts
+  // a download — of the newer, unverified update.
+  it('lets a verification that finished after a newer check start nothing', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    let passFirst!: (verdict: { ok: true }) => void;
+    h.verify = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { passFirst = resolve; }))
+      .mockImplementationOnce(async () => ({ ok: false, reason: 'not signed' }));
+    h.updater.emit('update-available', { version: '1.3.0', files: [] });
+    h.updater.emit('checking-for-update');
+    await offer('1.3.1'); // the newer check's update fails verification
+    passFirst({ ok: true }); // the stale 1.3.0 verification now passes
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    expect(service.getUpdateState().phase).toBe('error');
+    service.stopUpdateService();
+  });
+
+  // Same race, still mid-check: the stale verification passes while the newer
+  // check has not answered yet. Breaks: the download starts on whatever that
+  // check returns.
+  it('starts nothing from a verification that finishes while a newer check runs', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    let passFirst!: (verdict: { ok: true }) => void;
+    h.verify = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { passFirst = resolve; }));
+    h.updater.emit('update-available', { version: '1.3.0', files: [] });
+    h.updater.emit('checking-for-update');
+    passFirst({ ok: true });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    service.stopUpdateService();
+  });
+
+  // The download is staged only if it is the verified update, file for file.
+  // Breaks: a download of different files (or a version never verified) is
+  // armed to install on the next quit.
+  it('refuses to stage a download that is not the verified update', async () => {
+    const files = [{ url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'signed' }];
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    h.updater.emit('update-available', { version: '1.3.0', files });
+    await new Promise((resolve) => setImmediate(resolve));
+    h.updater.autoInstallOnAppQuit = true;
+
+    h.updater.emit('update-downloaded', { version: '1.3.0', files: [{ url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'other' }] });
+    expect(service.getUpdateState().phase).toBe('error');
+    expect(h.updater.autoInstallOnAppQuit).toBe(false);
+    expect(service.installUpdateAndRestart()).toBe(false);
+
+    h.updater.emit('update-downloaded', { version: '9.9.9', files });
+    expect(service.getUpdateState().phase).toBe('error');
+
+    h.updater.emit('update-downloaded', { version: '1.3.0', files });
+    expect(service.getUpdateState().phase).toBe('downloaded');
     service.stopUpdateService();
   });
 });

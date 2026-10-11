@@ -6,6 +6,7 @@ import {
   getUpdateSupport,
   parseUpdatePrefs,
   remindLater,
+  sameUpdate,
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
@@ -369,5 +370,30 @@ describe('automatic updates default', () => {
     expect(parseUpdatePrefs({ autoUpdate: 0 }).autoUpdate).toBe(true);
     expect(parseUpdatePrefs({ autoUpdate: null }).autoUpdate).toBe(true);
     expect(parseUpdatePrefs({ autoUpdate: false }).autoUpdate).toBe(false);
+  });
+});
+
+describe('sameUpdate', () => {
+  const files = [
+    { url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' },
+    { url: 'Sarv-Inbox-Setup-1.3.0.exe.blockmap', sha512: 'b' },
+  ];
+
+  // Ties a download to its verification. Breaks: a download of different
+  // files under the same version string is treated as the verified update.
+  it('matches only the same version with the same files and hashes', () => {
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.0', files: [...files].reverse() })).toBe(true);
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.1', files })).toBe(false);
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.0', files: [{ ...files[0], sha512: 'x' }, files[1]] })).toBe(false);
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.0', files: [files[0]] })).toBe(false);
+  });
+
+  // electron-updater reports a file by URL in one place and by name in another.
+  it('compares file names, not the URL they were fetched from, and treats no files as none', () => {
+    expect(sameUpdate(
+      { version: '1.3.0', files: [{ url: 'https://example/x/Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' }] },
+      { version: '1.3.0', files: [{ url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' }] },
+    )).toBe(true);
+    expect(sameUpdate({ version: '1.3.0' }, { version: '1.3.0', files: [] })).toBe(true);
   });
 });

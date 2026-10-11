@@ -398,3 +398,22 @@ export const shouldShowDialog = ({
  */
 export const shouldAutoInstallOnQuit = (prefs: UpdatePrefs, version: string | null): boolean =>
   version === null || prefs.skippedVersion !== version;
+
+/** The parts of an update description that identify what would be downloaded. */
+export interface UpdateIdentity {
+  version: string;
+  files?: Array<{ url: string; sha512: string }>;
+}
+
+/**
+ * Whether two update descriptions name the same version AND the same files
+ * (each file's name and sha512). A version string alone is not enough to tie a
+ * download to its verification: electron-updater downloads whatever its LATEST
+ * check returned, so an approval must hold for exactly those files.
+ */
+export const sameUpdate = (a: UpdateIdentity, b: UpdateIdentity): boolean => {
+  if (a.version !== b.version) return false;
+  const key = (info: UpdateIdentity) =>
+    (info.files ?? []).map((file) => `${String(file.url).split('/').pop()}\u0000${file.sha512}`).sort().join('\n');
+  return key(a) === key(b);
+};
