@@ -883,10 +883,13 @@ export function OutboxTab() {
                     </div>
                   )}
 
-                  {/* Body — render the composed HTML faithfully; fall back to text. */}
+                  {/* Body — render the composed HTML faithfully; fall back to text.
+                      Remote images stay blocked until "Load images": a reply or
+                      forward carries the ORIGINAL sender's HTML, tracking pixel
+                      included (CASA M-4). */}
                   <div className="border-t border-border pt-3">
                     {preview.htmlBody ? (
-                      <SandboxedEmailBody html={preview.htmlBody} transparentCanvas blockRemoteImages={false} />
+                      <SandboxedEmailBody html={preview.htmlBody} transparentCanvas />
                     ) : (
                       <pre className="text-sm whitespace-pre-wrap break-words font-sans text-foreground/90">
                         {preview.body || '(empty message)'}

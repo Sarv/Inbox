@@ -4,6 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OutboxTab } from '../../../../../src/components/settings/OutboxTab';
 import { fire, render, settle } from '../../../../helpers/render';
 
+// The real frame needs a layout engine; the preview test only needs to know
+// what the Outbox hands it.
+vi.mock('../../../../../src/components/SandboxedEmailBody', () => ({
+  SandboxedEmailBody: (props: { html: string; blockRemoteImages?: boolean }) => (
+    <div data-frame data-block={String(props.blockRemoteImages ?? true)}>{props.html}</div>
+  ),
+}));
+
 // What breaks if this suite goes red: the only way to move a message that is
 // already scheduled. The menu is absolutely positioned inside a row of the
 // scheduled list, so a clipping ancestor or a missed click hands the reader a
@@ -231,3 +239,27 @@ describe('OutboxTab delivered rows', () => {
     view.unmount();
   });
 });
+
+describe('OutboxTab preview', () => {
+  // A reply or forward carries the original sender's HTML, tracking pixel and
+  // all. Breaks: previewing it in the Outbox loads that pixel from the user's
+  // IP although they never chose "Load images" for the message (CASA M-4).
+  it('keeps remote images blocked in the composed preview', async () => {
+    api.outbox.get.mockResolvedValue({
+      success: true,
+      data: {
+        to: ['friend@example.com'], cc: [], bcc: [], subject: 'Re: hi', body: 'Sure',
+        htmlBody: '<p>Sure</p><div><img src="https://tracker.example/p.gif"></div>',
+        status: 'pending', lastError: null, createdAt: 1_700_000_000, attachments: [],
+      },
+    });
+    const view = render(<OutboxTab />);
+    await settle();
+    fire(view.all('[aria-label="Preview message"]')[0], 'click');
+    await settle();
+    const frame = view.find('[data-frame]');
+    expect(frame?.textContent).toContain('tracker.example');
+    expect(frame?.getAttribute('data-block')).toBe('true');
+  });
+});
+
