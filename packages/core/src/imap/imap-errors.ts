@@ -17,6 +17,8 @@ type AnyErr = Error & {
   serverResponse?: string;
   responseText?: string;
   throttleReset?: number;
+  /** ImapFlow: set on STARTTLS / TLS-upgrade failures. */
+  tlsFailed?: boolean;
   status?: number;
   cause?: unknown;
 };
@@ -222,6 +224,25 @@ export function isAuthError(error: unknown): boolean {
     // surface re-authentication rather than spin forever.
     m.includes('unsupported authentication mechanism')
   );
+}
+
+/** IMAPError code: a STARTTLS account's server would not encrypt (CASA M-5). */
+export const STARTTLS_UNAVAILABLE = 'STARTTLS_UNAVAILABLE';
+
+/**
+ * A STARTTLS account whose server would not do STARTTLS — not advertised,
+ * refused, or stripped by someone on the network. Terminal until the user
+ * changes the account's connection security: retrying re-runs the identical
+ * refusal, so the reconnect ladder must stop. It is deliberately NOT an auth
+ * error (the password was never sent, and must not be forgotten) and NOT a
+ * connection error (it must not be re-queued as a blip).
+ */
+export function isStartTlsUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const e = error as AnyErr;
+  if (e.code === STARTTLS_UNAVAILABLE) return true;
+  // ImapFlow's own shape, should one escape untranslated.
+  return e.tlsFailed === true && /does not support STARTTLS/i.test(error.message);
 }
 
 /**

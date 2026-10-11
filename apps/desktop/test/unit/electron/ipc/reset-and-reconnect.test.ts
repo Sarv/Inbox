@@ -46,6 +46,8 @@ vi.mock('@sarvinbox/core', () => ({
   ImapFlowClient: class {},
   isAuthError: () => false,
   isQuotaError: () => false,
+  isStartTlsUnavailableError: (e: { code?: string } | undefined) => e?.code === 'STARTTLS_UNAVAILABLE',
+  STARTTLS_UNAVAILABLE: 'STARTTLS_UNAVAILABLE',
   isTerminalOAuthError: () => false,
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   LogAggregator: class { note() { /* no-op */ } },

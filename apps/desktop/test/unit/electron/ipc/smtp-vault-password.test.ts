@@ -102,6 +102,21 @@ describe('smtp:connect', () => {
     expect(res).toEqual({ success: false, error: 'No sending password saved for smtp.x.com — set up sending for this account.' });
     expect(h.connect).not.toHaveBeenCalled();
   });
+
+  // CASA M-5: the sending server would not encrypt a STARTTLS account. Breaks:
+  // the window cannot tell this from any other failure, so startup and lazy
+  // send swallow it and mail waits in the Outbox with no reason shown.
+  it('tags a refused STARTTLS so the window can explain it', async () => {
+    const refusal = Object.assign(new Error('The outgoing mail server smtp.x.com did not agree to encrypt this session (STARTTLS).'), { starttlsRefused: true, code: 'ETLS' });
+    h.connect.mockRejectedValueOnce(refusal);
+    const res = await h.handlers.get('smtp:connect')!({}, SAVED, 'acct-a');
+    expect(res).toEqual({ success: false, error: refusal.message, code: 'STARTTLS_UNAVAILABLE' });
+  });
+
+  it('does not tag other failures', async () => {
+    h.connect.mockRejectedValueOnce(Object.assign(new Error('Invalid login: 535'), { code: 'EAUTH' }));
+    expect(await h.handlers.get('smtp:connect')!({}, SAVED, 'acct-a')).toEqual({ success: false, error: 'Invalid login: 535' });
+  });
 });
 
 describe('smtp:connectFor (multi-account send-as)', () => {

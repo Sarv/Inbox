@@ -256,6 +256,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     removeAuthErrorListener: () => {
       ipcRenderer.removeAllListeners('imap:auth-error');
     },
+    /** A STARTTLS account's server stopped encrypting mid-session (CASA M-5). */
+    onSecurityError: (callback: (message: string) => void) => {
+      ipcRenderer.on('imap:security-error', (_e, message: string) => callback(message));
+    },
+    removeSecurityErrorListener: () => {
+      ipcRenderer.removeAllListeners('imap:security-error');
+    },
   },
 
   // Folder operations
@@ -1278,7 +1285,9 @@ export interface ElectronAPI {
   imap: {
     /** `healedAuthMethod` is set when main repaired an account that was marked
      *  oauth2 but whose server rejected the token; persist it to make it stick. */
-    connect: (config: IMAPConfig, accountId?: string) => Promise<{ success: boolean; error?: string; healedAuthMethod?: 'password' }>;
+    /** `code` 'STARTTLS_UNAVAILABLE': a STARTTLS account's server would not
+     *  encrypt; `error` says what the user can change. */
+    connect: (config: IMAPConfig, accountId?: string) => Promise<{ success: boolean; error?: string; healedAuthMethod?: 'password'; code?: 'STARTTLS_UNAVAILABLE' }>;
     /** Verify credentials against the server without touching the active
      *  connection or any stored account. Used to gate account overwrites. */
     probeCredentials: (config: IMAPConfig) => Promise<{ success: boolean; error?: string }>;
@@ -1314,6 +1323,8 @@ export interface ElectronAPI {
     removeReconnectingListener: () => void;
     onAuthError: (callback: () => void) => void;
     removeAuthErrorListener: () => void;
+    onSecurityError: (callback: (message: string) => void) => void;
+    removeSecurityErrorListener: () => void;
   };
   folders: {
     list: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -1524,7 +1535,9 @@ export interface ElectronAPI {
     triggerNow: () => Promise<{ success: boolean; data?: { queued: number }; error?: string }>;
   };
   smtp: {
-    connect: (config: SMTPConfig, accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    /** `code` 'STARTTLS_UNAVAILABLE': the sending server would not encrypt a
+     *  STARTTLS account; `error` says what the user can change. */
+    connect: (config: SMTPConfig, accountId?: string) => Promise<{ success: boolean; error?: string; code?: 'STARTTLS_UNAVAILABLE' }>;
     connectFor: (accountId: string, config: SMTPConfig) => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
     isConnected: () => Promise<{ success: boolean; data?: boolean; error?: string }>;

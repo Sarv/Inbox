@@ -10,7 +10,26 @@ type NodemailerErr = Error & {
   code?: string;
   responseCode?: number;
   command?: string;
+  response?: unknown;
+  /** Set on our own re-worded refusal (SMTPClient.connect), whose message no longer carries nodemailer's text. */
+  starttlsRefused?: boolean;
 };
+
+/**
+ * nodemailer's refusal of a REQUIRED STARTTLS (requireTLS, CASA M-5): the
+ * server answered the STARTTLS command with an error (ETLS on STARTTLS, WITH a
+ * server reply — the command is sent even when someone stripped it from the
+ * EHLO list), or rejected EHLO when HELO cannot do STARTTLS. A TLS handshake
+ * failure after an accepted STARTTLS (a bad certificate) carries no server
+ * reply and is NOT this: switching to None would not help it.
+ */
+export function isStarttlsRefusedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const e = error as NodemailerErr;
+  if (e.starttlsRefused === true) return true;
+  if (e.code === 'ETLS' && e.command === 'STARTTLS' && typeof e.response === 'string') return true;
+  return e.code === 'ECONNECTION' && /does not support required STARTTLS/i.test(error.message);
+}
 
 /**
  * A failure raised by an outgoing MIME transform (encryption, signing) that

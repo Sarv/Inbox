@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { isAuthTokenError, isTransientSendError, OutgoingMimeError } from '../../../src/smtp/smtp-errors';
+import { isAuthTokenError, isStarttlsRefusedError, isTransientSendError, OutgoingMimeError } from '../../../src/smtp/smtp-errors';
 
 describe('isAuthTokenError', () => {
   it('matches the Sarv expired-token phrasing (the reported failure)', () => {
@@ -77,5 +77,37 @@ describe('isTransientSendError', () => {
     expect(isTransientSendError('ETIMEDOUT')).toBe(false);
     expect(isTransientSendError(undefined)).toBe(false);
     expect(isTransientSendError({ code: 'ESOCKET' })).toBe(false);
+  });
+});
+
+describe('isStarttlsRefusedError (CASA M-5)', () => {
+  const err = (message: string, fields: Record<string, unknown>) => Object.assign(new Error(message), fields);
+
+  // Breaks: a refused STARTTLS is reported as nodemailer jargon, or a
+  // certificate failure is wrongly told to switch to None (which cannot help).
+  it('matches the server refusing STARTTLS, or EHLO that HELO cannot repair', () => {
+    expect(isStarttlsRefusedError(err('Error upgrading connection with STARTTLS: 502 nope', { code: 'ETLS', command: 'STARTTLS', response: '502 nope' }))).toBe(true);
+    expect(isStarttlsRefusedError(err('EHLO failed but HELO does not support required STARTTLS. response=500', { code: 'ECONNECTION', command: 'EHLO' }))).toBe(true);
+  });
+
+  // Our own re-worded refusal (SMTPClient.connect) no longer carries
+  // nodemailer's text. Breaks: main can't tag it for the window, and an EHLO
+  // refusal reads as an ordinary failure once re-worded.
+  it('recognises the re-worded refusal SMTPClient throws', () => {
+    expect(isStarttlsRefusedError(err('The outgoing mail server x did not agree to encrypt', { code: 'ECONNECTION', command: 'EHLO', starttlsRefused: true }))).toBe(true);
+  });
+
+  it('does not match a handshake failure, other errors or non-errors', () => {
+    expect(isStarttlsRefusedError(err('Error initiating TLS - self-signed certificate', { code: 'ETLS', command: 'STARTTLS' }))).toBe(false);
+    expect(isStarttlsRefusedError(err('535 Authentication failed', { responseCode: 535, code: 'EAUTH' }))).toBe(false);
+    expect(isStarttlsRefusedError(err('Connection timeout', { code: 'ETIMEDOUT' }))).toBe(false);
+    expect(isStarttlsRefusedError('ETLS')).toBe(false);
+  });
+
+  // Refusals carry the server's reply code; the outbox keys retry off it.
+  it('keeps a 454 refusal retryable and a 502 refusal permanent', () => {
+    expect(isTransientSendError(err('x', { code: 'ETLS', command: 'STARTTLS', response: '454 later', responseCode: 454 }))).toBe(true);
+    expect(isTransientSendError(err('x', { code: 'ETLS', command: 'STARTTLS', response: '502 no', responseCode: 502 }))).toBe(false);
+    expect(isAuthTokenError(err('Error upgrading connection with STARTTLS: 502 no', { code: 'ETLS', responseCode: 502 }))).toBe(false);
   });
 });

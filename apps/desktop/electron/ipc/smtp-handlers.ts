@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, messageIdKey, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, isStarttlsRefusedError, withFolderSelected, messageIdKey, STARTTLS_UNAVAILABLE, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
@@ -116,6 +116,12 @@ export function registerSmtpHandlers(): void {
       drainOutbox().catch((e) => logger.warn('[SMTP] Outbox drain after connect failed:', e));
       return { success: true };
     } catch (error) {
+      // The server would not encrypt a STARTTLS sending account (CASA M-5).
+      // The client already said so in one line; tag it so the window can show
+      // why mail is waiting in the Outbox instead of a silent queue.
+      if (isStarttlsRefusedError(error)) {
+        return { success: false, error: (error as Error).message, code: STARTTLS_UNAVAILABLE };
+      }
       logger.error('SMTP connect error:', error);
       return {
         success: false,

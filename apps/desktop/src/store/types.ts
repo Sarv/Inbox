@@ -144,6 +144,18 @@ export interface ConnectionSlice {
   disconnect: () => Promise<void>;
   reconnect: () => Promise<void>;
   needsReauth: boolean;
+  /**
+   * Set when the active account's server would not encrypt a STARTTLS session
+   * (CASA M-5): the message says what to change. Not an auth failure — the
+   * password was never sent. Cleared by any successful connect.
+   */
+  connectionSecurityIssue: string | null;
+  /**
+   * The same for the active account's SENDING server: its STARTTLS was refused,
+   * so mail waits in the Outbox. Cleared by a successful SMTP connect and on
+   * account switch.
+   */
+  smtpSecurityIssue: string | null;
   handleDisconnection: () => void;
   handleReconnection: () => void;
   setConnectionStatus: (status: ConnectionStatus) => void;

@@ -27,6 +27,7 @@ export * from './format-bytes';
 export * from './log-aggregator';
 export * from './tags';
 export * from './tls';
+export * from './connection-security';
 export * from './filters';
 export * from './ai-error';
 export * from './calendar';

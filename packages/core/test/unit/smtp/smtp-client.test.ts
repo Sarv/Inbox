@@ -107,15 +107,44 @@ describe('SMTPClient.connect — transport + TLS policy', () => {
   });
 
   // Verification may only be dropped by an EXPLICIT per-account opt-in — never
-  // as a side effect of anything else.
-  it('only disables certificate verification on the explicit allowInsecureTLS opt-in', async () => {
+  // as a side effect of anything else. Changed deliberately (CASA M-5): the
+  // opt-in used to turn the STARTTLS requirement off as well, so ticking "allow
+  // self-signed certificates" let anyone on the network strip STARTTLS and
+  // read the password. It relaxes certificate checks only now.
+  it('only disables certificate verification on the explicit allowInsecureTLS opt-in, and still requires STARTTLS', async () => {
     const client = new SMTPClient();
-    await client.connect(baseConfig({ allowInsecureTLS: true }));
+    await client.connect(baseConfig({ port: 587, secure: false, allowInsecureTLS: true }));
     expect(lastTransportOptions().tls.rejectUnauthorized).toBe(false);
-    expect(lastTransportOptions().requireTLS).toBe(false); // opted out of forced upgrade too
+    expect(lastTransportOptions().requireTLS).toBe(true);
 
     await client.connect(baseConfig({ tlsOptions: { rejectUnauthorized: true }, allowInsecureTLS: true }));
     expect(lastTransportOptions().tls.rejectUnauthorized).toBe(true); // explicit override wins
+  });
+
+  // The account's connection security decides the transport (CASA M-5). Breaks:
+  // 'starttls' falls back to cleartext when the upgrade is stripped; 'none'
+  // fails on a server that offers but refuses STARTTLS; or a stale `secure`
+  // overrides the user's choice.
+  it.each([
+    ['ssl', { secure: true, requireTLS: false, opportunisticTLS: false }],
+    ['starttls', { secure: false, requireTLS: true, opportunisticTLS: false }],
+    ['none', { secure: false, requireTLS: false, opportunisticTLS: true }],
+  ] as const)('maps security %s to the transport, whatever `secure` says', async (security, expected) => {
+    const client = new SMTPClient();
+    for (const secure of [true, false]) {
+      await client.connect(baseConfig({ security, secure, port: 587 }));
+      expect(lastTransportOptions()).toMatchObject(expected);
+    }
+  });
+
+  // An OAuth token never goes over an unencrypted session, whatever the config
+  // says. Breaks: a config carrying security 'none' (stale, or from a
+  // compromised window) sends the user's token in cleartext once STARTTLS is
+  // stripped.
+  it('requires STARTTLS for an OAuth account even when the config says none', async () => {
+    const client = new SMTPClient();
+    await client.connect(baseConfig({ security: 'none', secure: false, authMethod: 'oauth2', accessToken: 't', oauthProvider: 'microsoft' }));
+    expect(lastTransportOptions()).toMatchObject({ requireTLS: true, opportunisticTLS: false });
   });
 
   it('pins a TLS 1.2 floor regardless of the account settings', async () => {
@@ -416,6 +445,65 @@ describe('SMTPClient.sendEmail — failure classification', () => {
     h.state.sendError = Object.assign(new Error('Connection timeout'), { code: 'ETIMEDOUT' });
     const result = await client.sendEmail(send());
     expect(result.transient).toBe(true);
+  });
+
+  // nodemailer opens a fresh session per send, so STARTTLS can be refused
+  // here too (the network changed after verify). Breaks: the Outbox shows
+  // nodemailer's jargon, or the retry class changes — 454 must stay retryable
+  // and a 5xx refusal must still dead-letter.
+  it('words a STARTTLS refusal at send time, keeping the retry class of the reply', async () => {
+    h.state.sendError = Object.assign(new Error('Error upgrading connection with STARTTLS: 454 4.7.0 TLS not available'), {
+      code: 'ETLS', command: 'STARTTLS', response: '454 4.7.0 TLS not available', responseCode: 454,
+    });
+    const retryable = await client.sendEmail(send());
+    expect(retryable).toMatchObject({ success: false, transient: true });
+    expect(retryable.error).toContain('did not agree to encrypt');
+    expect(retryable.error).toContain('The server replied: "454 4.7.0 TLS not available"');
+    h.state.sendError = Object.assign(new Error('Error upgrading connection with STARTTLS: 502 5.5.1 Unrecognized command'), {
+      code: 'ETLS', command: 'STARTTLS', response: '502 5.5.1 Unrecognized command', responseCode: 502,
+    });
+    expect(await client.sendEmail(send())).toMatchObject({ success: false, transient: false });
+  });
+});
+
+describe('SMTPClient.connect — a required STARTTLS the server will not do (CASA M-5)', () => {
+  // Breaks: the user sees "Error upgrading connection with STARTTLS: 502 …" and
+  // has no idea that choosing None (on a trusted network) is the way out — or
+  // the code/responseCode the send queue classifies on is lost.
+  it('says what happened and what to change, keeping nodemailer\'s code', async () => {
+    h.state.verifyError = Object.assign(new Error('Error upgrading connection with STARTTLS: 502 5.5.1 Unrecognized command'), {
+      code: 'ETLS', command: 'STARTTLS', response: '502 5.5.1 Unrecognized command', responseCode: 502,
+    });
+    const client = new SMTPClient();
+    const error = await client.connect(baseConfig()).catch((e: unknown) => e as Error & Record<string, unknown>);
+    expect(error.message).toContain('The outgoing mail server smtp.sarv.com did not agree to encrypt');
+    expect(error.message).toContain('set Connection security to None');
+    expect(error).toMatchObject({ code: 'ETLS', responseCode: 502, command: 'STARTTLS', starttlsRefused: true });
+    expect(client.isConnected()).toBe(false);
+  });
+
+  it('treats an EHLO rejection that HELO cannot repair as the same refusal', async () => {
+    h.state.verifyError = Object.assign(new Error('EHLO failed but HELO does not support required STARTTLS. response=500 nope'), {
+      code: 'ECONNECTION', command: 'EHLO',
+    });
+    await expect(new SMTPClient().connect(baseConfig())).rejects.toThrow('did not agree to encrypt');
+  });
+
+  // A server policy that rejects EHLO itself reaches us in the same shape.
+  // Breaks: the server's real reason is dropped, and the user is left with
+  // advice (None) that cannot fix a policy rejection.
+  it("keeps the server's own reply in the message", async () => {
+    h.state.verifyError = Object.assign(new Error('EHLO failed but HELO does not support required STARTTLS. response=550 HELO/EHLO must not be an address literal'), {
+      code: 'ECONNECTION', command: 'EHLO', response: '550 HELO/EHLO must not be\r\n an address literal', responseCode: 550,
+    });
+    await expect(new SMTPClient().connect(baseConfig())).rejects.toThrow('The server replied: "550 HELO/EHLO must not be an address literal".');
+  });
+
+  // A bad certificate after an ACCEPTED STARTTLS is not a refusal: None would
+  // not help, so the message must not suggest it.
+  it('leaves a TLS handshake failure (no server reply) as it was', async () => {
+    h.state.verifyError = Object.assign(new Error('Error initiating TLS - self-signed certificate'), { code: 'ETLS', command: 'STARTTLS' });
+    await expect(new SMTPClient().connect(baseConfig())).rejects.toThrow('Error initiating TLS - self-signed certificate');
   });
 });
 

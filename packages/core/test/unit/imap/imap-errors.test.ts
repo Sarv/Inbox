@@ -10,6 +10,8 @@ import {
   isQuotaError,
   isRateLimited,
   isUpstreamError,
+  isStartTlsUnavailableError,
+  STARTTLS_UNAVAILABLE,
 } from '../../../src/imap/imap-errors';
 
 // These classifiers decide whether a failure is RETRIED, RECONNECTED, BACKED OFF
@@ -327,5 +329,31 @@ describe('describeNetworkError', () => {
 
   it('stringifies non-Error values', () => {
     expect(describeNetworkError('nope')).toBe('nope');
+  });
+});
+
+describe('isStartTlsUnavailableError (CASA M-5)', () => {
+  // Breaks: a STARTTLS refusal is retried forever, or (worse) handled as a
+  // rejected password, which forgets the saved account.
+  it('matches the client\'s refusal code and ImapFlow\'s own shape', () => {
+    expect(isStartTlsUnavailableError(Object.assign(new Error('x'), { code: STARTTLS_UNAVAILABLE }))).toBe(true);
+    expect(isStartTlsUnavailableError(Object.assign(new Error('Server does not support STARTTLS'), { tlsFailed: true }))).toBe(true);
+  });
+
+  // None of these is "the server would not encrypt": switching to None would
+  // not fix a certificate, an injection attempt or a slow upgrade.
+  it('does not match other TLS failures, auth, plain errors or non-errors', () => {
+    expect(isStartTlsUnavailableError(Object.assign(new Error('possible plaintext-injection attack'), { tlsFailed: true, code: 'STARTTLS_INJECTION' }))).toBe(false);
+    expect(isStartTlsUnavailableError(Object.assign(new Error('self-signed certificate'), { tlsFailed: true }))).toBe(false);
+    expect(isStartTlsUnavailableError(Object.assign(new Error('Failed to upgrade connection in required time'), { code: 'UPGRADE_TIMEOUT' }))).toBe(false);
+    expect(isStartTlsUnavailableError(new Error('Server does not support STARTTLS'))).toBe(false);
+    expect(isStartTlsUnavailableError('Server does not support STARTTLS')).toBe(false);
+  });
+
+  it('is not an auth, connection or quota error', () => {
+    const refusal = Object.assign(new Error('Server does not support STARTTLS'), { tlsFailed: true });
+    expect(isAuthError(refusal)).toBe(false);
+    expect(isConnectionError(refusal)).toBe(false);
+    expect(isQuotaError(refusal)).toBe(false);
   });
 });
