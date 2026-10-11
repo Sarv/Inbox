@@ -133,10 +133,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   include a GPG-signed `SHA256SUMS` for checking downloads by hand (key:
   `docs/release-signing-key.asc`), and an unsigned macOS build can no longer be
   published.
-- **In-app updates on Windows work again.** The Windows installer is now named
-  `Sarv-Inbox-Setup-<version>.exe`, the same name the update feed uses. Before,
-  the release stored it as `Sarv.Inbox.Setup.<version>.exe`, so Windows copies
-  looked for a file that wasn't there and never updated themselves.
+- **In-app updates now work on Windows.** The Windows installer is now named
+  `Sarv-Inbox-Setup-<version>.exe`, the same name the update feed uses. In every
+  earlier release it was stored as `Sarv.Inbox.Setup.<version>.exe`, so Windows
+  copies looked for a file that wasn't there and never updated themselves.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still
