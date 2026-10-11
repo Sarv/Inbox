@@ -126,6 +126,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modified. On macOS the app also no longer allows other code to be loaded into
   it through environment variables. Every release checks these settings in the
   built app before it is published.
+- **Updates are verified before they download.** Each release now carries a
+  list of its files' fingerprints, signed with a key only Sarv holds. The app
+  downloads an update only if every file matches that signed list, so a
+  tampered release can't be installed on Windows, macOS or Linux. Releases also
+  include a GPG-signed `SHA256SUMS` for checking downloads by hand (key:
+  `docs/release-signing-key.asc`), and an unsigned macOS build can no longer be
+  published.
+- **In-app updates now work on Windows.** The Windows installer is now named
+  `Sarv-Inbox-Setup-<version>.exe`, the same name the update feed uses. In every
+  earlier release it was stored as `Sarv.Inbox.Setup.<version>.exe`, so Windows
+  copies looked for a file that wasn't there and never updated themselves.
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

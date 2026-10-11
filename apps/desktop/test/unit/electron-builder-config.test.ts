@@ -187,7 +187,10 @@ describe('electron-builder configuration', () => {
     for (const entry of win.target ?? []) {
       expect(entry.arch, `win target ${entry.target}`).toEqual(['x64', 'arm64']);
     }
-    const effectivePattern = win.artifactName ?? (buildConfig['artifactName'] as string | undefined) ?? '';
+    // electron-builder resolves the NSIS name target-first: nsis, then win,
+    // then the top level (platformPackager artifactPatternConfig).
+    const nsis = buildConfig['nsis'] as { artifactName?: string } | undefined;
+    const effectivePattern = nsis?.artifactName ?? win.artifactName ?? (buildConfig['artifactName'] as string | undefined) ?? '';
     expect(effectivePattern).not.toContain('${arch}');
   });
 
