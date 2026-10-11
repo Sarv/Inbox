@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { buildPrintDocument } from '../../../../../src/components/email-detail/print-document';
+import { buildPrintDocument, printDocumentFor } from '../../../../../src/components/email-detail/print-document';
 import { emailFrameCsp } from '../../../../../src/utils/email-frame-csp';
+
+// The user's auto-load rules, reduced to one fact: this sender's images are
+// allowed on account A only. The real rules read stores; the question here is
+// only WHICH account print asks them about.
+vi.mock('../../../../../src/utils/remote-images', () => ({
+  remoteImageFactsOf: (email: { accountId?: string | null }, pane?: string | null) => ({ accountId: email.accountId ?? pane ?? null }),
+  shouldAutoLoadRemoteImages: (facts: { accountId: string | null } | null) => facts?.accountId === 'acct-A',
+}));
 
 // Printing an email (CASA M-4). What breaks if this fails: printing fires the
 // tracking pixel the viewer blocked, or a crafted subject/sender becomes markup
@@ -43,5 +51,18 @@ describe('buildPrintDocument', () => {
     expect(doc).toContain('(no subject)');
     expect(doc).toContain('<div class="body">plain</div>');
     expect(doc).not.toContain('Cc:');
+  });
+});
+
+describe('printDocumentFor', () => {
+  // In All Inboxes a thread row carries no accountId: the pane knows which
+  // account it was read from, and the on-screen frame decides with that.
+  // Breaks: print decides with the ACTIVE account instead, and prints (fires)
+  // the pixel the screen blocked — or drops images the screen shows.
+  it('decides remote images with the message account, else the pane account — as the screen does', () => {
+    expect(printDocumentFor(email, 'acct-A')).toContain(emailFrameCsp(true));
+    expect(printDocumentFor(email, 'acct-B')).toContain(emailFrameCsp(false));
+    expect(printDocumentFor({ ...email, accountId: 'acct-A' }, 'acct-B')).toContain(emailFrameCsp(true));
+    expect(printDocumentFor({ ...email, accountId: 'acct-B' }, 'acct-A')).toContain(emailFrameCsp(false));
   });
 });

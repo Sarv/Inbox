@@ -1,6 +1,7 @@
 import { escapeHtml } from '@sarvinbox/core/html-escape';
 
 import { withLeadingCsp } from '../../utils/email-frame-csp';
+import { remoteImageFactsOf, shouldAutoLoadRemoteImages } from '../../utils/remote-images';
 
 /** The fields of an email the print view shows. */
 export interface PrintableEmail {
@@ -58,4 +59,18 @@ export function buildPrintDocument(email: PrintableEmail, allowRemoteImages: boo
       </body>
       </html>`;
   return withLeadingCsp(html, allowRemoteImages);
+}
+
+/**
+ * The print document for `email` as the reading pane shows it. Remote images
+ * print only if the user's rules auto-load them for this sender on this
+ * message's account — its own, else the pane's (a thread row in All Inboxes
+ * carries none) — the same decision the on-screen frame makes. Deciding on the
+ * active account instead let Print load a pixel the screen blocked.
+ */
+export function printDocumentFor(
+  email: PrintableEmail & { tags?: string | null; authStatus?: string | null; accountId?: string | null },
+  paneAccountId: string | null,
+): string {
+  return buildPrintDocument(email, shouldAutoLoadRemoteImages(remoteImageFactsOf(email, paneAccountId)));
 }

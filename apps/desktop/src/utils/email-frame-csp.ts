@@ -31,9 +31,15 @@ export function emailFrameCsp(allowRemoteImages: boolean): string {
  * standards mode, so this is belt and braces there; it matters if the same
  * document is ever loaded any other way, where a <meta> ahead of the doctype
  * would force quirks mode.) Nothing else may precede the policy.
+ *
+ * Only the whitespace the HTML parser itself skips before a doctype (TAB, LF,
+ * FF, CR, SPACE) may come before it — NOT JavaScript's `\s`, which also
+ * matches U+00A0, U+3000, U+2028, a second BOM and more. The parser reads
+ * those as text: text opens <body>, the <meta> lands there, and Chromium
+ * ignores a CSP <meta> outside <head>, so the email's images would load.
  */
 export function withLeadingCsp(html: string, allowRemoteImages: boolean, extraHead = ''): string {
   const body = html.startsWith('﻿') ? html.slice(1) : html;
-  const doctype = /^\s*<!doctype[^>]*>/i.exec(body)?.[0] ?? '';
+  const doctype = /^[\t\n\f\r ]*<!doctype[^>]*>/i.exec(body)?.[0] ?? '';
   return `${doctype}${emailFrameCsp(allowRemoteImages)}${extraHead}${body.slice(doctype.length)}`;
 }

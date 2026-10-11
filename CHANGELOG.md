@@ -142,8 +142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracking pixel report when and where you opened it without you clicking
   "Load images". The rule now applies to every message whatever its HTML looks
   like. Printing used to load remote images regardless of your choice; it now
-  follows the same image settings as the message view, and a crafted subject
-  or sender name can no longer add content to the printout.
+  follows the same image settings as the message view, for the account the
+  message arrived in, and a crafted subject or sender name can no longer add
+  content to the printout. The Outbox preview of a reply or forward no longer
+  loads the original sender's images until you click "Load images".
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still

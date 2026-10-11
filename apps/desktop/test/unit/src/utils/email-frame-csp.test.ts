@@ -1,3 +1,4 @@
+import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { describe, expect, it } from 'vitest';
 
 import { buildSrcdoc } from '../../../../src/components/SandboxedEmailBody';
@@ -12,11 +13,35 @@ import { emailFrameCsp, withLeadingCsp } from '../../../../src/utils/email-frame
 const BLOCKING = emailFrameCsp(false);
 const PIXEL = '<img src="https://tracker.example/p.gif">';
 
-/** The document starts with the policy, after at most a doctype. */
+type Node = DefaultTreeAdapterMap['childNode'] | DefaultTreeAdapterMap['document'];
+const children = (node: Node): Node[] => ('childNodes' in node ? (node.childNodes as Node[]) : []);
+const find = (node: Node, test: (n: Node) => boolean): Node | null =>
+  test(node) ? node : children(node).reduce<Node | null>((hit, child) => hit ?? find(child, test), null);
+const attr = (node: Node, name: string) => ('attrs' in node ? node.attrs.find((a) => a.name === name)?.value : undefined);
+
+/**
+ * Where a browser's parser really puts the policy (parse5 implements the HTML
+ * spec's tree construction, as Chromium does). It only takes effect as an
+ * element of <head>, and only over what comes after it, so it must be the
+ * FIRST element there, with the expected content, and the only policy.
+ * Checked by parsing, not by a regex: the regex the code used is what let an
+ * email push the policy into <body>.
+ */
 const startsWithPolicy = (doc: string, csp = BLOCKING) => {
-  const doctype = /^\s*<!doctype[^>]*>/i.exec(doc)?.[0] ?? '';
-  return doc.slice(doctype.length).startsWith(csp);
+  const tree = parse(doc);
+  const head = find(tree, (n) => n.nodeName === 'head');
+  const firstInHead = head ? children(head).find((n) => n.nodeName !== '#text' && n.nodeName !== '#comment') : undefined;
+  const policies: Node[] = [];
+  find(tree, (n) => { if (attr(n, 'http-equiv')?.toLowerCase() === 'content-security-policy') policies.push(n); return false; });
+  const expected = /content="([^"]*)"/.exec(csp)![1];
+  return policies.length === 1 && firstInHead === policies[0] && attr(policies[0], 'content') === expected;
 };
+
+/** Leading characters JavaScript counts as whitespace but HTML reads as text. */
+const NOT_HTML_WHITESPACE: Array<[string, string]> = [
+  ['U+00A0', '\u00a0'], ['U+3000', '\u3000'], ['VT', '\v'], ['U+2028', '\u2028'], ['U+1680', '\u1680'],
+  ['U+2009', '\u2009'], ['U+202F', '\u202f'], ['two BOMs', '\ufeff\ufeff'], ['three BOMs', '\ufeff\ufeff\ufeff'],
+];
 
 describe('emailFrameCsp', () => {
   it('blocks every remote fetch, and remote images unless allowed', () => {
@@ -36,6 +61,14 @@ describe('withLeadingCsp', () => {
     expect(withLeadingCsp('﻿  <!DOCTYPE html PUBLIC "x"><html>', false)).toBe(`  <!DOCTYPE html PUBLIC "x">${BLOCKING}<html>`);
   });
 
+  // A doctype is hoisted past HTML whitespace only. Breaks if it is hoisted
+  // past a character the parser reads as text: the policy lands in <body>,
+  // Chromium ignores it, and the tracking pixel loads (CASA M-4).
+  it.each(NOT_HTML_WHITESPACE)('keeps the policy in <head> when %s comes before the doctype', (_label, lead) => {
+    const doc = withLeadingCsp(`${lead}<!DOCTYPE html><html><head></head><body>${PIXEL}</body></html>`, false);
+    expect(startsWithPolicy(doc)).toBe(true);
+  });
+
   // A doctype that isn't leading is the email's content, not ours to hoist.
   it('does not hoist a doctype that comes after other content', () => {
     expect(withLeadingCsp('<p>a</p><!DOCTYPE html>', false)).toBe(`${BLOCKING}<p>a</p><!DOCTYPE html>`);
@@ -53,6 +86,8 @@ describe('buildSrcdoc — the policy survives hostile structure', () => {
     ['a </head> inside a comment', `<html><head><!-- </head> --><title>x</title></head><body>${PIXEL}</body></html>`],
     ['<html inside an attribute', `<p title="<html>">${PIXEL}</p>`],
     ['a doctype then <head> with no </head>', `<!DOCTYPE html><html><head><body>${PIXEL}`],
+    ...NOT_HTML_WHITESPACE.map(([label, lead]): [string, string] => [`${label} before a doctype`, `${lead}<!DOCTYPE html><html><body>${PIXEL}</body></html>`]),
+    ['U+00A0 before a doctype and a real <head>', `\u00a0<!DOCTYPE html><html><head><title>x</title></head><body>${PIXEL}</body></html>`],
   ])('keeps the policy first for %s', (_label, email) => {
     const doc = buildSrcdoc(email, 'THEME', false, false);
     expect(startsWithPolicy(doc)).toBe(true);

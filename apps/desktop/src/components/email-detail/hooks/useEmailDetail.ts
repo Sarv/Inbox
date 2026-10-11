@@ -23,14 +23,14 @@ import {
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
-import { remoteImageFactsOf, shouldAutoLoadRemoteImages } from '../../../utils/remote-images';
+import { paneAccountOf } from '../../../utils/pane-account';
 import { savedDraftContent } from '../../../utils/saved-draft-content';
 import { isDraftEmail } from '../../../utils/thread-utils';
 import { composeAiTurns, firstEmailFacts } from '../ai-view-compose';
 import { polishEntriesOf, threadTurns } from '../chat-message-adapter';
 import { chatViewRulesFor } from '../chat-view-rules';
 import { composerDraftFor, type ComposerSeed } from '../composer-target';
-import { buildPrintDocument } from '../print-document';
+import { printDocumentFor } from '../print-document';
 import type { EmailDetailContext } from '../types';
 import {
   getInitials,
@@ -1350,8 +1350,8 @@ export function useEmailDetail(): EmailDetailContext | null {
   const handlePrintEmail = (email: any) => {
     if (!email) return;
     // Remote images print only when the user's rules auto-load them for this
-    // sender — the same decision the on-screen frame starts from.
-    const html = buildPrintDocument(email, shouldAutoLoadRemoteImages(remoteImageFactsOf(email)));
+    // sender and account — the same decision the on-screen frame starts from.
+    const html = printDocumentFor(email, paneAccountOf(useEmailStore.getState()));
 
     // Print via a hidden, sandboxed iframe rather than window.open — the main
     // process denies all window.open (setWindowOpenHandler → 'deny'), so the old
