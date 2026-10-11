@@ -88,6 +88,7 @@ jobs:
             # The binary inside the .app bundle, launched directly: `open`
             # returns before the app has done anything.
             smoke: apps/desktop/release/mac-universal/Sarv Inbox.app/Contents/MacOS/Sarv Inbox
+            fuses: apps/desktop/release/mac-universal/Sarv Inbox.app
           # Each Linux arch gets its OWN runner: unlike Xcode and MSVC, the
           # stock gcc on a GitHub runner has no cross toolchain, so the arm64
           # machine cannot compile x64 (`cc: unrecognized command-line option
@@ -114,12 +115,14 @@ jobs:
             platform: linux
             args: --linux --x64
             unpacked: apps/desktop/release/linux-unpacked
+            fuses: apps/desktop/release/linux-unpacked/sarv-inbox
           - name: Linux arm64
             id: linux-arm64
             os: ubuntu-22.04-arm
             platform: linux
             args: --linux --arm64
             unpacked: apps/desktop/release/linux-arm64-unpacked
+            fuses: apps/desktop/release/linux-arm64-unpacked/sarv-inbox
           - name: Windows (x64 + arm64)
             id: win-x64-arm64
             os: windows-latest
@@ -136,6 +139,8 @@ jobs:
             # x64 only: an x64 runner cannot execute the arm64 build, whose
             # addon CPU is verified from its PE header instead.
             smoke: apps/desktop/release/win-unpacked/Sarv Inbox.exe
+            # '|'-separated: both arches come out of this one job.
+            fuses: apps/desktop/release/win-unpacked/Sarv Inbox.exe|apps/desktop/release/win-arm64-unpacked/Sarv Inbox.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -392,6 +397,21 @@ jobs:
           echo "Installing $DEB"
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb "$DEB"
+
+      # Fuses are bits in the Electron binary that switch off running the app as
+      # plain Node, NODE_OPTIONS and --inspect, and turn on asar integrity. Left
+      # at Electron's defaults, any local process can run code AS the signed app
+      # and read its Keychain / DPAPI secrets without a prompt (CASA M-2).
+      # electron-builder flips them from build.electronFuses; this reads them
+      # back out of every binary that ships -- Windows arm64 included, which the
+      # smoke launch below cannot execute -- so a builder change that silently
+      # stops flipping them fails here, not in an audit.
+      - name: Verify the Electron fuses
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS='|' read -ra TARGETS <<< "${{ matrix.fuses }}"
+          node scripts/verify-fuses.mjs "${TARGETS[@]}"
 
       # Every check above reads the artifact, and reading a binary cannot tell
       # you it runs: v1.2.2 was signed, verified, uploaded and dead on launch.
