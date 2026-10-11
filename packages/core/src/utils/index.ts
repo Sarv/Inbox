@@ -37,6 +37,7 @@ export * from './unsubscribe';
 export * from './attachment-kind';
 export * from './bulk-mail';
 export * from './safe-path';
+export * from './sealed-bytes';
 export * from './mail-parse';
 export * from './html-text';
 export * from './quoted-text';

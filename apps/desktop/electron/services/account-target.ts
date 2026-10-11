@@ -79,12 +79,14 @@ async function lookupAccountRuntime(
  */
 export async function resolveAccountTarget(
   accountId?: string,
-): Promise<{ storage: AccountStorage; syncEngine: AccountSyncEngine }> {
+): Promise<{ storage: AccountStorage; syncEngine: AccountSyncEngine; accountId: string | null }> {
   if (accountId && accountId !== getCurrentAccountId()) {
     const found = await lookupAccountRuntime(accountId);
-    if (found) return found;
+    if (found) return { ...found, accountId };
   }
-  return { storage: requireStorage(), syncEngine: getSyncEngine() };
+  // `accountId` says whose storage this is after the fallback (null on the
+  // pre-account default slot) — what per-account stores key by.
+  return { storage: requireStorage(), syncEngine: getSyncEngine(), accountId: getCurrentAccountId() };
 }
 
 /**

@@ -167,6 +167,9 @@ describe.skipIf(!enabled)('extension host → local Docker ClamAV (synthetic onl
           openSetup: () => {}, progress: (_requestId, phase) => { phases.push(phase); },
         }),
         resolveLegacy: async () => { throw new Error('Unchecked preview cache must not be used'); },
+        // The sealed cache's reader (CASA M-7): with a live scanner it must never
+        // be reached either — every byte here comes from a scan receipt.
+        readLegacy: async () => { throw new Error('Unchecked preview cache must not be read'); },
         temporaryRoot: () => temporaryRoot,
         openPath: async filePath => { opened.push({ filePath, bytes: await readFile(filePath) }); return ''; },
       });

@@ -46,6 +46,8 @@ import {
 import { loadAgentConfig } from './services/agent-config-store';
 import { getAllAiSecrets } from './services/ai-secret-store';
 import { createAntivirusDesktopBackend } from './services/antivirus-desktop-backend';
+import { cleanupOrphanedAttachmentStores } from './services/attachment-cache';
+import { migrateLegacyAttachmentCache } from './services/attachment-cache-legacy';
 import { attachmentScanRequired } from './services/attachment-download-protection';
 import { getAttachmentPreviewProtection } from './services/attachment-preview-protection';
 import {
@@ -661,6 +663,10 @@ async function initializeAccountRegistry(): Promise<void> {
     const keepAccountIds = readRegistryAccounts().map((a) => a.id);
     const removed = cleanupOrphanedAccountDbs({ keepAccountIds });
     if (removed.length) logger.info(`[Main] Cleaned ${removed.length} orphaned DB file(s):`, removed.join(', '));
+    // The same keep-set and rules for the accounts' cached attachments.
+    void cleanupOrphanedAttachmentStores(keepAccountIds)
+      .then((count) => { if (count) logger.info(`[Main] Cleaned ${count} orphaned attachment folder(s)`); })
+      .catch((e) => logger.warn('[Main] Orphaned attachment cleanup failed:', (e as Error)?.message));
   } catch (e) {
     logger.error('[Main] Orphaned DB cleanup SKIPPED — the account registry could not be read, so nothing was deleted:', (e as Error)?.message);
   }
@@ -997,6 +1003,12 @@ app.whenReady().then(async () => {
     // so main is self-sufficient (survives a lost renderer localStorage and
     // never bricks on "Storage not initialized"). Must run AFTER storage init.
     await initializeAccountRegistry();
+    // Retire the plaintext attachment cache of older builds (CASA M-7) once the
+    // accounts it may belong to are known. Off the startup path: it opens each
+    // account's database to match folders to mail.
+    void migrateLegacyAttachmentCache().catch((e) =>
+      logger.warn('[Main] Legacy attachment cache migration failed:', (e as Error)?.message)
+    );
     await initializeExtensionManager();
     // After the manager, because the handler asks it which extensions may serve
     // panels at all. The lookup is evaluated per request, so an extension

@@ -35,6 +35,7 @@ import {
 } from '../services/accounts-registry';
 import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accountInboxUnread, rekeyAccount, deleteAccountData, legacyDbExists, cleanupOrphanedAccountDbs } from '../services/accounts-runtime';
 import { peekAntivirusScanService } from '../services/antivirus-scan-service';
+import { cleanupOrphanedAttachmentStores, removeAllCachedAttachments } from '../services/attachment-cache';
 import { clearUnscannedWarningPreference } from '../services/attachment-warning-preferences';
 import { signOutOAuthAccount } from '../services/oauth-refresh-scheduler';
 import { rebindOutboxStorage } from '../services/outbox-service';
@@ -169,6 +170,10 @@ export function registerAccountsHandlers(): void {
       // remembered warning choice. An unreadable preference store stops removal.
       clearUnscannedWarningPreference(accountId);
       await peekAntivirusScanService()?.onAccountRemoved(accountId);
+      // Whether this removal can empty the registry — read with the THROWING
+      // reader, so "could not read it" never looks like "it was the last one".
+      let wasRegistered = false;
+      try { wasRegistered = readRegistryAccounts().some((a) => a.id === accountId); } catch { /* stays false */ }
       await deleteAccountData(accountId);
       // Drop it from the durable registry too, so it doesn't reappear on the
       // next hydrate/seed.
@@ -185,12 +190,26 @@ export function registerAccountsHandlers(): void {
       // that failed and answered `[]` would nuke every remaining mailbox on the
       // spot. `readRegistryAccounts` throws instead, and the sweep itself refuses
       // to act on an empty keep-set. Best-effort.
+      let keepAccountIds: string[] | null = null;
       try {
-        const keepAccountIds = readRegistryAccounts().map((a) => a.id);
+        keepAccountIds = readRegistryAccounts().map((a) => a.id);
         const removed = cleanupOrphanedAccountDbs({ keepAccountIds, staleAfterMs: 0 });
         if (removed.length) logger.info(`[Accounts] removal swept ${removed.length} orphan file(s):`, removed.join(', '));
       } catch (e) {
-        logger.warn('[Accounts] orphan sweep after removal SKIPPED (nothing deleted):', (e as Error).message);
+        logger.warn('[Accounts] orphan DB sweep after removal failed or was skipped:', (e as Error).message);
+      }
+      // Cached attachments (CASA M-7): this account's folder went with its data;
+      // sweep orphans with the same keep-set — only when the registry was read.
+      // When this removal emptied a registry that just held it, nothing cached
+      // belongs to anyone, including the plaintext cache of older builds, which
+      // names no account.
+      if (keepAccountIds) {
+        try {
+          if (keepAccountIds.length) await cleanupOrphanedAttachmentStores(keepAccountIds, { staleAfterMs: 0 });
+          else if (wasRegistered) await removeAllCachedAttachments();
+        } catch (e) {
+          logger.warn('[Accounts] attachment cleanup after removal failed:', (e as Error).message);
+        }
       }
 
       // The removed account may have been the OAuth session powering the AI/LLM
