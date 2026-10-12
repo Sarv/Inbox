@@ -456,7 +456,10 @@ describe('useFirstEmailSplit — the reader\'s run', () => {
     expect(run).not.toHaveBeenCalled();
     const before = gets.length;
 
-    await latest!.run();
+    // Inside act: run()'s re-read is a state update in its `finally`. Outside
+    // act React schedules it as a later task, so on a slow (coverage) CI runner
+    // the re-read landed after this assertion and the count was one short.
+    await act(async () => { await latest!.run(); });
     await settle();
     expect(run).toHaveBeenCalledWith({ accountId: 'acct-b', threadId: 't1' }, { trigger: 'manual' });
     expect(gets.length).toBe(before + 1);
