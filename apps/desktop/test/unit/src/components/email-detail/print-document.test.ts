@@ -46,10 +46,12 @@ describe('buildPrintDocument', () => {
     expect(doc).toContain('<p>Body <img src="https://tracker.example/b.gif"></p>');
   });
 
+  // Changed deliberately (dns-prefetch leak): the plain-text fallback is now
+  // escaped and kept in its line breaks — it was inserted as HTML, unstripped.
   it('falls back sensibly for missing fields', () => {
     const doc = buildPrintDocument({ date: 0, cleanBody: 'plain' }, false);
     expect(doc).toContain('(no subject)');
-    expect(doc).toContain('<div class="body">plain</div>');
+    expect(doc).toContain('<div class="body"><div style="white-space: pre-wrap">plain</div></div>');
     expect(doc).not.toContain('Cc:');
   });
 });

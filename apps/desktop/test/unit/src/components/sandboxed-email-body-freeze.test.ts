@@ -67,11 +67,13 @@ describe('ordinary mail is transformed exactly as before', () => {
   // These pin behaviour the linear rewrite must keep (a differential run of
   // 6,000 generated realistic emails against the previous implementation found
   // no difference in any transform).
+  // Changed deliberately (dns-prefetch leak): every <link> is dropped now, the
+  // icon one included — a hint the old rel list missed resolved its host.
   it('strips style/script/stylesheet resources but keeps the rest', () => {
     const out = stripBlockingResources(
       '<style>@font-face{font-family:X} .a{color:red}</style><link rel="stylesheet" href="s.css"><link rel="icon" href="f.ico"><script>x()</script><script src=y /><p>hi</p>',
     );
-    expect(out).toBe('<style> .a{color:red}</style><link rel="icon" href="f.ico"><p>hi</p>');
+    expect(out).toBe('<style> .a{color:red}</style><p>hi</p>');
   });
 
   // Breaks: a script survives the strip (defense in depth behind the sandbox

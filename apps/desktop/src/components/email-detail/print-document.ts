@@ -1,6 +1,7 @@
 import { escapeHtml } from '@sarvinbox/core/html-escape';
 
 import { withLeadingCsp } from '../../utils/email-frame-csp';
+import { stripActiveContent } from '../../utils/email-strip';
 import { remoteImageFactsOf, shouldAutoLoadRemoteImages } from '../../utils/remote-images';
 
 /** The fields of an email the print view shows. */
@@ -22,9 +23,12 @@ export interface PrintableEmail {
  * Two things it must never do. Fetch anything remote the viewer wouldn't: it
  * carries the same leading CSP as the on-screen frame, so a tracking pixel in
  * the body does not fire just because the user printed — remote images load
- * only when `allowRemoteImages` (the user's auto-load rules for this sender).
- * And let a header field become markup: subject, names and addresses are
- * sender-controlled text and are escaped; only the body is HTML.
+ * only when `allowRemoteImages` (the user's auto-load rules for this sender) —
+ * and the body loses its scripts, links and nested frames (stripActiveContent),
+ * because a DNS-prefetch hint is outside any CSP; its styles print as sent.
+ * And let anything but that body become markup: subject, names, addresses and
+ * the plain-text fallback (a body not loaded yet) are sender-controlled text
+ * and are escaped.
  */
 export function buildPrintDocument(email: PrintableEmail, allowRemoteImages: boolean): string {
   const text = (value: string | null | undefined) => escapeHtml(value ?? '');
@@ -55,7 +59,7 @@ export function buildPrintDocument(email: PrintableEmail, allowRemoteImages: boo
             <div><strong>Date:</strong> ${date}</div>
           </div>
         </div>
-        <div class="body">${email.rawBody || email.cleanBody || '(no content)'}</div>
+        <div class="body">${email.rawBody ? stripActiveContent(email.rawBody) : `<div style="white-space: pre-wrap">${text(email.cleanBody || '(no content)')}</div>`}</div>
       </body>
       </html>`;
   return withLeadingCsp(html, allowRemoteImages);
