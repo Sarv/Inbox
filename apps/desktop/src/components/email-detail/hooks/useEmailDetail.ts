@@ -1570,6 +1570,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     aiBoxActiveTab,
     selectedEmail,
     displayEmail,
+    latestThreadEmail,
     isStandaloneDraft,
     isRead,
     isStarred,

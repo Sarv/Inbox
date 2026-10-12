@@ -50,6 +50,7 @@ const context = (overrides: Record<string, unknown> = {}) =>
   new Proxy(
     {
       displayEmail: email({ id: 'm1', date: TEN_AM }),
+      latestThreadEmail: undefined,
       isRead: true,
       isInTrash: false,
       isInSpam: false,
@@ -126,5 +127,42 @@ describe('EmailToolbar — the three-dot menu', () => {
     expect(h.handleArchive).toHaveBeenCalledTimes(1);
     expect(h.deleteEmail).not.toHaveBeenCalled();
     expect(h.archiveEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('EmailToolbar — acts on the newest message of the conversation', () => {
+  // Breaks: the toolbar's Forward and Print buttons, and its menu's Reply /
+  // Forward / Print, reach the FIRST message (displayEmail) while its Reply
+  // button answers the newest — and the menu's Report spam strands every reply
+  // in the inbox.
+  it('sends Forward, Print and the menu to the latest message, spam thread-wide', () => {
+    const latest = email({ id: 'm9', date: TEN_AM });
+    const h = {
+      latestThreadEmail: latest,
+      handleReply: vi.fn(),
+      handleForward: vi.fn(),
+      handleInlineForward: vi.fn(),
+      handlePrintEmail: vi.fn(),
+      handleShowOriginal: vi.fn(),
+      handleReportSpam: vi.fn(),
+      handleReportSpamThread: vi.fn(),
+    };
+    mounted = render(<EmailToolbar ctx={context(h)} />);
+    act(() => mounted!.byLabel('Forward')!.click());
+    act(() => mounted!.byLabel('Print')!.click());
+    const menu = menuProps.current!;
+    menu.onReply();
+    menu.onForward();
+    menu.onPrint();
+    menu.onShowOriginal();
+    menu.onReportSpam();
+
+    expect(h.handleInlineForward.mock.calls).toEqual([[latest]]);
+    expect(h.handlePrintEmail.mock.calls).toEqual([[latest], [latest]]);
+    expect(h.handleReply.mock.calls).toEqual([[latest, false]]);
+    expect(h.handleForward.mock.calls).toEqual([[latest]]);
+    expect(h.handleShowOriginal.mock.calls).toEqual([[latest]]);
+    expect(h.handleReportSpamThread).toHaveBeenCalledTimes(1);
+    expect(h.handleReportSpam).not.toHaveBeenCalled();
   });
 });

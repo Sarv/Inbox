@@ -23,6 +23,7 @@ const { buildEmailMenuHandlers, buildReplyHandlers } = await import(
  */
 
 const MAIL = { id: 'm1', fromAddress: 'bob@acme.example' };
+const LATEST = { id: 'm9', fromAddress: 'carol@acme.example' };
 
 const newContext = () => {
   const ctx = {
@@ -37,12 +38,14 @@ const newContext = () => {
     archiveEmail: vi.fn(async () => {}),
     markAsRead: vi.fn(async () => {}),
     handleReportSpam: vi.fn(async () => {}),
+    handleReportSpamThread: vi.fn(async () => {}),
     handlePrintEmail: vi.fn(),
     handleDownloadEmail: vi.fn(),
     handleShowOriginal: vi.fn(),
     handleFilterLikeThis: vi.fn(),
     handleTranslate: vi.fn(),
     handleDetectSignature: vi.fn(async () => {}),
+    latestThreadEmail: LATEST as { id: string } | undefined,
   };
   return ctx satisfies EmailMenuContext;
 };
@@ -125,6 +128,7 @@ describe('buildEmailMenuHandlers — each site keeps its own flavour', () => {
     handlers.onDetectSignature();
 
     expect(ctx.handleReportSpam.mock.calls).toEqual([['m1']]);
+    expect(ctx.handleReportSpamThread).not.toHaveBeenCalled();
     for (const fn of [
       ctx.handlePrintEmail,
       ctx.handleDownloadEmail,
@@ -223,5 +227,75 @@ describe('buildEmailMenuHandlers — each site keeps its own flavour', () => {
     second.onDelete();
     first.onDelete();
     expect(ctx.deleteEmail.mock.calls).toEqual([['m2'], ['m1']]);
+  });
+});
+
+describe('buildEmailMenuHandlers — a conversation menu answers the latest message', () => {
+  // Breaks: Reply / Reply all / Forward on the toolbar or anchor-card menu
+  // answer the FIRST message (the anchor) and quote the oldest mail, while the
+  // toolbar's own Reply button answers the newest.
+  it.each(['popup', 'inline'] as const)('replies and forwards (%s) to the latest message', (forward) => {
+    const ctx = newContext();
+    const handlers = buildEmailMenuHandlers(ctx, MAIL, { forward, scope: 'thread' });
+    handlers.onReply();
+    handlers.onReplyAll();
+    handlers.onForward();
+
+    expect(ctx.handleReply.mock.calls).toEqual([[LATEST, false]]);
+    expect(ctx.handleReplyAll.mock.calls).toEqual([[LATEST, false]]);
+    const forwarded = forward === 'popup' ? ctx.handleForward : ctx.handleInlineForward;
+    expect(forwarded.mock.calls).toEqual([[LATEST]]);
+  });
+
+  // Breaks: a conversation still resolving its members (no latest yet) gets a
+  // Reply that does nothing instead of answering the message on screen.
+  it('falls back to the given message when the latest is not known yet', () => {
+    const ctx = { ...newContext(), latestThreadEmail: undefined };
+    buildEmailMenuHandlers(ctx, MAIL, { forward: 'popup', scope: 'thread' }).onReply();
+    expect(ctx.handleReply.mock.calls).toEqual([[MAIL, false]]);
+  });
+
+  // Breaks: a reply's own menu or a chat bubble answers the newest message
+  // instead of the one it was opened on.
+  it('keeps a message menu answering its own message', () => {
+    const ctx = newContext();
+    const handlers = buildEmailMenuHandlers(ctx, MAIL, { forward: 'inline', scope: 'message' });
+    handlers.onReply();
+    handlers.onForward();
+    expect(ctx.handleReply.mock.calls).toEqual([[MAIL, false]]);
+    expect(ctx.handleInlineForward.mock.calls).toEqual([[MAIL]]);
+  });
+
+  // Breaks: Report spam on a conversation menu moves only the first message to
+  // spam and leaves every reply in the inbox — unlike the toolbar's button.
+  it('reports the whole conversation as spam', () => {
+    const ctx = newContext();
+    buildEmailMenuHandlers(ctx, MAIL, { forward: 'popup', scope: 'thread' }).onReportSpam();
+    expect(ctx.handleReportSpamThread.mock.calls).toEqual([[]]);
+    expect(ctx.handleReportSpam).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the anchor card's Print / Show original / Download… stop acting on
+  // the card they sit on. The caller picks that message (the toolbar passes the
+  // latest, the card its own); the menu must not swap it.
+  it('leaves the one-message items on the message it was built for', () => {
+    const ctx = newContext();
+    const handlers = buildEmailMenuHandlers(ctx, MAIL, { forward: 'popup', scope: 'thread' });
+    handlers.onPrint();
+    handlers.onDownload();
+    handlers.onShowOriginal();
+    handlers.onFilterLikeThis();
+    handlers.onTranslate();
+    handlers.onDetectSignature();
+    for (const fn of [
+      ctx.handlePrintEmail,
+      ctx.handleDownloadEmail,
+      ctx.handleShowOriginal,
+      ctx.handleFilterLikeThis,
+      ctx.handleTranslate,
+      ctx.handleDetectSignature,
+    ]) {
+      expect(fn.mock.calls).toEqual([[MAIL]]);
+    }
   });
 });

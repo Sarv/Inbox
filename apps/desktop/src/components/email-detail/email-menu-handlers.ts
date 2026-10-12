@@ -12,11 +12,13 @@ import type { EmailDetailContext } from './types';
 export type ForwardMode = 'popup' | 'inline';
 
 /**
- * What Delete, Archive and Mark unread act on: this one message (a reply in the
- * list, a chat bubble), or the whole conversation (the anchor card and the
- * toolbar, which stand for it). Mark unread on a conversation menu used to
- * flag only the anchor — the FIRST message — so every reply stayed read on the
- * server and the thread came back read on the next sync.
+ * What the menu acts on: this one message (a reply in the list, a chat bubble),
+ * or the whole conversation (the anchor card and the toolbar, which stand for
+ * it). On a conversation menu Delete, Archive, Mark unread and Report spam
+ * reach every message, and Reply, Reply all and Forward answer the LATEST one
+ * (Outlook / Sarv Mail). These used to reach the anchor — the FIRST message —
+ * so a conversation came back read on the next sync, Report spam left every
+ * reply in the inbox, and a reply quoted the oldest message.
  */
 export type ActionScope = 'message' | 'thread';
 
@@ -35,6 +37,8 @@ export type EmailMenuContext = Pick<
   | 'handleDelete'
   | 'handleArchive'
   | 'handleMarkThreadUnread'
+  | 'handleReportSpamThread'
+  | 'latestThreadEmail'
   | 'deleteEmail'
   | 'archiveEmail'
   | 'markAsRead'
@@ -78,8 +82,9 @@ export function buildEmailMenuHandlers(
   email: { id: string },
   { forward, scope }: EmailMenuWiring,
 ): EmailMenuHandlers {
+  const answers = scope === 'thread' ? (ctx.latestThreadEmail ?? email) : email;
   return {
-    ...buildReplyHandlers(ctx, email, forward),
+    ...buildReplyHandlers(ctx, answers, forward),
     onDelete: scope === 'thread' ? () => ctx.handleDelete() : () => ctx.deleteEmail(email.id),
     onArchive: scope === 'thread' ? () => ctx.handleArchive() : () => ctx.archiveEmail(email.id),
     // Then the message closes, as it always has from this menu — and only once
@@ -89,7 +94,7 @@ export function buildEmailMenuHandlers(
       else await ctx.markAsRead(email.id, false);
       useEmailStore.getState().clearSelectedEmail();
     },
-    onReportSpam: () => ctx.handleReportSpam(email.id),
+    onReportSpam: scope === 'thread' ? () => ctx.handleReportSpamThread() : () => ctx.handleReportSpam(email.id),
     onPrint: () => ctx.handlePrintEmail(email),
     onDownload: () => ctx.handleDownloadEmail(email),
     onShowOriginal: () => ctx.handleShowOriginal(email),

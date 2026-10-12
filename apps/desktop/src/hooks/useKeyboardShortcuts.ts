@@ -1,5 +1,5 @@
 import type { EmailRecord } from '@sarvinbox/core';
-import { conversationFoldersOf } from '@sarvinbox/core/conversation-membership';
+import { conversationFoldersOf, latestConversationMember } from '@sarvinbox/core/conversation-membership';
 import { useEffect, useRef } from 'react';
 
 import type { AppSection } from '../components/AppSidebar';
@@ -93,6 +93,16 @@ function getActiveThreadEmailIds(): string[] {
   if (rows.length > 0) return rows.map(e => e.id);
   const activeId = getActiveEmailId();
   return activeId ? [activeId] : [];
+}
+
+// The message a popup Reply all / Forward answers: the NEWEST in the active
+// conversation, as the toolbar and the inline shortcuts do. The active id is
+// whichever row opened the thread — often its first unread — so answering it
+// quoted an older message than the one on top.
+function getActiveConversationLatest() {
+  const rows = getActiveThreadEmails();
+  const folders = conversationFoldersOf(useEmailStore.getState().folders);
+  return latestConversationMember(rows, folders) ?? getSelectedEmail();
 }
 
 function buildComposePayload(email: ReturnType<typeof getSelectedEmail>) {
@@ -482,7 +492,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
         }
 
         case 'REPLY_ALL_POPUP': {
-          const email = getSelectedEmail();
+          const email = getActiveConversationLatest();
           if (email) {
             store.openCompose('replyAll', buildComposePayload(email));
           }
@@ -503,7 +513,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
         }
 
         case 'FORWARD_POPUP': {
-          const email = getSelectedEmail();
+          const email = getActiveConversationLatest();
           if (email) {
             store.openCompose('forward', buildComposePayload(email));
           }

@@ -28,6 +28,8 @@ export interface EmailDetailContext {
   // Computed
   selectedEmail: any | undefined;
   displayEmail: any | undefined;
+  /** The conversation's newest message — what a conversation-level Reply / Forward answers. */
+  latestThreadEmail: any | undefined;
   isStandaloneDraft: boolean;
   isRead: boolean;
   isStarred: boolean;

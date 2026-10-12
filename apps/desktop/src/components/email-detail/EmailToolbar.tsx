@@ -41,6 +41,7 @@ interface EmailToolbarProps {
 export function EmailToolbar({ ctx }: EmailToolbarProps) {
   const {
     displayEmail,
+    latestThreadEmail,
     selectedEmail,
     isRead,
     isInTrash,
@@ -70,6 +71,11 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
     handleRestore,
     isRestoring,
   } = ctx;
+
+  // The toolbar stands for the whole conversation, so its one-message actions
+  // (Forward, Print, the ⋮ menu's Show original…) take the NEWEST message, as
+  // its Reply buttons already do — displayEmail is the first one.
+  const conversationEmail = latestThreadEmail ?? displayEmail;
 
   // Appearance > Layout: whether these actions are drawn as icons, text, or both.
   const { buttonLabels } = useAppearance();
@@ -271,7 +277,7 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
       <ToolbarButton
         name="Forward"
         icon={<Forward className="h-4 w-4" />}
-        onClick={() => handleInlineForward(displayEmail)}
+        onClick={() => handleInlineForward(conversationEmail)}
         shortcut={getShortcutHints('FORWARD_INLINE')}
       />
 
@@ -308,7 +314,7 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
       <ToolbarButton
         name="Print"
         icon={<Printer className="h-4 w-4" />}
-        onClick={() => displayEmail && handlePrintEmail(displayEmail)}
+        onClick={() => conversationEmail && handlePrintEmail(conversationEmail)}
       />
 
       {/* The ⋮ overflow menu stays icon-only in every mode: it has no single
@@ -317,8 +323,9 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
       <EmailMenu
         email={displayEmail}
         // The toolbar acts on the conversation, like its own Delete and
-        // Archive buttons: Forward in the popup, removal thread-wide.
-        {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', scope: 'thread' })}
+        // Archive buttons: Forward in the popup, removal thread-wide, and the
+        // single-message items (Print, Show original…) on the newest message.
+        {...buildEmailMenuHandlers(ctx, conversationEmail, { forward: 'popup', scope: 'thread' })}
       />
     </div>
   );
