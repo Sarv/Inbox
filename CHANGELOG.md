@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Conversation menus answer the latest message.** Reply, Reply all and
+  Forward from the message toolbar's ⋮ menu or the conversation card's ⋮ menu
+  now answer the newest message, as the toolbar's Reply button already did,
+  instead of quoting the first one. The toolbar's Forward and Print buttons,
+  and the Shift+A / Shift+F popup shortcuts, do the same. Report spam from a
+  conversation menu now moves the whole conversation to spam rather than only
+  its first message. A single reply's menu still acts on that reply.
+
 ## [1.3.2] - 2026-10-12
 
 ### Added
