@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-12
+
 ### Fixed
 - **Conversation menus answer the latest message.** Reply, Reply all and
   Forward from the message toolbar's ⋮ menu or the conversation card's ⋮ menu
@@ -896,7 +898,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/Sarv/Inbox/releases/tag/v1.3.3
 [1.3.2]: https://github.com/Sarv/Inbox/releases/tag/v1.3.2
 [1.3.1]: https://github.com/Sarv/Inbox/releases/tag/v1.3.1
 [1.3.0]: https://github.com/Sarv/Inbox/releases/tag/v1.3.0
