@@ -2817,10 +2817,10 @@ function startPollingTrigger(): void {
       const pendingAgent = repos.agent.getEmailsPendingAgent(10, AUTO_BACKLOG_RECENT_CAP());
       for (const e of pendingAgent) {
         if (!processingLock.has(e.id)) {
-          // With no live provider this is a local-score-only finalize pass, not
-          // an AI run — keep it out of INFO so the drain doesn't read as churn.
-          if (aiConfig) logger.info(`[Pipeline:Poll] P2 start: ${e.id} from=${e.fromAddress}`);
-          else if (traceEnabled()) logger.trace(`[Pipeline:Poll] P2 start (no-AI finalize): ${e.id} from=${e.fromAddress}`);
+          // Per-email, every tick: TRACE only (SARV_LOG_LEVEL=trace), never an
+          // INFO line naming each sender (CASA L-7). With no live provider this
+          // is a local-score-only finalize pass, not an AI run.
+          if (traceEnabled()) logger.trace(`[Pipeline:Poll] P2 start${aiConfig ? '' : ' (no-AI finalize)'}: ${e.id} from=${e.fromAddress}`);
           processingLock.add(e.id);
           runPipeline2(e.id, storage).finally(() => processingLock.delete(e.id));
         }

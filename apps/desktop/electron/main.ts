@@ -400,16 +400,20 @@ const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'] || (isDev ? 'http
 const APP_ENTRY_FILE = join(__dirname, '../dist/index.html');
 const APP_URL = VITE_DEV_SERVER_URL ?? pathToFileURL(APP_ENTRY_FILE).href;
 
-// Tee the main-process console to a rolling app.log (dev AND release).
-initFileLogger();
+// Tee the main-process console to a rolling app.log (dev AND release). A
+// release's log redacts email addresses (CASA L-7); dev keeps them for
+// debugging. `isDev`, never `app.isPackaged` — see isDevBuild.
+initFileLogger({ redactAddresses: !isDev });
 // Renderer logs → the SAME app.log (redacted in appendExternalLog), so a bug
 // report's log file carries the renderer's trail too — not just DevTools. The
 // renderer forwards fire-and-forget (ipcRenderer.send), and its own level gate
 // (set in bootstrap/renderer-logging.ts) decides what's forwarded, so trace/debug
 // stay off in release. Registered right after the sink exists so nothing is lost.
-ipcMain.on('log:forward', (_e, rec: { level?: string; name?: string; text?: string } | undefined) => {
+// The record is untrusted: appendExternalLog keeps it to one capped line with a
+// known level, whatever the renderer sent.
+ipcMain.on('log:forward', (_e, rec: { level?: unknown; name?: unknown; text?: unknown } | undefined) => {
   if (rec && typeof rec.text === 'string') {
-    appendExternalLog('renderer', rec.level ?? 'info', rec.name ?? '?', rec.text);
+    appendExternalLog('renderer', rec.level, rec.name, rec.text);
   }
 });
 // Announce the active log level up front so it's obvious in app.log what will

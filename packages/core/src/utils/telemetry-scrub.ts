@@ -1,12 +1,14 @@
 /**
- * Scrub personal data out of crash/error telemetry before it leaves the device.
+ * Scrub personal data and secrets out of diagnostics: crash/error telemetry
+ * before it leaves the device, and the local app.log before it is written.
  *
  * Crash reports (Sentry) carry a trail of log lines and SDK breadcrumbs, and
  * those lines name senders, recipients and fetch URLs. Email addresses taken
  * from a user's mailbox are mailbox data (Google's Limited Use policy covers
  * them for Gmail accounts), so they must not reach a crash-reporting vendor.
  * The shapes here are structural — no Sentry types — so both the Electron main
- * process and the renderer share ONE implementation.
+ * process and the renderer share ONE implementation. No imports: the renderer
+ * deep-imports this file (`@sarvinbox/core/telemetry-scrub`).
  *
  * Why a regex and not a library: the job is to FIND addresses in free text, not
  * to parse an address header (`email-addresses` does that and can't scan
@@ -23,6 +25,34 @@ export const REDACTED_EMAIL = '[email]';
 /** Replace every email address in `text` with `[email]`. */
 export function redactEmailAddresses(text: string): string {
   return text.replace(EMAIL_RE, REDACTED_EMAIL);
+}
+
+// Credential-ish key/value pairs, matched in both JSON (`"password":"x"`) and
+// util.inspect (`password: 'x'`) forms, so a stray console.log(config) or an
+// error carrying a token can never land in app.log (or a crash report) in
+// plaintext. Over-redaction is the safe side here — a log line is not worth a
+// leaked secret.
+//
+// The value is: escaped pairs (`\\.`), any other character except the quote,
+// a backslash or a line break, or a lone backslash right before the closing
+// quote. The single-character branch must NOT also accept a backslash: when it
+// did (`(?:\\.|(?!\2).)*`), every backslash could be read two ways, and an
+// unterminated value full of backslashes (`"password":"\\a\\a…`) backtracked
+// exponentially — about 3 s of main-thread stall at 40 of them. What matches is
+// unchanged (fuzz-compared against the old pattern); only the blow-up is gone.
+const SECRET_KV_RE = /(["']?(?:password|passwd|pass|access[_-]?token|refresh[_-]?token|id[_-]?token|token|authorization|api[_-]?key|client[_-]?secret|secret)["']?\s*[:=]\s*)(["'`])(?:\\.|(?!\2)[^\\\n\r\u2028\u2029]|\\(?=\2))*\2/gi;
+const BEARER_RE = /\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi;
+
+/**
+ * Replace secret values with [REDACTED]. The one secret policy for diagnostics:
+ * every app.log line (desktop file-logger) and everything a crash report
+ * carries (scrubEvent / scrubBreadcrumb, and main's log breadcrumbs) passes
+ * through it, so the two can't drift.
+ */
+export function redactSecrets(s: string): string {
+  return s
+    .replace(SECRET_KV_RE, (_m, key: string, quote: string) => `${key}${quote}[REDACTED]${quote}`)
+    .replace(BEARER_RE, '$1[REDACTED]');
 }
 
 /**

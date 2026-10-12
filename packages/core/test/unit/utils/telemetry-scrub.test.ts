@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   redactEmailAddresses,
+  redactSecrets,
   scrubBreadcrumb,
   scrubEvent,
   stripUrlQuery,
@@ -36,6 +37,68 @@ describe('redactEmailAddresses', () => {
     const t = performance.now();
     redactEmailAddresses(evil);
     expect(performance.now() - t).toBeLessThan(500);
+  });
+});
+
+// Changed deliberately (relocated, assertions unchanged): these six moved here
+// from the desktop file-logger suite with redactSecrets itself (CASA L-7), so
+// app.log and crash reports share ONE secret policy.
+// Breaks if a password / token / bearer reaches app.log or a crash report.
+describe('redactSecrets', () => {
+  it('redacts credential-ish keys in JSON form', () => {
+    const input = '{"password":"hunter2","host":"imap.example.com"}';
+    expect(redactSecrets(input)).toBe('{"password":"[REDACTED]","host":"imap.example.com"}');
+  });
+
+  it('redacts credential-ish keys in util.inspect form', () => {
+    expect(redactSecrets("{ password: 'hunter2', port: 993 }")).toBe(
+      "{ password: '[REDACTED]', port: 993 }",
+    );
+  });
+
+  it.each([
+    'password', 'passwd', 'pass', 'access_token', 'accessToken', 'refresh-token',
+    'refreshToken', 'id_token', 'token', 'authorization', 'api_key', 'apiKey',
+    'client_secret', 'secret',
+  ])('redacts the %s field', (key) => {
+    expect(redactSecrets(`{"${key}":"leak-me"}`)).not.toContain('leak-me');
+  });
+
+  it('redacts a Bearer token anywhere in the line', () => {
+    expect(redactSecrets('Authorization header: Bearer ya29.A0ARrdaM-abc_def=='))
+      .toBe('Authorization header: Bearer [REDACTED]');
+  });
+
+  it('redacts EVERY occurrence, not just the first', () => {
+    const out = redactSecrets('{"password":"a","token":"b","note":"keep"}');
+    expect(out).not.toContain('"a"');
+    expect(out).not.toContain('"b"');
+    expect(out).toContain('keep');
+  });
+
+  it('leaves ordinary text untouched', () => {
+    const text = 'Synced 42 emails for me@example.com in 1.2s';
+    expect(redactSecrets(text)).toBe(text);
+  });
+
+  // Breaks if the value pattern can read a backslash two ways again: an
+  // unterminated value full of backslashes backtracked exponentially (~3 s of
+  // main-thread stall at 40), on every app.log line and crash report.
+  it('stays fast on an unterminated value full of backslashes', () => {
+    // 40 backslashes: the old pattern took ~3 s here (and doubled every 1.5
+    // more), the bounded one microseconds — so the gap is unmistakable on any
+    // machine without hanging the suite when it regresses.
+    const t = performance.now();
+    redactSecrets(`"password":"${'\\'.repeat(40)}`);
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+
+  // The ReDoS fix must not change what is redacted: escaped quotes stay inside
+  // the value, and a trailing backslash before the quote still closes it.
+  it('treats escaped quotes as part of the value', () => {
+    expect(redactSecrets('{"password":"a\\"b","host":"h"}')).toBe('{"password":"[REDACTED]","host":"h"}');
+    expect(redactSecrets('{"token":"abc\\"}')).toBe('{"token":"[REDACTED]"}');
+    expect(redactSecrets('password: "unterminated')).toBe('password: "unterminated');
   });
 });
 

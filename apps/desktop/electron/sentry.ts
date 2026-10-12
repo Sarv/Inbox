@@ -23,13 +23,12 @@
  */
 import { createHash } from 'crypto';
 
-import { scrubBreadcrumb, scrubEvent, setLogSink, type LogLevel } from '@sarvinbox/core';
+import { redactSecrets, scrubBreadcrumb, scrubEvent, setLogSink, type LogLevel } from '@sarvinbox/core';
 import { setSlowQueryReporter, type SlowQueryEvent } from '@sarvinbox/storage-node';
 import * as Sentry from '@sentry/electron/main';
 import { app } from 'electron';
 
 import { readCrashReportsEnabled, writeCrashReportsEnabled } from './services/crash-report-pref';
-import { redactSecrets } from './utils/file-logger';
 
 let sentryEnabled = false;
 /**
