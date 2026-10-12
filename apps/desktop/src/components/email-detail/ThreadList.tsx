@@ -222,7 +222,7 @@ export function ThreadList({ ctx }: ThreadListProps) {
                   email={email}
                   // A reply's menu: Forward in the popup, as it always has been
                   // here; Delete and Archive act on this reply alone.
-                  {...buildEmailMenuHandlers(ctx, email, { forward: 'popup', removes: 'message' })}
+                  {...buildEmailMenuHandlers(ctx, email, { forward: 'popup', scope: 'message' })}
                 />
               </div>
 

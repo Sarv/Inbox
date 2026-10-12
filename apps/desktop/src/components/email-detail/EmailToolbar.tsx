@@ -318,7 +318,7 @@ export function EmailToolbar({ ctx }: EmailToolbarProps) {
         email={displayEmail}
         // The toolbar acts on the conversation, like its own Delete and
         // Archive buttons: Forward in the popup, removal thread-wide.
-        {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', removes: 'thread' })}
+        {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', scope: 'thread' })}
       />
     </div>
   );

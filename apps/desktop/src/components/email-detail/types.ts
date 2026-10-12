@@ -121,6 +121,8 @@ export interface EmailDetailContext {
   // Handlers
   handleBack: () => void;
   handleMarkRead: () => Promise<void>;
+  /** Mark every message of the open conversation unread (no navigation). */
+  handleMarkThreadUnread: () => Promise<void>;
   handleDelete: () => Promise<void>;
   handleArchive: () => Promise<void>;
   handleRemoveAICategory: () => Promise<void>;
