@@ -28,6 +28,7 @@ import {
   DEFAULT_SENDER_IDENTITY_POLICY,
   discoverFavicon,
   lookupBimi,
+  normalizeAllowDomain,
   normalizeSenderIdentityPolicy,
   type BimiLookup,
   type BimiStatus,
@@ -43,11 +44,10 @@ import {
   bimiIsStale,
   faviconIsStale,
   getDomainIdentityStore,
-  normalizeDomain,
   type DomainIdentityRow,
   type DomainIdentityStore,
 } from './domain-identity-store';
-import { timedChromiumFetch } from './timed-fetch';
+import { senderIdentityFetch } from './sender-identity-fetch';
 
 const logger = createLogger('sender-identity');
 
@@ -119,13 +119,25 @@ export interface SenderIdentity {
   pending: boolean;
 }
 
-/** The domain of an address, lower-cased; null when there is none worth looking up. */
+/**
+ * The domain sender identity may look up for `raw`, or null. It must be a
+ * registrable host name: lower-cased, with no port, path or brackets, and
+ * never an IP literal or a bare public suffix. Without this rule, an address
+ * like `x@10.0.0.5` or `x@[::1]` would ask for that host's favicon. It is the
+ * image allowlist's domain rule (core `normalizeAllowDomain`), so the two
+ * features agree on what a sender's domain is. Anything that is not a string
+ * (a renderer can send anything over IPC) is null.
+ */
+export function lookupDomain(raw: unknown): string | null {
+  return typeof raw === 'string' ? normalizeAllowDomain(raw) || null : null;
+}
+
+/** The domain of an address, lower-cased; null when there is none worth looking up (see {@link lookupDomain}). */
 export function senderDomain(address: string | null | undefined): string | null {
   if (!address) return null;
   const at = address.lastIndexOf('@');
   if (at < 0) return null;
-  const domain = normalizeDomain(address.slice(at + 1));
-  return domain.includes('.') ? domain : null;
+  return lookupDomain(address.slice(at + 1));
 }
 
 /** Shape a cached row into what the renderer consumes, honouring the policy. */
@@ -216,7 +228,10 @@ export class SenderIdentityService {
    * (an unstamped row would be retried on every render).
    */
   refresh(domain: string, parts: { bimi?: boolean; favicon?: boolean } = { bimi: true, favicon: true }): Promise<void> {
-    const key = normalizeDomain(domain);
+    // Every lookup passes through here, so this is where a domain that is not
+    // one (an IP literal, a host with a port) is turned away, whoever asked.
+    const key = lookupDomain(domain);
+    if (!key) return Promise.resolve();
     const running = this.inFlight.get(key);
     if (running) return running;
     const task = this.slot().then(async () => {
@@ -240,6 +255,17 @@ export class SenderIdentityService {
     return task;
   }
 
+  /**
+   * Re-run, now and fresh or not, every lookup the policy allows for `domain`.
+   * This is the Security page's "Refresh". A domain whose favicon is switched
+   * off gets no favicon fetch, and a domain with both lookups off gets nothing.
+   */
+  refreshAllowed(domain: string): Promise<void> {
+    const policy = this.deps.policy();
+    if (!policy.logos && !policy.favicons) return Promise.resolve();
+    return this.refresh(domain, { bimi: policy.logos, favicon: policy.favicons });
+  }
+
   /** Refresh whichever of `domains` is stale under the current policy, at most `limit` of them. */
   async refreshStale(domains: string[], limit: number): Promise<number> {
     const policy = this.deps.policy();
@@ -247,7 +273,8 @@ export class SenderIdentityService {
     const now = this.deps.now();
     const rows = this.deps.store.getMany(domains);
     const work: Promise<void>[] = [];
-    for (const d of [...new Set(domains.map(normalizeDomain))]) {
+    const candidates = domains.map(lookupDomain).filter((d): d is string => d !== null);
+    for (const d of [...new Set(candidates)]) {
       if (work.length >= limit) break;
       const row = rows.get(d) ?? null;
       const bimi = policy.logos && bimiIsStale(row, now);
@@ -298,9 +325,18 @@ export class SenderIdentityService {
 // ------------------------------------------------------------- the real wiring
 
 /** Per-request ceiling. A brand's logo server that hangs must not hold a slot for long. */
-const FETCH_TIMEOUT_MS = 15_000;
+export const FETCH_TIMEOUT_MS = 15_000;
 
-const timedFetch = timedChromiumFetch(FETCH_TIMEOUT_MS);
+/**
+ * The fetches the lookups make go to URLs a sender chose, so none of them may
+ * reach the reader's own machine or network (sender-identity-fetch.ts): public
+ * https hosts only, on every hop. Neither is held to the sender's own site. A
+ * BIMI logo or certificate normally sits on a CDN, and so do favicons: a mail
+ * domain often redirects to its brand's site (facebookmail.com → facebook.com),
+ * whose icon is on yet another host. Those hops are public, carry no cookies,
+ * and only an image is kept.
+ */
+const identityFetch = senderIdentityFetch({ timeoutMs: FETCH_TIMEOUT_MS });
 
 let service: SenderIdentityService | null = null;
 
@@ -311,8 +347,8 @@ export function getSenderIdentityService(): SenderIdentityService {
       // No resolver injected: the library builds one per lookup with a 5s
       // c-ares timeout and no retry, and answers a name that does not exist
       // with "no records" instead of an error — the distinction BIMI turns on.
-      lookupBimi: (domain) => lookupBimi(domain, { fetch: timedFetch }),
-      discoverFavicon: (domain) => discoverFavicon(domain, { fetch: timedFetch }),
+      lookupBimi: (domain) => lookupBimi(domain, { fetch: identityFetch }),
+      discoverFavicon: (domain) => discoverFavicon(domain, { fetch: identityFetch }),
       policy: getSenderIdentityPolicy,
       now: () => Math.floor(Date.now() / 1000),
       onUpdated: (domain) => {

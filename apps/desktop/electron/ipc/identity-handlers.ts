@@ -11,6 +11,7 @@ import { getDomainIdentityStore } from '../services/domain-identity-store';
 import {
   getSenderIdentityPolicy,
   getSenderIdentityService,
+  lookupDomain,
   setSenderIdentityPolicy,
 } from '../services/sender-identity-service';
 import { getStorage } from '../shared';
@@ -51,9 +52,15 @@ export function registerIdentityHandlers(): void {
     try { return { success: true, data: getDomainIdentityStore().list(typeof limit === 'number' ? limit : 200) }; } catch (error) { return fail(error); }
   });
 
-  ipcMain.handle('identity:refresh', async (_event, domain: string) => {
+  // The Security page's "Refresh". The domain comes from the renderer, so it
+  // is held to the same rule as a sender's domain (never an IP literal or a
+  // host with a port), and the lookups are only the ones the reader's settings
+  // allow. "Favicons off" means no favicon fetch, even on request.
+  ipcMain.handle('identity:refresh', async (_event, raw: unknown) => {
     try {
-      await getSenderIdentityService().refresh(domain, { bimi: true, favicon: true });
+      const domain = lookupDomain(raw);
+      if (!domain) return fail(new Error('Not a domain that can be looked up'));
+      await getSenderIdentityService().refreshAllowed(domain);
       return { success: true, data: getDomainIdentityStore().get(domain) };
     } catch (error) {
       logger.error('identity:refresh failed:', error);
