@@ -224,6 +224,11 @@ Established shared helpers (extend this list as you add more):
   IMAP/SMTP connection is secured: 'ssl' | 'starttls' (upgrade REQUIRED) | 'none'
   (explicit opt-out); legacy configs resolve from `secure`, OAuth never to 'none'.
   Use it in clients and account forms instead of reading `secure`.
+- `conversationStarTargetIds(rows, starring, folders)` —
+  `packages/core/src/utils/conversation-membership.ts`. Which messages a
+  conversation-level star writes to: the LATEST message when starring, every
+  row when unstarring (Outlook / Sarv Mail behaviour). Use it for any new
+  thread-wide star control instead of passing the whole thread's ids.
 - `useSecureStorageProtected()` — `apps/desktop/src/hooks/useSecureStorageProtected.ts`.
   Whether the OS key store really protects saved secrets on this device (false on
   Linux `basic_text`). Use it for any renderer wording that says a secret is

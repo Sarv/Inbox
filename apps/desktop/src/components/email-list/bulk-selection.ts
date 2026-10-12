@@ -19,7 +19,7 @@
  */
 
 import type { EmailRecord } from '@sarvinbox/core';
-import type { ConversationFolders } from '@sarvinbox/core/conversation-membership';
+import { conversationStarTargetIds, type ConversationFolders } from '@sarvinbox/core/conversation-membership';
 
 import type { EmailThread } from '../../utils/thread-utils';
 import { isDraftEmail } from '../../utils/thread-utils';
@@ -48,20 +48,29 @@ export type BulkSelectionInput = {
  * the bulk path was fixed for Drafts while the row path still expanded to the
  * whole conversation, which is the same data loss one click at a time.
  */
-export function actionableEmailIds(
+export function actionableEmails(
   emails: readonly EmailRecord[],
   viewIsDrafts: boolean,
   conversationFolders?: ConversationFolders | null,
   trashFolderPaths?: readonly string[],
-): string[] {
+): EmailRecord[] {
   // `isDraftEmail` is the shared definition — it also rejects a sent copy or a
   // trashed draft still carrying a stale `|draft|` tag — so this cannot drift
   // from what the rest of the app treats as a draft.
   const inView = trashFolderPaths
     ? emails.filter((e) => trashFolderPaths.some((path) => (e.tags || '').includes(`|${path}|`)))
     : emails;
-  const rows = viewIsDrafts ? inView.filter((e) => isDraftEmail(e, conversationFolders)) : inView;
-  return rows.map((e) => e.id);
+  return viewIsDrafts ? inView.filter((e) => isDraftEmail(e, conversationFolders)) : [...inView];
+}
+
+/** The ids of {@link actionableEmails}. */
+export function actionableEmailIds(
+  emails: readonly EmailRecord[],
+  viewIsDrafts: boolean,
+  conversationFolders?: ConversationFolders | null,
+  trashFolderPaths?: readonly string[],
+): string[] {
+  return actionableEmails(emails, viewIsDrafts, conversationFolders, trashFolderPaths).map((e) => e.id);
 }
 
 /**
@@ -79,4 +88,21 @@ export function selectedEmailIdsFor({
   return visibleThreads
     .filter((t) => selectedThreadIds.has(t.threadId))
     .flatMap((t) => actionableEmailIds(t.emails as EmailRecord[], viewIsDrafts, conversationFolders, trashFolderPaths));
+}
+
+/**
+ * Email ids a bulk star/unstar should write to: per selected thread, its
+ * actionable rows narrowed by {@link conversationStarTargetIds} — the latest
+ * message when starring, every row when unstarring. Taking every row (as the
+ * other bulk actions do) starred each reply on the server.
+ */
+export function selectedStarTargetIdsFor(input: BulkSelectionInput, starring: boolean): string[] {
+  const { visibleThreads, selectedThreadIds, viewIsDrafts, conversationFolders, trashFolderPaths } = input;
+  return visibleThreads
+    .filter((t) => selectedThreadIds.has(t.threadId))
+    .flatMap((t) => conversationStarTargetIds(
+      actionableEmails(t.emails as EmailRecord[], viewIsDrafts, conversationFolders, trashFolderPaths),
+      starring,
+      conversationFolders,
+    ));
 }
