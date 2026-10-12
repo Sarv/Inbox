@@ -142,11 +142,17 @@ and a list of permissions the user sees before installing. They are published
 to their own repository,
 [Sarv/SarvInbox-extensions](https://github.com/Sarv/SarvInbox-extensions),
 and installed from **Settings → Extensions → Browse**: the app reads that
-registry over HTTPS, shows you exactly what an extension can do, and refuses
-the download unless it hashes to the SHA-256 the registry pinned. Three are
-published today — one-time passcodes, VIP scoring, and thread summarization —
-and the build decides which of them a new profile starts with in
-[`apps/desktop/extensions.config.json`](apps/desktop/extensions.config.json).
+registry over HTTPS, shows you the permissions an extension asks for, and
+refuses the download unless it hashes to the SHA-256 the registry pinned. That
+checksum comes from the same registry; there is no publisher signature yet.
+Three are published today — one-time passcodes, VIP scoring, and thread
+summarization — and the build decides which of them a new profile starts with
+in [`apps/desktop/extensions.config.json`](apps/desktop/extensions.config.json).
+
+An extension runs in a separate process, but not in a sandbox: its code has
+full access to your user account on the computer, including the app's own data,
+whatever permissions it lists. Permissions only gate the app APIs it can call.
+Install only extensions you trust.
 
 The optional **ClamAV Scan** extension is maintained here in
 [`extensions/clamav-scan`](extensions/clamav-scan), with its desktop setup and

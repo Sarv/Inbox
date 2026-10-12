@@ -3,8 +3,8 @@
  * extension and a card on screen.
  *
  * Everything an extension passes is untrusted input: an extension is third-party
- * code that a user installed, and it runs in the main process. So nothing here
- * forwards a raw object to the renderer. Every card goes through
+ * code that a user installed, running as full Node code in the extension
+ * process. So nothing here forwards a raw object to the renderer. Every card goes through
  * `sanitizeExtensionNotification`, which caps each string, drops malformed
  * fields, namespaces the id by extension, and returns null for a card that
  * cannot be rendered meaningfully — one bad extension can then waste its own

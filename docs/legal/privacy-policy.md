@@ -216,8 +216,12 @@ the rest it asks first. You can change this under Security → Remote images.
 - The app checks GitHub for new versions about once an hour. That request
   carries your IP address, app version and platform, but no personal data.
 - The extension catalogue and extensions you install are downloaded from GitHub
-  and jsDelivr. An extension can only make its own network requests if you
-  grant it that permission.
+  and jsDelivr. A download is checked against the checksum the registry
+  publishes; there is no publisher signature yet. An extension runs in a
+  separate process with full access to your user account on this computer,
+  including your files and the app's mail data, whatever permissions it asks
+  for. Its permissions only limit what it can ask the app to do: its own code
+  can still make network requests. Install only extensions you trust.
 - The app checks your internet connection by contacting `www.google.com`.
 
 ### 4.8 Sarv accounts
