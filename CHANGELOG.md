@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmation dialog closes.
 
 ### Fixed
+- **Starring and marking a conversation unread now match Outlook and Sarv
+  Mail.** Starring a conversation from the list, the bulk toolbar or the `s`
+  shortcut flags only its latest message, instead of every reply; unstarring
+  still clears the star from every message. "Mark as unread" in the open
+  conversation's menu now marks every message unread — it used to mark only
+  the first, so the conversation came back as read after the next sync and
+  showed differently in other mail apps. Single messages behave as before.
 - **A specially built email can no longer freeze the app when you open it.**
   Some unusual (or deliberately malformed) email markup made the message
   viewer do work that grew with the square of the email's size — a large one
