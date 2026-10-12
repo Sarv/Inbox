@@ -118,6 +118,7 @@ import { startSpamVerdictRepair, stopSpamVerdictRepair } from './services/spam-v
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
 import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
 import { checkForUpdates, startUpdateService, stopUpdateService } from './services/update-service';
+import { captureRegistryForLegacyBinding } from './services/vault-credentials';
 import {
   setMainWindow,
   getMainWindow,
@@ -612,6 +613,10 @@ async function initializeAccountRegistry(): Promise<void> {
   } catch (e) {
     logger.warn('[Main] Account registry seed failed:', (e as Error)?.message);
   }
+  // Before any IPC handler or window exists: saved passwords from older
+  // versions are bound to what the registry says NOW, not to anything the
+  // window writes later (vault-credentials.ts).
+  captureRegistryForLegacyBinding();
 
   // The credential vault isn't read during seed (only on connect/reveal), so
   // force its file→DB migration now, before the legacy-file cleanup below.

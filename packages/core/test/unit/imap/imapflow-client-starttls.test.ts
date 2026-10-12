@@ -56,6 +56,22 @@ describe('ImapFlowClient — connection security options', () => {
   });
 });
 
+// Certificate checks for IMAP come from the same resolver as SMTP. Breaks: the
+// IMAP client goes back to reading its own override (which arrived from the
+// renderer and switched verification off for a saved password or an OAuth
+// token), or drops the TLS 1.2 floor it used to lose on the way to ImapFlow.
+describe('ImapFlowClient — certificate verification', () => {
+  it.each([
+    ['a default account', {}, true],
+    ['an account that opted out', { allowInsecureTLS: true }, false],
+    ['an OAuth account whose config opts out', { allowInsecureTLS: true, authMethod: 'oauth2', oauthProvider: 'gmail', accessToken: 't' }, true],
+    ['a config carrying the old override', { tlsOptions: { rejectUnauthorized: false } }, true],
+  ])('verifies for %s exactly when it should, with the TLS 1.2 floor', async (_label, over, verifies) => {
+    await new ImapFlowClient().connect(cfg(over) as never);
+    expect(lastOptions?.tls).toEqual({ rejectUnauthorized: verifies, minVersion: 'TLSv1.2' });
+  });
+});
+
 describe('ImapFlowClient — a required STARTTLS the server will not do', () => {
   it('fails with its own code and a message saying what to change, and closes the socket', async () => {
     connectImpl = async () => { throw imapFlowRefusal(); };

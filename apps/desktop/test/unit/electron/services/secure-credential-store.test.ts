@@ -43,12 +43,14 @@ vi.mock('@sarvinbox/core', () => ({
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {
   bindAccountSecretHost,
+  bindAccountSecretTransport,
   deleteAccountSecrets,
   getAccountSecrets,
   hasAccountSecrets,
   isSecureStorageAvailable,
   legacySecureCredFilesExist,
   migrateSecureCredsFromFile,
+  narrowAccountSecretTransport,
   rekeyAccountSecrets,
   setAccountSecrets,
 } from '../../../../electron/services/secure-credential-store';
@@ -58,6 +60,12 @@ const BLOB_KEY = 'secure-credentials';
 const LEGACY = 'secure-credentials.json';
 
 const plainEnvelope = (value: unknown): Buffer => Buffer.from(`PLAIN1:${JSON.stringify(value)}`, 'utf8');
+
+// Every secret written through setAccountSecrets now records the transport
+// relaxations chosen with it, as booleans (see 'transport binding' below).
+// Changed deliberately (transport binding): the expected entries in the tests
+// that spread this used to be the bare secret (and host).
+const STRICT = { allowInsecureTLS: false, allowPlaintext: false };
 
 beforeAll(() => { h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-vault-')); });
 
@@ -87,8 +95,8 @@ describe('setAccountSecrets / getAccountSecrets', () => {
     });
     expect(dbState.blobs.get(BLOB_KEY)!.subarray(0, 5).toString()).toBe('ENC1:');
     await expect(getAccountSecrets('acct-a')).resolves.toEqual({
-      imap: { password: 'imap-pw' },
-      smtp: { password: 'smtp-pw', refreshToken: 'rt' },
+      imap: { password: 'imap-pw', ...STRICT },
+      smtp: { password: 'smtp-pw', refreshToken: 'rt', ...STRICT },
     });
   });
 
@@ -96,14 +104,14 @@ describe('setAccountSecrets / getAccountSecrets', () => {
     await setAccountSecrets('acct-a', { imap: { password: 'imap-pw' } });
     await setAccountSecrets('acct-a', { smtp: { password: 'smtp-pw' } });
     await expect(getAccountSecrets('acct-a')).resolves.toEqual({
-      imap: { password: 'imap-pw' },
-      smtp: { password: 'smtp-pw' },
+      imap: { password: 'imap-pw', ...STRICT },
+      smtp: { password: 'smtp-pw', ...STRICT },
     });
     // Re-writing one kind replaces only that kind.
     await setAccountSecrets('acct-a', { imap: { accessToken: 'at' } });
     await expect(getAccountSecrets('acct-a')).resolves.toEqual({
-      imap: { accessToken: 'at' },
-      smtp: { password: 'smtp-pw' },
+      imap: { accessToken: 'at', ...STRICT },
+      smtp: { password: 'smtp-pw', ...STRICT },
     });
   });
 
@@ -111,7 +119,7 @@ describe('setAccountSecrets / getAccountSecrets', () => {
     await setAccountSecrets('acct-a', {
       imap: { password: 'kept', accessToken: '', refreshToken: undefined },
     });
-    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'kept' } });
+    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'kept', ...STRICT } });
   });
 
   it('no-ops when there is nothing to store, or no account id', async () => {
@@ -129,16 +137,16 @@ describe('setAccountSecrets / getAccountSecrets', () => {
       setAccountSecrets('acct-b', { imap: { password: 'b' } }),
       setAccountSecrets('acct-c', { imap: { password: 'c' } }),
     ]);
-    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'a' } });
-    await expect(getAccountSecrets('acct-b')).resolves.toEqual({ imap: { password: 'b' } });
-    await expect(getAccountSecrets('acct-c')).resolves.toEqual({ imap: { password: 'c' } });
+    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'a', ...STRICT } });
+    await expect(getAccountSecrets('acct-b')).resolves.toEqual({ imap: { password: 'b', ...STRICT } });
+    await expect(getAccountSecrets('acct-c')).resolves.toEqual({ imap: { password: 'c', ...STRICT } });
   });
 
   it('uses the marked plaintext envelope when there is no keychain', async () => {
     h.encAvailable = false;
     await setAccountSecrets('acct-a', { imap: { password: 'pw' } });
     expect(dbState.blobs.get(BLOB_KEY)!.subarray(0, 7).toString()).toBe('PLAIN1:');
-    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'pw' } });
+    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'pw', ...STRICT } });
   });
 });
 
@@ -170,14 +178,14 @@ describe('rekeyAccountSecrets', () => {
     await setAccountSecrets('acct-old', { imap: { password: 'pw' } });
     await rekeyAccountSecrets('acct-old', 'acct-new');
     await expect(getAccountSecrets('acct-old')).resolves.toBeNull();
-    await expect(getAccountSecrets('acct-new')).resolves.toEqual({ imap: { password: 'pw' } });
+    await expect(getAccountSecrets('acct-new')).resolves.toEqual({ imap: { password: 'pw', ...STRICT } });
   });
 
   it('keeps the canonical entry when BOTH ids have secrets, dropping the old one', async () => {
     await setAccountSecrets('acct-old', { imap: { password: 'old' } });
     await setAccountSecrets('acct-new', { imap: { password: 'new' } });
     await rekeyAccountSecrets('acct-old', 'acct-new');
-    await expect(getAccountSecrets('acct-new')).resolves.toEqual({ imap: { password: 'new' } });
+    await expect(getAccountSecrets('acct-new')).resolves.toEqual({ imap: { password: 'new', ...STRICT } });
     await expect(getAccountSecrets('acct-old')).resolves.toBeNull();
   });
 
@@ -272,7 +280,7 @@ describe('host binding on the vault entry', () => {
   // there. Breaks if the host is dropped: new secrets are written unbound.
   it('stores the host alongside the secret', async () => {
     await setAccountSecrets('acct-a', { imap: { password: 'pw', host: 'imap.x.com' } });
-    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' } });
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com', ...STRICT } });
   });
 
   // Breaks: a call carrying only a host re-points a saved password at another server.
@@ -286,7 +294,7 @@ describe('host binding on the vault entry', () => {
   it('re-binds when a new secret is saved with a new host', async () => {
     await setAccountSecrets('acct-a', { imap: { password: 'old', host: 'imap.x.com' } });
     await setAccountSecrets('acct-a', { imap: { password: 'new', host: 'imap.y.com' } });
-    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'new', host: 'imap.y.com' });
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'new', host: 'imap.y.com', ...STRICT });
   });
 });
 
@@ -295,7 +303,7 @@ describe('bindAccountSecretHost', () => {
   it('binds an unbound entry, leaving the other kind alone', async () => {
     await setAccountSecrets('acct-a', { imap: { password: 'pw' }, smtp: { password: 's' } });
     await bindAccountSecretHost('acct-a', 'imap', 'imap.x.com');
-    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' }, smtp: { password: 's' } });
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com', ...STRICT }, smtp: { password: 's', ...STRICT } });
   });
 
   // Breaks: a later "first use" for a different host steals an existing binding.
@@ -304,8 +312,97 @@ describe('bindAccountSecretHost', () => {
     await bindAccountSecretHost('acct-a', 'imap', 'imap.evil.example');
     await bindAccountSecretHost('acct-missing', 'imap', 'imap.x.com');
     await bindAccountSecretHost('acct-a', 'smtp', 'smtp.x.com');
-    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com' } });
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', host: 'imap.x.com', ...STRICT } });
     expect(await getAccountSecrets('acct-missing')).toBeNull();
+  });
+});
+
+describe('transport binding on the vault entry', () => {
+  // A saved password is only sent as loosely as the user chose when typing it
+  // (vault-credentials.ts). Breaks if dropped: a new secret is written unbound
+  // and its first connect — possibly from a compromised window — picks how it
+  // is sent.
+  it('stores the relaxations chosen with a secret, always as booleans', async () => {
+    await setAccountSecrets('acct-a', {
+      imap: { password: 'pw', host: 'imap.x.com', allowInsecureTLS: true, allowPlaintext: true },
+      smtp: { password: 's', host: 'smtp.x.com' },
+    });
+    expect(await getAccountSecrets('acct-a')).toEqual({
+      imap: { password: 'pw', host: 'imap.x.com', allowInsecureTLS: true, allowPlaintext: true },
+      smtp: { password: 's', host: 'smtp.x.com', ...STRICT },
+    });
+  });
+
+  // Only a real `true` relaxes; settings round-trip through IPC as JSON.
+  it('reads a truthy non-boolean as not chosen', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw', allowInsecureTLS: 'true', allowPlaintext: 1 } as never });
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'pw', ...STRICT });
+  });
+
+  // THE loosening. Breaks: a window that does not know the password ticks
+  // "allow self-signed" for it, and main sends it to a man-in-the-middle.
+  it('ignores relaxations that arrive without a secret', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw', host: 'imap.x.com' } });
+    await setAccountSecrets('acct-a', { imap: { host: 'imap.x.com', allowInsecureTLS: true, allowPlaintext: true } });
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'pw', host: 'imap.x.com', ...STRICT });
+  });
+});
+
+describe('bindAccountSecretTransport', () => {
+  const legacy = (vault: unknown) => dbState.blobs.set(BLOB_KEY, plainEnvelope(vault));
+
+  // Upgrade path: entries saved before transport binding are bound on first use.
+  it('fills in the relaxations a legacy entry lacks, leaving the other kind alone', async () => {
+    h.encAvailable = false;
+    legacy({ 'acct-a': { imap: { password: 'pw', host: 'imap.x.com' }, smtp: { password: 's' } } });
+    await bindAccountSecretTransport('acct-a', 'imap', { allowInsecureTLS: true, allowPlaintext: false });
+    expect(await getAccountSecrets('acct-a')).toEqual({
+      imap: { password: 'pw', host: 'imap.x.com', allowInsecureTLS: true, allowPlaintext: false },
+      smtp: { password: 's' },
+    });
+  });
+
+  // Breaks: a later "first use" asking for more rewrites an existing choice.
+  it('never changes a recorded relaxation, and is a no-op for missing entries', async () => {
+    h.encAvailable = false;
+    legacy({ 'acct-a': { imap: { password: 'pw', allowInsecureTLS: false } } });
+    await bindAccountSecretTransport('acct-a', 'imap', { allowInsecureTLS: true, allowPlaintext: true });
+    await bindAccountSecretTransport('acct-a', 'smtp', { allowInsecureTLS: true, allowPlaintext: true });
+    await bindAccountSecretTransport('acct-missing', 'imap', { allowInsecureTLS: true, allowPlaintext: true });
+    await bindAccountSecretTransport('', 'imap', { allowInsecureTLS: true, allowPlaintext: true });
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: { password: 'pw', allowInsecureTLS: false, allowPlaintext: true } });
+    expect(await getAccountSecrets('acct-missing')).toBeNull();
+  });
+});
+
+describe('narrowAccountSecretTransport', () => {
+  const both = { password: 'pw', host: 'imap.x.com', allowInsecureTLS: true, allowPlaintext: true };
+
+  // A stricter connection worked, so the user's stricter choice becomes the
+  // saved one. Breaks: switching "allow self-signed" off never sticks, and a
+  // later config can switch it back on for the saved password.
+  it('switches off only the named relaxations', async () => {
+    await setAccountSecrets('acct-a', { imap: both });
+    await narrowAccountSecretTransport('acct-a', 'imap', 'pw', ['allowInsecureTLS']);
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ ...both, allowInsecureTLS: false });
+  });
+
+  // Breaks: narrowing becomes a way to loosen.
+  it('never switches a relaxation on', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'pw' } });
+    await narrowAccountSecretTransport('acct-a', 'imap', 'pw', ['allowInsecureTLS', 'allowPlaintext']);
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'pw', ...STRICT });
+  });
+
+  // A password saved since the connect started carries its own choice.
+  // Breaks: a slow connect with the old password undoes the user's new choice.
+  it('leaves the entry alone once it holds a different password, and no-ops without one', async () => {
+    await setAccountSecrets('acct-a', { imap: both });
+    await narrowAccountSecretTransport('acct-a', 'imap', 'old-pw', ['allowInsecureTLS', 'allowPlaintext']);
+    await narrowAccountSecretTransport('acct-a', 'smtp', 'pw', ['allowInsecureTLS']);
+    await narrowAccountSecretTransport('acct-a', 'imap', '', ['allowInsecureTLS']);
+    await narrowAccountSecretTransport('', 'imap', 'pw', ['allowInsecureTLS']);
+    expect(await getAccountSecrets('acct-a')).toEqual({ imap: both });
   });
 });
 

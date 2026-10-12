@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import { isAuthError, isConnectionError, isQuotaError, isRateLimited } from '../../../src/imap/imap-errors';
 import { isAuthTokenError, isTransientSendError } from '../../../src/smtp/smtp-errors';
-import { resolveConnectionSecurity, starttlsUnavailableMessage } from '../../../src/utils/connection-security';
+import {
+  STRICT_TRANSPORT,
+  limitTransport,
+  resolveConnectionSecurity,
+  starttlsUnavailableMessage,
+  transportOptInBeyond,
+  transportOptInsOf,
+} from '../../../src/utils/connection-security';
 
 // The ONE rule for how a mail connection is secured (CASA M-5), shared by the
 // IMAP client, the SMTP client and the account forms. What breaks if this file
@@ -67,5 +74,63 @@ describe('starttlsUnavailableMessage', () => {
       expect(isTransientSendError(error)).toBe(false);
       expect(isAuthTokenError(error)).toBe(false);
     }
+  });
+});
+
+// A saved password only goes out over the transport the user saved it with
+// (vault-credentials.ts); these decide what a config asks for and what it may
+// have. Breaks: a config from the window loosens the transport main dials a
+// saved password over — a self-signed opt-in or 'none' it was never saved with.
+describe('transportOptInsOf', () => {
+  it('reads both relaxations off a password config', () => {
+    expect(transportOptInsOf({ allowInsecureTLS: true, security: 'none' })).toEqual({ allowInsecureTLS: true, allowPlaintext: true });
+    expect(transportOptInsOf({ security: 'starttls' })).toEqual(STRICT_TRANSPORT);
+    // A legacy secure:false account is a REQUIRED STARTTLS, not plaintext.
+    expect(transportOptInsOf({ secure: false }).allowPlaintext).toBe(false);
+  });
+
+  // Only a real boolean opts out; settings round-trip through JSON and IPC.
+  it('does not read a truthy non-boolean as the opt-in', () => {
+    for (const value of ['true', 1, {}]) expect(transportOptInsOf({ allowInsecureTLS: value }).allowInsecureTLS).toBe(false);
+  });
+
+  // An OAuth sign-in never asks for either, whatever its config carries.
+  it('asks for nothing for OAuth', () => {
+    expect(transportOptInsOf({ authMethod: 'oauth2', allowInsecureTLS: true, security: 'none' })).toEqual(STRICT_TRANSPORT);
+  });
+});
+
+describe('transportOptInBeyond', () => {
+  const all = { allowInsecureTLS: true, allowPlaintext: true };
+  it('names the relaxation asked for but not granted', () => {
+    expect(transportOptInBeyond({ allowInsecureTLS: true, allowPlaintext: false }, STRICT_TRANSPORT)).toBe('insecure-tls');
+    expect(transportOptInBeyond({ allowInsecureTLS: false, allowPlaintext: true }, STRICT_TRANSPORT)).toBe('plaintext');
+    expect(transportOptInBeyond({ allowInsecureTLS: false, allowPlaintext: true }, { allowInsecureTLS: true, allowPlaintext: false })).toBe('plaintext');
+  });
+
+  // Tightening is always allowed: a stricter request is never refused.
+  it('is null when everything asked for is granted, or less is asked', () => {
+    expect(transportOptInBeyond(all, all)).toBeNull();
+    expect(transportOptInBeyond(STRICT_TRANSPORT, all)).toBeNull();
+    expect(transportOptInBeyond(STRICT_TRANSPORT, STRICT_TRANSPORT)).toBeNull();
+  });
+});
+
+describe('limitTransport', () => {
+  const asksAll = { host: 'h', allowInsecureTLS: true, security: 'none' as const };
+
+  it('keeps what is both asked for and granted', () => {
+    expect(limitTransport(asksAll, { allowInsecureTLS: true, allowPlaintext: true })).toEqual(asksAll);
+  });
+
+  // Breaks: a relaxation nobody granted reaches the client.
+  it('drops what is asked for but not granted, turning None into a required STARTTLS', () => {
+    expect(limitTransport(asksAll, STRICT_TRANSPORT)).toEqual({ host: 'h', allowInsecureTLS: false, security: 'starttls' });
+  });
+
+  // A request can tighten: granted-but-not-asked never switches a relaxation on.
+  it('never adds a relaxation the config did not ask for', () => {
+    const strict = { host: 'h', security: 'ssl' as const };
+    expect(limitTransport(strict, { allowInsecureTLS: true, allowPlaintext: true })).toEqual({ ...strict, allowInsecureTLS: false });
   });
 });

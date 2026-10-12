@@ -1,3 +1,4 @@
+import { resolveTlsOptions } from '@sarvinbox/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // What breaks if this file fails: SMTP sending for a saved password account
@@ -60,8 +61,9 @@ vi.mock('../../../../electron/services/pgp-service', () => ({ sendTransformFor: 
 vi.mock('../../../../electron/ipc/follow-up-handlers', () => ({ recordFollowUpForSend: vi.fn() }));
 
 import { registerSmtpHandlers } from '../../../../electron/ipc/smtp-handlers';
-import { resetFakeCoreDb } from '../../../../electron/services/__testing__/fake-core-db';
-import { setAccountSecrets } from '../../../../electron/services/secure-credential-store';
+import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
+import { getAccountSecrets, setAccountSecrets } from '../../../../electron/services/secure-credential-store';
+import { captureRegistryForLegacyBinding } from '../../../../electron/services/vault-credentials';
 
 const SAVED = { host: 'smtp.x.com', port: 465, secure: true, username: 'a@x.com', authMethod: 'password' };
 
@@ -132,5 +134,95 @@ describe('smtp:connectFor (multi-account send-as)', () => {
     const res = await h.handlers.get('smtp:connectFor')!({}, 'acct-a', { ...SAVED, host: 'smtp.evil.example' });
     expect(res.success).toBe(false);
     expect(h.connect).not.toHaveBeenCalled();
+  });
+});
+
+// How the saved password is sent is the user's choice saved WITH it, not the
+// config's: the config comes from the window, which also renders untrusted
+// email. What breaks if these fail: a compromised window ticks "allow
+// self-signed" (or picks 'none') for a saved account and main sends the real
+// password to a man-in-the-middle; or a legitimately self-signed account stops
+// sending; or unticking "allow self-signed" never sticks.
+describe('smtp:connect — the transport saved with the password', () => {
+  /** Whether the client was asked to check the certificate. */
+  const verifies = () => resolveTlsOptions(h.connect.mock.calls[0][0] as never).rejectUnauthorized;
+
+  it('refuses to send it without certificate checks it was not saved with, and never dials', async () => {
+    const res = await h.handlers.get('smtp:connect')!({}, { ...SAVED, allowInsecureTLS: true }, 'acct-a');
+    expect(res).toEqual({
+      success: false,
+      error: "Your saved sending password was saved for a connection that checks smtp.x.com's certificate. Re-enter your password to connect without checking it.",
+    });
+    expect(h.connect).not.toHaveBeenCalled();
+  });
+
+  it('refuses to send it unencrypted when it was not saved for that, and never dials', async () => {
+    const res = await h.handlers.get('smtp:connect')!({}, { ...SAVED, port: 587, secure: false, security: 'none' }, 'acct-a');
+    expect(res.error).toBe('Your saved sending password was saved for an encrypted connection to smtp.x.com. Re-enter your password to connect without encryption.');
+    expect(h.connect).not.toHaveBeenCalled();
+  });
+
+  // The old override is not a way round it either.
+  it('checks the certificate whatever tlsOptions the config carries', async () => {
+    await h.handlers.get('smtp:connect')!({}, { ...SAVED, tlsOptions: { rejectUnauthorized: false } }, 'acct-a');
+    expect(verifies()).toBe(true);
+  });
+
+  it('sends it without certificate checks when it was saved that way', async () => {
+    await setAccountSecrets('acct-a', { smtp: { password: 'smtp-pw', host: 'smtp.x.com', allowInsecureTLS: true } });
+    expect(await h.handlers.get('smtp:connect')!({}, { ...SAVED, allowInsecureTLS: true }, 'acct-a')).toEqual({ success: true });
+    expect(h.connect).toHaveBeenCalledWith(expect.objectContaining({ password: 'smtp-pw' }));
+    expect(verifies()).toBe(false);
+  });
+
+  // A password saved by an older build records no transport. With no record
+  // of the account in the registry main captured at startup, it is bound
+  // strict — never to what a connect asks for. Breaks: the first connect for
+  // such a password (possibly a compromised window's, for an account the app
+  // had not used yet) decides how it is sent.
+  it('binds a legacy entry with no registry record strict, refusing a looser connect', async () => {
+    captureRegistryForLegacyBinding();
+    dbState.blobs.set('secure-credentials', Buffer.from(`PLAIN1:${JSON.stringify({ 'acct-a': { smtp: { password: 'smtp-pw', host: 'smtp.x.com' } } })}`));
+    const res = await h.handlers.get('smtp:connect')!({}, { ...SAVED, allowInsecureTLS: true }, 'acct-a');
+    expect(res).toMatchObject({ success: false, error: expect.stringContaining('Re-enter your password') });
+    expect(h.connect).not.toHaveBeenCalled();
+    expect((await getAccountSecrets('acct-a'))?.smtp).toEqual({ password: 'smtp-pw', host: 'smtp.x.com', allowInsecureTLS: false, allowPlaintext: false });
+  });
+
+  // Typing the password IS the choice: the window already holds that secret.
+  it('lets a typed password be sent however the config asks', async () => {
+    await h.handlers.get('smtp:connect')!({}, { ...SAVED, password: 'typed', allowInsecureTLS: true }, 'acct-a');
+    expect(verifies()).toBe(false);
+  });
+
+  it('switches the relaxation off for good once a verified connection works', async () => {
+    await setAccountSecrets('acct-a', { smtp: { password: 'smtp-pw', host: 'smtp.x.com', allowInsecureTLS: true } });
+    expect(await h.handlers.get('smtp:connect')!({}, SAVED, 'acct-a')).toEqual({ success: true });
+    expect(verifies()).toBe(true);
+    expect((await getAccountSecrets('acct-a'))?.smtp?.allowInsecureTLS).toBe(false);
+  });
+
+  // A failed strict connect proves nothing. Breaks: one connect from a config
+  // that forgot the opt-in costs a self-signed account its saved choice.
+  it('keeps the relaxation when the stricter connection fails', async () => {
+    await setAccountSecrets('acct-a', { smtp: { password: 'smtp-pw', host: 'smtp.x.com', allowInsecureTLS: true } });
+    h.connect.mockRejectedValue(new Error('self-signed certificate'));
+    expect((await h.handlers.get('smtp:connect')!({}, SAVED, 'acct-a')).success).toBe(false);
+    expect((await getAccountSecrets('acct-a'))?.smtp?.allowInsecureTLS).toBe(true);
+  });
+});
+
+describe('smtp:connectFor — the transport saved with the password', () => {
+  // Breaks: send-as becomes the unguarded route to a loosened connection.
+  it('refuses a relaxation the password was not saved with, and never dials', async () => {
+    const res = await h.handlers.get('smtp:connectFor')!({}, 'acct-a', { ...SAVED, allowInsecureTLS: true });
+    expect(res).toMatchObject({ success: false, error: expect.stringContaining('Re-enter your password') });
+    expect(h.connect).not.toHaveBeenCalled();
+  });
+
+  it('switches an unused relaxation off once the connection works', async () => {
+    await setAccountSecrets('acct-a', { smtp: { password: 'smtp-pw', host: 'smtp.x.com', allowInsecureTLS: true } });
+    expect(await h.handlers.get('smtp:connectFor')!({}, 'acct-a', SAVED)).toEqual({ success: true });
+    expect((await getAccountSecrets('acct-a'))?.smtp?.allowInsecureTLS).toBe(false);
   });
 });

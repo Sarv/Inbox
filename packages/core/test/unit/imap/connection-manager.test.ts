@@ -124,6 +124,29 @@ describe('ConnectionManager — connect / disconnect', () => {
     expect(clients).toHaveLength(1);
   });
 
+  // Main switches a saved password's relaxation off only once a stricter
+  // connection works (vault-credentials narrowSavedTransport). Breaks: a
+  // connect() that met an in-flight one — and so never dialled its settings —
+  // reads as "these settings work", and a saved choice is dropped untested.
+  it('isConnectedWith is true only for the config object that was actually dialled', async () => {
+    const { manager } = makeManager();
+    const other = { ...CONFIG };
+    let late: Promise<void> | undefined;
+    duringDial.push(() => { late = manager.connect(other); });
+    await manager.connect(CONFIG);
+    await late;
+    expect(connectedWith).toEqual([CONFIG]);
+    expect(manager.isConnectedWith(CONFIG)).toBe(true);
+    expect(manager.isConnectedWith(other)).toBe(false);
+
+    await manager.forceReconnect(30_000, other);
+    expect(manager.isConnectedWith(other)).toBe(true);
+    expect(manager.isConnectedWith(CONFIG)).toBe(false);
+
+    await manager.disconnect();
+    expect(manager.isConnectedWith(other)).toBe(false);
+  });
+
   it('detects the provider from the host', async () => {
     const { manager } = makeManager();
     await manager.connect(GMAIL_CONFIG);

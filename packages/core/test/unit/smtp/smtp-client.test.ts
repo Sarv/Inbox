@@ -116,9 +116,18 @@ describe('SMTPClient.connect — transport + TLS policy', () => {
     await client.connect(baseConfig({ port: 587, secure: false, allowInsecureTLS: true }));
     expect(lastTransportOptions().tls.rejectUnauthorized).toBe(false);
     expect(lastTransportOptions().requireTLS).toBe(true);
+  });
 
-    await client.connect(baseConfig({ tlsOptions: { rejectUnauthorized: true }, allowInsecureTLS: true }));
-    expect(lastTransportOptions().tls.rejectUnauthorized).toBe(true); // explicit override wins
+  // Changed deliberately (renderer-supplied TLS relaxation): the second half of
+  // the test above used to pin that `tlsOptions` overrode the opt-in; that
+  // override travelled in from the renderer and is gone. In its place: an
+  // OAuth token is never sent over an unverified connection. Breaks: a config
+  // carrying allowInsecureTLS (stale, or from a compromised window) hands the
+  // token to a man-in-the-middle.
+  it('verifies the certificate for an OAuth account even when the config opts out', async () => {
+    const client = new SMTPClient();
+    await client.connect(baseConfig({ allowInsecureTLS: true, authMethod: 'oauth2', accessToken: 't', oauthProvider: 'gmail' }));
+    expect(lastTransportOptions().tls).toEqual({ rejectUnauthorized: true, minVersion: 'TLSv1.2' });
   });
 
   // The account's connection security decides the transport (CASA M-5). Breaks:

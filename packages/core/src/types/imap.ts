@@ -419,14 +419,14 @@ export interface IMAPConfig {
    * it takes precedence over the static `accessToken`.
    */
   resolveBearer?: (forceRefresh?: boolean) => Promise<string>;
-  tlsOptions?: {
-    rejectUnauthorized?: boolean;
-  };
   /**
    * Opt-in escape hatch for servers with self-signed / untrusted certs.
    * Default (undefined/false) keeps TLS verification ON — disabling it exposes
    * credentials and mail to man-in-the-middle attacks, so it must be an explicit
    * per-account choice, never the default.
+   * Ignored for OAuth (resolveTlsOptions). For a saved password the main
+   * process injects, it is the choice saved WITH that password, not the
+   * config's (vault-credentials.ts).
    */
   allowInsecureTLS?: boolean;
   connectionTimeout?: number; // Milliseconds

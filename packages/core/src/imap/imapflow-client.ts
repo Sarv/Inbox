@@ -52,6 +52,7 @@ import { logger } from '../utils/logger';
 import { messageIdKey } from '../utils/message-id';
 import { createMutex, type Mutex } from '../utils/mutex';
 import { withTimeout, withStallTimeout, isTimeoutError } from '../utils/timeout';
+import { resolveTlsOptions } from '../utils/tls';
 
 import { acquireConnectionSlot, type ConnectionPriority } from './connection-budget';
 import { GMAIL_NATIVE_CATEGORY_SLUGS, modifyGmailNativeCategories, type GmailNativeCategory } from './gmail-category-api';
@@ -272,9 +273,9 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       // maxIdleTime (10 min) so a healthy IDLE refresh always resets it first;
       // 13 min gives the refresh room without letting a wedged socket linger.
       socketTimeout: 13 * 60 * 1000,
-      tls: config.tlsOptions
-        ? { rejectUnauthorized: config.tlsOptions.rejectUnauthorized }
-        : undefined,
+      // Certificate verification ON unless the account opted out (never for
+      // OAuth), plus the TLS 1.2 floor — the same resolver the SMTP client uses.
+      tls: resolveTlsOptions(config),
     };
 
     logger.info('IMAP config (ImapFlow)', {

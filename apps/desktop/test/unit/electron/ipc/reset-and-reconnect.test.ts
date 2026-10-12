@@ -39,9 +39,10 @@ const h = vi.hoisted(() => ({
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
 }));
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real transport rules (pure): which relaxations a config asks for and may have.
+  ...(await import('@sarvinbox/core/connection-security')),
   withTimeout: (p: Promise<unknown>) => p,
-  resolveTlsOptions: () => ({}),
   accountIdFor: (user: string, host: string) => `acct-${user}-${host}`,
   ImapFlowClient: class {},
   isAuthError: () => false,

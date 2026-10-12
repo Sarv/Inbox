@@ -1,6 +1,7 @@
 import { BLOCKLISTS } from '@sarv-in/mailguard/reputation';
 import type { SMTPConfig } from '@sarvinbox/core';
 import { readBlocklistPrefs, type BlocklistPrefs } from '@sarvinbox/core/blocklist-prefs';
+import { transportOptInsOf, type TransportOptIns } from '@sarvinbox/core/connection-security';
 import { conversationFoldersOf, isDraftRow } from '@sarvinbox/core/conversation-membership';
 
 import { clearCategoryBadgeCache, applyEmailCategories } from '../components/email-list/CategoryBadges';
@@ -593,15 +594,19 @@ export const extractSecrets = (config: Record<string, any> | null | undefined): 
 
 /**
  * The vault entry for a config: its secret fields plus the host they're for
- * (main only ever sends a saved secret to that host), or undefined when the
- * config carries no secret — a host is never written without one.
+ * (main only ever sends a saved secret to that host) and the transport
+ * relaxations chosen with them — "allow self-signed" and security 'none' (main
+ * never sends a saved secret more loosely than that). Undefined when the
+ * config carries no secret: neither a host nor a relaxation is ever written
+ * without one.
  */
 export const vaultEntryFor = (
   config: Record<string, any> | null | undefined,
-): (SecretBag & { host?: string }) | undefined => {
+): (SecretBag & TransportOptIns & { host?: string }) | undefined => {
   const secrets = extractSecrets(config);
-  if (!secrets) return undefined;
-  return typeof config?.host === 'string' && config.host ? { ...secrets, host: config.host } : secrets;
+  if (!secrets || !config) return undefined;
+  const entry = { ...secrets, ...transportOptInsOf(config) };
+  return typeof config.host === 'string' && config.host ? { ...entry, host: config.host } : entry;
 };
 
 /**

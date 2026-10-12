@@ -594,12 +594,27 @@ describe('stripSecrets / extractSecrets', () => {
   });
 });
 
+// Every vault entry now also records the transport relaxations chosen with the
+// secret. Changed deliberately (transport binding): the expected entries that
+// spread this used to be the bare secret and host.
+const STRICT = { allowInsecureTLS: false, allowPlaintext: false };
+
 describe('vaultEntryFor', () => {
   // Main only injects a saved secret for the host it was saved for. Breaks if
   // the host is dropped: every secret saved from now on is unbound and gets
   // bound to whatever host is asked for first.
   it('carries the config\'s host alongside its secrets', () => {
-    expect(vaultEntryFor({ host: 'imap.x.com', username: 'u', password: 'p' })).toEqual({ password: 'p', host: 'imap.x.com' });
+    expect(vaultEntryFor({ host: 'imap.x.com', username: 'u', password: 'p' })).toEqual({ password: 'p', host: 'imap.x.com', ...STRICT });
+  });
+
+  // Main sends a saved password no more loosely than it was saved for. Breaks
+  // if dropped: a self-signed or unencrypted account's password is saved
+  // strict and the account stops connecting the next time it reconnects.
+  it('carries the self-signed and no-encryption choices made with the secret', () => {
+    expect(vaultEntryFor({ host: 'imap.x.com', password: 'p', allowInsecureTLS: true, security: 'none' }))
+      .toEqual({ password: 'p', host: 'imap.x.com', allowInsecureTLS: true, allowPlaintext: true });
+    // A legacy secure:false account is a required STARTTLS, not plaintext.
+    expect(vaultEntryFor({ host: 'imap.x.com', password: 'p', secure: false })).toEqual({ password: 'p', host: 'imap.x.com', ...STRICT });
   });
 
   // Breaks: a host-only write could re-point an existing password elsewhere.
@@ -609,7 +624,7 @@ describe('vaultEntryFor', () => {
   });
 
   it('omits an empty host rather than binding to ""', () => {
-    expect(vaultEntryFor({ host: '', password: 'p' })).toEqual({ password: 'p' });
+    expect(vaultEntryFor({ host: '', password: 'p' })).toEqual({ password: 'p', ...STRICT });
   });
 });
 
@@ -664,7 +679,10 @@ describe('migrateCredentialsToVault', () => {
     await migrateCredentialsToVault([withSecret]);
 
     // Each secret is vaulted WITH the host it belongs to (main injects it only there).
-    expect(set).toHaveBeenCalledWith(withSecret.id, { imap: { password: 'imap-pw', host: 'imap.x.com' }, smtp: { password: 'smtp-pw', host: 'smtp.x.com' } });
+    expect(set).toHaveBeenCalledWith(withSecret.id, {
+      imap: { password: 'imap-pw', host: 'imap.x.com', ...STRICT },
+      smtp: { password: 'smtp-pw', host: 'smtp.x.com', ...STRICT },
+    });
     // localStorage now holds the STRIPPED snapshot.
     const stored = JSON.parse(localStorage.getItem('sarvinbox-accounts')!);
     expect(stored[0].imapConfig.password).toBeUndefined();
@@ -688,7 +706,7 @@ describe('migrateCredentialsToVault', () => {
 
     await migrateCredentialsToVault([legacyIdAccount]);
 
-    expect(set).toHaveBeenCalledWith('acct-a-x-com', { imap: { password: 'legacy-pw', host: 'imap.x.com' }, smtp: undefined });
+    expect(set).toHaveBeenCalledWith('acct-a-x-com', { imap: { password: 'legacy-pw', host: 'imap.x.com', ...STRICT }, smtp: undefined });
   });
 
   it('derives the id when no registry account matches the legacy credentials', async () => {
@@ -698,7 +716,7 @@ describe('migrateCredentialsToVault', () => {
 
     await migrateCredentialsToVault([]);
 
-    expect(set).toHaveBeenCalledWith(accountIdFor('z@y.com', 'imap.other.com'), { imap: { password: 'pw', host: 'imap.other.com' }, smtp: undefined });
+    expect(set).toHaveBeenCalledWith(accountIdFor('z@y.com', 'imap.other.com'), { imap: { password: 'pw', host: 'imap.other.com', ...STRICT }, smtp: undefined });
   });
 
   it('LEAVES plaintext in place when any vault write failed (never strip on a half-migration)', async () => {
