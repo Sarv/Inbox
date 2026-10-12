@@ -21,6 +21,7 @@ import {
 import { DARK_PAPER, applyEmailDarkMode } from '../utils/email-dark-mode';
 import { withLeadingCsp } from '../utils/email-frame-csp';
 import { collapseExcessBlankSpace, htmlLooksDesigned, trimTrailingWindowed } from '../utils/email-html';
+import { replaceUpToLastClose, stripBlockingResources, sweepActiveTags } from '../utils/email-strip';
 import { openExternalLink, opensExternally } from '../utils/open-external';
 import { rememberSenderImagesAllowed, useRemoteImageAutoLoad, type RemoteImageMessage } from '../utils/remote-images';
 // Shared with Chat View rather than kept in a second copy here: the two
@@ -386,119 +387,6 @@ export function buildIframeCss(
   `;
 }
 
-/**
- * Strip resource references that cause blocking network fetches
- * inside the iframe. Designed marketing emails frequently pull custom
- * fonts (\`@font-face\` from CDN), external stylesheets, preloads, and
- * tracking pixels — most of which CORS-fail from \`about:srcdoc\`
- * origin and stall the render until the browser times out. Removing
- * them up front makes paint instant; the email falls back to our
- * system font and renders with whatever inline CSS it shipped.
- *
- * What we keep: inline \`<style>\` rules that aren't \`@font-face\`,
- * inline images already converted to data URIs by image-cache, and
- * \`<link rel="icon">\` (cheap and harmless).
- *
- * What we drop:
- *   - \`@font-face { ... }\` blocks and \`@import url(...)\` lines inside <style>
- *   - \`<link rel="stylesheet">\`
- *   - \`<link rel="preload" as="font|style">\`
- *   - \`<link rel="prefetch">\`
- *   - \`<script>\` (defense-in-depth — sandbox already blocks scripts)
- */
-/**
- * `html.replace(re, fn)` for a pattern that can only match text ending in a
- * closing tag that starts with `close` (e.g. `</style` for `<style …>…</style >`),
- * applied ONLY up to the end of the last such tag.
- *
- * Identical result: no match can start after the last closing tag, because it
- * would need one later. And it is what keeps the pattern linear: on a run of
- * unclosed openers (`<style><style>…`) every attempt in the tail used to scan
- * to the end of the input and fail — quadratic, and a frozen window for one
- * crafted email.
- */
-function replaceUpToLastClose(
-  html: string,
-  close: string,
-  re: RegExp,
-  fn: (match: string, ...groups: string[]) => string,
-): string {
-  const end = html.toLowerCase().lastIndexOf(close);
-  if (end < 0) return html;
-  const gt = html.indexOf('>', end + close.length - 1);
-  const cut = gt < 0 ? html.length : gt + 1;
-  return html.slice(0, cut).replace(re, fn) + html.slice(cut);
-}
-
-/**
- * Drop every complete `<script …>` opener (up to its first `>`) left in `html`
- * — a self-closed or unpaired one. A split, not a regex replace, like
- * {@link escapeScriptTags}, which must run after it: dropping a tag can splice
- * the text around it into a new `<script`.
- */
-function dropScriptOpeners(html: string): string {
-  const parts = html.split('<');
-  let out = parts[0];
-  for (let i = 1; i < parts.length; i++) {
-    const gt = parts[i].indexOf('>');
-    out += /^script\b/i.test(parts[i]) && gt >= 0 ? parts[i].slice(gt + 1) : `<${parts[i]}`;
-  }
-  return out;
-}
-
-/**
- * Escape the `<` of every `<script` / `</script` left in `html` to `&lt;`, so
- * none can open or close a script. A split, not a regex replace: one linear
- * pass, and every `<` is checked against what actually follows it.
- */
-function escapeScriptTags(html: string): string {
-  const parts = html.split('<');
-  let out = parts[0];
-  for (let i = 1; i < parts.length; i++) {
-    out += (/^\/?script\b/i.test(parts[i]) ? '&lt;' : '<') + parts[i];
-  }
-  return out;
-}
-
-/** Exported for tests (pure HTML transform). */
-export function stripBlockingResources(html: string): string {
-  let out = html;
-
-  // 1. Inline <style>: drop @font-face blocks + @import lines, and neutralize
-  //    dark-mode media queries.
-  out = replaceUpToLastClose(out, '</style', /<style\b[^<>]*>([\s\S]*?)<\/style\b[^<>]*>/gi, (_, css) => {
-    const cleaned = css
-      // @font-face { ... } — handle nested braces minimally; one level is enough for fonts.
-      .replace(/@font-face\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g, '')
-      // @import url(...); or @import "...";
-      .replace(/@import\s+(?:url\([^)]*\)|"[^"]*"|'[^']*')\s*[^;]*;?/g, '')
-      // Neutralize `@media (prefers-color-scheme: dark)` blocks. The iframe
-      // inherits the OS colour-scheme preference, so an email's dark-mode CSS
-      // (Google Calendar invites, marketing mail) fires even when the app is in
-      // light mode — rendering the message on a black background. Appending an
-      // always-false condition makes the query never match, so the email falls
-      // back to its default (light) design, matching how Gmail renders it.
-      .replace(/\(\s*prefers-color-scheme\s*:\s*dark\s*\)/gi, '(prefers-color-scheme: dark) and (max-width: 0px)');
-    return `<style>${cleaned}</style>`;
-  });
-
-  // 2. <link rel="stylesheet|preload|prefetch|preconnect|dns-prefetch">.
-  out = out.replace(
-    /<link\b[^<>]*\brel\s*=\s*["']?(?:stylesheet|preload|prefetch|preconnect|dns-prefetch|modulepreload)["']?[^<>]*>/gi,
-    '',
-  );
-
-  // 3. <script>...</script> — sandbox blocks execution but the parser
-  // still spends time tokenizing them and can stall on src= fetches.
-  // The parser also ends a script at `</script >` or `</script foo>`. Deleting
-  // tags can splice the text around them into a new `<script` (`<scr<script>
-  // </script>ipt>`), and an opener with a `<` inside an attribute matches
-  // neither pattern — so any `<script` that survives is escaped to text.
-  out = replaceUpToLastClose(out, '</script', /<script\b[^<>]*>[\s\S]*?<\/script\b[^<>]*>/gi, () => '');
-  out = escapeScriptTags(dropScriptOpeners(out));
-
-  return out;
-}
 
 /**
  * Wrap a fragment (no <html>/<body>) in a minimal HTML document so
@@ -686,6 +574,9 @@ function peelTrailingDeadSpace(html: string): string {
 }
 
 /** Exported for tests (pure HTML transform). */
+/** Exported for tests (pure HTML transform); lives in utils/email-strip. */
+export { stripBlockingResources };
+
 export function buildSrcdoc(html: string, themeCss: string, normalize: boolean, allowRemoteImages: boolean): string {
   // The CSP (email-frame-csp.ts) blocks every remote fetch the regex stripper
   // missed: no remote fonts, stylesheets, scripts or frames, and remote images
@@ -712,9 +603,12 @@ export function buildSrcdoc(html: string, themeCss: string, normalize: boolean, 
   //     nothing the reader has to scroll past. Skipping designed bodies is what
   //     keeps heavy HTML rendering exactly as-is.
   const trimmed = trimTrailingDeadSpace(safe);
-  const cleaned = normalize
+  // Swept again last: the normalize pass deletes markup (`<o:p>`, empty
+  // blocks, attributes), and a deletion can splice a new link or script
+  // together (see sweepActiveTags).
+  const cleaned = sweepActiveTags(normalize
     ? normalizeHtmlForBubble(safe)
-    : (htmlLooksDesigned(trimmed) ? trimmed : collapseExcessBlankSpace(trimmed));
+    : (htmlLooksDesigned(trimmed) ? trimmed : collapseExcessBlankSpace(trimmed)));
   // Detect a full HTML document by presence of <html> or <body>.
   const hasHtmlTag = /<html\b/i.test(cleaned);
   const hasBodyTag = /<body\b/i.test(cleaned);

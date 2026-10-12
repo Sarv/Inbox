@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation menu now moves the whole conversation to spam rather than only
   its first message. A single reply's menu still acts on that reply.
 
+### Security
+- **Emails can no longer hide a lookup that reports when you opened them.**
+  An email could carry a hidden hint (a DNS prefetch, also tucked inside an
+  embedded frame) that made the app look up a web address the moment you opened
+  it, even with remote images blocked, so the sender could learn when, and from
+  which network, you read it. Several forms got past the filter, and printing
+  skipped it entirely. Such hints and embedded frames are now removed from email
+  content, on screen and when printing.
+
 ## [1.3.2] - 2026-10-12
 
 ### Added
