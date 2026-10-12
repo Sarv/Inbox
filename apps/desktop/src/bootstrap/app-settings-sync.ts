@@ -112,7 +112,7 @@ function initAppSettingsSync(): void {
     nativeSet(key, value);
     if (MANAGED.has(key)) { try { void api.set(key, value); } catch { /* ignore */ } }
     if (key === 'sarvinbox-settings') {
-      pushBacklogCap(value); pushSenderIdentityPolicy(value); pushCrashReportPref(value);
+      pushBacklogCap(value); pushSenderIdentityPolicy(value);
       // Readers holding a parsed copy (the remote-image mode) re-read it.
       try { window.dispatchEvent(new Event(SETTINGS_WRITTEN_EVENT)); } catch { /* ignore */ }
     }
@@ -168,18 +168,11 @@ function pushSenderIdentityPolicy(rawSettings: string | null): void {
   } catch { /* a malformed settings blob must not break boot */ }
 }
 
-/**
- * Mirror "Send crash reports" into main, which owns Sentry delivery and
- * persists the choice for the next launch. Only an explicit false opts out.
- */
-function pushCrashReportPref(rawSettings: string | null): void {
-  try {
-    const parsed = rawSettings ? JSON.parse(rawSettings) : null;
-    if (!parsed || typeof parsed !== 'object') return;
-    void Promise.resolve((window as any)?.electronAPI?.diagnostics?.setCrashReports?.(parsed.crashReports !== false))
-      .catch(() => { /* best-effort */ });
-  } catch { /* a malformed settings blob must not break boot */ }
-}
+// "Send crash reports" is deliberately NOT mirrored from here (CASA L-8). Main
+// owns that answer, and a push from this blob used to overwrite it on every
+// launch with the blob's default (on) — so nobody could ever be "not yet
+// asked". The consent dialog and Settings → General read and write main's
+// answer directly (services/crash-report-choice).
 
 initAppSettingsSync();
 // Boot push: main persists the cap, but a profile restored from the DB (or a
@@ -187,4 +180,3 @@ initAppSettingsSync();
 // next time the user opened Settings.
 try { pushBacklogCap(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
 try { pushSenderIdentityPolicy(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }
-try { pushCrashReportPref(localStorage.getItem('sarvinbox-settings')); } catch { /* ignore */ }

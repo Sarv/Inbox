@@ -57,9 +57,8 @@ export interface AppSettings {
    *  explicit `true` enables it; a missing value is off
    *  (core `senderIdentityPolicyFromSettings`). */
   contactGravatar: boolean;
-  /** Send crash and error reports (addresses removed) so bugs can be fixed.
-   *  On unless the user turns it off. */
-  crashReports: boolean;
+  // "Send crash reports" is not here: the main process owns that answer
+  // (CASA L-8) — see services/crash-report-choice.
   /** Mirror AI categories onto the mail server as labels (visible in Gmail /
    *  sarv webmail / other clients). `folderMode` only applies to providers that
    *  have no labels/keywords (Outlook, Yahoo, …): copy = keep in Inbox + a
@@ -143,7 +142,6 @@ export const defaultSettings: AppSettings = {
   senderLogos: DEFAULT_SENDER_IDENTITY_POLICY.logos,
   senderFavicons: DEFAULT_SENDER_IDENTITY_POLICY.favicons,
   contactGravatar: DEFAULT_SENDER_IDENTITY_POLICY.gravatar,
-  crashReports: true,
   categoryLabels: { enabled: true, folderMode: 'copy' },
   inboxType: 'priority_first',
   showImportanceMarkers: true,
