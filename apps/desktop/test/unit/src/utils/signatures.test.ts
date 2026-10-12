@@ -2,10 +2,19 @@
 // normalizeSignatureHtml deliberately uses the browser's real CSS parser
 // (DOMParser) rather than regex, so this file needs a DOM. Everything else here
 // is pure + localStorage-backed.
+// First: makes happy-dom faithful enough for the real DOMPurify (see the helper).
+import '../../../helpers/dompurify-dom';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import type { AppSettings } from '../../../../src/components/settings/types';
-import { getSignatureHtml, loadSignatureState, migrateSignatures, normalizeSignatureHtml } from '../../../../src/utils/signatures';
+import {
+  getSignatureHtml,
+  loadSignatureState,
+  migrateSignatures,
+  normalizeSignatureHtml,
+  sanitizeSignatureHtml,
+  signatureImageHtml,
+} from '../../../../src/utils/signatures';
 
 const SETTINGS_KEY = 'sarvinbox-settings';
 
@@ -183,5 +192,56 @@ describe('normalizeSignatureHtml', () => {
     expect(out).toContain('cid:logo');
     expect(out).toContain('href="https://sarv.com"');
     expect(out).toContain('border-left-style: solid');
+  });
+});
+
+describe('sanitizeSignatureHtml', () => {
+  // Regression (L-10): this is what stands between a stored signature and the
+  // main app document. Losing any of these strips lets script run in Settings.
+  it('drops event handlers, scripts, javascript: URLs and data attributes', () => {
+    const out = sanitizeSignatureHtml(
+      '<p data-x="1">Hi</p><img src="x" onerror="alert(1)"><script>alert(2)</script>' +
+        '<a href="javascript:alert(3)">x</a><svg onload="alert(4)"></svg>',
+    );
+    expect(out).toContain('Hi');
+    expect(out).not.toMatch(/onerror|onload|<script|javascript:|data-x/i);
+  });
+
+  // Regression: the sanitiser is deliberately light-touch. A schema-style
+  // allowlist here would flatten every designed signature a user pasted.
+  it('keeps tables, inline styles, sizing attributes, links and inline images', () => {
+    const html =
+      '<table width="400" style="border-collapse:collapse"><tbody><tr>' +
+      '<td valign="top" align="left" bgcolor="#eeeeee" style="color:#336699">' +
+      '<img src="data:image/png;base64,AAAA" width="120" height="40" alt="">' +
+      '<a href="https://sarv.com" target="_blank">sarv.com</a></td></tr></tbody></table>';
+    const out = sanitizeSignatureHtml(html);
+    for (const kept of [
+      '<table', 'width="400"', 'border-collapse', 'valign="top"', 'align="left"', 'bgcolor="#eeeeee"',
+      'color:#336699', 'src="data:image/png;base64,AAAA"', 'height="40"', 'href="https://sarv.com"', 'target="_blank"',
+    ]) {
+      expect(out).toContain(kept);
+    }
+  });
+});
+
+describe('signatureImageHtml', () => {
+  // Regression (L-10): the picked image's data URL used to be interpolated into
+  // the markup, so a `"` in it (from the file's MIME type) closed the attribute
+  // and smuggled in an event handler.
+  it('keeps the URL an attribute value even when it contains a quote', () => {
+    const html = signatureImageHtml('data:image/png" onerror="alert(1);base64,AAAA');
+    const img = new DOMParser().parseFromString(html, 'text/html').querySelector('img')!;
+    expect(img.getAttributeNames().sort()).toEqual(['alt', 'src', 'style']);
+    expect(img.getAttribute('src')).toBe('data:image/png" onerror="alert(1);base64,AAAA');
+  });
+
+  // Regression: a full-resolution photo must not land giant in the signature.
+  it('caps the inserted image to the default width', () => {
+    const img = new DOMParser()
+      .parseFromString(signatureImageHtml('data:image/png;base64,AAAA'), 'text/html')
+      .querySelector('img')!;
+    expect(img.getAttribute('style')).toBe('width:200px;height:auto;');
+    expect(img.getAttribute('alt')).toBe('');
   });
 });

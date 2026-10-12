@@ -1,4 +1,3 @@
-import DOMPurify from 'dompurify';
 import {
   Bold, Italic, Underline, Strikethrough, Link as LinkIcon,
   List, ListOrdered, Image as ImageIcon,
@@ -6,6 +5,8 @@ import {
   Baseline, Highlighter, RemoveFormatting, Maximize2, Minimize2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+
+import { sanitizeSignatureHtml, signatureImageHtml } from '../utils/signatures';
 
 import { Tooltip } from './Tooltip';
 
@@ -24,24 +25,15 @@ const FONTS = [
 /** Point-ish sizes offered in the size dropdown. */
 const SIZES = ['10px', '12px', '14px', '16px', '18px', '24px', '32px'];
 
-/** Strip only genuinely unsafe bits (scripts, inline event handlers) while
- *  keeping tables, inline styles, and image sizing — the layout we must NOT
- *  lose. Deliberately light-touch, unlike a rich-text schema allowlist. */
-const sanitize = (html: string): string =>
-  DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
-    ADD_TAGS: ['table', 'thead', 'tbody', 'tr', 'td', 'th'],
-    ADD_ATTR: ['style', 'target', 'width', 'height', 'align', 'valign', 'bgcolor', 'color'],
-    ALLOW_DATA_ATTR: false,
-  });
-
 /**
  * Fidelity-preserving signature editor. A plain contentEditable keeps pasted
  * HTML (tables, flex, inline styles, image width/height) exactly as pasted —
  * the TipTap editor drops all of that because its schema has no table/flex
- * nodes. innerHTML is stored verbatim so a designed signature renders here (and
- * when sent) identically to how it looks in Gmail; the toolbar also lets a user
+ * nodes. The layout is kept so a designed signature renders here (and when
+ * sent) identically to how it looks in Gmail; the toolbar also lets a user
  * build a good-looking signature from scratch (font, size, color, image, …).
+ * Only the unsafe parts are dropped, by `sanitizeSignatureHtml`, both on the
+ * way into the editor and on the way out.
  *
  * Remount via a `key` when switching between signatures so each loads fresh.
  */
@@ -66,13 +58,18 @@ export function SignatureEditor({ value, onChange, className }: SignatureEditorP
 
   useEffect(() => {
     if (ref.current && value !== lastEmitted.current) {
-      ref.current.innerHTML = value || '';
+      // Sanitised BEFORE it reaches the DOM: this div lives in the main app
+      // document, where an `<img onerror>` in a stored signature is stopped only
+      // by the release build's CSP — not in dev, and not markup or CSS.
+      ref.current.innerHTML = sanitizeSignatureHtml(value || '');
+      // The raw value, not the sanitised one, and nothing is emitted: showing a
+      // stored signature never writes it back (no onChange on mount).
       lastEmitted.current = value;
     }
   }, [value]);
 
   const emit = () => {
-    const html = sanitize(ref.current?.innerHTML || '');
+    const html = sanitizeSignatureHtml(ref.current?.innerHTML || '');
     lastEmitted.current = html;
     onChange(html);
   };
@@ -155,7 +152,7 @@ export function SignatureEditor({ value, onChange, className }: SignatureEditorP
     const reader = new FileReader();
     reader.onload = () => {
       const src = String(reader.result);
-      run(() => document.execCommand('insertHTML', false, `<img src="${src}" alt="" style="width:200px;height:auto;" />`));
+      run(() => document.execCommand('insertHTML', false, signatureImageHtml(src)));
     };
     reader.readAsDataURL(file);
   };
