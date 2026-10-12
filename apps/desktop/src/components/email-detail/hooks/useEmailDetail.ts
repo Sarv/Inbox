@@ -1120,25 +1120,36 @@ export function useEmailDetail(): EmailDetailContext | null {
     clearSelectedEmail();
   };
 
+  // Every row a whole-conversation action must reach. allThreadEmails, never
+  // the collapsed list: a whole-conversation action has to reach the duplicate
+  // copies we fold out of view, or deleting a thread leaves six identical rows
+  // behind that the next sync brings straight back.
+  const conversationTargets = () =>
+    allThreadEmails.length > 0 ? allThreadEmails : selectedEmail ? [selectedEmail] : [];
+
+  // markAsRead is optimistic locally; the IMAP flag writes are coalesced by the
+  // OperationQueue.
+  const markConversationRead = async (read: boolean) => {
+    for (const e of conversationTargets()) {
+      await markAsRead(e.id, read);
+    }
+  };
+
   const handleMarkRead = async () => {
     const markingUnread = isRead;
     // Gmail-style: the toolbar toggle acts on the WHOLE open conversation, not
     // just the shown message. Direction is still driven by the currently-shown
-    // `isRead` (mark everything read, or everything unread). markAsRead is
-    // optimistic locally; the IMAP flag writes are coalesced by the
-    // OperationQueue.
-    // allThreadEmails, never the collapsed list: a whole-conversation action has
-    // to reach the duplicate copies we fold out of view, or deleting a thread
-    // leaves six identical rows behind that the next sync brings straight back.
-    const targets = allThreadEmails.length > 0 ? allThreadEmails : selectedEmail ? [selectedEmail] : [];
-    for (const e of targets) {
-      await markAsRead(e.id, !isRead);
-    }
+    // `isRead` (mark everything read, or everything unread).
+    await markConversationRead(!isRead);
     // When marking as unread, go back to list view
     if (markingUnread) {
       clearSelectedEmail();
     }
   };
+
+  // The conversation menus' Mark unread (toolbar ⋮, anchor card ⋮): every
+  // message, not the anchor alone — the anchor is the FIRST message.
+  const handleMarkThreadUnread = () => markConversationRead(false);
 
   // Gmail-style: the detail toolbar acts on the WHOLE open conversation, not
   // just the message currently shown. Single deleteEmail/archiveEmail
@@ -1149,11 +1160,7 @@ export function useEmailDetail(): EmailDetailContext | null {
   // single-message thread keeps the per-message path so its undo toast +
   // built-in auto-advance are preserved.
   const removeWholeThread = async (action: 'delete' | 'archive' | 'notspam' | 'spam') => {
-    // allThreadEmails, never the collapsed list: a whole-conversation action has
-    // to reach the duplicate copies we fold out of view, or deleting a thread
-    // leaves six identical rows behind that the next sync brings straight back.
-    const targets = allThreadEmails.length > 0 ? allThreadEmails : selectedEmail ? [selectedEmail] : [];
-    const ids = targets.map((e) => e.id);
+    const ids = conversationTargets().map((e) => e.id);
     if (ids.length === 0) return;
 
     if (ids.length === 1) {
@@ -1608,6 +1615,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     isRestoring,
     handleBack,
     handleMarkRead,
+    handleMarkThreadUnread,
     handleDelete,
     handleArchive,
     handleRemoveAICategory,

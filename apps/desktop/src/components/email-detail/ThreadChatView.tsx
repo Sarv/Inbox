@@ -65,7 +65,7 @@ function copyFromMenu(text: string): void {
  * at the end of the conversation), and Delete / Archive act on the one message
  * a bubble shows — never the conversation around it.
  */
-const CHAT_MENU_WIRING: EmailMenuWiring = { forward: 'inline', removes: 'message' };
+const CHAT_MENU_WIRING: EmailMenuWiring = { forward: 'inline', scope: 'message' };
 
 /** An open right-click menu: whose message, where, and over what. */
 interface PointMenu extends MessageMenuTarget {
