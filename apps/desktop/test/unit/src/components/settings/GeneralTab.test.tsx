@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GeneralTab } from '../../../../../src/components/settings/GeneralTab';
 import { defaultSettings, type AppSettings } from '../../../../../src/components/settings/types';
-import { cleanup, render, toggle, type Mounted } from '../../../../helpers/render';
+import { useCrashReportChoiceStore } from '../../../../../src/services/crash-report-choice';
+import { cleanup, render, settle, toggle, type Mounted } from '../../../../helpers/render';
 
 // The signature editor is its own suite's business, and a heavy one.
 vi.mock('../../../../../src/components/settings/SignatureSettings', () => ({ SignatureSettings: () => null }));
@@ -113,5 +114,78 @@ describe('GeneralTab → Contact photos from Gravatar', () => {
     toggle(checkboxLabelled('Domain favicons'));
     expect(update).toHaveBeenCalledWith('senderLogos', false);
     expect(update).toHaveBeenCalledWith('senderFavicons', false);
+  });
+});
+
+describe('GeneralTab → Send crash reports (CASA L-8)', () => {
+  const diagnostics = { getCrashReports: vi.fn(), setCrashReports: vi.fn() };
+  const crashBox = () => checkboxLabelled('Send crash reports');
+
+  beforeEach(() => {
+    useCrashReportChoiceStore.setState({ choice: null });
+    diagnostics.getCrashReports.mockReset();
+    diagnostics.setCrashReports.mockReset();
+    (window as unknown as { electronAPI: unknown }).electronAPI = { diagnostics };
+  });
+  afterEach(() => {
+    delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+  });
+
+  const mountWith = async (answer: 'yes' | 'no' | 'unasked') => {
+    diagnostics.getCrashReports.mockResolvedValue({ success: true, data: answer });
+    const update = mount(defaultSettings);
+    await settle();
+    return update;
+  };
+
+  // Breaks if the box shows anything but main's answer — ticked for a user
+  // who was never asked (the old default) or unticked after a yes.
+  it('shows main’s answer: ticked only for a yes', async () => {
+    await mountWith('unasked');
+    expect(crashBox()?.checked).toBe(false);
+    cleanup();
+    await mountWith('no');
+    expect(crashBox()?.checked).toBe(false);
+    cleanup();
+    await mountWith('yes');
+    expect(crashBox()?.checked).toBe(true);
+  });
+
+  // Breaks if the choice goes into this screen's settings copy again (which
+  // Save would write back and the bootstrap used to push over main's answer)
+  // instead of straight to main.
+  it('records a change in main at once, never in the settings copy', async () => {
+    diagnostics.setCrashReports.mockResolvedValue({ success: true });
+    const update = await mountWith('unasked');
+    toggle(crashBox());
+    await settle();
+    expect(diagnostics.setCrashReports).toHaveBeenCalledWith(true);
+    expect(crashBox()?.checked).toBe(true);
+    toggle(crashBox());
+    await settle();
+    expect(diagnostics.setCrashReports).toHaveBeenLastCalledWith(false);
+    expect(crashBox()?.checked).toBe(false);
+    expect(update).not.toHaveBeenCalledWith('crashReports', expect.anything());
+  });
+
+  // Breaks if a failed save looks saved: the box must stay as main has it,
+  // and say why.
+  it('stays as it was and says so when main could not save it', async () => {
+    diagnostics.setCrashReports.mockResolvedValue({ success: false, error: 'EACCES' });
+    await mountWith('no');
+    toggle(crashBox());
+    await settle();
+    expect(crashBox()?.checked).toBe(false);
+    expect(mounted.container.textContent).toContain('That preference could not be saved.');
+  });
+
+  // Breaks if the explanation goes back to opt-out wording, or stops saying
+  // that no memory dump is sent.
+  it('explains that it is off until turned on, and what is sent', async () => {
+    await mountWith('unasked');
+    const text = mounted.container.textContent ?? '';
+    expect(text).toContain('Off until you turn it on.');
+    expect(text).toContain('Email addresses are removed, and so are passwords and tokens wherever the app recognises them');
+    expect(text).toContain('a copy of the app’s memory');
   });
 });

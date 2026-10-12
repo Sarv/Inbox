@@ -73,7 +73,7 @@ function comparableFilePath(pathname: string): string {
  * pane, outside the email CSP, and a top-level navigation to any local page
  * would have run it with the preload bridge. Query and fragment don't matter.
  */
-function isAppUrl(url: string, appUrl: string): boolean {
+export function isAppUrl(url: string, appUrl: string): boolean {
   try {
     const target = new URL(url);
     const app = new URL(appUrl);

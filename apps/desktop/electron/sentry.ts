@@ -1,19 +1,31 @@
 /**
  * Sentry initialization for the Electron MAIN process.
  *
- * Errors & crashes only — no performance tracing, no session replay. Native
- * crashes (renderer/GPU process minidumps) are captured automatically by
- * @sentry/electron. Renderer-process JS errors are routed here over IPC (see
- * the `@sentry/electron/preload` import in preload.ts).
+ * Errors only — no performance tracing, no session replay, and no native
+ * crash dumps: the minidump integrations are removed (see withoutMinidumps),
+ * because a minidump is a snapshot of process memory that can hold message
+ * text and tokens, and no beforeSend can scrub it. Renderer-process JS errors
+ * are routed here over IPC (see the `@sentry/electron/preload` import in
+ * preload.ts).
  *
  * All diagnostic context is set HERE in the main process. @sentry/electron
  * synchronizes scope (user, tags, breadcrumbs, contexts) between the main and
  * renderer processes, so identity/tags/breadcrumbs set here are attached to
  * renderer events too — we don't have to duplicate them in the renderer.
  *
- * Privacy: every event and breadcrumb passes through filterEvent /
- * filterBreadcrumb — dropped entirely when the user turned crash reports off,
- * otherwise scrubbed of email addresses and URL query strings (see
+ * Consent (CASA L-8): crash reporting is OFF until the user says yes — asked
+ * once on first launch (CrashReportConsentDialog), changeable in Settings →
+ * General. Main owns that answer (crash-report-pref.ts). Sentry is still
+ * initialised at module load whatever the answer (main.ts relies on it
+ * registering its IPC scheme first, and a yes must apply without a restart),
+ * but NOTHING leaves the device without a yes: the transport itself is gated
+ * (gatedTransport), which also covers what never passes beforeSend — session
+ * pings, renderer-forwarded envelopes, client reports, and anything queued
+ * offline by an earlier version.
+ *
+ * Privacy: every event and breadcrumb also passes through filterEvent /
+ * filterBreadcrumb — dropped without a yes, otherwise scrubbed of email
+ * addresses, secrets and URL query strings everywhere in the event (see
  * telemetry-scrub in core). Mailbox data must never reach Sentry.
  *
  * The DSN comes from SARVINBOX_SENTRY_DSN, baked at build time by Vite's
@@ -22,48 +34,95 @@
  * client). With no DSN configured, Sentry stays completely inert.
  */
 import { createHash } from 'crypto';
+import { rmSync } from 'fs';
+import { join } from 'path';
 
-import { scrubBreadcrumb, scrubEvent, setLogSink, type LogLevel } from '@sarvinbox/core';
+import { redactSecrets, scrubBreadcrumb, scrubEvent, setLogSink, type LogLevel } from '@sarvinbox/core';
 import { setSlowQueryReporter, type SlowQueryEvent } from '@sarvinbox/storage-node';
 import * as Sentry from '@sentry/electron/main';
 import { app } from 'electron';
 
-import { readCrashReportsEnabled, writeCrashReportsEnabled } from './services/crash-report-pref';
-import { redactSecrets } from './utils/file-logger';
+import { readCrashReportChoice, writeCrashReportChoice, type CrashReportChoice } from './services/crash-report-pref';
 
 let sentryEnabled = false;
 /**
- * The user's "Send crash reports" choice. Sentry is still initialised when it
- * is off (so turning it back on needs no restart), but every event and
- * breadcrumb is dropped in beforeSend/beforeBreadcrumb — nothing is queued or
- * sent, including native crash reports uploaded on the next launch.
+ * The user's crash-report answer, read from disk at startup. Only `yes`
+ * sends anything; `no` and `unasked` (never answered) both send nothing.
  */
-let reportingAllowed = true;
+let choice: CrashReportChoice = 'unasked';
 
-/** Apply and persist the user's choice. */
+/**
+ * Apply and persist the user's answer. Written FIRST: a write that fails
+ * throws before anything changes, so the running state never claims a choice
+ * the next launch would not see (the caller reports the failure).
+ */
 export function setCrashReportsEnabled(enabled: boolean): void {
-  reportingAllowed = enabled;
-  writeCrashReportsEnabled(enabled);
+  const next = enabled ? 'yes' : 'no';
+  writeCrashReportChoice(next);
+  choice = next;
 }
 
+/** The user's answer, or `unasked` — what Settings and the consent dialog show. */
+export function crashReportChoice(): CrashReportChoice {
+  return choice;
+}
+
+/** Whether anything may be sent: only after an explicit yes. */
 export function crashReportsEnabled(): boolean {
-  return reportingAllowed;
+  return choice === 'yes';
 }
 
 /**
- * The single filter every outgoing breadcrumb passes through: dropped when the
- * user opted out, otherwise email addresses redacted and URL queries stripped.
- * Exported for tests.
+ * The single filter every outgoing breadcrumb passes through: dropped without
+ * a yes, otherwise email addresses and secrets redacted and URL queries
+ * stripped. Exported for tests.
  */
 export function filterBreadcrumb<T extends Sentry.Breadcrumb>(crumb: T): T | null {
-  return reportingAllowed ? scrubBreadcrumb(crumb) : null;
+  return crashReportsEnabled() ? scrubBreadcrumb(crumb) : null;
 }
 
 /** The single filter every outgoing event passes through. Exported for tests. */
 export function filterEvent<T extends Sentry.ErrorEvent>(event: T, originalException?: unknown): T | null {
-  if (!reportingAllowed) return null;
+  if (!crashReportsEnabled()) return null;
   if (isTransientConnectionError(originalException)) return null;
   return scrubEvent(event);
+}
+
+// The integrations that capture native crashes as minidumps. SentryMinidump is
+// in the SDK's defaults (it starts Crashpad and uploads each dump as an event
+// attachment); ElectronMinidump uploads straight from Crashpad, bypassing
+// beforeSend entirely. A minidump is raw process memory — message text, tokens
+// — that no scrubber can see into, so neither may run.
+const MINIDUMP_INTEGRATIONS = new Set(['SentryMinidump', 'ElectronMinidump']);
+
+/** The SDK's integrations minus the minidump ones. Exported for tests. */
+export function withoutMinidumps<T extends { name: string }>(integrations: T[]): T[] {
+  return integrations.filter((integration) => !MINIDUMP_INTEGRATIONS.has(integration.name));
+}
+
+type SentryTransport = ReturnType<typeof Sentry.makeElectronTransport>;
+
+/**
+ * Wrap a transport factory so nothing is sent unless `allowed()` says so at
+ * send time. Everything the SDK sends — events, session pings, client
+ * reports, envelopes forwarded from the renderer — ends in a transport's
+ * `send`, which makes this the one gate that covers it all (beforeSend sees
+ * events only).
+ *
+ * Wraps the BASE transport, inside the offline queue: a refused envelope
+ * reads as sent, so it is never queued for later, and envelopes queued by an
+ * earlier version (captured under its opt-out default) are drained and
+ * dropped rather than delivered once the network returns. Exported for tests.
+ */
+export function gatedTransport<O>(make: (options: O) => SentryTransport, allowed: () => boolean): (options: O) => SentryTransport {
+  return (options) => {
+    const inner = make(options);
+    return {
+      ...inner,
+      send: (envelope) => (allowed() ? inner.send(envelope) : Promise.resolve({})),
+      flush: (timeout) => inner.flush(timeout),
+    };
+  };
 }
 
 // Slow-query telemetry → Sentry. The DB layer logs anything ≥ 40ms to the
@@ -143,9 +202,10 @@ function summarizeArgs(args: unknown[]): string | undefined {
 /**
  * Report a FATAL error (uncaughtException / unhandledRejection) to Sentry, then
  * best-effort flush so the event is on its way BEFORE the process may die. Wrapped
- * in try/catch: a crash handler must never throw again. Inert without a DSN.
+ * in try/catch: a crash handler must never throw again. Inert without a DSN,
+ * and sends nothing without the user's yes (filterEvent + gatedTransport).
  * `Sentry.flush` returns a promise — we fire it but don't (can't) await inside a
- * synchronous crash handler; @sentry/electron also persists a native crash report.
+ * synchronous crash handler.
  */
 export function captureFatal(error: unknown, tag?: string): void {
   try {
@@ -156,17 +216,39 @@ export function captureFatal(error: unknown, tag?: string): void {
   }
 }
 
+/**
+ * Delete the scope snapshot older versions left behind. The native-crash
+ * integration (now never started, see withoutMinidumps) rewrote
+ * `userData/sentry/scope_v3.json` — breadcrumbs, tags and the hashed user — on
+ * every scope change, readable by other local users (0644). Nothing writes it
+ * any more, so nothing would ever remove it. Best-effort.
+ */
+export function removeStaleSentryScope(userData: string = app.getPath('userData')): void {
+  try {
+    rmSync(join(userData, 'sentry', 'scope_v3.json'), { force: true });
+  } catch {
+    // Unreadable folder or a locked file: it stays, as before.
+  }
+}
+
 export function initSentryMain(): void {
+  removeStaleSentryScope();
+  // Read the answer even without a DSN, so Settings and the consent dialog
+  // show what the user actually chose.
+  choice = readCrashReportChoice();
   const dsn = process.env.SARVINBOX_SENTRY_DSN;
   if (!dsn) return; // inert without a DSN — nothing is sent
-  reportingAllowed = readCrashReportsEnabled();
 
   Sentry.init({
     dsn,
     environment: app.isPackaged ? 'production' : 'development',
     release: `sarvinbox@${app.getVersion()}`,
-    // Errors & crashes only.
+    // Errors only.
     tracesSampleRate: 0,
+    // No native crash dumps (process memory) — see withoutMinidumps.
+    integrations: (defaults) => withoutMinidumps(defaults),
+    // Nothing leaves the device without the user's yes — see gatedTransport.
+    transport: Sentry.makeElectronOfflineTransport(gatedTransport(Sentry.makeElectronTransport, crashReportsEnabled)),
     // Keep a long trail so the full reconnect ladder survives in breadcrumbs
     // (default 100 can be exhausted by a chatty sync burst before a crash).
     maxBreadcrumbs: 300,

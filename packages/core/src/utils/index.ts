@@ -101,6 +101,7 @@ export {
 export * from './spam-reputation';
 export * from './bimi';
 export * from './favicon';
+export * from './public-destination';
 export * from './asar-path';
 export * from './ai-provider-auth';
 export * from './html-escape';

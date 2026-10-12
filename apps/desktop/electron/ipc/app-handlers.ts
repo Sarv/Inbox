@@ -10,7 +10,7 @@ import { join } from 'path';
 import { createLogger } from '@sarvinbox/core';
 import { ipcMain, shell } from 'electron';
 
-import { crashReportsEnabled, setCrashReportsEnabled } from '../sentry';
+import { crashReportChoice, setCrashReportsEnabled } from '../sentry';
 
 const logger = createLogger('app-handlers');
 
@@ -38,9 +38,12 @@ function isSafeExternalUrl(url: string): boolean {
 }
 
 export function registerAppHandlers(): void {
-  // Settings → General → Send crash reports. Applied at once and persisted for
-  // the next launch (Sentry reads it before the window exists).
-  ipcMain.handle('diagnostics:getCrashReports', () => ({ success: true, data: crashReportsEnabled() }));
+  // Crash-report consent: the first-launch dialog and Settings → General →
+  // Send crash reports. Main is the ONLY owner of the answer — the window
+  // reads it here ('yes' | 'no' | 'unasked') and records an answer with a
+  // boolean; it is applied at once and persisted for the next launch (Sentry
+  // reads it before the window exists).
+  ipcMain.handle('diagnostics:getCrashReports', () => ({ success: true, data: crashReportChoice() }));
   ipcMain.handle('diagnostics:setCrashReports', (_event, enabled: unknown) => {
     if (typeof enabled !== 'boolean') return { success: false, error: 'enabled must be a boolean' };
     try {

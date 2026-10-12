@@ -25,6 +25,7 @@ import {
   SenderIdentityService,
   getSenderIdentityPolicy,
   identityFromRow,
+  lookupDomain,
   normalizeSenderIdentityPolicy,
   resetSenderIdentityPolicyCache,
   senderDomain,
@@ -75,6 +76,35 @@ describe('senderDomain', () => {
     expect(senderDomain('nope')).toBeNull();
     expect(senderDomain('x@localhost')).toBeNull(); // no dot: nothing to look up
     expect(senderDomain(null)).toBeNull();
+  });
+});
+
+describe('lookupDomain (CASA L-6)', () => {
+  // Breaks if an address whose "domain" is an IP literal or a host with a
+  // port starts a favicon or BIMI lookup. `x@10.0.0.5` would otherwise fetch
+  // https://10.0.0.5/ and its favicon from inside the reader's network.
+  it('turns away IP literals, ports, paths and other non-domains', () => {
+    for (const address of [
+      'x@10.0.0.5', 'x@[10.0.0.5]', 'x@[IPv6:::1]', 'x@[::1]', 'x@127.0.0.1',
+      'x@brand.example:8080', 'x@brand.example/path', 'x@bad host.example', 'x@co.uk', 'x@',
+    ]) {
+      expect(senderDomain(address), address).toBeNull();
+    }
+  });
+
+  // Breaks if a real sender domain is turned away. That sender would get no
+  // logo or favicon at all.
+  it('keeps real domains, normalised the way the cache keys them', () => {
+    expect(senderDomain('a@News.Brand.Co.UK')).toBe('news.brand.co.uk');
+    expect(senderDomain('a@brand.example.')).toBe('brand.example');
+    expect(senderDomain('a@bücher.de')).toBe('bücher.de');
+  });
+
+  // Breaks if a value the renderer sends over IPC that is not a string
+  // reaches the lookup.
+  it('is null for anything that is not a string', () => {
+    for (const raw of [null, undefined, 42, {}, ['brand.example']]) expect(lookupDomain(raw)).toBeNull();
+    expect(lookupDomain(' Brand.Example ')).toBe('brand.example');
   });
 });
 
@@ -222,6 +252,19 @@ describe('SenderIdentityService.refresh', () => {
     expect(store.get('brand.example')).toMatchObject({ faviconStatus: 'error', faviconDetail: expect.stringContaining('ECONNRESET') });
   });
 
+  // Breaks if a caller other than getForAddress (the scheduler, the
+  // Security page) can start a lookup for an IP literal. refresh is the one
+  // door every lookup passes through.
+  it('turns away a domain that is not one, whoever asks', async () => {
+    const { svc, lookupBimi, discoverFavicon, onUpdated } = harness();
+    await svc.refresh('10.0.0.5');
+    await svc.refresh('[::1]');
+    await svc.refresh('brand.example:8443');
+    expect(lookupBimi).not.toHaveBeenCalled();
+    expect(discoverFavicon).not.toHaveBeenCalled();
+    expect(onUpdated).not.toHaveBeenCalled();
+  });
+
   it('survives an onUpdated listener that throws (a renderer that is gone)', async () => {
     const { svc, onUpdated } = harness();
     onUpdated.mockImplementation(() => { throw new Error('window destroyed'); });
@@ -240,6 +283,50 @@ describe('SenderIdentityService.refreshStale', () => {
 
     const off = harness({ policy: { logos: false, favicons: false, gravatar: false } });
     expect(await off.svc.refreshStale(['a.example'], 5)).toBe(0);
+  });
+});
+
+describe('SenderIdentityService.refreshAllowed (the Security page’s Refresh)', () => {
+  // Breaks if "Refresh" stops re-running a lookup that is still fresh. The
+  // button would then do nothing.
+  it('re-runs every lookup the policy allows, fresh or not', async () => {
+    const { svc, store, lookupBimi, discoverFavicon } = harness();
+    store.upsertBimi('brand.example', verified(), T0);
+    store.upsertFavicon('brand.example', found(), T0);
+    await svc.refreshAllowed('brand.example');
+    expect(lookupBimi).toHaveBeenCalledWith('brand.example');
+    expect(discoverFavicon).toHaveBeenCalledWith('brand.example');
+  });
+
+  // Breaks if a forced refresh fetches a favicon the reader switched off.
+  // The old IPC forced both lookups whatever the settings said (CASA L-6).
+  it('fetches no favicon when favicons are off, and nothing when both are off', async () => {
+    const logosOnly = harness({ policy: { logos: true, favicons: false, gravatar: false } });
+    await logosOnly.svc.refreshAllowed('brand.example');
+    expect(logosOnly.lookupBimi).toHaveBeenCalledTimes(1);
+    expect(logosOnly.discoverFavicon).not.toHaveBeenCalled();
+
+    const faviconsOnly = harness({ policy: { logos: false, favicons: true, gravatar: false } });
+    await faviconsOnly.svc.refreshAllowed('brand.example');
+    expect(faviconsOnly.lookupBimi).not.toHaveBeenCalled();
+    expect(faviconsOnly.discoverFavicon).toHaveBeenCalledTimes(1);
+
+    const off = harness({ policy: { logos: false, favicons: false, gravatar: false } });
+    await off.svc.refreshAllowed('brand.example');
+    expect(off.lookupBimi).not.toHaveBeenCalled();
+    expect(off.discoverFavicon).not.toHaveBeenCalled();
+    expect(off.onUpdated).not.toHaveBeenCalled();
+  });
+});
+
+describe('SenderIdentityService.refreshStale skips non-domains', () => {
+  // Breaks if a sender_stats row whose domain is an IP literal is refreshed
+  // by the background tick, or if it uses up one of the tick's slots.
+  it('neither looks up nor counts a domain that is not one', async () => {
+    const { svc, lookupBimi } = harness();
+    const n = await svc.refreshStale(['10.0.0.5', '[::1]', 'a.example', 'b.example'], 2);
+    expect(n).toBe(2);
+    expect(lookupBimi.mock.calls.map((c) => c[0])).toEqual(['a.example', 'b.example']);
   });
 });
 

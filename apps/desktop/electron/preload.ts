@@ -455,7 +455,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
-  // Crash/error reporting consent (Settings → General → Send crash reports).
+  // Crash/error reporting consent (the first-launch dialog and Settings →
+  // General → Send crash reports). Main owns the answer.
   diagnostics: {
     getCrashReports: () => ipcRenderer.invoke('diagnostics:getCrashReports'),
     setCrashReports: (enabled: boolean) => ipcRenderer.invoke('diagnostics:setCrashReports', enabled),
@@ -1426,7 +1427,9 @@ export interface ElectronAPI {
     onHeaderBackfillProgress: (cb: (state: HeaderBackfillState) => void) => () => void;
   };
   diagnostics: {
-    getCrashReports: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
+    /** The user's crash-report answer; 'unasked' until they give one (nothing is sent). */
+    getCrashReports: () => Promise<{ success: boolean; data?: 'yes' | 'no' | 'unasked'; error?: string }>;
+    /** Record an answer: true = send crash reports, false = don't. */
     setCrashReports: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   };
   antivirus: {

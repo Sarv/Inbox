@@ -41,15 +41,27 @@ export function readAppSettings(): AppSettings {
 export const SETTINGS_OWNED_ELSEWHERE = ['remoteImageMode', 'reputation'] as const satisfies readonly (keyof AppSettings)[];
 
 /**
+ * Keys an older version kept in the blob that no longer belong there. A
+ * screen's working copy still carries one when the stored blob did (it is
+ * loaded as `{...defaults, ...stored}`), so Save drops it.
+ *
+ *  - `crashReports`: the main process owns the crash-report answer (CASA L-8;
+ *    services/crash-report-choice). A copy here is stale by definition, and it
+ *    is exactly what used to overwrite main's answer on every launch.
+ */
+export const RETIRED_SETTINGS = ['crashReports'] as const;
+
+/**
  * The blob a settings screen's Save writes: its working copy, with every
  * setting another surface owns taken from what is stored NOW. A setting that is
  * not stored at all stays out, rather than being written from the screen's
  * defaults: that would look like a choice, and hide a legacy value the real
- * setting is still read from (the old `autoLoadRemoteImages` boolean). Pure —
- * `stored` is the parsed blob, or anything unreadable.
+ * setting is still read from (the old `autoLoadRemoteImages` boolean). Retired
+ * keys are dropped. Pure — `stored` is the parsed blob, or anything unreadable.
  */
 export function settingsForSave(screen: AppSettings, stored: unknown): Record<string, unknown> {
   const next: Record<string, unknown> = { ...screen };
+  for (const key of RETIRED_SETTINGS) delete next[key];
   const current = stored && typeof stored === 'object' && !Array.isArray(stored)
     ? (stored as Record<string, unknown>)
     : {};

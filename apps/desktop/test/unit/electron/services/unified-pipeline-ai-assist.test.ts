@@ -687,3 +687,44 @@ describe('an unreadable stored AI Assist switch fails closed', () => {
     expect(h.sent).toEqual([]);
   });
 });
+
+describe('the poll’s per-email line (CASA L-7)', () => {
+  /** Run one poll-delivered email through AI sorting at `level`, collecting every console line. */
+  async function pollOneAt(level: 'info' | 'trace'): Promise<string[]> {
+    seedMirror(established(true));
+    const s = await launch();
+    const lines: string[] = [];
+    const record = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    const spies = (['log', 'debug', 'info', 'warn'] as const).map((m) => vi.spyOn(console, m).mockImplementation(record));
+    s.core.setLogLevel(level);
+    try {
+      const subject = await deliver(s, 'acct-a', 'a-poll', 'poll');
+      // Extraction already done (e.g. before a restart), so the poll reaches
+      // it in phase 2 — the per-email agent pass this line belongs to.
+      h.accounts[0].storage.getRepositories().agent.markExtractionDone('a-poll');
+      await pollTick();
+      await until(() => wasSent(subject), 'the polled email to reach the provider');
+      await until(decided([['acct-a', 'a-poll']]), 'the pipeline to finish');
+    } finally {
+      s.core.setLogLevel('warn');
+      for (const spy of spies) spy.mockRestore();
+    }
+    return lines.filter((l) => l.includes('P2 start'));
+  }
+
+  // Breaks if the 30s poll goes back to an INFO line per email naming its
+  // sender: a hot-path per-item log (one per email on every catch-up) that
+  // wrote each correspondent's address into a release app.log.
+  it('writes no per-email sender line at INFO', async () => {
+    expect(await pollOneAt('info')).toEqual([]);
+  });
+
+  // Breaks if the line is lost entirely rather than moved to TRACE — and
+  // proves the INFO test above really exercised the poll's phase-2 path.
+  it('still writes it at TRACE, for debugging', async () => {
+    const lines = await pollOneAt('trace');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('[TRACE]');
+    expect(lines[0]).toContain('P2 start: a-poll from=sender@example.test');
+  });
+});

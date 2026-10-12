@@ -19,6 +19,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   either option on later without re-entering your password, you are asked to
   re-enter it. Once a stricter connection works, the option is switched off for
   that saved password.
+- **Only the app's own window can talk to the app's core.** Every request the
+  window sends to the part of the app that holds your mail and passwords is now
+  checked: it must come from the app's main page in its main window. Before,
+  only a few requests were checked.
+- **Web pages inside the app can no longer use your microphone, camera or
+  clipboard.** The app had no rule for these requests, so they were allowed
+  without asking. Now only copying to the clipboard and full-screen video are
+  allowed, and only for the app itself. Extension panels and email content are
+  refused.
+- **A released app always loads its own files.** A setting meant only for
+  development could make an installed copy load its window from another
+  address, including from a file left in the folder the app was started from.
+  Installed copies now ignore it and no longer read such files.
+- **Crash reports are now your choice.** The app asks once whether to send
+  crash reports, and sends nothing until you say yes; until now they were on
+  unless you turned them off. If you close the question without answering, it
+  asks again next time. Reports no longer include snapshots of the app's memory,
+  and more of each report is checked for email addresses, passwords and tokens
+  before it is sent. You can change your answer in Settings → General.
+- **The app's log file no longer records email addresses.** In released
+  versions, email addresses are removed from the diagnostic log, the file can
+  only be read by your own user account, and text forwarded from the app window
+  can no longer be made to look like separate log lines.
+- **Sender logos can no longer reach devices on your network.** Looking up a
+  sender's website icon could be pointed at addresses inside your local network
+  (your router, say). The lookup now goes only to public internet addresses,
+  over a secure connection.
+- **Extensions are described as what they are.** Installing an extension now
+  always says that it runs as full code on your computer, with the same access
+  to your files and mail as the app, whatever permissions it asks for.
+  Installing from a folder asks you to confirm first. The checksum shown when
+  you install is described as a check for a damaged download, not as a check
+  on who made the extension.
+- **Signatures are cleaned before they are shown.** A saved signature is
+  stripped of scripts and other unsafe content before the signature editor
+  displays it, not only when it is saved.
 
 ## [1.3.3] - 2026-10-12
 

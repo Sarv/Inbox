@@ -671,6 +671,23 @@ describe('the in-app mirror', () => {
     expect(h.state.win!.sent).toHaveLength(1);
   });
 
+  // CASA L-3. Breaks: a shipped app reads the dev server variable again (it
+  // can only come from whoever launched it).
+  it('does NOT mirror in a release bundle even when VITE_DEV_SERVER_URL is set', async () => {
+    const svc = await load();
+    process.env['VITE_DEV_SERVER_URL'] = 'http://localhost:5173';
+    vi.stubEnv('SARVINBOX_BUILD_MODE', 'production');
+    try {
+      svc.setNotificationConfig({ mode: 'all' });
+      svc.notifyNewMail(mail());
+      flush();
+      expect(h.notifications).toHaveLength(1);
+      expect(h.state.win!.sent).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('does NOT mirror in a packaged build with native support', async () => {
     const svc = await load();
     svc.setNotificationConfig({ mode: 'all' });

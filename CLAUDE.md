@@ -233,6 +233,15 @@ Established shared helpers (extend this list as you add more):
   Whether the OS key store really protects saved secrets on this device (false on
   Linux `basic_text`). Use it for any renderer wording that says a secret is
   "saved securely" or "in the keychain", instead of asking `secureCreds` again.
+- `isPublicAddress(ip)` / `checkPublicHttpsUrl(url, { site })` —
+  `packages/core/src/utils/public-destination.ts`. The rules for a fetch whose URL
+  a stranger chose (mail content, a sender's DNS): public addresses only (NAT64
+  only around a public IPv4), https on port 443, optionally one registrable
+  domain. The main-process transport that enforces them at CONNECT time is
+  `senderIdentityFetch()` (`apps/desktop/electron/services/sender-identity-fetch.ts`,
+  plain Node https with a guarded `lookup`). Use these for any new
+  stranger-named fetch instead of `chromiumFetch`, which cannot check the
+  address it connects to.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

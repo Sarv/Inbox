@@ -1,6 +1,48 @@
+import DOMPurify from 'dompurify';
+
 import type { AppSettings, EmailSignature } from '../components/settings/types';
 
 const SETTINGS_KEY = 'sarvinbox-settings';
+
+/**
+ * The ONE sanitiser for signature HTML. Strips only genuinely unsafe bits
+ * (scripts, inline event handlers, `javascript:` URLs) while keeping tables,
+ * inline styles, links and image sizing — the layout a designed signature must
+ * NOT lose. Deliberately light-touch, unlike a rich-text schema allowlist.
+ *
+ * The signature editor runs it on BOTH sides: before stored HTML is assigned to
+ * its contentEditable (innerHTML into the main app document, which has the
+ * preload bridge: only the release build's CSP, `script-src 'self'`, keeps an
+ * `<img onerror>` there from running with the app's privileges, the dev build
+ * has none, and markup or CSS would still land in the app shell) and on every
+ * emit, so what is saved is clean too.
+ */
+export function sanitizeSignatureHtml(html: string): string {
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    ADD_TAGS: ['table', 'thead', 'tbody', 'tr', 'td', 'th'],
+    ADD_ATTR: ['style', 'target', 'width', 'height', 'align', 'valign', 'bgcolor', 'color'],
+    ALLOW_DATA_ATTR: false,
+  });
+}
+
+/**
+ * The markup the signature editor inserts for a picked image (an inline data
+ * URL, so it travels with the signature), capped to a sensible default width.
+ *
+ * Built through the DOM rather than string interpolation, so the URL can only
+ * ever be an attribute VALUE: a `"` in it (a data URL carries the file's MIME
+ * type) is escaped on serialisation instead of closing the attribute and adding
+ * an `onerror`. The element is created in an inert document, so building it
+ * never starts a load.
+ */
+export function signatureImageHtml(src: string): string {
+  const img = document.implementation.createHTMLDocument('').createElement('img');
+  img.setAttribute('src', src);
+  img.setAttribute('alt', '');
+  img.setAttribute('style', 'width:200px;height:auto;');
+  return img.outerHTML;
+}
 
 /**
  * Fill `signatures`/defaults from a legacy single `signature` string when the

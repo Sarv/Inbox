@@ -22,6 +22,7 @@ import { createLogger, getEventBus } from '@sarvinbox/core';
 import { Notification } from 'electron';
 
 import { getMainWindow } from '../shared';
+import { isReleaseBundle } from '../utils/dev-mode';
 
 const logger = createLogger('notifications');
 
@@ -173,8 +174,9 @@ export function notifyNewMail(m: NewMailNotice): void {
 // is spawned by node, so macOS won't authorize native toasts) and wherever the OS
 // can't show notifications (e.g. a headless Linux box with no notification
 // daemon). Kept OUT of a normal packaged build so native + in-app never double up.
+// A release bundle ignores the dev server variable, as everywhere (CASA L-3).
 function wantsInAppToast(): boolean {
-  return !!process.env['VITE_DEV_SERVER_URL'] || !Notification.isSupported();
+  return (!isReleaseBundle() && !!process.env['VITE_DEV_SERVER_URL']) || !Notification.isSupported();
 }
 
 let inAppSeq = 0;

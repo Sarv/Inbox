@@ -10,6 +10,7 @@ import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { ConnectionSecurityBanner } from './components/ConnectionSecurityBanner';
 import { Contacts } from './components/Contacts';
+import { CrashReportConsentDialog } from './components/CrashReportConsentDialog';
 import { EmailList } from './components/email-list';
 import { ExtensionManager } from './components/ExtensionManager';
 import { ExtensionNotification } from './components/ExtensionNotification';
@@ -984,6 +985,9 @@ function App() {
       {/* Auto-update prompt. Self-hiding: renders nothing unless the main
           process says there is something to show. */}
       <UpdateDialog />
+      {/* One-time crash-report consent (CASA L-8). Self-hiding: only while main
+          reports the question unanswered, and never on top of onboarding. */}
+      <CrashReportConsentDialog suppressed={showOnboarding} />
 
       {/* Set-up-sending (SMTP) modal — dismissible, opened on demand via the
           'sarvinbox:open-smtp-setup' event from the compose/reply banner. */}

@@ -141,11 +141,13 @@ import {
   hasAccountRuntime,
 } from './shared';
 import { resolveAppIconPath } from './utils/app-icon';
-import { isDevBuild } from './utils/dev-mode';
+import { devServerUrlFor, isDevBuild, isReleaseBundle } from './utils/dev-mode';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
+import { installIpcSenderGuard } from './utils/ipc-sender-guard';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
 import { mainWindowWebPreferences } from './utils/main-window-preferences';
 import { installNavigationGuards } from './utils/navigation-guards';
+import { installPermissionPolicy } from './utils/permission-policy';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -192,15 +194,30 @@ app.setAppUserModelId(isDev ? 'com.sarv.sarvinbox.dev' : 'com.sarv.sarvinbox');
 
 // Load local .env (gitignored) into process.env before anything reads it, so
 // OAuth secrets / dev overrides are available without exporting them by hand.
-loadDotEnv(defaultDotEnvPaths());
+// Dev bundles only: a release bundle has its client IDs inlined at build time,
+// and a `.env` it found in the launch directory (on Linux often $HOME) could
+// only be someone else's — re-pointing the Sarv sign-in server, say (CASA L-3).
+if (!isReleaseBundle()) loadDotEnv(defaultDotEnvPaths());
 
 // Release builds default to INFO — the logger's built-in default is 'debug' (so
 // the IMAP command + pool trace is visible in dev without any config), but that
 // floods a shipped app's app.log (tens of thousands of "Pool: acquired…" lines).
-// Dev stays at debug; an explicit SARV_LOG_LEVEL (env or .env) always wins.
+// Dev stays at debug; an explicit SARV_LOG_LEVEL (env, or .env in dev) always wins.
 if (!isDev && !process.env['SARV_LOG_LEVEL']) {
   setLogLevel('info');
 }
+
+// Every IPC listener — the Sentry SDK's (registered during its init below),
+// log:forward, and everything registerAllHandlers adds — only ever sees the
+// app's own window: its top frame, on the app URL. Installed before anything
+// registers; refuses everyone until the app URL is set below (CASA L-1).
+let ipcAppUrl: string | null = null;
+const ipcGuardLog = createLogger('ipc-guard');
+installIpcSenderGuard(ipcMain, {
+  mainWindow: getMainWindow,
+  appUrl: () => ipcAppUrl,
+  onRefused: (channel, url) => ipcGuardLog.warn(`refused IPC "${channel}" from ${url}: not the app window`),
+});
 
 // Initialize crash/error reporting as early as possible, before any app work.
 initSentryMain();
@@ -392,24 +409,29 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('log-level', '3');
 
 // App paths
-const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'] || (isDev ? 'http://localhost:5173' : null);
+const VITE_DEV_SERVER_URL = devServerUrlFor({ envUrl: process.env['VITE_DEV_SERVER_URL'], releaseBundle: isReleaseBundle(), isDev });
 // The bundled renderer entry, and the one URL the window counts as the app:
 // the dev server in development, this exact file in production (CASA M-6 —
 // see navigation-policy.ts). Built once, so the window, its navigation guards
 // and the two protocol handlers all agree on it.
 const APP_ENTRY_FILE = join(__dirname, '../dist/index.html');
 const APP_URL = VITE_DEV_SERVER_URL ?? pathToFileURL(APP_ENTRY_FILE).href;
+ipcAppUrl = APP_URL;
 
-// Tee the main-process console to a rolling app.log (dev AND release).
-initFileLogger();
+// Tee the main-process console to a rolling app.log (dev AND release). A
+// release's log redacts email addresses (CASA L-7); dev keeps them for
+// debugging. `isDev`, never `app.isPackaged` — see isDevBuild.
+initFileLogger({ redactAddresses: !isDev });
 // Renderer logs → the SAME app.log (redacted in appendExternalLog), so a bug
 // report's log file carries the renderer's trail too — not just DevTools. The
 // renderer forwards fire-and-forget (ipcRenderer.send), and its own level gate
 // (set in bootstrap/renderer-logging.ts) decides what's forwarded, so trace/debug
 // stay off in release. Registered right after the sink exists so nothing is lost.
-ipcMain.on('log:forward', (_e, rec: { level?: string; name?: string; text?: string } | undefined) => {
+// The record is untrusted: appendExternalLog keeps it to one capped line with a
+// known level, whatever the renderer sent.
+ipcMain.on('log:forward', (_e, rec: { level?: unknown; name?: unknown; text?: unknown } | undefined) => {
   if (rec && typeof rec.text === 'string') {
-    appendExternalLog('renderer', rec.level ?? 'info', rec.name ?? '?', rec.text);
+    appendExternalLog('renderer', rec.level, rec.name, rec.text);
   }
 });
 // Announce the active log level up front so it's obvious in app.log what will
@@ -968,6 +990,13 @@ app.whenReady().then(async () => {
     // will accept, and drop the cross-origin embedding blocks Chromium honours.
     // Without these, whole newsletters render with broken pictures.
     installEmailImageRequestHandlers(session.defaultSession.webRequest);
+
+    // Web permissions: with no handler Electron grants every request (the
+    // microphone, clipboard READ, notifications — to any frame). Only the app
+    // window's own top frame gets clipboard write and fullscreen (CASA L-2).
+    installPermissionPolicy(session.defaultSession, APP_URL, {
+      onDenied: (permission, origin) => logger.warn(`[Main] denied web permission "${permission}" to ${origin}`),
+    });
 
     // BEFORE anything opens a database: prove the native SQLite module actually
     // loads in this process. It dlopens lazily and every core-DB read swallows

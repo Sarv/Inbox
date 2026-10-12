@@ -1,5 +1,12 @@
 import { senderIdentityPolicyFromSettings } from '@sarvinbox/core/sender-identity-policy';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+
+import {
+  CRASH_REPORT_DISCLOSURE,
+  loadCrashReportChoice,
+  saveCrashReportChoice,
+  useCrashReportChoice,
+} from '../../services/crash-report-choice';
 
 import { SignatureSettings } from './SignatureSettings';
 import { FAILED_MESSAGE, describeTestNotificationResult } from './test-notification-message';
@@ -30,6 +37,16 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
   const identityPolicy = senderIdentityPolicyFromSettings(settings);
   const [labelSync, setLabelSync] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: '' });
   const [testNotifMsg, setTestNotifMsg] = useState<string | null>(null);
+  // "Send crash reports" is main's answer, not part of this screen's settings
+  // copy (CASA L-8): read on open, written at once on change, and shown from
+  // what main saved — a failed write leaves the box as it was, and says so.
+  const crashChoice = useCrashReportChoice();
+  const [crashError, setCrashError] = useState<string | null>(null);
+  useEffect(() => { void loadCrashReportChoice(); }, []);
+  const setCrashReports = async (enabled: boolean) => {
+    setCrashError(null);
+    if (!(await saveCrashReportChoice(enabled))) setCrashError('That preference could not be saved.');
+  };
 
   const sendTestNotification = async () => {
     setTestNotifMsg('Sending…');
@@ -289,20 +306,20 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
           <div>
             <div className="font-medium">Send crash reports</div>
             <div className="text-sm text-muted-foreground">
-              When the app hits an error, send a report to Sarv so it can be fixed. Reports carry the error, app version
-              and operating system — email addresses are removed and message contents are never included.
+              Off until you turn it on. {CRASH_REPORT_DISCLOSURE} A change applies at once.
             </div>
           </div>
           <div className="flex flex-col items-end gap-2">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                checked={settings.crashReports !== false}
-                onChange={(e) => updateSetting('crashReports', e.target.checked)}
+                checked={crashChoice === 'yes'}
+                onChange={(e) => void setCrashReports(e.target.checked)}
                 className="w-4 h-4"
               />
               <span className="text-sm whitespace-nowrap">Send crash reports</span>
             </label>
+            {crashError && <p role="alert" className="text-sm text-destructive">{crashError}</p>}
           </div>
         </div>
 
