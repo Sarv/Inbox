@@ -50,3 +50,65 @@ export function starttlsUnavailableMessage(server: 'incoming' | 'outgoing', host
     + 'so Sarv Inbox stopped before sending your password. Someone on this network may be blocking encryption. '
     + 'If this server really has no encryption and you trust the network, set Connection security to None in the account settings.';
 }
+
+/**
+ * The two ways a mail connection can be weaker than verified-and-encrypted:
+ * accepting a certificate nobody vouches for (`allowInsecureTLS`, for a
+ * self-signed server) and not requiring encryption at all (`security: 'none'`).
+ * Both are per-account choices the user makes in the account form.
+ *
+ * Where a SAVED password is involved they are not the config's to make: the
+ * config comes from the window, which also renders untrusted email, so the
+ * choice is saved WITH the password in main's vault and applied from there
+ * (apps/desktop/electron/services/vault-credentials.ts).
+ */
+export interface TransportOptIns {
+  allowInsecureTLS: boolean;
+  allowPlaintext: boolean;
+}
+
+/** Verified certificates, encryption required. */
+export const STRICT_TRANSPORT: Readonly<TransportOptIns> = Object.freeze({ allowInsecureTLS: false, allowPlaintext: false });
+
+/** The parts of a config that ask for a weaker transport. */
+export interface TransportResolvable extends SecurityResolvable {
+  allowInsecureTLS?: unknown;
+}
+
+/**
+ * The relaxations a config asks for. Only the boolean `true` opts out of
+ * certificate checks, and an OAuth sign-in asks for neither (it always
+ * verifies and never goes unencrypted).
+ */
+export function transportOptInsOf(config: TransportResolvable): TransportOptIns {
+  const oauth = config.authMethod === 'oauth2';
+  return {
+    allowInsecureTLS: !oauth && config.allowInsecureTLS === true,
+    allowPlaintext: resolveConnectionSecurity(config) === 'none',
+  };
+}
+
+/** The first relaxation `requested` asks for that `granted` does not allow, or null. */
+export function transportOptInBeyond(
+  requested: TransportOptIns,
+  granted: TransportOptIns,
+): 'insecure-tls' | 'plaintext' | null {
+  if (requested.allowInsecureTLS && !granted.allowInsecureTLS) return 'insecure-tls';
+  if (requested.allowPlaintext && !granted.allowPlaintext) return 'plaintext';
+  return null;
+}
+
+/**
+ * The config with its transport limited to what `granted` allows: each
+ * relaxation applies only when the config asks for it AND it is granted, so a
+ * config can tighten what was granted but never loosen it. A 'none' that is
+ * not granted becomes a required STARTTLS on the same port.
+ */
+export function limitTransport<C extends TransportResolvable>(config: C, granted: TransportOptIns): C {
+  const requested = transportOptInsOf(config);
+  return {
+    ...config,
+    allowInsecureTLS: requested.allowInsecureTLS && granted.allowInsecureTLS,
+    ...(requested.allowPlaintext && !granted.allowPlaintext ? { security: 'starttls' } : {}),
+  };
+}

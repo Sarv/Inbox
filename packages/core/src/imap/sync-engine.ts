@@ -595,6 +595,11 @@ export class SyncEngine {
     return this.connectionManager.isConnected();
   }
 
+  /** See ConnectionManager.isConnectedWith. */
+  isConnectedWith(config: IMAPConfig): boolean {
+    return this.connectionManager.isConnectedWith(config);
+  }
+
   /**
    * Mailbox storage quota (RFC 2087) in bytes, or null when unavailable
    * (disconnected, QUOTA not advertised, or no meaningful limit). Prefers the

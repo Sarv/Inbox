@@ -15,6 +15,8 @@ const h = vi.hoisted(() => ({
   engine: {
     isConnected: vi.fn(() => false),
     connect: vi.fn(async (_cfg: Record<string, unknown>) => {}),
+    // Connected with a config = connect() was dialled with that very object.
+    isConnectedWith: vi.fn((_cfg: unknown) => false),
     isRealTimeActive: vi.fn(() => false),
     initializePool: vi.fn(async () => { throw new Error('stop here'); }),
     isConnecting: vi.fn(() => false),
@@ -36,9 +38,10 @@ vi.mock('electron', () => ({
     },
   },
 }));
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real transport rules (pure): which relaxations a config asks for and may have.
+  ...(await import('@sarvinbox/core/connection-security')),
   withTimeout: (p: Promise<unknown>) => p,
-  resolveTlsOptions: () => ({}),
   accountIdFor: (user: string, host?: string) => (host ? `acct-${user}--${host}` : `acct-${user}`),
   ImapFlowClient: class {},
   isAuthError: () => false,
@@ -94,8 +97,9 @@ vi.mock('../../../../electron/services/unified-pipeline-service', () => ({
 }));
 
 import { registerSyncHandlers } from '../../../../electron/ipc/sync-handlers';
-import { resetFakeCoreDb } from '../../../../electron/services/__testing__/fake-core-db';
-import { setAccountSecrets } from '../../../../electron/services/secure-credential-store';
+import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
+import { getAccountSecrets, setAccountSecrets } from '../../../../electron/services/secure-credential-store';
+import { captureRegistryForLegacyBinding } from '../../../../electron/services/vault-credentials';
 
 const SAVED = { host: 'imap.x.com', port: 993, secure: true, username: 'a@x.com', authMethod: 'password' };
 
@@ -104,6 +108,7 @@ beforeEach(async () => {
   h.vaultLocked = false;
   h.handlers.clear();
   h.engine.connect.mockReset().mockResolvedValue(undefined);
+  h.engine.isConnectedWith.mockReset().mockImplementation((cfg) => h.engine.connect.mock.calls.some(([c]) => c === cfg));
   h.engine.isConnected.mockReset().mockReturnValue(false);
   registerSyncHandlers();
   await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com' } });
@@ -155,6 +160,104 @@ describe('accounts:backgroundSync (multi-account)', () => {
     const res = await h.handlers.get('accounts:backgroundSync')!({}, { accountId: 'acct-a', config: { ...SAVED, host: 'imap.evil.example' } });
     expect(res).toMatchObject({ success: false, retryable: false });
     expect(h.engine.connect).not.toHaveBeenCalled();
+  });
+});
+
+// How the saved password is sent is the choice saved WITH it, not the
+// config's (vault-credentials.ts). Breaks: a compromised window ticks "allow
+// self-signed" (or picks 'none') for a saved account and main sends the real
+// password to a man-in-the-middle; a self-signed account stops connecting; or
+// unticking "allow self-signed" never sticks.
+describe('imap:connect — the transport saved with the password', () => {
+  const dialled = () => h.engine.connect.mock.calls[0][0];
+
+  it('refuses certificate checks off when the password was not saved that way, non-retryably, and never dials', async () => {
+    const res = await h.handlers.get('imap:connect')!({}, { ...SAVED, allowInsecureTLS: true }, 'acct-a');
+    expect(res).toEqual({
+      success: false,
+      error: "Your saved mailbox password was saved for a connection that checks imap.x.com's certificate. Re-enter your password to connect without checking it.",
+      retryable: false,
+    });
+    expect(h.engine.connect).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unencrypted connection the password was not saved for', async () => {
+    const res = await h.handlers.get('imap:connect')!({}, { ...SAVED, port: 143, secure: false, security: 'none' }, 'acct-a');
+    expect(res).toMatchObject({ success: false, retryable: false, error: expect.stringContaining('without encryption') });
+    expect(h.engine.connect).not.toHaveBeenCalled();
+  });
+
+  it('dials with the relaxation the password was saved with', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com', allowInsecureTLS: true } });
+    await h.handlers.get('imap:connect')!({}, { ...SAVED, allowInsecureTLS: true }, 'acct-a');
+    expect(dialled()).toMatchObject({ password: 'imap-pw', allowInsecureTLS: true });
+  });
+
+  it('switches an unused relaxation off for good once the stricter connection works', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com', allowInsecureTLS: true } });
+    await h.handlers.get('imap:connect')!({}, SAVED, 'acct-a');
+    expect(dialled()).toMatchObject({ password: 'imap-pw', allowInsecureTLS: false });
+    expect((await getAccountSecrets('acct-a'))?.imap?.allowInsecureTLS).toBe(false);
+  });
+
+  // connect() returns without dialling when another connect is already in
+  // flight (ConnectionManager's "Already connected or connecting"). Breaks: a
+  // stricter config that was never dialled drops the saved choice, and the
+  // account is refused "re-enter your password" though nothing stricter worked.
+  it('keeps the relaxation when the connect did not dial this config', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com', allowInsecureTLS: true } });
+    h.engine.isConnectedWith.mockReturnValue(false);
+    await h.handlers.get('imap:connect')!({}, SAVED, 'acct-a');
+    expect(h.engine.connect).toHaveBeenCalled();
+    expect((await getAccountSecrets('acct-a'))?.imap?.allowInsecureTLS).toBe(true);
+
+    await h.handlers.get('accounts:backgroundSync')!({}, { accountId: 'acct-a', config: SAVED });
+    expect((await getAccountSecrets('acct-a'))?.imap?.allowInsecureTLS).toBe(true);
+  });
+
+  // Breaks: one connect from a config that forgot the opt-in costs a
+  // self-signed account its saved choice.
+  it('keeps the relaxation when the stricter connection fails', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com', allowInsecureTLS: true } });
+    h.engine.connect.mockRejectedValue(new Error('self-signed certificate in certificate chain'));
+    await h.handlers.get('imap:connect')!({}, SAVED, 'acct-a');
+    expect((await getAccountSecrets('acct-a'))?.imap?.allowInsecureTLS).toBe(true);
+  });
+
+  // A password saved by an older build records no transport. With no record
+  // of the account in the registry main captured at startup, it is bound
+  // strict — never to what a connect asks for. Breaks: the first connect for
+  // such a password (possibly a compromised window's, for an account the app
+  // had not used yet) decides how it is sent.
+  it('binds a legacy entry with no registry record strict, refusing a looser connect', async () => {
+    captureRegistryForLegacyBinding();
+    dbState.blobs.set('secure-credentials', Buffer.from(`PLAIN1:${JSON.stringify({ 'acct-a': { imap: { password: 'imap-pw', host: 'imap.x.com' } } })}`));
+    const res = await h.handlers.get('imap:connect')!({}, { ...SAVED, allowInsecureTLS: true }, 'acct-a');
+    expect(res).toMatchObject({ success: false, error: expect.stringContaining('Re-enter your password') });
+    expect(h.engine.connect).not.toHaveBeenCalled();
+    expect((await getAccountSecrets('acct-a'))?.imap).toEqual({ password: 'imap-pw', host: 'imap.x.com', allowInsecureTLS: false, allowPlaintext: false });
+  });
+
+  // Typing the password IS the choice; the window already holds that secret.
+  it('dials a typed password however the config asks', async () => {
+    await h.handlers.get('imap:connect')!({}, { ...SAVED, password: 'typed', allowInsecureTLS: true, security: 'none' }, 'acct-a');
+    expect(dialled()).toMatchObject({ password: 'typed', allowInsecureTLS: true, security: 'none' });
+  });
+});
+
+describe('accounts:backgroundSync — the transport saved with the password', () => {
+  // Breaks: the background path becomes the unguarded route to a loosened connection.
+  it('refuses a relaxation the password was not saved with, non-retryably, and never dials', async () => {
+    const res = await h.handlers.get('accounts:backgroundSync')!({}, { accountId: 'acct-a', config: { ...SAVED, allowInsecureTLS: true } });
+    expect(res).toMatchObject({ success: false, retryable: false, error: expect.stringContaining('Re-enter your password') });
+    expect(h.engine.connect).not.toHaveBeenCalled();
+  });
+
+  it('switches an unused relaxation off once the connection works', async () => {
+    await setAccountSecrets('acct-a', { imap: { password: 'imap-pw', host: 'imap.x.com', allowPlaintext: true } });
+    await h.handlers.get('accounts:backgroundSync')!({}, { accountId: 'acct-a', config: SAVED });
+    expect(h.engine.connect).toHaveBeenCalledWith(expect.objectContaining({ password: 'imap-pw' }));
+    expect((await getAccountSecrets('acct-a'))?.imap?.allowPlaintext).toBe(false);
   });
 });
 

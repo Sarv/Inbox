@@ -77,7 +77,8 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
         from: accountEmail || username.trim(),
         authMethod: imapConfig?.authMethod,
         oauthProvider: imapConfig?.oauthProvider,
-        allowInsecureTLS: allowInsecure || undefined,
+        // OAuth always verifies (core resolveTlsOptions), so it never asks.
+        allowInsecureTLS: (!isOAuth && allowInsecure) || undefined,
       };
       await connectSmtp(config); // verifies via nodemailer transporter.verify()
       markSmtpConfigured(true);
@@ -127,15 +128,18 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
         className={inputCls}
       />
 
-      <label className="flex items-center gap-2 text-sm text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={allowInsecure}
-          onChange={(e) => setAllowInsecure(e.target.checked)}
-          className="w-4 h-4 rounded"
-        />
-        Allow self-signed / invalid certificates (only if you trust this server)
-      </label>
+      {/* Not offered for OAuth: the provider's certificate is always checked. */}
+      {!isOAuth && (
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={allowInsecure}
+            onChange={(e) => setAllowInsecure(e.target.checked)}
+            className="w-4 h-4 rounded"
+          />
+          Allow self-signed / invalid certificates (only if you trust this server)
+        </label>
+      )}
 
       {error && (
         <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-md text-sm text-destructive">

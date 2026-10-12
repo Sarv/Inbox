@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Saved passwords and sign-ins are only sent over the connection you chose.**
+  "Allow self-signed certificates" and connection security None now apply to a
+  saved password only if you chose them when you entered it. A compromised
+  window could otherwise switch certificate checks off for a saved account, or
+  for a Gmail, Outlook, Yahoo or Sarv sign-in, and let someone on your network
+  read the password or token. Sign-ins now always check the server's
+  certificate, and "allow self-signed" is no longer offered for them. Accounts
+  set up in earlier versions keep the choices they already had. If you turn
+  either option on later without re-entering your password, you are asked to
+  re-enter it. Once a stricter connection works, the option is switched off for
+  that saved password.
+
 ## [1.3.3] - 2026-10-12
 
 ### Fixed

@@ -25,6 +25,7 @@ const h = vi.hoisted(() => {
     engine: {
       isConnected: vi.fn(() => false),
       connect: vi.fn(async (_cfg: Record<string, unknown>) => {}),
+      isConnectedWith: vi.fn((_cfg: unknown) => false),
       isRealTimeActive: vi.fn(() => false),
       initializePool: vi.fn(async () => {}),
       isConnecting: vi.fn(() => false),
@@ -47,9 +48,10 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/sarvinbox-imap-security-test', getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(s), decryptString: (b: Buffer) => b.toString() },
 }));
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real transport rules (pure): which relaxations a config asks for and may have.
+  ...(await import('@sarvinbox/core/connection-security')),
   withTimeout: (p: Promise<unknown>) => p,
-  resolveTlsOptions: () => ({}),
   accountIdFor: (user: string, host?: string) => (host ? `acct-${user}--${host}` : `acct-${user}`),
   ImapFlowClient: class {},
   isAuthError: () => false,
@@ -102,6 +104,8 @@ vi.mock('../../../../electron/services/unified-pipeline-service', () => ({
 }));
 
 import { registerSyncHandlers } from '../../../../electron/ipc/sync-handlers';
+import { resetFakeCoreDb } from '../../../../electron/services/__testing__/fake-core-db';
+import { setAccountSecrets } from '../../../../electron/services/secure-credential-store';
 
 const NONE_ACCOUNT = {
   host: 'mail.example.org', port: 143, secure: false, security: 'none', allowInsecureTLS: true,
@@ -118,6 +122,9 @@ beforeEach(() => {
   h.clearImapAccount.mockClear();
   h.engine.connect.mockReset().mockResolvedValue(undefined);
   h.engine.forceReconnect.mockReset().mockResolvedValue(undefined);
+  // Connected with a config = connect() or forceReconnect() dialled that very object.
+  h.engine.isConnectedWith.mockReset().mockImplementation((cfg) =>
+    [...h.engine.connect.mock.calls, ...h.engine.forceReconnect.mock.calls].some(([c]) => c === cfg));
   h.engine.isConnected.mockReset().mockReturnValue(false);
   h.engine.isForceReconnecting.mockReset().mockReturnValue(false);
   registerSyncHandlers();
@@ -127,6 +134,21 @@ describe('imap:connect — connection security (CASA M-5)', () => {
   it('saves the account\'s connection security and self-signed choice with the last-good config', async () => {
     expect(await connect(NONE_ACCOUNT)).toMatchObject({ success: true });
     expect(h.saveImapAccount).toHaveBeenCalledWith(expect.objectContaining({ security: 'none', allowInsecureTLS: true }));
+  });
+
+  // The last-good config feeds startup recovery (imap:getSavedConfig). Breaks:
+  // it records the relaxation the request asked for rather than the one the
+  // saved password was actually sent with, and recovery asks for it again.
+  it('saves the self-signed choice that was used, not the one the request asked for', async () => {
+    resetFakeCoreDb();
+    await setAccountSecrets('acct-a', { imap: { password: 'pw', host: 'mail.example.org', allowInsecureTLS: true } });
+    const { password: _typed, ...savedAccount } = NONE_ACCOUNT;
+    expect(await connect({ ...savedAccount, security: 'starttls', allowInsecureTLS: false })).toMatchObject({ success: true });
+    expect(h.saveImapAccount).toHaveBeenLastCalledWith(expect.objectContaining({ allowInsecureTLS: false }));
+    // A typed password with a "true" that is not a boolean was verified (core
+    // only honours the boolean), so that is what is recorded.
+    expect(await connect({ ...NONE_ACCOUNT, allowInsecureTLS: 'true' })).toMatchObject({ success: true });
+    expect(h.saveImapAccount).toHaveBeenLastCalledWith(expect.objectContaining({ allowInsecureTLS: false }));
   });
 
   it('reports a STARTTLS refusal with its code, not retryable, and keeps the saved account', async () => {

@@ -245,6 +245,16 @@ export class ConnectionManager extends EventEmitter {
   }
 
   /**
+   * Connected, and dialled with exactly `config` (the same object). A
+   * connect() that met an in-flight or live connection returned without
+   * dialling, and its config was never latched, so this is how a caller tells
+   * "my settings work" from "something else is connected".
+   */
+  isConnectedWith(config: IMAPConfig): boolean {
+    return this.isConnected() && this._imapConfig === config;
+  }
+
+  /**
    * Resolve once the connection is usable, or false on timeout. Used to gate
    * IMAP commands (e.g. realtime IDLE) that must not run mid-handshake — issuing
    * them while state is 'connecting' throws "Connection not available". Resolves

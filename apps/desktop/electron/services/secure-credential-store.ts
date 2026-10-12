@@ -30,13 +30,27 @@ const logger = createLogger('secure-credential-store');
 const LEGACY_FILE_NAME = 'secure-credentials.json';
 const BLOB_KEY = 'secure-credentials';
 
-/** The secret fields we pull out of a config so they never touch renderer disk. */
 /**
  * One credential kind. `host` is the server the secret was saved FOR: main only
- * ever sends the secret to that host (see vault-credentials.ts). Entries written
- * before host binding have none and are bound on first use.
+ * ever sends the secret to that host (see vault-credentials.ts). The two
+ * transport relaxations are the ones the user chose WITH the secret: main only
+ * sends it over a connection that is at least that strict. Entries written
+ * before either binding lack those fields and are bound on first use.
  */
-export interface VaultCredential { password?: string; accessToken?: string; refreshToken?: string; host?: string }
+export interface VaultCredential {
+  password?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  host?: string;
+  /** Accept a certificate nobody vouches for (a self-signed server). */
+  allowInsecureTLS?: boolean;
+  /** Connect without requiring encryption (security 'none'). */
+  allowPlaintext?: boolean;
+}
+
+/** The relaxations a vault entry may record. */
+export type VaultTransportField = 'allowInsecureTLS' | 'allowPlaintext';
+const TRANSPORT_FIELDS: readonly VaultTransportField[] = ['allowInsecureTLS', 'allowPlaintext'];
 
 export interface AccountSecrets {
   imap?: VaultCredential;
@@ -121,9 +135,9 @@ async function writeVault(mutate: (vault: Vault) => void): Promise<void> {
  *  keep current" preserves the stored password). No-op if there's nothing new. */
 export async function setAccountSecrets(accountId: string, secrets: AccountSecrets): Promise<void> {
   if (!accountId) return;
-  const pick = (o?: VaultCredential) => {
+  const pick = (o?: VaultCredential): VaultCredential | undefined => {
     if (!o) return undefined;
-    const out: Record<string, string> = {};
+    const out: VaultCredential = {};
     for (const k of ['password', 'accessToken', 'refreshToken'] as const) {
       if (o[k]) out[k] = o[k] as string;
     }
@@ -131,6 +145,10 @@ export async function setAccountSecrets(accountId: string, secrets: AccountSecre
     // The host travels WITH a secret, never alone: a call carrying only a host
     // must not be able to re-point an existing password at another server.
     if (typeof o.host === 'string' && o.host.trim()) out.host = o.host.trim();
+    // So do the transport relaxations, and always as booleans: a call carrying
+    // only "allow self-signed" must not loosen how an existing password is
+    // sent, and a new secret is bound to exactly what was chosen with it.
+    for (const k of TRANSPORT_FIELDS) out[k] = o[k] === true;
     return out;
   };
   const imap = pick(secrets.imap);
@@ -165,6 +183,44 @@ export async function bindAccountSecretHost(accountId: string, kind: 'imap' | 's
     const entry = v[accountId]?.[kind];
     if (!entry || entry.host) return;
     entry.host = host;
+  });
+}
+
+/**
+ * Record the transport relaxations an entry saved before transport binding
+ * belongs to. Only fills fields the entry lacks — never changes a recorded one.
+ */
+export async function bindAccountSecretTransport(
+  accountId: string,
+  kind: 'imap' | 'smtp',
+  transport: Record<VaultTransportField, boolean>,
+): Promise<void> {
+  if (!accountId) return;
+  await writeVault((v) => {
+    const entry = v[accountId]?.[kind];
+    if (!entry) return;
+    for (const k of TRANSPORT_FIELDS) {
+      if (typeof entry[k] !== 'boolean') entry[k] = transport[k] === true;
+    }
+  });
+}
+
+/**
+ * Switch off relaxations the saved `password` turned out not to need: only
+ * ever true → false, and only while the entry still holds that password (a
+ * secret saved since carries its own choice).
+ */
+export async function narrowAccountSecretTransport(
+  accountId: string,
+  kind: 'imap' | 'smtp',
+  password: string,
+  fields: readonly VaultTransportField[],
+): Promise<void> {
+  if (!accountId || !password) return;
+  await writeVault((v) => {
+    const entry = v[accountId]?.[kind];
+    if (!entry || entry.password !== password) return;
+    for (const k of fields) if (entry[k] === true) entry[k] = false;
   });
 }
 

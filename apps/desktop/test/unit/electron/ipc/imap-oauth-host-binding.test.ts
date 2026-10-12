@@ -24,9 +24,10 @@ const h = vi.hoisted(() => ({
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
 }));
-vi.mock('@sarvinbox/core', () => ({
+vi.mock('@sarvinbox/core', async () => ({
+  // The real transport rules (pure): which relaxations a config asks for and may have.
+  ...(await import('@sarvinbox/core/connection-security')),
   withTimeout: (p: Promise<unknown>) => p,
-  resolveTlsOptions: () => ({}),
   accountIdFor: (user: string, host?: string) => `acct-${user}-${host ?? ''}`,
   ImapFlowClient: class {
     setShuttingDown() { /* no-op */ }
@@ -88,6 +89,8 @@ vi.mock('../../../../electron/services/unified-pipeline-service', () => ({
 
 import { registerSyncHandlers } from '../../../../electron/ipc/sync-handlers';
 
+const SAVED_APP_PW = { password: 'app-pw', host: 'mail.example.org', allowInsecureTLS: false, allowPlaintext: false };
+
 const refused = () => Object.assign(new Error('A gmail sign-in can only be used with gmail\'s own mail servers'), {
   code: 'TOKEN_DESTINATION_REFUSED',
 });
@@ -139,8 +142,11 @@ describe('imap:connect', () => {
   // vaulted app password, saved for that server. Breaks: the refusal strands it
   // instead of letting the existing self-heal fall back to that password — and
   // the token is still never sent there.
+  // Changed deliberately (transport binding): the vaulted entry in these two
+  // tests now records the relaxations saved with it, as every entry written
+  // since does; an entry without them is bound on first use (vault-credentials.test.ts).
   it('lets a converted account on a non-provider host self-heal to its vaulted password', async () => {
-    h.getAccountSecrets.mockResolvedValue({ imap: { password: 'app-pw', host: 'mail.example.org' } });
+    h.getAccountSecrets.mockResolvedValue({ imap: SAVED_APP_PW });
     const res = await h.handlers.get('imap:connect')!({}, { ...GMAIL, host: 'mail.example.org' }, 'acct-1');
     expect(h.getToken).toHaveBeenCalledWith('gmail', 'me@gmail.com', 'imap', 'mail.example.org');
     // The rest of the connect (pool, sync) is outside this harness; reaching
@@ -150,11 +156,23 @@ describe('imap:connect', () => {
       host: 'mail.example.org', authMethod: 'password', password: 'app-pw', accessToken: undefined,
     }));
   });
+  // The healed config started life as an OAuth one, and nobody chose its
+  // relaxations for the password. Breaks: a stale (or forged) "allow
+  // self-signed" / 'none' on the OAuth config sends the vaulted password to a
+  // man-in-the-middle the moment the account heals.
+  it('sends the healed password no more loosely than it was saved for', async () => {
+    h.getAccountSecrets.mockResolvedValue({ imap: SAVED_APP_PW });
+    await h.handlers.get('imap:connect')!({}, { ...GMAIL, host: 'mail.example.org', port: 143, secure: false, security: 'none', allowInsecureTLS: true }, 'acct-1');
+    expect(h.engine.connect).toHaveBeenCalledWith(expect.objectContaining({
+      authMethod: 'password', password: 'app-pw', allowInsecureTLS: false, security: 'starttls',
+    }));
+  });
+
   // The fallback password is bound to its server too. Breaks: a refused token
   // falls back to a password saved for ANOTHER server, so a renderer-chosen
   // host receives the user's real password instead of their token.
   it('does not fall back to a vaulted password saved for another server', async () => {
-    h.getAccountSecrets.mockResolvedValue({ imap: { password: 'app-pw', host: 'mail.example.org' } });
+    h.getAccountSecrets.mockResolvedValue({ imap: SAVED_APP_PW });
     const res = await h.handlers.get('imap:connect')!({}, EVIL, 'acct-1');
     expect(res.success).toBe(false);
     expect(h.engine.connect).not.toHaveBeenCalled();

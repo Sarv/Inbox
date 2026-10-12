@@ -96,6 +96,22 @@ describe('SmtpConfigForm', () => {
     await submitForm();
     expect(connectSmtp).toHaveBeenCalledWith(expect.objectContaining({ security: 'none', secure: false, port: 25 }));
   });
+
+  // An OAuth connection always checks the certificate (core resolveTlsOptions),
+  // so the box would do nothing. Breaks: an OAuth user ticks a box that is
+  // silently ignored, or a saved stale opt-in rides along on every send.
+  it('offers "allow self-signed" for a password account only, and never sends it for OAuth', async () => {
+    state.smtpConfig = { host: 'smtp.x.com', port: 465, secure: true, username: 'me@x.com', allowInsecureTLS: true };
+    mounted = render(<SmtpConfigForm onVerified={vi.fn()} />);
+    expect(text()).toContain('Allow self-signed');
+    mounted.unmount();
+    state.imapConfig = { host: 'imap.gmail.com', username: 'me@gmail.com', authMethod: 'oauth2', oauthProvider: 'gmail' };
+    state.smtpConfig = { host: 'smtp.gmail.com', port: 465, secure: true, username: 'me@gmail.com', authMethod: 'oauth2', allowInsecureTLS: true };
+    mounted = render(<SmtpConfigForm onVerified={vi.fn()} />);
+    expect(text()).not.toContain('Allow self-signed');
+    await submitForm();
+    expect(connectSmtp).toHaveBeenCalledWith(expect.objectContaining({ authMethod: 'oauth2', allowInsecureTLS: undefined }));
+  });
 });
 
 describe('ConnectionDialog (re-auth)', () => {
