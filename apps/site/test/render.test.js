@@ -148,4 +148,19 @@ describe('renderDownloadPage', () => {
     expect(icons.length).toBeGreaterThan(1);
     icons.forEach((svg) => expect(svg.getAttribute('aria-hidden')).toBe('true'));
   });
+
+  // Breaks if the download glyph's path is malformed: browsers stop drawing at the
+  // first bad command, so a dropped coordinate renders a half arrow with no tray.
+  it('draws the download glyph from a well-formed path', () => {
+    const ARITY = { m: 2, l: 2, h: 1, v: 1 };
+    render(OS.MAC, ARCH.ARM64);
+    const pathData = root.querySelector('a.btn svg path').getAttribute('d');
+    const commands = [...pathData.matchAll(/([a-z])([^a-z]*)/gi)];
+    expect(commands.map(([, letter]) => letter).join('')).toBe('MvMlMh');
+    commands.forEach(([, letter, args]) => {
+      const numbers = args.match(/-?\d*\.?\d+/g) ?? [];
+      expect(numbers.length % ARITY[letter.toLowerCase()]).toBe(0);
+      expect(numbers.length).toBeGreaterThan(0);
+    });
+  });
 });

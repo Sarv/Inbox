@@ -3,7 +3,7 @@ import { LATEST_RELEASE_URL, VIEW } from './download-view.js';
 import { OS } from './platform.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const DOWNLOAD_PATH = 'M12 4v12M6 10l6 6-6M4 20h16';
+const DOWNLOAD_PATH = 'M12 4v12M6 10l6 6 6-6M4 20h16';
 
 const icon = (doc, size) => {
   const svg = doc.createElementNS(SVG_NS, 'svg');
