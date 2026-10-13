@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-10-13
+
 ### Fixed
 - **Logos show again when adding an account.** In the installed app, the Sarv,
   Gmail, Outlook and Yahoo logos and the Sarv Inbox icon at the top of the
@@ -972,7 +974,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.4...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.5...HEAD
+[1.3.5]: https://github.com/Sarv/Inbox/releases/tag/v1.3.5
 [1.3.4]: https://github.com/Sarv/Inbox/releases/tag/v1.3.4
 [1.3.3]: https://github.com/Sarv/Inbox/releases/tag/v1.3.3
 [1.3.2]: https://github.com/Sarv/Inbox/releases/tag/v1.3.2
