@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **You're told when an update is ready.** With automatic updates on, a
+  downloaded update used to wait silently for the next quit — and on a Mac,
+  closing the window isn't quitting, so it could wait for weeks. A system
+  notification now says once that the new version is ready; click it to
+  restart now, or ignore it and it installs the next time you quit.
+
+### Fixed
+- **"Couldn't check for updates" no longer appears for an update that is
+  already downloaded.** A later check that was slow or offline replaced the
+  "ready to install" state with an error saying the release could not be
+  verified, and "Restart now" stopped working. A downloaded update now stays
+  ready until it is installed or a newer one replaces it.
+- **Update checks work on slow connections.** On networks where reaching
+  GitHub's download server takes longer than 20 seconds, every check failed
+  and every new release was refused as unverifiable. Checks now wait up to a
+  minute.
+- Pressing **Check for Updates…** shortly after launch now always shows its
+  result; a background check starting at the same moment used to hide it.
+
 ## [1.3.5] - 2026-10-13
 
 ### Fixed
