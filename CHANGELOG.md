@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-10-13
+
 ### Changed
 - **Mac updates download far less.** Updates now come as a separate download
   for Apple Silicon and for Intel Macs instead of one that carried both, so an
@@ -965,7 +967,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.3...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.4...HEAD
+[1.3.4]: https://github.com/Sarv/Inbox/releases/tag/v1.3.4
 [1.3.3]: https://github.com/Sarv/Inbox/releases/tag/v1.3.3
 [1.3.2]: https://github.com/Sarv/Inbox/releases/tag/v1.3.2
 [1.3.1]: https://github.com/Sarv/Inbox/releases/tag/v1.3.1
