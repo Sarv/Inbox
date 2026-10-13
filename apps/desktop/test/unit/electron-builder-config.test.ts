@@ -160,6 +160,16 @@ describe('electron-builder configuration', () => {
     expect(mac.artifactName).toContain('amd64');
   });
 
+  // The packaged app ships only the node_modules the production bundles still
+  // load: vite bundles everything else (vite.config.ts mainExternals), and the
+  // unbundled copies were ~180 MB of every update. Breaks if the allowlist
+  // drops better-sqlite3 or its loader chain -- the app boots with no database,
+  // which reads as no accounts and no mail, not as a crash.
+  it('packs only better-sqlite3 and its loader from node_modules', () => {
+    const files = buildConfig['files'] as string[];
+    expect(files).toContain('!node_modules/!(better-sqlite3|bindings|file-uri-to-path){,/**}');
+  });
+
   // The regression: @electron/universal refuses to merge two packs whose files
   // disagree, and node-gyp's intermediates (obj/, obj.target/, .deps/) are
   // arch-specific build droppings. Worse, build/afterPack.js deletes them from

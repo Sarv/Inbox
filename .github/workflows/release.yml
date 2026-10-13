@@ -367,6 +367,18 @@ jobs:
         shell: bash
         run: node scripts/verify-packaged-addons.mjs apps/desktop/release
 
+      # build.files ships only the node_modules the production bundles still
+      # load (better-sqlite3 and its loader) -- the rest duplicated what vite
+      # had already bundled and was ~180 MB of every update. The cost is that
+      # a module newly made external in vite.config.ts must be added there
+      # too, or the app throws the first time it is required, which for a
+      # lazy chunk is on a user's machine, not in the smoke launch below.
+      # This reads every require() out of the packed bundles and fails if one
+      # names a package the asar does not carry.
+      - name: Verify the packed app carries every module it requires
+        shell: bash
+        run: node scripts/verify-asar-requires.mjs apps/desktop/release
+
       # glibc is backward compatible and never forward, so a binary linked on a
       # newer distribution than the user's refuses to load there -- and the
       # build machine can never notice, because its own glibc is always new
