@@ -225,6 +225,7 @@ describe('scripts/sign-release.mjs (as the release workflow runs it)', () => {
 // every installed app refuses the update.
 const build = require('../../../../package.json').build as {
   mac: { artifactName: string };
+  dmg: { artifactName: string };
   linux: { artifactName: string };
   nsis: { artifactName: string };
 };
@@ -235,7 +236,8 @@ describe('release artifact names', () => {
   it('gives every platform an artifact name that is already GitHub-safe', () => {
     const names = [
       expandArtifactName(build.nsis.artifactName, { version: '1.3.0', ext: 'exe' }),
-      expandArtifactName(build.mac.artifactName, { version: '1.3.0', ext: 'dmg' }),
+      expandArtifactName(build.dmg.artifactName, { version: '1.3.0', ext: 'dmg' }),
+      ...['arm64', 'x64'].map((arch) => expandArtifactName(build.mac.artifactName, { version: '1.3.0', arch, ext: 'zip' })),
       ...['x86_64', 'arm64', 'amd64'].map((arch) => expandArtifactName(build.linux.artifactName, { version: '1.3.0', arch, ext: 'AppImage' })),
     ];
     for (const name of names) {

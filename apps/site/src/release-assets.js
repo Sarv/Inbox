@@ -2,6 +2,8 @@
 // Pure: no fetch, no DOM. Asset names come from electron-builder's
 // `artifactName` settings in apps/desktop/package.json, e.g.
 //   sarv-inbox-1.2.2-mac-arm64-amd64.dmg   (universal macOS)
+//   sarv-inbox-1.3.4-mac-arm64.zip / -mac-x64.zip  (per-arch, for auto-update;
+//                                           one universal -mac-arm64-amd64.zip before)
 //   Sarv-Inbox-Setup-1.3.2.exe             (one NSIS installer, x64 + arm64;
 //                                           Sarv.Inbox.Setup.1.2.2.exe before 1.3.2)
 //   sarv-inbox-1.2.2-x86_64.AppImage / -arm64.AppImage

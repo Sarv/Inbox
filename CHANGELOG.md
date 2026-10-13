@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Mac updates download far less.** Updates now come as a separate download
+  for Apple Silicon and for Intel Macs instead of one that carried both, so an
+  update only fetches the parts that changed — tens of MB rather than ~100 MB.
+  The first update after this one is still a full download, once. The installer
+  on the website is unchanged and still runs on every Mac.
+- **The app is smaller.** About 180 MB of unused copies of libraries the app
+  already contains were removed from the package, which also shrinks every
+  update on every platform.
+- The update log in `app.log` now records how each update was downloaded (only
+  the changed parts, or the whole file) and why, so a slow update can be
+  diagnosed.
+
+### Fixed
+- **Intel Macs receive automatic updates again.** The updater skipped the
+  combined Mac update because its file name mentioned Apple Silicon, so Intel
+  Macs reported an error instead of updating.
+
 ### Security
 - **Saved passwords and sign-ins are only sent over the connection you chose.**
   "Allow self-signed certificates" and connection security None now apply to a

@@ -130,6 +130,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "!node_modules/!(better-sqlite3|bindings|file-uri-to-path){,/**}",
       "!dist/icon-dev.png",
       "!**/build/Release/obj/**",
       "!**/build/Release/obj.target/**",
@@ -165,7 +166,7 @@
       }
     ],
     "mac": {
-      "artifactName": "sarv-inbox-${version}-mac-arm64-amd64.${ext}",
+      "artifactName": "sarv-inbox-${version}-mac-${arch}.${ext}",
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
@@ -183,12 +184,14 @@
         {
           "target": "zip",
           "arch": [
-            "universal"
+            "arm64",
+            "x64"
           ]
         }
       ]
     },
     "dmg": {
+      "artifactName": "sarv-inbox-${version}-mac-arm64-amd64.${ext}",
       "iconSize": 100,
       "window": {
         "width": 660,

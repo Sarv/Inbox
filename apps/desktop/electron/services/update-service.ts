@@ -24,7 +24,7 @@ import { join } from 'path';
 
 import { createLogger, isTimeoutError, withTimeout } from '@sarvinbox/core';
 import { app } from 'electron';
-import { autoUpdater } from 'electron-updater';
+import { autoUpdater, type Logger as UpdaterLogger } from 'electron-updater';
 
 import { getMainWindow } from '../shared';
 
@@ -51,6 +51,24 @@ import {
 } from './update-policy';
 
 const logger = createLogger('update-service');
+
+/**
+ * electron-updater's own log, written to app.log. It is the only record of
+ * whether an update came down as a differential (blockmap) download or fell
+ * back to the whole file, and why: "Full: 258 MB, To download: 12 MB (5%)".
+ * Without it a release that quietly ships every user the full installer looks
+ * exactly like one that ships them a few MB. No `debug`: electron-updater only
+ * calls it when it exists, and it is per-request noise.
+ */
+const electronUpdaterLog = createLogger('electron-updater');
+/** Keeps an Error's stack; electron-updater mostly logs plain strings. */
+const describeUpdaterMessage = (message: unknown): string =>
+  message instanceof Error ? (message.stack ?? message.message) : String(message);
+const updaterLogger: UpdaterLogger = {
+  info: (message) => electronUpdaterLog.info(describeUpdaterMessage(message)),
+  warn: (message) => electronUpdaterLog.warn(describeUpdaterMessage(message)),
+  error: (message) => electronUpdaterLog.error(describeUpdaterMessage(message)),
+};
 
 const PREFS_FILE_NAME = 'update-prefs.json';
 
@@ -558,7 +576,7 @@ export const startUpdateService = (): void => {
   // `skipCurrentVersion()` is the one thing that turns this off, and only for
   // the version that was skipped.
   autoUpdater.autoInstallOnAppQuit = shouldAutoInstallOnQuit(prefs, null);
-  autoUpdater.logger = null;
+  autoUpdater.logger = updaterLogger;
   state = { ...state, currentVersion: runningVersion(), autoUpdate: prefs.autoUpdate };
 
   wireEvents();
