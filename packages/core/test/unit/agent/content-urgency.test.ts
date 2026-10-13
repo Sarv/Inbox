@@ -24,18 +24,28 @@ function timed(fn: () => void): number {
   return performance.now() - start;
 }
 
+/**
+ * Fastest of `runs` wall-clock timings of `fn`. Scheduler noise on a shared CI
+ * runner only ever ADDS time (a single 57 ms run against the 50 ms budget
+ * failed the v1.3.6 release), so the minimum is the honest cost — and a
+ * quadratic regex is slow on every run, so it still fails.
+ */
+function fastest(fn: () => void, runs = 3): number {
+  return Math.min(...Array.from({ length: runs }, () => timed(fn)));
+}
+
 const HOSTILE = 100_000;
 
 describe('computeContentUrgency — bounded work on hostile bodies', () => {
   // Breaks: a body of unclosed `<` stalls the main process (the tag strip).
   it('scores a 100 KB run of "<" quickly', () => {
-    expect(timed(() => computeContentUrgency('s', '<'.repeat(HOSTILE), 'Ann'))).toBeLessThan(50);
+    expect(fastest(() => computeContentUrgency('s', '<'.repeat(HOSTILE), 'Ann'))).toBeLessThan(50);
   });
 
   // Breaks: a long line of question words with no "?" stalls the main process.
   it.each(['what ', 'can you ', 'which '])('scores a 100 KB line of %j with no "?" quickly', (word) => {
     const body = word.repeat(Math.ceil(HOSTILE / word.length));
-    expect(timed(() => computeContentUrgency('s', body, 'Ann'))).toBeLessThan(50);
+    expect(fastest(() => computeContentUrgency('s', body, 'Ann'))).toBeLessThan(50);
   });
 
   // Breaks: markup the tag strip can't pair up (`<<b>`, a bare `<`) hides a
@@ -148,9 +158,8 @@ describe('BehaviorIntelligence recipient role — parsed, not regex-scanned', ()
       toAddress: 'a'.repeat(n),
       ccAddress: `${'x@y.com, '.repeat(n / 120)}${'"'.repeat(n / 6)}`,
     });
-    const best = (n: number, runs: number) => Math.min(...Array.from({ length: runs }, () => timed(() => role(headers(n)))));
-    const small = best(6_000, 5);
-    const large = best(48_000, 3);
+    const small = fastest(() => role(headers(6_000)), 5);
+    const large = fastest(() => role(headers(48_000)), 3);
     expect(large / Math.max(small, 1)).toBeLessThan(24);
   }, 20_000);
 });
