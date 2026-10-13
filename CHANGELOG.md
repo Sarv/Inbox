@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-10-13
+
 ### Added
 - **You're told when an update is ready.** With automatic updates on, a
   downloaded update used to wait silently for the next quit — and on a Mac,
@@ -999,7 +1001,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.6...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.7...HEAD
+[1.3.7]: https://github.com/Sarv/Inbox/releases/tag/v1.3.7
 [1.3.6]: https://github.com/Sarv/Inbox/releases/tag/v1.3.6
 [1.3.5]: https://github.com/Sarv/Inbox/releases/tag/v1.3.5
 [1.3.4]: https://github.com/Sarv/Inbox/releases/tag/v1.3.4
