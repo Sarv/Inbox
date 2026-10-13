@@ -40,6 +40,8 @@ const h = vi.hoisted(() => ({
     quitAndInstall: vi.fn(),
   },
   sent: [] as Array<{ channel: string; payload: unknown }>,
+  /** Every line written through createLogger, as [logger name, level, message]. */
+  logs: [] as Array<[string, string, unknown]>,
   /** The signed-manifest check every found update must pass before download. */
   verify: vi.fn(async (_info: unknown) => ({ ok: true }) as { ok: true } | { ok: false; reason: string }),
   /** Overridable so a build whose version lookup throws can be exercised. */
@@ -74,9 +76,12 @@ vi.mock('@sarvinbox/core', async () => {
     typeof import('../../../../../../packages/core/src/utils/timeout')
   >('../../../../../../packages/core/src/utils/timeout');
   return {
-    createLogger: () => ({
-      info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
-    }),
+    createLogger: (name: string) => {
+      const record = (level: string) => (message: unknown) => void h.logs.push([name, level, message]);
+      return {
+        info: record('info'), warn: record('warn'), error: record('error'), debug: record('debug'), trace: record('trace'),
+      };
+    },
     withTimeout: timeout.withTimeout,
     isTimeoutError: timeout.isTimeoutError,
   };
@@ -137,6 +142,8 @@ beforeEach(() => {
   // default harness build is one that can genuinely update itself.
   writeFileSync(join(h.resources, 'app-update.yml'), 'provider: github\n');
   h.sent = [];
+  h.logs = [];
+  h.updater.logger = undefined;
   h.updater.handlers.clear();
   h.updater.autoDownload = false;
   h.updater.autoInstallOnAppQuit = false;
@@ -273,6 +280,52 @@ describe('startUpdateService', () => {
     appImage.startUpdateService();
     expect(appImage.getUpdateState().phase).not.toBe('unsupported');
     appImage.stopUpdateService();
+  });
+});
+
+describe("electron-updater's own log", () => {
+  type UpdaterLogger = { info: (m: unknown) => void; warn: (m: unknown) => void; error: (m: unknown) => void; debug?: unknown };
+  const updaterLines = () => h.logs.filter(([name]) => name === 'electron-updater');
+
+  // The only record of whether an update was fetched as a few-MB differential
+  // download or the whole file. With the logger null'd, a release that
+  // silently shipped every user the full 250 MB was indistinguishable in
+  // app.log from one that shipped them 12 MB.
+  it('routes info, warn and error into app.log under its own name', async () => {
+    const service = await load();
+    service.startUpdateService();
+    const updaterLogger = h.updater.logger as UpdaterLogger;
+
+    updaterLogger.info('Full: 258,345.44 KB, To download: 11,712.93 KB (5%)');
+    updaterLogger.warn('Cannot download differentially, fallback to full download');
+    updaterLogger.error(new Error('blockmap 404'));
+
+    expect(updaterLines().map(([, level]) => level)).toEqual(['info', 'warn', 'error']);
+    expect(updaterLines()[0]?.[2]).toContain('To download');
+    // An Error keeps its stack, which is where the cause of a fallback lives.
+    expect(String(updaterLines()[2]?.[2])).toContain('blockmap 404');
+    service.stopUpdateService();
+  });
+
+  // electron-updater calls debug for every HTTP request when it exists; that
+  // is a synchronous app.log write per request on the main thread.
+  it('leaves out debug so per-request noise never reaches app.log', async () => {
+    const service = await load();
+    service.startUpdateService();
+
+    expect((h.updater.logger as UpdaterLogger).debug).toBeUndefined();
+    service.stopUpdateService();
+  });
+
+  // A dev run never touches electron-updater; installing a logger there would
+  // be the first thing that did.
+  it('installs no logger on a build that cannot update itself', async () => {
+    devRun();
+    const service = await load();
+    service.startUpdateService();
+
+    expect(h.updater.logger).toBeUndefined();
+    service.stopUpdateService();
   });
 });
 
