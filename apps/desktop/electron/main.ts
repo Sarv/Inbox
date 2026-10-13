@@ -148,6 +148,7 @@ import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
 import { mainWindowWebPreferences } from './utils/main-window-preferences';
 import { installNavigationGuards } from './utils/navigation-guards';
 import { installPermissionPolicy } from './utils/permission-policy';
+import { restoreAndFocusWindow } from './utils/window-focus';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -916,9 +917,7 @@ app.on('second-instance', () => {
     && !existing.webContents.isCrashed();
   const action = decideSecondInstanceAction({ hasWindow: !!existing, windowUsable, isReady: app.isReady() });
   if (action === 'focus' && existing) {
-    if (existing.isMinimized()) existing.restore();
-    existing.show();
-    existing.focus();
+    restoreAndFocusWindow(existing);
   } else if (action === 'create') {
     createWindow();
   }

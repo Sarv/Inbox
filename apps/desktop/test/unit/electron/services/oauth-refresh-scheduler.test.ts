@@ -17,8 +17,10 @@ const h = vi.hoisted(() => {
     restored: boolean;
     focusCalls: number;
     sent: Array<{ channel: string; payload: unknown }>;
+    isDestroyed: () => boolean;
     isMinimized: () => boolean;
     restore: () => void;
+    show: () => void;
     focus: () => void;
     webContents: { send: (channel: string, payload: unknown) => void };
   }
@@ -28,8 +30,10 @@ const h = vi.hoisted(() => {
       restored: false,
       focusCalls: 0,
       sent: [],
+      isDestroyed: () => false,
       isMinimized: () => win.minimized,
       restore: () => { win.restored = true; },
+      show: () => {},
       focus: () => { win.focusCalls += 1; },
       webContents: { send: (channel, payload) => win.sent.push({ channel, payload }) },
     };

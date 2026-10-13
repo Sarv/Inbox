@@ -23,6 +23,7 @@ import { Notification } from 'electron';
 
 import { getMainWindow } from '../shared';
 import { isReleaseBundle } from '../utils/dev-mode';
+import { restoreAndFocusWindow } from '../utils/window-focus';
 
 const logger = createLogger('notifications');
 
@@ -239,12 +240,7 @@ function summarize(items: PendingItem[], multiAccount: boolean): string {
 }
 
 function focusWindow(): void {
-  const win = getMainWindow();
-  if (win && !win.isDestroyed()) {
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-  }
+  restoreAndFocusWindow(getMainWindow());
 }
 
 /** `threadId` lets the renderer open a message that isn't in the list on screen (a sent one). */

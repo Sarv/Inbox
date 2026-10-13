@@ -39,6 +39,7 @@ import type { OAuthProviderId } from '@sarvinbox/core';
 import { Notification, powerMonitor } from 'electron';
 
 import { getMainWindow } from '../shared';
+import { restoreAndFocusWindow } from '../utils/window-focus';
 
 import {
   getValidAccessToken,
@@ -147,8 +148,7 @@ function notifyReauthRequired(provider: OAuthProviderId, email: string, reason: 
       n.on('click', () => {
         const win = getMainWindow();
         if (win) {
-          if (win.isMinimized()) win.restore();
-          win.focus();
+          restoreAndFocusWindow(win);
           sendToRenderer('oauth:reauth-open-settings', { provider, email, reason });
         }
       });
