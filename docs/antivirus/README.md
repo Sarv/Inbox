@@ -18,8 +18,8 @@ its release package without changing where its source is maintained.
 
 ## Install and use
 
-1. Run this updated Sarv Inbox build. An older 1.3.1 release does not have the new
-   scanner host API, even though the app version has not yet been bumped.
+1. Run Sarv Inbox 1.3.2 or later. Version 1.3.1 and earlier do not have the
+   scanner host API.
 2. In Extensions, choose **Install from folder** and select
    `extensions/clamav-scan` from this checkout. Its manifest is
    `sarvinbox-extension.json`; no npm install or extension build is needed.
@@ -69,7 +69,7 @@ shasum -a 256 docs/antivirus/clamav-scan-1.0.0.zip > docs/antivirus/clamav-scan-
 
 ## Local Docker server
 
-The sibling checkout is `/Users/rcsarv/dev/Inbox-av-server`. Its Compose stack
+Check out the `Inbox-av-server` repository next to Inbox. Its Compose stack
 provides an authenticated ticket gateway, scanner API, separate superadmin
 API/UI, PostgreSQL and private ClamAV daemon. Sarv OAuth authenticates scanner
 and admin users; a separate Keycloak identity service is unnecessary for the
