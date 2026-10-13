@@ -463,6 +463,114 @@ describe('checkForUpdates timeout', () => {
   });
 });
 
+/**
+ * Download, verify and stage `version` through a background check, exactly as
+ * the hourly cycle does with automatic updates on.
+ */
+const stage = async (service: Service, version = '1.3.0') => {
+  await service.checkForUpdates('scheduled');
+  await offer(version);
+  h.updater.emit('update-downloaded', { version, files: [] });
+};
+
+describe('a staged update survives later checks', () => {
+  /**
+   * Seen in the field (2026-10-13): 1.3.5 was staged at 16:11, the 17:11 check
+   * timed out, and the state became 'error'. A manual check then read "Couldn't
+   * check for updates" while the update sat on disk, and "Restart now" refused.
+   */
+  it('stays ready to install when a later check times out', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    vi.useFakeTimers();
+    h.updater.checkForUpdates = vi.fn(() => new Promise(() => {}));
+    const pending = service.checkForUpdates('manual');
+    await vi.advanceTimersByTimeAsync(UPDATE_CHECK_TIMEOUT_MS);
+    const state = await pending;
+
+    expect(state).toMatchObject({ phase: 'downloaded', version: '1.3.0', error: null, prompt: true });
+    expect(service.installUpdateAndRestart()).toBe(true);
+    service.stopUpdateService();
+  });
+
+  // The same field failure's other half: re-offered the version it had
+  // already staged, the service verified it AGAIN, the slow verification
+  // aborted, and a genuine release was reported as unverifiable.
+  it('neither re-verifies nor re-downloads the version already staged', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+    h.verify.mockClear();
+    h.updater.downloadUpdate.mockClear();
+
+    await service.checkForUpdates('manual');
+    await offer('1.3.0');
+
+    expect(h.verify).not.toHaveBeenCalled();
+    expect(h.updater.downloadUpdate).not.toHaveBeenCalled();
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', version: '1.3.0', prompt: true });
+    service.stopUpdateService();
+  });
+
+  // A NEWER release that fails verification is refused, but the verified
+  // update already on disk is still a fine thing to install.
+  it('keeps the staged update when a newer one is refused', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+    h.verify = vi.fn(async () => ({ ok: false, reason: 'This operation was aborted' }) as const);
+
+    await service.checkForUpdates('scheduled');
+    await offer('1.4.0');
+
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', version: '1.3.0', error: null });
+    service.stopUpdateService();
+  });
+
+  // Offline for an hour after staging must not turn "ready" into "error".
+  it('keeps the staged update when a later check fails', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    h.updater.emit('error', new Error('net::ERR_INTERNET_DISCONNECTED'));
+
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', version: '1.3.0', error: null });
+    service.stopUpdateService();
+  });
+
+  // Squirrel still installs it on quit, so "you're up to date" would be untrue.
+  it('keeps the staged update when the feed offers nothing newer', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    h.updater.emit('update-not-available');
+
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', version: '1.3.0' });
+    service.stopUpdateService();
+  });
+
+  // A newer download replaces the staged one (electron-updater empties its
+  // cache for it). If that download then fails, claiming the OLD update is
+  // still ready would offer "Restart now" for files that may be gone.
+  it('does not resurrect a staged update a newer download replaced', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    await service.checkForUpdates('scheduled');
+    await offer('1.4.0');
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloading', version: '1.4.0' });
+    h.updater.emit('error', new Error('socket hang up'));
+
+    expect(service.getUpdateState().phase).toBe('error');
+    service.stopUpdateService();
+  });
+});
+
 describe('automatic updates ON', () => {
   // The default mode, and the promise it makes: the user is never interrupted.
   // A dialog appearing here - mid-reply, asking to restart a mail client - is

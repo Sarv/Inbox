@@ -127,6 +127,16 @@ let verifiedInfo: UpdateIdentity | null = null;
 let offeredInfo: UpdateIdentity | null = null;
 /** The verification started by the last 'update-available', so a check awaits it. */
 let pendingVerification: Promise<void> | null = null;
+/**
+ * The update that is downloaded, verified and waiting to install on quit.
+ *
+ * Checks keep running hourly after an update is staged (a newer release may
+ * come out), and each used to overwrite the 'downloaded' phase: a slow check
+ * timed out, or re-offered the SAME version and failed to re-verify it, and the
+ * state became 'error'. A manual check then said "could not be verified" about
+ * an update that was sitting on disk, and "Restart now" refused to run.
+ */
+let stagedInfo: UpdateIdentity | null = null;
 
 const loadPrefs = (): UpdatePrefs => {
   try {
@@ -203,6 +213,18 @@ export const getUpdateState = (): UpdateState => state;
 const checkDurationMs = (): number => (checkStartedAt === 0 ? 0 : Date.now() - checkStartedAt);
 
 /**
+ * A check that brought nothing newer leaves a staged update exactly where it
+ * was: 'downloaded', installable now and on quit. Returns false when nothing is
+ * staged, so the caller reports its own outcome.
+ */
+const keepStagedUpdate = (outcome: string): boolean => {
+  if (!stagedInfo) return false;
+  logger.info(`[Update] ${outcome}; keeping the staged ${stagedInfo.version}, which still installs on quit`);
+  setState({ phase: 'downloaded', version: stagedInfo.version, percent: 100, error: null });
+  return true;
+};
+
+/**
  * Wire electron-updater's events onto {@link setState}. Called once; the
  * listeners live for the process lifetime.
  */
@@ -224,6 +246,12 @@ const wireEvents = (): void => {
 
   autoUpdater.on('update-available', (info) => {
     offeredInfo = info;
+    // Already downloaded and verified: nothing to verify or fetch again.
+    if (stagedInfo && sameUpdate(info, stagedInfo)) {
+      pendingVerification = null;
+      keepStagedUpdate(`Check found ${info.version} again`);
+      return;
+    }
     // Verify BEFORE anything is downloaded: the found update must be one the
     // release's signed manifest vouches for, file for file (CASA M-3). The
     // check that found it awaits this, so the dialog never shows an
@@ -237,6 +265,7 @@ const wireEvents = (): void => {
       }
       if (!verdict.ok) {
         logger.warn(`[Update] Refused ${info.version}: could not verify it against the signed release manifest (${verdict.reason})`);
+        if (keepStagedUpdate(`Refused ${info.version}`)) return;
         setState({
           phase: 'error',
           version: null,
@@ -268,6 +297,7 @@ const wireEvents = (): void => {
   autoUpdater.on('update-not-available', () => {
     offeredInfo = null;
     verifiedInfo = null;
+    if (keepStagedUpdate('No newer update')) return;
     logger.info(`[Update] No update available (check took ${checkDurationMs()}ms)`);
     setState({ phase: 'up-to-date', version: null, checkedAt: Date.now(), error: null });
   });
@@ -303,6 +333,7 @@ const wireEvents = (): void => {
     // the progress dialog while it ran. Without this the "ready to install"
     // prompt was swallowed by the dismissal of the dialog it replaces.
     if (downloadRequested) dialogDismissed = false;
+    stagedInfo = info;
     setState({
       phase: 'downloaded',
       version: info.version,
@@ -318,6 +349,7 @@ const wireEvents = (): void => {
     // stays false unless the user asked or is waiting on a download they
     // started — so it cannot become a recurring popup.
     logger.warn(`[Update] Update check failed after ${checkDurationMs()}ms:`, error);
+    if (keepStagedUpdate('Check failed')) return;
     setState({
       phase: 'error',
       error: error instanceof Error ? error.message : String(error),
@@ -413,11 +445,13 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
     // so it has to report itself.
     if (isTimeoutError(error)) {
       logger.warn(`[Update] Check timed out after ${checkDurationMs()}ms`);
-      setState({
-        phase: 'error',
-        error: error.message,
-        checkedAt: Date.now(),
-      });
+      if (!keepStagedUpdate('Check timed out')) {
+        setState({
+          phase: 'error',
+          error: error.message,
+          checkedAt: Date.now(),
+        });
+      }
     } else {
       logger.warn('[Update] Check rejected:', error);
     }
@@ -461,6 +495,9 @@ export const downloadUpdate = (): boolean => {
 
 /** Start electron-updater's download of the update just verified. */
 function startVerifiedDownload(): void {
+  // A new download replaces whatever was staged (electron-updater clears its
+  // cache for it), so a failure from here on must not resurrect the old one.
+  stagedInfo = null;
   // The rejection path is the 'error' event, which is already wired; this
   // catch only stops an unhandled rejection from reaching the process.
   void autoUpdater.downloadUpdate().catch((error) => {
@@ -628,4 +665,5 @@ export const __resetUpdateServiceForTests = (): void => {
   verifiedInfo = null;
   offeredInfo = null;
   pendingVerification = null;
+  stagedInfo = null;
 };
