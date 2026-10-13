@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.6] - 2026-10-13
-
 ### Added
 - **You're told when an update is ready.** With automatic updates on, a
   downloaded update used to wait silently for the next quit — and on a Mac,
@@ -28,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minute.
 - Pressing **Check for Updates…** shortly after launch now always shows its
   result; a background check starting at the same moment used to hide it.
+
+## [1.3.6] - 2026-10-13
+
+Not published: its release build failed on a flaky test before anything was
+built. Its changes ship in 1.3.7.
 
 ## [1.3.5] - 2026-10-13
 
