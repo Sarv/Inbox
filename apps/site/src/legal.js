@@ -4,8 +4,8 @@
 import './theme.css';
 import './styles.css';
 
-import appIconUrl from '../../desktop/public/icon.svg';
+import appIconSvg from '../../desktop/public/icon.svg?raw';
 
 import { showAppIcon } from './app-icon.js';
 
-if (typeof window !== 'undefined' && !import.meta.env?.VITEST) showAppIcon(document, appIconUrl);
+if (typeof window !== 'undefined' && !import.meta.env?.VITEST) showAppIcon(document, appIconSvg);
