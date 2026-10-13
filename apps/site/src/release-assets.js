@@ -74,10 +74,15 @@ export const classifyAsset = ({ name = '', browser_download_url: url, size = 0 }
 
 export const classifyAssets = (assets = []) => assets.map(classifyAsset).filter(Boolean);
 
-// An unknown architecture is most likely x64: it is what the vast majority of
-// desktops run, and every browser that hides the architecture runs on it too.
-const archPreference = (arch) =>
-  arch === ARCH.ARM64 ? [ARCH.ARM64, ANY_ARCH] : [ARCH.X64, ANY_ARCH];
+// The architectures whose files RUN on this machine, best first. A known arch
+// takes its own build over a universal one. An unknown arch (Safari on every
+// Mac, most Windows browsers) takes the universal file first, since it runs
+// whatever the CPU is; then x64, which most desktops run.
+const archPreference = (arch) => {
+  if (arch === ARCH.ARM64) return [ARCH.ARM64, ANY_ARCH];
+  if (arch === ARCH.X64) return [ARCH.X64, ANY_ARCH];
+  return [ANY_ARCH, ARCH.X64];
+};
 
 const rankOf = (list, value) => {
   const index = list.indexOf(value);
@@ -85,18 +90,22 @@ const rankOf = (list, value) => {
 };
 
 /**
- * Every installable asset for `os`, best match for `arch` first: preferred
- * package, then matching architecture, then the other architecture.
+ * Every installable asset for `os`, best match for `arch` first: files that
+ * run on this machine before files for the other architecture; within those,
+ * the preferred package (a Mac's .dmg over its .zip) before the architecture
+ * fit, so a per-arch .zip never outranks a .dmg that runs here.
  */
 export const rankAssetsFor = (installables, os, arch) => {
   const packages = PACKAGE_PREFERENCE[os] ?? [];
   const arches = archPreference(arch);
+  const runsHere = (asset) => (arches.includes(asset.arch) ? 0 : 1);
   return installables
     .filter((asset) => asset.os === os)
     .toSorted(
       (left, right) =>
-        rankOf(arches, left.arch) - rankOf(arches, right.arch) ||
-        rankOf(packages, left.kind) - rankOf(packages, right.kind)
+        runsHere(left) - runsHere(right) ||
+        rankOf(packages, left.kind) - rankOf(packages, right.kind) ||
+        rankOf(arches, left.arch) - rankOf(arches, right.arch)
     );
 };
 

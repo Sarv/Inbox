@@ -31,6 +31,30 @@ export const releaseV122 = () => ({
   assets: V122_ASSETS.map((asset) => ({ ...asset })),
 });
 
+// The macOS assets v1.3.4 publishes: the universal dmg for first installs plus
+// per-arch zips (auto-update). Sizes are representative.
+const V134_MAC_ASSETS = [
+  ['latest-mac.yml', 812],
+  ['sarv-inbox-1.3.4-mac-arm64-amd64.dmg', 263000000],
+  ['sarv-inbox-1.3.4-mac-arm64-amd64.dmg.blockmap', 274000],
+  ['sarv-inbox-1.3.4-mac-arm64.zip', 128000000],
+  ['sarv-inbox-1.3.4-mac-arm64.zip.blockmap', 134000],
+  ['sarv-inbox-1.3.4-mac-x64.zip', 131000000],
+  ['sarv-inbox-1.3.4-mac-x64.zip.blockmap', 137000],
+  ['Sarv-Inbox-Setup-1.3.4.exe', 268000000],
+].map(([name, size]) => ({
+  name,
+  size,
+  browser_download_url: `https://github.com/Sarv/Inbox/releases/download/v1.3.4/${name}`,
+}));
+
+export const releaseV134Mac = () => ({
+  tag_name: 'v1.3.4',
+  html_url: 'https://github.com/Sarv/Inbox/releases/tag/v1.3.4',
+  published_at: '2026-10-13T07:00:00Z',
+  assets: V134_MAC_ASSETS.map((asset) => ({ ...asset })),
+});
+
 export const UA = {
   macChrome:
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',

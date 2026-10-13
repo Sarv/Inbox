@@ -54,8 +54,16 @@ const ARCH_NAME = Object.freeze({
   [ARCH.ARM64]: 'ARM64',
 });
 
-const archName = (asset) =>
-  asset.arch === ANY_ARCH ? ANY_ARCH_NAME[asset.os] : ARCH_NAME[asset.arch];
+// Mac owners know their chip as Apple Silicon or Intel, not by ISA name.
+const MAC_ARCH_NAME = Object.freeze({
+  [ARCH.X64]: 'Intel',
+  [ARCH.ARM64]: 'Apple Silicon',
+});
+
+const archName = (asset) => {
+  if (asset.arch === ANY_ARCH) return ANY_ARCH_NAME[asset.os];
+  return (asset.os === OS.MAC ? MAC_ARCH_NAME : ARCH_NAME)[asset.arch];
+};
 
 /** One download link, ready to show. `size` is bytes; render.js formats it. */
 export const toLink = (asset) => ({
