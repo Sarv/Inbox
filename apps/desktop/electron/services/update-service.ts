@@ -361,10 +361,18 @@ const currentUpdateSupport = () =>
  */
 export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateState> => {
   const support = currentUpdateSupport();
+  const coalescing = checkInFlight || state.phase === 'downloading';
 
-  currentTrigger = trigger;
-  // A new check is a new question, so an earlier "Close" no longer applies.
-  dialogDismissed = false;
+  // A background tick that lands on a run already in progress asks nothing
+  // new. Letting it set the trigger turned a manual check into a scheduled one
+  // mid-flight (the first check fires 30s after launch, inside the check
+  // timeout), so the answer the user pressed for was never shown — and
+  // clearing the dismissal reopened a dialog they had closed.
+  if (!(coalescing && trigger === 'scheduled')) {
+    currentTrigger = trigger;
+    // A new check is a new question, so an earlier "Close" no longer applies.
+    dialogDismissed = false;
+  }
 
   if (!support.supported) {
     setState({ phase: 'unsupported', error: support.message, version: null });
@@ -375,7 +383,7 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
   // running — re-shows the dialog against the run already in progress rather
   // than starting a second one. Re-checking during a download is the worse of
   // the two: electron-updater would start fetching the same file again.
-  if (checkInFlight || state.phase === 'downloading') {
+  if (coalescing) {
     setState({});
     return state;
   }
@@ -388,7 +396,7 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
     // Bounded, because nothing below us is. builder-util-runtime's transport
     // defaults to a 60s socket timeout and retries server errors three times,
     // so an unbounded await can leave the dialog on "Checking for updates..."
-    // for minutes. An honest failure at 20s is a better answer than a spinner.
+    // for minutes. An honest failure at the deadline beats a spinner.
     pendingVerification = null;
     await withTimeout(
       autoUpdater.checkForUpdates(),

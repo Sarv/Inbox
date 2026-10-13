@@ -28,7 +28,13 @@ export const SIGNATURE_NAME = 'update-manifest.json.sig';
 const MANIFEST_FORMAT = 1;
 /** Far above any real manifest; a bound so a hostile response can't exhaust memory. */
 const MAX_MANIFEST_BYTES = 256 * 1024;
-const FETCH_TIMEOUT_MS = 20_000;
+/**
+ * Per request. Not shorter than the check's own budget (UPDATE_CHECK_TIMEOUT_MS):
+ * both connect to the same slow-pathed asset host (45s TCP connect, measured
+ * 2026-10-13), and at 20s every verification on that network aborted, so a
+ * genuine release was refused as "could not be verified".
+ */
+const FETCH_TIMEOUT_MS = 60_000;
 
 export interface UpdateManifest {
   format: number;

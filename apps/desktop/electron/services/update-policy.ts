@@ -50,16 +50,17 @@ export const FIRST_CHECK_DELAY_MS = 30 * 1000;
  * check can legitimately sit there for minutes — which is exactly what it did:
  * "Checking for updates..." with no end and no log line.
  *
- * 20s is chosen against a measured worst case, not a guess. The GitHub feed is
+ * 60s is chosen against a measured worst case, not a guess. The GitHub feed is
  * two requests: the releases atom feed, and `latest-mac.yml` from
  * `release-assets.githubusercontent.com`. On a network that slow-paths that
- * asset host the TCP connect alone was reproducibly ~14.8s (15.5s wall, three
- * runs). So the budget must clear ~16s to avoid failing a check that would
- * have succeeded, and must stay far enough under a minute that the dialog
- * always answers. Below this, an honest "couldn't reach the server, the next
- * check is in an hour" beats a spinner that never resolves.
+ * asset host the TCP connect alone was ~14.8s when first measured, and 45.0s
+ * on 2026-10-13 (curl, three runs, while github.com itself answered in 0.7s).
+ * The old 20s budget failed EVERY check on that network — the update was found
+ * a minute later, after the dialog had already said "Couldn't check". 60s
+ * clears 45s and matches the transport's own socket timeout, so ours fires
+ * only when it is retrying, which is the spinner this bound exists to end.
  */
-export const UPDATE_CHECK_TIMEOUT_MS = 20 * 1000;
+export const UPDATE_CHECK_TIMEOUT_MS = 60 * 1000;
 
 /** Who asked. A manual check always reports back, even to say "you're current". */
 export type UpdateTrigger = 'manual' | 'scheduled';

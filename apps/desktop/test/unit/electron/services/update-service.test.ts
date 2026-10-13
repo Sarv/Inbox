@@ -351,7 +351,9 @@ describe('checkForUpdates timeout', () => {
     const state = await pending;
 
     expect(state.phase).toBe('error');
-    expect(state.error).toMatch(/did not respond within 20 seconds/);
+    expect(state.error).toMatch(
+      new RegExp(`did not respond within ${UPDATE_CHECK_TIMEOUT_MS / 1000} seconds`),
+    );
     // A manual check must still SHOW that answer - silence is what made this
     // look broken in the first place.
     expect(state.prompt).toBe(true);
@@ -415,6 +417,32 @@ describe('checkForUpdates timeout', () => {
 
     await vi.advanceTimersByTimeAsync(UPDATE_CHECK_TIMEOUT_MS);
     await first;
+    service.stopUpdateService();
+  });
+
+  // The first background check fires 30s after launch, inside the check
+  // timeout. Landing on a manual check, it used to rewrite the trigger to
+  // 'scheduled', so the answer the user pressed for never appeared; it also
+  // cleared their "Close", reopening a dialog they had dismissed.
+  it('does not let a background tick take over a manual check in flight', async () => {
+    vi.useFakeTimers();
+    h.updater.checkForUpdates = vi.fn(() => {
+      h.updater.emit('checking-for-update');
+      return new Promise(() => {});
+    });
+    const service = await load();
+    service.startUpdateService();
+
+    const pending = service.checkForUpdates('manual');
+    await service.checkForUpdates('scheduled');
+    expect(service.getUpdateState()).toMatchObject({ trigger: 'manual', prompt: true });
+
+    service.dismissUpdateDialog();
+    await service.checkForUpdates('scheduled');
+    expect(service.getUpdateState().prompt).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(UPDATE_CHECK_TIMEOUT_MS);
+    await pending;
     service.stopUpdateService();
   });
 
