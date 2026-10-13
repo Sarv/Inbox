@@ -23,10 +23,11 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 
 import { join } from 'path';
 
 import { createLogger, isTimeoutError, withTimeout } from '@sarvinbox/core';
-import { app } from 'electron';
+import { app, Notification } from 'electron';
 import { autoUpdater, type Logger as UpdaterLogger } from 'electron-updater';
 
 import { getMainWindow } from '../shared';
+import { restoreAndFocusWindow } from '../utils/window-focus';
 
 import { verifyUpdate } from './update-manifest';
 import {
@@ -42,6 +43,7 @@ import {
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
+  shouldNotifyUpdateReady,
   shouldShowDialog,
   skipVersion,
   type UpdateIdentity,
@@ -137,6 +139,8 @@ let pendingVerification: Promise<void> | null = null;
  * an update that was sitting on disk, and "Restart now" refused to run.
  */
 let stagedInfo: UpdateIdentity | null = null;
+/** The version the "ready to install" notification was shown for. Once each. */
+let notifiedVersion: string | null = null;
 
 const loadPrefs = (): UpdatePrefs => {
   try {
@@ -222,6 +226,35 @@ const keepStagedUpdate = (outcome: string): boolean => {
   logger.info(`[Update] ${outcome}; keeping the staged ${stagedInfo.version}, which still installs on quit`);
   setState({ phase: 'downloaded', version: stagedInfo.version, percent: 100, error: null });
   return true;
+};
+
+/**
+ * Show the update dialog as if the user had asked — the click on the "ready to
+ * install" notification. 'manual' is what makes the dialog open with automatic
+ * updates on; the next check resets the trigger.
+ */
+const openUpdateDialog = (): void => {
+  restoreAndFocusWindow(getMainWindow());
+  currentTrigger = 'manual';
+  dialogDismissed = false;
+  setState({});
+};
+
+/** Tell the user, once, that an update is staged. A failure only costs the notice. */
+const notifyUpdateReady = (version: string): void => {
+  notifiedVersion = version;
+  try {
+    if (!Notification.isSupported()) return;
+    const notice = new Notification({
+      title: `Sarv Inbox ${version} is ready`,
+      body: 'It installs the next time you quit the app. Click to restart now.',
+      silent: true,
+    });
+    notice.on('click', openUpdateDialog);
+    notice.show();
+  } catch (error) {
+    logger.warn('[Update] Could not show the update-ready notification:', error);
+  }
 };
 
 /**
@@ -341,6 +374,17 @@ const wireEvents = (): void => {
       checkedAt: Date.now(),
       error: null,
     });
+    if (
+      shouldNotifyUpdateReady({
+        version: info.version,
+        prefs,
+        now: Date.now(),
+        prompted: state.prompt,
+        notifiedVersion,
+      })
+    ) {
+      notifyUpdateReady(info.version);
+    }
   });
 
   autoUpdater.on('error', (error) => {
@@ -666,4 +710,5 @@ export const __resetUpdateServiceForTests = (): void => {
   offeredInfo = null;
   pendingVerification = null;
   stagedInfo = null;
+  notifiedVersion = null;
 };

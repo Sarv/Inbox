@@ -48,6 +48,12 @@ const h = vi.hoisted(() => ({
   getVersion: (): string => '1.2.1',
   /** Null models a closed window; a throwing send models a torn-down one. */
   window: true,
+  /** Every system notification the service showed, with its click handler. */
+  notifications: [] as Array<{ title: string; body: string; click?: () => void }>,
+  notificationsSupported: true,
+  notificationThrows: false,
+  /** The main window's restore/focus calls when a notification is clicked. */
+  focused: 0,
   send: (channel: string, payload: unknown) => {
     h.sent.push({ channel, payload });
   },
@@ -62,6 +68,21 @@ vi.mock('electron', () => ({
     // Deliberately NO isPackaged: the service must not consult it. Electron
     // derives it from the executable's file name, which scripts/postinstall.mjs
     // renames in dev, so it is true inside `pnpm dev:desktop`.
+  },
+  Notification: class {
+    static isSupported = () => h.notificationsSupported;
+    private readonly record: { title: string; body: string; click?: () => void };
+    constructor(options: { title: string; body: string }) {
+      this.record = { title: options.title, body: options.body };
+    }
+    on(event: string, handler: () => void) {
+      if (event === 'click') this.record.click = handler;
+      return this;
+    }
+    show() {
+      if (h.notificationThrows) throw new Error('no notification server');
+      h.notifications.push(this.record);
+    }
   },
 }));
 
@@ -90,7 +111,13 @@ vi.mock('@sarvinbox/core', async () => {
 vi.mock('../../../../electron/shared', () => ({
   getMainWindow: () =>
     h.window
-      ? { isDestroyed: () => false, webContents: { send: (c: string, p: unknown) => h.send(c, p) } }
+      ? {
+          isDestroyed: () => false,
+          isMinimized: () => false,
+          show: () => {},
+          focus: () => { h.focused += 1; },
+          webContents: { send: (c: string, p: unknown) => h.send(c, p) },
+        }
       : null,
 }));
 
@@ -153,6 +180,10 @@ beforeEach(() => {
   h.verify = vi.fn(async () => ({ ok: true }) as const);
   h.getVersion = () => '1.2.1';
   h.window = true;
+  h.notifications = [];
+  h.notificationsSupported = true;
+  h.notificationThrows = false;
+  h.focused = 0;
   h.send = (channel, payload) => {
     h.sent.push({ channel, payload });
   };
@@ -567,6 +598,101 @@ describe('a staged update survives later checks', () => {
     h.updater.emit('error', new Error('socket hang up'));
 
     expect(service.getUpdateState().phase).toBe('error');
+    service.stopUpdateService();
+  });
+});
+
+describe('update-ready notification', () => {
+  /**
+   * The user's report: releases kept shipping and nothing ever said so. With
+   * automatic updates on the dialog stays shut by design, and on macOS closing
+   * the window is not quitting, so a staged update could wait indefinitely
+   * with no sign of it. If this fails, that silence is back.
+   */
+  it('announces a background-staged update once, without opening the dialog', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0]?.title).toBe('Sarv Inbox 1.3.0 is ready');
+    expect(service.getUpdateState().prompt).toBe(false);
+    service.stopUpdateService();
+  });
+
+  // The notification is the way in to "Restart now"; a click that only
+  // focused the window would leave the user hunting for a menu item.
+  it('opens the ready-to-install dialog when clicked', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    h.notifications[0]?.click?.();
+
+    expect(h.focused).toBe(1);
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', prompt: true });
+    service.stopUpdateService();
+  });
+
+  // An hourly notification for the same update would be the nagging the
+  // automatic mode promises not to do.
+  it('does not repeat for the same version', async () => {
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+    h.updater.emit('update-downloaded', { version: '1.3.0', files: [] });
+
+    expect(h.notifications).toHaveLength(1);
+    service.stopUpdateService();
+  });
+
+  // A download the user asked for already ends in the dialog; a notification
+  // on top would say the same thing twice.
+  it('stays quiet when the dialog is already showing the update', async () => {
+    manualMode();
+    const service = await load();
+    service.startUpdateService();
+    await service.checkForUpdates('scheduled');
+    await offer('1.3.0');
+    service.downloadUpdate();
+    h.updater.emit('update-downloaded', { version: '1.3.0', files: [] });
+
+    expect(service.getUpdateState().prompt).toBe(true);
+    expect(h.notifications).toHaveLength(0);
+    service.stopUpdateService();
+  });
+
+  // "Remind me later" means no prompts of any kind for six hours.
+  it('respects an active snooze', async () => {
+    writePrefs({ skippedVersion: null, remindAfter: Date.now() + 60_000, autoUpdate: true });
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    expect(h.notifications).toHaveLength(0);
+    service.stopUpdateService();
+  });
+
+  // No notification support (some Linux desktops) must cost only the notice,
+  // never the staged update.
+  it('stages normally where notifications are unsupported or fail', async () => {
+    h.notificationsSupported = false;
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+    expect(h.notifications).toHaveLength(0);
+    expect(service.getUpdateState().phase).toBe('downloaded');
+    service.stopUpdateService();
+  });
+
+  it('logs, rather than throws, when the notification cannot be shown', async () => {
+    h.notificationThrows = true;
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    expect(service.getUpdateState().phase).toBe('downloaded');
+    expect(h.logs).toContainEqual(['update-service', 'warn', '[Update] Could not show the update-ready notification:']);
     service.stopUpdateService();
   });
 });

@@ -11,6 +11,7 @@ import {
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
   shouldPromptForUpdate,
+  shouldNotifyUpdateReady,
   shouldShowDialog,
   skipVersion,
   type UpdatePhase,
@@ -238,6 +239,34 @@ describe('shouldShowDialog', () => {
     const base = { phase: 'downloaded' as const, trigger: 'scheduled' as const, version: '1.2.0', now: NOW };
     expect(shouldShowDialog({ ...base, prefs: prefs({ skippedVersion: '1.2.0' }) })).toBe(false);
     expect(shouldShowDialog({ ...base, prefs: prefs({ remindAfter: NOW + 1 }) })).toBe(false);
+  });
+});
+
+describe('shouldNotifyUpdateReady', () => {
+  const ready = { version: '1.2.0', now: NOW, prompted: false, notifiedVersion: null };
+
+  // The whole point: with automatic updates on, a staged update is otherwise
+  // invisible until the user happens to quit.
+  it('announces a staged update nobody has been told about', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs() })).toBe(true);
+  });
+
+  // The dialog already says it; a toast on top is the same news twice.
+  it('stays quiet while the dialog is showing it', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs(), prompted: true })).toBe(false);
+  });
+
+  // Once per version, or the hourly cycle becomes an hourly nag.
+  it('announces each version once, and the next version again', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs(), notifiedVersion: '1.2.0' })).toBe(false);
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs(), notifiedVersion: '1.1.0' })).toBe(true);
+  });
+
+  // "Skip this version" and "Remind me later" cover notifications too.
+  it('respects skip and snooze', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs({ skippedVersion: '1.2.0' }) })).toBe(false);
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs({ remindAfter: NOW + 1 }) })).toBe(false);
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs({ remindAfter: NOW - 1 }) })).toBe(true);
   });
 });
 

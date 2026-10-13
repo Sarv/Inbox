@@ -346,7 +346,8 @@ export const getUpdateSupport = ({
  *     though they may have hidden the progress in the meantime.
  *  4. **Otherwise, a background cycle interrupts only when there is a decision
  *     to make.** With automatic updates ON there is none — the download and the
- *     install both happen without the user, so the dialog never opens. With
+ *     install both happen without the user, so the dialog never opens (a
+ *     staged update is announced by {@link shouldNotifyUpdateReady} instead). With
  *     them OFF the app cannot proceed without an answer, so it asks once the
  *     update is found (and again when a requested download is staged), subject
  *     to the user's earlier "skip" and "later".
@@ -380,6 +381,37 @@ export const shouldShowDialog = ({
   if (version === null) return false;
   return shouldPromptForUpdate({ version, prefs, now, trigger });
 };
+
+/**
+ * Should a freshly staged update announce itself with a system notification?
+ *
+ * The quiet counterpart of the dialog. With automatic updates on, a background
+ * download never opens the dialog (rule 4 above), and on macOS closing the
+ * window is not quitting — so "installs on next quit" could wait weeks with
+ * nothing on screen saying an update was waiting. A notification tells the user
+ * once, without taking focus or blocking a half-written reply.
+ *
+ * Not when the dialog is already saying it (`prompted`), not twice for the same
+ * version, and not against the user's own "skip" or "later".
+ */
+export const shouldNotifyUpdateReady = ({
+  version,
+  prefs,
+  now,
+  prompted,
+  notifiedVersion,
+}: {
+  version: string;
+  prefs: UpdatePrefs;
+  now: number;
+  /** The dialog is showing this update already. */
+  prompted: boolean;
+  /** The version a notification was last shown for in this process. */
+  notifiedVersion: string | null;
+}): boolean =>
+  !prompted
+  && notifiedVersion !== version
+  && shouldPromptForUpdate({ version, prefs, now, trigger: 'scheduled' });
 
 /**
  * May a downloaded update install ITSELF the next time the app quits, with no
