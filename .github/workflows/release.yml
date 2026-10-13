@@ -59,7 +59,9 @@ jobs:
     name: ${{ matrix.name }}
     needs: verify
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90 # notarization alone can take 20+ minutes
+    # notarization alone can take 20+ minutes, and macOS notarizes three apps
+    # (universal, arm64, x64)
+    timeout-minutes: 150
     env:
       # Evaluated once at job level: a step cannot read env it sets on itself,
       # and this gates both signing and the verification step below.
@@ -68,27 +70,38 @@ jobs:
       fail-fast: false # one platform failing must not discard the others
       matrix:
         include:
-          - name: macOS (universal)
-            id: mac-universal
+          - name: macOS
+            id: mac
             os: macos-latest
             platform: mac
             # Both macOS arches build on one runner: Xcode ships both SDKs, so
             # the native addons cross-compile between arm64 and x64 fine. This
             # is the ONLY cross-arch case that works.
             #
-            # --universal packs each arch separately and then merges them with
-            # lipo into ONE fat binary, so the job emits a single dmg and a
-            # single zip instead of one of each per arch. Users stop having to
-            # know which Mac they own; the cost is that each download carries
-            # both slices. The merge is strict -- it refuses to reconcile files
-            # that differ between the two packs -- which is why build.files
-            # excludes the node-gyp intermediates (obj/, .deps/) whose contents
-            # are arch-specific.
-            args: --mac --universal
+            # Two different shapes, on purpose (build.mac.target):
+            #  - the DMG is UNIVERSAL: both packs merged with lipo into one fat
+            #    binary, so a first-time download never asks which Mac you own;
+            #  - the auto-update ZIPs are PER ARCH (arm64, x64). electron-
+            #    updater only fetches the blocks that changed (.blockmap), and
+            #    in a universal binary the arm64 code signature sits mid-file,
+            #    so every release re-shipped the whole x64 half of the 168 MB
+            #    Electron Framework: 97 MB of a 258 MB zip for 1.3.2 -> 1.3.3,
+            #    against 12 MB on Windows. Per-arch, the signature is at the
+            #    end. It also fixes Intel Macs: electron-updater treats any
+            #    file with "arm64" in its name as Apple Silicon, so the
+            #    universal "...-mac-arm64-amd64.zip" was filtered out for them
+            #    and they had NO update to download.
+            # The merge is strict -- it refuses to reconcile files that differ
+            # between the two packs -- which is why build.files excludes the
+            # node-gyp intermediates (obj/, .deps/) whose contents are
+            # arch-specific. No arch flag here: every target pins its own.
+            args: --mac
             # The binary inside the .app bundle, launched directly: `open`
-            # returns before the app has done anything.
-            smoke: apps/desktop/release/mac-universal/Sarv Inbox.app/Contents/MacOS/Sarv Inbox
-            fuses: apps/desktop/release/mac-universal/Sarv Inbox.app
+            # returns before the app has done anything. The universal app (the
+            # DMG) and the arm64 app (what auto-update ships to Apple Silicon)
+            # both run on this runner; the x64 zip is covered by the arch check.
+            smoke: apps/desktop/release/mac-universal/Sarv Inbox.app/Contents/MacOS/Sarv Inbox|apps/desktop/release/mac-arm64/Sarv Inbox.app/Contents/MacOS/Sarv Inbox
+            fuses: apps/desktop/release/mac-universal/Sarv Inbox.app|apps/desktop/release/mac-arm64/Sarv Inbox.app|apps/desktop/release/mac/Sarv Inbox.app
           # Each Linux arch gets its OWN runner: unlike Xcode and MSVC, the
           # stock gcc on a GitHub runner has no cross toolchain, so the arm64
           # machine cannot compile x64 (`cc: unrecognized command-line option
@@ -327,11 +340,14 @@ jobs:
         if: matrix.platform == 'mac' && env.HAS_APPLE_CERT == 'true'
         run: |
           set -euo pipefail
-          APP=$(find apps/desktop/release -name '*.app' -maxdepth 3 | head -1)
-          echo "Verifying $APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
-            || { echo "FAIL: signed app carries no entitlements"; exit 1; }
+          # Every app that ships: the universal one in the DMG and the two
+          # per-arch ones in the update zips.
+          for APP in apps/desktop/release/{mac-universal,mac-arm64,mac}/"Sarv Inbox.app"; do
+            echo "Verifying $APP"
+            codesign --verify --deep --strict --verbose=2 "$APP"
+            codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
+              || { echo "FAIL: $APP carries no entitlements"; exit 1; }
+          done
           echo "OK: signature and entitlements present"
 
       # A cross-compiled addon that silently fell back to the host CPU still
@@ -349,12 +365,19 @@ jobs:
       # The universal merge is the step that can silently halve the app: if
       # lipo ever keeps one slice, the dmg still builds, signs, notarizes and
       # installs, and fails only for users on the missing CPU -- as an app with
-      # no mail, not as a crash, because every DB read is try/catch'd. Reading
-      # the Mach-O fat header costs milliseconds.
-      - name: Verify the macOS build is really universal
+      # no mail, not as a crash, because every DB read is try/catch'd. The
+      # per-arch update zips are the same risk one step earlier: an x64 app
+      # carrying the arm64 addon (beforeBuild rebuilds it per arch, in place)
+      # is what auto-update would hand every Intel Mac. Reading the Mach-O
+      # headers costs milliseconds.
+      - name: Verify the macOS builds carry the right architectures
         if: matrix.platform == 'mac'
         shell: bash
-        run: node scripts/verify-mac-arch.mjs apps/desktop/release/mac-universal=x64,arm64
+        run: |
+          node scripts/verify-mac-arch.mjs \
+            apps/desktop/release/mac-universal=x64,arm64 \
+            apps/desktop/release/mac-arm64=arm64 \
+            apps/desktop/release/mac=x64
 
       # The v1.2.0 tag built four green artifacts that were all EMPTY: a false
       # from build/beforeBuild.js told electron-builder 26 that node_modules
@@ -441,7 +464,8 @@ jobs:
           if [[ "${{ matrix.platform }}" == "linux" ]]; then
             xvfb-run -a node scripts/smoke-launch.mjs "/opt/Sarv Inbox/sarv-inbox"
           else
-            node scripts/smoke-launch.mjs "${{ matrix.smoke }}"
+            IFS='|' read -ra APPS <<< "${{ matrix.smoke }}"
+            for APP in "${APPS[@]}"; do node scripts/smoke-launch.mjs "$APP"; done
           fi
 
       - name: Upload artifacts
