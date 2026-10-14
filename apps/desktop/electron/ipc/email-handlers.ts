@@ -2022,7 +2022,7 @@ export function registerEmailHandlers(): void {
    * Bulk action on multiple emails
    * Groups emails by source folder, updates local DB in batch, fires single bulk IMAP call per folder group
    */
-  ipcMain.handle('emails:bulkAction', async (_event, emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => {
+  ipcMain.handle('emails:bulkAction', async (_event, emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean, requestId?: string) => {
     emailIds = [...new Set(emailIds)];
     const processedIds: string[] = [];
     const queuedIds: string[] = [];
@@ -2166,6 +2166,20 @@ export function registerEmailHandlers(): void {
                   // remapping uses row ids, even during persisted queue replay.
                   await storage.updateEmail(item.id, { folderId: trashFolder.id, tags, uid: null } as any);
                   placed.push(item);
+                }
+                if (requestId && _event?.sender) {
+                  // The next page can be read locally while IMAP is still moving
+                  // this group. Progress is not a final acknowledgement: failures
+                  // below still restore the original rows.
+                  try {
+                    _event.sender.send('emails:bulkActionProgress', {
+                      requestId, action, accountId, emailIds: deletable.map((item) => item.id),
+                    });
+                  } catch (error) {
+                    // Closing the renderer must not turn a successful local
+                    // placement into a failed mail operation.
+                    logger.warn('[Main] Bulk action progress delivery failed:', error);
+                  }
                 }
                 outcome = await syncEngine.bulkMoveToTrash(folderPath, uids, deletable.map((i) => i.id));
                 if (outcome === 'failed') throw new Error('IMAP trash move failed');

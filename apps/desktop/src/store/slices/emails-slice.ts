@@ -13,7 +13,7 @@ import { noteAccountFolders } from '../../utils/remote-images';
 import { buildThreads, threadRowCount, threadRowKey } from '../../utils/thread-utils';
 import { isRetryableBodyFetchError, looksGoneFromServer, withFailedBody } from '../body-fetch-failures';
 import { getEmailsPerPage, getPageSizeForView, getPageSizeForState, isThreadPagedView, mergePageWindow, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal, fetchVirtualFolderTotal, computeSectionFetchLimit, sectionDataUnchanged } from '../helpers';
-import type { EmailsSlice, SliceCreator } from '../types';
+import type { EmailsSlice, EmailStore, SliceCreator } from '../types';
 
 // Monotonic sequence for loadAllSections. Concurrent reloads of the SAME
 // folder are routine (a new-mail event, a background single-folder sync, a
@@ -24,6 +24,25 @@ import type { EmailsSlice, SliceCreator } from '../types';
 // re-selected (the counter, a separate persisted value, stays correct). Each
 // call captures the seq at entry and bails before writing if a newer one began.
 let sectionLoadSeq = 0;
+
+const sectionReadTokens = new WeakMap<object, Map<string, symbol>>();
+
+function beginSectionRead(get: () => EmailStore, sectionId: string) {
+  const tokens = sectionReadTokens.get(get) ?? new Map<string, symbol>();
+  sectionReadTokens.set(get, tokens);
+  const token = Symbol(sectionId);
+  tokens.set(sectionId, token);
+  // A targeted post-mutation read supersedes an older whole-inbox snapshot.
+  ++sectionLoadSeq;
+  return {
+    isCurrent: () => tokens.get(sectionId) === token,
+    finish: () => {
+      if (tokens.get(sectionId) !== token) return false;
+      tokens.delete(sectionId);
+      return true;
+    },
+  };
+}
 
 // Monotonic sequence for loadThread — same "last-to-resolve wins" hazard as
 // sectionLoadSeq above, but on the navigation hot path. Arrowing quickly
@@ -73,6 +92,15 @@ function getDbFilter(section: InboxSection, inboxType: string): string {
     return section.filter; // 'unread'
   }
   return section.filter;
+}
+
+/** List reads may finish after the user selects another account or tab. */
+function emailListViewKey(state: EmailStore): string {
+  return JSON.stringify([
+    state.activeAccountId, state.selectedFolderId, state.selectedVirtualFolder,
+    state.viewingAICategory, state.viewingSection, state.viewingSnoozed,
+    state.searchQuery, state.activeInboxFilter, state.inboxType,
+  ]);
 }
 
 const LOAD_MORE_SIZE = 25;
@@ -726,6 +754,8 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
    */
   goToEmailPage: async (page) => {
     if (page < 0 || get().loadingMoreEmails) return;
+    const viewKey = emailListViewKey(get());
+    const isStale = () => emailListViewKey(get()) !== viewKey;
     const { selectedFolderId, folders, viewingAICategory, viewingSection, selectedVirtualFolder, viewingSnoozed, accounts } = get();
     // One source of truth for the tiers (section 50 / All Email 100 / standard
     // mailbox 50 / everything else emailsPerPage) — see getPageSizeForView.
@@ -753,6 +783,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
             ? window.electronAPI.emails.sectionCounts([viewingSection], folderPath, viewFilter)
             : Promise.resolve(null),
         ]);
+        if (isStale()) return;
         const rows = listRes.success && listRes.data ? listRes.data : [];
         const total = needCount
           ? (countRes?.success && countRes.data ? (countRes.data[viewingSection] || 0) : 0)
@@ -764,7 +795,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       if (selectedVirtualFolder === 'virtual-unified' && !viewingAICategory) {
         const accountIds = accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id);
         const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset });
-        if (get().selectedVirtualFolder !== 'virtual-unified' || get().viewingAICategory) return;
+        if (isStale()) return;
         if (res?.success && res.data) {
           set({ emails: res.data.emails, emailsPage: page, emailsOffset: offset + res.data.emails.length, hasMoreEmails: res.data.hasMore, emailsTotal: res.data.total ?? 0 });
         }
@@ -803,9 +834,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
               })
             : Promise.resolve(cachedTotal),
         ]);
-        if (get().viewingAICategory !== viewingAICategory
-          || get().selectedVirtualFolder !== selectedVirtualFolder
-          || get().selectedFolderId !== selectedFolderId) return;
+        if (isStale()) return;
         set({ emails: rows, emailsPage: page, emailsOffset: offset + rows.length, hasMoreEmails: total ? offset + rows.length < total : rows.length >= PAGE_SIZE, emailsTotal: total });
         return;
       }
@@ -828,6 +857,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
               : window.electronAPI.emails.getAll(PAGE_SIZE, offset),
           needCount ? fetchVirtualFolderTotal(selectedVirtualFolder) : Promise.resolve(cachedTotal),
         ]);
+        if (isStale()) return;
         if (result.success && result.data) {
           // These views page by CONVERSATION (so do their totals). Measure the
           // page in whichever unit the source used, or the label promises pages
@@ -857,6 +887,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           window.electronAPI.snooze.listEmails({ limit: PAGE_SIZE, offset }),
           needCount ? fetchVirtualFolderTotal('virtual-snoozed') : Promise.resolve(cachedTotal),
         ]);
+        if (isStale()) return;
         if (result.success && result.data) {
           const rows = threadRowCount(result.data as any[]);
           set({
@@ -876,14 +907,18 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       const serverTotal = folder?.serverMessageCount || 0;
       const total = Math.max(localTotal, serverTotal);
       let result = await window.electronAPI.emails.list(selectedFolderId, PAGE_SIZE, offset);
+      if (isStale()) return;
       let rows = result.success && result.data ? result.data : [];
       // Page past what's synced locally but the server holds more → nudge the
       // background backfill (bounded, header-only) then re-read this page once.
       if (rows.length < PAGE_SIZE && offset + rows.length < serverTotal && folder) {
         const res = await window.electronAPI.imap.backfillChunk(folder.path);
+        if (isStale()) return;
         if (res?.success && (res.data?.inserted ?? 0) > 0) {
           await get().loadFolders();
+          if (isStale()) return;
           result = await window.electronAPI.emails.list(selectedFolderId, PAGE_SIZE, offset);
+          if (isStale()) return;
           rows = result.success && result.data ? result.data : [];
         }
       }
@@ -1535,6 +1570,8 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   clearSectionData: () => set({ sectionData: {}, sectionLoading: new Set() }),
 
   loadSectionEmails: async (sectionId, filter, folderPath?) => {
+    const viewKey = emailListViewKey(get());
+    const request = beginSectionRead(get, sectionId);
     // Gmail "Show up to" — the home section preview shows the section's maxItems
     // (5/10/25/50; default 25). Clicking the count opens the full paginated page.
     const section = get().inboxSections.find((s) => s.id === sectionId);
@@ -1553,6 +1590,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         window.electronAPI.emails.sectionCounts([filter], folderPath, viewFilter),
       ]);
 
+      if (!request.isCurrent() || emailListViewKey(get()) !== viewKey) return;
       const emails = emailsResult.success && emailsResult.data ? emailsResult.data : [];
       const total = countsResult.success && countsResult.data ? (countsResult.data[filter] || 0) : 0;
       const threads = buildThreads(emails);
@@ -1574,9 +1612,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     } catch (error) {
       console.error(`[Store] Failed to load section ${sectionId}:`, error);
     } finally {
-      const updatedLoading = new Set(get().sectionLoading);
-      updatedLoading.delete(sectionId);
-      set({ sectionLoading: updatedLoading });
+      if (request.finish()) {
+        const updatedLoading = new Set(get().sectionLoading);
+        updatedLoading.delete(sectionId);
+        set({ sectionLoading: updatedLoading });
+      }
     }
   },
 
@@ -1648,6 +1688,8 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   goToSectionPage: async (sectionId, filter, page, folderPath?) => {
     const cur = get().sectionData[sectionId];
     if (page < 0 || cur?.loading) return;
+    const viewKey = emailListViewKey(get());
+    const request = beginSectionRead(get, sectionId);
     const pageSize = getEmailsPerPage();
     const offset = page * pageSize;
     // Mark loading (preserve current rows so the list doesn't flash empty).
@@ -1658,6 +1700,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         window.electronAPI.emails.listBySection(filter, pageSize, offset, folderPath, viewFilter),
         window.electronAPI.emails.sectionCounts([filter], folderPath, viewFilter),
       ]);
+      if (!request.isCurrent() || emailListViewKey(get()) !== viewKey) return;
       const emails = emailsResult.success && emailsResult.data ? emailsResult.data : [];
       const total = countsResult.success && countsResult.data ? (countsResult.data[filter] || 0) : (cur?.total || 0);
       const threads = buildThreads(emails);
@@ -1676,8 +1719,13 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       set(sectionRowsPatch(get().viewingSection, newSectionData));
     } catch (error) {
       console.error(`[Store] goToSectionPage ${sectionId} failed:`, error);
-      const latest = get().sectionData;
-      set({ sectionData: { ...latest, [sectionId]: { ...(latest[sectionId] || { emails: [], threads: [] }), loading: false } } });
+    } finally {
+      if (request.finish()) {
+        const latest = get().sectionData;
+        if (latest[sectionId]?.loading) {
+          set({ sectionData: { ...latest, [sectionId]: { ...latest[sectionId], loading: false } } });
+        }
+      }
     }
   },
 

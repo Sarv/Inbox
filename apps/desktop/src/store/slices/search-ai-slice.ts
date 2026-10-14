@@ -3,13 +3,30 @@ import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
 import { isAIAssistEnabled } from '../../services/agent-settings';
 import { isSignatureDetectionEnabled, detectSignature, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
 import { getMaxAIProcessingEmails, getEmailsPerPage, getPageSizeForView, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
-import type { SearchAISlice, SliceCreator } from '../types';
+import type { EmailStore, SearchAISlice, SliceCreator } from '../types';
 
 // The parsed query + context of the ACTIVE search, kept so goToSearchPage can
 // re-fetch any page without re-parsing (and without threading them through the
 // UI). Module-scoped — there is a single store instance.
 let activeSearchParsed: any = null;
 let activeSearchContext: { folderId?: string; aiCategory?: string } | null = null;
+let searchRequestSeq = 0;
+
+function searchViewKey(state: EmailStore): string {
+  return JSON.stringify([
+    state.activeAccountId, state.selectedFolderId, state.selectedVirtualFolder,
+    state.viewingAICategory, state.searchQuery,
+  ]);
+}
+
+function searchStaleCheck(get: () => EmailStore): () => boolean {
+  const viewKey = searchViewKey(get());
+  const parsed = activeSearchParsed;
+  const context = activeSearchContext;
+  const sequence = searchRequestSeq;
+  return () => sequence !== searchRequestSeq || searchViewKey(get()) !== viewKey
+    || activeSearchParsed !== parsed || activeSearchContext !== context;
+}
 
 export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   searchQuery: '',
@@ -52,10 +69,11 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   refreshCategoryCounts: () => set({ aiCategoryCountsLastUpdate: Date.now() }),
 
   search: async (query, context) => {
+    const sequence = ++searchRequestSeq;
     if (!query.trim()) {
       activeSearchParsed = null;
       activeSearchContext = null;
-      set({ searchQuery: '', searchResults: [], searchInterpretation: null, searchFilter: null, searchPage: 0, searchHasMore: false, searchTotal: 0, searchingServer: false, serverSearchRan: false, serverSearchStatus: null });
+      set({ searchQuery: '', searchResults: [], searching: false, searchInterpretation: null, searchFilter: null, searchPage: 0, searchHasMore: false, searchTotal: 0, searchingServer: false, serverSearchRan: false, serverSearchStatus: null });
       return;
     }
 
@@ -80,9 +98,9 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     // and the auto-escalation gate don't carry over from the last search.
     set({ searching: true, searchQuery: query, searchInterpretation: null, searchPage: 0, serverSearchRan: false, serverSearchStatus: null });
 
-    // A slower search must not overwrite the results of a newer one (or a
-    // cleared search) — bail before every set() if the query changed.
-    const isStale = () => get().searchQuery !== query;
+    // The same text in another category/account is a different search.
+    const viewKey = searchViewKey(get());
+    const isStale = () => sequence !== searchRequestSeq || searchViewKey(get()) !== viewKey;
 
     try {
       const useAISearch = !context?.skipAI && isAISearchEnabled() && getDefaultProvider();
@@ -135,8 +153,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
         // Ignore fallback error
       }
     } finally {
-      // Skip only when a NEWER query owns the spinner; a cleared search
-      // (searchQuery === '') still needs searching reset.
+      // Folder navigation can also clear the query without starting a search.
       if (!isStale() || !get().searchQuery) set({ searching: false });
     }
   },
@@ -147,11 +164,23 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   goToSearchPage: async (page) => {
     const query = get().searchQuery;
     if (!query || !activeSearchParsed) return;
+    const isStale = searchStaleCheck(get);
+    const needCount = get().searchTotal === 0 && get().selectedVirtualFolder !== 'virtual-unified';
+    const countQuery = { ...activeSearchParsed, folderId: activeSearchContext?.folderId, aiCategory: activeSearchContext?.aiCategory };
     set({ searching: true });
     try {
       await get()._loadSearchPage(page, query);
+      // Removal invalidates the cached denominator along with the page rows.
+      if (needCount && !isStale()) {
+        try {
+          const count = await window.electronAPI.ai.searchCount(countQuery);
+          if (count?.success && typeof count.data === 'number' && !isStale()) {
+            set({ searchTotal: count.data });
+          }
+        } catch { /* leave total unknown -> hasMore-gated */ }
+      }
     } finally {
-      if (get().searchQuery === query) set({ searching: false });
+      if (!isStale() || !get().searchQuery) set({ searching: false });
     }
   },
 
@@ -159,7 +188,8 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   // search used: single-account (ai.search), or on All Inboxes unifiedSearch
   // (free text) / unifiedInbox (pure filter). hasMore = a full page came back.
   _loadSearchPage: async (page, query) => {
-    const isStale = () => get().searchQuery !== query;
+    if (get().searchQuery !== query) return;
+    const isStale = searchStaleCheck(get);
     const q = activeSearchParsed;
     const context = activeSearchContext;
     if (!q) return;
@@ -260,9 +290,10 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   },
 
   clearSearch: () => {
+    ++searchRequestSeq;
     activeSearchParsed = null;
     activeSearchContext = null;
-    set({ searchQuery: '', searchResults: [], searchInterpretation: null, searchSuggestions: [], searchFilter: null, searchPage: 0, searchHasMore: false, searchTotal: 0, searchingServer: false, serverSearchRan: false, serverSearchStatus: null });
+    set({ searchQuery: '', searchResults: [], searching: false, searchInterpretation: null, searchSuggestions: [], searchFilter: null, searchPage: 0, searchHasMore: false, searchTotal: 0, searchingServer: false, serverSearchRan: false, serverSearchStatus: null });
   },
 
   // Apply (or toggle off) a quick-filter over the sectioned inbox. Same label

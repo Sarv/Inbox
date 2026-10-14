@@ -11,7 +11,7 @@ import { addTag, removeTag, hasTag } from '../../utils/tags';
 import { buildThreads } from '../../utils/thread-utils';
 import { reloadTrustedSenders } from '../../utils/trusted-senders';
 import { requestConfirm } from '../confirm-service';
-import type { EmailActionsSlice, SliceCreator } from '../types';
+import type { EmailActionsSlice, EmailStore, SliceCreator } from '../types';
 
 /**
  * At or above this many messages, a destructive bulk action prompts for
@@ -408,10 +408,12 @@ function groupIdsByAccount(get: any, emailIds: string[]): Map<string | undefined
 type BulkActionResult = { processedIds: string[]; failedIds: string[]; queuedIds: string[] };
 
 /** One IPC per owning account; accept only the ids the backend acknowledged. */
-async function dispatchBulkByAccount(grouped: Map<string | undefined, string[]>, action: string, allowPermanent = false): Promise<BulkActionResult> {
+async function dispatchBulkByAccount(grouped: Map<string | undefined, string[]>, action: string, allowPermanent = false, requestId?: string): Promise<BulkActionResult> {
   const results = await Promise.all([...grouped.entries()].map(async ([acct, ids]): Promise<BulkActionResult> => {
     try {
-      const result = await window.electronAPI.emails.bulkAction(ids, action, acct, allowPermanent) as {
+      const result = await (requestId
+        ? window.electronAPI.emails.bulkAction(ids, action, acct, allowPermanent, requestId)
+        : window.electronAPI.emails.bulkAction(ids, action, acct, allowPermanent)) as {
         success: boolean;
         error?: string;
         data?: { processedIds: string[]; failedIds: string[]; queuedIds?: string[] };
@@ -446,13 +448,132 @@ function reportBulkFailure(action: string, failedCount: number): void {
 }
 
 /** A failed removal must not insert the old page into a different view. */
-function bulkRemovalViewKey(state: any): string {
+function bulkRemovalViewKey(state: EmailStore): string {
   return JSON.stringify([
     state.activeAccountId, state.selectedFolderId, state.selectedVirtualFolder,
     state.viewingAICategory, state.viewingSection, state.viewingSnoozed,
     state.searchQuery, state.searchInterpretation, state.activeInboxFilter,
-    state.emailsPage,
+    state.emailsPage, state.searchPage, state.inboxType,
   ]);
+}
+
+// The next page can be deleted while a previous batch is still syncing. Any
+// batch's requery must retain the optimistic removal of every pending batch.
+const pendingBulkRemovals = new WeakMap<object, Map<symbol, Set<string>>>();
+
+function trackBulkRemoval(store: object, ids: Set<string>): () => void {
+  let batches = pendingBulkRemovals.get(store);
+  if (!batches) { batches = new Map(); pendingBulkRemovals.set(store, batches); }
+  const token = Symbol();
+  batches.set(token, ids);
+  return () => {
+    batches.delete(token);
+    if (batches.size === 0) pendingBulkRemovals.delete(store);
+  };
+}
+
+function hidePendingBulkRows(store: object, get: () => EmailStore, set: (patch: Partial<EmailStore>) => void): void {
+  const ids = new Set([...(pendingBulkRemovals.get(store)?.values() ?? [])].flatMap((batch) => [...batch]));
+  if (ids.size === 0) return;
+  const current = get();
+  const sections = removeEmailsFromSectionData(current.sectionData, ids);
+  set({
+    emails: current.emails.filter((email) => !ids.has(email.id)),
+    searchResults: current.searchResults.filter((email) => !ids.has(email.id)),
+    threadEmails: current.threadEmails.filter((email) => !ids.has(email.id)),
+    ...(sections ? { sectionData: sections } : {}),
+  });
+}
+
+/** Wait for an older read to finish before requesting the post-mutation page. */
+async function waitForRemovalViewIdle(
+  get: () => EmailStore,
+  subscribe: (listener: () => void) => () => void,
+  viewKey: string,
+  isLoading: (state: EmailStore) => boolean,
+): Promise<boolean> {
+  while (bulkRemovalViewKey(get()) === viewKey) {
+    if (!isLoading(get())) return true;
+    await new Promise<void>((resolve) => {
+      const unsubscribe = subscribe(() => {
+        if (bulkRemovalViewKey(get()) !== viewKey || !isLoading(get())) {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+  }
+  return false;
+}
+
+/** Re-read the same offset: removing a page shifts the following rows into it. */
+async function refillAfterBulkRemoval(
+  get: () => EmailStore,
+  set: (patch: Partial<EmailStore>) => void,
+  subscribe: (listener: () => void) => () => void,
+  viewKey: string,
+  originalSections: EmailStore['sectionData'],
+  processedIds: Set<string>,
+  hasFailures: boolean,
+  hidePendingRows: () => void,
+): Promise<void> {
+  const isLoading = (state: EmailStore) => state.searchQuery
+    ? state.searching || state.searchingServer
+    : state.loadingEmails || state.loadingMoreEmails;
+  while (isLoading(get())) {
+    if (!await waitForRemovalViewIdle(get, subscribe, viewKey, isLoading)) return;
+  }
+  if (bulkRemovalViewKey(get()) !== viewKey) return;
+
+  const state = get();
+  if (state.searchQuery) {
+    set({ searchTotal: 0 });
+    await get().goToSearchPage(state.searchPage);
+    if (bulkRemovalViewKey(get()) === viewKey) hidePendingRows();
+    if (bulkRemovalViewKey(get()) === viewKey && !hasFailures && get().searchResults.length === 0 && state.searchPage > 0) {
+      await get().goToSearchPage(0);
+      hidePendingRows();
+    }
+    return;
+  }
+
+  const folder = state.folders.find((f) => f.id === state.selectedFolderId);
+  const sectionedInbox = folder?.path === 'INBOX' && state.inboxType !== 'default'
+    && state.inboxSections?.length > 0 && !state.viewingAICategory && !state.viewingSection
+    && !state.selectedVirtualFolder && !state.viewingSnoozed;
+  if (sectionedInbox) {
+    for (const section of state.inboxSections) {
+      const original = originalSections[section.id];
+      if (!original?.emails.some((email) => processedIds.has(email.id))) continue;
+      const page = original.page ?? 0;
+      const isSectionLoading = (current: EmailStore) => current.sectionData[section.id]?.loading || current.sectionLoading.has(section.id);
+      while (isSectionLoading(get())) {
+        if (!await waitForRemovalViewIdle(get, subscribe, viewKey, isSectionLoading)) return;
+      }
+      if (bulkRemovalViewKey(get()) !== viewKey) return;
+      if ((get().sectionData[section.id]?.page ?? 0) !== page) continue;
+      const filter = section.filter === 'everything_else' && state.inboxType === 'important_first'
+        ? 'not_important' : section.filter === 'everything_else' && state.inboxType === 'unread_first'
+          ? 'read' : section.filter;
+      if (page === 0) await get().loadSectionEmails(section.id, filter, folder.path);
+      else await get().goToSectionPage(section.id, filter, page, folder.path);
+      if (bulkRemovalViewKey(get()) !== viewKey) return;
+      hidePendingRows();
+      if (!hasFailures && get().sectionData[section.id]?.emails.length === 0 && page > 0) {
+        await get().loadSectionEmails(section.id, filter, folder.path);
+        if (bulkRemovalViewKey(get()) === viewKey) hidePendingRows();
+      }
+    }
+    return;
+  }
+
+  set({ emailsTotal: 0 });
+  await get().goToEmailPage(state.emailsPage);
+  if (bulkRemovalViewKey(get()) === viewKey) hidePendingRows();
+  if (bulkRemovalViewKey(get()) === viewKey && !hasFailures && get().emails.length === 0 && state.emailsPage > 0) {
+    await get().goToEmailPage(0);
+    hidePendingRows();
+  }
 }
 
 /** Restore only missing failures, retaining refreshed rows and their order. */
@@ -551,7 +672,7 @@ async function applyFolderPlacement(
   }
 }
 
-export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, get) => ({
+export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, get, api) => ({
   // Resolve the owning account for an email id from current state — so actions
   // on unified "All Inboxes" rows (which can belong to a non-active account)
   // route to the right DB/engine. undefined for normal single-account views.
@@ -1373,7 +1494,34 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     // server-side EXPUNGE: the main process permanently deletes ONLY when this
     // renderer confirmed it (permanent === true). Without the flag it moves to
     // Trash, so a Trash row we failed to detect can never be silently expunged.
-    const result = await dispatchBulkByAccount(grouped, action, permanent);
+    // Local Trash placement finishes before IMAP acknowledges the move. Refill
+    // at that point so a busy server cannot leave the page empty for a minute.
+    const progressedIds = new Set<string>();
+    const releasePending = trackBulkRemoval(api, idSet);
+    const hidePendingRows = () => hidePendingBulkRows(api, get, set);
+    let earlyRefill = Promise.resolve();
+    const onProgress = window.electronAPI.emails.onBulkActionProgress;
+    const requestId = onProgress ? crypto.randomUUID() : undefined;
+    const unsubscribe = onProgress?.((progress) => {
+      if (progress.requestId !== requestId || progress.action !== action) return;
+      const affected = progress.emailIds.filter((id) => idSet.has(id));
+      if (affected.length === 0) return;
+      for (const id of affected) progressedIds.add(id);
+      earlyRefill = earlyRefill.then(async () => {
+        await refillAfterBulkRemoval(get, set, api.subscribe, viewKey, snapshot.sectionData, progressedIds, true, hidePendingRows);
+      }).catch((error) => console.error('[Store] bulk action local refill failed:', error));
+    });
+    let result: BulkActionResult;
+    try {
+      try {
+        result = await dispatchBulkByAccount(grouped, action, permanent, requestId);
+      } finally {
+        unsubscribe?.();
+      }
+      await earlyRefill;
+    } finally {
+      releasePending();
+    }
     const failedIds = new Set(result.failedIds);
     const processedIds = new Set(result.processedIds);
     const removeAcknowledgedRows = () => {
@@ -1430,19 +1578,24 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     rollbackFailures();
     reportBulkFailure(action, failedIds.size);
 
+    // A failed badge/count refresh must not prevent the visible page refill.
+    const folderRefresh = Promise.resolve().then(() => get().loadFolders());
+    void Promise.allSettled([
+      folderRefresh,
+      Promise.resolve().then(() => get().refreshCategoryCounts()),
+      Promise.resolve().then(() => get().refreshUnreadSummary()),
+    ]).then((refreshes) => {
+      for (const refresh of refreshes) {
+        if (refresh.status === 'rejected') console.error('[Store] bulk action count refresh failed:', refresh.reason);
+      }
+    });
+    // Folder pagination uses these cached counts. Account-wide unread badges
+    // can resolve later and must not hold up this mailbox's page.
+    await folderRefresh.catch(() => undefined);
     try {
-      await get().loadFolders();
-      await get().refreshCategoryCounts();
-      await get().refreshUnreadSummary();
-      // Refill only the original category/unified page. A completed bulk call
-      // must not reset a filter or navigation the user changed while it ran.
-      if (result.processedIds.length > 0 && bulkRemovalViewKey(get()) === viewKey
-        && !get().searchQuery && (get().viewingAICategory || get().selectedVirtualFolder === 'virtual-unified')) {
-        set({ emailsTotal: 0 });
-        await get().goToEmailPage(get().emailsPage);
-        if (bulkRemovalViewKey(get()) === viewKey && failedIds.size === 0 && get().emails.length === 0 && get().emailsPage > 0) {
-          await get().goToEmailPage(0);
-        }
+      if ((processedIds.size > 0 || progressedIds.size > 0) && bulkRemovalViewKey(get()) === viewKey) {
+        const affectedIds = new Set([...processedIds, ...progressedIds]);
+        await refillAfterBulkRemoval(get, set, api.subscribe, viewKey, snapshot.sectionData, affectedIds, failedIds.size > 0 || pendingBulkRemovals.has(api), hidePendingRows);
         removeAcknowledgedRows();
         rollbackFailures();
       }

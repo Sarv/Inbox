@@ -1010,7 +1010,7 @@ export function EmailList() {
             fixedWindow={listHeader.fixedWindow}
           />
         )}
-        {loadingEmails || isSearching ? (
+        {loadingEmails || isSearching || (loadingMoreEmails && flatThreads.length === 0) ? (
           <div className="flex items-center justify-center p-8">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>

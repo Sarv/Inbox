@@ -69,6 +69,14 @@ export interface AttachmentDownloadProgress {
   phase: AttachmentDownloadPhase;
 }
 
+/** Local rows have changed while the bulk action is still awaiting its server result. */
+export interface BulkActionProgress {
+  requestId: string;
+  action: string;
+  accountId?: string;
+  emailIds: string[];
+}
+
 interface AntivirusProbeResult {
   challenge: string;
   setup: AntivirusSetupStatus;
@@ -372,8 +380,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('emails:archive', emailId, accountId),
     delete: (emailId: string, accountId?: string) =>
       ipcRenderer.invoke('emails:delete', emailId, accountId),
-    bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) =>
-      ipcRenderer.invoke('emails:bulkAction', emailIds, action, accountId, allowPermanent),
+    bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean, requestId?: string) =>
+      ipcRenderer.invoke('emails:bulkAction', emailIds, action, accountId, allowPermanent, requestId),
+    onBulkActionProgress: (callback: (progress: BulkActionProgress) => void) => {
+      const handler = (_event: unknown, progress: BulkActionProgress) => callback(progress);
+      ipcRenderer.on('emails:bulkActionProgress', handler);
+      return () => ipcRenderer.removeListener('emails:bulkActionProgress', handler);
+    },
     // Remote-image trust sources, per account: the explicit allowlist and the
     // people this account has emailed. No accountId = the active account.
     allowImagesForSender: (address: string, accountId?: string) => ipcRenderer.invoke('images:allowSender', address, accountId),
@@ -1374,7 +1387,8 @@ export interface ElectronAPI {
     moveFromSpam: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     archive: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     delete: (emailId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
-    bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean) => Promise<{ success: boolean; data?: { processedIds: string[]; queuedIds?: string[]; failedIds: string[] }; error?: string }>;
+    bulkAction: (emailIds: string[], action: string, accountId?: string, allowPermanent?: boolean, requestId?: string) => Promise<{ success: boolean; data?: { processedIds: string[]; queuedIds?: string[]; failedIds: string[] }; error?: string }>;
+    onBulkActionProgress?: (callback: (progress: BulkActionProgress) => void) => () => void;
     allowImagesForSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     getImageAllowedSenders: (accountId?: string) => Promise<{ success: boolean; data?: string[]; error?: string }>;
     disallowImagesForSender: (address: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;

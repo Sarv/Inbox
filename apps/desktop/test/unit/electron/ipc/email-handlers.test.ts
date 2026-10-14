@@ -422,6 +422,87 @@ describe('emails:bulkAction — deletion acknowledgements', () => {
     complete('queued');
     expect((await pending).data).toEqual({ processedIds: ['e1'], queuedIds: ['e1'], failedIds: [] });
   });
+
+  it('reports all 25 local placements before the slow server move acknowledges them', async () => {
+    const rows = Array.from({ length: 25 }, (_, index) => ({
+      id: `e${index}`, folderId: 'inbox', uid: index + 1, tags: '|INBOX|promotions|',
+    }));
+    seed(rows);
+    let complete!: (result: string) => void;
+    h.syncEngine.bulkMoveToTrash.mockReturnValue(new Promise((resolve) => { complete = resolve; }));
+    let progressWrites: Array<[string, any]> = [];
+    let serverCallsAtProgress = -1;
+    const send = vi.fn(() => {
+      progressWrites = h.storage.updateEmail.mock.calls.map(([id, patch]) => [id, { ...patch }]);
+      serverCallsAtProgress = h.syncEngine.bulkMoveToTrash.mock.calls.length;
+    });
+    let acknowledged = false;
+    const pending = bulkAction()({ sender: { send } }, rows.map((row) => row.id), 'delete', undefined, false, 'bulk-25')
+      .then((result: any) => {
+        acknowledged = true;
+        return result;
+      });
+
+    await vi.waitFor(() => expect(h.syncEngine.bulkMoveToTrash).toHaveBeenCalled());
+    expect(send).toHaveBeenCalledExactlyOnceWith('emails:bulkActionProgress', {
+      requestId: 'bulk-25', action: 'delete', accountId: undefined, emailIds: rows.map((row) => row.id),
+    });
+    expect(progressWrites).toEqual(rows.map((row) => [row.id, {
+      folderId: 'trash', uid: null, tags: '|promotions|[Gmail]/Trash|',
+    }]));
+    expect(serverCallsAtProgress).toBe(0);
+    expect(acknowledged).toBe(false);
+    complete('queued');
+    expect((await pending).data).toEqual({
+      processedIds: rows.map((row) => row.id), queuedIds: rows.map((row) => row.id), failedIds: [],
+    });
+  });
+
+  it('restores local rows when the server move fails after progress was reported', async () => {
+    const originals = [
+      { id: 'e1', folderId: 'inbox', uid: 9, tags: '|INBOX|promotions|' },
+      { id: 'e2', folderId: 'inbox', uid: 10, tags: '|INBOX|promotions|' },
+    ];
+    seed(originals);
+    const localRows = new Map(originals.map((row) => [row.id, { ...row }]));
+    h.storage.updateEmail.mockImplementation(async (id: string, patch: any) => {
+      Object.assign(localRows.get(id)!, patch);
+    });
+    let complete!: (result: string) => void;
+    h.syncEngine.bulkMoveToTrash.mockReturnValue(new Promise((resolve) => { complete = resolve; }));
+    const send = vi.fn();
+    const pending = bulkAction()({ sender: { send } }, ['e1', 'e2'], 'delete', undefined, false, 'bulk-failed');
+
+    await vi.waitFor(() => expect(send).toHaveBeenCalled());
+    expect([...localRows.values()].map((row) => row.folderId)).toEqual(['trash', 'trash']);
+    complete('failed');
+    expect((await pending).data).toEqual({ processedIds: [], queuedIds: [], failedIds: ['e1', 'e2'] });
+    expect([...localRows.values()]).toEqual(originals);
+  });
+
+  it('keeps an accepted move when the requesting renderer closes before progress delivery', async () => {
+    seed([{ id: 'e1', folderId: 'inbox', uid: 9, tags: '|INBOX|promotions|' }]);
+    const send = vi.fn(() => { throw new Error('WebContents was destroyed'); });
+
+    const result = await bulkAction()({ sender: { send } }, ['e1'], 'delete', undefined, false, 'bulk-closed');
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(result.data).toEqual({ processedIds: ['e1'], queuedIds: [], failedIds: [] });
+    expect(h.syncEngine.bulkMoveToTrash).toHaveBeenCalledWith('INBOX', [9], ['e1']);
+    expect(h.storage.updateEmail).toHaveBeenCalledTimes(1);
+    expect(h.storage.updateEmail).toHaveBeenCalledWith('e1', {
+      folderId: 'trash', uid: null, tags: '|promotions|[Gmail]/Trash|',
+    });
+  });
+
+  it('only reports progress for a request that opts in and has a sender', async () => {
+    seed([{ id: 'e1', folderId: 'inbox', uid: 9, tags: '|INBOX|' }]);
+    const send = vi.fn();
+
+    expect((await bulkAction()({ sender: { send } }, ['e1'], 'delete')).data.processedIds).toEqual(['e1']);
+    expect(send).not.toHaveBeenCalled();
+    expect((await bulkAction()(null, ['e1'], 'delete', undefined, false, 'bulk-no-sender')).data.processedIds).toEqual(['e1']);
+  });
 });
 
 /**
