@@ -22,7 +22,9 @@ import {
 } from '../../../services/ai-service';
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
+import { needsAttachmentMetadata } from '../../../utils/attachment-metadata';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
+import { toForwardSource } from '../../../utils/forward-quote';
 import { savedDraftContent } from '../../../utils/saved-draft-content';
 import { isDraftEmail } from '../../../utils/thread-utils';
 import { composeAiTurns, firstEmailFacts } from '../ai-view-compose';
@@ -405,11 +407,10 @@ export function useEmailDetail(): EmailDetailContext | null {
   // loop on that ordering means the message the user is looking at downloads
   // before the rest of the thread — no wasted round-trips racing it.
   useEffect(() => {
-    // Fetch when the body is missing OR when an attachment email still lacks
-    // parsed attachment metadata (attachmentSizes null → legacy row; the source
-    // parse on fetch fills real filenames + sizes so the chip + download work).
-    const needsFetch = (e: { rawBody?: string | null; hasAttachments?: boolean; attachmentSizes?: string | null }) =>
-      !e.rawBody || (!!e.hasAttachments && !e.attachmentSizes);
+    // A legacy local Sent mirror can have its body but still owe the attachment
+    // metadata from its own source, including forwards incorrectly marked empty.
+    const needsFetch = (e: typeof displayEmail) =>
+      !!e && (!e.rawBody || needsAttachmentMetadata(e));
 
     if (displayEmail && needsFetch(displayEmail) && !loadingBodies.has(displayEmail.id) && !failedBodies.has(displayEmail.id)) {
       log.trace(`fetching body for the opened email (priority): ${displayEmail.id}`);
@@ -1311,18 +1312,7 @@ export function useEmailDetail(): EmailDetailContext | null {
 
   const handleForward = (email = selectedEmail) => {
     if (!email) return;
-    openCompose('forward', {
-      id: email.id,
-      accountId: (email as any).accountId,
-      subject: email.subject || '',
-      fromAddress: email.fromAddress,
-      fromName: email.fromName,
-      toAddress: email.toAddress || '',
-      ccAddress: email.ccAddress,
-      date: email.date,
-      cleanBody: email.cleanBody,
-      rawBody: email.rawBody,
-    });
+    openCompose('forward', toForwardSource(email));
   };
 
   const handleInlineForward = (email = latestThreadEmail) => {

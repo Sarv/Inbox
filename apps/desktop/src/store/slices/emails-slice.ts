@@ -9,9 +9,11 @@ import { createLogger } from '@sarvinbox/core/logger';
 
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import type { InboxSection } from '../../config/inbox-types';
+import { needsAttachmentMetadata } from '../../utils/attachment-metadata';
 import { noteAccountFolders } from '../../utils/remote-images';
 import { buildThreads, threadRowCount, threadRowKey } from '../../utils/thread-utils';
 import { isRetryableBodyFetchError, looksGoneFromServer, withFailedBody } from '../body-fetch-failures';
+import { categoryViewQuery, countCategoryView, pageCategoryView } from '../category-view-query';
 import { getEmailsPerPage, getPageSizeForView, getPageSizeForState, isThreadPagedView, mergePageWindow, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal, fetchVirtualFolderTotal, computeSectionFetchLimit, sectionDataUnchanged } from '../helpers';
 import type { EmailsSlice, EmailStore, SliceCreator } from '../types';
 
@@ -615,8 +617,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   },
 
   loadMoreEmails: async () => {
-    const { selectedFolderId, emailsOffset, loadingMoreEmails, folders, viewingAICategory, selectedVirtualFolder } = get();
+    const { selectedFolderId, emailsOffset, loadingMoreEmails, folders, viewingAICategory, selectedVirtualFolder, activeInboxFilter } = get();
     if (loadingMoreEmails) return;
+    const viewKey = emailListViewKey(get());
 
     const PAGE_SIZE = getPageSizeForState(get());
 
@@ -631,8 +634,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         const res = await window.electronAPI.accounts.unifiedInbox({
           accountIds, limit: PAGE_SIZE, offset: emailsOffset,
           ...(viewingAICategory ? { aiCategory: viewingAICategory } : {}),
+          ...(activeInboxFilter ? { filter: activeInboxFilter } : {}),
         });
-        if (get().selectedVirtualFolder !== selectedVirtualFolder || get().viewingAICategory !== viewingAICategory) return;
+        if (emailListViewKey(get()) !== viewKey) return;
         if (res?.success && res.data && res.data.emails.length > 0) {
           const currentEmails = get().emails;
           const existingIds = new Set(currentEmails.map((e) => e.id));
@@ -657,9 +661,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
     if (viewingAICategory) {
       set({ loadingMoreEmails: true });
       try {
-        const result = await window.electronAPI.ai.getByCategory(
-          viewingAICategory, PAGE_SIZE, emailsOffset, selectedFolderId ?? undefined
-        );
+        const query = categoryViewQuery(viewingAICategory, selectedFolderId, activeInboxFilter);
+        const result = query
+          ? await pageCategoryView(query, PAGE_SIZE, emailsOffset)
+          : await window.electronAPI.ai.getByCategory(viewingAICategory, PAGE_SIZE, emailsOffset, selectedFolderId ?? undefined);
+        if (emailListViewKey(get()) !== viewKey) return;
         if (result.success && result.data && result.data.length > 0) {
           const currentEmails = get().emails;
           const existingIds = new Set(currentEmails.map(e => e.id));
@@ -667,7 +673,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
           set({
             emails: [...currentEmails, ...newEmails],
             emailsOffset: emailsOffset + PAGE_SIZE,
-            hasMoreEmails: result.data.length >= PAGE_SIZE,
+            hasMoreEmails: threadRowCount(result.data) >= PAGE_SIZE,
           });
         } else {
           set({ hasMoreEmails: false });
@@ -797,11 +803,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset });
         if (isStale()) return;
         if (res?.success && res.data) {
-          set({ emails: res.data.emails, emailsPage: page, emailsOffset: offset + res.data.emails.length, hasMoreEmails: res.data.hasMore, emailsTotal: res.data.total ?? 0 });
+          set({ emails: res.data.emails, emailsPage: page, emailsOffset: offset + threadRowCount(res.data.emails), hasMoreEmails: res.data.hasMore, emailsTotal: res.data.total ?? 0 });
         }
         return;
       }
-      // AI category (no exact total). Checked BEFORE the static virtual folders
+      // AI category. Checked BEFORE the static virtual folders
       // so a category active on top of "All Email" still pages by category, not
       // the whole mailbox. On unified, browse the category across every opted-in
       // account; otherwise the active account/folder — mirrors
@@ -810,32 +816,50 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         // The category total is invariant across pages, so fetch it only on page 0
         // (first open) or when it's been invalidated to 0 (e.g. after a delete) and
         // reuse it while paging — mirrors the section view's needCount pattern, and
-        // uses the chip's count source so the "of N" can't disagree with the chip.
+        // uses the category predicate, including a retained inbox quick-filter.
         const cachedTotal = get().emailsTotal;
         const needCount = page === 0 || cachedTotal === 0;
+        const viewFilter = get().activeInboxFilter;
+        const query = categoryViewQuery(viewingAICategory, selectedFolderId, viewFilter);
         let rows: any[] = [];
-        const [, total] = await Promise.all([
+        let unifiedTotal = 0;
+        let unifiedHasMore: boolean | undefined;
+        const [, categoryTotal] = await Promise.all([
           (async () => {
             if (selectedVirtualFolder === 'virtual-unified') {
               const accountIds = accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id);
-              const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset, aiCategory: viewingAICategory });
+              const res = await window.electronAPI.accounts.unifiedInbox({
+                accountIds, limit: PAGE_SIZE, offset, aiCategory: viewingAICategory,
+                ...(viewFilter ? { filter: viewFilter } : {}),
+              });
               rows = res?.success && res.data ? res.data.emails : [];
+              unifiedTotal = res?.success && res.data ? (res.data.total ?? 0) : 0;
+              unifiedHasMore = res?.success && res.data ? res.data.hasMore : undefined;
             } else {
-              const res = await window.electronAPI.ai.getByCategory(viewingAICategory, PAGE_SIZE, offset, selectedFolderId ?? undefined);
+              const res = query
+                ? await pageCategoryView(query, PAGE_SIZE, offset)
+                : await window.electronAPI.ai.getByCategory(viewingAICategory, PAGE_SIZE, offset, selectedFolderId ?? undefined);
               rows = res.success && res.data ? res.data : [];
             }
           })(),
           needCount
-            ? fetchAICategoryTotal({
-                category: viewingAICategory,
-                selectedFolderId,
-                selectedVirtualFolder,
-                unifiedAccountIds: accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id),
-              })
+            ? query
+              ? selectedVirtualFolder === 'virtual-unified' ? Promise.resolve(0) : countCategoryView(query)
+              : fetchAICategoryTotal({
+                  category: viewingAICategory,
+                  selectedFolderId,
+                  selectedVirtualFolder,
+                  unifiedAccountIds: accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id),
+                })
             : Promise.resolve(cachedTotal),
         ]);
         if (isStale()) return;
-        set({ emails: rows, emailsPage: page, emailsOffset: offset + rows.length, hasMoreEmails: total ? offset + rows.length < total : rows.length >= PAGE_SIZE, emailsTotal: total });
+        const total = selectedVirtualFolder === 'virtual-unified' ? unifiedTotal : categoryTotal;
+        const threadCount = threadRowCount(rows);
+        const hasMore = total ? offset + threadCount < total
+          : selectedVirtualFolder === 'virtual-unified' ? (unifiedHasMore ?? threadCount >= PAGE_SIZE)
+            : threadCount >= PAGE_SIZE;
+        set({ emails: rows, emailsPage: page, emailsOffset: offset + threadCount, hasMoreEmails: hasMore, emailsTotal: total });
         return;
       }
       // Static virtual folders (All Email / Important / Starred) — flat,
@@ -1257,7 +1281,7 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
         if (isStale()) return;
         if (res?.success && res.data) {
           const merged = res.data.emails as any[];
-          set({ emails: merged, hasMoreEmails: res.data.hasMore, emailsOffset: offset + merged.length, emailsTotal: res.data.total ?? 0 });
+          set({ emails: merged, hasMoreEmails: res.data.hasMore, emailsOffset: offset + threadRowCount(merged), emailsTotal: res.data.total ?? 0 });
           // Rows synced header-only (e.g. just arrived via IDLE) have no preview
           // snippet. Fetch their bodies — fetchEmailBody routes to each row's OWN
           // account (via the accountId tag), so it works across accounts.
@@ -1947,12 +1971,9 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       || threadEmails.find(e => e.id === emailId)
       || searchResults.find(e => e.id === emailId);
 
-    // A cached body normally means "nothing to do" — but older attachment rows
-    // still owe us real filenames + sizes, which only the source parse on fetch
-    // can supply. We key off attachmentSizes (null until the new parser has run
-    // — the legacy filename could be the bogus truthy "SIZE") so those rows
-    // re-fetch once and the chip renders + downloads match the real filename.
-    const needsAttachmentMeta = !!email?.hasAttachments && !email?.attachmentSizes;
+    // Cached bodies can still owe file metadata, including older Sent mirrors
+    // whose attachment flag was incorrectly hardcoded to false.
+    const needsAttachmentMeta = needsAttachmentMetadata(email);
     if (email?.rawBody && !needsAttachmentMeta) {
       console.log('[Store] fetchEmailBody: body already exists', emailId);
       return;

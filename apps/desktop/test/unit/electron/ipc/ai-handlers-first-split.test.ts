@@ -369,3 +369,48 @@ describe('ai:setBackgroundSplitEnabled', () => {
     expect(setter.mock.calls).toEqual([[true], [false], [false], [false]]);
   });
 });
+
+describe('ai:search conversation pagination', () => {
+  it('keeps category pages and totals in the active account without splitting a thread', async () => {
+    await accountA.add('shared-reminder', email('a-reminder-new', { tags: '|INBOX|reminders|', date: T0 + 200 }));
+    await accountA.add('shared-reminder', email('a-reminder-old', { tags: '|INBOX|reminders|', date: T0 + 190 }));
+    await accountB.add('shared-reminder', email('b-reminder', { tags: '|INBOX|reminders|', date: T0 + 150 }));
+    await accountA.add('last-reminder', email('last-reminder', { tags: '|INBOX|reminders|', date: T0 + 100 }));
+    const first = await call<EmailRecord[]>('ai:getByCategory', 'reminders', 1, 0);
+    const second = await call<EmailRecord[]>('ai:getByCategory', 'reminders', 1, 1);
+    expect(first.data!.map((row) => row.id)).toEqual(['a-reminder-new', 'a-reminder-old']);
+    expect(second.data!.map((row) => row.id)).toEqual(['last-reminder']);
+    expect((await call<Record<string, number>>('ai:getCategoryCounts', undefined, 'total')).data!.reminders).toBe(2);
+  });
+
+  it('pages 33 matching messages as 31 threads and keeps every selected unread member', async () => {
+    for (let index = 0; index < 31; index++) {
+      await accountA.add(`reminder-${index}`, email(`reminder-${index}-a`, {
+        tags: '|INBOX|reminders|', date: T0 + 100 - index,
+      }));
+    }
+    for (const index of [0, 1]) {
+      await accountA.add(`reminder-${index}`, email(`reminder-${index}-b`, {
+        tags: '|INBOX|reminders|', date: T0 + 200 - index,
+      }));
+    }
+    await accountA.add('reminder-0', email('already-read', { tags: '|INBOX|reminders|read|' }));
+    await accountB.add('reminder-0', email('other-account', { tags: '|INBOX|reminders|' }));
+    const query = { folderId: 'f-inbox', aiCategory: 'reminders', isUnread: true };
+    const first = await call<EmailRecord[]>('ai:search', { ...query, limit: 25, offset: 0 });
+    const second = await call<EmailRecord[]>('ai:search', { ...query, limit: 25, offset: 25 });
+    const firstThreads = new Set(first.data!.map((row) => row.threadId));
+    const secondThreads = new Set(second.data!.map((row) => row.threadId));
+
+    expect(await call<number>('ai:searchCount', query)).toEqual({ success: true, data: 31 });
+    expect(firstThreads.size).toBe(25);
+    expect(first.data).toHaveLength(27);
+    expect(secondThreads.size).toBe(6);
+    expect(second.data).toHaveLength(6);
+    expect([...secondThreads].some((id) => firstThreads.has(id))).toBe(false);
+    expect(first.data!.map((row) => row.id)).toEqual(expect.arrayContaining([
+      'reminder-0-a', 'reminder-0-b', 'reminder-1-a', 'reminder-1-b',
+    ]));
+    expect([...first.data!, ...second.data!].map((row) => row.id)).not.toContain('already-read');
+  });
+});

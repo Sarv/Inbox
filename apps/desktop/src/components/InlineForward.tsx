@@ -11,12 +11,12 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 
 import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
+import { useForwardAttachments } from '../hooks/useForwardAttachments';
 import { useInlineSendingAccount } from '../hooks/useInlineSendingAccount';
 import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
-import { loadEmailAttachments } from '../utils/compose-attachments';
 import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { buildForwardQuoteHtml, composeForwardDraft, forwardSubject, type ForwardSource } from '../utils/forward-quote';
@@ -24,6 +24,7 @@ import { reportSendFailure } from '../utils/send-failure';
 
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
+import { ForwardAttachmentStatus } from './ForwardAttachmentStatus';
 import { FromAccountBar } from './FromAccountBar';
 import { PolishModal } from './PolishModal';
 import { RichTextEditor } from './RichTextEditor';
@@ -76,14 +77,11 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
 
   const hasAIProvider = !!getDefaultProvider();
 
-  // Fetch original attachments on mount
-  useEffect(() => {
-    if (draft) return; // don't fetch if restoring a draft with existing files
-    if (!forwardEmail.hasAttachments || !forwardEmail.attachmentNames) return;
-    void loadEmailAttachments({ ...forwardEmail, accountId: forwardAccountId }).then((loaded) => {
-      if (loaded.length > 0) setAttachments(prev => [...prev, ...loaded]);
-    });
-  }, [forwardEmail.id, forwardEmail.hasAttachments, forwardEmail.attachmentNames]);
+  const forwardAttachments = useForwardAttachments({
+    source: { ...forwardEmail, accountId: forwardAccountId },
+    restoredDraft: !!draft,
+    setAttachments,
+  });
 
   const subject = forwardSubject(forwardEmail.subject);
 
@@ -105,6 +103,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     // A fresh forward's files are the original's, loaded for the user; a
     // restored forward's are the ones they chose to send.
     attachmentsPrefilled: !draft,
+    prepareAttachments: forwardAttachments.prepareAttachments,
     initialDraftMessageId: draft?.draftMessageId,
     initialDraftUnsaved: draft?.unsaved,
     accountId: forwardAccountId,
@@ -123,7 +122,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   // Saving is just closing — the autosave's unmount save writes the draft.
   const { requestClose, isAsking, closePromptDialog } = useCloseComposePrompt({
     closeAction,
-    onSave: onClose,
+    onSave: () => { if (!forwardAttachments.blocked) onClose(); },
     onDiscard: handleDiscard,
   });
 
@@ -143,6 +142,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
   const [followUp, setFollowUp] = useState<SendFollowUpRequest | null>(null);
 
   const handleSend = async () => {
+    if (sending || forwardAttachments.blocked) return;
     const finalTo = mergeRecipientEmails(to, pendingTo);
 
     if (finalTo.length === 0) return;
@@ -368,8 +368,10 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
       </div>
 
       {/* Footer with Send and actions */}
+      <ForwardAttachmentStatus {...forwardAttachments} onRetry={forwardAttachments.retry} />
       <ComposeToolbar
         sending={sending}
+        sendBlocked={forwardAttachments.blocked}
         hasAIProvider={hasAIProvider}
         plainBody={plainBody}
         hasRecipients={!!to.trim()}

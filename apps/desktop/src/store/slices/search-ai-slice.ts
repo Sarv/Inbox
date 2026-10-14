@@ -2,6 +2,8 @@ import { shouldAutoEscalateToServer, describeServerSearchResult, hasServerSearch
 import { INBOX_QUICK_FILTERS } from '../../config/search-suggestions';
 import { isAIAssistEnabled } from '../../services/agent-settings';
 import { isSignatureDetectionEnabled, detectSignature, getDefaultProvider, getAIHealth, parseSearchQuery, isAISearchEnabled } from '../../services/ai-service';
+import { threadRowCount } from '../../utils/thread-utils';
+import { categoryViewQuery, countCategoryView, pageCategoryView } from '../category-view-query';
 import { getMaxAIProcessingEmails, getEmailsPerPage, getPageSizeForView, SECTION_FULL_PAGE_SIZE, fetchAICategoryTotal } from '../helpers';
 import type { EmailStore, SearchAISlice, SliceCreator } from '../types';
 
@@ -28,6 +30,13 @@ function searchStaleCheck(get: () => EmailStore): () => boolean {
     || activeSearchParsed !== parsed || activeSearchContext !== context;
 }
 
+function searchTotalPatch(state: EmailStore, total: number) {
+  return {
+    searchTotal: total,
+    searchHasMore: state.searchPage * getEmailsPerPage() + threadRowCount(state.searchResults) < total,
+  };
+}
+
 export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   searchQuery: '',
   searchResults: [],
@@ -36,12 +45,12 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   searchSuggestions: [],
   searchFilter: null,
   // Discrete pagination for search results (same pattern as the folder list):
-  // one page of getEmailsPerPage() rows at a time, so a filter matching 3k mails
-  // pages through all of them instead of truncating at a cap.
+  // one page of getEmailsPerPage() matching conversations at a time, retaining
+  // every matching message of those conversations.
   searchPage: 0,
   searchHasMore: false,
-  // True total of ALL matches across the whole mailbox (a COUNT, not the loaded
-  // page) — the paginator's "of N". 0 = unknown (e.g. All Inboxes), where
+  // True total of matching conversations across the whole mailbox, rather than
+  // the loaded page — the paginator's "of N". 0 = unknown, where
   // prev/next falls back to searchHasMore.
   searchTotal: 0,
   searchingServer: false,
@@ -96,7 +105,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
 
     // A new query starts fresh: clear any prior server-search status so the chip
     // and the auto-escalation gate don't carry over from the last search.
-    set({ searching: true, searchQuery: query, searchInterpretation: null, searchPage: 0, serverSearchRan: false, serverSearchStatus: null });
+    set({ searching: true, searchQuery: query, searchInterpretation: null, searchPage: 0, searchingServer: false, serverSearchRan: false, serverSearchStatus: null });
 
     // The same text in another category/account is a different search.
     const viewKey = searchViewKey(get());
@@ -124,7 +133,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       if (get().selectedVirtualFolder !== 'virtual-unified' && !isStale()) {
         try {
           const c = await window.electronAPI.ai.searchCount({ ...aiResult.query, folderId: context?.folderId, aiCategory: context?.aiCategory } as any);
-          if (c?.success && typeof c.data === 'number' && !isStale()) set({ searchTotal: c.data });
+          if (c?.success && typeof c.data === 'number' && !isStale()) set(searchTotalPatch(get(), c.data));
         } catch { /* leave total unknown → hasMore-gated */ }
       }
 
@@ -134,7 +143,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       // first page only, once per query; the explicit button forces it anytime.
       if (!isStale() && shouldAutoEscalateToServer({
         hasServerSearchableTerms: hasServerSearchableParsedQuery(aiResult.query),
-        localResultCount: get().searchResults.length,
+        localResultCount: threadRowCount(get().searchResults),
         pageSize: getEmailsPerPage(),
         page: 0,
         alreadyRanServer: get().serverSearchRan,
@@ -175,7 +184,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
         try {
           const count = await window.electronAPI.ai.searchCount(countQuery);
           if (count?.success && typeof count.data === 'number' && !isStale()) {
-            set({ searchTotal: count.data });
+            set(searchTotalPatch(get(), count.data));
           }
         } catch { /* leave total unknown -> hasMore-gated */ }
       }
@@ -208,11 +217,22 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
           limit: pageSize,
           offset,
         });
-        if (res?.success && res.data && !isStale()) set({ searchResults: res.data, searchPage: page, searchHasMore: res.data.length >= pageSize });
+        if (res?.success && res.data && !isStale()) {
+          const count = threadRowCount(res.data);
+          const total = 'total' in res && typeof res.total === 'number' ? res.total : undefined;
+          set({
+            searchResults: res.data, searchPage: page,
+            searchHasMore: total !== undefined ? offset + count < total : count >= pageSize,
+            ...(total !== undefined ? { searchTotal: total } : {}),
+          });
+        }
       } else {
         const filter = { isUnread: q.isUnread, isFlagged: q.isFlagged, hasAttachments: q.hasAttachments, noCategory: q.noCategory };
         const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: pageSize, offset, filter, aiCategory: context?.aiCategory ?? q.aiCategory });
-        if (res?.success && res.data && !isStale()) set({ searchResults: res.data.emails, searchPage: page, searchHasMore: res.data.hasMore });
+        if (res?.success && res.data && !isStale()) set({
+          searchResults: res.data.emails, searchPage: page, searchHasMore: res.data.hasMore,
+          ...(typeof res.data.total === 'number' ? { searchTotal: res.data.total } : {}),
+        });
       }
       return;
     }
@@ -220,7 +240,9 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     const searchQuery = { ...q, folderId: context?.folderId, aiCategory: context?.aiCategory, limit: pageSize, offset };
     const searchResult = await window.electronAPI.ai.search(searchQuery);
     if (searchResult.success && searchResult.data && !isStale()) {
-      set({ searchResults: searchResult.data, searchPage: page, searchHasMore: searchResult.data.length >= pageSize });
+      const count = threadRowCount(searchResult.data);
+      const total = get().searchTotal;
+      set({ searchResults: searchResult.data, searchPage: page, searchHasMore: total > 0 ? offset + count < total : count >= pageSize });
     }
   },
 
@@ -258,7 +280,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       sizeMax: parsed.sizeMax,
     };
 
-    const isStale = () => get().searchQuery !== query;
+    const isStale = searchStaleCheck(get);
     set({ searchingServer: true });
     try {
       const res = await window.electronAPI.emails.searchServer({
@@ -274,7 +296,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
           await get()._loadSearchPage(get().searchPage, query);
           try {
             const c = await window.electronAPI.ai.searchCount({ ...parsed, folderId: context?.folderId, aiCategory: context?.aiCategory } as any);
-            if (c?.success && typeof c.data === 'number' && !isStale()) set({ searchTotal: c.data });
+            if (c?.success && typeof c.data === 'number' && !isStale()) set(searchTotalPatch(get(), c.data));
           } catch { /* leave total as-is */ }
         }
       } else {
@@ -285,7 +307,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     } catch (error) {
       if (!isStale()) set({ serverSearchRan: true, serverSearchStatus: manual ? 'Server search failed' : null });
     } finally {
-      if (get().searchQuery === query) set({ searchingServer: false });
+      if (!isStale() || !get().searchQuery) set({ searchingServer: false });
     }
   },
 
@@ -334,7 +356,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
   },
 
   loadAICategoryEmails: async (category) => {
-    const { selectedFolderId, searchQuery, viewingAICategory: currentCategory, selectedVirtualFolder } = get();
+    const { selectedFolderId, searchQuery, viewingAICategory: currentCategory, selectedVirtualFolder, activeInboxFilter, activeAccountId } = get();
     console.log(`[View] Selected: AI Category "${category}" (folderId=${selectedFolderId || 'all'}, searchQuery=${searchQuery || 'none'})`);
 
     // If search is active, re-run search with updated AI category context
@@ -364,14 +386,18 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       return;
     }
 
-    // Real total for the category so the paginator shows "1–N of total" (was hard-set
-    // to 0) and the number matches the chip — from the SAME count source the chip uses.
-    const fetchCategoryTotal = (): Promise<number> => fetchAICategoryTotal({
-      category,
-      selectedFolderId,
-      selectedVirtualFolder,
-      unifiedAccountIds: get().accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id),
-    });
+    // With a quick-filter the category page and its denominator must both
+    // apply it in SQL; filtering only the loaded rows can hide a whole page.
+    const query = categoryViewQuery(category, selectedFolderId, activeInboxFilter);
+    const filterKey = JSON.stringify(activeInboxFilter);
+    const fetchCategoryTotal = (): Promise<number> => query
+      ? selectedVirtualFolder === 'virtual-unified' ? Promise.resolve(0) : countCategoryView(query)
+      : fetchAICategoryTotal({
+          category,
+          selectedFolderId,
+          selectedVirtualFolder,
+          unifiedAccountIds: get().accounts.filter((a) => a.includeInUnified !== false).map((a) => a.id),
+        });
 
     // Keep sectionData cached (not rendered in the AI-category view) so
     // returning to the sectioned INBOX shows it instantly instead of
@@ -393,28 +419,42 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
     // Bail if the user left this category (or this view) while in flight
     const isStale = () => get().viewingAICategory !== category
       || get().selectedFolderId !== selectedFolderId
-      || get().selectedVirtualFolder !== selectedVirtualFolder;
+      || get().selectedVirtualFolder !== selectedVirtualFolder
+      || get().activeAccountId !== activeAccountId
+      || JSON.stringify(get().activeInboxFilter) !== filterKey;
     try {
       // On All Inboxes, browse the category across EVERY opted-in account (each
       // row tagged with its accountId for the color) instead of just the active
       // account — so category tabs respect the unified view like the list does.
       let result: { success: boolean; data?: any[]; error?: string };
+      let unifiedTotal = 0;
+      let unifiedHasMore: boolean | undefined;
       if (selectedVirtualFolder === 'virtual-unified') {
         const accountIds = get().accounts
           .filter((a) => a.includeInUnified !== false)
           .map((a) => a.id);
-        const res = await window.electronAPI.accounts.unifiedInbox({ accountIds, limit: PAGE_SIZE, offset: 0, aiCategory: category });
+        const res = await window.electronAPI.accounts.unifiedInbox({
+          accountIds, limit: PAGE_SIZE, offset: 0, aiCategory: category,
+          ...(activeInboxFilter ? { filter: activeInboxFilter } : {}),
+        });
         result = res?.success && res.data ? { success: true, data: res.data.emails } : { success: false, error: res?.error };
+        unifiedTotal = res?.success && res.data ? (res.data.total ?? 0) : 0;
+        unifiedHasMore = res?.success && res.data ? res.data.hasMore : undefined;
       } else {
-        result = await window.electronAPI.ai.getByCategory(category, PAGE_SIZE, 0, selectedFolderId ?? undefined);
+        result = query
+          ? await pageCategoryView(query, PAGE_SIZE, 0)
+          : await window.electronAPI.ai.getByCategory(category, PAGE_SIZE, 0, selectedFolderId ?? undefined);
       }
-      const total = await fetchCategoryTotal();
+      const categoryTotal = await fetchCategoryTotal();
       if (isStale()) return;
+      const total = selectedVirtualFolder === 'virtual-unified' ? unifiedTotal : categoryTotal;
       if (result.success && result.data) {
         set({
           emails: result.data,
           loadingEmails: false,
-          hasMoreEmails: total ? result.data.length < total : result.data.length >= PAGE_SIZE,
+          hasMoreEmails: total ? threadRowCount(result.data) < total
+            : selectedVirtualFolder === 'virtual-unified' ? (unifiedHasMore ?? threadRowCount(result.data) >= PAGE_SIZE)
+              : threadRowCount(result.data) >= PAGE_SIZE,
           emailsTotal: total,
         });
       } else {
@@ -423,7 +463,7 @@ export const createSearchAISlice: SliceCreator<SearchAISlice> = (set, get) => ({
       }
     } catch (error) {
       console.error('[Store] Error loading AI category emails:', error);
-      set({ loadingEmails: false });
+      if (!isStale()) set({ loadingEmails: false });
     }
   },
 

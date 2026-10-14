@@ -342,9 +342,8 @@ export function buildThreads(emails: EmailRecord[]): EmailThread[] {
     // from the DB aggregate (Trash/Spam excluded, matching getByThread), so a
     // multi-message thread still shows "(N)" even when only one of its messages
     // is loaded in the current filtered view. Falls back to the loaded count
-    // when the aggregate is absent. Note: this deliberately does NOT sum to the
-    // footer's "X of Y emails" — that counts emails loaded in THIS view, a
-    // different metric (Gmail's list works the same way).
+    // when the aggregate is absent. This counts messages within one conversation;
+    // a conversation-paged footer counts each row once regardless of N.
     const messageCount = oldestEmail.threadMessageCount ?? threadEmails.length;
     // Prefer thread-wide DB aggregates (threadIsStarred/threadIsImportant)
     // when present — they reflect the thread's state across ALL folders,

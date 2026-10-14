@@ -15,7 +15,7 @@
  * `sarvinbox-<id>.db`. This holds across restarts even when a secondary account
  * is active on launch, so no account can grab the primary's database.
  */
-import type { EmailRecord, ViewFilter } from '@sarvinbox/core';
+import type { EmailRecord, SearchQuery, ViewFilter } from '@sarvinbox/core';
 import { createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
@@ -41,6 +41,7 @@ import { rebindOutboxStorage } from '../services/outbox-service';
 import { noteAppSettingChanged } from '../services/reputation-service';
 import { disablePipelineAIIfProviderRemoved } from '../services/unified-pipeline-service';
 import { setCurrentAccount, hasAccountRuntime, getCurrentAccountId } from '../shared';
+import { pageThreadMatches } from '../utils/thread-page';
 
 const logger = createLogger('accounts-handlers');
 
@@ -298,13 +299,22 @@ export function registerAccountsHandlers(): void {
               if (!rt?.storage) return { emails: [], total: 0 };
               const inbox = await findInbox(rt.storage);
               if (!inbox) return { emails: [], total: 0 };
+              const query: SearchQuery = {
+                query: '', scope: 'folder', folderPath: inbox.path,
+                collapseThreads: true, limit: fetchPerAccount, offset: 0,
+                ...(categoryTag ? { aiCategory: categoryTag } : {}),
+                ...(filter?.isUnread !== undefined ? { isUnread: filter.isUnread } : {}),
+                ...(filter?.isFlagged ? { isFlagged: true } : {}),
+                ...(filter?.hasAttachments ? { hasAttachments: true } : {}),
+                ...(filter?.noCategory ? { noCategory: true } : {}),
+              };
               const [emails, total] = await Promise.all([
-                rt.storage.getEmailsByFolder(inbox.id, { limit: fetchPerAccount, offset: 0, filter, categoryTag }),
+                rt.storage.searchEmails(query),
                 // The "of N" for All Inboxes. `merged.length` can't be it: each
                 // account is only over-fetched to offset+limit, so the merged
                 // array is a page window, not the mailbox. Counted per account
                 // under the SAME filter, so the denominator matches the list.
-                rt.storage.countEmailsInFolder?.(inbox.id, { filter, categoryTag }) ?? Promise.resolve(0),
+                rt.storage.searchEmailsCount(query),
               ]);
               return { emails: emails.map((e) => ({ ...e, accountId })), total };
             } catch (e) {
@@ -314,10 +324,10 @@ export function registerAccountsHandlers(): void {
           }),
         );
 
-        const merged = perAccount.flatMap((a) => a.emails).sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
+        const merged = perAccount.flatMap((a) => a.emails);
         const total = perAccount.reduce((sum, a) => sum + a.total, 0);
-        const page = merged.slice(offset, offset + limit);
-        return { success: true, data: { emails: page, total, hasMore: total > 0 ? offset + page.length < total : merged.length > offset + limit } };
+        const page = pageThreadMatches(merged, limit, offset);
+        return { success: true, data: { emails: page, total, hasMore: offset + limit < total } };
       } catch (error) {
         logger.error('[Accounts] unifiedInbox failed:', error);
         return { success: false, error: (error as Error).message };
@@ -336,7 +346,7 @@ export function registerAccountsHandlers(): void {
             const rt = await ensureAccountRuntime(accountId);
             if (!rt?.storage) return {};
             const inbox = await findInbox(rt.storage);
-            return rt.storage.getDynamicCategoryCounts(inbox?.id, mode) as Record<string, number>;
+            return inbox ? rt.storage.getDynamicCategoryCounts(inbox.id, mode) as Record<string, number> : {};
           } catch {
             return {};
           }
@@ -367,15 +377,17 @@ export function registerAccountsHandlers(): void {
       // pattern as unifiedInbox, so paging never drops a row at the merge boundary.
       const fetchPerAccount = offset + limit;
       const perAccount = await Promise.all(
-        accountIds.map(async (accountId): Promise<EmailRecord[]> => {
+        accountIds.map(async (accountId): Promise<{ emails: EmailRecord[]; total: number }> => {
           try {
             const rt = await ensureAccountRuntime(accountId);
-            if (!rt?.storage) return [];
+            if (!rt?.storage) return { emails: [], total: 0 };
             const inbox = await findInbox(rt.storage);
-            const emails = await rt.storage.searchEmails({
+            if (!inbox) return { emails: [], total: 0 };
+            const query: SearchQuery = {
               query: sq.textQuery || '',
-              folderPath: inbox?.path,
-              scope: inbox?.path ? 'folder' : 'all',
+              collapseThreads: true,
+              folderPath: inbox.path,
+              scope: 'folder',
               aiCategory: sq.aiCategory,
               noCategory: sq.noCategory,
               from: sq.from, to: sq.to, subject: sq.subject,
@@ -384,17 +396,24 @@ export function registerAccountsHandlers(): void {
               doesntHave: sq.doesntHave,
               sizeMin: sq.sizeMin, sizeMax: sq.sizeMax, cc: sq.cc,
               limit: fetchPerAccount, offset: 0,
-              sortBy: sq.textQuery ? 'relevance' : 'date', sortOrder: 'desc',
-            });
-            return emails.map((e) => ({ ...e, accountId }));
+              // The merged view orders by date, so each account must expose
+              // the same leading thread window before the global page is cut.
+              sortBy: 'date', sortOrder: 'desc',
+            };
+            const [emails, total] = await Promise.all([
+              rt.storage.searchEmails(query),
+              rt.storage.searchEmailsCount(query),
+            ]);
+            return { emails: emails.map((e) => ({ ...e, accountId })), total };
           } catch (e) {
             logger.warn('[Accounts] unifiedSearch: skipping account', accountId, (e as Error).message);
-            return [];
+            return { emails: [], total: 0 };
           }
         }),
       );
-      const merged = perAccount.flat().sort((a, b) => (b.date ?? 0) - (a.date ?? 0)).slice(offset, offset + limit);
-      return { success: true, data: merged };
+      const merged = pageThreadMatches(perAccount.flatMap((account) => account.emails), limit, offset);
+      const total = perAccount.reduce((sum, account) => sum + account.total, 0);
+      return { success: true, data: merged, total };
     } catch (error) {
       logger.error('[Accounts] unifiedSearch failed:', error);
       return { success: false, error: (error as Error).message };

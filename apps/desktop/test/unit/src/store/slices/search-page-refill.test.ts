@@ -29,13 +29,18 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+type BulkResponse = {
+  success: boolean;
+  data: { processedIds: string[]; failedIds: string[]; queuedIds?: string[] };
+};
+
 const row = (id: string, extra: Record<string, any> = {}) => ({
   id, accountId: 'account-a', threadId: `thread-${id}`, date: 1_000,
-  tags: '|INBOX|', isUnread: true, isFlagged: false, ...extra,
+  tags: extra.isUnread === false ? '|INBOX|read|' : '|INBOX|', isUnread: true, isFlagged: false, ...extra,
 });
 const ids = (rows: any[]) => rows.map((email) => email.id);
 
-// Keep the real search pager and deletion action together: the action
+// Keep the real search pager and mutation actions together: the action
 // invalidates the cached count and the pager must reload rows and their total.
 async function loadSlices() {
   vi.resetModules();
@@ -48,9 +53,17 @@ async function loadSlices() {
     success: true, data: matches(query).slice(query.offset, query.offset + query.limit),
   }));
   const searchCount = vi.fn(async (query: any) => ({ success: true, data: matches(query).length }));
-  const bulkAction = vi.fn(async (removed: string[]) => {
-    backend = backend.filter((email) => !removed.includes(email.id));
-    return { success: true, data: { processedIds: removed, failedIds: [] } };
+  const persistRead = (changed: string[], read: boolean) => {
+    const selected = new Set(changed);
+    backend = backend.map((email) => selected.has(email.id) ? {
+      ...email, isUnread: !read,
+      tags: read ? '|INBOX|read|' : '|INBOX|',
+    } : email);
+  };
+  const bulkAction = vi.fn(async (changed: string[], action: string): Promise<BulkResponse> => {
+    if (action === 'markRead' || action === 'markUnread') persistRead(changed, action === 'markRead');
+    else backend = backend.filter((email) => !changed.includes(email.id));
+    return { success: true, data: { processedIds: changed, failedIds: [] } };
   });
   vi.stubGlobal('window', {
     alert: vi.fn(),
@@ -74,7 +87,7 @@ async function loadSlices() {
     loadFolders: vi.fn(async () => {}), refreshUnreadSummary: vi.fn(async () => {}),
     goToEmailPage: vi.fn(async () => {}),
   }));
-  return { get: store.getState, set: store.setState, unread, starred, searchPage, searchCount, bulkAction };
+  return { get: store.getState, set: store.setState, unread, starred, searchPage, searchCount, bulkAction, persistRead };
 }
 
 beforeEach(() => {
@@ -248,5 +261,83 @@ describe('search pagination after bulk removal', () => {
     await oldRefill;
 
     expect(get()).toMatchObject({ searchQuery: '', searchResults: [], searchTotal: 0, searching: false, selectedFolderId: 'other-folder' });
+  });
+});
+
+describe('unread search pagination after bulk mark as read', () => {
+  it('refills all 25 Finance results from the remaining unread matches and refreshes their total', async () => {
+    const { get, set, unread, searchPage, searchCount, bulkAction } = await loadSlices();
+    set({ viewingAICategory: 'finance' });
+    await get().search('is:unread', { folderId: 'inbox', aiCategory: 'finance', skipAI: true });
+    const selected = ids(get().searchResults);
+    expect(selected).toEqual(ids(unread.slice(0, 25)));
+    expect(get().searchTotal).toBe(53);
+
+    get().bulkMarkRead(selected, true);
+    await vi.waitFor(() => expect(get()).toMatchObject({ searchTotal: 28, searching: false }));
+
+    expect(bulkAction).toHaveBeenCalledWith(selected, 'markRead', 'account-a', false);
+    expect(ids(get().searchResults)).toEqual(ids(unread.slice(25, 50)));
+    expect(get()).toMatchObject({ searchQuery: 'is:unread', viewingAICategory: 'finance', searchPage: 0, searchHasMore: true });
+    expect(searchPage).toHaveBeenLastCalledWith(expect.objectContaining({ isUnread: true, limit: 25, offset: 0, aiCategory: 'finance' }));
+    expect(searchCount).toHaveBeenCalledTimes(2);
+    expect(searchCount).toHaveBeenLastCalledWith({ isUnread: true, folderId: 'inbox', aiCategory: 'finance' });
+  });
+
+  it('returns to the first unread page after marking the final page as read', async () => {
+    const { get, set, unread } = await loadSlices();
+    set({ viewingAICategory: 'finance' });
+    await get().search('is:unread', { folderId: 'inbox', aiCategory: 'finance' });
+    await get().goToSearchPage(2);
+    expect(ids(get().searchResults)).toEqual(ids(unread.slice(50)));
+
+    get().bulkMarkRead(ids(get().searchResults), true);
+    await vi.waitFor(() => expect(get()).toMatchObject({ searchPage: 0, searchTotal: 50, searching: false }));
+
+    expect(ids(get().searchResults)).toEqual(ids(unread.slice(0, 25)));
+    expect(get().searchHasMore).toBe(true);
+  });
+
+  it('keeps a failed mark-read result unread while filling the other slots with remaining matches', async () => {
+    const { get, set, unread, bulkAction, persistRead } = await loadSlices();
+    set({ viewingAICategory: 'finance' });
+    await get().search('is:unread', { folderId: 'inbox', aiCategory: 'finance' });
+    const selected = ids(get().searchResults);
+    bulkAction.mockImplementationOnce(async (changed) => {
+      const processedIds = changed.filter((id) => id !== 'unread-0');
+      persistRead(processedIds, true);
+      return { success: false, data: { processedIds, failedIds: ['unread-0'] } };
+    });
+
+    get().bulkMarkRead(selected, true);
+    await vi.waitFor(() => expect(get()).toMatchObject({ searchTotal: 29, searching: false }));
+
+    expect(ids(get().searchResults)).toEqual(['unread-0', ...ids(unread.slice(25, 49))]);
+    expect(get().searchResults[0].tags).not.toContain('|read|');
+    expect(window.alert).toHaveBeenCalledWith('Could not mark as read 1 message. Check your connection and try again.');
+  });
+
+  it('does not refill the old Finance view after navigation while the read mutation is pending', async () => {
+    const { get, set, searchPage, searchCount, bulkAction, persistRead } = await loadSlices();
+    set({ viewingAICategory: 'finance' });
+    await get().search('is:unread', { folderId: 'inbox', aiCategory: 'finance' });
+    const selected = ids(get().searchResults);
+    const pending = deferred<BulkResponse>();
+    bulkAction.mockReturnValueOnce(pending.promise);
+    get().bulkMarkRead(selected, true);
+
+    const promotionRows = Array.from({ length: 7 }, (_, index) => row(`promotions-${index}`));
+    searchPage.mockResolvedValueOnce({ success: true, data: promotionRows });
+    searchCount.mockResolvedValueOnce({ success: true, data: promotionRows.length });
+    set({ viewingAICategory: 'promotions' });
+    await get().search('is:unread', { folderId: 'inbox', aiCategory: 'promotions' });
+    persistRead(selected, true);
+    pending.resolve({ success: true, data: { processedIds: selected, failedIds: [] } });
+    await vi.waitFor(() => expect(get().loadFolders).toHaveBeenCalledOnce());
+
+    expect(get()).toMatchObject({ viewingAICategory: 'promotions', searchQuery: 'is:unread', searchTotal: 7, searching: false });
+    expect(ids(get().searchResults)).toEqual(ids(promotionRows));
+    expect(searchPage).toHaveBeenCalledTimes(2);
+    expect(searchCount).toHaveBeenCalledTimes(2);
   });
 });

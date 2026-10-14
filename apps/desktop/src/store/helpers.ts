@@ -313,12 +313,11 @@ const STANDARD_PAGE_VIRTUAL_VIEWS = new Set([
  *
  * Deliberately NOT the same set as either page-size tier, because the two
  * questions are independent: "All Email" pages by conversation but at 100,
- * while "All Inboxes" (virtual-unified) shares that 100 and is still
- * message-grained — it merges several accounts' lists in the renderer, with no
- * single repository query to make thread-grained.
+ * while "All Inboxes" (virtual-unified) shares that 100 and merges pages of
+ * account-scoped conversations.
  */
 export const THREAD_PAGED_VIRTUAL_VIEWS = new Set([
-  'virtual-starred', 'virtual-important', 'virtual-all', SNOOZED_VIRTUAL_FOLDER,
+  'virtual-starred', 'virtual-important', 'virtual-all', 'virtual-unified', SNOOZED_VIRTUAL_FOLDER,
 ]);
 
 /**
@@ -330,9 +329,9 @@ export const THREAD_PAGED_VIRTUAL_VIEWS = new Set([
  * labels a fixed thread window, and a background merge caps the page at N
  * threads. Mixing units is what made Starred read "1–50 of 52" over 15 rows.
  */
-export const isThreadPagedView = (view: Pick<PagedView, 'section' | 'virtualFolder' | 'snoozed'> = {}): boolean => {
+export const isThreadPagedView = (view: Pick<PagedView, 'section' | 'virtualFolder' | 'snoozed' | 'aiCategory'> = {}): boolean => {
   const virtualFolder = pagedVirtualFolder(view);
-  return !!view.section || (!!virtualFolder && THREAD_PAGED_VIRTUAL_VIEWS.has(virtualFolder));
+  return !!view.section || !!view.aiCategory || (!!virtualFolder && THREAD_PAGED_VIRTUAL_VIEWS.has(virtualFolder));
 };
 
 /** The view a page size is being resolved for. Every field optional so a caller

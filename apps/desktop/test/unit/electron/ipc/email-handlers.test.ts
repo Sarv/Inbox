@@ -757,6 +757,43 @@ describe('emails:fetchBody — row awaiting its UID after a move', () => {
   });
 });
 
+describe('emails:fetchBody — legacy sent attachment metadata', () => {
+  it.each([0, 212])('reparses a cached local Sent mirror with previously missing attachments at UID %i', async (uid) => {
+    const legacy = {
+      id: 'sent@example.test', messageId: '<sent@example.test>', folderId: 'sent-folder', uid,
+      tags: '|Sent|read|', rawBody: '<p>Forwarded message.</p>',
+      hasAttachments: false, attachmentNames: '', attachmentSizes: null,
+    };
+    const repaired = {
+      ...legacy, uid: 42, hasAttachments: true,
+      attachmentNames: '["report.docx"]', attachmentSizes: '[14336]',
+    };
+    h.storage.getEmail.mockResolvedValueOnce(legacy).mockResolvedValue(repaired);
+    h.storage.getFolder.mockResolvedValue({ path: 'Sent' });
+    h.syncEngine.fetchBody.mockResolvedValue({ rawBody: repaired.rawBody });
+
+    const result = await fetchBody()(null, legacy.id);
+
+    expect(h.syncEngine.fetchBody).toHaveBeenCalledWith(legacy.id, 'Sent', uid);
+    expect(result).toEqual({ success: true, data: repaired });
+  });
+
+  it('reparses a paperclip whose attachment names and truthy size array are empty', async () => {
+    const incomplete = {
+      id: 'server-row', messageId: '<server@example.test>', folderId: 'sent-folder', uid: 42,
+      tags: '|Sent|read|', rawBody: '<p>Forwarded message.</p>',
+      hasAttachments: true, attachmentNames: '', attachmentSizes: '[]',
+    };
+    h.storage.getEmail.mockResolvedValue(incomplete);
+    h.storage.getFolder.mockResolvedValue({ path: 'Sent' });
+    h.syncEngine.fetchBody.mockResolvedValue({ rawBody: incomplete.rawBody });
+
+    await fetchBody()(null, incomplete.id);
+
+    expect(h.syncEngine.fetchBody).toHaveBeenCalledWith(incomplete.id, 'Sent', 42);
+  });
+});
+
 describe('claimCidRepairAttempt', () => {
   // Breaks: the once-only rule either never fires (repeat downloads) or fires
   // for bodies that need nothing (a download per open of every mail).

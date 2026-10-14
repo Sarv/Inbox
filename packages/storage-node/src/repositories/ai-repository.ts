@@ -435,7 +435,8 @@ export class AIRepository extends BaseRepository {
   }
 
   /**
-   * Get emails by dynamic category slug (via tags — zero JOINs)
+   * Get category mail with LIMIT/OFFSET measured in conversations. Only matching
+   * members are hydrated, so other folders or categories cannot leak into a tab.
    */
   async getEmailsByDynamicCategory(
     categorySlug: string,
@@ -461,20 +462,11 @@ export class AIRepository extends BaseRepository {
         params.push(folder.path);
       }
 
-      params.push(limit, offset);
-
-      const rows = this.db.prepare(`
-        SELECT ${this.emailSelect()} FROM emails
-        WHERE ai_processed_at IS NOT NULL
+      return this.pageCategoryThreads(`ai_processed_at IS NOT NULL
           AND instr(tags, '|spam|') = 0
           ${this.excludeSpecialFolders}
           ${excludeConditions}
-          ${folderCondition}
-        ORDER BY date DESC
-        LIMIT ? OFFSET ?
-      `).all(...params) as any[];
-
-      return rows.map(row => this.rowToEmailRecord(row));
+          ${folderCondition}`, params, limit, offset);
     }
 
     const params: any[] = [categorySlug];
@@ -487,28 +479,37 @@ export class AIRepository extends BaseRepository {
       params.push(folder.path);
     }
 
-    params.push(limit, offset);
-
-    const rows = this.db.prepare(`
-      SELECT ${this.emailSelect()} FROM emails
-      WHERE instr(tags, '|' || ? || '|') > 0
+    return this.pageCategoryThreads(`instr(tags, '|' || ? || '|') > 0
         ${this.excludeSpecialFolders}
-        ${folderCondition}
-      ORDER BY date DESC
-      LIMIT ? OFFSET ?
-    `).all(...params) as any[];
+        ${folderCondition}`, params, limit, offset);
+  }
 
+  private pageCategoryThreads(where: string, params: any[], limit: number, offset: number): EmailRecord[] {
+    const rows = this.db.prepare(`
+      WITH matching AS (
+        SELECT id, COALESCE(NULLIF(thread_id, ''), id) AS conversation_id, date
+        FROM emails WHERE ${where}
+      ), page AS (
+        SELECT conversation_id, MAX(date) AS latest_date
+        FROM matching GROUP BY conversation_id
+        ORDER BY latest_date DESC, conversation_id DESC
+        LIMIT ? OFFSET ?
+      )
+      SELECT ${this.emailSelect()} FROM emails
+      INNER JOIN matching ON matching.id = emails.id
+      INNER JOIN page ON page.conversation_id = matching.conversation_id
+      ORDER BY page.latest_date DESC, page.conversation_id DESC, emails.date DESC, emails.id DESC
+    `).all(...params, limit, offset) as any[];
     return rows.map(row => this.rowToEmailRecord(row));
   }
 
   /**
-   * Per-category message counts — tags-based, zero JOINs. TWO deliberately
+   * Per-category conversation counts. TWO deliberately
    * different numbers share this one query, selected by `mode`:
-   *   - `'unread'` (DEFAULT): the CHIP badge — how many UNREAD mails are in the
-   *     category (message-level, so "25 mails, 4 unread" → 4). Matches how the
-   *     user reads the badge and drops as unread mail is read/deleted.
+   *   - `'unread'` (DEFAULT): the CHIP badge — conversations with matching UNREAD
+   *     mail. Several unread replies in one conversation count once.
    *   - `'total'`: the category VIEW's "1–N of total" pagination denominator —
-   *     ALL mails (read + unread), the same set getEmailsByDynamicCategory pages
+   *     ALL conversations (read + unread), the same set getEmailsByDynamicCategory pages
    *     over, so the pager can't point past the end.
    * Both share the SAME category-set, excludeSpecialFolders and folder scope, so
    * the only difference is the unread filter. Chip (unread) and pager (total) are
@@ -523,18 +524,16 @@ export class AIRepository extends BaseRepository {
     const folderParams: any[] = [];
     if (folderId) {
       const folder = this.db.prepare('SELECT path FROM folders WHERE id = ?').get(folderId) as any;
-      if (folder) {
-        folderCondition = `AND instr(tags, '|' || ? || '|') > 0`;
-        folderParams.push(folder.path);
-      }
+      if (!folder) return Object.fromEntries([...allCats.map(cat => [cat.slug, 0]), ['uncategorized', 0]]);
+      folderCondition = `AND instr(tags, '|' || ? || '|') > 0`;
+      folderParams.push(folder.path);
     }
 
-    // COUNT(*) is message-level, matching the message-based list (LIMIT/OFFSET over
-    // messages). In 'total' mode this equals the list length (chip pager parity); in
-    // 'unread' mode it's the unread-mail badge.
+    // The same conversation key as the page query keeps replies from inflating
+    // either the badge or the pagination denominator. Unthreaded mail stands alone.
     for (const cat of allCats) {
       const row = this.db.prepare(`
-        SELECT COUNT(*) as count FROM emails
+        SELECT COUNT(DISTINCT COALESCE(NULLIF(thread_id, ''), id)) as count FROM emails
         WHERE instr(tags, '|' || ? || '|') > 0
           ${unreadClause}
           ${this.excludeSpecialFolders}
@@ -554,7 +553,7 @@ export class AIRepository extends BaseRepository {
     const excludeParams = allDefsForExclude.map(c => c.slug);
 
     const uncategorized = this.db.prepare(`
-      SELECT COUNT(*) as count FROM emails
+      SELECT COUNT(DISTINCT COALESCE(NULLIF(thread_id, ''), id)) as count FROM emails
       WHERE ai_processed_at IS NOT NULL
         AND instr(tags, '|spam|') = 0
         ${unreadClause}

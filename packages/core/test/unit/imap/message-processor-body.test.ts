@@ -463,6 +463,8 @@ describe('fetchBody', () => {
 
     expect(ctx.db.row(row.id)!.hasAttachments).toBe(false);
     expect(ctx.db.row(row.id)!.attachmentCount).toBe(0);
+    expect(ctx.db.row(row.id)!.attachmentNames).toBe('');
+    expect(ctx.db.row(row.id)!.attachmentSizes).toBe('[]');
   });
 
   it('captures a calendar invite so the event card renders offline', async () => {

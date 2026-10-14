@@ -1,4 +1,4 @@
-import type { EmailRecord } from '@sarvinbox/core';
+import type { EmailRecord, SendAttachment } from '@sarvinbox/core';
 
 import { readUndoSendDelayMs } from '../../utils/app-settings';
 import { fetchVaultSecrets, accountIdFor, effectiveSmtpConfig } from '../helpers';
@@ -54,6 +54,16 @@ export function optimisticThreadId(
 ): string {
   if (!replyTarget) return fallback;
   return replyTarget.threadId || replyTarget.id || fallback;
+}
+
+/** Match the bytes SMTP will send without importing Node's Buffer in the renderer. */
+function attachmentByteLength(file: SendAttachment): number {
+  if (typeof file.content !== 'string') return file.content.byteLength;
+  if (file.encoding === 'base64') {
+    const unpadded = file.content.replace(/\s/g, '').replace(/=+$/, '');
+    return Math.floor(unpadded.length * 3 / 4);
+  }
+  return new TextEncoder().encode(file.content).byteLength;
 }
 
 // Flush function for the current pendingSend. Held at module level (the
@@ -263,6 +273,9 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
     // Add optimistic sent email to thread immediately
     const optimisticId = `sent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const now = Math.floor(Date.now() / 1000);
+    // The held send appears in both readers before SMTP writes its Sent mirror.
+    // Encrypted sends keep their plaintext files inside the outgoing envelope.
+    const optimisticAttachments = options.pgp?.encrypt ? [] : (options.attachments ?? []);
 
     const sentEmail: EmailRecord = {
       id: optimisticId,
@@ -290,10 +303,10 @@ export const createComposeSlice: SliceCreator<ComposeSlice> = (set, get) => ({
       references: references ? references.join(' ') : null,
       tags: '|read|',
       priority: null,
-      hasAttachments: (options.attachments?.length ?? 0) > 0,
-      attachmentCount: options.attachments?.length ?? 0,
-      attachmentNames: null,
-      attachmentSizes: null,
+      hasAttachments: optimisticAttachments.length > 0,
+      attachmentCount: optimisticAttachments.length,
+      attachmentNames: optimisticAttachments.length ? JSON.stringify(optimisticAttachments.map((file) => file.filename)) : '',
+      attachmentSizes: JSON.stringify(optimisticAttachments.map(attachmentByteLength)),
       hasEmbedding: false,
       embeddingLastGenerated: null,
       createdAt: now,

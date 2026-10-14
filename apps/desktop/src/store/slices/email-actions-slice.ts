@@ -516,6 +516,7 @@ async function refillAfterBulkRemoval(
   processedIds: Set<string>,
   hasFailures: boolean,
   hidePendingRows: () => void,
+  reloadAllSections = false,
 ): Promise<void> {
   const isLoading = (state: EmailStore) => state.searchQuery
     ? state.searching || state.searchingServer
@@ -544,8 +545,8 @@ async function refillAfterBulkRemoval(
   if (sectionedInbox) {
     for (const section of state.inboxSections) {
       const original = originalSections[section.id];
-      if (!original?.emails.some((email) => processedIds.has(email.id))) continue;
-      const page = original.page ?? 0;
+      if (section.filter === 'none' || (!reloadAllSections && !original?.emails.some((email) => processedIds.has(email.id)))) continue;
+      const page = original?.page ?? 0;
       const isSectionLoading = (current: EmailStore) => current.sectionData[section.id]?.loading || current.sectionLoading.has(section.id);
       while (isSectionLoading(get())) {
         if (!await waitForRemovalViewIdle(get, subscribe, viewKey, isSectionLoading)) return;
@@ -574,6 +575,16 @@ async function refillAfterBulkRemoval(
     await get().goToEmailPage(0);
     hidePendingRows();
   }
+}
+
+/** Read flags can remove search matches or move mail between inbox sections. */
+function readChangeAffectsView(state: EmailStore): boolean {
+  if (typeof state.activeInboxFilter?.isUnread === 'boolean') return true;
+  if (state.searchQuery) return typeof state.searchFilter?.isUnread === 'boolean';
+  if (state.viewingSection) return ['unread', 'read', 'important_unread', 'everything_else'].includes(state.viewingSection);
+  const inbox = state.folders.find((folder) => folder.id === state.selectedFolderId)?.path === 'INBOX';
+  return inbox && !state.viewingAICategory && !state.selectedVirtualFolder && !state.viewingSnoozed
+    && state.inboxType !== 'default' && state.inboxSections.some((section) => ['unread', 'read', 'important_unread'].includes(section.filter));
 }
 
 /** Restore only missing failures, retaining refreshed rows and their order. */
@@ -750,6 +761,16 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
 
   bulkMarkRead: (emailIds, read) => {
     if (emailIds.length === 0) return;
+    emailIds = [...new Set(emailIds)];
+    const initial = get();
+    const viewKey = bulkRemovalViewKey(initial);
+    const originalSections = initial.sectionData;
+    const needsRefill = readChangeAffectsView(initial);
+    const originalRead = new Map<string, boolean>();
+    for (const id of emailIds) {
+      const row = resolveRowById(get, id);
+      if (row) originalRead.set(id, hasTag(row.tags || '', 'read'));
+    }
     // Group by owning account BEFORE the optimistic flip so each account's rows
     // route to their own DB/engine (unified "All Inboxes" mixes accounts).
     const grouped = groupIdsByAccount(get, emailIds);
@@ -758,9 +779,24 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
     if (!applyOptimisticRead(get, set, emailIds, read)) return;
     (async () => {
       const result = await dispatchBulkByAccount(grouped, read ? 'markRead' : 'markUnread');
-      reportBulkFailure(read ? 'mark as read' : 'mark as unread', result.failedIds.length);
+      if (bulkRemovalViewKey(get()) === viewKey) {
+        // Restore only the original read bit, keeping concurrent star/category
+        // changes and leaving successful rows in their acknowledged state.
+        const failed = new Set(result.failedIds);
+        for (const wasRead of [true, false]) {
+          const restoreIds = new Set([...originalRead].filter(([id, original]) => failed.has(id) && original === wasRead).map(([id]) => id));
+          if (restoreIds.size) applyTagsAcrossState(get, set, restoreIds, (tags) => wasRead ? addTag(tags, 'read') : removeTag(tags, 'read'));
+        }
+      }
       refreshMailCounts(get, { unreadSummary: true });
-    })();
+      if (needsRefill && result.processedIds.length > 0) {
+        await refillAfterBulkRemoval(
+          get, set, api.subscribe, viewKey, originalSections, new Set(result.processedIds),
+          result.failedIds.length > 0 || pendingBulkRemovals.has(api), () => hidePendingBulkRows(api, get, set), true,
+        );
+      }
+      reportBulkFailure(read ? 'mark as read' : 'mark as unread', result.failedIds.length);
+    })().catch((error) => console.error('[Store] bulk read-state refresh failed:', error));
   },
 
   bulkMarkStarred: (emailIds, starred) => {

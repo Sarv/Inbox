@@ -74,6 +74,7 @@ export interface ForwardSource extends ForwardedMessage {
   /** With attachmentNames, lets the forward fetch and re-attach the files. */
   hasAttachments?: boolean;
   attachmentNames?: string | null;
+  attachmentSizes?: string | null;
   /** Owning account — the forward goes out from (and drafts into) it. */
   accountId?: string;
   /** 'encrypted' keeps the forward encrypted by default. */
@@ -92,6 +93,7 @@ interface ForwardableEmail {
   rawBody: string | null;
   hasAttachments?: boolean;
   attachmentNames?: string | null;
+  attachmentSizes?: string | null;
   accountId?: string;
   pgpStatus?: 'encrypted' | 'signed' | null;
 }
@@ -114,6 +116,7 @@ export function toForwardSource(email: ForwardableEmail): ForwardSource {
     rawBody: email.rawBody,
     hasAttachments: email.hasAttachments,
     attachmentNames: email.attachmentNames,
+    attachmentSizes: email.attachmentSizes,
     accountId: email.accountId,
     pgpStatus: email.pgpStatus,
   };

@@ -1718,7 +1718,7 @@ export interface ElectronAPI {
     setActivePointer: (accountId: string | null) => Promise<{ success: boolean; error?: string }>;
     unifiedInbox: (opts: { accountIds: string[]; limit?: number; offset?: number; filter?: ViewFilter; aiCategory?: string }) => Promise<{ success: boolean; data?: { emails: EmailRecord[]; total: number; hasMore: boolean }; error?: string }>;
     unifiedCategoryCounts: (accountIds: string[], mode?: 'unread' | 'total') => Promise<{ success: boolean; data?: Record<string, number>; error?: string }>;
-    unifiedSearch: (opts: { accountIds: string[]; searchQuery: any; limit?: number; offset?: number }) => Promise<{ success: boolean; data?: EmailRecord[]; error?: string }>;
+    unifiedSearch: (opts: { accountIds: string[]; searchQuery: any; limit?: number; offset?: number }) => Promise<{ success: boolean; data?: EmailRecord[]; total?: number; error?: string }>;
     unreadSummary: (accountIds: string[]) => Promise<{ success: boolean; data?: Array<{ accountId: string; unread: number }>; error?: string }>;
     backgroundSync: (opts: { accountId: string; config: any }) => Promise<{ success: boolean; data?: { unread: number; skipped?: boolean }; error?: string }>;
   };

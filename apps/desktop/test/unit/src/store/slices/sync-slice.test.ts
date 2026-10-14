@@ -151,6 +151,59 @@ const runFlush = async (): Promise<void> => {
   await vi.advanceTimersByTimeAsync(1_200);
 };
 
+describe('flushRealtimeBatch — search conversation totals after deletion', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const rows = [
+    { id: 'first-member', threadId: 'shared-thread', accountId: 'A' },
+    { id: 'second-member', threadId: 'shared-thread', accountId: 'A' },
+    { id: 'other-thread', threadId: 'another-thread', accountId: 'A' },
+  ];
+
+  it('removes a matching message while keeping the total until its final thread member disappears', async () => {
+    const h = await loadFlushHarness({ emails: [], searchQuery: 'is:unread', searchResults: rows, searchTotal: 2, pendingThreadEmailIds: [] });
+    h.slice.handleRealtimeEvent({ type: 'deleted', accountId: 'A', emailId: 'first-member', folderPath: 'INBOX' });
+    await runFlush();
+
+    expect(h.state.searchResults.map((row: any) => row.id)).toEqual(['second-member', 'other-thread']);
+    expect(h.state.searchTotal).toBe(2);
+    // No flat/section/banner row changed: a zero conversation delta must still
+    // write the filtered search message array.
+    expect(h.sets.some((patch) => patch.searchResults?.length === 2)).toBe(true);
+
+    h.slice.handleRealtimeEvent({ type: 'deleted', accountId: 'A', emailId: 'second-member', folderPath: 'INBOX' });
+    await runFlush();
+    expect(h.state.searchResults.map((row: any) => row.id)).toEqual(['other-thread']);
+    expect(h.state.searchTotal).toBe(1);
+  });
+
+  it('subtracts one conversation for several of its messages deleted in the same flush', async () => {
+    const h = await loadFlushHarness({ emails: [], searchQuery: 'is:unread', searchResults: rows, searchTotal: 2, pendingThreadEmailIds: [] });
+    h.slice.handleRealtimeEvent({ type: 'deleted', accountId: 'A', emailId: 'first-member', folderPath: 'INBOX' });
+    h.slice.handleRealtimeEvent({ type: 'deleted', accountId: 'A', emailId: 'second-member', folderPath: 'INBOX' });
+    await runFlush();
+
+    expect(h.state.searchResults.map((row: any) => row.id)).toEqual(['other-thread']);
+    expect(h.state.searchTotal).toBe(1);
+  });
+
+  it('counts same-named threads in separate accounts independently', async () => {
+    const h = await loadFlushHarness({
+      emails: [], searchQuery: 'is:unread', searchTotal: 3, pendingThreadEmailIds: [],
+      searchResults: rows.map((row) => row.id === 'second-member' ? { ...row, accountId: 'B' } : row),
+    });
+    h.slice.handleRealtimeEvent({ type: 'deleted', accountId: 'A', emailId: 'first-member', folderPath: 'INBOX' });
+    await runFlush();
+
+    expect(h.state.searchResults.map((row: any) => row.id)).toEqual(['second-member', 'other-thread']);
+    expect(h.state.searchTotal).toBe(2);
+  });
+});
+
 describe('flushRealtimeBatch — external flag changes (webmail read / star)', () => {
   beforeEach(() => {
     vi.spyOn(console, 'log').mockImplementation(() => {});

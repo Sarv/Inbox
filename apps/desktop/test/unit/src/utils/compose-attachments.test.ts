@@ -58,7 +58,7 @@ describe('loadEmailAttachments', () => {
     stubFetch(() => ({ success: true, base64: 'JVBERg==' }));
     const files = await loadEmailAttachments({ id: 'e1', attachmentNames: '["invoice.pdf","b.txt"]' });
     expect(files.map((file) => file.filename)).toEqual(['invoice.pdf', 'b.txt']);
-    expect(files[0]).toMatchObject({ content: 'JVBERg==', encoding: 'base64', size: 6 });
+    expect(files[0]).toMatchObject({ content: 'JVBERg==', encoding: 'base64', size: 4 });
   });
 
   // MULTI-ACCOUNT. Breaks: from All Inboxes the files are looked up in the

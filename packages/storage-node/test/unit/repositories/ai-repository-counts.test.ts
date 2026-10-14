@@ -187,8 +187,8 @@ describe('AIRepository read side (listings + counts)', () => {
 
   // ==========================================================================
   // getDynamicCategoryCounts serves TWO numbers, by `mode`: the DEFAULT 'unread'
-  // is the CHIP badge (unread mails, message-level), and 'total' is the pager
-  // "1–N of total" denominator (all mails). They are intentionally different.
+  // is the CHIP badge (unread conversations), and 'total' is the pager
+  // "1–N of total" denominator (all conversations). They are intentionally different.
   // ==========================================================================
   describe('getDynamicCategoryCounts', () => {
     beforeEach(() => {
@@ -210,21 +210,19 @@ describe('AIRepository read side (listings + counts)', () => {
       insertEmail(db, { id: 'g1', threadId: 't-g', tags: '|Trash|invoice|', date: 508, aiProcessedAt: 1 });
     });
 
-    // Message-level counts (a 3-reply thread contributes 3), so the 'total' mode
-    // equals the message list the view pages over. One mail can add to two chips.
-    it('default mode counts UNREAD mails per category (the chip badge)', () => {
+    it('default mode counts UNREAD conversations per category (the chip badge)', () => {
       const counts = repo.getDynamicCategoryCounts(); // default: unread
 
-      expect(counts.invoice).toBe(4);       // a1,a2,a3 + c1 unread; b1 read, g1 trashed
+      expect(counts.invoice).toBe(2);       // t-a + t-c; b1 read, g1 trashed
       expect(counts.meeting).toBe(1);       // c1
       expect(counts.important).toBe(0);
       expect(counts.uncategorized).toBe(1); // d1: unread, processed, no category, not spam/trashed
     });
 
-    it("'total' mode counts ALL mails per category (the pager denominator)", () => {
+    it("'total' mode counts ALL conversations per category (the pager denominator)", () => {
       const counts = repo.getDynamicCategoryCounts(undefined, 'total');
 
-      expect(counts.invoice).toBe(5);       // a1,a2,a3 + b1 (read) + c1; g1 trashed
+      expect(counts.invoice).toBe(3);       // t-a + t-b (read) + t-c; g1 trashed
       expect(counts.meeting).toBe(1);       // c1
       expect(counts.uncategorized).toBe(1); // d1 only
     });
@@ -248,9 +246,9 @@ describe('AIRepository read side (listings + counts)', () => {
       insertEmail(db, { id: 'arch', threadId: 't-arch', tags: '|Archive|invoice|', date: 600, aiProcessedAt: 1 });
 
       const inbox = repo.getDynamicCategoryCounts('f-inbox'); // unread
-      expect(inbox.invoice).toBe(4);       // a1,a2,a3,c1 — the Archive copy is out of scope
+      expect(inbox.invoice).toBe(2);       // t-a,t-c — the Archive copy is out of scope
       expect(inbox.uncategorized).toBe(1);
-      expect(repo.getDynamicCategoryCounts('f-inbox', 'total').invoice).toBe(5); // total, in scope
+      expect(repo.getDynamicCategoryCounts('f-inbox', 'total').invoice).toBe(3); // total, in scope
 
       const archive = repo.getDynamicCategoryCounts('f-archive');
       expect(archive.invoice).toBe(1);     // arch (unread)
@@ -258,11 +256,10 @@ describe('AIRepository read side (listings + counts)', () => {
       expect(archive.uncategorized).toBe(0);
     });
 
-    // Pinned deliberately: an unknown folderId silently drops the folder filter
-    // (unlike getEmailsByDynamicCategory, which returns an empty list). The chips
-    // then show mailbox-wide numbers next to an empty list.
-    it('an unknown folderId falls back to mailbox-wide counts instead of zero', () => {
-      expect(repo.getDynamicCategoryCounts('f-does-not-exist')).toEqual(repo.getDynamicCategoryCounts());
+    it('an unknown folderId counts zero, matching its empty category list', () => {
+      expect(Object.values(repo.getDynamicCategoryCounts('f-does-not-exist'))).toEqual(
+        Object.values(repo.getDynamicCategoryCounts()).map(() => 0),
+      );
     });
 
     it('returns zero for every category on an empty mailbox', () => {
@@ -305,14 +302,10 @@ describe('AIRepository read side (listings + counts)', () => {
       });
     });
 
-    // The legacy per-message counter and the chip (DEFAULT mode) both count UNREAD
-    // messages, so they agree for a shared slug (a1, a2 — a3 is read). The chip's
-    // 'total' mode is the separate number that counts EVERY message (the pager
-    // denominator). Pinned so nobody collapses the chip's two modes into one.
-    it('legacy and the chip agree on unread; the chip total counts every message', async () => {
+    it('legacy counts messages while category chips and pagers count conversations', async () => {
       expect((await repo.getCategoryCounts()).important).toBe(2);              // unread: a1, a2
-      expect(repo.getDynamicCategoryCounts().important).toBe(2);              // chip (unread) agrees
-      expect(repo.getDynamicCategoryCounts(undefined, 'total').important).toBe(3); // total: a1, a2, a3
+      expect(repo.getDynamicCategoryCounts().important).toBe(1);              // one unread conversation
+      expect(repo.getDynamicCategoryCounts(undefined, 'total').important).toBe(1); // one conversation
     });
 
     it('returns zeroes (not NULLs) for an empty mailbox', async () => {

@@ -5,12 +5,13 @@
  * two can never disagree about what a file is — a disagreement here is a
  * security bug, not a cosmetic one.
  *
- * Deliberately DEPENDENCY-FREE — not even `./safe-path`, and not `mime-types`.
- * The renderer deep-imports this file (see `vite/renderer-aliases.ts`), and both
- * of those pull in Node's `path`, which Vite externalizes for the browser: the
- * import resolves, then throws at runtime. Keeping the module pure is what lets
- * one copy serve both processes instead of the two drifting apart.
+ * Only pure core dependencies — never `./safe-path` or `mime-types`, which pull
+ * in Node's `path`. The renderer deep-imports this file (see
+ * `vite/renderer-aliases.ts`), so keeping the graph browser-safe lets one copy
+ * serve both processes without drifting apart.
  */
+
+import { isDraftRow } from './conversation-membership';
 
 /**
  * Attachment types we hand to the OS default app (Preview/Quick Look for images
@@ -281,6 +282,42 @@ export function parseAttachmentNames(attachmentNames?: string | null): string[] 
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean);
+}
+
+interface AttachmentMetadata {
+  id?: string;
+  messageId?: string;
+  tags?: string | null;
+  hasAttachments?: boolean;
+  attachmentNames?: string | null;
+  attachmentSizes?: string | null;
+}
+
+/** Local Sent mirrors use their bare Message-ID; synced rows have generated IDs.
+ * Local drafts share that ID format but are excluded by the draft predicate. */
+export function isLocalSentMirror(email: AttachmentMetadata): boolean {
+  return !!email.id && !!email.messageId
+    && email.id === email.messageId.replace(/[<>]/g, '')
+    && !isDraftRow(email.tags);
+}
+
+/** True when the message source still owes the reader authoritative file metadata. */
+export function needsAttachmentMetadata(email: AttachmentMetadata | undefined | null): boolean {
+  if (!email) return false;
+  if (!email.hasAttachments) {
+    // Older Sent mirrors incorrectly claimed no attachments, even for forwards.
+    // Reparse their own source once; [] records a verified attachment-free send.
+    return email.attachmentSizes == null && isLocalSentMirror(email);
+  }
+  const names = parseAttachmentNames(email.attachmentNames);
+  if (names.length === 0) return true;
+  try {
+    const sizes: unknown = JSON.parse(email.attachmentSizes ?? 'null');
+    return !Array.isArray(sizes) || sizes.length !== names.length
+      || sizes.some((size) => typeof size !== 'number' || !Number.isFinite(size) || size < 0);
+  } catch {
+    return true;
+  }
 }
 
 /** Scheme backing the in-app viewer. Registered as a privileged scheme in main. */

@@ -156,23 +156,11 @@ export function registerAIHandlers(): void {
     'ai:getByCategory',
     async (_event, category: string, limit = 50, offset = 0, folderId?: string) => {
       try {
-        const stores = allAccountStorages();
-        // Single account (or a folder-scoped view): direct query.
-        if (stores.length <= 1 || folderId) {
-          const storage = stores[0] ?? requireStorage();
-          const emails = await storage.getEmailsByDynamicCategory(category, { limit, offset, folderId });
-          return { success: true, data: emails };
-        }
-        // Unified: pull the category from every account, merge, sort newest-first.
-        const all: any[] = [];
-        for (const store of stores) {
-          try {
-            const rows = await store.getEmailsByDynamicCategory(category, { limit: offset + limit, offset: 0, folderId });
-            if (Array.isArray(rows)) all.push(...rows);
-          } catch { /* skip a failing account */ }
-        }
-        all.sort((a, b) => (b.date || 0) - (a.date || 0));
-        return { success: true, data: all.slice(offset, offset + limit) };
+        // This route and its category counts belong to the active account.
+        // All Inboxes explicitly uses accounts:unifiedInbox instead.
+        const storage = requireStorage();
+        const emails = await storage.getEmailsByDynamicCategory(category, { limit, offset, folderId });
+        return { success: true, data: emails };
       } catch (error) {
         logger.error('AI getByCategory error:', error);
         return { success: false, error: (error as Error).message };
@@ -593,6 +581,7 @@ export function registerAIHandlers(): void {
         // Single DB query with all filters combined
         const emails = await storage.searchEmails({
           query: searchQuery.textQuery || '',
+          collapseThreads: true,
           folderPath,
           scope: folderPath ? 'folder' : 'all',
           aiCategory: searchQuery.aiCategory,
@@ -631,9 +620,8 @@ export function registerAIHandlers(): void {
     }
   );
 
-  // True total for the search paginator — COUNT of ALL matches (no limit/offset),
-  // so the list shows "1–25 of <all>" over the whole mailbox. Same query shape as
-  // ai:search (minus paging/sort).
+  // Search pages and totals use matching conversations, so several matching
+  // messages in one thread occupy one row and one position in the paginator.
   ipcMain.handle(
     'ai:searchCount',
     async (_event, searchQuery: Record<string, any>) => {
@@ -646,6 +634,7 @@ export function registerAIHandlers(): void {
         }
         const total = await (storage as any).searchEmailsCount({
           query: searchQuery.textQuery || '',
+          collapseThreads: true,
           folderPath,
           scope: folderPath ? 'folder' : 'all',
           aiCategory: searchQuery.aiCategory,

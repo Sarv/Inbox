@@ -52,6 +52,23 @@ describe('useDraftAutosave — closing the compose box', () => {
     expect(save.mock.calls[0][0]).toMatchObject({ body: 'hello', accountEmail: 'me@x.com' });
   });
 
+  it('waits for the original forward files before saving on close', async () => {
+    let complete!: (files: NonNullable<Opts['attachments']>) => void;
+    const loading = new Promise<NonNullable<Opts['attachments']>>((resolve) => { complete = resolve; });
+    const view = render(<Probe opts={{
+      ...base, body: 'Please see the letter.', htmlBody: '<p>Please see the letter.</p>', attachments: [],
+      prepareAttachments: async () => loading,
+    }} />);
+    view.unmount();
+    await flush();
+    expect(save).not.toHaveBeenCalled();
+
+    complete([{ filename: 'letter.docx', content: 'YQ==', encoding: 'base64', size: 1, type: 'attachment' }]);
+    await flush();
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0][0].attachments).toEqual([{ filename: 'letter.docx', content: 'YQ==' }]);
+  });
+
   // Breaks: an empty new compose left an empty draft behind every time.
   it('does not save an empty compose', async () => {
     const view = render(<Probe opts={{ ...base, to: '', subject: '' }} />);

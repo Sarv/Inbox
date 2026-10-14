@@ -13,6 +13,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 
 import { useCloseComposePrompt } from '../hooks/useCloseComposePrompt';
 import { useDraftAutosave } from '../hooks/useDraftAutosave';
+import { useForwardAttachments } from '../hooks/useForwardAttachments';
 import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
@@ -25,6 +26,7 @@ import { reportSendFailure } from '../utils/send-failure';
 
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
+import { ForwardAttachmentStatus } from './ForwardAttachmentStatus';
 import { PolishModal } from './PolishModal';
 import { QuotedOriginalPreview } from './QuotedOriginalPreview';
 import { EMPTY_EDITOR_HTML, RichTextEditor } from './RichTextEditor';
@@ -54,6 +56,10 @@ interface ComposeEmailProps {
     rawBody: string | null; // Original HTML body for preserving email trail structure
     /** 'encrypted' keeps the reply encrypted by default. */
     pgpStatus?: 'encrypted' | 'signed' | null;
+    hasAttachments?: boolean;
+    attachmentNames?: string | null;
+    attachmentSizes?: string | null;
+    accountId?: string;
   };
   draft?: any; // To restore draft on Undo
   /** AI-drafted reply body (plain text) — prefilled when agent suggests reply */
@@ -134,6 +140,11 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
   } = useCompose({
     initialDraft: draft
   });
+  const forwardAttachments = useForwardAttachments({
+    source: mode === 'forward' ? replyToEmail : undefined,
+    restoredDraft: !!draft,
+    setAttachments,
+  });
 
   // OpenPGP over the same recipient list the send uses, so the lock speaks for who actually gets the mail.
   // A draft saved encrypted reopens encrypted, as a reply to encrypted mail does.
@@ -159,6 +170,8 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     initialDraftUnsaved: (draft as any)?.unsaved,
     accountId: (draft as any)?.accountId ?? replyAccountId,
     attachments,
+    attachmentsPrefilled: mode === 'forward' && !draft,
+    prepareAttachments: forwardAttachments.prepareAttachments,
     encrypt: pgp.state.encrypt,
     initialDraftEncrypted: draft?.pgpEncrypted,
   });
@@ -341,7 +354,7 @@ ${createQuotedHeader(prefix, extraInfo)}
   // just closing — the autosave's unmount save writes the draft.
   const { requestClose, isAsking, closePromptDialog } = useCloseComposePrompt({
     closeAction,
-    onSave: onClose,
+    onSave: () => { if (!forwardAttachments.blocked) onClose(); },
     onDiscard: discardAndClose,
   });
 
@@ -355,6 +368,7 @@ ${createQuotedHeader(prefix, extraInfo)}
 
   /** @param sendAt UTC epoch SECONDS to deliver at; omitted = send now. */
   const handleSend = async (sendAt?: number) => {
+    if (sending || forwardAttachments.blocked) return;
     const finalTo = mergeEmails(to, pendingTo);
     const finalCc = mergeEmails(cc, pendingCc);
     const finalBcc = mergeEmails(bcc, pendingBcc);
@@ -714,8 +728,10 @@ ${createQuotedHeader(prefix, extraInfo)}
           </div>
 
           {/* Footer UI replaced by ComposeToolbar */}
+          <ForwardAttachmentStatus {...forwardAttachments} onRetry={forwardAttachments.retry} />
           <ComposeToolbar
             sending={sending}
+            sendBlocked={forwardAttachments.blocked}
             hasAIProvider={hasAIProvider}
             plainBody={plainBody}
             hasRecipients={!!to.trim()}
@@ -929,8 +945,10 @@ ${createQuotedHeader(prefix, extraInfo)}
       {/* Footer — the SAME toolbar the fullscreen composer uses, so an action
           added to one is never missing from the other (this panel used to carry
           a hand-copied footer, which is how it ended up without Send later). */}
+      <ForwardAttachmentStatus {...forwardAttachments} onRetry={forwardAttachments.retry} />
       <ComposeToolbar
         sending={sending}
+        sendBlocked={forwardAttachments.blocked}
         hasAIProvider={hasAIProvider}
         plainBody={plainBody}
         hasRecipients={!!to.trim()}

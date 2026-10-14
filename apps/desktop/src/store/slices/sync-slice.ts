@@ -6,7 +6,7 @@ import pLimit from 'p-limit';
 import { clearCategoryBadgeCache } from '../../components/email-list/CategoryBadges';
 import { findFolderByType } from '../../config/folder-mapping';
 import { refreshEmailedAddresses } from '../../utils/remote-images';
-import { buildThreads, threadRowKey } from '../../utils/thread-utils';
+import { buildThreads, threadRowCount, threadRowKey } from '../../utils/thread-utils';
 import {
   getMaxEmailsPerFolder,
   getBodyDownloadLimit,
@@ -361,7 +361,8 @@ function applyDeletions(set: StoreSet, get: StoreGet, deletedIds: Set<string>): 
   // `searchResults`, NOT `emails`/`sectionData` — so a deleted row lingers in that
   // view until a full reload rebuilds searchResults. Drop it here too, mirroring
   // the user-initiated deleteEmail path (email-actions-slice.ts), and decrement
-  // searchTotal so the "1–N of N" header stays correct.
+  // searchTotal by conversations that lose their last matching member, so a
+  // partial deletion within one conversation does not shrink the denominator.
   const searchResults = state.searchResults;
   const nextSearchResults = searchResults.filter((e: any) => !deletedIds.has(e.id));
   const searchRemoved = searchResults.length - nextSearchResults.length;
@@ -372,7 +373,8 @@ function applyDeletions(set: StoreSet, get: StoreGet, deletedIds: Set<string>): 
   if (nextSectionData) patch.sectionData = nextSectionData;
   if (searchRemoved > 0) {
     patch.searchResults = nextSearchResults;
-    patch.searchTotal = Math.max(0, (state.searchTotal || 0) - searchRemoved);
+    const removedThreads = threadRowCount(searchResults) - threadRowCount(nextSearchResults);
+    patch.searchTotal = Math.max(0, (state.searchTotal || 0) - removedThreads);
   }
   if (nextPending.length !== pending.length) patch.pendingThreadEmailIds = nextPending;
   set(patch);

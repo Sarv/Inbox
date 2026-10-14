@@ -333,6 +333,9 @@ export interface SearchQuery {
   dateTo?: number;
   limit?: number;
   offset?: number;
+  /** Page matching conversations, returning all matched members of each page.
+   * Omitted keeps message-based search for background and programmatic callers. */
+  collapseThreads?: boolean;
   doesntHave?: string;    // NOT text match (exclude emails containing these words)
   sizeMin?: number;       // Minimum size in bytes (uses length of raw_body as proxy)
   sizeMax?: number;       // Maximum size in bytes

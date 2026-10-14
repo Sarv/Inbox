@@ -11,7 +11,7 @@ import { useEmailStore } from '../../store/email-store';
 import { accountDisplayLabel, getEmailsPerPage, getPageSizeForView, isThreadPagedView } from '../../store/helpers';
 import { emailMatchesLiveSearchFilter, hasLiveSearchFilterTokens } from '../../utils/search-filter';
 import type { SectionData , EmailThread } from '../../utils/thread-utils';
-import { adjustTotalForFilteredOut, buildThreads, sectionIsVisible, threadStaysVisible, visibleThreadsUnderFilter } from '../../utils/thread-utils';
+import { adjustTotalForFilteredOut, buildThreads, sectionIsVisible, threadRowCount, threadStaysVisible, visibleThreadsUnderFilter } from '../../utils/thread-utils';
 import { SearchBar } from '../SearchBar';
 import { canOfferServerSearch, hasServerSearchableParsedQuery } from '../server-search';
 import { Tooltip } from '../Tooltip';
@@ -267,6 +267,8 @@ export function EmailList() {
   // rows the moment 21 mails are read in webmail. Same helper as the per-section
   // `droppedPerSection` adjustment below.
   const flatTotal = adjustTotalForFilteredOut(emailsTotal, threads.length - flatThreads.length);
+  const visibleSearchTotal = searchQuery
+    ? adjustTotalForFilteredOut(searchTotal, threadRowCount(searchResults) - flatThreads.length) : 0;
 
   // True when the SOURCE paged by conversation — the section full-page view and
   // the Starred/Important virtual folders all fetch pageSize THREADS and hand
@@ -276,10 +278,12 @@ export function EmailList() {
   const threadPaged = isThreadPagedView({
     section: viewingSection,
     virtualFolder: selectedVirtualFolder,
+    aiCategory: viewingAICategory,
     // Snoozed is the same kind of source (a page of conversations, every snoozed
     // message of each) but carries no virtualFolder to recognise it by.
     snoozed: viewingSnoozed,
   });
+  const fixedWindow = threadPaged && !viewingAICategory && selectedVirtualFolder !== 'virtual-unified';
 
   // Section assignment hook
   const { sectionedThreads, threadMatchesFilter } = useSectionAssignment({
@@ -794,11 +798,11 @@ export function EmailList() {
     });
     if (title === null) return null;
     if (searchQuery) {
-      // Search pages through ALL matches with no exact total (no COUNT), so
-      // prev/next is gated by hasMore.
+      // Search pages and counts matching conversations, including every
+      // matching message of each conversation in the loaded page.
       return {
-        title, page: searchPage, pageSize: getEmailsPerPage(), count: searchResults.length,
-        total: searchTotal, hasMore: searchHasMore, loading: searching,
+        title, page: searchPage, pageSize: getEmailsPerPage(), count: flatThreads.length,
+        total: visibleSearchTotal, hasMore: searchHasMore, loading: searching,
         onGoToPage: goToSearchPage, fixedWindow: false,
         onBack: undefined as (() => void) | undefined, backLabel: undefined as string | undefined,
       };
@@ -816,12 +820,12 @@ export function EmailList() {
       hasMore: hasMoreEmails,
       loading: loadingMoreEmails,
       onGoToPage: goToEmailPage,
-      fixedWindow: threadPaged,
+      fixedWindow,
     };
   }, [useDbSections, viewingSection, viewingSectionLabel, searchQuery, viewingAICategory, viewingSnoozed,
-      selectedVirtualFolder, selectedFolder, searchPage, searchResults.length, searchTotal, searchHasMore,
+      selectedVirtualFolder, selectedFolder, searchPage, searchHasMore,
       searching, goToSearchPage, closeSectionFullPage, emailsPage, listPageSize, flatThreads.length,
-      displayEmails.length, flatTotal, hasMoreEmails, loadingMoreEmails, goToEmailPage, threadPaged]);
+      displayEmails.length, flatTotal, hasMoreEmails, loadingMoreEmails, goToEmailPage, threadPaged, fixedWindow, visibleSearchTotal]);
 
   const accounts = useEmailStore((s) => s.accounts);
   const accountMetaById = useMemo(
@@ -906,7 +910,7 @@ export function EmailList() {
                 <X className="h-3 w-3" />
               </button>
             </span>
-            <span className="text-xs text-muted-foreground">{flatThreads.length} results</span>
+            <span className="text-xs text-muted-foreground">{visibleSearchTotal || flatThreads.length} results</span>
             {/* Server-search escalation. Local index is searched first; this lets
                 the user force an IMAP UID SEARCH (and auto-fires when local came
                 back thin) to surface mail not downloaded yet. Single-account /
@@ -1100,14 +1104,12 @@ export function EmailList() {
                 Discrete pages REPLACE the rows, so the DOM stays bounded to one
                 page. (The sectioned inbox paginates per section — see SectionList.) */}
             {!useDbSections && searchQuery && (
-              /* Search results page through ALL matches (getEmailsPerPage per
-                 page) instead of a capped one-shot fetch. No exact total (no
-                 COUNT), so prev/next is gated by hasMore. */
+              /* Search uses the same conversation count in both paginators. */
               <Paginator
                 page={searchPage}
                 pageSize={getEmailsPerPage()}
-                count={searchResults.length}
-                total={searchTotal}
+                count={flatThreads.length}
+                total={visibleSearchTotal}
                 hasMore={searchHasMore}
                 loading={searching}
                 onGoToPage={goToSearchPage}
@@ -1122,7 +1124,7 @@ export function EmailList() {
                 hasMore={hasMoreEmails}
                 loading={loadingMoreEmails}
                 onGoToPage={goToEmailPage}
-                fixedWindow={threadPaged}
+                fixedWindow={fixedWindow}
               />
             )}
           </div>

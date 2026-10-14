@@ -13,6 +13,8 @@ import { SendLaterDropdown } from './SendLaterDropdown';
 import { Tooltip } from './Tooltip';
 export interface ComposeToolbarProps {
     sending: boolean;
+    /** Original forward files are still loading, or need a retry. */
+    sendBlocked?: boolean;
     hasAIProvider: boolean;
     plainBody: string;
     hasRecipients: boolean;
@@ -43,6 +45,7 @@ const MOD_KEY = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl
 
 export function ComposeToolbar({
     sending,
+    sendBlocked = false,
     hasAIProvider,
     plainBody,
     hasRecipients,
@@ -79,7 +82,7 @@ export function ComposeToolbar({
     useClickAway(followUpRef, showFollowUp, closeFollowUp);
     const followUpSummary = describeFollowUp(followUp);
 
-    const sendDisabled = sending || (!isForward && !plainBody.trim()) || !hasRecipients;
+    const sendDisabled = sending || sendBlocked || (!isForward && !plainBody.trim()) || !hasRecipients;
 
     return (
         <div className={`flex items-center justify-between px-3 py-2 border-t border-border ${isInline ? 'bg-muted/30' : 'bg-muted/50'}`}>

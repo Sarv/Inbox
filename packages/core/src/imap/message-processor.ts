@@ -1659,6 +1659,8 @@ export class MessageProcessor {
     } else {
       update.hasAttachments = false;
       update.attachmentCount = 0;
+      update.attachmentNames = '';
+      update.attachmentSizes = '[]';
     }
     // Persist the calendar invite (if any) so the detail view can render the
     // event card offline on subsequent opens. Only set when found — never clear

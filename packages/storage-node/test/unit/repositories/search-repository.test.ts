@@ -733,6 +733,126 @@ describe('SearchRepository', () => {
     });
   });
 
+  describe('conversation pagination', () => {
+    const threadKeys = (rows: EmailRecord[]) => [...new Set(rows.map((row) => row.threadId || row.id))];
+    const seedThreads = (): SearchQuery => {
+      for (let index = 0; index < 31; index++) {
+        addEmail(db, {
+          id: `paged-${index}`, threadId: `paged-thread-${index}`,
+          subject: 'Thread paging', body: 'threadneedle ###', tags: '|INBOX|finance|', date: 10_000 + index * 10,
+        });
+      }
+      for (const index of [29, 30]) {
+        addEmail(db, {
+          id: `paged-extra-${index}`, threadId: `paged-thread-${index}`,
+          subject: 'Thread paging', body: 'threadneedle ###', tags: '|INBOX|finance|', date: 20_000 + index * 10,
+        });
+      }
+      // Newer non-matches must neither replace the matched representative nor
+      // leak into the hydrated page and its bulk-action selection.
+      for (const suffix of ['a', 'b']) {
+        addEmail(db, {
+          id: `paged-read-${suffix}`, threadId: 'paged-thread-30',
+          subject: 'Thread paging', body: 'threadneedle ###', tags: '|INBOX|finance|read|', date: 30_000,
+        });
+      }
+      return { query: '', subject: 'Thread paging', folderPath: 'INBOX', aiCategory: 'finance', isUnread: true, collapseThreads: true };
+    };
+
+    it('pages 33 matching messages as 31 conversations, hydrating every matched member of each page', () => {
+      const query = seedThreads();
+      const first = repo.search({ ...query, limit: 25 });
+      const next = repo.search({ ...query, limit: 25, offset: 25 });
+
+      expect(repo.count(query)).toBe(31);
+      expect(repo.count({ ...query, limit: 1, offset: 999 })).toBe(31);
+      expect(threadKeys(first)).toHaveLength(25);
+      expect(threadKeys(next)).toHaveLength(6);
+      expect(first).toHaveLength(27);
+      expect(next).toHaveLength(6);
+      expect(new Set([...threadKeys(first), ...threadKeys(next)]).size).toBe(31);
+      expect(threadKeys(first).filter((key) => threadKeys(next).includes(key))).toEqual([]);
+      expect(new Set([...ids(first), ...ids(next)]).size).toBe(33);
+      expect(ids(first)).toEqual(expect.arrayContaining(['paged-30', 'paged-extra-30', 'paged-29', 'paged-extra-29']));
+      expect(ids(first)).not.toContain('paged-read-a');
+      expect(repo.search({ ...query, offset: 25 })).toHaveLength(6);
+    });
+
+    it('keeps message-based search unchanged unless conversation pagination is requested', () => {
+      const query = { ...seedThreads(), collapseThreads: undefined };
+      expect(repo.count(query)).toBe(33);
+      const page = repo.search({ ...query, limit: 25 });
+      expect(page).toHaveLength(25);
+      expect(threadKeys(page)).toHaveLength(23);
+    });
+
+    it('keeps the inverse read predicate on both the page keys and hydrated members', () => {
+      const query = { ...seedThreads(), isUnread: false };
+      expect(repo.count(query)).toBe(1);
+      expect(ids(repo.search({ ...query, limit: 25 })).sort()).toEqual(['paged-read-a', 'paged-read-b']);
+    });
+
+    it.each(['date', 'relevance'] as const)('uses FTS scores with %s ordering while paging whole conversations', (sortBy) => {
+      const query = { ...seedThreads(), query: 'threadneedle', sortBy };
+      const first = repo.search({ ...query, limit: 25 });
+      const next = repo.search({ ...query, limit: 25, offset: 25 });
+      expect(repo.count(query)).toBe(31);
+      expect(threadKeys(first)).toHaveLength(25);
+      expect(threadKeys(next)).toHaveLength(6);
+      // A hidden FTS/window error must not silently pass through LIKE fallback.
+      expect(first.every((row) => (row as any).relevanceScore < 0)).toBe(true);
+      expect(new Set([...ids(first), ...ids(next)]).size).toBe(33);
+    });
+
+    it('keeps conversation pages and counts when FTS is unavailable', () => {
+      const query = { ...seedThreads(), query: 'threadneedle' };
+      breakFtsIndex(db);
+      expect(repo.count(query)).toBe(31);
+      const first = repo.search({ ...query, limit: 25 });
+      const next = repo.search({ ...query, limit: 25, offset: 25 });
+      expect(threadKeys(first)).toHaveLength(25);
+      expect(threadKeys(next)).toHaveLength(6);
+      expect(new Set([...ids(first), ...ids(next)]).size).toBe(33);
+    });
+
+    it('counts conversations in the punctuation-only LIKE fallback', () => {
+      const query = { ...seedThreads(), query: '###' };
+      expect(repo.count(query)).toBe(31);
+      expect(threadKeys(repo.search({ ...query, limit: 25 }))).toHaveLength(25);
+    });
+
+    it('breaks date ties deterministically without splitting a conversation', () => {
+      for (const id of ['tie-a', 'tie-b', 'tie-c1', 'tie-c2']) {
+        addEmail(db, {
+          id, threadId: id.startsWith('tie-c') ? 'tie-thread-c' : `thread-${id}`,
+          subject: 'Pager ties', tags: '|INBOX|finance|', date: 100,
+        });
+      }
+      const query: SearchQuery = { query: '', subject: 'Pager ties', collapseThreads: true, limit: 1 };
+      expect(ids(repo.search(query))).toEqual(['tie-c2', 'tie-c1']);
+      expect(ids(repo.search({ ...query, offset: 1 }))).toEqual(['tie-b']);
+      expect(ids(repo.search({ ...query, offset: 2 }))).toEqual(['tie-a']);
+    });
+
+    it('uses the row ID for each legacy empty thread key', () => {
+      for (const id of ['empty-thread-a', 'empty-thread-b']) {
+        addEmail(db, { id, threadId: '', subject: 'Missing thread key', tags: '|INBOX|finance|', date: 100 });
+      }
+      const query: SearchQuery = { query: '', subject: 'Missing thread key', collapseThreads: true };
+      expect(repo.count(query)).toBe(2);
+      expect(ids(repo.search({ ...query, limit: 1 }))).toEqual(['empty-thread-b']);
+      expect(ids(repo.search({ ...query, limit: 1, offset: 1 }))).toEqual(['empty-thread-a']);
+    });
+
+    it('breaks thread-page date ties by thread key rather than representative email ID', () => {
+      addEmail(db, { id: 'a-representative', threadId: 'z-thread', subject: 'Merge ties', tags: '|INBOX|', date: 100 });
+      addEmail(db, { id: 'z-representative', threadId: 'a-thread', subject: 'Merge ties', tags: '|INBOX|', date: 100 });
+      const query: SearchQuery = { query: '', subject: 'Merge ties', collapseThreads: true, limit: 1 };
+      expect(ids(repo.search(query))).toEqual(['a-representative']);
+      expect(ids(repo.search({ ...query, offset: 1 }))).toEqual(['z-representative']);
+    });
+  });
+
   // ── count() ────────────────────────────────────────────────────────────────
   describe('count', () => {
     it('counts the WHOLE match set, ignoring limit/offset (the paginator "of N")', () => {

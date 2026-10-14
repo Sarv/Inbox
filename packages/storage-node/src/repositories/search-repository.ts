@@ -18,6 +18,9 @@ const SEARCH_SORT_COLUMNS = new Set([
   'importance_score', 'priority_score', 'created_at', 'updated_at',
 ]);
 
+// Match the renderer's threadId || id grouping, including legacy empty keys.
+const SEARCH_THREAD_KEY = `COALESCE(NULLIF(emails.thread_id, ''), emails.id)`;
+
 /**
  * Repository for FTS5-powered search
  */
@@ -144,6 +147,7 @@ export class SearchRepository extends BaseRepository {
    * Search emails using FTS5 with relevance ranking
    */
   search(query: SearchQuery): EmailRecord[] {
+    if (query.collapseThreads) return this.searchThreads(query);
     const textQuery = query.query?.trim();
     const useFTS = textQuery && textQuery.length > 0;
 
@@ -218,6 +222,72 @@ export class SearchRepository extends BaseRepository {
     } catch (error) {
       logger.error('[SearchRepo] FTS search failed, falling back to LIKE:', error);
       return this.searchWithLike(query);
+    }
+  }
+
+  /** Select a page of matching conversation keys before hydrating its members.
+   * Retain every matching member so list bulk actions can operate on all of
+   * that conversation's visible matches, rather than just a representative. */
+  private searchThreads(query: SearchQuery, likeOnly = false): EmailRecord[] {
+    const text = query.query?.trim();
+    const ftsQuery = !likeOnly && text ? this.escapeFTSQuery(text) : '';
+    if (!likeOnly && text && !ftsQuery) return this.searchThreads(query, true);
+    const useFTS = !!ftsQuery;
+    const params: any[] = [];
+    const { column, direction } = this.safeOrderBy(query.sortBy, query.sortOrder, SEARCH_SORT_COLUMNS, 'date');
+    let from = 'FROM emails WHERE 1=1';
+    if (useFTS) {
+      from = 'FROM emails_fts JOIN emails ON emails.id = emails_fts.email_id WHERE emails_fts MATCH ?';
+      params.push(ftsQuery);
+    }
+    from += this.appendFilters(query, params, { likeOnly });
+    if (likeOnly && text) {
+      from += ` AND (emails.subject LIKE ? ESCAPE '\\' OR ${cleanBodyExpression()} LIKE ? ESCAPE '\\' OR emails.from_name LIKE ? ESCAPE '\\'`
+        + ` OR emails.from_address LIKE ? ESCAPE '\\' OR emails.cc_address LIKE ? ESCAPE '\\' OR emails.attachment_names LIKE ? ESCAPE '\\')`;
+      const match = this.likeContains(text);
+      params.push(match, match, match, match, match, match);
+    }
+
+    const relevance = useFTS ? 'bm25(emails_fts, 0, 10, 5, 3, 3, 2, 2, 1)' : '0';
+    const relevanceSort = useFTS && query.sortBy === 'relevance';
+    const rank = relevanceSort ? `${relevance}
+      - (CASE WHEN instr(emails.tags, '|starred|') > 0 THEN 4.0 ELSE 0 END)
+      - (CASE WHEN instr(emails.tags, '|important|') > 0 THEN 2.0 ELSE 0 END)
+      - (CASE WHEN instr(emails.tags, '|read|') = 0 THEN 1.0 ELSE 0 END)` : `emails.${column}`;
+    const order = (alias: string, threads = false) => `${alias}.search_rank ${relevanceSort ? 'ASC' : direction}, ${alias}.search_date DESC, ${alias}.${threads ? 'search_thread' : 'search_id'} DESC`;
+    let page = `SELECT * FROM search_ranked WHERE search_position = 1 ORDER BY ${order('search_ranked', true)}`;
+    if (query.limit || query.offset) {
+      page += ' LIMIT ?';
+      params.push(query.limit ?? -1);
+    }
+    if (query.offset) {
+      page += ' OFFSET ?';
+      params.push(query.offset);
+    }
+
+    // FTS5 auxiliary functions cannot be evaluated inside window functions.
+    // Materializing the narrow candidate rows evaluates bm25 against the FTS
+    // cursor once; body hydration and thread metadata run only for page members.
+    const sql = `WITH search_matches AS MATERIALIZED (
+      SELECT emails.id AS search_id, ${SEARCH_THREAD_KEY} AS search_thread,
+        emails.date AS search_date, ${rank} AS search_rank, ${relevance} AS relevance_score
+      ${from}
+    ), search_ranked AS (
+      SELECT search_matches.*, ROW_NUMBER() OVER (
+        PARTITION BY search_thread ORDER BY ${order('search_matches')}
+      ) AS search_position FROM search_matches
+    ), search_page AS (${page})
+    SELECT ${this.emailSelect()}, ${this.threadMeta()}, search_matches.relevance_score
+    FROM search_page JOIN search_matches ON search_matches.search_thread = search_page.search_thread
+    JOIN emails ON emails.id = search_matches.search_id
+    ORDER BY ${order('search_page', true)}, ${order('search_matches')}`;
+
+    try {
+      return (this.db.prepare(sql).all(...params) as any[]).map((row) => this.rowToRecord(row));
+    } catch (error) {
+      if (likeOnly) throw error;
+      logger.error('[SearchRepo] Thread search failed, falling back to LIKE:', error);
+      return this.searchThreads(query, true);
     }
   }
 
@@ -407,7 +477,7 @@ export class SearchRepository extends BaseRepository {
   }
 
   /**
-   * COUNT of ALL rows matching a search (no limit/offset) — the true "of N"
+   * COUNT of ALL matching messages (or conversations when requested) — "of N"
    * total for the paginator, computed over the whole mailbox, not just the
    * loaded page. Uses the exact same WHERE as search() via appendFilters.
    */
@@ -416,14 +486,15 @@ export class SearchRepository extends BaseRepository {
     const useFTS = !!(textQuery && textQuery.length > 0);
     const params: any[] = [];
     let sql: string;
+    const counted = query.collapseThreads ? `COUNT(DISTINCT ${SEARCH_THREAD_KEY})` : 'COUNT(*)';
 
     if (useFTS) {
       const ftsQuery = this.escapeFTSQuery(textQuery!);
-      if (!ftsQuery) return this.searchWithLike({ ...query, limit: undefined, offset: undefined }).length;
-      sql = `SELECT COUNT(*) as cnt FROM emails_fts JOIN emails ON emails.id = emails_fts.email_id WHERE emails_fts MATCH ?`;
+      if (!ftsQuery) return this.countLike(query);
+      sql = `SELECT ${counted} as cnt FROM emails_fts JOIN emails ON emails.id = emails_fts.email_id WHERE emails_fts MATCH ?`;
       params.push(ftsQuery);
     } else {
-      sql = `SELECT COUNT(*) as cnt FROM emails WHERE 1=1`;
+      sql = `SELECT ${counted} as cnt FROM emails WHERE 1=1`;
     }
 
     sql += this.appendFilters(query, params);
@@ -433,8 +504,15 @@ export class SearchRepository extends BaseRepository {
       return row?.cnt ?? 0;
     } catch (error) {
       logger.error('[SearchRepo] count failed, falling back to LIKE length:', error);
-      return this.searchWithLike({ ...query, limit: undefined, offset: undefined }).length;
+      return this.countLike(query);
     }
+  }
+
+  private countLike(query: SearchQuery): number {
+    const matches = this.searchWithLike({ ...query, limit: undefined, offset: undefined });
+    return query.collapseThreads
+      ? new Set(matches.map((email) => email.threadId || email.id)).size
+      : matches.length;
   }
 
   /**
@@ -443,6 +521,7 @@ export class SearchRepository extends BaseRepository {
    * only the free-text match differs: LIKE across the same fields FTS indexes.
    */
   private searchWithLike(query: SearchQuery): EmailRecord[] {
+    if (query.collapseThreads) return this.searchThreads(query, true);
     let sql = `SELECT ${this.emailSelect()}, ${this.threadMeta()} FROM emails WHERE 1=1`;
     const params: any[] = [];
 

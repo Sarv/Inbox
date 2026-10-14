@@ -1016,8 +1016,8 @@ export class SQLiteStorage implements IEmailStorage {
     return this.searchRepo.search(query);
   }
 
-  /** True total of ALL rows matching a search (no limit/offset) — the paginator's
-   *  "of N" over the whole mailbox, not just the loaded page. */
+  /** Total matching messages, or matching conversations with collapseThreads.
+   * Ignores limit/offset so the paginator counts the same unit its page uses. */
   async searchEmailsCount(query: SearchQuery): Promise<number> {
     this.ensureInitialized();
     return this.searchRepo.count(query);

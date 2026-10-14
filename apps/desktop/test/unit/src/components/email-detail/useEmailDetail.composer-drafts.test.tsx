@@ -193,6 +193,21 @@ afterEach(() => {
 });
 
 describe('useEmailDetail — the forward composer\'s seed', () => {
+  it('opens the popup forward with the chosen original message\'s files and owning account', async () => {
+    const original = email({
+      ...A, hasAttachments: true, attachmentNames: '["letter.docx"]',
+      attachmentSizes: '[14837]', accountId: 'original-account',
+    } as Partial<EmailRecord> & { id: string; accountId: string });
+    await mount();
+
+    run(() => ctx().handleForward(original));
+
+    expect(state.openCompose).toHaveBeenCalledWith('forward', expect.objectContaining({
+      id: original.id, accountId: 'original-account', hasAttachments: true,
+      attachmentNames: '["letter.docx"]', attachmentSizes: '[14837]',
+    }));
+  });
+
   // Precondition for the rest: Undo send reopens the forward with its draft.
   it('reopens a forward restored by Undo send with what was written', async () => {
     state.restoreDraft = restored('forward', A);

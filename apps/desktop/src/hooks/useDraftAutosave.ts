@@ -38,6 +38,8 @@ interface DraftAutosaveOptions {
   /** The attachments were filled in FOR the user (a forward's original files),
    *  so on their own they are not work worth keeping — like subjectPrefilled. */
   attachmentsPrefilled?: boolean;
+  /** Await original files still loading for a forward before persisting it. */
+  prepareAttachments?: (files: AttachmentFile[] | undefined) => Promise<AttachmentFile[] | undefined>;
   /** Account that owns this draft — routes save/delete to the RIGHT per-account
    *  DB + IMAP engine. Without it they hit the active account (wrong DB when the
    *  draft belongs to another account / opened from All Inboxes). */
@@ -192,7 +194,9 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
         htmlBody,
         inReplyTo,
         accountId,
-        attachments: toDraftAttachments(attachments),
+        attachments: toDraftAttachments(latestRef.current.prepareAttachments
+          ? await latestRef.current.prepareAttachments(attachments)
+          : attachments),
         // Group the draft into the SAME thread as the mail being replied to, so
         // reopening the thread finds this draft and edits it in place instead of
         // spawning a brand-new standalone draft every time (the "immortal draft"

@@ -281,6 +281,8 @@ describe('isThreadPagedView', () => {
     expect(isThreadPagedView({ virtualFolder: 'virtual-starred' })).toBe(true);
     expect(isThreadPagedView({ virtualFolder: 'virtual-important' })).toBe(true);
     expect(isThreadPagedView({ virtualFolder: 'virtual-all' })).toBe(true);
+    expect(isThreadPagedView({ virtualFolder: 'virtual-unified' })).toBe(true);
+    expect(isThreadPagedView({ aiCategory: 'promotions' })).toBe(true);
   });
 
   // Snoozed is the same kind of source but has no selectedVirtualFolder to
@@ -292,12 +294,7 @@ describe('isThreadPagedView', () => {
     expect(isThreadPagedView({ snoozed: false })).toBe(false);
   });
 
-  // The grain and the page SIZE are independent questions: "All Inboxes" shares
-  // All Email's 100 but merges several accounts' lists in the renderer, with no
-  // single thread-grained repository query behind it. Flipping it here without
-  // changing that would break its label instead of fixing it.
-  it('is false for All Inboxes and for no view at all', () => {
-    expect(isThreadPagedView({ virtualFolder: 'virtual-unified' })).toBe(false);
+  it('leaves ordinary folders message-paged when no conversation view is active', () => {
     expect(isThreadPagedView({})).toBe(false);
     expect(isThreadPagedView()).toBe(false);
   });

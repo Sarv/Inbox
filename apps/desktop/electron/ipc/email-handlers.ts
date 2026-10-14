@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import path from 'path';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, type ParsedSearchQuery } from '@sarvinbox/core';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, resolveWithinDir, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
@@ -749,11 +749,9 @@ export function registerEmailHandlers(): void {
         return { success: false, error: 'Email not found' };
       }
 
-      // Re-fetch the source even when the body is cached if we still owe this
-      // email accurate attachment metadata. Keyed on attachmentSizes (null
-      // until the source has been parsed by the current code) so legacy rows
-      // whose filename is the bogus "SIZE" still refresh and downloads match.
-      const needsAttachmentMeta = email.hasAttachments && !email.attachmentSizes;
+      // Reparse incomplete attachment metadata and legacy local Sent mirrors
+      // even when their body is cached and their old attachment flag is false.
+      const needsAttachmentMeta = needsAttachmentMetadata(email);
 
       // A stored body still carrying `cid:` references was parsed before cid
       // resolution existed, or by a mailparser that declined the part (see
@@ -788,11 +786,13 @@ export function registerEmailHandlers(): void {
       // verdict — answering with a plain failure parked the mail in the
       // renderer's failedBodies, so opening it showed "Unable to load email
       // content" until restart.
-      if (!email.uid) {
+      // A local Sent mirror can resolve its own exact Message-ID in Sent via
+      // the core fetcher, so it need not wait for a sync to discover its UID.
+      if (!email.uid && !isLocalSentMirror(email)) {
         return failed(createDeferredFetchError('awaiting the server UID after a move').message);
       }
 
-      const fetchResult = await syncEngine.fetchBody(emailId, folder.path, email.uid);
+      const fetchResult = await syncEngine.fetchBody(emailId, folder.path, email.uid || 0);
       if (fetchResult === null) {
         // Don't use "not found" / "deleted" / "moved" in error — the store interprets
         // those keywords as "deleted on server" and removes the email locally.
@@ -1176,6 +1176,7 @@ export function registerEmailHandlers(): void {
 
       const emails = await storage.searchEmails({
         query: parsed.textQuery,
+        collapseThreads: true,
         from: parsed.from,
         to: parsed.to,
         subject: parsed.subject,

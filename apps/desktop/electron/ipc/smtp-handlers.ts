@@ -13,6 +13,7 @@ import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImage
 import { ipcMain, dialog } from 'electron';
 
 import { ensureAccountRuntime } from '../services/accounts-runtime';
+import { seedAttachmentCache } from '../services/attachment-cache';
 import { getValidAccessToken } from '../services/oauth-service';
 import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
 import { sendTransformFor } from '../services/pgp-service';
@@ -22,6 +23,7 @@ import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine,
 
 // Static import (not require()): the bundled main.js has no on-disk services
 // file, so a runtime require() throws "Cannot find module".
+import { draftAttachmentColumns } from './draft-attachments';
 import { deleteDraftsForThread } from './draft-handlers';
 import { recordFollowUpForSend } from './follow-up-handlers';
 
@@ -467,6 +469,10 @@ export async function sendEmailFromMain(
         ...sentMirrorBody(options),
         inReplyTo: options.inReplyTo || '',
         references: options.references?.join(' ') || options.inReplyTo || '',
+        // Encrypted filenames and bytes stay inside the encrypted Sent copy,
+        // as they do for encrypted drafts; plaintext sends are usable locally
+        // before the server's Sent copy has acquired a UID.
+        attachments: options.pgp?.encrypt ? [] : options.attachments,
       }, scopedStorage);
     } catch (err) {
       logger.error('[SMTP] Local sent mirror write failed (non-fatal):', err);
@@ -672,6 +678,7 @@ export async function writeLocalSentRow(row: {
   bodyHtml: string;
   inReplyTo: string;
   references: string;
+  attachments?: SendEmailOptions['attachments'];
 }, targetStorage?: ReturnType<typeof getStorage>): Promise<void> {
   // Mirror into the SENDING account's DB (targetStorage), not just the active one.
   const storage = targetStorage ?? getStorage();
@@ -697,11 +704,36 @@ export async function writeLocalSentRow(row: {
     return;
   }
 
-  // If this message-id is already in the DB (e.g. re-send), skip.
+  const attachments = (row.attachments ?? []).map((file) => ({
+    filename: file.filename,
+    content: Buffer.isBuffer(file.content)
+      ? file.content
+      : Buffer.from(file.content, file.encoding ?? 'utf-8'),
+  }));
+  const attachmentColumns = draftAttachmentColumns(attachments);
+  const cacheAttachments = async (emailId: string) => {
+    if (attachments.length === 0) return;
+    try {
+      await seedAttachmentCache(emailId, attachments);
+    } catch (err) {
+      logger.warn('[SMTP] Could not cache sent attachments locally:', err);
+    }
+  };
+
+  // A server header row can arrive before this mirror. Keep its body, thread
+  // and UID, while filling file metadata from this exact send's own payload.
   const existing = db
     .prepare('SELECT id FROM emails WHERE message_id = ?')
     .get(row.messageId) as any;
   if (existing?.id) {
+    if (attachments.length > 0) {
+      db.prepare(`UPDATE emails SET has_attachments = @hasAttachments,
+        attachment_count = @attachmentCount, attachment_names = @attachmentNames,
+        attachment_sizes = @attachmentSizes WHERE id = @id`)
+        .run({ id: existing.id, ...attachmentColumns });
+      await cacheAttachments(existing.id);
+      pokeReadModel(storage);
+    }
     logger.info('[SMTP] Sent mirror already exists for message-id', row.messageId);
     return;
   }
@@ -743,7 +775,7 @@ export async function writeLocalSentRow(row: {
       clean_body, raw_body, clean_body_len, raw_body_len, content_type, content_hash,
       in_reply_to, "references",
       priority,
-      has_attachments, attachment_count, attachment_names,
+      has_attachments, attachment_count, attachment_names, attachment_sizes,
       importance_score, importance_source,
       extraction_status, agent_status
     ) VALUES (
@@ -762,7 +794,7 @@ export async function writeLocalSentRow(row: {
       @contentType, @contentHash,
       @inReplyTo, @refs,
       @priority,
-      @hasAttachments, @attachmentCount, @attachmentNames,
+      @hasAttachments, @attachmentCount, @attachmentNames, @attachmentSizes,
       @importanceScore, @importanceSource,
       'done', 'done'
     )
@@ -800,10 +832,10 @@ export async function writeLocalSentRow(row: {
     inReplyTo: row.inReplyTo,
     refs: row.references,
     priority: 'normal',
-    hasAttachments: 0,
-    attachmentCount: 0,
-    attachmentNames: '',
-    attachmentSizes: null,
+    ...attachmentColumns,
+    // Unlike an older mirror whose files are unknown, this send is known to
+    // have no attachments when its own compose payload contained none.
+    attachmentSizes: attachmentColumns.attachmentSizes ?? '[]',
     importanceScore: 0,
     importanceSource: 'none',
   };
@@ -832,6 +864,10 @@ export async function writeLocalSentRow(row: {
     writeImageLinks(db, id, hashes);
     writeThreadKey(db, { id, subject: row.subject, date: now });
   })();
+
+  // Like an offline draft, this local-first Sent row has UID 0. Its own bytes
+  // must be available now so both message views can open/download the files.
+  await cacheAttachments(id);
 
   // Written on the raw handle, so the projection the Sent list and its badge
   // are read from only learns about it on the drain.

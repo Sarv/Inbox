@@ -6,12 +6,11 @@ import { openTestDb } from '../../../src/test-support/test-db';
 
 // A category surfaces TWO deliberately different numbers, both from
 // getDynamicCategoryCounts:
-//   - CHIP badge  = getDynamicCategoryCounts(folderId)            → UNREAD mails.
-//   - Pager "of N"= getDynamicCategoryCounts(folderId, 'total')  → ALL mails.
-// The view (getEmailsByDynamicCategory) is a flat, message-level list of ALL mail
-// in the category. So the invariants are:
-//   1. 'total' == the number of rows the list pages over  (pager can't overrun).
-//   2. 'unread' == the unread mails in that list          (badge the user reads).
+//   - CHIP badge  = getDynamicCategoryCounts(folderId)            → UNREAD threads.
+//   - Pager "of N"= getDynamicCategoryCounts(folderId, 'total')  → ALL threads.
+// The category list hydrates matching messages from a page of threads:
+//   1. 'total' == the number of conversations the list pages over.
+//   2. 'unread' == conversations with matching unread mail.
 //   3. deleting the visible page drops BOTH correctly and the next page slides up.
 // chip (unread) and pager (total) are intentionally distinct — never reconciled.
 
@@ -39,10 +38,10 @@ function newDb(): Database.Database {
 }
 
 let dateSeq = 1000;
-function add(db: Database.Database, id: string, tags: string, opts: { aiProcessed?: boolean } = {}): void {
+function add(db: Database.Database, id: string, tags: string, opts: { aiProcessed?: boolean; threadId?: string | null } = {}): void {
   const aiProcessed = opts.aiProcessed !== false;
   db.prepare('INSERT INTO emails (id, thread_id, tags, date, ai_processed_at) VALUES (?,?,?,?,?)')
-    .run(id, `t-${id}`, `|${tags}|`, dateSeq++, aiProcessed ? 1 : null);
+    .run(id, opts.threadId === undefined ? `t-${id}` : opts.threadId, `|${tags}|`, dateSeq++, aiProcessed ? 1 : null);
 }
 /** Mark a mail read the same way the app does — append the `read` tag token. */
 function markRead(db: Database.Database, id: string): void {
@@ -160,5 +159,52 @@ describe('category counters — total (pager) vs unread (chip)', () => {
     const nextPage = await collectAll(repo, 'promotions', 'f-inbox', 2);
     expect(nextPage.length).toBe(afterTotal);       // the following rows slid up
     expect(nextPage).not.toContain(removed[0]);     // deleted rows are gone
+  });
+
+  it('pages 33 matching messages as 31 conversations, with 25 visible threads then six', async () => {
+    db.prepare('DELETE FROM emails').run();
+    for (let i = 1; i <= 31; i++) add(db, `m${i}`, 'INBOX|promotions');
+    add(db, 'reply31', 'INBOX|promotions', { threadId: 't-m31' });
+    add(db, 'reply30', 'INBOX|promotions', { threadId: 't-m30' });
+    // These newer copies cannot affect category order, page membership or totals.
+    add(db, 'trashed31', 'Trash|promotions', { threadId: 't-m31' });
+    add(db, 'other-category31', 'INBOX|finance', { threadId: 't-m31' });
+
+    const first = await repo.getEmailsByDynamicCategory('promotions', { folderId: 'f-inbox', limit: 25 });
+    const second = await repo.getEmailsByDynamicCategory('promotions', { folderId: 'f-inbox', limit: 25, offset: 25 });
+    const threadIds = (rows: any[]) => new Set(rows.map(row => row.thread_id ?? row.id));
+    expect(threadIds(first).size).toBe(25);
+    expect(first).toHaveLength(27); // matching members retained for row aggregation
+    expect(threadIds(second).size).toBe(6);
+    expect(second).toHaveLength(6);
+    for (const tid of threadIds(first)) expect(threadIds(second).has(tid)).toBe(false);
+    expect(first.map(row => row.id)).not.toContain('trashed31');
+    expect(first.map(row => row.id)).not.toContain('other-category31');
+    expect(repo.getDynamicCategoryCounts('f-inbox').promotions).toBe(31);
+    expect(repo.getDynamicCategoryCounts('f-inbox', 'total').promotions).toBe(31);
+  });
+
+  it('counts an unread thread once until its last unread category member is read', () => {
+    add(db, 'reply4', 'INBOX|promotions', { threadId: 't-p4' });
+    expect(repo.getDynamicCategoryCounts('f-inbox').promotions).toBe(3);
+    markRead(db, 'p4');
+    expect(repo.getDynamicCategoryCounts('f-inbox').promotions).toBe(3);
+    markRead(db, 'reply4');
+    expect(repo.getDynamicCategoryCounts('f-inbox').promotions).toBe(2);
+    expect(repo.getDynamicCategoryCounts('f-inbox', 'total').promotions).toBe(4);
+  });
+
+  it('uses the same thread key for uncategorized pages, including standalone messages', async () => {
+    db.prepare('DELETE FROM emails').run();
+    add(db, 'u1', 'INBOX');
+    add(db, 'u1-reply', 'INBOX', { threadId: 't-u1' });
+    add(db, 'solo1', 'INBOX', { threadId: null });
+    add(db, 'solo2', 'INBOX', { threadId: null });
+    const first = await repo.getEmailsByDynamicCategory('uncategorized', { limit: 2 });
+    const second = await repo.getEmailsByDynamicCategory('uncategorized', { limit: 2, offset: 2 });
+    expect(first.map(row => row.id)).toEqual(['solo2', 'solo1']);
+    expect(second.map(row => row.id)).toEqual(['u1-reply', 'u1']);
+    expect(repo.getDynamicCategoryCounts().uncategorized).toBe(3);
+    expect(repo.getDynamicCategoryCounts(undefined, 'total').uncategorized).toBe(3);
   });
 });
