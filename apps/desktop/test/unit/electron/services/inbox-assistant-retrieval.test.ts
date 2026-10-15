@@ -35,6 +35,7 @@ function mailbox(records: EmailRecord[]): AssistantResearchMailbox {
     getContacts: vi.fn(async () => []),
     getEmail: vi.fn(async (id: string) => byId.get(id) ?? null),
     getAttachments: vi.fn(async () => []),
+    getEmailsByThread: vi.fn(async (threadId: string) => records.filter(email => email.threadId === threadId)),
     searchEmails: vi.fn(async (request: SearchQuery) => records.filter(email => {
       const text = `${email.subject} ${email.cleanBody} ${email.fromAddress} ${email.toAddress} ${email.attachmentNames ?? ''}`.toLowerCase();
       return (!request.query || text.includes(request.query.toLowerCase()))
@@ -51,6 +52,113 @@ function ready(ref: AssistantAttachmentRef, text = 'TCS quotation total INR 90,0
 }
 
 describe('Inbox Agent bounded retrieval priorities', () => {
+  it('reads a complete HTML quotation when the persisted clean body is a legacy preview', async () => {
+    const preview = 'Dear customer, please find our User Directory licensing proposal for your existing deployment. '.repeat(2).slice(0, 181);
+    const primary = mailbox([sentEmail('full-html', {
+      cleanBody: preview,
+      rawBody: `<p>${preview}</p><p>The total commercial value is ₹9.5 Cr.</p>`,
+    })]);
+    const fetchBody = vi.fn();
+    primary.fetchBody = fetchBody;
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence.find(source => source.emailId === 'full-html')?.text).toContain('₹9.5 Cr');
+    expect(fetchBody).not.toHaveBeenCalled();
+  });
+
+  it.each(['', ' \n '])('downloads a nonempty preview when the original body is absent (%j)', async rawBody => {
+    let current = sentEmail('preview-only', { cleanBody: 'TCS proposal preview', rawBody, hasBody: false });
+    const primary = mailbox([current]);
+    vi.mocked(primary.storage.getEmail).mockImplementation(async () => current);
+    primary.fetchBody = vi.fn(async () => {
+      current = { ...current, rawBody: '<p>TCS complete proposal total INR 82,000.</p>', hasBody: true };
+      return current;
+    });
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(primary.fetchBody).toHaveBeenCalledOnce();
+    expect(result.evidence[0]?.text).toContain('INR 82,000');
+  });
+
+  it('reports an unavailable original instead of calling a retained preview complete', async () => {
+    const primary = mailbox([sentEmail('offline-preview', { cleanBody: 'TCS proposal preview', rawBody: '', hasBody: false })]);
+    primary.fetchBody = vi.fn(async () => { throw new Error('offline'); });
+    const activities: InboxAssistantProgress[] = [];
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() }, undefined, { onProgress: value => activities.push(value) });
+    expect(result.coverage[0]?.missingBodies).toBe(1);
+    expect(result.evidence[0]?.text).toContain('only a preview');
+    expect(activities.some(value => value.stage === 'body' && value.status === 'done')).toBe(false);
+  });
+
+  it('does not download input tender files or incidental acronym matches while finding an outgoing quotation', async () => {
+    const primary = mailbox([
+      sentEmail('offer', { cleanBody: 'TCS final offer total INR 90,000.' }),
+      sentEmail('input-rfp', { subject: 'TCS project opportunity', cleanBody: 'Please review the incoming tender.', attachmentNames: '["Tender Document.pdf"]' }),
+      sentEmail('bank-notice', { subject: 'Credit report notification', toAddress: 'private@example.com', cleanBody: 'An incidental TCS reference in the report.', rawBody: '', attachmentNames: '["883059_signed.pdf"]' }),
+    ]);
+    const readAttachment = vi.fn();
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment });
+    expect(result.evidence.some(source => source.emailId === 'offer' && source.text.includes('INR 90,000'))).toBe(true);
+    expect(readAttachment).not.toHaveBeenCalled();
+  });
+
+  it('expands a relevant thread to team replies without allowing unrelated people or excluded messages to crowd them out', async () => {
+    const seed = sentEmail('demo', { subject: 'EPFO demo coordination', threadId: 'epfo-thread', cleanBody: 'Prakash will handle the project.' });
+    const reply = sentEmail('team-response', {
+      subject: 'Technical response', threadId: 'epfo-thread', fromAddress: 'prakash@sarv.example',
+      fromName: 'Prakash', toAddress: 'buyer@infosys.example', folderId: 'f-inbox', tags: '|INBOX|',
+      cleanBody: 'Attached technical response', rawBody: '<p>Technical response: GPU sizing and deployment are provided.</p>', date: seed.date + 1,
+    });
+    const trash = { ...reply, id: 'trashed-team-response', tags: '|Trash|' };
+    const unrelated = Array.from({ length: 30 }, (_, index) => ({ ...reply, id: `other-${index}`, threadId: `other-${index}`, subject: 'Other customer proposal', rawBody: '', cleanBody: 'Please review another tender.', date: seed.date + 10 + index }));
+    const primary = mailbox([seed, reply, trash, ...unrelated]);
+    const plan: InboxAssistantSearchPlan = { queries: ['proposal', 'Prakash'], entityTerms: ['Prakash'], topicTerms: ['EPFO'], participantTerms: ['Prakash'], intent: 'all', quoteIntent: true, filters: {} };
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], plan, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence.some(source => source.emailId === reply.id && source.text.includes('GPU sizing'))).toBe(true);
+    expect(result.evidence.some(source => source.emailId === trash.id || source.emailId.startsWith('other-'))).toBe(false);
+    expect(primary.storage.getEmailsByThread).toHaveBeenCalledWith('epfo-thread');
+    const strict = await researchInboxAssistant([ACCOUNTS[0]!], { ...plan, intent: 'sent' }, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(strict.evidence.some(source => source.emailId === reply.id)).toBe(false);
+  });
+
+  it('preserves forwarded commercial history and CC recipients as explicitly attributed evidence', async () => {
+    const primary = mailbox([sentEmail('forward', {
+      cleanBody: 'Forwarded message', ccAddress: 'buyer@tcs.example',
+      rawBody: '<p>Forwarded message</p><p>From: Prakash</p><p>Date: August 6, 2026</p><p>Please find the updated TCS price bid attached.</p>',
+    })]);
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence[0]?.text).toContain('From: Prakash');
+    expect(result.evidence[0]?.text).toContain('August 6, 2026');
+    expect(result.evidence[0]?.text).toContain('CC: buyer@tcs.example');
+  });
+
+  it('retains a useful contiguous latest reply in a crowded account alongside older forwarded proposals', async () => {
+    const responseLead = `${'Deployment sizing details. '.repeat(36)}For 50 concurrent sessions use MXFP4.\n\n`;
+    const response = `${responseLead}${'Further capacity explanation. '.repeat(72)}Deploy four GPU servers for recovery capacity.\n\n`;
+    const rows = Array.from({ length: 24 }, (_, index) => sentEmail(`project-${index}`, {
+      subject: index === 2 ? 'Re: ProjectX technical response' : 'ProjectX proposal discussion',
+      fromAddress: 'prakash@sarv.example', fromName: 'Prakash', folderId: 'inbox', tags: '|INBOX|',
+      date: Date.parse('2026-10-13T12:00:00Z') / 1000 - index * 86400,
+      cleanBody: 'ProjectX correspondence preview',
+      rawBody: index === 2 ? `${response}On Tuesday, Buyer wrote:\n${'Older ProjectX proposal history. '.repeat(300)}` : 'ProjectX correspondence.',
+      contentType: 'text', attachmentNames: index < 4 ? '["ProjectX-proposal.pdf"]' : null,
+    }));
+    const primary = mailbox(rows);
+    const accounts = [...ACCOUNTS, { id: 'third', email: 'other@example.com' }];
+    const plan: InboxAssistantSearchPlan = {
+      queries: ['ProjectX'], entityTerms: ['ProjectX', 'Prakash'], topicTerms: ['ProjectX'], participantTerms: ['Prakash'],
+      intent: 'all', quoteIntent: true, filters: {},
+    };
+    const result = await researchInboxAssistant(accounts, plan, {
+      openMailbox: vi.fn(async id => id === 'primary' ? primary : mailbox([])),
+      readAttachment: vi.fn(async ref => ({ ref, status: 'unavailable' as const, segments: [], truncated: false })),
+    });
+    const direct = result.evidence.find(source => source.emailId === 'project-2');
+    expect(direct?.text).toContain(responseLead.trim());
+    expect(direct?.text).toContain('Deploy four GPU servers for recovery capacity.');
+    expect(direct?.from).toBe('prakash@sarv.example');
+    expect(direct?.date).toBe(rows[2]!.date);
+    expect(result.coverage[0]?.reviewedMessages).toBe(24);
+    expect(result.evidence.filter(source => source.accountId === 'primary').reduce((sum, source) => sum + source.text.length, 0)).toBeLessThanOrEqual(Math.floor(110_000 / 3));
+  });
   it('automatically downloads missing bodies, refreshes discovered attachments and reports real work', async () => {
     let current = sentEmail('headers-only', { cleanBody: '', rawBody: '', attachmentNames: null });
     const primary = mailbox([current]);
@@ -90,6 +198,25 @@ describe('Inbox Agent bounded retrieval priorities', () => {
       await vi.waitFor(() => expect(primary.fetchBody).toHaveBeenCalledOnce());
       await vi.advanceTimersByTimeAsync(15_000);
       expect((await result).coverage[0]?.missingBodies).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not spend the network budget while the user is deciding an attachment security prompt', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const primary = mailbox([sentEmail('approval-wait', { attachmentNames: '["TCS-final.pdf"]' })]);
+      const readAttachment = vi.fn(async (ref, options): Promise<AssistantAttachmentResult> => {
+        options.onApprovalWait(true);
+        await new Promise(resolve => setTimeout(resolve, 100_000));
+        options.onApprovalWait(false);
+        return ready(ref, 'TCS final offer INR 82,000.');
+      });
+      const result = researchInboxAssistant([...ACCOUNTS, { id: 'third', email: 'third@example.com' }], PLAN, {
+        openMailbox: vi.fn(async id => id === 'primary' ? primary : mailbox([])), readAttachment,
+      });
+      await vi.waitFor(() => expect(readAttachment).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect((await result).coverage[0]).toMatchObject({ attachmentsRead: 1, attachmentsSkipped: 0 });
     } finally { vi.useRealTimers(); }
   });
 
@@ -188,7 +315,7 @@ describe('Inbox Agent bounded retrieval priorities', () => {
     });
     expect(result.evidence.some(source => source.emailId === 'old-tcs' && source.text.includes('Q-104'))).toBe(true);
     expect(result.evidence[0]?.emailId).toBe('old-tcs');
-    expect(result.coverage[0]).toMatchObject({ matchedMessages: 26, reviewedMessages: 24, truncated: true });
+    expect(result.coverage[0]).toMatchObject({ matchedMessages: 1, reviewedMessages: 1 });
   });
 
   it('extracts a quotation PDF after six inline logos without spending document slots on images', async () => {
@@ -235,5 +362,29 @@ describe('Inbox Agent bounded retrieval priorities', () => {
     ]);
     const firstText = result.evidence.filter(source => source.accountId === 'primary').reduce((sum, source) => sum + source.text.length, 0);
     expect(firstText).toBeLessThanOrEqual(55_000);
+  });
+
+  it('keeps a workbook total together with dummy-volume and actual-payment qualifications under a busy account budget', async () => {
+    const busy = mailbox(Array.from({ length: 24 }, (_, index) => sentEmail(`project-${index}`, {
+      date: 1_791_000_100 - index, cleanBody: 'TCS proposal and project update.',
+      hasAttachments: index % 6 === 0, attachmentNames: index % 6 === 0 ? `["TCS-pricing-${index}.xlsx"]` : null,
+    })));
+    const segments: AssistantAttachmentResult['segments'] = [
+      ...Array.from({ length: 100 }, (_, index) => ({ text: `INR component ${index} details ${'detail '.repeat(100)}`, locator: { kind: 'sheet' as const, label: `Costs!A${index + 1}:B${index + 1}`, sheet: 'Costs' } })),
+      { text: 'A17: Total Bid Value including GST | B17: INR 90,000 (saved formula value)', locator: { kind: 'sheet', label: 'Cost Summary!A17:B17', sheet: 'Cost Summary' } },
+      { text: 'A14: Seat quantities are dummy evaluation inputs.', locator: { kind: 'sheet', label: 'Call Centre!A14', sheet: 'Call Centre' } },
+      { text: 'C9: Actual effort determines payment; this evaluation figure is not the total contract value.', locator: { kind: 'sheet', label: 'Read Me!C9', sheet: 'Read Me' } },
+    ];
+    const result = await researchInboxAssistant([...ACCOUNTS, { id: 'third', email: 'other@example.com' }], PLAN, {
+      openMailbox: vi.fn(async id => id === 'primary' ? busy : mailbox([])),
+      readAttachment: vi.fn(async (ref): Promise<AssistantAttachmentResult> => ({ ref, status: 'ready', truncated: false, segments, message: 'Saved values; formulas were not recalculated.' })),
+    });
+    const selected = result.evidence.filter(source => source.filename === 'TCS-pricing-0.xlsx');
+    const text = selected.map(source => source.text).join('\n');
+    expect(text).toContain('INR 90,000');
+    expect(text).toContain('dummy evaluation inputs');
+    expect(text).toContain('Actual effort determines payment');
+    expect(result.coverage[0]?.warnings.join(' ')).toContain('formulas were not recalculated');
+    expect(selected.reduce((sum, source) => sum + source.text.length, 0)).toBeLessThanOrEqual(4_000);
   });
 });

@@ -23,7 +23,9 @@ const service = new InboxAssistantService({
     return {
       storage, aliases: resolveAccountIdentity(storage).aliases,
       fetchBody: async (email, _folder, options) => {
-        const downloaded = await fetchAssistantMessageBody(accountId, email.id, options?.signal);
+        // Retrieval has checked completeness; bypass a legacy clean preview
+        // rather than letting the download helper treat it as the full body.
+        const downloaded = await fetchAssistantMessageBody(accountId, email.id, options?.signal, { force: true });
         if (await requireAccountStorage(accountId) !== storage) throw new Error('The source account changed during download.');
         return downloaded;
       },

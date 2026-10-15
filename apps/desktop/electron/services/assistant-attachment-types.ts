@@ -20,11 +20,13 @@ export type AssistantAttachmentStatus =
   | 'unavailable';
 
 export interface AssistantAttachmentLocator {
-  kind: 'page' | 'paragraph' | 'sheet' | 'line';
+  kind: 'page' | 'paragraph' | 'sheet' | 'slide' | 'line';
   label: string;
   page?: number;
   paragraph?: number;
   sheet?: string;
+  cellRange?: string;
+  slide?: number;
   rowStart?: number;
   rowEnd?: number;
   lineStart?: number;

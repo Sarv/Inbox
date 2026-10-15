@@ -213,7 +213,9 @@ export class InboxAssistantService {
       if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
       report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
       const callAI = (prompt: string) => { assertCurrent(); return waitForAbortableOperation(this.deps.callAI(prompt, controller.signal), controller.signal); };
-      const plan = await planInboxAssistantSearch(context.contextualizedQuestion, callAI, { historyContext });
+      const plan = await planInboxAssistantSearch(context.contextualizedQuestion, callAI, {
+        historyContext, topicTerms: context.topicTerms, participantTerms: context.participantTerms, intent: context.intent,
+      });
       assertCurrent();
       const research = await researchInboxAssistant(selected, plan, this.deps, controller.signal, {
         onProgress: report, sourceRefs: context.sourceRefs,

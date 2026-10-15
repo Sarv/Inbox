@@ -26,6 +26,56 @@ describe('Inbox Agent persisted conversation context', () => {
     expect(fallbackInboxAssistantSearchPlan(context.contextualizedQuestion).intent).toBe('all');
     expect(fallbackInboxAssistantSearchPlan('What quote did I send to my team?').intent).toBe('sent');
   });
+  it('preserves a lowercase project anchor after a team correction instead of searching every proposal by that person', async () => {
+    const saved = [exchange({ id: 'epfo', question: 'check aabout epfo final propsal we send',
+      answer: { text: 'Only coordination was found.', sources: [source({ subject: 'EPFO demo coordination', emailId: 'epfo-coordination' })], coverage: [], warnings: [] } })];
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'epfo', question: 'this is send by my team members so fis what prakash submit last' }));
+    expect(context.topicTerms).toEqual(['epfo']);
+    expect(context.participantTerms).toEqual(['prakash']);
+    expect(context.sourceRefs).toEqual([{ accountId: 'primary', emailId: 'epfo-coordination' }]);
+    const callAI = vi.fn().mockResolvedValue(JSON.stringify({ queries: ['Prakash', 'proposal'], entityTerms: ['Prakash'], intent: 'sent', quoteIntent: true, filters: {} }));
+    const plan = await planInboxAssistantSearch(context.contextualizedQuestion, callAI, context);
+    expect(plan.intent).toBe('all');
+    expect(plan.topicTerms).toEqual(['epfo']);
+    expect(plan.participantTerms).toEqual(['prakash']);
+    expect(plan.queries[0]).toBe('epfo');
+    expect(callAI.mock.calls[0][0]).toContain('check aabout epfo final propsal we send');
+  });
+
+  it.each(['What did Prakash submit?', 'What Prakash submit last?', 'What has Prakash shared?'])('keeps the project and broadens sender scope for %s', async question => {
+    const saved = [exchange({ id: 'epfo', question: 'What proposal did we send for EPFO?' })];
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'epfo', question }));
+    expect(context.topicTerms).toEqual(['EPFO']);
+    expect(context.participantTerms).toEqual(['Prakash']);
+    const plan = await planInboxAssistantSearch(context.contextualizedQuestion, vi.fn().mockRejectedValue(new Error('offline')), context);
+    expect(plan.intent).toBe('all');
+    expect(plan.topicTerms).toEqual(['EPFO']);
+    expect(plan.queries).toContain('EPFO');
+  });
+
+  it('retains the original project across restored team-member follow-ups and answer topic drift', () => {
+    const saved = [exchange({ id: 'epfo', question: 'What proposal did we send for EPFO?' }),
+      exchange({ id: 'team', question: 'What did Prakash submit last?', answer: { text: 'Unrelated tender answer.',
+        sources: [source({ subject: 'Unrelated tender', emailId: 'unrelated' })], coverage: [], warnings: [] } })];
+    const context = buildInboxAssistantContext(JSON.parse(JSON.stringify(saved)), request({ previousExchangeId: 'team', question: 'Read the actual proposal and tell me the amount' }));
+    expect(context.topicTerms).toEqual(['EPFO']);
+    expect(context.historyContext).toContain('What proposal did we send for EPFO?');
+  });
+
+  it('keeps a team sender correction for later vague turns and allows an explicit personal-Sent override', async () => {
+    const saved = [exchange({ id: 'epfo', question: 'What proposal did we send for EPFO?' }),
+      exchange({ id: 'team', question: 'What did Prakash submit last?' }),
+      exchange({ id: 'document', question: 'Read the actual proposal' })];
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'document', question: 'How much?' }));
+    expect(context.topicTerms).toEqual(['EPFO']);
+    expect(context.participantTerms).toEqual(['Prakash']);
+    expect(context.intent).toBe('all');
+    const model = vi.fn().mockResolvedValue(JSON.stringify({ queries: ['proposal'], entityTerms: [], intent: 'sent', quoteIntent: true, filters: {} }));
+    expect((await planInboxAssistantSearch(context.contextualizedQuestion, model, context)).intent).toBe('all');
+    const personal = buildInboxAssistantContext(saved, request({ previousExchangeId: 'document', question: 'Which of these did I personally send?' }));
+    expect(personal.intent).toBe('sent');
+    expect(personal.participantTerms).toBeUndefined();
+  });
   it('reconstructs all relevant earlier turns for a third question after restoring persisted history', () => {
     const restored = JSON.parse(JSON.stringify(history())) as InboxAssistantExchange[];
     const context = buildInboxAssistantContext(restored, request());
@@ -154,5 +204,15 @@ describe('Inbox Agent persisted conversation context', () => {
     expect(parsed.omittedMiddleTurns).toBe(40);
     expect(context.historyContext!.length).toBeLessThanOrEqual(6_000);
     expect(saved).toHaveLength(60);
+  });
+
+  it('retains a sender correction from the middle of a long conversation outside the prompt window', () => {
+    const saved = Array.from({ length: 60 }, (_, index) => exchange({ id: `long-${index}`,
+      question: index === 0 ? 'What proposal did we send for EPFO?' : index === 1 ? 'What did Prakash submit last?' : `What changed in revision ${index}?` }));
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'long-59', question: 'How much?' }));
+    expect(context.intent).toBe('all');
+    expect(context.participantTerms).toEqual(['Prakash']);
+    expect(context.topicTerms).toEqual(['EPFO']);
+    expect(JSON.parse(context.historyContext!).turns).toHaveLength(20);
   });
 });

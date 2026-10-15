@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { EmailRecord } from '@sarvinbox/core';
+import { strToU8, zipSync } from 'fflate';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const draftGenerator = vi.hoisted(() => vi.fn());
 vi.mock('../../../../electron/services/inbox-assistant-draft', () => ({ generateInboxAssistantDraft: draftGenerator }));
 
+import { extractAssistantAttachment } from '../../../../electron/services/assistant-attachment-extractor';
 import type { AssistantAttachmentResult } from '../../../../electron/services/assistant-attachment-types';
 import { InboxAssistantService, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
 import type { InboxAssistantAccount, InboxAssistantChat, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange } from '../../../../src/types/inbox-assistant';
@@ -22,6 +24,69 @@ const NEW_QUOTE = 'TCS quotation Q-104 revision 2. Total INR 90,000 excluding GS
 const FILENAME = 'TCS-quotation-revision-2.xlsx';
 const QUESTION = 'What quote did I send to TCS?';
 const PLAN = JSON.stringify({ queries: ['TCS', 'quotation'], entityTerms: ['TCS'], intent: 'sent', quoteIntent: true, filters: {} });
+const TEAM_DETAIL = 'Plan 30 concurrent sessions normally and 60 at peak. Production and DR each use four inference servers.';
+const TEAM_COORDINATION = 'EPFO proposal coordination was acknowledged; the commercial attachment is not in this message.';
+const TEAM_FORWARD = 'This forwards the earlier EPFO price bid sent to TCS; it is not a new submission or client acceptance.';
+const TEAM_PRICE_FILE = 'EPFO-price-bid-final.xlsx';
+
+/** Sanitized shape of the audited case: never copy real customer figures into fixtures. */
+function teamPriceWorkbook(): Uint8Array {
+  return zipSync(Object.fromEntries(Object.entries({
+    'xl/workbook.xml': '<workbook xmlns:r="urn:rels"><sheets><sheet name="Cost Summary" r:id="r1"/></sheets></workbook>',
+    'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>',
+    'xl/worksheets/sheet1.xml': '<worksheet><sheetData>'
+      + '<row r="17"><c r="A17" t="inlineStr"><is><t>Total bid value including GST (INR)</t></is></c><c r="B17"><f>SUM(B12:B16)</f><v>2750000</v></c></row>'
+      + '<row r="20"><c r="A20" t="inlineStr"><is><t>These are dummy evaluation quantities; payment uses actual consumption.</t></is></c></row>'
+      + '</sheetData></worksheet>',
+  }).map(([name, value]) => [name, strToU8(value)])));
+}
+
+async function seedTeamProposal(): Promise<void> {
+  await primary.add('epfo-coordination-thread', {
+    id: 'epfo-coordination', folderId: 'f-sent', tags: '|Sent|', fromAddress: ACCOUNTS[0]!.email,
+    toAddress: 'buyer@tcs.example', subject: 'EPFO final proposal coordination', date: 1_788_220_800,
+    cleanBody: TEAM_COORDINATION, rawBody: `<p>${TEAM_COORDINATION}</p>`,
+  });
+  await primary.add('epfo-team-thread', {
+    id: 'epfo-technical-seed', fromAddress: 'vinay@integrator.example', toAddress: 'prakash@sarv.example',
+    subject: 'EPFO technical proposal discussion', date: 1_789_430_400,
+    cleanBody: 'Please send the revised deployment assumptions.', rawBody: '<p>Please send the revised deployment assumptions.</p>',
+  });
+  const introduction = 'Hi Vinay, this is the updated deployment sizing discussed in the earlier review. We have reviewed the working assumptions and are sending the revision below for your technical team to assess. ';
+  await primary.add('epfo-team-thread', {
+    id: 'epfo-latest', fromAddress: 'prakash@sarv.example', fromName: 'Prakash', toAddress: 'vinay@integrator.example',
+    subject: 'Re: Updated sizing', date: 1_790_294_400,
+    // Legacy imported rows may mark a body present while retaining only a
+    // preview in cleanBody. The answer needs content beyond that preview.
+    cleanBody: introduction.slice(0, 180), rawBody: `<p>${introduction}</p><p>${TEAM_DETAIL}</p>`, hasBody: true,
+  });
+  await primary.add('epfo-team-thread', {
+    id: 'epfo-draft', folderId: 'f-drafts', tags: '|INBOX.Drafts|', fromAddress: 'prakash@sarv.example',
+    subject: 'Re: EPFO unapproved draft', date: 1_792_022_400,
+    cleanBody: 'UNAPPROVED DRAFT: quote INR 99999999.', rawBody: '<p>UNAPPROVED DRAFT: quote INR 99999999.</p>',
+  });
+  await primary.add('epfo-team-thread', {
+    id: 'epfo-trash', folderId: 'f-trash', tags: '|Trash|', fromAddress: 'prakash@sarv.example',
+    subject: 'Re: EPFO deleted offer', date: 1_792_022_401,
+    cleanBody: 'DELETED OFFER: quote INR 88888888.', rawBody: '<p>DELETED OFFER: quote INR 88888888.</p>',
+  });
+  await primary.add('unrelated-tender-thread', {
+    id: 'unrelated-latest', fromAddress: 'prakash@sarv.example', fromName: 'Prakash', toAddress: ACCOUNTS[0]!.email,
+    subject: 'New ministry tender checklist', date: 1_792_022_400,
+    cleanBody: 'UNRELATED CUSTOMER: a ministry tender checklist is ready.', rawBody: '<p>UNRELATED CUSTOMER: a ministry tender checklist is ready.</p>',
+  });
+  // Same message ID in another account must still resolve to that account's
+  // attachment and provenance, rather than the technical reply above.
+  await secondary.add('epfo-price-thread', {
+    id: 'epfo-latest', fromAddress: 'prakash@sarv.example', fromName: 'Prakash', toAddress: ACCOUNTS[1]!.email,
+    subject: 'Fwd: EPFO commercial price bid', date: 1_791_849_600,
+    cleanBody: TEAM_FORWARD, rawBody: `<p>${TEAM_FORWARD}</p>`,
+    hasAttachments: true, attachmentCount: 1, attachmentNames: JSON.stringify([TEAM_PRICE_FILE]),
+  });
+  await secondary.storage.insertAttachment({ id: 'epfo-price-attachment', emailId: 'epfo-latest', filename: TEAM_PRICE_FILE,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: 500,
+    filePath: '/fixture/EPFO-price-bid-final.xlsx', createdAt: 1_791_849_600 });
+}
 
 let dir: string;
 let primary: TestAccount;
@@ -554,5 +619,106 @@ describe('Inbox Agent with real account databases', () => {
     expect(third.answer.text).toContain(NEW_QUOTE);
     expect(third.answer.sources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'attachment', filename: FILENAME, accountId: 'secondary' })]));
     expect(third.activities).toEqual(expect.arrayContaining([expect.objectContaining({ stage: 'context', status: 'done' })]));
+  });
+
+  it('keeps a corrective team follow-up on the customer and joins full thread bodies with qualified attachment evidence', async () => {
+    await seedTeamProposal();
+    const extracted = await extractAssistantAttachment({ filename: TEAM_PRICE_FILE, bytes: teamPriceWorkbook() });
+    expect(extracted.status).toBe('ready');
+    const total = extracted.segments.find(segment => segment.text.includes('2750000'))!;
+    const qualification = extracted.segments.find(segment => segment.text.includes('dummy evaluation quantities'))!;
+    expect(total.locator).toMatchObject({ sheet: 'Cost Summary', cellRange: 'A17:B17' });
+    vi.mocked(deps.readAttachment).mockImplementation(async ref => ({ ...extracted, ref }));
+    const prompts: string[] = [];
+    let planned = 0;
+    vi.mocked(deps.callAI).mockImplementation(async prompt => {
+      prompts.push(prompt);
+      if (prompt.startsWith('You plan')) {
+        if (planned++ === 0) return JSON.stringify({ queries: ['EPFO'], entityTerms: ['EPFO'], intent: 'sent', quoteIntent: true, filters: {} });
+        // Deliberately model the real failure: the provider focuses on the
+        // named person and forgets the customer from the preceding question.
+        return JSON.stringify({ queries: ['Prakash', 'latest submission'], entityTerms: ['Prakash'], intent: 'all', quoteIntent: true, filters: {} });
+      }
+      const actual = evidence(prompt);
+      const facts = [TEAM_COORDINATION, TEAM_DETAIL, TEAM_FORWARD, total.text, qualification.text].flatMap(quote => {
+        const source = actual.find(item => item.evidence.includes(quote));
+        return source ? [{ text: quote, sourceIds: [source.id], quotes: [{ sourceId: source.id, text: quote }] }] : [];
+      });
+      return JSON.stringify({ facts });
+    });
+    const first = await service.ask(request({ question: 'Check about EPFO final proposal I personally sent.' }));
+    expect(first.answer.text).toContain(TEAM_COORDINATION);
+    expect(first.answer.sources).toEqual([expect.objectContaining({ emailId: 'epfo-coordination', accountId: 'primary', sent: true })]);
+    prompts.length = 0;
+    const beforePrimary = await primary.storage.getEmail('epfo-latest');
+    const beforeSecondary = await secondary.storage.getEmail('epfo-latest');
+    const expand = vi.spyOn(primary.storage, 'getEmailsByThread');
+    const followUp = await new InboxAssistantService(deps).ask(request({
+      requestId: 'team-follow-up', question: 'this is send by my team members so find what Prakash submit last', previousExchangeId: first.id,
+    }));
+
+    expect(prompts[0]).toContain('EPFO');
+    expect(expand).toHaveBeenCalledWith('epfo-team-thread');
+    const answerPrompt = prompts.find(prompt => prompt.includes('UNTRUSTED_EVIDENCE_JSON: '))!;
+    expect(answerPrompt).toContain(TEAM_DETAIL);
+    expect(answerPrompt).not.toContain('UNRELATED CUSTOMER');
+    expect(answerPrompt).not.toContain('UNAPPROVED DRAFT');
+    expect(answerPrompt).not.toContain('DELETED OFFER');
+    expect(followUp.answer.text).toContain(TEAM_DETAIL);
+    expect(followUp.answer.text).toContain(TEAM_FORWARD);
+    expect(followUp.answer.text).toContain('2750000');
+    expect(followUp.answer.text).toContain('dummy evaluation quantities');
+    expect(followUp.answer.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accountId: 'primary', emailId: 'epfo-latest', threadId: 'epfo-team-thread',
+        from: 'prakash@sarv.example', sent: false, kind: 'message', excerpt: expect.stringContaining('30 concurrent sessions') }),
+      expect.objectContaining({ accountId: 'secondary', emailId: 'epfo-latest', threadId: 'epfo-price-thread',
+        kind: 'attachment', filename: TEAM_PRICE_FILE, attachmentId: 'epfo-price-attachment', location: 'Cost Summary!A17:B17', sent: false }),
+    ]));
+    expect(followUp.answer.sources.every(source => !['epfo-draft', 'epfo-trash', 'unrelated-latest'].includes(source.emailId))).toBe(true);
+    expect(deps.readAttachment).toHaveBeenCalledWith({ accountId: 'secondary', emailId: 'epfo-latest', filename: TEAM_PRICE_FILE },
+      expect.objectContaining({ allowSecurityPrompt: true, signal: expect.any(AbortSignal) }));
+    expect(followUp.answer.warnings.join(' ')).toMatch(/formulas were not recalculated/i);
+    expect(await primary.storage.getEmail('epfo-latest')).toEqual(beforePrimary);
+    expect(await secondary.storage.getEmail('epfo-latest')).toEqual(beforeSecondary);
+  });
+
+  it('keeps explicit personal Sent and account scope when customer threads also contain team submissions', async () => {
+    await seedTeamProposal();
+    vi.mocked(deps.callAI).mockImplementation(async prompt => {
+      if (prompt.startsWith('You plan')) return JSON.stringify({
+        queries: ['EPFO'], entityTerms: ['EPFO'], topicTerms: ['EPFO'], intent: 'sent', quoteIntent: true, filters: {},
+      });
+      const actual = evidence(prompt);
+      const source = actual.find(item => item.evidence.includes(TEAM_COORDINATION));
+      return JSON.stringify({ facts: source ? [{ text: TEAM_COORDINATION, sourceIds: [source.id], quotes: [{ sourceId: source.id, text: TEAM_COORDINATION }] }] : [] });
+    });
+    const result = await service.ask(request({ question: 'What EPFO proposal did I personally send?', accountIds: ['primary'] }));
+    expect(result.answer.text).toContain(TEAM_COORDINATION);
+    expect(deps.openMailbox).toHaveBeenCalledExactlyOnceWith('primary');
+    expect(deps.readAttachment).not.toHaveBeenCalled();
+    const answerPrompt = vi.mocked(deps.callAI).mock.calls.find(([prompt]) => prompt.includes('UNTRUSTED_EVIDENCE_JSON: '))![0];
+    expect(answerPrompt).not.toContain(TEAM_DETAIL);
+    expect(answerPrompt).not.toContain(TEAM_FORWARD);
+    expect(answerPrompt).not.toContain('2750000');
+    expect(result.answer.sources).toEqual([expect.objectContaining({ accountId: 'primary', emailId: 'epfo-coordination', sent: true })]);
+  });
+
+  it.each(['Find EPFO proposal details in both sent and received mail.', 'check aabout epfo final propsal we send'])('includes personal Sent and team conversations for collective research: %s', async question => {
+    await seedTeamProposal();
+    vi.mocked(deps.callAI).mockImplementation(async prompt => {
+      if (prompt.startsWith('You plan')) return JSON.stringify({ queries: ['EPFO'], entityTerms: ['EPFO'], intent: 'sent', quoteIntent: true, filters: {} });
+      const actual = evidence(prompt);
+      return JSON.stringify({ facts: [TEAM_COORDINATION, TEAM_DETAIL].flatMap(quote => {
+        const source = actual.find(item => item.evidence.includes(quote));
+        return source ? [{ text: quote, sourceIds: [source.id], quotes: [{ sourceId: source.id, text: quote }] }] : [];
+      }) });
+    });
+    const result = await service.ask(request({ question, accountIds: ['primary'] }));
+    expect(result.answer.text).toContain(TEAM_COORDINATION);
+    expect(result.answer.text).toContain(TEAM_DETAIL);
+    expect(result.answer.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ emailId: 'epfo-coordination', sent: true }),
+      expect.objectContaining({ emailId: 'epfo-latest', sent: false }),
+    ]));
   });
 });

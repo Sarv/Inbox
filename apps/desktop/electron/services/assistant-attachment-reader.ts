@@ -31,9 +31,13 @@ export interface AssistantAttachmentReaderDependencies {
 export interface AssistantAttachmentReadOptions {
   signal?: AbortSignal;
   onProgress?: (progress: InboxAssistantProgress) => void;
+  /** A deliberate read of this file may show the existing host security warning. Never enabled for automatic background reads. */
+  allowSecurityPrompt?: boolean;
+  /** Host-only activity accounting; a human approval wait is not active downloading. */
+  onApprovalWait?: (waiting: boolean) => void;
 }
 
-const SUPPORTED = /\.(?:pdf|docx|xlsx|txt|csv|tsv)$/i;
+const SUPPORTED = /\.(?:pdf|docx|xlsx|pptx|txt|csv|tsv)$/i;
 
 export class AssistantAttachmentReader {
   constructor(private deps: AssistantAttachmentReaderDependencies) {}
@@ -62,7 +66,8 @@ export class AssistantAttachmentReader {
     const cancel = () => { try { operations.cancel(requestId); } catch {} };
     try {
       progress(`Checking attachment security for ${ref.filename}`);
-      if (!await this.deps.scannerReady(ref)) return fail('blocked', 'Attachment scanning needs attention in Extensions.');
+      const scannerReady = await this.deps.scannerReady(ref);
+      if (!scannerReady && options.allowSecurityPrompt !== true) return fail('blocked', 'Attachment scanning needs attention in Extensions.');
       options.signal?.throwIfAborted();
       if (owned.prepare) {
         progress(`Connecting to the mailbox for ${ref.filename}`);
@@ -70,8 +75,9 @@ export class AssistantAttachmentReader {
         options.signal?.throwIfAborted();
       }
       options.signal?.addEventListener('abort', cancel, { once: true });
+      if (!scannerReady) progress('Waiting for attachment security approval', ref.filename);
       return await operations.run(ref.emailId, ref.accountId, ref.filename, async operation => {
-        if (operation.notScanned) return fail('blocked', 'Attachment scanning needs attention in Extensions.');
+        if (operation.notScanned && options.allowSecurityPrompt !== true) return fail('blocked', 'Attachment scanning needs attention in Extensions.');
         let unscanned: Buffer | undefined;
         try {
           options.signal?.throwIfAborted();
@@ -85,11 +91,13 @@ export class AssistantAttachmentReader {
           const extracted = await this.deps.extract(ref.filename, bytes, operation.signal);
           await operation.assertCurrent();
           await owned!.assertCurrent();
-          return result(extracted);
+          return result(operation.notScanned ? { ...extracted,
+            message: `Read with your permission without antivirus scanning.${extracted.message ? ` ${extracted.message}` : ''}`,
+          } : extracted);
         } finally {
           unscanned?.fill(0);
         }
-      }, requestId);
+      }, requestId, undefined, 'view', { allowSecurityPrompt: options.allowSecurityPrompt === true, onApprovalWait: options.onApprovalWait });
     } catch {
       if (options.signal?.aborted) return fail('cancelled', 'Attachment reading was cancelled.');
       return fail('blocked', 'Attachment could not be read through the security checks.');

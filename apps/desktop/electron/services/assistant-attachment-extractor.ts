@@ -112,7 +112,7 @@ function nodeText(nodes: XmlNode[], depth = 0, currentWordText = false): string 
   return value;
 }
 
-function readOfficeZip(bytes: Uint8Array, kind: 'docx' | 'xlsx'): Record<string, Uint8Array> {
+function readOfficeZip(bytes: Uint8Array, kind: 'docx' | 'xlsx' | 'pptx'): Record<string, Uint8Array> {
   if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
     // Office encrypted OOXML uses an OLE container, not a normal ZIP.
     if (bytes[0] === 0xd0 && bytes[1] === 0xcf) throw new ExtractionError('password_protected');
@@ -130,7 +130,9 @@ function readOfficeZip(bytes: Uint8Array, kind: 'docx' | 'xlsx'): Record<string,
     if (total > LIMIT.uncompressedBytes) throw new ExtractionError('too_large');
     const needed = kind === 'docx'
       ? name === 'word/document.xml'
-      : /^(?:xl\/(?:workbook\.xml|_rels\/workbook\.xml\.rels|sharedStrings\.xml|worksheets\/[^/]+\.xml))$/.test(name);
+      : kind === 'xlsx'
+        ? /^(?:xl\/(?:workbook\.xml|_rels\/workbook\.xml\.rels|sharedStrings\.xml|worksheets\/[^/]+\.xml))$/.test(name)
+        : /^(?:ppt\/(?:presentation\.xml|_rels\/presentation\.xml\.rels|slides\/slide\d+\.xml))$/.test(name);
     if (!needed) return false;
     if (file.originalSize > LIMIT.xmlEntryBytes) throw new ExtractionError('too_large');
     if (selected.has(name)) throw new ExtractionError('malformed');
@@ -151,42 +153,137 @@ function docx(bytes: Uint8Array, evidence: EvidenceCollector, signal?: AbortSign
   }
 }
 
+interface SpreadsheetRow {
+  text: string;
+  locator: AssistantAttachmentLocator;
+  priority: number;
+}
+
+/** Ignore only empty-input formula padding, never an explicit zero or a labelled total. */
+function spreadsheetRows(raw: Uint8Array, sheet: string, sharedStrings: string[], evidence: EvidenceCollector, signal?: AbortSignal): SpreadsheetRow[] {
+  const rows: SpreadsheetRow[] = [];
+  const headers = new Map<string, string>();
+  const paddingTemplates = new Set<string>();
+  let rowCount = 0;
+  for (const row of elements(xml(raw), 'row')) {
+    checkAbort(signal);
+    if (++rowCount > LIMIT.rows) { evidence.truncated = true; break; }
+    const rowIndex = Number(attribute(row, 'r')) || rowCount;
+    const cells = [...elements(children(row, 'row'), 'c')].map(cell => {
+      const nodes = children(cell, 'c');
+      const type = attribute(cell, 't') || 'n';
+      const formulaNode = [...elements(nodes, 'f')][0];
+      const formula = Boolean(formulaNode);
+      const formulaText = formulaNode ? nodeText(children(formulaNode, 'f')) : '';
+      const sharedId = formulaNode && attribute(formulaNode, 't') === 'shared' ? attribute(formulaNode, 'si') : '';
+      const rawValue = type === 'inlineStr'
+        ? [...elements(nodes, 'is')].map(value => nodeText(children(value, 'is'))).join('')
+        : [...elements(nodes, 'v')].map(value => nodeText(children(value, 'v'))).join('');
+      const address = attribute(cell, 'r');
+      return { address, column: address.match(/^[A-Z]+/)?.[0] ?? '', type, formula, formulaText, sharedId, raw: rawValue };
+    });
+    const values = cells.map(cell => ({ ...cell, value: cell.type === 's' ? cell.raw ? sharedStrings[Number(cell.raw)] ?? '' : ''
+      : cell.type === 'b' ? cell.raw === '1' ? 'TRUE' : 'FALSE' : cell.raw }));
+    if (values.some(cell => cell.formula && !cell.raw)) evidence.truncated = true;
+    const sameRowFormula = (formula: string) => {
+      const references = [...formula.matchAll(/\$?[A-Z]{1,3}\$?(\d+)/g)];
+      return references.length > 0 && references.every(match => Number(match[1]) === rowIndex)
+        && !formula.includes('!') && !formula.includes('[') && !formula.includes(']') && !/\$\d/.test(formula);
+    };
+    for (const cell of values) if (cell.sharedId && cell.formulaText && sameRowFormula(cell.formulaText)) paddingTemplates.add(cell.sharedId);
+    const hasInput = values.some(cell => !cell.formula && cell.value.trim());
+    const nonzeroFormula = values.some(cell => cell.formula && cell.value && Number(cell.value) !== 0);
+    if (!hasInput && !nonzeroFormula) {
+      const padding = values.filter(cell => cell.formula).every(cell => {
+        if (!cell.formulaText) return Boolean(cell.sharedId && paddingTemplates.has(cell.sharedId));
+        return sameRowFormula(cell.formulaText);
+      });
+      if (padding) continue;
+    }
+    const labels = values.filter(cell => ['s', 'inlineStr', 'str'].includes(cell.type)).map(cell => cell.value);
+    const isHeader = !values.some(cell => !cell.formula && cell.type === 'n' && cell.value)
+      && labels.filter(value => /(?:description|cost|GST|INR|service|unit|quantity|months|role|make|worksheet|details required|O&M-Y)/i.test(value)).length >= 2;
+    if (isHeader) for (const cell of values) if (cell.column && cell.value) headers.set(cell.column, cell.value.replace(/\s+/g, ' ').slice(0, 100));
+    const text = values.filter(cell => cell.value || cell.formula).map(cell => {
+      const header = !isHeader ? headers.get(cell.column) : undefined;
+      const value = cell.value || (cell.formula ? '(saved formula result unavailable)' : '');
+      return `${cell.address || 'Cell'}${header ? ` [${header}]` : ''}: ${value}${cell.formula ? ' (saved formula value)' : ''}`;
+    }).join(' | ');
+    const addresses = values.filter(cell => cell.value || cell.formula).map(cell => cell.address).filter(value => /^[A-Z]{1,3}[1-9]\d{0,6}$/.test(value));
+    const cellRange = addresses.length ? `${addresses[0]}:${addresses.at(-1)}` : undefined;
+    const label = cellRange ? `${sheet}!${cellRange}` : `${sheet}, row ${rowIndex}`;
+    const priority = /(?:total|\bTBV\b|dummy|evaluation|payment|excluding|including|notes?|currency|years)/i.test(labels.join(' ')) ? 3 : isHeader || rowIndex <= 12 ? 2 : 1;
+    rows.push({ text, priority, locator: { kind: 'sheet', sheet, rowStart: rowIndex, rowEnd: rowIndex, label, ...(cellRange ? { cellRange } : {}) } });
+  }
+  return rows;
+}
+
 function xlsx(bytes: Uint8Array, evidence: EvidenceCollector, signal?: AbortSignal): void {
   const files = readOfficeZip(bytes, 'xlsx');
   if (!files['xl/workbook.xml'] || !files['xl/_rels/workbook.xml.rels']) throw new ExtractionError('malformed');
   const sharedStrings = files['xl/sharedStrings.xml']
     ? [...elements(xml(files['xl/sharedStrings.xml']), 'si')].map(node => nodeText(children(node, 'si')))
     : [];
+  {
+    const relationships = new Map<string, string>();
+    for (const node of elements(xml(files['xl/_rels/workbook.xml.rels']), 'Relationship')) {
+      if (attribute(node, 'TargetMode') === 'External') continue;
+      const target = attribute(node, 'Target');
+      const resolved = target.startsWith('/') ? target.slice(1) : path.posix.normalize(`xl/${target}`);
+      if (resolved.startsWith('xl/worksheets/') && !resolved.includes('..')) {
+        if (relationships.has(attribute(node, 'Id'))) throw new ExtractionError('malformed');
+        relationships.set(attribute(node, 'Id'), resolved);
+      }
+    }
+    const sheets = [...elements(xml(files['xl/workbook.xml']), 'sheet')];
+    if (sheets.length > LIMIT.sheets) evidence.truncated = true;
+    const selected = sheets.slice(0, LIMIT.sheets);
+    const characterQuota = Math.floor(LIMIT.characters / Math.max(1, selected.length));
+    const segmentQuota = Math.floor(LIMIT.segments / Math.max(1, selected.length));
+    for (const sheet of selected) {
+      checkAbort(signal);
+      const name = attribute(sheet, 'name') || 'Sheet';
+      const location = relationships.get(attribute(sheet, 'r:id'));
+      if (!location || !files[location]) { evidence.truncated = true; continue; }
+      const rows = spreadsheetRows(files[location], name, sharedStrings, evidence, signal);
+      const chosen: SpreadsheetRow[] = [];
+      let characters = 0; let segments = 0;
+      // Reserve room for every sheet. Headers, totals and commercial caveats
+      // survive dense formula padding and a long first worksheet.
+      for (const row of [...rows].sort((a, b) => b.priority - a.priority)) {
+        const cost = Math.ceil(row.text.length / LIMIT.segmentCharacters);
+        if (characters + row.text.length > characterQuota || segments + cost > segmentQuota) { evidence.truncated = true; continue; }
+        characters += row.text.length; segments += cost; chosen.push(row);
+      }
+      chosen.sort((a, b) => (a.locator.rowStart ?? 0) - (b.locator.rowStart ?? 0));
+      const hidden = attribute(sheet, 'state');
+      for (const row of chosen) evidence.add(hidden && hidden !== 'visible' ? `[Hidden sheet] ${row.text}` : row.text, row.locator);
+    }
+  }
+}
+
+function pptx(bytes: Uint8Array, evidence: EvidenceCollector, signal?: AbortSignal): void {
+  const files = readOfficeZip(bytes, 'pptx');
+  if (!files['ppt/presentation.xml'] || !files['ppt/_rels/presentation.xml.rels']) throw new ExtractionError('malformed');
   const relationships = new Map<string, string>();
-  for (const node of elements(xml(files['xl/_rels/workbook.xml.rels']), 'Relationship')) {
+  for (const node of elements(xml(files['ppt/_rels/presentation.xml.rels']), 'Relationship')) {
     if (attribute(node, 'TargetMode') === 'External') continue;
     const target = attribute(node, 'Target');
-    const resolved = target.startsWith('/') ? target.slice(1) : path.posix.normalize(`xl/${target}`);
-    if (resolved.startsWith('xl/worksheets/') && !resolved.includes('..')) relationships.set(attribute(node, 'Id'), resolved);
-  }
-  const sheets = [...elements(xml(files['xl/workbook.xml']), 'sheet')];
-  if (sheets.length > LIMIT.sheets) evidence.truncated = true;
-  for (const sheet of sheets.slice(0, LIMIT.sheets)) {
-    checkAbort(signal);
-    const name = attribute(sheet, 'name') || 'Sheet';
-    const location = relationships.get(attribute(sheet, 'r:id'));
-    if (!location || !files[location]) continue;
-    let rowCount = 0;
-    for (const row of elements(xml(files[location]), 'row')) {
-      checkAbort(signal);
-      if (++rowCount > LIMIT.rows) { evidence.truncated = true; break; }
-      const rowIndex = Number(attribute(row, 'r')) || rowCount;
-      const values: string[] = [];
-      for (const cell of elements(children(row, 'row'), 'c')) {
-        const type = attribute(cell, 't');
-        const address = attribute(cell, 'r');
-        const raw = type === 'inlineStr' ? nodeText(children(cell, 'c')) : [...elements(children(cell, 'c'), 'v')].map(v => nodeText(children(v, 'v'))).join('');
-        const value = type === 's' ? sharedStrings[Number(raw)] ?? '' : type === 'b' ? raw === '1' ? 'TRUE' : 'FALSE' : raw;
-        if (value) values.push(`${address || 'Cell'}: ${value}`);
-      }
-      evidence.add(values.join(' | '), { kind: 'sheet', sheet: name, rowStart: rowIndex, rowEnd: rowIndex, label: `${name}, row ${rowIndex}` });
-      if (evidence.full) { evidence.truncated = true; return; }
+    const resolved = target.startsWith('/') ? target.slice(1) : path.posix.normalize(`ppt/${target}`);
+    if (/^ppt\/slides\/slide\d+\.xml$/.test(resolved)) {
+      if (relationships.has(attribute(node, 'Id'))) throw new ExtractionError('malformed');
+      relationships.set(attribute(node, 'Id'), resolved);
     }
+  }
+  const slides = [...elements(xml(files['ppt/presentation.xml']), 'sldId')];
+  if (slides.length > LIMIT.pages) evidence.truncated = true;
+  for (let index = 0; index < Math.min(slides.length, LIMIT.pages); index++) {
+    checkAbort(signal);
+    const location = relationships.get(attribute(slides[index], 'r:id'));
+    if (!location || !files[location]) { evidence.truncated = true; continue; }
+    const text = [...elements(xml(files[location]), 'p')].map(node => nodeText(children(node, 'p'))).filter(Boolean).join('\n');
+    evidence.add(text, { kind: 'slide', slide: index + 1, label: `Slide ${index + 1}` });
+    if (evidence.full) { evidence.truncated = true; break; }
   }
 }
 
@@ -271,9 +368,13 @@ export async function extractAssistantAttachment(input: {
     if (extension === '.pdf') await pdf(bytes, evidence, signal);
     else if (extension === '.docx') docx(bytes, evidence, signal);
     else if (extension === '.xlsx') xlsx(bytes, evidence, signal);
+    else if (extension === '.pptx') pptx(bytes, evidence, signal);
     else if (['.txt', '.csv', '.tsv'].includes(extension)) plainText(bytes, evidence, signal);
     else return assistantAttachmentFailure('unsupported', 'This attachment type is not supported for text extraction.');
-    return evidence.result(extension === '.pdf' ? 'scanned' : 'empty');
+    return { ...evidence.result(extension === '.pdf' ? 'scanned' : 'empty'),
+      ...(extension === '.xlsx' ? { message: 'Spreadsheet values are saved values; formulas were not recalculated. Zero formula results may come from blank inputs and do not confirm a fully priced or free service.' } : {}),
+      ...(extension === '.pptx' ? { message: 'Slide text only. Images, speaker notes and embedded objects were not read.' } : {}),
+    };
   } catch (error) {
     if (signal?.aborted) return assistantAttachmentFailure('cancelled', 'Attachment reading was cancelled.');
     if (error instanceof ExtractionError) return assistantAttachmentFailure(error.status);

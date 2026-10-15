@@ -155,7 +155,8 @@ export class AttachmentOperationProtection {
     consume: (operation: ProtectedAttachmentOperation) => Promise<T>,
     requestId: string = randomUUID(),
     unscannableReason?: string,
-    action: AttachmentWarningAction = 'view'
+    action: AttachmentWarningAction = 'view',
+    options: { allowSecurityPrompt?: boolean; onApprovalWait?: (waiting: boolean) => void } = {}
   ): Promise<T> {
     if (this.closed) throw new Error('Download cancelled.');
     this.requireRequestId(requestId);
@@ -218,7 +219,7 @@ export class AttachmentOperationProtection {
       };
       if (scanner) {
         if (!scanner.active || !scanner.granted) {
-          await this.deps.openSetup(scanner.id);
+          if (options.allowSecurityPrompt !== false) await this.deps.openSetup(scanner.id);
           throw new Error(
             'The antivirus extension is unavailable or lacks attachment scanning permission. Download blocked.'
           );
@@ -228,6 +229,10 @@ export class AttachmentOperationProtection {
           : undefined;
         this.assertCurrentScanner(scanner.id);
         if (missingSetup) {
+          // Background readers must not create a prompt after a setup change
+          // between their preflight and this authoritative security check.
+          if (options.allowSecurityPrompt === false)
+            throw new Error('Attachment scanning needs attention. Explicit approval is required to read this file without scanning.');
           // Revalidate before remembering a warning choice as well as before
           // consuming bytes: a stale popup must never create durable consent.
           const verifyMissingSetup = async () => {
@@ -244,14 +249,19 @@ export class AttachmentOperationProtection {
               'Set up antivirus scanning and allow this account before downloading attachments.'
             );
           }
-          const choice = await waitForAbortableOperation(
-            this.deps.confirmUnscanned(
-              { messageId, accountId, filename, action },
-              signal,
-              verifyMissingSetup
-            ),
-            signal
-          );
+          const approvalWait = (waiting: boolean) => { try { options.onApprovalWait?.(waiting); } catch {} };
+          let choice: 'continue' | 'setup' | 'cancel';
+          approvalWait(true);
+          try {
+            choice = await waitForAbortableOperation(
+              this.deps.confirmUnscanned(
+                { messageId, accountId, filename, action },
+                signal,
+                verifyMissingSetup
+              ),
+              signal
+            );
+          } finally { approvalWait(false); }
           assertNotCancelled();
           if (choice === 'setup') await this.deps.openSetup(scanner.id);
           if (choice !== 'continue') throw new Error('Download cancelled.');

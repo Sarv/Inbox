@@ -1,5 +1,5 @@
 import type { ContactRecord, EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
-import { htmlToPlainText, parseAddresses, parseAttachmentNames, stripQuotedTail, waitForAbortableOperation } from '@sarvinbox/core';
+import { htmlToPlainText, parseAddresses, parseAttachmentNames, waitForAbortableOperation } from '@sarvinbox/core';
 import type { SQLiteStorage } from '@sarvinbox/storage-node';
 
 import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssistantEvidence, InboxAssistantProgress } from '../../src/types/inbox-assistant';
@@ -8,7 +8,8 @@ import type { AssistantAttachmentResult } from './assistant-attachment-types';
 import type { InboxAssistantSearchPlan } from './inbox-assistant-answer';
 
 export type AssistantResearchStorage = Pick<SQLiteStorage,
-  'getFolders' | 'searchEmails' | 'getEmail' | 'getContacts' | 'getAttachments'>;
+  'getFolders' | 'searchEmails' | 'getEmail' | 'getContacts' | 'getAttachments'>
+  & Partial<Pick<SQLiteStorage, 'getEmailsByThread'>>;
 
 export interface AssistantResearchMailbox {
   storage: AssistantResearchStorage;
@@ -18,7 +19,7 @@ export interface AssistantResearchMailbox {
 
 export interface AssistantResearchDeps {
   openMailbox(accountId: string): Promise<AssistantResearchMailbox>;
-  readAttachment(ref: { accountId: string; emailId: string; filename: string }, options: { signal?: AbortSignal; onProgress?: (progress: InboxAssistantProgress) => void }): Promise<AssistantAttachmentResult>;
+  readAttachment(ref: { accountId: string; emailId: string; filename: string }, options: { signal?: AbortSignal; onProgress?: (progress: InboxAssistantProgress) => void; allowSecurityPrompt?: boolean; onApprovalWait?: (waiting: boolean) => void }): Promise<AssistantAttachmentResult>;
 }
 
 export interface InboxAssistantResearchOptions {
@@ -38,6 +39,9 @@ const MAX_ATTACHMENT_FILES = 12;
 const MAX_FILES_PER_MESSAGE = 6;
 const MAX_MESSAGE_CHARS = 12_000;
 const MAX_SEGMENTS_PER_FILE = 12;
+const MAX_THREAD_SEEDS = 8;
+const MAX_THREAD_MEMBERS = 120;
+const MAX_RAW_BODY_CHARS = 500_000;
 const EXCLUDED_ROLES = new Set(['\\drafts', '\\junk', '\\trash']);
 const SENT_NAMES = new Set(['sent', 'sent items', 'sent mail', '[gmail]/sent mail']);
 
@@ -47,6 +51,65 @@ function checkAbort(signal?: AbortSignal): void {
 
 function unique(values: string[], limit: number): string[] {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, limit);
+}
+
+/** Full records can still contain a legacy list preview in cleanBody. */
+function fullBody(email: EmailRecord): string {
+  const clean = email.cleanBody?.trim() || '';
+  const raw = email.rawBody?.slice(0, MAX_RAW_BODY_CHARS).trim() || '';
+  const plain = raw && email.contentType !== 'text' ? htmlToPlainText(raw).trim() : raw;
+  return plain.length > clean.length ? plain : clean;
+}
+
+function matchesTerm(value: string, term: string): boolean {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Company acronyms can precede a version (EPFO3.0), but must not match
+  // unrelated words such as postcss. Names and domains remain literal.
+  return new RegExp(`(^|[^\\p{L}])${escaped}(?=$|[^\\p{L}])`, 'iu').test(value);
+}
+
+function participantText(email: EmailRecord): string {
+  return `${email.fromAddress} ${email.fromName ?? ''} ${email.toAddress ?? ''} ${email.toNames ?? ''} ${email.ccAddress ?? ''} ${email.ccNames ?? ''}`;
+}
+
+/** Read the complete body, then retain bounded, explicitly separated excerpts. */
+function bodyEvidence(body: string, allowance: number, terms: string[], leadingShare = 0.25): string {
+  if (body.length <= allowance) return body;
+  if (allowance < 300) return body.slice(0, Math.max(0, allowance));
+  const separator = '\n[… additional email content …]\n';
+  const available = allowance - separator.length * 3;
+  const leadingWindow = Math.max(80, Math.floor(available * leadingShare));
+  const window = Math.max(80, Math.floor((available - leadingWindow) / 3));
+  const ranges: Array<[number, number]> = [[0, leadingWindow]];
+  const matcher = terms.filter(Boolean).map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  if (matcher) {
+    const hits = [...body.matchAll(new RegExp(matcher, 'giu'))].slice(0, 100);
+    // Commercial figures and submission terms near a topic hit are useful,
+    // including when they occur after a long signature or quoted history.
+    hits.sort((a, b) => Number(/₹|\b(?:INR|total|bid|price|attached|submitted)\b/i.test(body.slice(Math.max(0, b.index! - 150), b.index! + window)))
+      - Number(/₹|\b(?:INR|total|bid|price|attached|submitted)\b/i.test(body.slice(Math.max(0, a.index! - 150), a.index! + window))));
+    for (const hit of hits) {
+      const start = Math.max(0, hit.index! - Math.floor(window / 3));
+      if (ranges.some(([left, right]) => start < right && start + window > left)) continue;
+      ranges.push([start, Math.min(body.length, start + window)]);
+      if (ranges.length === 3) break;
+    }
+  }
+  // A reply's deployment details or closing answer can precede a long quoted
+  // conversation. Preserve that authored ending instead of an old signature.
+  // Topic windows above still retain relevant forwarded/quoted material.
+  const quotedBoundary = leadingShare > 0.25
+    ? body.search(/\n\s*(?:On [^\n]{1,250}wrote:|[- ]{2,}(?:Original Message|Forwarded Message)[- ]*)/i) : -1;
+  const tailEnd = quotedBoundary > leadingWindow + window ? quotedBoundary : body.length;
+  ranges.push([Math.max(0, tailEnd - window), tailEnd]);
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const range of ranges) {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  return merged.map(([start, end]) => body.slice(start, end)).join(separator).slice(0, allowance);
 }
 
 function addresses(value: string | null): string[] {
@@ -127,23 +190,40 @@ export async function researchInboxAssistant(
         progress({ stage: 'search', status: 'warning', accountId: account.id, message: `Download time limit reached for ${account.email}`, detail: 'Continuing with cached content and the other selected accounts.' });
       }
     };
-    const download = async <T>(run: (downloadSignal: AbortSignal) => Promise<T>): Promise<T> => {
+    const download = async <T>(run: (downloadSignal: AbortSignal, approvalWait: (waiting: boolean) => void) => Promise<T>): Promise<T> => {
       checkAbort(signal);
       const remaining = downloadBudgetMs - downloadSpentMs;
       if (remaining <= 0) { reportDownloadLimit(); throw new Error('Account download time limit reached.'); }
       const controller = new AbortController();
       const downloadSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-      const started = Date.now();
-      const timer = setTimeout(() => {
-        downloadSpentMs = downloadBudgetMs;
-        controller.abort(new Error('Account download time limit reached.'));
-      }, remaining);
-      timer.unref?.();
+      let activeMs = 0;
+      let activeSince = Date.now();
+      let awaitingApproval = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const arm = () => {
+        timer = setTimeout(() => {
+          downloadSpentMs = downloadBudgetMs;
+          controller.abort(new Error('Account download time limit reached.'));
+        }, Math.max(0, remaining - activeMs));
+        timer.unref?.();
+      };
+      const approvalWait = (waiting: boolean) => {
+        if (waiting === awaitingApproval || downloadSignal.aborted) return;
+        if (!awaitingApproval) activeMs += Math.max(0, Date.now() - activeSince);
+        if (timer) clearTimeout(timer);
+        awaitingApproval = waiting;
+        activeSince = Date.now();
+        // User consent is not network/extraction work. The request and security
+        // gate retain their absolute cancellation/deadline protections.
+        if (!waiting) arm();
+      };
+      arm();
       try {
-        return await waitForAbortableOperation(run(downloadSignal), downloadSignal);
+        return await waitForAbortableOperation(run(downloadSignal, approvalWait), downloadSignal);
       } finally {
-        clearTimeout(timer);
-        downloadSpentMs = Math.min(downloadBudgetMs, downloadSpentMs + Math.max(0, Date.now() - started));
+        if (timer) clearTimeout(timer);
+        if (!awaitingApproval) activeMs += Math.max(0, Date.now() - activeSince);
+        downloadSpentMs = Math.min(downloadBudgetMs, downloadSpentMs + activeMs);
         if (controller.signal.aborted && !signal?.aborted) reportDownloadLimit();
       }
     };
@@ -157,13 +237,17 @@ export async function researchInboxAssistant(
         covered.warnings.push('Older mail is still synchronizing. This answer covers locally searchable mail.');
       }
       const entities = unique(plan.entityTerms, 6);
+      const topics = unique(plan.topicTerms?.length ? plan.topicTerms : entities.filter(term => !plan.participantTerms?.some(person => person.toLowerCase() === term.toLowerCase())), 6);
+      const people = unique(plan.participantTerms ?? [], 6);
       const contacts: ContactRecord[] = [];
       for (const term of entities.slice(0, 3)) {
         try { contacts.push(...await mailbox.storage.getContacts({ search: term, limit: 12, offset: 0 })); }
         catch { /* Contact expansion is optional; original search terms remain. */ }
       }
-      const queries = unique([...entities, ...plan.queries], 8);
-      const participants = unique([...entities.filter(value => value.includes('@') || value.includes('.')), ...contactTerms(contacts)], 8);
+      const queries = unique(topics.length
+        ? [...topics, ...plan.queries.filter(query => topics.some(topic => matchesTerm(query, topic)))]
+        : [...entities, ...plan.queries], 8);
+      const participants = unique([...people, ...entities.filter(value => value.includes('@') || value.includes('.')), ...contactTerms(contacts)], 12);
       const requests: SearchQuery[] = [];
       const sentFolders = folders.filter(folder => (folder.specialUse ?? '').toLowerCase() === '\\sent' || SENT_NAMES.has(folder.path.toLowerCase()));
       const addRequest = (query: string, extra: Partial<SearchQuery> = {}) => requests.push({
@@ -171,19 +255,40 @@ export async function researchInboxAssistant(
         limit: QUERY_LIMIT, ...planFilters(plan), ...extra,
       });
       for (const query of queries) {
-        if (plan.intent === 'sent') {
-          for (const folder of sentFolders.slice(0, 3)) addRequest(query, { folderPath: folder.path });
-          for (const alias of aliases.slice(0, 3)) {
-            if (!plan.filters.from || plan.filters.from.toLowerCase() === alias) addRequest(query, { from: alias });
-          }
-        } else addRequest(query);
+        if (plan.intent === 'all') addRequest(query);
+        // Legacy mailbox search excludes Sent unless it is requested
+        // explicitly. Discover it for both intents; only the strict intent
+        // filters received messages out of the resulting conversations.
+        for (const folder of sentFolders.slice(0, 3)) addRequest(query, { folderPath: folder.path });
+        for (const alias of aliases.slice(0, 3)) {
+          if (!plan.filters.from || plan.filters.from.toLowerCase() === alias) addRequest(query, { from: alias });
+        }
       }
       for (const participant of participants) {
-        if (!plan.filters.to || plan.filters.to.toLowerCase() === participant.toLowerCase()) addRequest('', { to: participant });
-        if (plan.intent !== 'sent' && !plan.filters.from) addRequest('', { from: participant });
+        // Keep participant discovery inside the project. A generic sender or
+        // company match must not consume the result window with other work.
+        for (const topic of topics.length ? topics.slice(0, 3) : ['']) {
+          if (!plan.filters.to || plan.filters.to.toLowerCase() === participant.toLowerCase()) addRequest(topic, { to: participant });
+          if (plan.intent !== 'sent' && !plan.filters.from) addRequest(topic, { from: participant });
+        }
       }
       const found = new Map<string, EmailRecord>();
       const relevance = new Map<string, number>();
+      const pinnedIds = new Set<string>();
+      const expandedThreads = new Set<string>();
+      const eligible = (email: EmailRecord) => !isExcluded(email, folders) && matchesFilters(email, plan)
+        && (plan.intent !== 'sent' || isSent(email, folders, aliases));
+      const score = (email: EmailRecord, body = fullBody(email), threadMatch = false): number => {
+        const header = `${email.subject ?? ''} ${email.attachmentNames ?? ''} ${participantText(email)}`;
+        const inHeader = topics.filter(topic => matchesTerm(header, topic)).length;
+        const inBody = topics.filter(topic => matchesTerm(body, topic)).length;
+        if (topics.length && !inHeader && !inBody && !threadMatch) return -1;
+        const person = people.some(term => matchesTerm(participantText(email), term));
+        const authoredByPerson = people.some(term => matchesTerm(`${email.fromAddress} ${email.fromName ?? ''}`, term));
+        return inHeader * 80 + inBody * 25 + Number(person) * 40 + Number(authoredByPerson) * 160
+          + Number(plan.quoteIntent && /quot|proposal|pricing|price.?bid|commercial/i.test(`${email.subject ?? ''} ${email.attachmentNames ?? ''}`)) * 30
+          + Number(pinnedIds.has(email.id)) * 10 + Number(threadMatch) * 5;
+      };
       // Follow-up questions re-read their actual cited messages. A vague phrase
       // such as "read the attached document" must not lose the previous source.
       const pinned = unique((options.sourceRefs ?? []).filter(ref => ref.accountId === account.id).map(ref => ref.emailId), 12);
@@ -193,9 +298,10 @@ export async function researchInboxAssistant(
         for (const emailId of pinned) {
           checkAbort(signal);
           const email = await mailbox.storage.getEmail(emailId);
-          if (!email || isExcluded(email, folders) || !matchesFilters(email, plan) || (plan.intent === 'sent' && !isSent(email, folders, aliases))) continue;
+          if (!email || !eligible(email)) continue;
+          pinnedIds.add(email.id);
           found.set(email.id, email);
-          relevance.set(email.id, 100);
+          relevance.set(email.id, score(email));
           reopened++;
         }
         progress({ stage: 'context', status: reopened ? 'done' : 'warning', accountId: account.id, message: `Reopened ${reopened} previously cited ${reopened === 1 ? 'message' : 'messages'}`, detail: account.email });
@@ -209,27 +315,65 @@ export async function researchInboxAssistant(
         const rows = await mailbox.storage.searchEmails(request);
         if (rows.length >= QUERY_LIMIT) covered.truncated = true;
         for (const email of rows) {
-          if (isExcluded(email, folders) || (plan.intent === 'sent' && !isSent(email, folders, aliases))) continue;
+          if (!eligible(email)) continue;
           found.set(email.id, email);
-          const entityQuery = entities.some(entity => entity.toLowerCase() === request.query.toLowerCase());
-          const participantQuery = participants.some(participant => request.to === participant || request.from === participant);
-          const quoted = plan.quoteIntent && /quot|proposal|pricing/i.test(`${email.subject ?? ''} ${email.attachmentNames ?? ''}`);
-          relevance.set(email.id, Math.max(relevance.get(email.id) ?? 0, (participantQuery ? 20 : entityQuery ? 10 : 0) + (quoted ? 1 : 0)));
+          relevance.set(email.id, Math.max(relevance.get(email.id) ?? -1, score(email)));
         }
         // Release the Electron main loop between synchronous SQLite searches.
         await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      // Search rows deliberately carry previews. Hydrate before deciding topic
+      // relevance and expand actual conversations, including team replies.
+      for (const [id] of found) {
+        checkAbort(signal);
+        const email = await mailbox.storage.getEmail(id);
+        if (!email || !eligible(email)) { found.delete(id); continue; }
+        const value = score(email);
+        if (value < 0 && email.rawBody) { found.delete(id); continue; }
+        found.set(id, email);
+        relevance.set(id, value);
+      }
+      if (mailbox.storage.getEmailsByThread) {
+        const seeds = [...found.values()].sort((a, b) => (relevance.get(b.id) ?? 0) - (relevance.get(a.id) ?? 0) || b.date - a.date);
+        for (const seed of seeds) {
+          if (expandedThreads.size >= MAX_THREAD_SEEDS) break;
+          if (!seed.threadId || expandedThreads.has(seed.threadId) || (relevance.get(seed.id) ?? -1) < 0) continue;
+          checkAbort(signal);
+          expandedThreads.add(seed.threadId);
+          const members = await mailbox.storage.getEmailsByThread(seed.threadId);
+          if (members.length > MAX_THREAD_MEMBERS) covered.truncated = true;
+          let added = 0;
+          for (const email of members.sort((a, b) => b.date - a.date).slice(0, MAX_THREAD_MEMBERS)) {
+            if (!eligible(email)) continue;
+            if (!found.has(email.id)) added++;
+            found.set(email.id, email);
+            relevance.set(email.id, score(email, fullBody(email), true));
+          }
+          if (added) progress({ stage: 'context', status: 'done', accountId: account.id, emailId: seed.id,
+            message: `Loaded ${added} additional conversation ${added === 1 ? 'message' : 'messages'}`, detail: seed.subject || '(No subject)' });
+        }
       }
       covered.matchedMessages = found.size;
       progress({ stage: 'search', status: 'done', accountId: account.id, message: `Found ${found.size} matching ${found.size === 1 ? 'message' : 'messages'}`, detail: account.email });
       const candidates = [...found.values()].sort((a, b) => (relevance.get(b.id) ?? 0) - (relevance.get(a.id) ?? 0) || b.date - a.date);
       if (candidates.length > MAX_MESSAGES_PER_ACCOUNT) covered.truncated = true;
-      for (const candidate of candidates.slice(0, MAX_MESSAGES_PER_ACCOUNT)) {
+      const selected = candidates.slice(0, MAX_MESSAGES_PER_ACCOUNT);
+      const documentCount = selected.filter(email => email.hasAttachments || parseAttachmentNames(email.attachmentNames).length).length;
+      const messageBudget = Math.floor((accountCharEnd - totalChars) * (documentCount ? 0.62 : 1));
+      // Give the strongest matches enough contiguous text to explain their
+      // actual reply before older quoted history. Keep the same account budget.
+      const messageWeights = selected.map((_, index) => index < 4 ? 3 : 1);
+      const totalWeight = messageWeights.reduce((sum, weight) => sum + weight, 0) || 1;
+      for (const [candidateIndex, candidate] of selected.entries()) {
         checkAbort(signal);
         if (totalChars >= accountCharEnd) { covered.truncated = true; break; }
         let email = await mailbox.storage.getEmail(candidate.id);
         if (!email || isExcluded(email, folders) || !matchesFilters(email, plan) || (plan.intent === 'sent' && !isSent(email, folders, aliases))) continue;
-        let body = email.cleanBody?.trim() || '';
-        if (!body && !email.rawBody && mailbox.fetchBody) {
+        let body = fullBody(email);
+        let unavailableOriginal = !email.rawBody?.trim() && email.hasBody === false;
+        // A bounded preview is not a downloaded body. Request the original
+        // even when the list/search snippet is nonempty.
+        if (!email.rawBody?.trim() && (!body || email.hasBody === false || body.length <= 256) && mailbox.fetchBody) {
           const folder = folders.find(item => item.id === email!.folderId);
           if (folder) {
             progress({ stage: 'body', status: 'running', accountId: account.id, emailId: email.id, message: 'Downloading missing email content', detail: email.subject || '(No subject)' });
@@ -243,16 +387,18 @@ export async function researchInboxAssistant(
               // Refresh the authoritative row before selecting attachments.
               const refreshed = await mailbox.storage.getEmail(email.id);
               if (!refreshed && !downloaded) continue;
-              email = refreshed && (refreshed.cleanBody?.trim() || refreshed.rawBody) ? refreshed : downloaded ?? refreshed ?? email;
+              email = refreshed && (refreshed.cleanBody?.trim() || refreshed.rawBody?.trim()) ? refreshed : downloaded ?? refreshed ?? email;
+              unavailableOriginal = !email.rawBody?.trim() && (!downloaded || downloaded.hasBody === false
+                || downloaded.cleanBody === downloadingEmail.cleanBody);
             }
-            catch { /* Report missing body and continue with attachment/header evidence. */ }
+            catch { unavailableOriginal = true; }
           }
           checkAbort(signal);
-          body = email.cleanBody?.trim() || '';
+          body = fullBody(email);
         }
-        if (isExcluded(email, folders) || !matchesFilters(email, plan) || (plan.intent === 'sent' && !isSent(email, folders, aliases))) continue;
-        if (!body && email.rawBody) body = htmlToPlainText(email.rawBody.slice(0, 500_000));
-        if (!body) {
+        if (!eligible(email)) continue;
+        if (score(email, body, expandedThreads.has(email.threadId)) < 0) continue;
+        if (!body || unavailableOriginal) {
           covered.missingBodies++;
           progress({ stage: 'body', status: 'warning', accountId: account.id, emailId: email.id, message: 'Email content could not be downloaded', detail: email.subject || '(No subject)' });
         } else {
@@ -261,24 +407,28 @@ export async function researchInboxAssistant(
         covered.reviewedMessages++;
         const folder = folders.find(item => item.id === email!.folderId);
         const sent = isSent(email, folders, aliases);
-        const ownBody = stripQuotedTail(body).trim() || body;
         const metadata = {
           accountId: account.id, accountEmail: account.email, emailId: email.id,
           threadId: email.threadId, subject: email.subject || '(No subject)',
           from: email.fromAddress, to: addresses(email.toAddress), date: email.date,
           folder: folder?.path ?? '', sent,
         };
-        const header = `Subject: ${metadata.subject}\nDate: ${new Date(email.date * 1000).toISOString()}\nFrom: ${metadata.from}\nTo: ${metadata.to.join(', ')}\nDirection: ${sent ? 'Sent by the user' : 'Received'}\n`;
-        const allowance = Math.min(MAX_MESSAGE_CHARS, accountCharEnd - totalChars);
-        const text = `${header}\n${ownBody}`.slice(0, allowance);
-        if (text.length < header.length + ownBody.length) covered.truncated = true;
-        evidence.push({ ...metadata, id: `S${evidence.length + 1}`, kind: 'message', text, excerpt: ownBody.slice(0, 1000) });
+        // The answer renderer supplies Subject/Date/From/To from this source's
+        // metadata. Duplicating them here wastes the bounded body allowance.
+        const header = `CC: ${addresses(email.ccAddress).join(', ')}\n`;
+        const messageAllowance = Math.min(MAX_MESSAGE_CHARS,
+          Math.floor(messageBudget * messageWeights[candidateIndex]! / totalWeight));
+        const allowance = Math.min(messageAllowance, accountCharEnd - totalChars);
+        const selectedBody = bodyEvidence(body, Math.max(0, allowance - header.length - 1), [...topics, ...people, ...(plan.quoteIntent ? ['total', 'price', 'commercial', '₹'] : [])], 0.6);
+        const text = `${header}${unavailableOriginal ? 'Content status: original unavailable; the following is only a preview.\n' : ''}\n${selectedBody}`.slice(0, allowance);
+        if (text.length < header.length + body.length || email.rawBody.length > MAX_RAW_BODY_CHARS) covered.truncated = true;
+        evidence.push({ ...metadata, id: `S${evidence.length + 1}`, kind: 'message', text, excerpt: selectedBody.slice(0, 1000) });
         totalChars += text.length;
 
         let names = parseAttachmentNames(email.attachmentNames);
         const declared = await mailbox.storage.getAttachments(email.id);
         names = unique([...names, ...declared.map(item => item.filename)], 500);
-        const supported = (name: string) => /\.(?:pdf|docx|xlsx|csv|tsv|txt)$/i.test(name);
+        const supported = (name: string) => /\.(?:pdf|docx|xlsx|pptx|csv|tsv|txt)$/i.test(name);
         names.sort((a, b) => Number(supported(b)) - Number(supported(a))
           || Number(/quot|proposal|pricing/i.test(b)) - Number(/quot|proposal|pricing/i.test(a)));
         if (names.length > 30) { covered.attachmentsSkipped += names.length - 30; covered.truncated = true; }
@@ -287,6 +437,19 @@ export async function researchInboxAssistant(
           checkAbort(signal);
           // Inline logos and unsupported files do not consume document slots.
           if (!supported(filename)) { covered.attachmentsSkipped++; continue; }
+          if (plan.quoteIntent && /tender|\brfp\b|declaration|invoice|cibil/i.test(filename)
+            && !/quot|proposal|pricing|price.?bid|commercial/i.test(`${filename} ${email.subject ?? ''}`)) {
+            covered.attachmentsSkipped++;
+            continue;
+          }
+          // A company acronym in an incidental quoted body (for example a
+          // financial newsletter) is insufficient reason to download its files.
+          // Preserve the message evidence, but spend document work on matching
+          // headers, commercial filenames, named senders or a reopened source.
+          if (topics.length && (relevance.get(candidate.id) ?? 0) < 50 && !pinnedIds.has(candidate.id)) {
+            covered.attachmentsSkipped++;
+            continue;
+          }
           if (supportedFiles >= MAX_FILES_PER_MESSAGE || filesRead >= MAX_ATTACHMENT_FILES || accountFilesRead >= accountFileLimit || totalChars >= accountCharEnd) {
             covered.attachmentsSkipped++; covered.truncated = true; continue;
           }
@@ -296,8 +459,10 @@ export async function researchInboxAssistant(
           try {
             progress({ stage: 'attachment', status: 'running', accountId: account.id, emailId: email.id, filename, message: `Downloading and reading ${filename}`, detail: account.email });
             const ref = { accountId: account.id, emailId: email.id, filename };
-            const result = await download(attachmentSignal => deps.readAttachment(ref, {
+            const result = await download((attachmentSignal, onApprovalWait) => deps.readAttachment(ref, {
               signal: attachmentSignal,
+              allowSecurityPrompt: true,
+              onApprovalWait,
               ...(options.onProgress ? { onProgress: (activity: InboxAssistantProgress) => { if (!attachmentSignal.aborted) progress(activity); } } : {}),
             }));
             checkAbort(signal);
@@ -308,23 +473,38 @@ export async function researchInboxAssistant(
               continue;
             }
             covered.attachmentsRead++;
+            if (result.message) covered.warnings.push(`${filename}: ${result.message}`);
             progress({ stage: 'attachment', status: 'done', accountId: account.id, emailId: email.id, filename, message: `Read ${filename}`, detail: `${result.segments.length} text ${result.segments.length === 1 ? 'section' : 'sections'} available${result.truncated ? '; document exceeds the reading limit' : ''}.` });
             if (result.truncated) covered.truncated = true;
-            const score = (value: string) => queries.reduce((n, query) => n + (value.toLowerCase().includes(query.toLowerCase()) ? 2 : 0), 0)
+            const score = (value: string, label: string) => queries.reduce((n, query) => n + (value.toLowerCase().includes(query.toLowerCase()) ? 2 : 0), 0)
+              + Number(/summary/i.test(label) && /total bid value|grand total|total commercial value/i.test(value)) * 100
+              + Number(/\bdummy\b/i.test(value)) * 40
+              + Number(/summary|read\s*me|notes|terms|conditions/i.test(label)) * 10
+              + Number(/dummy|evaluation|actual (?:effort|consumption)|exclud|contract value/i.test(value)) * 5
               + (plan.quoteIntent && /(?:quot|total|amount|price|INR|USD|₹|\$)/i.test(value) ? 1 : 0);
             const segments = result.segments.map((segment, originalIndex) => ({ ...segment, originalIndex }))
-              .sort((a, b) => score(b.text) - score(a.text) || a.originalIndex - b.originalIndex);
+              .sort((a, b) => score(b.text, b.locator.label) - score(a.text, a.locator.label) || a.originalIndex - b.originalIndex);
             if (segments.length > MAX_SEGMENTS_PER_FILE) covered.truncated = true;
-            for (const segment of segments.slice(0, MAX_SEGMENTS_PER_FILE)) {
-              const maxChars = Math.min(6000, accountCharEnd - totalChars);
+            let fileChars = 0;
+            const fileAllowance = Math.min(16_000, Math.max(4_000,
+              Math.floor(MAX_EVIDENCE_CHARS / accounts.length * 0.38 / Math.max(1, Math.min(documentCount, accountFileLimit)))));
+            const selectedSegments = segments.slice(0, MAX_SEGMENTS_PER_FILE);
+            const segmentAllowance = Math.min(6000, Math.max(1200, Math.floor(fileAllowance / Math.min(4, selectedSegments.length))));
+            for (const segment of selectedSegments) {
+              const maxChars = Math.min(segmentAllowance, fileAllowance - fileChars, accountCharEnd - totalChars);
               if (maxChars <= 0) { covered.truncated = true; break; }
-              const segmentText = `${header}Attachment: ${filename}\nLocation: ${segment.locator.label}\n\n${segment.text}`.slice(0, maxChars);
-              if (segment.text.length > maxChars - header.length) covered.truncated = true;
+              // Attachment identity and location also travel as source metadata.
+              const attachmentHeader = '';
+              if (maxChars <= attachmentHeader.length + 100) { covered.truncated = true; break; }
+              const segmentText = attachmentHeader + bodyEvidence(segment.text, maxChars - attachmentHeader.length,
+                [...topics, 'Total Bid Value', 'total', 'dummy', 'evaluation', 'actual', 'contract value', 'including GST']);
+              if (segment.text.length > maxChars - attachmentHeader.length) covered.truncated = true;
               evidence.push({ ...metadata, id: `S${evidence.length + 1}`, kind: 'attachment',
                 attachmentId: declared.find(item => item.filename === filename)?.id, filename,
                 location: segment.locator.label, text: segmentText, excerpt: segment.text.slice(0, 1000),
               });
               totalChars += segmentText.length;
+              fileChars += segmentText.length;
             }
           } catch (error) {
             checkAbort(signal);

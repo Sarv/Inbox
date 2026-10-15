@@ -3,8 +3,8 @@ import type { InboxAssistantExchange, InboxAssistantRequest, InboxAssistantSourc
 export const INBOX_ASSISTANT_FOLLOWUP_SEPARATOR = '\nEarlier user question for this follow-up: ';
 const MAX_CONTEXT = 6_000;
 const MAX_SOURCE_REFS = 12;
-const TOPIC_WORDS = new Set('a all an and are as at be by can could did do does email emails for from have how i in is it latest me my of on one our please previous quote quotes quotation quotations reference revision revisions sent show tell that the their them these they this those to us validity was we were what when where which who with would you your'.split(' '));
-const FOLLOW_UP = /\b(?:it|its|that|this|these|those|them|their|same|again|earlier|previous|latest|revised|revision|revisions|validity|valid|expiry|expires|expired|changed|difference|differences|compared|compare)\b|\b(?:which one|what about|how about|how much|tell me more|more details|break (?:it|that) down|the (?:quote|quotation|proposal|attachment|email|message|amount|price|customer))\b|^(?:amount|price|total|currency|tax|gst|recipient|recipients|validity|when|who|why)\??$/i;
+const TOPIC_WORDS = new Set('a aabout about all an and are as at be by can check could did do does email emails final find for from have how i in is it last latest me my of on one our please previous proposal proposals propsal quote quotes quotation quotations reference regarding revision revisions send sent show submit submitted submission tell that the their them these they this those to us validity was we were what when where which who with would you your'.split(' '));
+const FOLLOW_UP = /\b(?:it|its|that|this|these|those|them|their|same|again|earlier|previous|latest|last|revised|revision|revisions|validity|valid|expiry|expires|expired|changed|difference|differences|compared|compare)\b|\b(?:which one|what about|how about|how much|tell me more|more details|break (?:it|that) down|the (?:(?:actual|full|complete|original|updated) )?(?:quote|quotation|proposal|attachment|document|email|message|amount|price|customer))\b|^(?:read|summari[sz]e|explain|extract)\s+(?:(?:the|an)\s+)?(?:(?:actual|full|complete|original)\s+)?(?:proposal|attachment|document|email|message)\b|^(?:amount|price|total|currency|tax|gst|recipient|recipients|validity|when|who|why)\??$/i;
 const EXPLICIT_OLD_SOURCE = /\b(?:back to|return to|go back to|earlier|previous|compare|compared)\b|\bsource\s+S\d+\b|\[S\d+\]/i;
 
 export interface InboxAssistantConversationContext {
@@ -12,6 +12,10 @@ export interface InboxAssistantConversationContext {
   sourceRefs: Array<{ accountId: string; emailId: string }>;
   contextualizedQuestion: string;
   isFollowUp: boolean;
+  /** Customer/project scope is independent of the person named in a follow-up. */
+  topicTerms?: string[];
+  participantTerms?: string[];
+  intent?: 'sent' | 'all';
 }
 
 function bounded(value: string, max: number): string {
@@ -26,6 +30,34 @@ function sameScope(left: string[], right: string[]): boolean {
 function topicTerms(question: string): string[] {
   return [...new Set((question.match(/[\p{L}\p{N}][\p{L}\p{N}@._+-]*/gu) ?? [])
     .map(word => word.toLowerCase()).filter(word => !TOPIC_WORDS.has(word) && word.length > 1))];
+}
+
+export function inboxAssistantTopicTerms(question: string): string[] {
+  const words = question.match(/[\p{L}\p{N}][\p{L}\p{N}@._+-]*/gu) ?? [];
+  const useful = words.filter(word => !TOPIC_WORDS.has(word.toLowerCase()) && word.length > 1);
+  const named = useful.filter(word => /[A-Z]/.test(word) || word.includes('@') || /\.[a-z]{2,}$/i.test(word));
+  return [...new Set((named.length ? named : useful).map(word => bounded(word, 100)))].slice(0, 6);
+}
+
+export function inboxAssistantParticipantTerms(question: string): string[] {
+  const result: string[] = question.match(/[\p{L}\p{N}._+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu) ?? [];
+  const patterns = [
+    /\b(?:what|which)\s+(?:(?:did|has|have)\s+)?([\p{L}][\p{L}.'-]*(?:\s+[A-Z][\p{L}.'-]*)?)\s+(?:send|sent|submit|submitted|share|shared)\b/giu,
+    /\b(?:sent|send|submitted|submit|shared)\s+by\s+([\p{L}][\p{L}.'-]*(?:\s+[A-Z][\p{L}.'-]*)?)/gu,
+  ];
+  for (const pattern of patterns) result.push(...[...question.matchAll(pattern)].map(match => match[1]!));
+  return [...new Set(result.filter(value => !TOPIC_WORDS.has(value.toLowerCase()) && !/^(?:my|our|the)\s+team\b/i.test(value)))]
+    .map(value => bounded(value, 100)).slice(0, 6);
+}
+
+/** Explicit current user scope overrides earlier sender requests, never model guesses. */
+export function inboxAssistantExplicitIntent(question: string): 'sent' | 'all' | undefined {
+  if (/\b(?:received|incoming|inbound|sent to me|sent to us|they sent|all mail|both sent and received|include received)\b/i.test(question)) return 'all';
+  if (/\b(?:my|our|the)\s+team(?:\s+members)?\s+(?:(?:have|had|has)\s+)?(?:sent|send|submitted|submit)\b|\b(?:sent|send|submitted|submit)\s+by\s+(?!me\b|us\b)/i.test(question)) return 'all';
+  if (/\b(?:i|you)\s+(?:(?:have|had|has|personally|already|actually|myself)\s+)*(?:sent|send|emailed|submitted)\b|\bmy\s+(?:sent|outgoing)\b|\bour\s+(?:sent(?:\s+mail)?|outgoing)\s+folder\b|\b(?:sent|submitted|emailed)\s+by\s+me\b/i.test(question)) return 'sent';
+  if (/\bwe\s+(?:(?:have|had|personally|already|actually|ourselves)\s+)*(?:sent|send|emailed|submitted)\b|\b(?:sent|submitted|emailed)\s+by\s+us\b|\bour\s+(?:sent|outgoing)\b/i.test(question)) return 'all';
+  if (inboxAssistantParticipantTerms(question).length) return 'all';
+  return undefined;
 }
 
 function metadata(source: InboxAssistantSource, selected: Set<string>) {
@@ -73,9 +105,10 @@ export function buildInboxAssistantContext(
 
   let end = scoped.length - 1;
   const question = request.question.trim();
+  const participants = inboxAssistantParticipantTerms(question);
   const explicitOld = EXPLICIT_OLD_SOURCE.test(question);
   const previousTopic = topicText(scoped[end]!, selected);
-  if (!FOLLOW_UP.test(question) && !explicitOld) return empty;
+  if (!FOLLOW_UP.test(question) && !explicitOld && !participants.length) return empty;
   if (!explicitOld && namesNewTarget(question, previousTopic)) return empty;
 
   // "Back to TCS" can resume an older topic after an unrelated customer turn.
@@ -86,13 +119,20 @@ export function buildInboxAssistantContext(
     if (best && best.score > 0) end = best.index;
   }
   let start = end;
-  while (start > 0 && FOLLOW_UP.test(scoped[start]!.question)
+  while (start > 0 && (FOLLOW_UP.test(scoped[start]!.question) || inboxAssistantParticipantTerms(scoped[start]!.question).length > 0)
     && !namesNewTarget(scoped[start]!.question, topicText(scoped[start - 1]!, selected))) start--;
   const chain = scoped.slice(start, end + 1);
   // Persistence keeps every message. Only the provider context has a window:
   // retain the original topic plus the most recent follow-ups.
   const relevant = chain.length > 20 ? [chain[0]!, ...chain.slice(-19)] : chain;
   const anchor = relevant[0]!.question;
+  // Scope and sender anchors survive even when a long chat's middle turns are
+  // outside the provider context window.
+  const priorRequests = [...chain.map(exchange => exchange.question), question].reverse();
+  const intent = priorRequests.map(inboxAssistantExplicitIntent).find(value => value !== undefined);
+  const people = participants.length ? participants : intent === 'all'
+    ? priorRequests.map(inboxAssistantParticipantTerms).find(value => value.length) ?? [] : [];
+  const topics = inboxAssistantTopicTerms(anchor).filter(term => !people.some(person => person.toLowerCase() === term.toLowerCase()));
   const sourceRefs: InboxAssistantConversationContext['sourceRefs'] = [];
   const seen = new Set<string>();
   for (const exchange of [...relevant].reverse()) {
@@ -128,5 +168,8 @@ export function buildInboxAssistantContext(
   return {
     historyContext, sourceRefs, isFollowUp: true,
     contextualizedQuestion: `${question.slice(0, 3_200)}${INBOX_ASSISTANT_FOLLOWUP_SEPARATOR}${bounded(anchor, 700)}`,
+    ...(topics.length ? { topicTerms: topics } : {}),
+    ...(people.length ? { participantTerms: people } : {}),
+    ...(intent ? { intent } : {}),
   };
 }

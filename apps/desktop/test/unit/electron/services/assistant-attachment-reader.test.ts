@@ -6,13 +6,19 @@ import { AttachmentOperationProtection, type DownloadScanner } from '../../../..
 const ref = { accountId: 'work-account', emailId: 'sent-quote', filename: 'TCS.pdf' };
 const evidence = { status: 'ready' as const, segments: [{ text: 'TCS INR 250000', locator: { kind: 'page' as const, page: 1, label: 'Page 1' } }], truncated: false };
 
-function fixture(options: { scanner?: boolean; ready?: boolean } = {}) {
+function fixture(options: { scanner?: boolean; ready?: boolean; missingSetup?: boolean; choice?: 'continue' | 'cancel' | 'setup' } = {}) {
   const bytes = Buffer.from('private unscanned quote');
   const scanned = Buffer.from('private scanned quote');
   const dispose = vi.fn(() => scanned.fill(0));
   const scan = vi.fn(async (_id: string, _message: string, _account: string, _name: string, _options: { signal: AbortSignal }) => ({ content: scanned, assertCurrent: async () => {}, dispose }));
   const scanners: DownloadScanner[] = options.scanner ? [{ id: 'scanner', enabled: true, active: true, scanner: true, granted: true }] : [];
-  const operations = new AttachmentOperationProtection({ scanners: () => scanners, scan, openSetup: vi.fn(), progress: vi.fn() });
+  const setupCurrent = vi.fn(async () => {});
+  const confirmUnscanned = vi.fn(async () => options.choice ?? 'continue' as const);
+  const openSetup = vi.fn();
+  const operations = new AttachmentOperationProtection({ scanners: () => scanners, scan, openSetup, progress: vi.fn(),
+    checkSetup: async () => options.missingSetup ? { assertCurrent: setupCurrent } : undefined,
+    confirmUnscanned,
+  });
   const owned = { read: vi.fn(async () => bytes), assertCurrent: vi.fn(async () => {}), size: 25 };
   const deps: AssistantAttachmentReaderDependencies = {
     resolve: vi.fn(async () => owned),
@@ -20,7 +26,7 @@ function fixture(options: { scanner?: boolean; ready?: boolean } = {}) {
     scannerReady: vi.fn(async () => options.ready !== false),
     extract: vi.fn(async () => evidence),
   };
-  return { reader: new AssistantAttachmentReader(deps), deps, owned, bytes, scanned, scan, dispose, operations };
+  return { reader: new AssistantAttachmentReader(deps), deps, owned, bytes, scanned, scan, dispose, operations, scanners, setupCurrent, confirmUnscanned, openSetup };
 }
 
 describe('assistant attachment security gate', () => {
@@ -63,6 +69,88 @@ describe('assistant attachment security gate', () => {
     expect(f.scan).not.toHaveBeenCalled();
     expect(f.owned.read).not.toHaveBeenCalled();
     expect(f.deps.extract).not.toHaveBeenCalled();
+    expect(f.confirmUnscanned).not.toHaveBeenCalled();
+  });
+
+  it('allows an explicitly requested file read only through the existing per-operation warning', async () => {
+    const f = fixture({ scanner: true, ready: false, missingSetup: true });
+    const progress: string[] = [];
+    const waiting: boolean[] = [];
+    const result = await f.reader.read(ref, { allowSecurityPrompt: true, onApprovalWait: value => waiting.push(value), onProgress: p => progress.push(p.message) });
+    expect(result.status).toBe('ready');
+    expect(result.message).toContain('without antivirus scanning');
+    expect(f.confirmUnscanned).toHaveBeenCalledWith({ messageId: ref.emailId, accountId: ref.accountId, filename: ref.filename, action: 'view' }, expect.any(AbortSignal), expect.any(Function));
+    expect(f.scan).not.toHaveBeenCalled();
+    expect(f.owned.read).toHaveBeenCalledOnce();
+    expect(f.setupCurrent).toHaveBeenCalled();
+    expect(progress).toContain('Waiting for attachment security approval');
+    expect(waiting).toEqual([true, false]);
+    // This read does not grant permission for another automatic assistant read.
+    expect((await f.reader.read(ref)).status).toBe('blocked');
+    expect(f.owned.read).toHaveBeenCalledOnce();
+  });
+
+  it('never reads bytes if the explicit security warning is rejected', async () => {
+    const f = fixture({ scanner: true, ready: false, missingSetup: true, choice: 'cancel' });
+    const waiting: boolean[] = [];
+    expect((await f.reader.read(ref, { allowSecurityPrompt: true, onApprovalWait: value => waiting.push(value) })).status).toBe('blocked');
+    expect(waiting).toEqual([true, false]);
+    expect(f.owned.read).not.toHaveBeenCalled();
+    expect(f.deps.extract).not.toHaveBeenCalled();
+  });
+
+  it('ends approval wait accounting when the host prompt fails', async () => {
+    const f = fixture({ scanner: true, ready: false, missingSetup: true });
+    f.confirmUnscanned.mockRejectedValueOnce(new Error('Warning window closed'));
+    const waiting: boolean[] = [];
+    expect((await f.reader.read(ref, { allowSecurityPrompt: true, onApprovalWait: value => waiting.push(value) })).status).toBe('blocked');
+    expect(waiting).toEqual([true, false]);
+    expect(f.owned.read).not.toHaveBeenCalled();
+  });
+
+  it('blocks without a dialog if scanner setup changes after an automatic preflight', async () => {
+    const f = fixture({ scanner: true, ready: true, missingSetup: true });
+    expect((await f.reader.read(ref)).status).toBe('blocked');
+    expect(f.confirmUnscanned).not.toHaveBeenCalled();
+    expect(f.owned.read).not.toHaveBeenCalled();
+    expect(f.deps.extract).not.toHaveBeenCalled();
+  });
+
+  it('does not open setup if scanner permissions change after an automatic preflight', async () => {
+    const f = fixture({ scanner: true });
+    f.scanners[0]!.granted = false;
+    expect((await f.reader.read(ref)).status).toBe('blocked');
+    expect(f.openSetup).not.toHaveBeenCalled();
+    expect(f.owned.read).not.toHaveBeenCalled();
+  });
+
+  it('does not accept a stale warning when scanner configuration changes during approval', async () => {
+    const f = fixture({ scanner: true, ready: false, missingSetup: true });
+    f.confirmUnscanned.mockImplementation(async () => { f.scanners[0]!.enabled = false; return 'continue'; });
+    expect((await f.reader.read(ref, { allowSecurityPrompt: true })).status).toBe('blocked');
+    expect(f.owned.read).not.toHaveBeenCalled();
+    expect(f.deps.extract).not.toHaveBeenCalled();
+  });
+
+  it('cancels while waiting for an explicit security warning without reading the file', async () => {
+    const f = fixture({ scanner: true, ready: false, missingSetup: true });
+    const controller = new AbortController();
+    f.confirmUnscanned.mockImplementation(() => new Promise(() => {}));
+    const waiting: boolean[] = [];
+    const reading = f.reader.read(ref, { allowSecurityPrompt: true, signal: controller.signal, onApprovalWait: value => waiting.push(value) });
+    await vi.waitFor(() => expect(f.confirmUnscanned).toHaveBeenCalledOnce());
+    expect(waiting).toEqual([true]);
+    controller.abort();
+    expect((await reading).status).toBe('cancelled');
+    expect(waiting).toEqual([true, false]);
+    expect(f.owned.read).not.toHaveBeenCalled();
+  });
+
+  it('does not pause download accounting for a normal scanned read or an automatic blocked read', async () => {
+    const waiting = vi.fn();
+    expect((await fixture({ scanner: true }).reader.read(ref, { onApprovalWait: waiting })).status).toBe('ready');
+    expect((await fixture({ scanner: true, ready: false, missingSetup: true }).reader.read(ref, { onApprovalWait: waiting })).status).toBe('blocked');
+    expect(waiting).not.toHaveBeenCalled();
   });
 
   it('fails closed if attachment protection has not been installed', async () => {

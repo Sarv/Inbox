@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   salesStorage: { getEmail: vi.fn(), getAttachments: vi.fn() },
   requireStorage: vi.fn(),
   ensureRuntime: vi.fn(),
+  serviceDeps: undefined as unknown as InboxAssistantServiceDeps,
   service: { accounts: vi.fn(), chats: vi.fn(), chat: vi.fn(), createChat: vi.fn(), renameChat: vi.fn(), updateChat: vi.fn(), deleteChat: vi.fn(), draftEmail: vi.fn(), history: vi.fn(), ask: vi.fn(), cancel: vi.fn(), clearHistory: vi.fn() },
 }));
 
@@ -41,6 +42,7 @@ vi.mock('../../../../electron/services/inbox-assistant-history', () => ({ inboxA
 vi.mock('../../../../electron/services/unified-pipeline-service', () => ({ getPipelineAIConfig: vi.fn() }));
 vi.mock('../../../../electron/services/inbox-assistant-service', () => ({
   InboxAssistantService: class {
+    constructor(deps: InboxAssistantServiceDeps) { h.serviceDeps = deps; }
     accounts() { return h.service.accounts(); }
     chats() { return h.service.chats(); }
     chat(value: unknown) { return h.service.chat(value); }
@@ -57,6 +59,8 @@ vi.mock('../../../../electron/services/inbox-assistant-service', () => ({
 }));
 
 import { registerInboxAssistantHandlers } from '../../../../electron/ipc/inbox-assistant-handlers';
+import { fetchAssistantMessageBody } from '../../../../electron/services/assistant-mailbox-download';
+import type { InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
 import type { InboxAssistantActivity } from '../../../../src/types/inbox-assistant';
 
 const trusted = () => ({ sender: h.sender, senderFrame: h.frame });
@@ -85,6 +89,16 @@ beforeEach(() => {
 });
 
 describe('Inbox Agent trusted IPC and source ownership', () => {
+  it('downloads the original when research identifies an incomplete nonempty preview', async () => {
+    const mailbox = await h.serviceDeps.openMailbox('sales-account');
+    const signal = new AbortController().signal;
+    const original = { id: ref.emailId, cleanBody: 'preview', rawBody: '<p>Full commercial proposal</p>' };
+    vi.mocked(fetchAssistantMessageBody).mockResolvedValue(original as never);
+    const preview = { ...original, rawBody: '' };
+    expect(await mailbox.fetchBody!(preview as never, {} as never, { signal })).toBe(original);
+    expect(fetchAssistantMessageBody).toHaveBeenCalledExactlyOnceWith('sales-account', ref.emailId, signal, { force: true });
+  });
+
   it.each(['accounts', 'chats', 'chat', 'createChat', 'renameChat', 'updateChat', 'deleteChat', 'draftEmail', 'history', 'ask', 'cancel', 'clearHistory', 'source'])('accepts %s only from the app main frame', async channel => {
     for (const event of [{ sender: h.sender, senderFrame: {} }, { sender: { mainFrame: h.frame }, senderFrame: h.frame }, {}]) {
       expect(await call(channel, ref, event)).toEqual({ success: false, error: 'Inbox Agent requests must come from the main app window.' });

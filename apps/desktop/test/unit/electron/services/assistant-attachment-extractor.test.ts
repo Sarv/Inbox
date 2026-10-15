@@ -71,7 +71,8 @@ describe('assistant document evidence extraction', () => {
     });
     const result = await extractAssistantAttachment({ filename: 'quote.xlsx', bytes });
     expect(result.status).toBe('ready');
-    expect(result.segments[1]).toEqual({ text: 'A4: Annual service | B4: 300000', locator: { kind: 'sheet', sheet: 'Quotation & GST', rowStart: 4, rowEnd: 4, label: 'Quotation & GST, row 4' } });
+    expect(result.segments[1]).toEqual({ text: 'A4 [Service]: Annual service | B4 [INR before GST]: 300000 (saved formula value)', locator: { kind: 'sheet', sheet: 'Quotation & GST', rowStart: 4, rowEnd: 4, cellRange: 'A4:B4', label: 'Quotation & GST!A4:B4' } });
+    expect(result.message).toContain('formulas were not recalculated');
     expect(JSON.stringify(result)).not.toContain('100000*3');
   });
 
@@ -81,6 +82,95 @@ describe('assistant document evidence extraction', () => {
       'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="https://evil.invalid/quote.xml" TargetMode="External"/></Relationships>',
     });
     expect((await extractAssistantAttachment({ filename: 'quote.xlsx', bytes })).status).toBe('empty');
+  });
+
+  it('preserves later sheet totals and evaluation caveats despite hundreds of blank-input formula rows', async () => {
+    const padding = Array.from({ length: 600 }, (_, i) => `<row r="${i + 10}"><c r="K${i + 10}"><f>F${i + 10}*G${i + 10}</f><v>0</v></c></row>`).join('');
+    const bytes = office({
+      'xl/workbook.xml': '<workbook xmlns:r="urn:rels"><sheets><sheet name="Software" r:id="r1"/><sheet name="Summary" r:id="r2"/><sheet name="Read Me" r:id="r3"/></sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/a.xml"/><Relationship Id="r2" Target="worksheets/b.xml"/><Relationship Id="r3" Target="worksheets/c.xml"/></Relationships>',
+      'xl/worksheets/a.xml': `<worksheet><sheetData>${padding}</sheetData></worksheet>`,
+      'xl/worksheets/b.xml': '<worksheet><sheetData><row r="17"><c r="C17" t="inlineStr"><is><t>Total Bid Value including GST</t></is></c><c r="D17"><f>SUM(D12:D16)</f><v>698870095.61</v></c></row><row r="18"><c r="C18" t="inlineStr"><is><t>Infrastructure inputs unpopulated</t></is></c><c r="D18"><f>SUM(A1:A3)</f><v>0</v></c></row></sheetData></worksheet>',
+      'xl/worksheets/c.xml': '<worksheet><sheetData><row r="8"><c r="C8" t="inlineStr"><is><t>Infrastructure is included in evaluation TBV but excluded from payable TCV.</t></is></c></row><row r="9"><c r="C9" t="inlineStr"><is><t>Dummy seat quantities are only for evaluation. Actual efforts govern payments.</t></is></c></row></sheetData></worksheet>',
+    });
+    const result = await extractAssistantAttachment({ filename: 'final.xlsx', bytes });
+    expect(result.status).toBe('ready');
+    expect(result.truncated).toBe(false);
+    expect(result.segments).toHaveLength(4);
+    expect(result.segments[0]).toMatchObject({ text: expect.stringContaining('698870095.61'), locator: { label: 'Summary!C17:D17', cellRange: 'C17:D17' } });
+    expect(result.segments[1].text).toContain('D18: 0 (saved formula value)');
+    expect(result.segments[2].text).toContain('excluded from payable TCV');
+    expect(result.segments[3].text).toContain('Actual efforts govern payments');
+  });
+
+  it('reserves space for later sheets and keeps totals when dense details exceed the reading budget', async () => {
+    const dense = Array.from({ length: 650 }, (_, i) => `<row r="${i + 1}"><c r="A${i + 1}" t="inlineStr"><is><t>Detail item ${i + 1}</t></is></c><c r="B${i + 1}"><v>100</v></c></row>`).join('');
+    const bytes = office({
+      'xl/workbook.xml': '<workbook xmlns:r="urn:rels"><sheets><sheet name="Detail" r:id="r1"/><sheet name="Caveats" r:id="r2"/></sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/a.xml"/><Relationship Id="r2" Target="worksheets/b.xml"/></Relationships>',
+      'xl/worksheets/a.xml': `<worksheet><sheetData>${dense}<row r="1000"><c r="A1000" t="inlineStr"><is><t>Total including GST</t></is></c><c r="B1000"><v>65000</v></c></row></sheetData></worksheet>`,
+      'xl/worksheets/b.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Dummy inputs for evaluation only; payment based on actual effort.</t></is></c></row></sheetData></worksheet>',
+    });
+    const result = await extractAssistantAttachment({ filename: 'dense.xlsx', bytes });
+    expect(result.truncated).toBe(true);
+    expect(result.segments.some(s => s.locator.cellRange === 'A1000:B1000')).toBe(true);
+    expect(result.segments.at(-1)?.text).toContain('payment based on actual effort');
+    expect(result.segments.length).toBeLessThanOrEqual(LIMIT.segments);
+    expect(result.segments.reduce((size, s) => size + s.text.length, 0)).toBeLessThanOrEqual(LIMIT.characters);
+  });
+
+  it('never evaluates a formula with no saved value or treats it as zero', async () => {
+    const bytes = office({
+      'xl/workbook.xml': '<workbook xmlns:r="urn:rels"><sheets><sheet name="Quote" r:id="r1"/></sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/a.xml"/></Relationships>',
+      'xl/worksheets/a.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Total</t></is></c><c r="B1"><f>WEBSERVICE("https://evil.invalid")</f></c></row></sheetData></worksheet>',
+    });
+    const result = await extractAssistantAttachment({ filename: 'uncached.xlsx', bytes });
+    expect(result.truncated).toBe(true);
+    expect(result.segments[0].text).toContain('saved formula result unavailable');
+    expect(JSON.stringify(result)).not.toContain('WEBSERVICE');
+    expect(JSON.stringify(result)).not.toContain('evil.invalid');
+  });
+
+  it('retains explicit and cross-row zero results rather than mistaking them for blank-input padding', async () => {
+    const bytes = office({
+      'xl/workbook.xml': '<workbook xmlns:r="urn:rels"><sheets><sheet name="Zeros" r:id="r1"/></sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/a.xml"/></Relationships>',
+      'xl/worksheets/a.xml': '<worksheet><sheetData><row r="1"><c r="A1"><f>1-1</f><v>0</v></c></row><row r="2"><c r="A2"><f>SUM(A1)</f><v>0</v></c></row><row r="3"><c r="A3"><v>0</v></c></row><row r="4"><c r="A4"><f>C4*D4</f><v>0</v></c></row></sheetData></worksheet>',
+    });
+    const result = await extractAssistantAttachment({ filename: 'zeros.xlsx', bytes });
+    expect(result.truncated).toBe(false);
+    expect(result.segments.map(segment => segment.locator.rowStart)).toEqual([1, 2, 3]);
+  });
+
+  it('reads PPTX text in presentation order with slide references while ignoring external content', async () => {
+    const bytes = office({
+      'ppt/presentation.xml': '<p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId r:id="r2"/><p:sldId r:id="r1"/><p:sldId r:id="r3"/></p:sldIdLst></p:presentation>',
+      'ppt/_rels/presentation.xml.rels': '<Relationships><Relationship Id="r1" Target="slides/slide1.xml"/><Relationship Id="r2" Target="slides/slide2.xml"/><Relationship Id="r3" Target="https://evil.invalid/slide.xml" TargetMode="External"/></Relationships>',
+      'ppt/slides/slide1.xml': '<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:p><a:r><a:t>Technical sizing: 160 seats</a:t></a:r></a:p></p:sld>',
+      'ppt/slides/slide2.xml': '<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:p><a:r><a:t>EPFO &amp; TCS architecture</a:t></a:r></a:p><a:p><a:r><a:t>On-premise deployment</a:t></a:r></a:p></p:sld>',
+      'ppt/notesSlides/notesSlide1.xml': '<notes>Not extracted speaker notes</notes>',
+      'ppt/embeddings/macro.bin': 'never executed',
+    });
+    const result = await extractAssistantAttachment({ filename: 'technical.pptx', bytes });
+    expect(result.segments).toEqual([
+      { text: 'EPFO & TCS architecture\nOn-premise deployment', locator: { kind: 'slide', slide: 1, label: 'Slide 1' } },
+      { text: 'Technical sizing: 160 seats', locator: { kind: 'slide', slide: 2, label: 'Slide 2' } },
+    ]);
+    expect(result.truncated).toBe(true);
+    expect(result.message).toContain('speaker notes');
+    expect(JSON.stringify(result)).not.toContain('evil.invalid');
+    expect(JSON.stringify(result)).not.toContain('never executed');
+  });
+
+  it('enforces Office ZIP and XML security limits for PPTX too', async () => {
+    const files = {
+      'ppt/presentation.xml': '<!DOCTYPE p [<!ENTITY leak SYSTEM "file:///etc/passwd">]><presentation/>',
+      'ppt/_rels/presentation.xml.rels': '<Relationships/>',
+    };
+    expect((await extractAssistantAttachment({ filename: 'malicious.pptx', bytes: office(files) })).status).toBe('malformed');
+    files['ppt/presentation.xml'] = 'x'.repeat(LIMIT.xmlEntryBytes + 1);
+    expect((await extractAssistantAttachment({ filename: 'bomb.pptx', bytes: office(files) })).status).toBe('too_large');
   });
 
   it('keeps CSV/TXT line references and supports UTF-16 exports', async () => {
