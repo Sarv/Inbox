@@ -2,13 +2,20 @@
 
 import { randomUUID } from 'crypto';
 
-import type {
-  ContactRecord,
-  ContactEnrichment,
-  ContactEnrichmentHistoryRecord,
-  PaginationOptions,
-  EmailRecord,
- contactNameForAddress, isRoleAddress, parseAddressList, PUBLIC_DOMAINS, CONTACT_ENRICHMENT_REVIEW_VERSION, isIncompleteContactProfile, type ContactEnrichmentReview } from '@sarvinbox/core';
+import {
+  type ContactRecord,
+  type ContactEnrichment,
+  type ContactEnrichmentHistoryRecord,
+  type PaginationOptions,
+  type EmailRecord,
+  type ContactEnrichmentReview,
+  contactNameForAddress,
+  isRoleAddress,
+  parseAddressList,
+  PUBLIC_DOMAINS,
+  CONTACT_ENRICHMENT_REVIEW_VERSION,
+  isIncompleteContactProfile,
+} from '@sarvinbox/core';
 
 import { SHARED } from '../shared-contacts';
 import type { SenderStats, SignaturePattern } from '../sqlite-storage';
