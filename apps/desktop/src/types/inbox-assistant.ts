@@ -1,0 +1,142 @@
+/** Type-only contract shared by the isolated renderer and main-process agent. */
+export interface InboxAssistantAccount {
+  id: string;
+  email: string;
+  name?: string;
+}
+
+export interface InboxAssistantSource {
+  id: string;
+  kind: 'message' | 'attachment';
+  accountId: string;
+  accountEmail: string;
+  emailId: string;
+  threadId?: string;
+  subject: string;
+  from: string;
+  to: string[];
+  date: number; // Unix seconds, matching EmailRecord.
+  folder: string;
+  sent: boolean;
+  attachmentId?: string;
+  filename?: string;
+  location?: string;
+  excerpt: string;
+}
+
+/** Full bounded evidence stays in the main process, not conversation storage. */
+export interface InboxAssistantEvidence extends InboxAssistantSource {
+  text: string;
+}
+
+export interface InboxAssistantAccountCoverage {
+  accountId: string;
+  email: string;
+  status: 'searched' | 'unavailable';
+  matchedMessages: number;
+  reviewedMessages: number;
+  missingBodies: number;
+  attachmentsRead: number;
+  attachmentsSkipped: number;
+  truncated: boolean;
+  warnings: string[];
+}
+
+export interface InboxAssistantAnswer {
+  text: string;
+  sources: InboxAssistantSource[];
+  coverage: InboxAssistantAccountCoverage[];
+  warnings: string[];
+}
+
+/** Observable work only: never model reasoning or private thinking tokens. */
+export interface InboxAssistantProgress {
+  stage: 'context' | 'search' | 'body' | 'attachment' | 'answer' | 'complete';
+  status: 'running' | 'done' | 'warning';
+  message: string;
+  detail?: string;
+  accountId?: string;
+  emailId?: string;
+  filename?: string;
+}
+
+export interface InboxAssistantActivity extends InboxAssistantProgress {
+  requestId: string;
+  chatId?: string;
+  sequence: number;
+  at: number;
+}
+
+export interface InboxAssistantExchange {
+  id: string;
+  chatId?: string;
+  question: string;
+  accountIds: string[];
+  answer: InboxAssistantAnswer;
+  createdAt: number; // Unix milliseconds for conversation ordering.
+  activities?: InboxAssistantActivity[];
+}
+
+export interface InboxAssistantRequest {
+  requestId: string;
+  chatId: string;
+  question: string;
+  accountIds: string[];
+  previousExchangeId?: string;
+}
+
+export interface InboxAssistantChatSummary {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  exchangeCount: number;
+  pinned?: boolean;
+}
+
+export interface InboxAssistantChat extends InboxAssistantChatSummary {
+  exchanges: InboxAssistantExchange[];
+}
+
+export interface InboxAssistantChatList {
+  chats: InboxAssistantChatSummary[];
+  activeChatId: string | null;
+}
+
+export interface InboxAssistantDraftRequest {
+  requestId: string;
+  chatId: string;
+  accountId: string;
+  instructions?: string;
+}
+
+/** A reviewable plain-text draft; opening it never sends email. */
+export interface InboxAssistantDraft {
+  chatId: string;
+  accountId: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+}
+
+export type InboxAssistantResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: string };
+
+export interface InboxAssistantAPI {
+  accounts(): Promise<InboxAssistantResult<InboxAssistantAccount[]>>;
+  chats(): Promise<InboxAssistantResult<InboxAssistantChatList>>;
+  chat(chatId: string): Promise<InboxAssistantResult<InboxAssistantChat>>;
+  createChat(): Promise<InboxAssistantResult<InboxAssistantChat>>;
+  renameChat(request: { chatId: string; title: string }): Promise<InboxAssistantResult<InboxAssistantChatSummary>>;
+  updateChat(request: { chatId: string; pinned: boolean }): Promise<InboxAssistantResult<InboxAssistantChatSummary>>;
+  deleteChat(chatId: string): Promise<InboxAssistantResult<InboxAssistantChatList>>;
+  draftEmail(request: InboxAssistantDraftRequest): Promise<InboxAssistantResult<InboxAssistantDraft>>;
+  history(): Promise<InboxAssistantResult<InboxAssistantExchange[]>>;
+  ask(request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
+  cancel(requestId: string): Promise<void>;
+  clearHistory(): Promise<InboxAssistantResult<null>>;
+  onActivity(listener: (activity: InboxAssistantActivity) => void): () => void;
+  source(request: Pick<InboxAssistantSource, 'accountId' | 'emailId' | 'filename'>): Promise<InboxAssistantResult<{ emailId: string; threadId: string; filename?: string }>>;
+}

@@ -16,6 +16,7 @@ import { EmailCard } from './EmailCard';
 import { EmailToolbar } from './EmailToolbar';
 import { FollowUpBanner } from './FollowUpBanner';
 import { useEmailDetail } from './hooks/useEmailDetail';
+import type { EmailReaderOptions } from './reader-options';
 import { ShowOriginalModal } from './ShowOriginalModal';
 import { SignatureDetectionModal } from './SignatureDetectionModal';
 import { threadHeaderLabel } from './thread-header-label';
@@ -27,8 +28,8 @@ import { ViewModeToggle } from './ViewModeToggle';
 /** Stable empty thread, so the prewarm effect does not restart on every render. */
 const NO_EMAILS: readonly [] = [];
 
-export function EmailDetail() {
-  const ctx = useEmailDetail();
+export function EmailDetail(options: EmailReaderOptions = {}) {
+  const ctx = useEmailDetail(options);
   const setEmailLabel = useEmailStore((s) => s.setEmailLabel);
   // Account color dot before the subject — ONLY when the message was opened from
   // the unified "All Inboxes" view, so the reader can tell which account it's in.

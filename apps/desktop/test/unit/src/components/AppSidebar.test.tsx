@@ -17,7 +17,7 @@ describe('AppSidebar AI navigation', () => {
 
     const navigation = [...view.container.querySelectorAll<HTMLButtonElement>('button')]
       .filter((button) => !button.querySelector('img') && !labelOf(button)?.includes('sidebar'));
-    expect(navigation.map(labelOf)).toEqual(['Mail', 'Contacts', 'Extensions', 'AI', 'Settings', 'Security']);
+    expect(navigation.map(labelOf)).toEqual(['Mail', 'Inbox Agent', 'Contacts', 'Extensions', 'AI', 'Settings', 'Security']);
 
     const ai = navigation.filter((button) => labelOf(button) === 'AI');
     expect(ai).toHaveLength(1);
@@ -27,7 +27,7 @@ describe('AppSidebar AI navigation', () => {
     onSectionChange.mockClear();
     for (const item of navigation.filter((button) => labelOf(button) !== 'AI')) fire(item, 'click');
     expect(onSectionChange.mock.calls.map(([section]) => section)).toEqual([
-      'mail', 'contacts', 'extensions', 'settings', 'security',
+      'mail', 'assistant', 'contacts', 'extensions', 'settings', 'security',
     ]);
   });
 });

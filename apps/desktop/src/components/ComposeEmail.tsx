@@ -69,19 +69,19 @@ interface ComposeEmailProps {
 
 export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: ComposeEmailProps) {
   const { imapConfig } = useEmailStore();
-  // From-account (and the From bar) applies ONLY to a reply/forward whose mail
-  // belongs to a DIFFERENT account than the active one (unified "All Inboxes").
-  // New mail and same-account flows → no From bar, active-account send.
+  // Saved and assistant-created drafts keep their chosen sending account,
+  // including new messages composed while another mailbox is active.
   const accounts = useEmailStore((s) => s.accounts);
   const activeAccountId = useEmailStore((s) => s.activeAccountId);
   const replyAccountId = mode !== 'new' ? ((replyToEmail as any)?.accountId as string | undefined) : undefined;
-  const fromAccount = (replyAccountId && replyAccountId !== activeAccountId)
-    ? accounts.find((a) => a.id === replyAccountId)
+  const composeAccountId = (draft?.accountId as string | undefined) ?? replyAccountId;
+  const fromAccount = (composeAccountId && composeAccountId !== activeAccountId)
+    ? accounts.find((a) => a.id === composeAccountId)
     : null;
   // The account this compose actually sends through: the replied mail's owner in a
   // cross-account reply, otherwise the active account. Its identities feed the
   // "From" picker (send-as an alias WITHIN that account).
-  const sendingAccount = fromAccount ?? accounts.find((a) => a.id === activeAccountId) ?? null;
+  const sendingAccount = accounts.find((a) => a.id === (composeAccountId ?? activeAccountId)) ?? null;
   const identities = sendingAccount ? normalizeIdentities(sendingAccount.email, sendingAccount.identities) : [];
   const canPickIdentity = identities.length > 1;
   // Chosen From header (undefined = the account's own address / default). Resolved
@@ -168,7 +168,7 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     threadId: (draft as any)?.threadId,
     initialDraftMessageId: (draft as any)?.draftMessageId,
     initialDraftUnsaved: (draft as any)?.unsaved,
-    accountId: (draft as any)?.accountId ?? replyAccountId,
+    accountId: composeAccountId,
     attachments,
     attachmentsPrefilled: mode === 'forward' && !draft,
     prepareAttachments: forwardAttachments.prepareAttachments,
@@ -179,9 +179,8 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
   const [quotedHtml, setQuotedHtml] = useState('');
   // Signature is kept OUT of the TipTap editor (its schema flattens tables/flex)
   // — appended verbatim on send + shown in the preview, so it renders as designed.
-  // Per-account signature: reply/forward use the replied mail's owning account
-  // (unified view); new mail uses the active account's default.
-  const signatureHtml = useMemo(() => getSignature(mode === 'new' ? 'new' : 'reply', mode === 'new' ? undefined : (replyToEmail as any)?.accountId), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Use the draft/replied message's chosen account for its signature too.
+  const signatureHtml = useMemo(() => getSignature(mode === 'new' ? 'new' : 'reply', composeAccountId), [mode, composeAccountId]); // eslint-disable-line react-hooks/exhaustive-deps
   const [isMinimized, setIsMinimized] = useState(false);
   const [readReceipt, setReadReceipt] = useState(false);
   // Armed by the toolbar bell; recorded by the main process once the send succeeds.
@@ -369,6 +368,10 @@ ${createQuotedHeader(prefix, extraInfo)}
   /** @param sendAt UTC epoch SECONDS to deliver at; omitted = send now. */
   const handleSend = async (sendAt?: number) => {
     if (sending || forwardAttachments.blocked) return;
+    if (composeAccountId && !sendingAccount) {
+      reportSendFailure(new Error('The sending account is no longer connected. Reopen this draft after connecting its account.'));
+      return;
+    }
     const finalTo = mergeEmails(to, pendingTo);
     const finalCc = mergeEmails(cc, pendingCc);
     const finalBcc = mergeEmails(bcc, pendingBcc);
@@ -408,8 +411,8 @@ ${createQuotedHeader(prefix, extraInfo)}
         htmlBody: fullHtmlBody, // Email-friendly HTML with inline styles
         sendAt,
         inReplyTo: mode !== 'new' ? replyToEmail?.id : undefined,
-        // Send AS the replied mail's owning account (unified view). undefined = active.
-        accountId: mode !== 'new' ? (replyToEmail as any)?.accountId : undefined,
+        // Preserve the chosen account through new, restored and reply drafts.
+        accountId: composeAccountId,
         // Send-as identity/alias header From within that account (undefined = default).
         from: resolvedFrom,
         requestReadReceipt: readReceipt,

@@ -58,6 +58,25 @@ function harness(api: Record<string, unknown>, initial: Record<string, unknown> 
 afterEach(() => { delete (globalThis as any).window; });
 
 describe('loadThread', () => {
+  it('does not resurrect source rows after the reader closes during the load', async () => {
+    let finish!: (value: { success: boolean; data: unknown[] }) => void;
+    const h = harness({ getThread: () => new Promise(resolve => { finish = resolve; }) }, { selectedEmailId: 'source' });
+    const loading = h.slice.loadThread('t1');
+    h.state.selectedEmailId = null;
+    finish({ success: true, data: [row('source')] });
+    await loading;
+    expect(h.state.threadEmails).toEqual([]);
+  });
+
+  it('does not apply rows after an owning account changes with identical message IDs', async () => {
+    let finish!: (value: { success: boolean; data: unknown[] }) => void;
+    const h = harness({ getThread: () => new Promise(resolve => { finish = resolve; }) }, { selectedEmailId: 'same-id', viewAccountId: 'acct-a' });
+    const loading = h.slice.loadThread('t1');
+    h.state.viewAccountId = 'acct-b';
+    finish({ success: true, data: [row('same-id')] });
+    await loading;
+    expect(h.state.threadEmails).toEqual([]);
+  });
   const load = async (rows: unknown[]) => {
     const h = harness({ getThread: async () => ({ success: true, data: rows }) });
     await h.slice.loadThread('t1');

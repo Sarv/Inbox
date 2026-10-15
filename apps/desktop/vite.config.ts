@@ -144,6 +144,21 @@ export default defineConfig(({ mode }) => ({
         },
       },
       {
+        // Text-only evidence extraction runs outside the main/UI thread. Keep
+        // its parser imports in one file so it also runs from app.asar.unpacked.
+        entry: 'electron/services/assistant-attachment-extract.worker.ts',
+        onstart() {},
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: ['electron', 'better-sqlite3'],
+              output: { codeSplitting: false },
+            },
+          },
+        },
+      },
+      {
         // Extension sandbox. Its own entry for the same reason as the VACUUM
         // worker: `utilityProcess.fork` loads it by path at runtime, so it has
         // to exist as its own file beside the main bundle. Same externals — it

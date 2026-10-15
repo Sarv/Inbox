@@ -5,6 +5,9 @@ import { AIStatusBanner } from './components/AIStatusBanner';
 import { AntivirusSetupModal } from './components/antivirus/AntivirusSetupModal';
 import { UnscannedAttachmentWarning } from './components/antivirus/UnscannedAttachmentWarning';
 import { AppSidebar, AppSection } from './components/AppSidebar';
+import { AssistantSourcePane } from './components/assistant/AssistantSourcePane';
+import { InboxAssistant } from './components/assistant/InboxAssistant';
+import { AttachmentViewer } from './components/attachment-viewer/AttachmentViewer';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { Contacts } from './components/Contacts';
@@ -46,7 +49,9 @@ import { ensureSarvAiProvider } from './services/sarv-ai-auto-register';
 import { requestConfirm } from './store/confirm-service';
 import { useEmailStore } from './store/email-store';
 import { migrateCredentialsToVault, canonicalizeAccountIds } from './store/helpers';
+import type { InboxAssistantSource } from './types/inbox-assistant';
 import { shouldShowOnboarding, shouldShowNoAccountEmptyState } from './utils/app-gates';
+import { openInboxAssistantDraft } from './utils/inbox-assistant-draft';
 import { setImageTrustAccount } from './utils/remote-images';
 
 function App() {
@@ -100,6 +105,9 @@ function App() {
   // the AI-inactive banner opens Providers, where the provider is configured).
   const [aiSettingsInitialTab, setAiSettingsInitialTab] = useState<string | undefined>(undefined);
   const [aiSettingsNavigationId, setAiSettingsNavigationId] = useState(0);
+  const [assistantAttachment, setAssistantAttachment] = useState<{ accountId: string; emailId: string; filename: string } | null>(null);
+  const [assistantSource, setAssistantSource] = useState<InboxAssistantSource | null>(null);
+  const closeAssistantSource = useCallback(() => { setAssistantSource(null); setAssistantAttachment(null); }, []);
   // One-shot: open the add-account wizard once AccountsTab mounts. Set by the
   // shared add-account flow so every entry point (sidebar switcher, mailbox
   // empty state, in-tab button) lands on Settings → Accounts with the wizard open.
@@ -161,6 +169,7 @@ function App() {
 
   // Perform the actual section switch, clearing any deep-link tab hints.
   const doNavigate = useCallback((next: AppSection) => {
+    if (next !== 'assistant') { setAssistantSource(null); setAssistantAttachment(null); }
     setSettingsInitialTab(undefined);
     setAiSettingsInitialTab(undefined);
     if (next === 'ai-settings') setAiSettingsNavigationId((id) => id + 1);
@@ -239,7 +248,7 @@ function App() {
     return () => { try { off?.(); } catch { /* ignore */ } };
   }, []);
 
-  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, enabled: !showOnboarding });
+  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, enabled: !showOnboarding && (activeSection !== 'assistant' || !!assistantSource), allowListNavigation: activeSection !== 'assistant' });
   useNotificationBridge();
 
   // Load user-defined labels once on mount (local DB — no connection needed).
@@ -861,6 +870,14 @@ function App() {
             void useEmailStore.getState().loadAICategoryEmails(category);
           })}
         />;
+      case 'assistant':
+        return <InboxAssistant
+          defaultDraftAccountId={activeAccountId ?? undefined}
+          onOpenDraft={draft => openInboxAssistantDraft(draft, useEmailStore.getState())}
+          onNavigateToSource={setAssistantSource}
+          onCloseSourcePane={closeAssistantSource}
+          sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} onClose={closeAssistantSource} onOpenAttachment={target => setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename })} /> : undefined}
+        />;
       case 'extensions':
         return <ExtensionManager />;
       case 'teams':
@@ -920,7 +937,7 @@ function App() {
       <AppSidebar activeSection={activeSection} onSectionChange={requestSection} />
 
       {/* Main Layout */}
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+      <div className="flex flex-col flex-1 min-h-0 min-w-0 overflow-hidden">
         {/* Security warning — only shows if the OS keychain is unavailable and
             credentials can't be encrypted at rest (never on macOS/Windows). */}
         <SecurityStatusBanner />
@@ -943,7 +960,7 @@ function App() {
             reassuring green "Live" while nothing arrives. Hidden when re-auth is
             needed (that banner takes over). */}
         <SyncTroubleBanner />
-        <div className="flex flex-1 min-w-0 overflow-hidden">
+        <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
           {/* No account + on the mail view → show the empty state. Only overrides
               the mail section so Settings (and other sections) stay reachable and
               the user can add/configure there. "Add account" deep-links to
@@ -971,6 +988,15 @@ function App() {
       {/* App-wide confirmation prompt — backs requestConfirm() so store-level
           guards (e.g. bulk delete) can prompt regardless of entry point. */}
       <GlobalConfirmDialog />
+      {assistantAttachment && (
+        <AttachmentViewer
+          emailId={assistantAttachment.emailId}
+          accountId={assistantAttachment.accountId}
+          attachments={[{ name: assistantAttachment.filename }]}
+          initialIndex={0}
+          onClose={() => setAssistantAttachment(null)}
+        />
+      )}
       <AntivirusSetupModal />
       <UnscannedAttachmentWarning />
       {/* Auto-update prompt. Self-hiding: renders nothing unless the main

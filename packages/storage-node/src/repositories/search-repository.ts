@@ -310,7 +310,29 @@ export class SearchRepository extends BaseRepository {
     let sql = '';
 
     // Folder scoping
-    if (query.folderPath) {
+    if (query.scope === 'mailbox') {
+      // Assistant research includes Sent and Archive. Keep normal list/search
+      // semantics unchanged, and honour provider-specific special-use folders.
+      const excluded = this.db.prepare(`SELECT id, path FROM folders
+        WHERE LOWER(COALESCE(special_use, '')) IN ('\\trash', '\\junk', '\\drafts')`).all() as Array<{ id: string; path: string }>;
+      const paths = new Set(['Trash', 'Spam', 'Drafts', '[Gmail]/Trash', '[Gmail]/Spam', '[Gmail]/Drafts', 'Junk', 'Junk Email', 'Deleted Items', ...excluded.map(folder => folder.path)]);
+      for (const path of paths) {
+        sql += ` AND instr(emails.tags, ?) = 0`;
+        params.push(`|${path}|`);
+      }
+      for (const folder of excluded) {
+        sql += ` AND emails.folder_id != ?`;
+        params.push(folder.id);
+      }
+      for (const flag of ['draft', 'deleted', 'outbox', 'queued']) {
+        sql += ` AND instr(emails.tags, ?) = 0`;
+        params.push(`|${flag}|`);
+      }
+      if (query.folderPath) {
+        sql += ` AND instr(emails.tags, '|' || ? || '|') > 0`;
+        params.push(query.folderPath);
+      }
+    } else if (query.folderPath) {
       sql += ` AND instr(emails.tags, '|' || ? || '|') > 0`;
       params.push(query.folderPath);
       sql += ` ${this.getExcludeSpecialFolders(query.folderPath)}`;

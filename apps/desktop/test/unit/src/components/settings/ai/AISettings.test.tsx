@@ -82,6 +82,14 @@ describe('combined AI page', () => {
     expect(view.byLabel('Agent overview')).not.toBeNull();
   });
 
+  it('keeps the standalone Inbox Agent out of the AI configuration tabs', () => {
+    const view = render(<AISettings />);
+    expect(button(view, 'Assistant')).toBeNull();
+    expect(button(view, 'Inbox Agent')).toBeNull();
+    expect(button(view, 'Dashboard')).not.toBeNull();
+    expect(button(view, 'Email Agent')).not.toBeNull();
+  });
+
   it('keeps the categorization shortcut pointed at agent configuration', () => {
     const view = render(<AISettings initialTab="categorization" />);
     fire(button(view, 'Open Email Agent'), 'click');

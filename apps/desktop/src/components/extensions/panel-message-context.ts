@@ -4,8 +4,10 @@ import type { EmailStore } from '../../store/types';
 export function panelMessageAccount(state: Pick<EmailStore, 'selectedEmailId' | 'emails' | 'threadEmails' | 'threadAccountId' | 'viewAccountId' | 'activeAccountId'>): string | undefined {
   if (!state.selectedEmailId) return undefined;
   if (state.viewAccountId) return state.viewAccountId;
+  // A cited thread may belong to the active account while a still-loaded
+  // unified-list row with the same ID belongs to another mailbox.
+  if (state.threadEmails.some(email => email.id === state.selectedEmailId) && state.threadAccountId) return state.threadAccountId;
   const rowAccount = state.emails.find(email => email.id === state.selectedEmailId)?.accountId;
   if (rowAccount) return rowAccount;
-  if (state.threadEmails.some(email => email.id === state.selectedEmailId) && state.threadAccountId) return state.threadAccountId;
   return state.activeAccountId || undefined;
 }

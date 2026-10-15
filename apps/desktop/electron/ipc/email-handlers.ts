@@ -1012,9 +1012,21 @@ export function registerEmailHandlers(): void {
    */
   ipcMain.handle('emails:thread', async (_event, threadId: string, accountId?: string) => {
     try {
-      // Unified view: read the thread from the row's own account DB.
-      const { storage } = await resolveAccountTarget(accountId);
-      const emails = await storage.getEmailsByThread(threadId);
+      // A citation can open a thread outside the active mailbox. A named
+      // account must never fall back to another account with the same IDs.
+      if (accountId !== undefined) requireTargetAccountId(accountId);
+      const { storage } = await resolveNamedOrActiveAccountTarget(accountId);
+      let emails = await storage.getEmailsByThread(threadId);
+      // Older messages may have no thread ID. Source links use their message
+      // ID as the conversation key, still resolved inside this same mailbox.
+      if (!emails.length) {
+        const single = await storage.getEmail(threadId);
+        if (single && !single.threadId) emails = [single];
+      }
+      if (accountId !== undefined) {
+        requireTargetAccountId(accountId);
+        if ((await resolveNamedOrActiveAccountTarget(accountId)).storage !== storage) throw new Error('The thread account changed while loading.');
+      }
       return { success: true, data: emails };
     } catch (error) {
       logger.error('Get thread error:', error);

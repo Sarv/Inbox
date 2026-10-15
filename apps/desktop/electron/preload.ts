@@ -9,6 +9,8 @@ import '@sentry/electron/preload';
 import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
+import type { InboxAssistantAPI, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
+
 
 import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
 import type { DomainIdentityRow } from './services/domain-identity-store';
@@ -102,6 +104,26 @@ interface RegistryAccountDTO {
 
 // Expose protected methods that allow the renderer process to use ipcRenderer
 contextBridge.exposeInMainWorld('electronAPI', {
+  inboxAssistant: {
+    accounts: () => ipcRenderer.invoke('inboxAssistant:accounts'),
+    chats: () => ipcRenderer.invoke('inboxAssistant:chats'),
+    chat: (chatId: string) => ipcRenderer.invoke('inboxAssistant:chat', chatId),
+    createChat: () => ipcRenderer.invoke('inboxAssistant:createChat'),
+    renameChat: (request: { chatId: string; title: string }) => ipcRenderer.invoke('inboxAssistant:renameChat', request),
+    updateChat: (request: { chatId: string; pinned: boolean }) => ipcRenderer.invoke('inboxAssistant:updateChat', request),
+    deleteChat: (chatId: string) => ipcRenderer.invoke('inboxAssistant:deleteChat', chatId),
+    draftEmail: (request: InboxAssistantDraftRequest) => ipcRenderer.invoke('inboxAssistant:draftEmail', request),
+    history: () => ipcRenderer.invoke('inboxAssistant:history'),
+    ask: (request: InboxAssistantRequest) => ipcRenderer.invoke('inboxAssistant:ask', request),
+    cancel: async (requestId: string) => { await ipcRenderer.invoke('inboxAssistant:cancel', requestId); },
+    clearHistory: () => ipcRenderer.invoke('inboxAssistant:clearHistory'),
+    onActivity: (listener: (activity: InboxAssistantActivity) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, activity: InboxAssistantActivity) => listener(activity);
+      ipcRenderer.on('inboxAssistant:activity', handler);
+      return () => ipcRenderer.removeListener('inboxAssistant:activity', handler);
+    },
+    source: (request: Pick<InboxAssistantSource, 'accountId' | 'emailId' | 'filename'>) => ipcRenderer.invoke('inboxAssistant:source', request),
+  } satisfies InboxAssistantAPI,
   // App info
   app: {
     getVersion: () => ipcRenderer.invoke('app:version'),
@@ -1235,6 +1257,7 @@ export interface BodyDownloadState {
 }
 
 export interface ElectronAPI {
+  inboxAssistant: InboxAssistantAPI;
   app: {
     getVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
     openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;

@@ -308,7 +308,7 @@ export interface SearchQuery {
   query: string;
   folderIds?: string[];
   folderPath?: string;       // Direct folder path for tag-based filtering (e.g. 'INBOX')
-  scope?: 'all' | 'folder';  // 'all' = exclude Trash/Spam/Sent/Drafts; 'folder' = scope to folderPath
+  scope?: 'all' | 'folder' | 'mailbox'; // 'mailbox' includes Sent, excluding Trash/Spam/Drafts and unsent mail.
   aiCategory?: string;       // AI category slug filter
   noCategory?: boolean;      // Only mail with NO AI category (unlabelled)
   /**

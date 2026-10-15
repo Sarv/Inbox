@@ -22,6 +22,7 @@ import { registerFolderHandlers } from './folder-handlers';
 import { registerFollowUpHandlers } from './follow-up-handlers';
 import { registerIdentityHandlers } from './identity-handlers';
 import { registerImageTrustHandlers } from './image-trust-handlers';
+import { registerInboxAssistantHandlers } from './inbox-assistant-handlers';
 import { registerLabelHandlers } from './label-handlers';
 import { registerMiscHandlers } from './misc-handlers';
 import { registerNotificationHandlers } from './notification-handlers';
@@ -72,6 +73,7 @@ export function registerAllHandlers(): void {
   registerNotificationHandlers();
   registerStorageHandlers();
   registerIdentityHandlers();
+  registerInboxAssistantHandlers();
   registerSpamHandlers();
   registerUnsubscribeHandlers();
   registerPgpHandlers();

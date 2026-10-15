@@ -415,6 +415,104 @@ describe('SearchRepository', () => {
     });
   });
 
+  describe('read-only assistant mailbox scope', () => {
+    const allowed = ['mailbox-archive', 'mailbox-inbox', 'mailbox-role-sent', 'mailbox-sent'];
+
+    beforeEach(() => {
+      const insertFolder = db.prepare('INSERT INTO folders (id, name, path, special_use) VALUES (?, ?, ?, ?)');
+      insertFolder.run('f-sent', 'Sent', 'Sent', '\\Sent');
+      insertFolder.run('f-role-sent', 'Outbound correspondence', 'Correspondence/Outgoing2026', '\\Sent');
+      insertFolder.run('f-role-drafts', 'Pending review', 'Projects/ReviewHolding', '\\Drafts');
+      insertFolder.run('f-role-trash', 'Retired records', 'Retired/DeletedRecords', '\\Trash');
+      insertFolder.run('f-role-junk', 'Quarantined', 'Quarantine/Filtered', '\\Junk');
+
+      const seed = (id: string, folderId: string, tags: string, date: number) => addEmail(db, {
+        id, folderId, tags, date, subject: 'Mailboxproof TCS quotation', body: 'Mailboxproof TCS cloud proposal',
+        from: 'sales@sarv.example', to: 'procurement@tcs.example', hasAttachments: true, attachmentNames: 'TCS-quotation.pdf',
+      });
+      seed('mailbox-sent', 'f-sent', '|Sent|read|', 7001);
+      seed('mailbox-archive', 'f-arch', '|Archive|read|', 7002);
+      seed('mailbox-role-sent', 'f-role-sent', '|Correspondence/Outgoing2026|read|', 7003);
+      seed('mailbox-inbox', 'f-inbox', '|INBOX|read|', 7004);
+      // Provider roles must still exclude these when the path/tag is unknown or missing.
+      seed('mailbox-role-drafts', 'f-role-drafts', '|read|', 7005);
+      seed('mailbox-role-trash', 'f-role-trash', '|read|', 7006);
+      seed('mailbox-role-junk', 'f-role-junk', '|read|', 7007);
+      // Unsent/deleted status can exist independently of the folder role or path.
+      seed('mailbox-draft-flag', 'f-inbox', '|INBOX|draft|', 7008);
+      seed('mailbox-deleted-flag', 'f-arch', '|Archive|deleted|', 7009);
+      seed('mailbox-outbox-flag', 'f-inbox', '|INBOX|outbox|', 7010);
+      seed('mailbox-queued-flag', 'f-inbox', '|INBOX|queued|', 7011);
+      seed('mailbox-standard-trash', 'f-trash', '|Trash|', 7012);
+    });
+
+    it('includes Sent and Archive while preserving ordinary all-search exclusions', () => {
+      expect(sortedIds(repo.search({ query: 'Mailboxproof', scope: 'mailbox' }))).toEqual(allowed);
+      const ordinary = sortedIds(repo.search({ query: 'Mailboxproof', scope: 'all' }));
+      expect(ordinary).not.toContain('mailbox-sent');
+      expect(ordinary).not.toContain('mailbox-standard-trash');
+      expect(ordinary).toContain('mailbox-archive');
+      // Existing scope:'all' remains tag-based, including its legacy custom-folder behavior.
+      expect(ordinary).toContain('mailbox-role-sent');
+      expect(ordinary).toContain('mailbox-role-drafts');
+    });
+
+    it('uses provider Drafts, Trash and Junk roles even without matching path tags', () => {
+      for (const folderId of ['f-role-drafts', 'f-role-trash', 'f-role-junk']) {
+        expect(repo.search({ query: 'Mailboxproof', scope: 'mailbox', threadIds: [`t-mailbox-${folderId.slice(2)}`] })).toEqual([]);
+      }
+      const matched = ids(repo.search({ query: 'Mailboxproof', scope: 'mailbox' }));
+      expect(matched).not.toContain('mailbox-role-drafts');
+      expect(matched).not.toContain('mailbox-role-trash');
+      expect(matched).not.toContain('mailbox-role-junk');
+      expect(matched).toContain('mailbox-role-sent');
+    });
+
+    it('excludes draft, deleted, outbox and queued flags independently of folder tags', () => {
+      const matched = ids(repo.search({ query: '', subject: 'Mailboxproof', scope: 'mailbox' }));
+      expect(matched.sort()).toEqual(allowed);
+      for (const flag of ['draft', 'deleted', 'outbox', 'queued']) {
+        expect(matched).not.toContain(`mailbox-${flag}-flag`);
+      }
+    });
+
+    it('keeps explicit Sent-folder, participant and attachment filters within mailbox scope', () => {
+      const query: SearchQuery = {
+        query: 'Mailboxproof', scope: 'mailbox', folderPath: 'Sent', to: 'procurement@tcs.example', hasAttachments: true,
+      };
+      expect(ids(repo.search(query))).toEqual(['mailbox-sent']);
+      expect(repo.count(query)).toBe(1);
+      expect(repo.search({ ...query, to: 'someone-else@tcs.example' })).toEqual([]);
+      expect(repo.search({ ...query, folderPath: 'Projects/ReviewHolding' })).toEqual([]);
+    });
+
+    it('search and count agree for text, filters, pagination and thread collapse', () => {
+      for (const query of [
+        { query: 'Mailboxproof', scope: 'mailbox' },
+        { query: '', scope: 'mailbox', subject: 'Mailboxproof' },
+        { query: 'Mailboxproof', scope: 'mailbox', collapseThreads: true },
+      ] satisfies SearchQuery[]) {
+        expect(sortedIds(repo.search(query))).toEqual(allowed);
+        expect(repo.count(query)).toBe(allowed.length);
+        expect(repo.search({ ...query, limit: 2, offset: 1 })).toHaveLength(2);
+        expect(repo.count({ ...query, limit: 2, offset: 1 })).toBe(allowed.length);
+      }
+    });
+
+    it('preserves the same mailbox scope and counts when the real FTS table is unavailable', () => {
+      const query: SearchQuery = { query: 'Mailboxproof', scope: 'mailbox' };
+      const expected = sortedIds(repo.search(query));
+      breakFtsIndex(db);
+      expect(sortedIds(repo.search(query))).toEqual(expected);
+      expect(repo.count(query)).toBe(expected.length);
+      expect(sortedIds(repo.search({ ...query, collapseThreads: true }))).toEqual(expected);
+      expect(repo.count({ ...query, collapseThreads: true })).toBe(expected.length);
+      expect(ids(repo.search({ ...query, folderPath: 'Sent' }))).toEqual(['mailbox-sent']);
+      expect(repo.count({ ...query, folderPath: 'Sent' })).toBe(1);
+      expect(repo.search({ ...query, folderPath: 'Quarantine/Filtered' })).toEqual([]);
+    });
+  });
+
   // ── combined filters ───────────────────────────────────────────────────────
   describe('combined filters', () => {
     it('ANDs every filter — a row matching only one of them is excluded', () => {

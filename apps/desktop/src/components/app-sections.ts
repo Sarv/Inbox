@@ -7,6 +7,7 @@
 // icon library to get at it.
 export const APP_SECTIONS = [
   'mail',
+  'assistant',
   'teams',
   'chat',
   'meet',

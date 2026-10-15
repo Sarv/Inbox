@@ -4,7 +4,7 @@ Date: 14 October 2026
 
 Updated: 15 October 2026 with the requirement to manage a local calendar and synchronize Google, Microsoft, Sarv and CalDAV calendars.
 
-Status: Proposed development plan. SarvInbox findings describe the current branch, including the committed Contacts, AI Dashboard and layout improvements. These commits are not a released version; the assistant and calendar phases below remain proposed work.
+Status: SarvInbox findings describe the current branch, including the committed Contacts, AI Dashboard and layout improvements. Phase 1 is now implemented locally and ready for the user acceptance test below. The remaining assistant and calendar phases are proposed work; these changes are not a released version.
 
 SarvInbox already has much of the basic email workflow. The largest useful additions are a conversational Inbox Assistant, reliable answers from sent mail and attachments, a connected calendar, and commands that act on every matching result. Build these on shared mail and calendar tools so the assistant, automatic drafter and normal UI use the same rules.
 
@@ -54,7 +54,7 @@ SarvInbox should preserve its own strengths: broad IMAP/SMTP compatibility, encr
 
 ## A clean experience for the user
 
-Keep **one AI entry**. Add an Assistant tab to the existing AI area while keeping Dashboard and the current configuration tabs. A global command palette opens a compact assistant panel from Mail, Contacts or Calendar. The same conversation can expand to the full page; it should not create another standalone Email Agent settings page.
+Keep **one AI configuration entry** with Dashboard and the current settings tabs. **Inbox Agent** is a separate workspace directly below Mail in the app rail. Its left sidebar uses the mail account selector design, a New conversation button and named saved chats. The center displays only the selected conversation. Activity and source emails open on the right; email sources reuse the normal mail reader, Thread/Chat views and message actions. A future global command palette can open this same assistant from Mail, Contacts or Calendar.
 
 The assistant shows selected accounts, the scope of the current task, source links and a small task-progress area. A follow-up such as “only last month” changes the current request visibly. Search answers, draft previews, calendar proposals and action review cards use consistent layouts.
 
@@ -169,7 +169,7 @@ Each phase should be independently reviewable and usable. Calendar adapter work 
 | Phase | Deliverable | Completion gate |
 | --- | --- | --- |
 | 0 | **Completed baseline.** Contacts, AI and layout improvements are committed separately, and the connected search limitations are recorded here. | Workspace type checks and lint pass; build and regression results are recorded in the development task. New assistant and calendar work starts from this baseline. |
-| 1 | **Ask your Inbox.** Assistant tab/panel, account scope, conversation history, full Sent/Archive/Inbox retrieval, company resolution, linked answers and bounded quotation-attachment extraction. | “What quote did I send to TCS?” works when the latest quote is only in a Sent attachment; revisions and unavailable accounts are shown correctly. No mutations in this first slice. |
+| 1 | **Ask your Inbox.** Inbox Agent workspace with named chats, account scope, conversation history, full Sent/Archive/Inbox retrieval, company resolution, linked answers, the shared source-email reader and bounded quotation-attachment extraction. | “What quote did I send to TCS?” works when the latest quote is only in a Sent attachment; revisions and unavailable accounts are shown correctly. Agent commands remain read-only; source emails retain the normal manually operated Mail controls. |
 | 2A | **Local calendar.** Encrypted event storage, local-only calendars, agenda/day/week/month views, create/edit/delete, reminders, import/export and local availability. | Manage appointments offline without a provider login; restart preserves edits, recurrence and timezone behavior. |
 | 2B | **Synchronization with all required services.** Google, Microsoft, CalDAV and Sarv adapters, independent connections, permissions, durable offline writes, conflict handling and sync status. | Create/edit/delete round-trips on each supported backend without duplicate events/invitations or broken mail authentication. Pending local work survives resync and permission failures. |
 | 2C | **Availability-aware drafts.** Busy-calendar selection, working hours, buffers/timezones and compose slot previews. Feed manual and automatic drafting through the same availability tool. | Local plus selected connected calendars → three verified 30-minute options in a draft. Stale/partial data never claims a time is free. |
@@ -177,6 +177,26 @@ Each phase should be independently reviewable and usable. Calendar adapter work 
 | 4 | **Meeting workflows and combined tasks.** Invitation/RSVP support across capable providers, organizer-aware cancellation, recurring meeting changes, explicit cross-provider copy/move and quote-follow-up/scheduling workflows. | Correct organizer/calendar identity, fresh conflict checks, exact invite/change previews, no duplicate events on retry, and preserved user draft edits. |
 | 5 | **Proactive assistance.** Account-complete auto-drafts, stale-draft updates, daily briefing, waiting-on replies, approved cleanup playbooks, meeting preparation, company timelines, knowledge sources, snippets and optional OCR. | Per-account controls and task history; feedback improves proposals without overwriting manual decisions. Closed-app execution limits are clear. |
 | Later | Team comments/assignment/shared drafts, CRM connectors, public booking links, external MCP, mobile/web clients and optional read analytics. | Separate product/infrastructure decisions, authenticated access and appropriate deployment/operating support. |
+
+### Phase 1 user acceptance test
+
+Inbox Agent is available from its icon **directly below Mail**. It searches selected accounts with a separate mailbox scope that includes Sent and Archive, hydrates message bodies, reads related supported attachments through the attachment security gate, and produces answers with validated source references. Named conversations stay in the encrypted app database, with a lightweight chat index and a separate blob for each conversation. Opening one chat loads only that chat; starting another preserves the previous chats and their independent context. Existing flat conversation history is migrated without removing its original backup.
+
+The conversation sidebar uses compact **Pinned** and **Recents** sections, with metadata on hover or keyboard focus. Pin and Delete actions appear beside the name; deletion requires confirmation and removes only that saved conversation. **Draft email** uses all turns in the selected conversation, including source excerpts and warnings. The user chooses the sending account and optional instructions, then reviews the generated email in the existing Mail composer. Draft generation never sends mail or adds source attachments automatically. Long conversations are summarized in complete groups before drafting; unsupported size or incomplete summary results fail explicitly instead of dropping earlier turns.
+
+1. Leave all accounts selected and ask **“What quote did I send to TCS?”**
+2. Check the quotation details and revision dates against the linked original messages. Open a message source in the right pane and verify its owning account, even when it is not the active inbox. The pane uses the same Thread/Chat reader and Reply/Forward controls as Mail.
+3. Open an attachment source and verify its filename and displayed page, paragraph, sheet/row or line reference. Text PDF, DOCX, XLSX, CSV, TSV and TXT files are supported.
+4. Ask several follow-ups, such as **“Which was the latest revision?”**, **“What changed?”** and **“Who received it?”** Reopen the app and verify that the saved conversation still supplies context. Narrow the account selection and verify that answers use only those accounts.
+5. Click the compact activity status to open the right sidebar. Follow account searches, missing-body downloads and attachment reading as they happen. Answers show the result and source links; coverage details and real failures are available in the sidebar without routine warning blocks.
+6. Try a matching message whose body has not been downloaded, then one with a quotation only in an attachment. The agent should fetch the required content automatically. Stop a running question and start another; old activity and late answers must not appear in the new run.
+7. Start a new conversation, rename it and switch back to the earlier chat. Verify that only the selected chat is displayed and each chat retains its own context. Reload and verify that the last selected chat and its name return.
+8. Pin and unpin a conversation from its name, reload, and verify its section. Cancel a Delete confirmation and verify all content remains. Delete only a disposable test conversation, then verify other chats and original emails remain available.
+9. Choose **Draft email**, select the sending account and describe the intended email. Verify details from early and later turns appear correctly, review recipients and content, and check that the composer displays the chosen From account. Switching chats or cancelling while generation runs must prevent a late draft from opening.
+
+Automated validation passed with 7,197 desktop tests, 320 connection/body-queue tests and 88 real SQLite search tests, plus workspace type checks, lint, and the production build. Coverage includes separate chat persistence and migration, lazy conversation loading, switching races, pinning and deletion, full-conversation draft generation, recipient validation, cancellation, and account ownership through the shared source-email reader and composer. The production attachment worker was also exercised with synthetic PDF, DOCX and XLSX quotations from an isolated packaged-style location. Tests used temporary mailboxes and mocked AI responses; real customer quotation accuracy remains part of this user acceptance test.
+
+This slice searches locally synchronized mail and related attachments, with bounded evidence per account. Scanned PDFs need future OCR; password-protected, unsupported, blocked or unavailable files are reported. Calendar work and mail-changing commands remain outside this feature until it passes the user test.
 
 ### Acceptance scenarios for the first releases
 

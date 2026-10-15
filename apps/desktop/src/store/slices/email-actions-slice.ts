@@ -689,6 +689,10 @@ export const createEmailActionsSlice: SliceCreator<EmailActionsSlice> = (set, ge
   // route to the right DB/engine. undefined for normal single-account views.
   _accountIdFor: (id: string): string | undefined => {
     const s = get();
+    // An embedded cited thread can belong to a different account whose IDs
+    // collide with the still-loaded inbox. The stamped reader owns its actions.
+    if (s.selectedEmailId && s.threadAccountId && s.threadEmails.some((row: any) => row.id === s.selectedEmailId)
+      && s.threadEmails.some((row: any) => row.id === id)) return s.threadAccountId;
     const e = resolveRowById(get, id);
     return e?.accountId ?? s.viewAccountId ?? undefined;
   },

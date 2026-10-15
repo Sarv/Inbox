@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createStore } from 'zustand/vanilla';
+
+import { createEmailActionsSlice } from '../../../../../src/store/slices/email-actions-slice';
+import { createSearchAISlice } from '../../../../../src/store/slices/search-ai-slice';
 
 const confirm = vi.hoisted(() => vi.fn());
 vi.mock('../../../../../src/store/confirm-service', () => ({ requestConfirm: confirm }));
@@ -42,8 +46,11 @@ const ids = (rows: any[]) => rows.map((email) => email.id);
 
 // Keep the real search pager and mutation actions together: the action
 // invalidates the cached count and the pager must reload rows and their total.
+// Import their production graph once at module initialization. Reloading it
+// inside each timed test charged a cold Vite transform queue to the first case
+// during a full run. Each fixture owns a fresh store; the public clearSearch()
+// action resets the pager's module-scoped query/context and request sequence.
 async function loadSlices() {
-  vi.resetModules();
   const unread = Array.from({ length: 53 }, (_, index) => row(`unread-${index}`));
   const starred = Array.from({ length: 31 }, (_, index) => row(`starred-${index}`, { isUnread: false, isFlagged: true }));
   let backend = [...unread, ...starred];
@@ -69,11 +76,6 @@ async function loadSlices() {
     alert: vi.fn(),
     electronAPI: { ai: { search: searchPage, searchCount }, emails: { bulkAction } },
   });
-  const [{ createStore }, { createSearchAISlice }, { createEmailActionsSlice }] = await Promise.all([
-    import('zustand/vanilla'),
-    import('../../../../../src/store/slices/search-ai-slice'),
-    import('../../../../../src/store/slices/email-actions-slice'),
-  ]);
   const store = createStore<any>((set, get, api) => ({
     ...createSearchAISlice(set, get, api),
     ...createEmailActionsSlice(set, get, api),
@@ -87,6 +89,7 @@ async function loadSlices() {
     loadFolders: vi.fn(async () => {}), refreshUnreadSummary: vi.fn(async () => {}),
     goToEmailPage: vi.fn(async () => {}),
   }));
+  store.getState().clearSearch();
   return { get: store.getState, set: store.setState, unread, starred, searchPage, searchCount, bulkAction, persistRead };
 }
 

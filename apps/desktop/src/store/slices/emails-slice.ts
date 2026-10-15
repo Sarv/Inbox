@@ -1005,6 +1005,8 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
 
   loadThread: async (threadId) => {
     const seq = ++threadLoadSeq;
+    const selectedAtStart = get().selectedEmailId;
+    const ownerAtStart = get().viewAccountId ?? get().activeAccountId ?? null;
     set({ loadingThread: true });
     try {
       // Unified view: read the thread from the open email's own account DB.
@@ -1012,7 +1014,8 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
       const result = await window.electronAPI.emails.getThread(threadId, accountId);
       // A newer loadThread (or a newer selection) began while we awaited —
       // discard this stale result so it can't overwrite the current thread.
-      if (seq !== threadLoadSeq) return;
+      if (seq !== threadLoadSeq || get().selectedEmailId !== selectedAtStart
+        || (get().viewAccountId ?? get().activeAccountId ?? null) !== ownerAtStart) return;
       if (result.success && result.data) {
         // Belt-and-suspenders (backend getByThread already excludes these):
         // drop trashed/junked copies — by the SAME folder list the membership
@@ -1497,7 +1500,11 @@ export const createEmailsSlice: SliceCreator<EmailsSlice> = (set, get) => ({
   // selectEmail only loads a thread whose email is in the visible list; a
   // follow-up's sent message usually isn't, so this goes by thread id.
   openThread: (emailId, threadId, accountId) => {
-    const sameThread = get().threadEmails[0]?.threadId === threadId;
+    const current = get();
+    const loadedOwner = current.threadAccountId ?? current.threadEmails[0]?.accountId
+      ?? current.viewAccountId ?? current.activeAccountId ?? null;
+    const sameThread = current.threadEmails[0]?.threadId === threadId
+      && loadedOwner === (accountId ?? current.activeAccountId ?? null);
     set({
       selectedEmailId: emailId,
       manuallyMarkedUnreadId: null,

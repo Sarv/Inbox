@@ -31,6 +31,7 @@ import { composeAiTurns, firstEmailFacts } from '../ai-view-compose';
 import { polishEntriesOf, threadTurns } from '../chat-message-adapter';
 import { chatViewRulesFor } from '../chat-view-rules';
 import { composerDraftFor, type ComposerSeed } from '../composer-target';
+import { readerCurrentUserEmail, readerFolderFlags, type EmailReaderOptions } from '../reader-options';
 import type { EmailDetailContext } from '../types';
 import {
   getInitials,
@@ -105,7 +106,7 @@ function focusComposerWhenMounted(
   later(() => tryFocus(0), 100);
 }
 
-export function useEmailDetail(): EmailDetailContext | null {
+export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailContext | null {
   const {
     emails,
     folders,
@@ -140,6 +141,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     restoreDraft,
     clearRestoreDraft,
     threadAccountId,
+    accounts,
   } = useEmailStore();
 
   // Where this account's drafts and sent copies live (provider paths such as
@@ -241,7 +243,7 @@ export function useEmailDetail(): EmailDetailContext | null {
 
   // Check emails, searchResults, and threadEmails for the selected email
   // (Falling back to threadEmails prevents the UI from unmounting if a background sync replaces the active `emails` array)
-  const selectedEmail = emails.find((e) => e.id === selectedEmailId)
+  const selectedEmail = options.threadOnly ? threadEmails.find((e) => e.id === selectedEmailId) : emails.find((e) => e.id === selectedEmailId)
     || (searchQuery ? searchResults.find((e) => e.id === selectedEmailId) : undefined)
     || threadEmails.find((e) => e.id === selectedEmailId);
 
@@ -954,8 +956,8 @@ export function useEmailDetail(): EmailDetailContext | null {
   // a single email (its facts split it anyway — the same cached segments),
   // the chat on screen, or a reply/forward open.
   const currentUserEmail = useMemo(
-    () => getCurrentUserEmail(displayEmail?.toAddress || ''),
-    [displayEmail?.toAddress],
+    () => readerCurrentUserEmail({ threadOnly: options.threadOnly, threadAccountId, accounts, fallback: getCurrentUserEmail(displayEmail?.toAddress || '') }),
+    [options.threadOnly, threadAccountId, accounts, displayEmail?.toAddress],
   );
   const composerOpen = (showInlineReply && !!replyingToEmail) || (showInlineForward && !!forwardingEmail);
   const wantStandard = threadEmails.length > 0
@@ -1013,8 +1015,8 @@ export function useEmailDetail(): EmailDetailContext | null {
     );
   }, [navigationThreads, selectedEmailId]);
 
-  const hasNextEmail = currentThreadIndex >= 0 && currentThreadIndex < navigationThreads.length - 1;
-  const hasPreviousEmail = currentThreadIndex > 0;
+  const hasNextEmail = !options.threadOnly && currentThreadIndex >= 0 && currentThreadIndex < navigationThreads.length - 1;
+  const hasPreviousEmail = !options.threadOnly && currentThreadIndex > 0;
 
   const handleNextEmail = () => {
     if (!hasNextEmail) return;
@@ -1105,9 +1107,7 @@ export function useEmailDetail(): EmailDetailContext | null {
 
   // Detect if viewing Trash or Spam folder
   const selectedFolder = selectedFolderId ? folders.find((f: any) => f.id === selectedFolderId) : null;
-  const folderPath = selectedFolder?.path?.toLowerCase() || '';
-  const isInTrash = !!selectedFolder && classifyFolder(selectedFolder) === 'trash';
-  const isInSpam = folderPath.includes('spam') || folderPath.includes('junk') || (selectedFolder as any)?.specialUse === '\\Junk';
+  const { isInTrash, isInSpam } = readerFolderFlags({ threadOnly: options.threadOnly, tags: displayEmail.tags, selectedFolder });
 
   const attachments = parseAttachments(displayEmail.attachmentNames, displayEmail.attachmentSizes)
     .map((a) => ({
@@ -1116,6 +1116,7 @@ export function useEmailDetail(): EmailDetailContext | null {
     }));
 
   const handleBack = () => {
+    if (options.onBack) { options.onBack(); return; }
     clearSelectedEmail();
   };
 
@@ -1572,8 +1573,8 @@ export function useEmailDetail(): EmailDetailContext | null {
     loadingThread,
     loadingBodies,
     failedBodies,
-    viewingAICategory,
-    aiBoxActiveTab,
+    viewingAICategory: options.threadOnly ? null : viewingAICategory,
+    aiBoxActiveTab: options.threadOnly ? null : aiBoxActiveTab,
     selectedEmail,
     displayEmail,
     isStandaloneDraft,
@@ -1652,8 +1653,8 @@ export function useEmailDetail(): EmailDetailContext | null {
     handlePreviousEmail,
     hasNextEmail,
     hasPreviousEmail,
-    currentEmailPosition: currentThreadIndex + 1,
-    totalEmailCount: getNavigationTotalCount(),
+    currentEmailPosition: options.threadOnly ? 1 : currentThreadIndex + 1,
+    totalEmailCount: options.threadOnly ? 1 : getNavigationTotalCount(),
     markAsRead,
     deleteEmail,
     archiveEmail,

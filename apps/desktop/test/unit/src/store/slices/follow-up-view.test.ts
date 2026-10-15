@@ -64,6 +64,26 @@ describe('openThread', () => {
     expect(h.state.viewAccountId).toBeNull();
   });
 
+  it('keeps an unstamped loaded thread when its row belongs to the requested account', () => {
+    const open = [{ threadId: 't1', accountId: 'acct-b' }];
+    const h = harness({ threadEmails: open });
+    h.slice.openThread('sent-1', 't1', 'acct-b');
+    expect(h.state.threadEmails).toBe(open);
+    expect(h.state.viewAccountId).toBe('acct-b');
+  });
+
+  it('drops colliding thread IDs whose loaded rows or account stamp belong to another account', () => {
+    for (const ownership of [
+      { threadEmails: [{ threadId: 't1', accountId: 'acct-b' }] },
+      { threadEmails: [{ threadId: 't1' }], threadAccountId: 'acct-b' },
+    ]) {
+      const h = harness(ownership);
+      h.slice.openThread('sent-1', 't1', 'acct-a');
+      expect(h.state.threadEmails).toEqual([]);
+      expect(h.state.pendingThreadEmailIds).toEqual([]);
+    }
+  });
+
   // A reminder on a background account reads that account's DB.
   it('routes to the reminder\'s account when it is not the active one', () => {
     const h = harness();

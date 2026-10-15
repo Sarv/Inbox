@@ -14,6 +14,10 @@ describe('extension panel mailbox context', () => {
   it('uses the All Inboxes row owner while its thread is still loading', () => {
     expect(panelMessageAccount({ ...state(), emails: [row('chosen', 'row-account')], threadAccountId: 'stale-account' })).toBe('row-account');
   });
+  it('keeps an active-account cited thread ahead of an equal-ID row from another unified mailbox', () => {
+    expect(panelMessageAccount({ ...state(), emails: [row('chosen', 'other-account')],
+      threadEmails: [row('chosen')], threadAccountId: 'active-account' })).toBe('active-account');
+  });
   it('uses the loaded thread owner only if that thread contains the selected message', () => {
     expect(panelMessageAccount({ ...state(), threadEmails: [row('chosen')], threadAccountId: 'thread-account' })).toBe('thread-account');
     expect(panelMessageAccount({ ...state(), threadEmails: [row('old-message')], threadAccountId: 'stale-account' })).toBe('active-account');

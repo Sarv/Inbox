@@ -1,10 +1,11 @@
-import { BellDot, Check, ChevronDown, Plus } from 'lucide-react';
+import { BellDot, Check, Plus } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useEmailStore } from '../store/email-store';
 import { accountHost, isAccountEmailDuplicated } from '../store/helpers';
 
+import { AccountSelectorTrigger } from './AccountSelectorTrigger';
 import { Tooltip } from './Tooltip';
 
 /** Sidebar account switcher: shows the active account, lists the others, and
@@ -46,31 +47,24 @@ export function AccountSwitcher() {
   return (
     <div className="px-3 pt-3" ref={ref}>
       <div className="relative">
-        <button
+        <AccountSelectorTrigger
           onClick={() => setOpen((o) => !o)}
-          className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md border border-border hover:bg-accent/50 text-left transition-colors"
           title="Switch account"
-        >
-          <span
+          expanded={open}
+          label={active?.email ?? 'Account'}
+          secondaryLabel={active && isDupEmail(active) ? hostOf(active) : undefined}
+          avatar={<span
             className="h-6 w-6 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 text-white"
             style={{ backgroundColor: active?.color ?? '#2563eb' }}
           >
             {(active?.email?.[0] || '?').toUpperCase()}
-          </span>
-          <span className="flex-1 min-w-0">
-            <span className="block truncate text-sm">{active?.email ?? 'Account'}</span>
-            {active && isDupEmail(active) && (
-              <span className="block truncate text-[11px] text-muted-foreground">{hostOf(active)}</span>
-            )}
-          </span>
-          {/* Unread on another account — visible even while collapsed. */}
-          {hasOtherUnread && (
+          </span>}
+          indicator={hasOtherUnread ? (
             <Tooltip content="Unread mail in another account" delayMs={40}>
               <BellDot className="h-4 w-4 text-[#e56910] shrink-0" aria-label="Unread mail in another account" />
             </Tooltip>
-          )}
-          <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-        </button>
+          ) : undefined}
+        />
 
         {open && (
           <div className="absolute left-0 right-0 z-30 mt-1 rounded-md border border-border bg-background shadow-lg p-1">

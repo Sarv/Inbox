@@ -14,6 +14,7 @@ interface UseKeyboardShortcutsOptions {
   setActiveSection: (section: AppSection) => void;
   focusSearch: () => void;
   enabled?: boolean;
+  allowListNavigation?: boolean;
 }
 
 // Next/prev-email navigation always opens a different thread and thus triggers
@@ -55,6 +56,10 @@ function getSelectedEmail() {
   const state = useEmailStore.getState();
   const { emails, searchResults, searchQuery } = state;
   const activeId = getActiveEmailId();
+  if (state.threadAccountId && activeId) {
+    const owned = state.threadEmails.find(email => email.id === activeId);
+    if (owned) return owned;
+  }
   const pool = searchQuery ? searchResults : emails;
   const email = activeId ? pool.find(e => e.id === activeId) : null;
   return email ?? null;
@@ -98,7 +103,7 @@ function buildComposePayload(email: ReturnType<typeof getSelectedEmail>) {
   };
 }
 
-export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = true }: UseKeyboardShortcutsOptions) {
+export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = true, allowListNavigation = true }: UseKeyboardShortcutsOptions) {
   const gotoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waitingForGotoRef = useRef(false);
 
@@ -224,6 +229,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
     };
 
     const handleNavigation = async (direction: 1 | -1) => {
+      if (!allowListNavigation) return;
       const store = useEmailStore.getState();
       const threads = store.getNavigationThreads();
       if (threads.length === 0) return;
@@ -328,6 +334,11 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
 
     const handleAction = (action: ShortcutAction) => {
       const store = useEmailStore.getState();
+      // The embedded reader can be resolving a citation while the background
+      // inbox still has a highlighted row. Shortcuts must wait for its owned
+      // thread rather than acting on that unrelated mailbox selection.
+      if (!allowListNavigation && (!store.selectedEmailId || !store.threadAccountId
+        || !store.threadEmails.some(email => email.id === store.selectedEmailId))) return;
 
       switch (action) {
         case 'MOVE_DOWN':
@@ -353,6 +364,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
           break;
 
         case 'OPEN_THREAD': {
+          if (!allowListNavigation) break;
           if (store.selectedEmailId) {
             // Already viewing detail — no-op
           } else {
@@ -379,6 +391,8 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
           // Close compose > clear search > deselect > go to inbox
           if (store.compose.isOpen) {
             store.closeCompose();
+          } else if (!allowListNavigation && store.selectedEmailId) {
+            store.clearSelectedEmail();
           } else if (store.searchQuery) {
             store.clearSearch?.();
           } else if (store.selectedEmailId) {
@@ -569,5 +583,5 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
       document.removeEventListener('keydown', handleKeyDown);
       if (gotoTimerRef.current) clearTimeout(gotoTimerRef.current);
     };
-  }, [setActiveSection, focusSearch, enabled]);
+  }, [setActiveSection, focusSearch, enabled, allowListNavigation]);
 }

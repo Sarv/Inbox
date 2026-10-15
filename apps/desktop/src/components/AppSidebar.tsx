@@ -1,5 +1,6 @@
 import {
   Mail,
+  Bot,
   Contact,
   Settings,
   ChevronRight,
@@ -22,6 +23,7 @@ interface AppSidebarProps {
 
 const menuItems: { id: AppSection; icon: typeof Mail; label: string }[] = [
   { id: 'mail', icon: Mail, label: 'Mail' },
+  { id: 'assistant', icon: Bot, label: 'Inbox Agent' },
   { id: 'contacts', icon: Contact, label: 'Contacts' },
 ];
 
@@ -76,6 +78,7 @@ export function AppSidebar({ activeSection, onSectionChange }: AppSidebarProps) 
                   : 'text-muted-foreground hover:bg-accent hover:text-foreground'
               }`}
               title={!isExpanded ? item.label : undefined}
+              aria-label={item.label}
             >
               {/* Active indicator */}
               {isActive && (

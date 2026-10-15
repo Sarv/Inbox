@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { useEmailStore } from '../../store/email-store';
 import { EmailDetail } from '../email-detail';
+import type { EmailReaderOptions } from '../email-detail/reader-options';
 import { Tooltip } from '../Tooltip';
 
 import { ExtensionPanelModal } from './ExtensionPanelModal';
@@ -26,7 +27,7 @@ import { panelsForSurface, useExtensionPanels } from './useExtensionPanels';
  * enabled extension was granted `ui:panel` and contributes a panel, this
  * renders `EmailDetail` alone and costs nothing.
  */
-export function MailDetailWithPanels() {
+export function MailDetailWithPanels(options: EmailReaderOptions = {}) {
   const selectedEmailId = useEmailStore((state) => state.selectedEmailId);
   const currentAccountId = useEmailStore(panelMessageAccount);
   const { panels } = useExtensionPanels();
@@ -77,14 +78,14 @@ export function MailDetailWithPanels() {
 
   const hasPanels = sidebarPanels.length > 0 || modalPanels.length > 0;
   if (!selectedEmailId || !hasPanels) {
-    return <EmailDetail />;
+    return <EmailDetail {...options} />;
   }
 
   const currentMessageId = selectedEmailId;
 
   return (
     <div className="flex flex-1 h-full min-w-0 overflow-hidden">
-      <EmailDetail />
+      <EmailDetail {...options} />
 
       {open && sidebarPanels.length > 0 && (
         <ExtensionPanelSidebar

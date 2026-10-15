@@ -81,10 +81,10 @@ export function AISettings({ initialTab, tabRequestId, onDirtyChange, onNavigate
   };
 
   return (
-    <div className="flex-1 min-w-0 w-full h-full overflow-hidden bg-background">
-      <div className="min-w-0 h-full flex flex-col">
+    <div className="flex-1 min-h-0 min-w-0 w-full h-full overflow-hidden bg-background">
+      <div className="min-h-0 min-w-0 h-full flex flex-col">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+        <div className="shrink-0 px-6 py-4 border-b border-border flex items-center justify-between">
           <h1 className="text-2xl font-semibold">AI</h1>
           {/* The header Save button only drives the Categorization tab (the one
               wired to updateSetting/localStorage). Every other tab self-saves
@@ -113,7 +113,7 @@ export function AISettings({ initialTab, tabRequestId, onDirtyChange, onNavigate
         </div>
 
         {/* Tabs */}
-        <div className="px-6 border-b border-border">
+        <div className="shrink-0 px-6 border-b border-border">
           <div className="flex gap-1 overflow-x-auto">
             {tabs.map((tab) => (
               <button
@@ -132,7 +132,7 @@ export function AISettings({ initialTab, tabRequestId, onDirtyChange, onNavigate
         </div>
 
         {/* Content */}
-        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-6">
+        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto px-6 py-6">
           {activeTab === 'dashboard' && (
             <div className="w-full min-w-0 space-y-8">
               <AIBoxDashboard onNavigateToCategory={onNavigateToCategory} />

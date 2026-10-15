@@ -633,6 +633,11 @@ export class SyncEngine {
     return this.connectionManager.ensureConnection();
   }
 
+  /** Distinguish a fresh runtime from an existing connection that must honor its retry/auth state. */
+  hasConnectionConfig(): boolean {
+    return this.connectionManager.imapConfig !== null;
+  }
+
   /**
    * Probe whether the current connection answers a NOOP (liveness), without
    * triggering the reconnect ladder. Callers use this to avoid a needless
