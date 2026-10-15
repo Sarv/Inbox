@@ -66,3 +66,4 @@ export {
 // renderer) get it from this module rather than re-declaring it — an inlined
 // duplicate is exactly how the two copies drifted apart before.
 export type { ContactEnrichment } from '../types/models';
+export { CONTACT_ENRICHMENT_REVIEW_VERSION, isIncompleteContactProfile, type ContactEnrichmentReview } from './review-state';

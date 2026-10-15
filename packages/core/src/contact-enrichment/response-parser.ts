@@ -5,7 +5,14 @@
  * so the caller can just trust the return value.
  */
 
+import { findPhoneNumbersInText } from 'libphonenumber-js';
+
 import type { ContactEnrichment } from '../types/models';
+
+import { contactLinkKind, normalizeContactUrl } from './contact-links';
+import { PUBLIC_DOMAINS } from './phone-classifier';
+import { normalizePhoneToE164 } from './phone-normalizer';
+import type { ExtractedSignals } from './signal-extractor';
 
 export class EnrichmentParseError extends Error {
   constructor(message: string, readonly raw: string) {
@@ -88,10 +95,7 @@ function asStr(v: unknown): string | null {
 function asUrl(v: unknown): string | null {
   const s = asStr(v);
   if (!s) return null;
-  // Accept bare domain or full URL; normalize to include protocol.
-  if (/^https?:\/\//i.test(s)) return s;
-  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(s)) return `https://${s}`;
-  return s;
+  return normalizeContactUrl(s);
 }
 
 function asOtherSocials(v: unknown): Array<{ platform: string; url: string }> {
@@ -109,7 +113,7 @@ function asOtherSocials(v: unknown): Array<{ platform: string; url: string }> {
 // Never throw out of the parser — a single unparseable LLM response must
 // not crash the enrichment run. On any failure (empty, invalid JSON, non-
 // object) we return null and let the caller record it as a soft failure.
-export function parseEnrichmentResponse(raw: string): ContactEnrichment | null {
+export function parseEnrichmentResponse(raw: string, evidence?: ExtractedSignals): ContactEnrichment | null {
   if (!raw || !raw.trim()) return null;
   const body = isolateJsonObject(raw);
   let data: any;
@@ -120,7 +124,11 @@ export function parseEnrichmentResponse(raw: string): ContactEnrichment | null {
   }
   if (!data || typeof data !== 'object') return null;
 
-  return {
+  const linkedin = asUrl(data.linkedinUrl);
+  const companyLinkedin = asUrl(data.companyLinkedinUrl);
+  const twitter = asUrl(data.twitterUrl);
+  const github = asUrl(data.githubUrl);
+  const enrichment: ContactEnrichment = {
     fullName: asStr(data.fullName),
     designation: asStr(data.designation),
     department: asStr(data.department),
@@ -128,9 +136,10 @@ export function parseEnrichmentResponse(raw: string): ContactEnrichment | null {
     companyDomain: asStr(data.companyDomain)?.toLowerCase() || null,
     companyWebsite: asUrl(data.companyWebsite),
     companyAddress: asStr(data.companyAddress),
-    linkedinUrl: asUrl(data.linkedinUrl),
-    twitterUrl: asUrl(data.twitterUrl),
-    githubUrl: asUrl(data.githubUrl),
+    linkedinUrl: linkedin && contactLinkKind(linkedin) === 'linkedinPersonal' ? linkedin : null,
+    companyLinkedinUrl: companyLinkedin && contactLinkKind(companyLinkedin) === 'linkedinCompany' ? companyLinkedin : linkedin && contactLinkKind(linkedin) === 'linkedinCompany' ? linkedin : null,
+    twitterUrl: twitter && contactLinkKind(twitter) === 'twitter' ? twitter : null,
+    githubUrl: github && contactLinkKind(github) === 'github' ? github : null,
     personalPhone: asStr(data.personalPhone),
     companyPhone: asStr(data.companyPhone),
     whatsappNumber: asStr(data.whatsappNumber),
@@ -140,4 +149,28 @@ export function parseEnrichmentResponse(raw: string): ContactEnrichment | null {
     otherSocials: asOtherSocials(data.otherSocials),
     notes: asStr(data.notes),
   };
+  if (!evidence) return enrichment;
+
+  const block = evidence.signatureBlock || '';
+  const comparable = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const source = comparable(block);
+  const supported = (value: string | null | undefined) => !!value && !!source && source.includes(comparable(value));
+  const textFields = ['fullName', 'designation', 'department', 'companyName', 'companyAddress', 'location', 'pronouns', 'personalEmail', 'notes'] as const;
+  for (const key of textFields) if (!supported(enrichment[key])) enrichment[key] = null;
+  const urlEvidence = new Set(evidence.urls.map(normalizeContactUrl).filter((url): url is string => !!url));
+  const urlFields = ['companyWebsite', 'linkedinUrl', 'companyLinkedinUrl', 'twitterUrl', 'githubUrl'] as const;
+  for (const key of urlFields) {
+    const value = enrichment[key];
+    const isObservedRoot = key === 'companyWebsite' && value && [...urlEvidence].some(url => new URL(url).origin === value);
+    if (!value || (!urlEvidence.has(value) && !isObservedRoot)) enrichment[key] = null;
+  }
+  enrichment.otherSocials = enrichment.otherSocials?.filter(item => urlEvidence.has(item.url)) ?? [];
+  const domain = enrichment.companyDomain;
+  if (!domain || PUBLIC_DOMAINS.has(domain) || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) || !supported(domain)) enrichment.companyDomain = null;
+  const phones = new Set(findPhoneNumbersInText(block, 'IN').map(match => match.number.number as string));
+  for (const key of ['personalPhone', 'companyPhone', 'whatsappNumber'] as const) {
+    const normalized = enrichment[key] && normalizePhoneToE164(enrichment[key]);
+    if (!normalized || !phones.has(normalized)) enrichment[key] = null;
+  }
+  return enrichment;
 }

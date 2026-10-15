@@ -480,6 +480,7 @@ export interface ContactEnrichment {
   companyWebsite?: string | null;
   companyAddress?: string | null;
   linkedinUrl?: string | null;
+  companyLinkedinUrl?: string | null;
   twitterUrl?: string | null;
   githubUrl?: string | null;
   personalPhone?: string | null;

@@ -21,19 +21,25 @@ import {
   reportContactEnrichmentProgress,
   reportBatchDone,
   triggerEnrichmentNow,
+  setEnrichmentRendererReady,
 } from '../services/contact-enrichment-scheduler';
 
 export function registerContactEnrichmentHandlers(): void {
   ipcMain.handle(
     'contact-enrichment:report-progress',
-    async (_event, payload: { contactId: string; ok: boolean; reason?: string | null }) => {
+    async (_event, payload: { contactId: string; ok: boolean; reason?: string | null; batchId?: string }) => {
       reportContactEnrichmentProgress(payload);
       return { success: true };
     },
   );
 
-  ipcMain.handle('contact-enrichment:report-batch-done', async () => {
-    reportBatchDone();
+  ipcMain.handle('contact-enrichment:report-batch-done', async (_event, payload?: { batchId?: string; continue?: boolean }) => {
+    reportBatchDone(payload);
+    return { success: true };
+  });
+
+  ipcMain.handle('contact-enrichment:set-ready', async (_event, ready: boolean, sessionId?: string, providerRevision?: string) => {
+    setEnrichmentRendererReady(ready === true, sessionId, providerRevision);
     return { success: true };
   });
 

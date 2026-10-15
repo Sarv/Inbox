@@ -1,3 +1,4 @@
+import type { ContactEnrichment } from '@sarvinbox/core';
 import {
   Search,
   User,
@@ -8,8 +9,6 @@ import {
   Loader2,
   ChevronLeft,
   ChevronRight,
-  Phone,
-  Building,
   Calendar,
   Send,
   Inbox,
@@ -22,41 +21,16 @@ import {
   X,
   StickyNote,
   Sparkles,
-  Linkedin,
-  Twitter,
-  Github,
-  Globe,
-  Briefcase,
-  MapPin,
-  ExternalLink,
 } from 'lucide-react';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 import { enrichContact } from '../services/contact-enrichment-service';
 
 import { Avatar } from './Avatar';
-import { contactPhoneView, formatPhone } from './contact-phone-view';
+import { contactDisplayName, contactProfileCoverage } from './contacts/contact-profile';
+import { ContactProfile } from './contacts/ContactProfile';
+import { EnrichmentStatus } from './contacts/EnrichmentStatus';
 import { Tooltip } from './Tooltip';
-
-interface ContactEnrichmentView {
-  designation?: string | null;
-  department?: string | null;
-  companyName?: string | null;
-  companyDomain?: string | null;
-  companyWebsite?: string | null;
-  companyAddress?: string | null;
-  linkedinUrl?: string | null;
-  twitterUrl?: string | null;
-  githubUrl?: string | null;
-  personalPhone?: string | null;
-  companyPhone?: string | null;
-  whatsappNumber?: string | null;
-  personalEmail?: string | null;
-  location?: string | null;
-  pronouns?: string | null;
-  otherSocials?: Array<{ platform: string; url: string }>;
-  notes?: string | null;
-}
 
 interface Contact {
   id: string;
@@ -87,7 +61,7 @@ interface Contact {
   personId?: string | null;
   companyContactId?: string | null;
   mobileE164?: string | null;
-  enrichment?: ContactEnrichmentView | null;
+  enrichment?: ContactEnrichment | null;
   enrichedThroughEmailAt?: number | null;
   enrichmentSource?: 'llm' | 'user' | null;
 }
@@ -112,7 +86,7 @@ const CONTACT_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'recruiter', label: 'Recruiter' },
   { value: 'newsletter', label: 'Newsletter' },
   { value: 'automated', label: 'Automated' },
-  { value: 'unknown', label: 'Unknown' },
+  { value: 'unknown', label: 'Unclassified' },
 ];
 
 function contactTypeLabel(t: string | null | undefined): string {
@@ -122,19 +96,7 @@ function contactTypeLabel(t: string | null | undefined): string {
 
 const PAGE_SIZE = 50;
 
-// Capitalize first letter of each word
-const capitalizeWords = (str: string): string => {
-  return str
-    .split(/[\s]+/)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
-};
-
-// Format contact display name with proper capitalization
-const formatDisplayName = (contact: { displayName: string | null; name: string | null; email: string }): string => {
-  const name = contact.displayName || contact.name || contact.email.split('@')[0];
-  return capitalizeWords(name);
-};
+const formatDisplayName = contactDisplayName;
 
 /**
  * Percentage of num/den, rounded and clamped to [0, 100]. Guards against a zero
@@ -173,8 +135,13 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
   const [enriching, setEnriching] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   const [relatedContacts, setRelatedContacts] = useState<Contact[]>([]);
+  const [contactsRevision, setContactsRevision] = useState(0);
+  const listRequest = useRef(0);
+  const selectedContactId = useRef<string | null>(null);
+  selectedContactId.current = selectedContact?.id ?? null;
 
   const loadContacts = useCallback(async () => {
+    const request = ++listRequest.current;
     setLoading(true);
     try {
       const result = await window.electronAPI.contacts.list({
@@ -186,19 +153,24 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
         contactType: typeFilter || undefined,
       });
 
+      if (request !== listRequest.current) return;
       if (result.success && result.data) {
+        const lastPage = Math.max(0, Math.ceil(result.data.total / PAGE_SIZE) - 1);
+        if (page > lastPage) { setPage(lastPage); return; }
         setContacts(result.data.contacts);
         setTotal(result.data.total);
+        setContactsRevision((version) => version + 1);
       }
     } catch (error) {
       console.error('Failed to load contacts:', error);
     } finally {
-      setLoading(false);
+      if (request === listRequest.current) setLoading(false);
     }
   }, [page, searchQuery, sortBy, sortOrder, typeFilter]);
 
   useEffect(() => {
     loadContacts();
+    return () => { listRequest.current++; };
   }, [loadContacts]);
 
   // Listen for sidebar "Contacts" icon clicks — even when already on the
@@ -211,35 +183,51 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
 
   // Refresh the list live when a contact gets enriched (name/company/phone).
   useEffect(() => {
-    const handler = () => { void loadContacts(); };
+    const handler = (event: Event) => {
+      void loadContacts();
+      const contactId = (event as CustomEvent<{ contactId?: string }>).detail?.contactId;
+      if (!selectedContact || (contactId && contactId !== selectedContact.id)) return;
+      const id = selectedContact.id;
+      void window.electronAPI.contacts.get(id).then((result) => {
+        if (result?.success && result.data) {
+          setSelectedContact((current) => current?.id === id ? result.data : current);
+        }
+      }).catch(() => {});
+    };
     document.addEventListener('sarvinbox:contact-enriched', handler);
     return () => document.removeEventListener('sarvinbox:contact-enriched', handler);
-  }, [loadContacts]);
+  }, [loadContacts, selectedContact?.id]);
 
   // Background avatar discovery found candidate photo(s) → refresh the list and
   // the open contact so the "use this photo?" prompt appears without a reload.
   useEffect(() => {
-    const off = window.electronAPI.contacts.onAvatarsUpdated?.(() => {
+    const refresh = () => {
       void loadContacts();
-      setSelectedContact((prev) => {
-        if (!prev) return prev;
-        window.electronAPI.contacts.get(prev.id).then((res) => {
-          if (res?.success && res.data) setSelectedContact(res.data);
-        }).catch(() => {});
-        return prev;
-      });
-    });
-    return () => { off?.(); };
+      const id = selectedContactId.current;
+      if (!id) return;
+      void window.electronAPI.contacts.get(id).then((res) => {
+        if (res?.success && res.data) setSelectedContact((current) => current?.id === id ? res.data : current);
+      }).catch(() => {});
+    };
+    const off = window.electronAPI.contacts.onAvatarsUpdated?.(refresh);
+    const offUpdated = window.electronAPI.contacts.onUpdated?.(refresh);
+    return () => { off?.(); offUpdated?.(); };
   }, [loadContacts]);
 
   // Fetch sender stats when a contact is selected
   useEffect(() => {
+    let cancelled = false;
+    setSenderStats(null);
+    setNotes([]);
+    setEnrichError(null);
+    setNewNote('');
+    setEditingNoteId(null);
+    setEditingNoteText('');
     if (!selectedContact) {
-      setSenderStats(null);
-      setNotes([]);
       return;
     }
     window.electronAPI.sender.getStats(selectedContact.email).then((result) => {
+      if (cancelled) return;
       if (result.success && result.data) {
         setSenderStats({
           receivedCount: result.data.receivedCount || 0,
@@ -253,24 +241,26 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
       } else {
         setSenderStats(null);
       }
-    }).catch(() => setSenderStats(null));
+    }).catch(() => { if (!cancelled) setSenderStats(null); });
     // Load agent-maintained memory notes for this contact (fed into the
     // LLM prompt on every categorization of their new emails).
     const anyApi = (window as any).electronAPI;
     anyApi.agent?.getNotes?.(selectedContact.email, 100).then((res: any) => {
+      if (cancelled) return;
       if (res?.success && Array.isArray(res.data)) {
         setNotes(res.data);
       } else {
         setNotes([]);
       }
-    }).catch(() => setNotes([]));
+    }).catch(() => { if (!cancelled) setNotes([]); });
+    return () => { cancelled = true; };
   }, [selectedContact?.id, selectedContact?.email]);
 
   const refreshNotes = useCallback(async () => {
     if (!selectedContact) return;
     const anyApi = (window as any).electronAPI;
     const res = await anyApi.agent?.getNotes?.(selectedContact.email, 100);
-    if (res?.success && Array.isArray(res.data)) setNotes(res.data);
+    if (selectedContactId.current === selectedContact.id && res?.success && Array.isArray(res.data)) setNotes(res.data);
   }, [selectedContact?.email]);
 
   const handleAddNote = async () => {
@@ -306,6 +296,8 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
   // Load the "also known as" list whenever selection changes. Same
   // person_id = same human across different employer emails.
   useEffect(() => {
+    let cancelled = false;
+    setRelatedContacts([]);
     if (!selectedContact) {
       setRelatedContacts([]);
       setEnrichError(null);
@@ -313,41 +305,49 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
     }
     const anyApi = (window as any).electronAPI;
     anyApi.contacts?.getRelatedByPerson?.(selectedContact.id).then((res: any) => {
+      if (cancelled) return;
       if (res?.success && Array.isArray(res.data)) setRelatedContacts(res.data);
       else setRelatedContacts([]);
-    }).catch(() => setRelatedContacts([]));
+    }).catch(() => { if (!cancelled) setRelatedContacts([]); });
+    return () => { cancelled = true; };
   }, [selectedContact?.id]);
 
   const handleEnrich = async () => {
     if (!selectedContact || enriching) return;
+    const contactId = selectedContact.id;
     setEnriching(true);
     setEnrichError(null);
     try {
       const result = await enrichContact({
-        contactId: selectedContact.id,
+        contactId,
         force: true, // button click bypasses the 90d cadence gate
       });
       if (!result.ok) {
         const messages: Record<string, string> = {
           no_contact: 'Contact not found',
-          no_provider: 'Configure an AI provider in Settings → AI first',
-          no_inbound_mail: 'No incoming emails from this contact to scan',
-          no_signals: 'No phone/LinkedIn/company signals found in their emails',
+          no_provider: 'Configure an AI provider in AI → Providers first',
+          awaiting_body: 'Email bodies are still downloading. Signature analysis will retry automatically.',
+          no_inbound_mail: 'No downloaded incoming email bodies are available to review yet.',
+          ai_disabled: 'Automatic AI enrichment is paused. Enable AI Assist in AI → Email Agent.',
+          onboarding: 'Finish account setup before automatic enrichment starts.',
+          no_signals: 'No reliable signature details found in the available emails yet.',
+          unchanged_signature: 'The latest signatures match this profile. No update was needed.',
+          automated_sender: 'This automated address has no personal signature to enrich.',
           llm_failed: 'AI call failed',
           cadence_not_due: 'Already enriched recently',
         };
-        setEnrichError(messages[result.reason] || result.reason);
+        if (selectedContactId.current === contactId) setEnrichError(messages[result.reason] || result.reason);
       } else {
         // Pull the fresh contact row so the UI reflects the new blob
         // + any mirrored title/organization/phone columns.
-        const fresh = await window.electronAPI.contacts.get(selectedContact.id);
+        const fresh = await window.electronAPI.contacts.get(contactId);
         if (fresh.success && fresh.data) {
-          setSelectedContact(fresh.data);
+          setSelectedContact((current) => current?.id === contactId ? fresh.data : current);
           setContacts((prev) => prev.map((c) => (c.id === fresh.data.id ? fresh.data : c)));
         }
       }
     } catch (err) {
-      setEnrichError((err as Error).message);
+      if (selectedContactId.current === contactId) setEnrichError((err as Error).message);
     } finally {
       setEnriching(false);
     }
@@ -355,13 +355,15 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
 
   const handleChangeContactType = async (type: string) => {
     if (!selectedContact) return;
+    const contactId = selectedContact.id;
     const anyApi = (window as any).electronAPI;
-    await anyApi.agent?.setContactType?.(selectedContact.email, type, 'user');
-    // Optimistic update — parent list + detail both reflect the change
-    setContacts(contacts.map(c =>
-      c.id === selectedContact.id ? { ...c, contactType: type, contactTypeSource: 'user' } : c
-    ));
-    setSelectedContact({ ...selectedContact, contactType: type, contactTypeSource: 'user' });
+    try {
+      const result = await anyApi.agent?.setContactType?.(selectedContact.email, type, 'user');
+      if (!result?.success) throw new Error(result?.error || 'Could not save the contact category.');
+      setSelectedContact((current) => current?.id === contactId
+        ? { ...current, contactType: type, contactTypeSource: 'user', contactTypeConfidence: 1 } : current);
+      await loadContacts();
+    } catch (error) { setEnrichError((error as Error).message); }
   };
 
   const handleScan = async () => {
@@ -449,11 +451,11 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
-    <div className="flex flex-1 h-full">
+    <div className="flex flex-1 min-w-0 w-full h-full">
       {/* Contact List */}
-      <div className="w-80 border-r border-border flex flex-col bg-card">
+      <div className="w-72 xl:w-80 shrink-0 border-r border-border flex flex-col bg-card">
         {/* Header */}
-        <div className="p-4 border-b border-border">
+        <div className="p-6 border-b border-border">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold">Contacts</h2>
             <button
@@ -481,7 +483,8 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                 setSearchQuery(e.target.value);
                 setPage(0);
               }}
-              placeholder="Search contacts..."
+              placeholder="Search name, email or company..."
+              aria-label="Search contacts"
               className="w-full pl-9 pr-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-primary/50"
             />
           </div>
@@ -490,7 +493,8 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
           <div className="flex items-center gap-2 mt-2">
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
+              aria-label="Sort contacts"
+              onChange={(e) => { setSortBy(e.target.value); setPage(0); }}
               className="flex-1 px-2 py-1 bg-background border border-border rounded text-xs"
             >
               <option value="relevance">Relevance</option>
@@ -512,6 +516,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
             <Tag className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
             <select
               value={typeFilter}
+              aria-label="Filter contact category"
               onChange={(e) => { setTypeFilter(e.target.value); setPage(0); }}
               className="flex-1 px-2 py-1 bg-background border border-border rounded text-xs"
             >
@@ -542,7 +547,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
             <div className="p-8 text-center text-muted-foreground">
               <User className="h-12 w-12 mx-auto mb-3 opacity-50" />
               <p className="text-sm">No contacts found</p>
-              <p className="text-xs mt-1">Click "Scan" to discover contacts from your emails</p>
+              <p className="text-xs mt-1">{searchQuery || typeFilter ? 'Try a different search or category.' : 'Contacts appear as your mail syncs. Scan to include existing mail.'}</p>
             </div>
           ) : (
             <div>
@@ -550,7 +555,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                 <button
                   key={contact.id}
                   onClick={() => setSelectedContact(contact)}
-                  className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-accent/50 transition-colors ${
+                  className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-accent/50 transition-colors ${
                     selectedContact?.id === contact.id ? 'bg-accent' : ''
                   }`}
                 >
@@ -570,6 +575,15 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                     <div className="text-xs text-muted-foreground truncate">
                       {contact.email}
                     </div>
+                    {(contact.enrichment?.designation || contact.title || contact.organization || contact.enrichment?.companyName) && (
+                      <div className="text-xs text-muted-foreground truncate mt-0.5">
+                        {[contact.enrichment?.designation || contact.title, contact.enrichment?.companyName || contact.organization].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                    <div className="text-[10px] text-muted-foreground mt-1 flex flex-wrap gap-x-2">
+                      <span>{contactTypeLabel(contact.contactType)}</span>
+                      <span>{contactProfileCoverage(contact).details} details</span>
+                    </div>
                   </div>
 
                   {/* Email count badge */}
@@ -588,6 +602,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
         {totalPages > 1 && (
           <div className="p-3 border-t border-border flex items-center justify-between">
             <button
+              aria-label="Previous contacts page"
               onClick={() => setPage(p => Math.max(0, p - 1))}
               disabled={page === 0}
               className="p-1 hover:bg-accent rounded disabled:opacity-50"
@@ -598,6 +613,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
               {page + 1} / {totalPages}
             </span>
             <button
+              aria-label="Next contacts page"
               onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
               disabled={page >= totalPages - 1}
               className="p-1 hover:bg-accent rounded disabled:opacity-50"
@@ -608,29 +624,33 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
         )}
 
         {/* Total count */}
-        <div className="px-4 py-2 border-t border-border text-xs text-muted-foreground text-center">
+        <div className="px-6 py-2 border-t border-border text-xs text-muted-foreground text-center">
           {total} contacts
         </div>
       </div>
 
       {/* Contact Detail or Dashboard */}
-      <div className="flex-1 bg-background">
+      <div className="flex-1 min-w-0 bg-background">
         {!selectedContact && (
           <ContactsDashboard
             onSelectContact={(c) => setSelectedContact(c)}
-            contactsVersion={contacts.length + ':' + total}
+            contactsVersion={contactsRevision}
+            onFilterType={(type) => { setTypeFilter(type); setPage(0); }}
+            activeType={typeFilter}
+            onContactsChanged={loadContacts}
           />
         )}
         {selectedContact && (
           <div className="h-full flex flex-col">
             {/* Header */}
             <div className="p-6 border-b border-border">
+              <button onClick={() => setSelectedContact(null)} className="mb-4 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"><ChevronLeft className="h-3.5 w-3.5" />Contacts overview</button>
               <div className="flex items-start gap-4">
                 {/* Large avatar: colored initials + Gravatar photo when available */}
                 <Avatar email={selectedContact.email} name={formatDisplayName(selectedContact)} size={80} photoUrl={selectedContact.avatarStatus === 'confirmed' ? selectedContact.avatarUrl : null} />
 
                 {/* Info */}
-                <div className="flex-1">
+                <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <h2 className="text-2xl font-semibold">
                       {formatDisplayName(selectedContact)}
@@ -650,9 +670,9 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                     </Tooltip>
                   </div>
 
-                  {selectedContact.title && selectedContact.organization && (
+                  {(selectedContact.title || selectedContact.organization || selectedContact.enrichment?.designation || selectedContact.enrichment?.companyName) && (
                     <p className="text-muted-foreground mt-1">
-                      {selectedContact.title} at {selectedContact.organization}
+                      {[selectedContact.enrichment?.designation || selectedContact.title, selectedContact.enrichment?.companyName || selectedContact.organization].filter(Boolean).join(' · ')}
                     </p>
                   )}
 
@@ -661,6 +681,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                     <Tag className="h-4 w-4 text-muted-foreground" />
                     <select
                       value={selectedContact.contactType || 'unknown'}
+                      aria-label="Contact category"
                       onChange={(e) => handleChangeContactType(e.target.value)}
                       className="text-xs bg-background border border-input rounded-md px-2 py-1"
                     >
@@ -668,9 +689,9 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
-                    {selectedContact.contactTypeSource && (
+                    {selectedContact.contactTypeSource && selectedContact.contactTypeSource !== 'unset' && (
                       <span className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded-full">
-                        {selectedContact.contactTypeSource}
+                        {selectedContact.contactTypeSource === 'user' ? 'Set by you' : 'Automatically suggested'}
                         {typeof selectedContact.contactTypeConfidence === 'number' && selectedContact.contactTypeConfidence > 0 && (
                           <> · {Math.round(selectedContact.contactTypeConfidence * 100)}%</>
                         )}
@@ -690,7 +711,7 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                       ) : (
                         <Sparkles className="h-4 w-4" />
                       )}
-                      {enriching ? 'Enriching…' : 'Enrich'}
+                      {enriching ? 'Reviewing signatures…' : 'Review signatures now'}
                     </button>
                     <button
                       onClick={() => handleDelete(selectedContact)}
@@ -738,56 +759,9 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
 
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-6">
-              <div className="grid grid-cols-2 gap-6">
-                {/* Contact Info */}
-                <div className="space-y-4">
-                  <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-                    Contact Information
-                  </h3>
-
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3">
-                      <Mail className="h-4 w-4 text-muted-foreground" />
-                      {/* Opens Mail filtered to this address. Composing a new
-                          message is the less common intent from a contact card —
-                          "show me our correspondence" is — so the click searches
-                          and the mailto: stays available via the mail icon. */}
-                      <button
-                        type="button"
-                        onClick={() => onSearchMail?.(selectedContact.email)}
-                        disabled={!onSearchMail}
-                        title={`Show emails from ${selectedContact.email}`}
-                        className="text-sm text-primary hover:underline disabled:no-underline disabled:cursor-default"
-                      >
-                        {selectedContact.email}
-                      </button>
-                    </div>
-
-                    {(() => {
-                      // Same rule as the list row (contact-phone-view), so the
-                      // card and the row can never show different numbers for
-                      // the same person.
-                      const view = contactPhoneView(selectedContact);
-                      if (!view) return null;
-                      return (
-                        <div className="flex items-center gap-3">
-                          <Phone className="h-4 w-4 text-muted-foreground" />
-                          <span className="text-sm">
-                            {view.number}
-                            {view.isOffice && <span className="text-xs text-muted-foreground ml-1">(office)</span>}
-                          </span>
-                        </div>
-                      );
-                    })()}
-
-                    {selectedContact.organization && (
-                      <div className="flex items-center gap-3">
-                        <Building className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-sm">{selectedContact.organization}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
+              <div className="mb-6"><EnrichmentStatus /></div>
+              <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,2fr)_minmax(230px,1fr)] gap-6 items-start">
+                <ContactProfile contact={selectedContact} onSearchMail={onSearchMail} />
 
                 {/* Activity Stats */}
                 <div className="space-y-4">
@@ -892,173 +866,17 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
                 </div>
               )}
 
-              {/* Enrichment — LinkedIn / social / phones / designation
-                  mined from email signatures. Rendered only when we
-                  have something to show. */}
-              {selectedContact.enrichment && (
-                <div className="mt-6 space-y-3">
-                  <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                    <Sparkles className="h-4 w-4" />
-                    Enrichment
-                    {selectedContact.enrichmentSource && (
-                      <span className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded-full normal-case font-normal tracking-normal">
-                        {selectedContact.enrichmentSource}
-                      </span>
-                    )}
-                  </h3>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    {/* Role */}
-                    {(selectedContact.enrichment.designation || selectedContact.enrichment.department) && (
-                      <div className="flex items-start gap-3">
-                        <Briefcase className="h-4 w-4 text-muted-foreground mt-0.5" />
-                        <div className="text-sm">
-                          {selectedContact.enrichment.designation && <div>{selectedContact.enrichment.designation}</div>}
-                          {selectedContact.enrichment.department && (
-                            <div className="text-xs text-muted-foreground">{selectedContact.enrichment.department}</div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Company */}
-                    {(selectedContact.enrichment.companyName || selectedContact.enrichment.companyDomain) && (
-                      <div className="flex items-start gap-3">
-                        <Building className="h-4 w-4 text-muted-foreground mt-0.5" />
-                        <div className="text-sm">
-                          <div>{selectedContact.enrichment.companyName || selectedContact.enrichment.companyDomain}</div>
-                          {selectedContact.enrichment.companyWebsite && (
-                            <a
-                              href={selectedContact.enrichment.companyWebsite}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-primary hover:underline inline-flex items-center gap-1"
-                            >
-                              {selectedContact.enrichment.companyDomain || selectedContact.enrichment.companyWebsite}
-                              <ExternalLink className="h-3 w-3" />
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Personal phone / WhatsApp */}
-                    {(selectedContact.enrichment.personalPhone || selectedContact.enrichment.whatsappNumber) && (
-                      <div className="flex items-center gap-3">
-                        <Phone className="h-4 w-4 text-muted-foreground" />
-                        <div className="text-sm">
-                          {selectedContact.enrichment.personalPhone && <div>{formatPhone(selectedContact.enrichment.personalPhone)} <span className="text-xs text-muted-foreground">(personal)</span></div>}
-                          {selectedContact.enrichment.whatsappNumber && selectedContact.enrichment.whatsappNumber !== selectedContact.enrichment.personalPhone && (
-                            <div>{formatPhone(selectedContact.enrichment.whatsappNumber)} <span className="text-xs text-muted-foreground">(whatsapp)</span></div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Company phone */}
-                    {selectedContact.enrichment.companyPhone && (
-                      <div className="flex items-center gap-3">
-                        <Phone className="h-4 w-4 text-muted-foreground" />
-                        <div className="text-sm">
-                          {formatPhone(selectedContact.enrichment.companyPhone)} <span className="text-xs text-muted-foreground">(office)</span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Location */}
-                    {selectedContact.enrichment.location && (
-                      <div className="flex items-center gap-3">
-                        <MapPin className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-sm">{selectedContact.enrichment.location}</span>
-                      </div>
-                    )}
-
-                    {/* Personal email */}
-                    {selectedContact.enrichment.personalEmail && (
-                      <div className="flex items-center gap-3">
-                        <Mail className="h-4 w-4 text-muted-foreground" />
-                        <a href={`mailto:${selectedContact.enrichment.personalEmail}`} className="text-sm text-primary hover:underline">
-                          {selectedContact.enrichment.personalEmail}
-                        </a>
-                      </div>
-                    )}
+              {relatedContacts.length > 0 && (
+                <section className="mt-6 rounded-xl border border-border p-4">
+                  <h3 className="text-sm font-semibold mb-2">Other email addresses for this person</h3>
+                  <div className="flex flex-wrap gap-2">
+                    {relatedContacts.map((contact) => (
+                      <button key={contact.id} onClick={() => setSelectedContact(contact)} className="text-xs px-3 py-2 rounded-md border border-border hover:bg-accent">
+                        {contact.email}{contact.organization ? ` · ${contact.organization}` : ''}
+                      </button>
+                    ))}
                   </div>
-
-                  {/* Social icons */}
-                  {(selectedContact.enrichment.linkedinUrl ||
-                    selectedContact.enrichment.twitterUrl ||
-                    selectedContact.enrichment.githubUrl ||
-                    (selectedContact.enrichment.otherSocials && selectedContact.enrichment.otherSocials.length > 0)) && (
-                    <div className="flex items-center gap-2 pt-2">
-                      {selectedContact.enrichment.linkedinUrl && (
-                        <a
-                          href={selectedContact.enrichment.linkedinUrl}
-                          target="_blank" rel="noreferrer"
-                          className="p-2 rounded-md border border-border hover:bg-accent"
-                          title={selectedContact.enrichment.linkedinUrl}
-                        >
-                          <Linkedin className="h-4 w-4" />
-                        </a>
-                      )}
-                      {selectedContact.enrichment.twitterUrl && (
-                        <a
-                          href={selectedContact.enrichment.twitterUrl}
-                          target="_blank" rel="noreferrer"
-                          className="p-2 rounded-md border border-border hover:bg-accent"
-                          title={selectedContact.enrichment.twitterUrl}
-                        >
-                          <Twitter className="h-4 w-4" />
-                        </a>
-                      )}
-                      {selectedContact.enrichment.githubUrl && (
-                        <a
-                          href={selectedContact.enrichment.githubUrl}
-                          target="_blank" rel="noreferrer"
-                          className="p-2 rounded-md border border-border hover:bg-accent"
-                          title={selectedContact.enrichment.githubUrl}
-                        >
-                          <Github className="h-4 w-4" />
-                        </a>
-                      )}
-                      {selectedContact.enrichment.otherSocials?.map((s) => (
-                        <a
-                          key={s.url}
-                          href={s.url}
-                          target="_blank" rel="noreferrer"
-                          className="px-2 py-1 rounded-md border border-border hover:bg-accent text-xs inline-flex items-center gap-1"
-                          title={s.url}
-                        >
-                          <Globe className="h-3 w-3" />
-                          {s.platform}
-                        </a>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Also known as — same person_id across emails */}
-                  {relatedContacts.length > 0 && (
-                    <div className="pt-2">
-                      <div className="text-xs text-muted-foreground mb-1">Also known as (same person)</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {relatedContacts.map((rc) => (
-                          <button
-                            key={rc.id}
-                            onClick={() => setSelectedContact(rc)}
-                            className="text-xs px-2 py-1 rounded-md border border-border hover:bg-accent"
-                            title={rc.email}
-                          >
-                            {rc.email}
-                            {rc.organization ? ` · ${rc.organization}` : ''}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {selectedContact.enrichment.notes && (
-                    <p className="text-xs text-muted-foreground italic pt-1">{selectedContact.enrichment.notes}</p>
-                  )}
-                </div>
+                </section>
               )}
 
               {/* Memory (agent notes) — one-line pointers about this contact
@@ -1210,9 +1028,15 @@ export function Contacts({ onSearchMail }: { onSearchMail?: (query: string) => v
 function ContactsDashboard({
   onSelectContact,
   contactsVersion,
+  onFilterType,
+  activeType,
+  onContactsChanged,
 }: {
   onSelectContact: (c: Contact) => void;
-  contactsVersion: string;
+  contactsVersion: number;
+  onFilterType: (type: string) => void;
+  activeType: string;
+  onContactsChanged: () => Promise<void>;
 }) {
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [topActive, setTopActive] = useState<Contact[]>([]);
@@ -1225,26 +1049,16 @@ function ContactsDashboard({
   const [reloadKey, setReloadKey] = useState(0);
 
   const handleAutoClassify = async () => {
-    const userEmail = localStorage.getItem('sarvinbox-user-email')
-      || (() => {
-        try {
-          const settings = JSON.parse(localStorage.getItem('sarvinbox-settings') || '{}');
-          return settings.profileEmail || '';
-        } catch { return ''; }
-      })();
-    if (!userEmail) {
-      setClassifyError('Set your email in Settings → Profile first.');
-      return;
-    }
     setClassifying(true);
     setClassifyError(null);
     try {
       const anyApi = (window as any).electronAPI;
-      const res = await anyApi.agent?.autoClassifyContacts?.(userEmail);
+      const res = await anyApi.agent?.autoClassifyContacts?.();
       if (res?.success) {
         // Reload the dashboard so the tile counts and "unclassified" nudge
         // reflect the just-classified rows.
         setReloadKey(k => k + 1);
+        await onContactsChanged();
       } else {
         setClassifyError(res?.error || 'Auto-classify failed.');
       }
@@ -1275,25 +1089,16 @@ function ContactsDashboard({
         // VIPs: pull via sender.listVip then hydrate against contacts list.
         const vipRes = await anyApi.sender?.listVip?.();
         if (vipRes?.success && Array.isArray(vipRes.data) && vipRes.data.length > 0) {
-          // sender.listVip returns sender_stats rows — just need email to render.
-          // Map to a light Contact-shaped object for the tile; full data
-          // comes when user clicks through.
-          const simplified: Contact[] = vipRes.data.slice(0, 8).map((s: any) => ({
-            id: s.email,
-            email: s.email,
-            name: null, displayName: null, avatarUrl: null,
-            organization: null, title: null, phone: null,
-            firstSeen: s.firstSeen || 0, lastSeen: s.lastReceived || 0,
-            emailCount: s.receivedCount || 0,
-            sentCount: s.sentToCount || 0,
-            receivedCount: s.receivedCount || 0,
-            isFavorite: true, notes: null, tags: [],
-            createdAt: s.createdAt || 0, updatedAt: s.updatedAt || 0,
+          const hydrated = await Promise.all(vipRes.data.slice(0, 8).map(async (sender: { email: string }) => {
+            const result = await window.electronAPI.contacts.list({ search: sender.email, limit: 10, offset: 0 });
+            return result.data?.contacts.find((contact: Contact) => contact.email.toLowerCase() === sender.email.toLowerCase());
           }));
-          if (!cancelled) setVips(simplified);
+          if (!cancelled) setVips(hydrated.filter((contact): contact is Contact => !!contact));
         } else {
-          setVips([]);
+          if (!cancelled) setVips([]);
         }
+      } catch (error) {
+        if (!cancelled) setClassifyError(`Could not load the contact overview: ${(error as Error).message}`);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -1303,31 +1108,30 @@ function ContactsDashboard({
   }, [contactsVersion, reloadKey]);
 
   // Classification tile order — same taxonomy as CONTACT_TYPE_OPTIONS
-  const typeOrder: Array<{ key: string; label: string; tone: string }> = [
-    { key: 'existing_customer', label: 'Customers', tone: 'text-green-600 bg-green-500/10' },
-    { key: 'potential_customer', label: 'Prospects', tone: 'text-blue-600 bg-blue-500/10' },
-    { key: 'colleague', label: 'Colleagues', tone: 'text-cyan-600 bg-cyan-500/10' },
-    { key: 'vendor', label: 'Vendors', tone: 'text-purple-600 bg-purple-500/10' },
-    { key: 'newsletter', label: 'Newsletters', tone: 'text-gray-500 bg-gray-500/10' },
-    { key: 'unknown', label: 'Unclassified', tone: 'text-muted-foreground bg-muted' },
-  ];
+  const typeOrder = CONTACT_TYPE_OPTIONS.map((type) => ({ key: type.value, label: type.label }));
 
   const classified = Object.entries(counts).filter(([k]) => k !== 'unknown').reduce((a, [, n]) => a + n, 0);
   const unclassified = counts['unknown'] || 0;
-  const classifiedPct = total > 0 ? Math.round((classified / total) * 100) : 0;
+  const classifiedPct = clampedPct(classified, total);
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="max-w-6xl mx-auto p-6 space-y-6">
+    <div className="w-full h-full overflow-y-auto">
+      <div className="w-full p-6 space-y-6">
         {/* Header */}
-        <div className="flex items-start justify-between">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">Contacts overview</h1>
             <p className="text-sm text-muted-foreground mt-1">
-              {total.toLocaleString()} contacts · {classifiedPct}% classified · Data lives in one table shared with the agent.
+              {total.toLocaleString()} contacts · {classifiedPct}% categorized · Profiles built from your email conversations.
             </p>
           </div>
+          <button onClick={handleAutoClassify} disabled={classifying} className="inline-flex items-center gap-2 border border-border rounded-md px-3 py-2 text-sm hover:bg-accent disabled:opacity-50">
+            {classifying ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            {classifying ? 'Reviewing categories…' : 'Review categories'}
+          </button>
         </div>
+        <EnrichmentStatus />
+        {classifyError && <p role="alert" className="text-sm text-destructive">{classifyError}</p>}
 
         {loading ? (
           <div className="flex items-center justify-center py-16">
@@ -1336,22 +1140,26 @@ function ContactsDashboard({
         ) : total === 0 ? (
           <div className="rounded-lg border border-dashed border-border p-12 text-center text-muted-foreground">
             <User className="h-12 w-12 mx-auto mb-3 opacity-40" />
-            <p className="text-sm">No contacts yet. Click "Scan" in the sidebar to discover contacts from your emails.</p>
+            <p className="text-sm">Contacts appear as your mail syncs. Use Scan to discover people in existing emails.</p>
           </div>
         ) : (
           <>
             {/* Classification tiles */}
-            <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-              {typeOrder.map(({ key, label, tone }) => {
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold">Contact categories</h2>
+              {activeType && <button onClick={() => onFilterType('')} className="text-xs text-primary hover:underline">Show all contacts</button>}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 2xl:grid-cols-5 gap-3">
+              {typeOrder.map(({ key, label }) => {
                 const n = key === 'unknown' ? unclassified : (counts[key] || 0);
                 return (
-                  <div key={key} className={`rounded-lg border border-border p-3 ${n === 0 ? 'opacity-50' : ''}`}>
+                  <button key={key} onClick={() => onFilterType(key)} aria-pressed={activeType === key} aria-label={`Filter ${label} contacts`} className={`rounded-xl border p-4 text-left hover:bg-accent/50 ${activeType === key ? 'border-primary bg-primary/5' : 'border-border'}`}>
                     <div className="flex items-center gap-2 mb-1">
-                      <Tag className={`h-3.5 w-3.5 ${tone.split(' ')[0]}`} />
+                      <Tag className="h-3.5 w-3.5 text-primary" />
                       <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</span>
                     </div>
                     <div className="text-2xl font-semibold">{n.toLocaleString()}</div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -1380,7 +1188,7 @@ function ContactsDashboard({
             {vips.length > 0 && (
               <ContactListCard
                 title="VIPs"
-                subtitle="Marked as VIP on sender_stats"
+                subtitle="People you have marked as important"
                 icon={<Star className="h-4 w-4 text-yellow-500" />}
                 contacts={vips}
                 metric={(c) => `${c.emailCount} emails`}
@@ -1397,11 +1205,8 @@ function ContactsDashboard({
                       {unclassified} contacts still unclassified
                     </div>
                     <div className="text-muted-foreground mt-1">
-                      Run Auto-Classify to assign a contact type using the agent's heuristics, or edit each contact's type from their detail view.
+                      Categories update automatically from account and conversation evidence. When evidence is unclear, the contact stays unclassified. You can set a category in their profile.
                     </div>
-                    {classifyError && (
-                      <div className="mt-2 text-xs text-destructive">{classifyError}</div>
-                    )}
                   </div>
                   <button
                     onClick={handleAutoClassify}
@@ -1413,7 +1218,7 @@ function ContactsDashboard({
                     ) : (
                       <Sparkles className="h-3.5 w-3.5" />
                     )}
-                    {classifying ? 'Classifying...' : 'Auto-Classify'}
+                    {classifying ? 'Reviewing…' : 'Review now'}
                   </button>
                 </div>
               </div>

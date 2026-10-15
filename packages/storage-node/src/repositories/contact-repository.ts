@@ -8,12 +8,12 @@ import type {
   ContactEnrichmentHistoryRecord,
   PaginationOptions,
   EmailRecord,
-} from '@sarvinbox/core';
-import { contactNameForAddress, isRoleAddress, parseAddressList, PUBLIC_DOMAINS } from '@sarvinbox/core';
+ contactNameForAddress, isRoleAddress, parseAddressList, PUBLIC_DOMAINS, CONTACT_ENRICHMENT_REVIEW_VERSION, isIncompleteContactProfile, type ContactEnrichmentReview } from '@sarvinbox/core';
 
 import { SHARED } from '../shared-contacts';
 import type { SenderStats, SignaturePattern } from '../sqlite-storage';
 
+import { hasBodyClause } from './agent-eligibility';
 import { BaseRepository, type DatabaseAccessor } from './base-repository';
 
 /*
@@ -31,6 +31,11 @@ import { BaseRepository, type DatabaseAccessor } from './base-repository';
 const CONTACTS = SHARED('contacts');
 const CONTACT_ACCOUNTS = SHARED('contact_accounts');
 const ENRICHMENT_HISTORY = SHARED('contact_enrichment_history');
+const REVIEW_VERSION = `COALESCE(json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.contactEnrichmentReview.version'), 0)`;
+const REVIEW_FINGERPRINT = `json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.contactEnrichmentReview.signatureFingerprint')`;
+const REVIEW_THROUGH = `COALESCE(json_extract(CASE WHEN json_valid(c.metadata) THEN c.metadata ELSE '{}' END, '$.contactEnrichmentReview.throughEmailAt'), c.enriched_through_email_at)`;
+const profileField = (field: string) => `TRIM(COALESCE(json_extract(CASE WHEN json_valid(c.enrichment) THEN c.enrichment ELSE '{}' END, '$.${field}'), ''))`;
+const INCOMPLETE_PROFILE = `(${profileField('fullName')} = '' OR ${profileField('designation')} = '' OR ${profileField('companyName')} = '' OR (${profileField('linkedinUrl')} || ${profileField('companyLinkedinUrl')} || ${profileField('companyWebsite')}) = '')`;
 
 /** Provenance account id used when a storage was opened with no account. */
 const UNKNOWN_ACCOUNT = 'unknown-account';
@@ -89,6 +94,8 @@ export const SQL_ENRICHMENT_CANDIDATES = `
       GROUP BY c.id
       HAVING
         c.enriched_through_email_at IS NULL
+        OR (${REVIEW_VERSION} < ${CONTACT_ENRICHMENT_REVIEW_VERSION} AND ${INCOMPLETE_PROFILE})
+        OR (${REVIEW_VERSION} >= ${CONTACT_ENRICHMENT_REVIEW_VERSION} AND ${REVIEW_FINGERPRINT} IS NOT NULL AND MAX(e.date) > ${REVIEW_THROUGH})
         OR MAX(e.date) > c.enriched_through_email_at + ?
       ORDER BY newest_email_at DESC
       LIMIT ?
@@ -119,6 +126,7 @@ export interface ApplyEnrichmentInput {
   enrichedThroughEmailAt: number; // max(scanned emails' date)
   sourceEmailId?: string | null;
   source?: 'llm' | 'user';
+  review?: ContactEnrichmentReview;
 }
 
 export interface SenderContext {
@@ -1118,11 +1126,16 @@ export class ContactRepository extends BaseRepository {
   async getEnrichmentCandidates(opts: {
     minAgeDays?: number;    // e.g. 90 — only re-enrich if last run is this old
     limit?: number;
+    excludeContactIds?: string[];
   } = {}): Promise<EnrichmentCandidate[]> {
     const minAgeSec = (opts.minAgeDays ?? 0) * 86400;
     const limit = opts.limit ?? 1000;
 
-    const rows = this.db.prepare(SQL_ENRICHMENT_CANDIDATES).all(minAgeSec, limit) as Array<{
+    const excluded = opts.excludeContactIds ?? [];
+    const sql = excluded.length
+      ? SQL_ENRICHMENT_CANDIDATES.replace('GROUP BY c.id', `AND c.id NOT IN (${excluded.map(() => '?').join(',')}) GROUP BY c.id`)
+      : SQL_ENRICHMENT_CANDIDATES;
+    const rows = this.db.prepare(sql).all(...excluded, minAgeSec, limit) as Array<{
       id: string;
       email: string;
       kind: string;
@@ -1226,25 +1239,41 @@ export class ContactRepository extends BaseRepository {
    */
   async applyEnrichment(input: ApplyEnrichmentInput): Promise<ContactRecord> {
     const now = this.now();
-    const contact = await this.get(input.contactId);
-    if (!contact) throw new Error(`Contact not found: ${input.contactId}`);
-
-    const source = input.source ?? 'llm';
-    const enrichment = input.enrichment;
-
-    // Role/generic mailboxes (info@, sales@, hr@, accounts@…) are a
-    // company's functional address, never a person — so they must never
-    // acquire a person_id or a personal mobile (which would merge every
-    // colleague who shares the company switchboard into one "person").
-    // Company-level enrichment (domain/org/history) still proceeds.
-    const isRole = isRoleAddress(contact.email);
-    const newMobile = isRole ? null : (input.mobileE164 ?? contact.mobileE164 ?? null);
-
-    // Resolve async lookups up front — the write transaction below must
-    // be synchronous (better-sqlite3).
-    const mobileMatches = newMobile ? await this.findContactsByMobile(newMobile, contact.id) : [];
-
     this.db.transaction(() => {
+      // Re-read at the authoritative write boundary. A renderer may have waited
+      // for an AI response while the user or another account edited this row.
+      const row = this.db.prepare(`SELECT * FROM ${CONTACTS} WHERE id = ?`).get(input.contactId);
+      if (!row) throw new Error(`Contact not found: ${input.contactId}`);
+      const contact = this.rowToContactRecord(row);
+      const previousReview = contact.metadata?.contactEnrichmentReview as ContactEnrichmentReview | undefined;
+      const previousThrough = previousReview?.throughEmailAt ?? contact.enrichedThroughEmailAt ?? 0;
+      const legacyRecovery = (previousReview?.version ?? 0) < CONTACT_ENRICHMENT_REVIEW_VERSION && isIncompleteContactProfile(contact.enrichment);
+      if (input.source !== 'user' && previousThrough > input.enrichedThroughEmailAt && !legacyRecovery) return;
+      const olderRecovery = input.source !== 'user' && previousThrough > input.enrichedThroughEmailAt && legacyRecovery;
+      const preserveUser = input.source !== 'user' && contact.enrichmentSource === 'user';
+      const source = preserveUser ? 'user' : (input.source ?? 'llm');
+      const enrichment: ContactEnrichment = { ...contact.enrichment, ...input.enrichment };
+      for (const [key, value] of Object.entries(contact.enrichment ?? {})) {
+        const incoming = (enrichment as Record<string, unknown>)[key];
+        const knownValue = value != null && (typeof value !== 'string' || value.trim() !== '') && (!Array.isArray(value) || value.length > 0);
+        if (preserveUser || (olderRecovery && knownValue) || incoming == null || incoming === '' || (Array.isArray(incoming) && !incoming.length)) {
+          (enrichment as Record<string, unknown>)[key] = value;
+        }
+      }
+      if (preserveUser || olderRecovery) {
+        if (contact.title) enrichment.designation = contact.title;
+        if (contact.organization) enrichment.companyName = contact.organization;
+      }
+      // Deterministic phone classifications may also have landed during the call.
+      if (input.source !== 'user') {
+        if (contact.enrichment?.personalPhone) enrichment.personalPhone = contact.enrichment.personalPhone;
+        if (contact.enrichment?.companyPhone) enrichment.companyPhone = contact.enrichment.companyPhone;
+      }
+      // Human-staffed role mailboxes carry signatures, but never person identity.
+      const isRole = isRoleAddress(contact.email);
+      const newMobile = isRole ? null : (preserveUser || olderRecovery ? contact.mobileE164 ?? null : input.mobileE164 ?? contact.mobileE164 ?? null);
+      const mobileMatches = newMobile ? (this.db.prepare(`SELECT * FROM ${CONTACTS} WHERE mobile_e164 = ? AND id != ?`)
+        .all(newMobile, contact.id) as any[]).map(matched => this.rowToContactRecord(matched)) : [];
       // --- Identity resolution: if mobile matches another contact, they
       // share a person_id. Pick whichever non-null id already exists, or
       // mint a fresh one. Role mailboxes never get a person identity.
@@ -1270,6 +1299,7 @@ export class ContactRepository extends BaseRepository {
       // domain as a company would link every Gmail/Outlook/… sender into
       // one synthetic "company" and mark them all as colleagues. Enforced
       // here (server-side, authoritative) — not just in the prompt.
+      if (olderRecovery && contact.companyContactId) enrichment.companyDomain = contact.enrichment?.companyDomain ?? null;
       const companyDomain =
         enrichment.companyDomain && PUBLIC_DOMAINS.has(enrichment.companyDomain.toLowerCase())
           ? null
@@ -1278,7 +1308,7 @@ export class ContactRepository extends BaseRepository {
       // free-provider domain either.
       enrichment.companyDomain = companyDomain;
       let companyContactId: string | null = contact.companyContactId ?? null;
-      if (companyDomain) {
+      if (companyDomain && !olderRecovery) {
         const company = this.upsertCompanySync({
           domain: companyDomain,
           name: enrichment.companyName,
@@ -1330,7 +1360,7 @@ export class ContactRepository extends BaseRepository {
           UPDATE ${ENRICHMENT_HISTORY}
           SET enrichment = ?, effective_from = ?
           WHERE id = ?
-        `).run(JSON.stringify(enrichment), input.enrichedThroughEmailAt, prevOpen.id);
+        `).run(JSON.stringify(enrichment), olderRecovery ? prevOpen.effective_from : input.enrichedThroughEmailAt, prevOpen.id);
       }
 
       // --- Update current-state columns on the contact row. `title` and
@@ -1358,7 +1388,7 @@ export class ContactRepository extends BaseRepository {
           company_contact_id = ?,
           mobile_e164 = ?,
           enrichment = ?,
-          enriched_through_email_at = ?,
+          enriched_through_email_at = MAX(COALESCE(enriched_through_email_at, 0), ?),
           enrichment_source = ?,
           name = COALESCE(?, name),
           title = COALESCE(?, title),
@@ -1377,13 +1407,14 @@ export class ContactRepository extends BaseRepository {
         newName,
         designation,
         organization,
-        enrichment.companyPhone || enrichment.personalPhone || null,
+        olderRecovery && contact.phone ? contact.phone : enrichment.companyPhone || enrichment.personalPhone || null,
         now,
         contact.id,
       );
+      if (input.review) this.recordReview(input.contactId, input.review, input.enrichedThroughEmailAt);
     })();
 
-    const updated = await this.get(contact.id);
+    const updated = await this.get(input.contactId);
     if (!updated) throw new Error('Contact vanished during enrichment');
     return updated;
   }
@@ -1393,12 +1424,24 @@ export class ContactRepository extends BaseRepository {
    * watermark so the scheduler doesn't re-scan the same emails next
    * tick. Written as an UPDATE only — no history row.
    */
-  async recordEnrichmentWatermark(contactId: string, throughEmailAt: number): Promise<void> {
+  async recordEnrichmentWatermark(contactId: string, throughEmailAt: number, review: ContactEnrichmentReview = { version: CONTACT_ENRICHMENT_REVIEW_VERSION }): Promise<void> {
     const now = this.now();
-    this.db.prepare(`
-      UPDATE ${CONTACTS} SET enriched_through_email_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(throughEmailAt, now, contactId);
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE ${CONTACTS} SET enriched_through_email_at = MAX(COALESCE(enriched_through_email_at, 0), ?), updated_at = ? WHERE id = ?`)
+        .run(throughEmailAt, now, contactId);
+      this.recordReview(contactId, review, throughEmailAt);
+    })();
+  }
+
+  private recordReview(contactId: string, review: ContactEnrichmentReview, sourceThrough: number): void {
+    const row = this.db.prepare(`SELECT metadata, enriched_through_email_at FROM ${CONTACTS} WHERE id = ?`).get(contactId) as { metadata: string | null; enriched_through_email_at: number | null } | undefined;
+    const metadata = this.parseJsonField<Record<string, unknown>>(row?.metadata, {});
+    const previous = metadata.contactEnrichmentReview as ContactEnrichmentReview | undefined;
+    const throughEmailAt = review.throughEmailAt ?? sourceThrough;
+    if (previous && previous.version >= review.version && (previous.throughEmailAt ?? row?.enriched_through_email_at ?? 0) > throughEmailAt) return;
+    this.db.prepare(`UPDATE ${CONTACTS}
+      SET metadata = json_set(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.contactEnrichmentReview', json(?))
+      WHERE id = ?`).run(JSON.stringify({ ...review, throughEmailAt }), contactId);
   }
 
   // ========== Confirm-gated avatars ==========
@@ -1505,10 +1548,11 @@ export class ContactRepository extends BaseRepository {
    * source. Returns raw EmailRecord shape so the caller can feed
    * subject/body/html into signature regexing.
    */
-  async getRecentInboundEmails(email: string, limit = 20): Promise<EmailRecord[]> {
+  async getRecentInboundEmails(email: string, limit = 20, bodyReadyOnly = false): Promise<EmailRecord[]> {
     const rows = this.db.prepare(`
       SELECT ${this.emailSelect()} FROM emails
       WHERE LOWER(from_address) = LOWER(?)
+      ${bodyReadyOnly ? `AND ${hasBodyClause('emails', this.bodyLengthsReady())}` : ''}
       ORDER BY date DESC
       LIMIT ?
     `).all(email, limit) as any[];

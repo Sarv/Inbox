@@ -391,6 +391,7 @@ export function saveAISettings(settings: AISettings): void {
       }
     }
     persistStripped(settings);
+    window.dispatchEvent(new Event('sarvinbox:ai-provider-changed'));
   } catch (error) {
     console.error('Failed to save AI settings:', error);
   }
@@ -861,7 +862,7 @@ export async function polishText(
 ): Promise<PolishResponse> {
   const provider = getDefaultProvider();
   if (!provider) {
-    throw new Error('No AI provider configured. Please add a provider in Settings > AI.');
+    throw new Error('No AI provider configured. Please add a provider in AI → Providers.');
   }
 
   const isNewEmail = context.mode === 'new' || context.mode === 'forward';
@@ -1243,7 +1244,7 @@ function mapCaiError(
   switch (code) {
     case 'invalid_token':
       return {
-        message: 'Your Sarv session expired. Re-authenticate in Settings → AI.',
+        message: 'Your Sarv session expired. Re-authenticate in AI → Providers.',
         action: 'retry_with_refresh',
       };
     case 'insufficient_scope':
@@ -1401,7 +1402,7 @@ export async function makeAICompletion(options: {
 }): Promise<string> {
   const provider = getDefaultProvider();
   if (!provider) {
-    throw new Error('No AI provider configured');
+    throw new Error('No AI provider configured. Please add a provider in AI → Providers.');
   }
 
   if (provider.type === 'gemini') {

@@ -1627,11 +1627,7 @@ describe('AgentRepository — contact classification', () => {
     expect((db.prepare('SELECT COUNT(*) AS c FROM contacts').get() as { c: number }).c).toBe(0);
   });
 
-  // The rule pass is ordered, and the order is the behaviour: same-domain →
-  // colleague, no-reply → automated, then the volume-based behaviour rules.
-  // Only 'unknown' contacts are ever touched, so a user's manual choice is
-  // never overwritten.
-  it('classifies contacts by rule and never overwrites an explicit type', () => {
+  it('classifies explicit address evidence without guessing relationships from volume', () => {
     seedContact(db, { email: 'teammate@mine.example', receivedCount: 3, sentCount: 3 });
     seedContact(db, { email: 'noreply@bank.example', receivedCount: 20 });
     seedContact(db, { email: 'no-reply@shop.example' });
@@ -1654,19 +1650,17 @@ describe('AgentRepository — contact classification', () => {
       'noreply@bank.example': 'automated',
       'no-reply@shop.example': 'automated',
       'notifications@social.example': 'automated',
-      'news@letters.example': 'newsletter',
-      'lead@prospect.example': 'potential_customer',
-      'customer@client.example': 'existing_customer',
-      // received_count 5 satisfies the potential_customer range first — the
-      // rules are applied in order, so this one never reaches rule 5.
-      'boundary@client.example': 'potential_customer',
+      'news@letters.example': 'unknown',
+      'lead@prospect.example': 'unknown',
+      'customer@client.example': 'unknown',
+      'boundary@client.example': 'unknown',
       'friend@gmail.example': 'personal', // untouched: not 'unknown'
     });
-    expect(classified).toBe(8);
+    expect(classified).toBe(4);
     // The classification is mirrored onto sender_stats for the sender screens.
     expect(
       db.prepare("SELECT contact_type AS t FROM sender_stats WHERE email = 'news@letters.example'").get(),
-    ).toEqual({ t: 'newsletter' });
+    ).toEqual({ t: 'unknown' });
   });
 
   // A user on a public domain must NOT have every gmail.com sender classified
@@ -1682,16 +1676,16 @@ describe('AgentRepository — contact classification', () => {
         .map((r) => [r.email, r.type]),
     );
     expect(byEmail['stranger@gmail.com']).toBe('unknown'); // excluded from every rule
-    expect(byEmail['work@corp.example']).toBe('newsletter');
+    expect(byEmail['work@corp.example']).toBe('unknown');
   });
 
   // A malformed user address (no domain) must not throw or classify everyone.
   it('survives a user address with no domain', () => {
     seedContact(db, { email: 'someone@corp.example', receivedCount: 12 });
-    expect(repo.autoClassifyContacts('not-an-email')).toBe(1);
+    expect(repo.autoClassifyContacts('not-an-email')).toBe(0);
     expect(
       db.prepare("SELECT contact_type AS t FROM contacts WHERE email = 'someone@corp.example'").get(),
-    ).toEqual({ t: 'newsletter' });
+    ).toEqual({ t: 'unknown' });
   });
 
   // A legacy row with a NULL contact_type must be reported as 'unknown' and

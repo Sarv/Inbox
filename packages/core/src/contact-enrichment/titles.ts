@@ -19,7 +19,8 @@ const TITLE_KEYWORDS = [
   'Consultant', 'Analyst', 'Specialist', 'Lead', 'Senior',
   'Principal', 'Junior', 'Associate', 'Partner', 'Owner',
   'Executive', 'Coordinator', 'Supervisor', 'Administrator',
-  'Intern', 'President', 'Advocate', 'Counsel',
+  'Intern', 'President', 'Advocate', 'Counsel', 'Business Head', 'Officer',
+  'Scientist', 'Researcher', 'Accountant', 'Professor', 'Lecturer', 'Recruiter',
 ];
 
 export const TITLE_REGEX = new RegExp(`\\b(${TITLE_KEYWORDS.join('|')})\\b`, 'i');

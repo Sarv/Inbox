@@ -25,7 +25,9 @@ Jaipur: IT-10, EPIP RIICO Industrial Area, Sitapura, Jaipur 302022`, 'pkh@sarv.c
 
     expect(p.fullName).toBe('Pooja Khatri');
     expect(p.title).toMatch(/CBO/);
-    expect(p.organization).toBeTruthy();
+    // The website is explicit; an employer name must not be invented from it.
+    expect(p.website).toBe('https://www.sarv.com');
+    expect(p.organization).toBeNull();
   });
 
   it('takes a title that is NOT in the keyword list from the line after the name', () => {
@@ -64,8 +66,7 @@ www.acme.com`, 'support@acme.com');
 Alex Roe
 Engineer
 Some Unrelated Phrase`, 'alex@acme.com');
-    // Falls back to the domain root rather than grabbing a random line.
-    expect(p.organization).toBe('Acme');
+    expect(p.organization).toBeNull();
   });
 
   it('returns nulls rather than guesses when there is no signature', () => {

@@ -6,6 +6,7 @@
 // own mail) is that person's own direct/mobile number. We mine phones from each
 // sender's signature, group by domain, and split them on that frequency signal.
 
+import { contactLinkKind, normalizeContactUrl } from './contact-links';
 import { normalizePhoneToE164 } from './phone-normalizer';
 import { splitByAuthor } from './quote-attribution';
 import { extractSignals } from './signal-extractor';
@@ -94,12 +95,11 @@ export interface MinedLinkedIn {
  * dedups across signatures.
  */
 function classifyLinkedIn(raw: string): { type: 'personal' | 'company'; url: string } | null {
-  const trimmed = (raw || '').trim();
-  if (!/linkedin\.com/i.test(trimmed)) return null;
-  const url = trimmed.split(/[?#]/)[0].replace(/\/+$/, '');
-  const path = url.toLowerCase();
-  if (/linkedin\.com\/(?:company|school)\/[^/]/.test(path)) return { type: 'company', url };
-  if (/linkedin\.com\/(?:in|pub)\/[^/]/.test(path)) return { type: 'personal', url };
+  const url = normalizeContactUrl(raw || '');
+  if (!url) return null;
+  const kind = contactLinkKind(url);
+  if (kind === 'linkedinCompany') return { type: 'company', url };
+  if (kind === 'linkedinPersonal') return { type: 'personal', url };
   return null;
 }
 

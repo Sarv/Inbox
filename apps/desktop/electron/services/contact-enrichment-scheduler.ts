@@ -46,6 +46,37 @@ let unsubscribeEvents: (() => void) | null = null;
 let batchInFlight = false;
 let batchStartedAt = 0;
 let accountCursor = 0;
+let rendererReady = false;
+let rendererSession: string | undefined;
+let rendererProviderRevision: string | undefined;
+let batchSequence = 0;
+let tickGeneration = 0;
+let activeBatch: { batchId: string; accountId?: string; contactIds: string[] } | null = null;
+const retryAfter = new Map<string, { until: number; reason?: string | null }>();
+const failures = new Map<string, number>();
+const RETRY_DELAY_MS = 15 * 60_000;
+
+/** The renderer calls after installing its listener and whenever AI readiness changes. */
+export function setEnrichmentRendererReady(ready: boolean, sessionId?: string, providerRevision?: string): void {
+  if (sessionId && rendererSession !== sessionId) {
+    releaseBatchLock();
+    rendererSession = sessionId;
+  }
+  if (providerRevision && providerRevision !== rendererProviderRevision) {
+    for (const [key, retry] of retryAfter) {
+      if (retry.reason === 'llm_failed') { retryAfter.delete(key); failures.delete(key); }
+    }
+    rendererProviderRevision = providerRevision;
+  }
+  if (ready && !rendererReady) {
+    for (const [key, retry] of retryAfter) {
+      if (retry.reason === 'no_provider' || retry.reason === 'ai_disabled' || retry.reason === 'onboarding') retryAfter.delete(key);
+    }
+  }
+  rendererReady = ready;
+  if (!ready && !activeBatch) releaseBatchLock();
+  if (ready) scheduleNewMailTick();
+}
 
 export function startContactEnrichmentScheduler(): void {
   if (tickInterval) return;
@@ -80,6 +111,11 @@ export function startContactEnrichmentScheduler(): void {
     // actually present, so a new sender's card populates as soon as their first
     // mail is fetched. Debounced + cadence-gated, so it can't hammer the LLM.
     const offBodyReady = eventBus.on('email:body-ready' as any, () => {
+      // New signatures can unblock header-only contacts immediately; provider
+      // failures retain their cooldown so body bursts cannot buy repeated calls.
+      for (const [key, retry] of retryAfter) {
+        if (retry.reason === 'awaiting_body' || retry.reason === 'no_inbound_mail') retryAfter.delete(key);
+      }
       scheduleNewMailTick();
     });
     unsubscribeEvents = () => {
@@ -101,6 +137,9 @@ function scheduleNewMailTick(): void {
 }
 
 export function stopContactEnrichmentScheduler(): void {
+  rendererReady = false;
+  rendererSession = undefined;
+  releaseBatchLock();
   if (initialTimer) {
     clearTimeout(initialTimer);
     initialTimer = null;
@@ -141,7 +180,19 @@ export function reportContactEnrichmentProgress(payload: {
   contactId: string;
   ok: boolean;
   reason?: string | null;
+  batchId?: string;
 }): void {
+  if (payload.batchId && payload.batchId !== activeBatch?.batchId) return;
+  const key = `${activeBatch?.accountId ?? ''}:${payload.contactId}`;
+  if (payload.ok) failures.delete(key);
+  if (activeBatch?.contactIds.includes(payload.contactId) && !payload.ok && !['no_signals', 'automated_sender', 'unchanged_signature'].includes(payload.reason ?? '')) {
+    // Temporary failures must not advance a durable source watermark, but must
+    // leave room for other candidates rather than immediately buying a retry.
+    const attempts = payload.reason === 'llm_failed' ? (failures.get(key) ?? 0) + 1 : 1;
+    if (payload.reason === 'llm_failed') failures.set(key, attempts);
+    const delay = Math.min(24 * 60 * 60_000, RETRY_DELAY_MS * 4 ** Math.min(attempts - 1, 4));
+    retryAfter.set(key, { until: Date.now() + delay, reason: payload.reason });
+  }
   if (!payload.ok) {
     logger.info(`[EnrichmentScheduler] contact=${payload.contactId} skipped: ${payload.reason || 'unknown'}`);
   }
@@ -151,21 +202,25 @@ export function reportContactEnrichmentProgress(payload: {
  * Renderer signals that the batch is drained — unblock the scheduler
  * so the next tick can dispatch.
  */
-export function reportBatchDone(): void {
+export function reportBatchDone(payload?: { batchId?: string; continue?: boolean }): void {
   if (!batchInFlight) return;
+  if (payload?.batchId && payload.batchId !== activeBatch?.batchId) return;
   logger.info('[EnrichmentScheduler] batch done');
   releaseBatchLock();
   // Continue the rotation: serve the next account with pending work shortly.
-  scheduleFollowupTick();
+  if (payload?.continue !== false && rendererReady) scheduleFollowupTick();
 }
 
 /** Release the single-batch-in-flight lock. One place so every path resets both fields. */
 function releaseBatchLock(): void {
   batchInFlight = false;
   batchStartedAt = 0;
+  activeBatch = null;
+  tickGeneration++;
 }
 
 async function runTick(manual = false): Promise<number> {
+  if (!rendererReady) return 0;
   // Stale-lock guard: if the renderer died mid-batch we'd be stuck forever.
   if (batchInFlight && Date.now() - batchStartedAt > STALE_BATCH_TIMEOUT_MS) {
     logger.warn('[EnrichmentScheduler] stale batch lock cleared');
@@ -184,6 +239,7 @@ async function runTick(manual = false): Promise<number> {
   // stale-lock timeout fires).
   batchInFlight = true;
   batchStartedAt = Date.now();
+  const generation = ++tickGeneration;
 
   const mainWindow = getMainWindow();
   if (!mainWindow) {
@@ -205,51 +261,78 @@ async function runTick(manual = false): Promise<number> {
   // candidates; advance the cursor past it so the next tick serves the next
   // account. One account per tick keeps the single-batch-in-flight invariant.
   for (let i = 0; i < accounts.length; i++) {
+    if (generation !== tickGeneration) return 0;
     const idx = (accountCursor + i) % accounts.length;
     const { id, storage } = accounts[idx];
     if (!storage) continue;
     let candidates: Array<{ id: string }>;
     try {
+      const prefix = `${id ?? ''}:`;
+      const excludeContactIds: string[] = [];
+      for (const [key, retry] of retryAfter) {
+        if (retry.until <= Date.now()) retryAfter.delete(key);
+        else if (key.startsWith(prefix)) excludeContactIds.push(key.slice(prefix.length));
+      }
       candidates = await (storage as any).getContactEnrichmentCandidates({
         minAgeDays: MIN_AGE_DAYS,
         limit: BATCH_SIZE,
+        ...(excludeContactIds.length ? { excludeContactIds } : {}),
       });
     } catch (e) {
       logger.error(`[EnrichmentScheduler] list candidates failed (acct=${id ?? 'active'}):`, e);
       continue;
     }
+    if (generation !== tickGeneration) return 0;
     if (candidates.length === 0) continue;
+    // stop()/readiness may have changed while the candidate read awaited.
+    if (generation !== tickGeneration || !rendererReady || !batchInFlight) return 0;
+    // Fresh work must not inherit a long provider-retry wake. Its ack starts
+    // the normal short drain, which re-arms the cooldown once the queue empties.
+    if (followupTimer) { clearTimeout(followupTimer); followupTimer = null; }
 
     accountCursor = (idx + 1) % accounts.length;
     // Lock already held from the claim above; refresh the start time so the
     // stale-lock timeout measures from the actual dispatch, not the claim.
     batchStartedAt = Date.now();
     logger.info(`[EnrichmentScheduler] dispatching batch of ${candidates.length} contacts (acct=${id ?? 'active'})`);
-    mainWindow.webContents.send('contact-enrichment:run-batch', {
+    activeBatch = {
+      batchId: `${Date.now()}-${++batchSequence}`,
       contactIds: candidates.map((c) => c.id),
       accountId: id ?? undefined,
-    });
+    };
+    try {
+      mainWindow.webContents.send('contact-enrichment:run-batch', activeBatch);
+    } catch (error) {
+      releaseBatchLock();
+      logger.error('[EnrichmentScheduler] dispatch failed:', error);
+      return 0;
+    }
     return candidates.length;
   }
 
   // No account had eligible contacts — release and stop the rotation (a later
   // interval / new-mail tick restarts it).
+  if (generation !== tickGeneration) return 0;
   if (manual) logger.info('[EnrichmentScheduler] no eligible contacts on any account');
   releaseBatchLock();
+  if (retryAfter.size && rendererReady) {
+    const nextRetry = Math.min(...[...retryAfter.values()].map(retry => retry.until));
+    scheduleFollowupTick(Math.max(FOLLOWUP_DELAY_MS, nextRetry - Date.now()));
+  }
   return 0;
 }
 
 /**
  * After a batch acks, quickly serve the NEXT account that has work so a 10-
  * account rotation drains in minutes, not 10 x 6h. Self-limiting: a follow-up
- * tick that finds no candidates dispatches nothing (no ack → no further
- * follow-up), so this converges to idle. Tracked so stop() can cancel it.
+ * tick that finds no candidates idles until new mail or the earliest temporary
+ * failure cooldown. Tracked so stop() can cancel it.
  */
-function scheduleFollowupTick(): void {
+function scheduleFollowupTick(delay = FOLLOWUP_DELAY_MS): void {
   if (followupTimer) return;
   followupTimer = setTimeout(() => {
     followupTimer = null;
     runTick().catch((e) => logger.error('[EnrichmentScheduler] follow-up tick error:', e));
-  }, FOLLOWUP_DELAY_MS);
+  }, delay);
   followupTimer.unref?.();
 }

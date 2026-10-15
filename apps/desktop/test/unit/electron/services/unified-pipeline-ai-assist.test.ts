@@ -107,6 +107,9 @@ vi.mock('../../../../electron/ipc/draft-handlers', () => ({
 vi.mock('../../../../electron/ipc/smtp-handlers', () => ({ sendEmailFromMain: vi.fn(), appendSentCopy: vi.fn() }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({
   readRegistryAccounts: () => [],
+  // The deterministic contact refresh shares the pipeline lifecycle. Give it
+  // the same isolated account identities instead of reaching the real registry.
+  listRegistryAccounts: () => h.accounts.map(({ id }) => ({ id, email: 'me@example.test' })),
   registryAccountEmail: () => 'me@example.test',
   resolveAccountEmail: () => 'me@example.test',
   resolveAccountIdentity: () => ({ email: 'me@example.test', name: 'Me' }),

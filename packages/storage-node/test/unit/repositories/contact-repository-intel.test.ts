@@ -43,8 +43,8 @@ function insertEmail(id: string, fromAddress: string, date: number, subject = 's
   db.prepare(
     `INSERT INTO emails (
        id, message_id, thread_id, folder_id, tags, subject, from_address, date,
-       clean_body, raw_body, content_type, content_hash
-     ) VALUES (?, ?, ?, 'f1', '|INBOX|', ?, ?, ?, 'body', 'body', 'text', ?)`,
+       clean_body, raw_body, content_type, content_hash, clean_body_len, raw_body_len
+     ) VALUES (?, ?, ?, 'f1', '|INBOX|', ?, ?, ?, 'body', 'body', 'text', ?, 4, 4)`,
   ).run(id, `<${id}>`, threadId, subject, fromAddress, date, `h-${id}`);
 }
 
@@ -71,6 +71,69 @@ afterEach(() => {
 // with no inbound mail, or re-returns ones already enriched through their newest
 // email, every tick burns LLM calls on nothing.
 describe('ContactRepository — enrichment candidates', () => {
+  it('recovers an incomplete legacy attempt despite its old nonnull watermark, once per review version', async () => {
+    const contact = await repo.upsert({ email: 'legacy@corp.io', receivedCount: 1, metadata: { retained: 'value' } });
+    insertEmail('legacy-signature', 'legacy@corp.io', NOW);
+    // Reproduce an older build consuming a provider failure/bodyless attempt.
+    db.prepare('UPDATE contacts SET enriched_through_email_at = ?, enrichment = NULL WHERE id = ?').run(NOW, contact.id);
+    expect((await repo.getEnrichmentCandidates({ minAgeDays: 90 })).map(row => row.id)).toContain(contact.id);
+    const reviewed = await repo.applyEnrichment({ contactId: contact.id, enrichedThroughEmailAt: NOW, source: 'llm',
+      enrichment: { fullName: 'Alice Doe', designation: 'Product Manager' }, review: { version: 1, signatureFingerprint: 'owned-signature' } });
+    expect(reviewed.metadata).toMatchObject({ retained: 'value', contactEnrichmentReview: { version: 1, signatureFingerprint: 'owned-signature' } });
+    expect(await repo.getEnrichmentCandidates({ minAgeDays: 90 })).toEqual([]);
+  });
+
+  it('retires a reviewed signal-less contact and rechecks genuinely newer source mail', async () => {
+    const contact = await repo.upsert({ email: 'unsigned@corp.io', receivedCount: 1 });
+    insertEmail('unsigned-old', 'unsigned@corp.io', NOW);
+    await repo.recordEnrichmentWatermark(contact.id, NOW, { version: 1, signatureFingerprint: 'no-signature-features' });
+    expect(await repo.getEnrichmentCandidates({ minAgeDays: 90 })).toEqual([]);
+    insertEmail('unsigned-new', 'unsigned@corp.io', NOW + 1);
+    expect((await repo.getEnrichmentCandidates({ minAgeDays: 90 })).map(row => row.id)).toEqual([contact.id]);
+    await repo.recordEnrichmentWatermark(contact.id, NOW + 1, { version: 1, signatureFingerprint: 'no-signature-features' });
+    expect(await repo.getEnrichmentCandidates({ minAgeDays: 90 })).toEqual([]);
+    expect(historyRows(contact.id)).toEqual([]);
+  });
+
+  it('leaves complete legacy profiles on their existing cadence', async () => {
+    const contact = await repo.upsert({ email: 'complete@corp.io', receivedCount: 1 });
+    insertEmail('complete-old', 'complete@corp.io', NOW);
+    await repo.applyEnrichment({ contactId: contact.id, enrichedThroughEmailAt: NOW, enrichment: {
+      fullName: 'Alice Doe', designation: 'Product Manager', companyName: 'Acme', linkedinUrl: 'https://linkedin.com/in/alice',
+    } });
+    expect(await repo.getEnrichmentCandidates({ minAgeDays: 90 })).toEqual([]);
+  });
+  it('excludes retrying contacts before limiting so older contacts remain reachable', async () => {
+    const first = await repo.upsert({ email: 'recent@corp.io', receivedCount: 1 });
+    const next = await repo.upsert({ email: 'older@corp.io', receivedCount: 1 });
+    insertEmail('recent', 'recent@corp.io', NOW);
+    insertEmail('older', 'older@corp.io', NOW - DAY);
+    expect((await repo.getEnrichmentCandidates({ limit: 1, excludeContactIds: [first.id] })).map(row => row.id)).toEqual([next.id]);
+  });
+
+  it('can scan available signatures past twenty newer bodyless headers', async () => {
+    insertEmail('signature', 'alice@corp.io', NOW - DAY);
+    for (let i = 0; i < 25; i++) {
+      insertEmail(`header-${i}`, 'alice@corp.io', NOW + i);
+      db.prepare("UPDATE emails SET clean_body = '', raw_body = '', clean_body_len = 0, raw_body_len = 0 WHERE id = ?").run(`header-${i}`);
+    }
+    expect(await repo.getRecentInboundEmails('alice@corp.io', 20, true)).toMatchObject([{ id: 'signature' }]);
+    expect(await repo.getRecentInboundEmails('alice@corp.io', 20)).toHaveLength(20);
+  });
+
+  it.each([true, false])('reads relocated signatures with body metrics ready=%s', async (metricsReady) => {
+    insertEmail('relocated', 'alice@corp.io', NOW);
+    db.prepare("INSERT INTO email_bodies (email_id, clean_body, raw_body) VALUES (?, ?, ?)")
+      .run('relocated', 'Regards, Alice Doe, Acme', '<p>Regards, Alice Doe, Acme</p>');
+    db.prepare("UPDATE emails SET clean_body = '', raw_body = '' WHERE id = ?").run('relocated');
+    if (!metricsReady) {
+      db.prepare('UPDATE emails SET clean_body_len = NULL, raw_body_len = NULL WHERE id = ?').run('relocated');
+      db.prepare("UPDATE email_body_metrics_state SET value = '0' WHERE key = 'lengths_backfilled'").run();
+    }
+    expect(await repo.getRecentInboundEmails('alice@corp.io', 20, true)).toMatchObject([
+      { id: 'relocated', clean_body: 'Regards, Alice Doe, Acme' },
+    ]);
+  });
   it('returns only individuals with inbound mail, reporting their newest email date', async () => {
     const withMail = await repo.upsert({ email: 'has@corp.io', receivedCount: 1 });
     await repo.upsert({ email: 'nomail@corp.io', sentCount: 1 }); // we wrote to them; nothing to mine
@@ -199,6 +262,62 @@ describe('ContactRepository — company synthesis', () => {
 // applyEnrichment is the one write that can corrupt identity. Every branch below
 // corresponds to a real-world failure we must not regress into.
 describe('ContactRepository — applyEnrichment', () => {
+  it('keeps a newer shared profile, fingerprint and watermark when another account reviews older source mail', async () => {
+    const c = await repo.upsert({ email: 'alice@corp.io' });
+    await repo.applyEnrichment({ contactId: c.id, source: 'llm', enrichedThroughEmailAt: NOW,
+      enrichment: { fullName: 'Alice Doe', designation: 'Director', companyName: 'Company B' },
+      review: { version: 1, signatureFingerprint: 'current-signature' } });
+    const after = await repo.applyEnrichment({ contactId: c.id, source: 'llm', enrichedThroughEmailAt: NOW - 365 * DAY,
+      enrichment: { fullName: 'Alice Doe', designation: 'Engineer', companyName: 'Company A' },
+      review: { version: 1, signatureFingerprint: 'old-signature' } });
+    expect(after).toMatchObject({ title: 'Director', organization: 'Company B', enrichedThroughEmailAt: NOW,
+      metadata: { contactEnrichmentReview: { version: 1, signatureFingerprint: 'current-signature', throughEmailAt: NOW } } });
+    expect(historyRows(c.id)).toHaveLength(1);
+    await repo.recordEnrichmentWatermark(c.id, NOW - 365 * DAY, { version: 1, signatureFingerprint: 'old-signature' });
+    expect(await repo.get(c.id)).toMatchObject({ enrichedThroughEmailAt: NOW,
+      metadata: { contactEnrichmentReview: { signatureFingerprint: 'current-signature', throughEmailAt: NOW } } });
+  });
+
+  it('allows an older available signature to recover a bad legacy watermark while keeping that watermark monotonic', async () => {
+    const c = await repo.upsert({ email: 'legacy@corp.io' });
+    db.prepare('UPDATE contacts SET enriched_through_email_at = ? WHERE id = ?').run(NOW, c.id);
+    const recovered = await repo.applyEnrichment({ contactId: c.id, enrichedThroughEmailAt: NOW - DAY,
+      enrichment: { fullName: 'Alice Doe', designation: 'Engineer' }, review: { version: 1, signatureFingerprint: 'available-signature' } });
+    expect(recovered).toMatchObject({ title: 'Engineer', enrichedThroughEmailAt: NOW,
+      metadata: { contactEnrichmentReview: { throughEmailAt: NOW - DAY } } });
+    insertEmail('later-body', 'legacy@corp.io', NOW);
+    expect((await repo.getEnrichmentCandidates({ minAgeDays: 90 })).map(row => row.id)).toEqual([c.id]);
+  });
+
+  it('fills legacy missing fields from older source without replacing a known newer job, identity or company link', async () => {
+    const c = await repo.upsert({ email: 'alice@corp.io' });
+    const current = await repo.applyEnrichment({ contactId: c.id, source: 'llm', enrichedThroughEmailAt: NOW, mobileE164: '+919812345678',
+      enrichment: { fullName: 'Alice Doe', designation: 'Director', companyName: 'Company B', companyDomain: 'company-b.test', companyPhone: '+911140001111' } });
+    // This pre-version profile is incomplete (no social URL), but the job and
+    // identity are already newer than another account's available signature.
+    const recovered = await repo.applyEnrichment({ contactId: c.id, source: 'llm', enrichedThroughEmailAt: NOW - 365 * DAY,
+      mobileE164: '+919999999999', enrichment: { fullName: 'Older name', designation: 'Engineer', companyName: 'Company A',
+        companyDomain: 'company-a.test', companyPhone: '+911122223333', linkedinUrl: 'https://linkedin.com/in/alice-doe' },
+      review: { version: 1, signatureFingerprint: 'older-recovery' } });
+    expect(recovered).toMatchObject({ title: 'Director', organization: 'Company B', enrichedThroughEmailAt: NOW,
+      companyContactId: current.companyContactId, personId: current.personId, mobileE164: '+919812345678', phone: '+911140001111',
+      enrichment: { fullName: 'Alice Doe', designation: 'Director', companyName: 'Company B', companyDomain: 'company-b.test',
+        companyPhone: '+911140001111', linkedinUrl: 'https://linkedin.com/in/alice-doe' },
+      metadata: { contactEnrichmentReview: { throughEmailAt: NOW - 365 * DAY } } });
+    expect(historyRows(c.id)).toHaveLength(1);
+    expect(historyRows(c.id)[0]).toMatchObject({ designation: 'Director', organization: 'Company B', company_contact_id: current.companyContactId, effective_from: NOW });
+  });
+  it('preserves a user edit made after the caller took its AI snapshot', async () => {
+    const c = await repo.upsert({ email: 'alice@corp.io', title: 'Original title', organization: 'Original employer' });
+    const staleResult = { fullName: 'AI name', designation: 'Stale title', companyName: 'Stale employer', notes: 'AI note', department: null };
+    await repo.applyEnrichment({ contactId: c.id, source: 'user', enrichedThroughEmailAt: NOW - DAY,
+      enrichment: { fullName: 'Chosen name', designation: 'Chosen title', companyName: 'Chosen employer', notes: 'Keep this note', department: 'Chosen team' } });
+    const after = await repo.applyEnrichment({ contactId: c.id, source: 'llm', enrichedThroughEmailAt: NOW, enrichment: staleResult });
+    expect(after).toMatchObject({ title: 'Chosen title', organization: 'Chosen employer', enrichmentSource: 'user', enrichment: {
+      fullName: 'Chosen name', designation: 'Chosen title', companyName: 'Chosen employer', notes: 'Keep this note', department: 'Chosen team',
+    } });
+    expect(historyRows(c.id)).toHaveLength(1);
+  });
   const baseEnrichment = (over: Partial<ContactEnrichment> = {}): ContactEnrichment => ({
     fullName: 'Priya Sharma',
     designation: 'Head of Ops',

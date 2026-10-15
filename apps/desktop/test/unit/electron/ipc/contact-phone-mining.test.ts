@@ -30,6 +30,9 @@ vi.mock('../../../../electron/shared', () => ({
   getStorageFor: (id: string) => h.runtimes.find(([rid]) => rid === id)?.[1].storage ?? null,
   getAllAccountRuntimes: () => h.runtimes,
 }));
+vi.mock('../../../../electron/services/contact-classification-service', () => ({
+  refreshContactClassifications: vi.fn(() => 0),
+}));
 
 import { registerContactsHandlers } from '../../../../electron/ipc/contacts-handlers';
 
@@ -98,6 +101,21 @@ beforeEach(() => {
 });
 
 const scan = () => h.handlers.get('contacts:scan')!();
+
+describe('recent inbound signature evidence', () => {
+  it('keeps icon-only links in bounded owned HTML evidence despite a long clean body', async () => {
+    const raw = `<p>Here is the update.</p><p>Regards,<br>Alice Doe<br>Engineering Lead<br>Acme Ltd<br><a href="https://www.linkedin.com/in/alice-doe"><img alt="LinkedIn"></a></p>`;
+    const storage = {
+      getContact: vi.fn(async () => ({ id: 'alice', email: 'alice@acme.example' })),
+      getRecentInboundEmailsForContact: vi.fn(async () => [{ id: 'mail', date: 123, clean_body: 'A long clean body without the icon URL. '.repeat(5), raw_body: raw }]),
+    };
+    h.primary = storage;
+    const response = await h.handlers.get('contacts:recentInbound')!(undefined, 'alice', 20);
+    expect(response.success).toBe(true);
+    expect(response.data[0].miningText).toContain('https://www.linkedin.com/in/alice-doe');
+    expect(storage.getRecentInboundEmailsForContact).toHaveBeenCalledWith('alice@acme.example', 20, true);
+  });
+});
 
 describe('mining a top-posted reply', () => {
   // Regression: the scan converted only the LAST 12KB of a body, so in any

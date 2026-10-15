@@ -58,6 +58,7 @@ import { loadAgentConfig } from './agent-config-store';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
 import { runClassificationMutation } from './classification-actions';
+import { refreshContactClassifications, startContactClassificationRefresh, stopContactClassificationRefresh } from './contact-classification-service';
 import { getMeta, setMeta } from './core-db';
 import { ensureGmailLabelColor, renameGmailLabel, deleteGmailLabelsUnder } from './gmail-label-api';
 import { chromiumFetch } from './net-fetch';
@@ -599,6 +600,7 @@ export function initializeUnifiedPipeline(
   // registered AFTER the storage guard, so a transient "Storage not available"
   // left them unregistered ("No handler registered").
   registerPipelineIPC();
+  startContactClassificationRefresh();
 
   const storage = getStorage();
   if (!storage) {
@@ -798,7 +800,7 @@ export function initializeUnifiedPipeline(
         logger.info(`[Pipeline] Already learned: ${s.totalActions} actions (${s.fromHistory} hist, ${s.fromLive} live), ${s.uniqueSenders} senders`);
       }
       if (userEmail) {
-        const cl = repos.agent.autoClassifyContacts(userEmail);
+        const cl = refreshContactClassifications(userEmail, true);
         if (cl > 0) logger.info(`[Pipeline] Classified ${cl} contacts`);
         const m = repos.agent.buildAllSenderMemories(userEmail);
         if (m > 0) logger.info(`[Pipeline] Built ${m} sender memories`);
@@ -838,7 +840,7 @@ export function initializeUnifiedPipeline(
         if (email) {
           serviceConfig.userEmail = email;
           logger.info(`[Pipeline] Post-sync userEmail: ${email}`);
-          const cl = repos.agent.autoClassifyContacts(email);
+          const cl = refreshContactClassifications(email, true);
           if (cl > 0) logger.info(`[Pipeline] Classified ${cl} contacts`);
           const m = repos.agent.buildAllSenderMemories(email);
           if (m > 0) logger.info(`[Pipeline] Built ${m} sender memories`);
@@ -854,6 +856,7 @@ export function getIntelligence(): BehaviorIntelligence | null { return intellig
 export function updatePipelineAIConfig(config: AIProviderConfig): void { aiConfig = withChromiumFetch(config); emitAiPipelineStatus(); }
 
 export function stopUnifiedPipeline(): void {
+  stopContactClassificationRefresh();
   if (unsubscribeSync) { unsubscribeSync(); unsubscribeSync = null; }
   if (unsubscribeBodyReady) { unsubscribeBodyReady(); unsubscribeBodyReady = null; }
   if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }

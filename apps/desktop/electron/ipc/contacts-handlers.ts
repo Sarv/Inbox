@@ -7,6 +7,7 @@
 import { classifyDomainPhones, classifyDomainUrls, htmlMiningWindow, htmlToPlainText, isSentMailFolder, mineAttributedPhones, mineContactSignals, phoneDomainOf, parseAddresses, type SenderPhones, type SenderUrls, createLogger } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
+import { refreshContactClassifications } from '../services/contact-classification-service';
 import { requireStorage, getStorageFor, getAllAccountRuntimes } from '../shared';
 const logger = createLogger('contacts-handlers');
 
@@ -473,6 +474,7 @@ export function registerContactsHandlers(): void {
    */
   ipcMain.handle('contacts:list', async (_event, options: { limit: number; offset: number; search?: string; sortBy?: string; sortOrder?: 'asc' | 'desc'; contactType?: string }) => {
     try {
+      refreshContactClassifications();
       const storage = requireStorage();
       const contacts = await storage.getContacts(options);
       const total = await storage.getContactsCount(options.search, options.contactType);
@@ -550,7 +552,7 @@ export function registerContactsHandlers(): void {
       if (!contact) {
         return { success: false, error: 'Contact not found' };
       }
-      const emails = await (storage as any).getRecentInboundEmailsForContact(contact.email, limit);
+      const emails = await (storage as any).getRecentInboundEmailsForContact(contact.email, limit, true);
       // Return just the fields the enricher needs — keeps IPC payload
       // reasonable when a contact has long HTML bodies. The repo returns
       // raw email rows: the only body columns are clean_body (cleaned
@@ -562,6 +564,11 @@ export function registerContactsHandlers(): void {
         subject: e.subject,
         cleanBody: e.clean_body || e.cleanBody || null,
         htmlBody: e.raw_body || e.rawBody || null,
+        // HTML signatures often expose profile URLs only through icon hrefs.
+        // Convert once in Node, bounded, while preserving those evidence links.
+        miningText: (e.raw_body || e.rawBody || e.htmlBody)
+          ? htmlToPlainText(htmlMiningWindow(e.raw_body || e.rawBody || e.htmlBody, MAX_CONVERT_CHARS), { keepLinkHrefs: true })
+          : null,
       }));
       return { success: true, data: trimmed };
     } catch (error) {
@@ -593,10 +600,10 @@ export function registerContactsHandlers(): void {
    * Prevents the scheduler from re-queuing the same contact on every
    * tick.
    */
-  ipcMain.handle('contacts:recordEnrichmentWatermark', async (_event, contactId: string, throughEmailAt: number, accountId?: string) => {
+  ipcMain.handle('contacts:recordEnrichmentWatermark', async (_event, contactId: string, throughEmailAt: number, accountId?: string, review?: { version: number; signatureFingerprint?: string }) => {
     try {
       const storage = storageForAccount(accountId);
-      await (storage as any).recordContactEnrichmentWatermark(contactId, throughEmailAt);
+      await (storage as any).recordContactEnrichmentWatermark(contactId, throughEmailAt, review);
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -677,6 +684,7 @@ export function registerContactsHandlers(): void {
         }
       }
 
+      refreshContactClassifications(undefined, true);
       const total = await storage.getContactsCount();
       logger.info(`[Contacts] Scan complete. Total emails scanned: ${totalScanned}, Total contacts: ${total}`);
 

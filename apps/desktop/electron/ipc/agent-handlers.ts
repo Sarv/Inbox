@@ -12,6 +12,7 @@ import { ipcMain } from 'electron';
 import { openAccountStorages, requireNamedOrActiveStorage } from '../services/account-target';
 import { resolveAccountIdentity } from '../services/accounts-registry';
 import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
+import { refreshContactClassifications } from '../services/contact-classification-service';
 import { buildThreadMessages } from '../services/thread-context';
 import { getIntelligence, getUnifiedPipeline, setPipelineUserProfile, getPipelineAIConfig } from '../services/unified-pipeline-service';
 import { requireStorage, getSyncEngine } from '../shared';
@@ -60,7 +61,7 @@ function scheduleAgentLearning(userEmail: string): void {
     try {
       const agentRepo = getAgentRepo();
       const bf = agentRepo.backfillFromHistory();
-      const cl = agentRepo.autoClassifyContacts(email);
+      const cl = refreshContactClassifications(email, true);
       const m = agentRepo.buildAllSenderMemories(email);
       logger.info(`[Agent] Learning (deferred): +${bf.actionsCreated} actions, ${cl} contacts, ${m} sender memories`);
     } catch (e) {
@@ -861,18 +862,21 @@ export function registerAgentHandlers(): void {
 
   ipcMain.handle('agent:setContactType', async (_event, email: string, contactType: string, source?: string) => {
     try {
-      const agentRepo = getAgentRepo();
-      agentRepo.setContactType(email, contactType as any, 1.0, (source || 'user') as any);
+      // This renderer operation is an explicit user edit. Automated pipelines
+      // use the repository directly and may never masquerade as a user here.
+      if (source && source !== 'user') throw new Error('Contact edits must use the user source');
+      for (const { storage } of openAccountStorages()) {
+        getAgentRepo(storage).setContactType(email, contactType as any, 1.0, 'user');
+      }
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
   });
 
-  ipcMain.handle('agent:autoClassifyContacts', async (_event, userEmail: string) => {
+  ipcMain.handle('agent:autoClassifyContacts', async (_event, userEmail?: string) => {
     try {
-      const agentRepo = getAgentRepo();
-      const count = agentRepo.autoClassifyContacts(userEmail);
+      const count = refreshContactClassifications(userEmail, true);
       return { success: true, data: { classified: count } };
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -881,6 +885,7 @@ export function registerAgentHandlers(): void {
 
   ipcMain.handle('agent:getContactsByType', async (_event, contactType: string, options?: { limit?: number; offset?: number; search?: string }) => {
     try {
+      refreshContactClassifications();
       const agentRepo = getAgentRepo();
       const contacts = agentRepo.getContactsByType(contactType as any, options);
       return { success: true, data: contacts };
@@ -891,6 +896,7 @@ export function registerAgentHandlers(): void {
 
   ipcMain.handle('agent:getContactTypeCounts', async () => {
     try {
+      refreshContactClassifications();
       const agentRepo = getAgentRepo();
       const counts = agentRepo.getContactTypeCounts();
       return { success: true, data: counts };

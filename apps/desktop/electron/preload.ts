@@ -509,8 +509,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     recentInbound: (contactId: string, limit?: number, accountId?: string) =>
       ipcRenderer.invoke('contacts:recentInbound', contactId, limit, accountId),
     applyEnrichment: (input: any) => ipcRenderer.invoke('contacts:applyEnrichment', input),
-    recordEnrichmentWatermark: (contactId: string, throughEmailAt: number, accountId?: string) =>
-      ipcRenderer.invoke('contacts:recordEnrichmentWatermark', contactId, throughEmailAt, accountId),
+    recordEnrichmentWatermark: (contactId: string, throughEmailAt: number, accountId?: string, review?: { version: number; signatureFingerprint?: string }) =>
+      ipcRenderer.invoke('contacts:recordEnrichmentWatermark', contactId, throughEmailAt, accountId, review),
     // Confirm-gated avatars: approve / decline a discovered candidate photo.
     confirmAvatar: (contactId: string, accountId?: string) =>
       ipcRenderer.invoke('contacts:confirmAvatar', contactId, accountId),
@@ -523,6 +523,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('contacts:avatars-updated', handler);
       return () => ipcRenderer.removeListener('contacts:avatars-updated', handler);
     },
+    // Relationship labels can change in the background without a Contacts read.
+    onUpdated: (cb: () => void) => {
+      const handler = () => cb();
+      ipcRenderer.on('contacts:updated', handler);
+      return () => ipcRenderer.removeListener('contacts:updated', handler);
+    },
     getEnrichmentHistory: (contactId: string) =>
       ipcRenderer.invoke('contacts:getEnrichmentHistory', contactId),
     getRelatedByPerson: (contactId: string) =>
@@ -532,14 +538,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Contact enrichment scheduler bridge — main drives the queue, renderer
   // does the LLM calls one-at-a-time.
   contactEnrichment: {
-    onRunBatch: (callback: (payload: { contactIds: string[]; accountId?: string }) => void) => {
-      const handler = (_e: unknown, payload: { contactIds: string[]; accountId?: string }) => callback(payload);
+    onRunBatch: (callback: (payload: { contactIds: string[]; accountId?: string; batchId?: string }) => void) => {
+      const handler = (_e: unknown, payload: { contactIds: string[]; accountId?: string; batchId?: string }) => callback(payload);
       ipcRenderer.on('contact-enrichment:run-batch', handler);
       return () => ipcRenderer.removeListener('contact-enrichment:run-batch', handler);
     },
-    reportProgress: (payload: { contactId: string; ok: boolean; reason?: string | null }) =>
+    reportProgress: (payload: { contactId: string; ok: boolean; reason?: string | null; batchId?: string }) =>
       ipcRenderer.invoke('contact-enrichment:report-progress', payload),
-    reportBatchDone: () => ipcRenderer.invoke('contact-enrichment:report-batch-done'),
+    reportBatchDone: (payload?: { batchId?: string; continue?: boolean }) => ipcRenderer.invoke('contact-enrichment:report-batch-done', payload),
+    setReady: (ready: boolean, sessionId?: string, providerRevision?: string) => ipcRenderer.invoke('contact-enrichment:set-ready', ready, sessionId, providerRevision),
     triggerNow: () => ipcRenderer.invoke('contact-enrichment:trigger-now'),
   },
 
@@ -1480,25 +1487,28 @@ export interface ElectronAPI {
   contacts: {
     list: (options: { limit: number; offset: number; search?: string; sortBy?: string; sortOrder?: 'asc' | 'desc'; contactType?: string }) =>
       Promise<{ success: boolean; data?: { contacts: any[]; total: number }; error?: string }>;
-    get: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+    get: (id: string, accountId?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
     update: (id: string, updates: any) => Promise<{ success: boolean; data?: any; error?: string }>;
     delete: (id: string) => Promise<{ success: boolean; error?: string }>;
     confirmAvatar: (contactId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     rejectAvatar: (contactId: string, accountId?: string) => Promise<{ success: boolean; error?: string }>;
     onAvatarsUpdated: (cb: () => void) => () => void;
+    onUpdated: (cb: () => void) => () => void;
     scan: () => Promise<{ success: boolean; data?: { scanned: boolean; totalContacts: number }; error?: string }>;
-    recentInbound: (contactId: string, limit?: number) =>
-      Promise<{ success: boolean; data?: Array<{ id: string; date: number; subject: string; cleanBody: string | null; plainBody: string | null; htmlBody: string | null }>; error?: string }>;
+    recentInbound: (contactId: string, limit?: number, accountId?: string) =>
+      Promise<{ success: boolean; data?: Array<{ id: string; date: number; subject: string; cleanBody: string | null; plainBody: string | null; htmlBody: string | null; miningText?: string | null }>; error?: string }>;
     applyEnrichment: (input: {
       contactId: string;
+      accountId?: string;
       enrichment: any;
       kind?: 'individual' | 'company';
       mobileE164?: string | null;
       enrichedThroughEmailAt: number;
       sourceEmailId?: string | null;
       source?: 'llm' | 'user';
+      review?: { version: number; signatureFingerprint?: string };
     }) => Promise<{ success: boolean; data?: any; error?: string }>;
-    recordEnrichmentWatermark: (contactId: string, throughEmailAt: number) =>
+    recordEnrichmentWatermark: (contactId: string, throughEmailAt: number, accountId?: string, review?: { version: number; signatureFingerprint?: string }) =>
       Promise<{ success: boolean; error?: string }>;
     getEnrichmentHistory: (contactId: string) =>
       Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -1506,10 +1516,11 @@ export interface ElectronAPI {
       Promise<{ success: boolean; data?: any[]; error?: string }>;
   };
   contactEnrichment: {
-    onRunBatch: (callback: (payload: { contactIds: string[] }) => void) => () => void;
-    reportProgress: (payload: { contactId: string; ok: boolean; reason?: string | null }) =>
+    onRunBatch: (callback: (payload: { contactIds: string[]; accountId?: string; batchId?: string }) => void) => () => void;
+    reportProgress: (payload: { contactId: string; ok: boolean; reason?: string | null; batchId?: string }) =>
       Promise<{ success: boolean }>;
-    reportBatchDone: () => Promise<{ success: boolean }>;
+    reportBatchDone: (payload?: { batchId?: string; continue?: boolean }) => Promise<{ success: boolean }>;
+    setReady: (ready: boolean, sessionId?: string, providerRevision?: string) => Promise<{ success: boolean }>;
     triggerNow: () => Promise<{ success: boolean; data?: { queued: number }; error?: string }>;
   };
   smtp: {

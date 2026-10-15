@@ -110,6 +110,7 @@ export {
 } from './contact-enrichment/phone-scoring';
 
 export { segmentZones, setSignatureSplitter, type Zone, type SignatureSplitter } from './contact-enrichment/zones';
+export { CONTACT_ENRICHMENT_REVIEW_VERSION, isIncompleteContactProfile, type ContactEnrichmentReview } from './contact-enrichment/review-state';
 
 // NODE-ONLY. email-reply-parser's regex.js does a bare `require("re2")` to pick
 // up an optional native regex engine; the call is inside a try/catch, but a

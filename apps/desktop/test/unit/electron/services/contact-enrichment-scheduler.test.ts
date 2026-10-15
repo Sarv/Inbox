@@ -60,24 +60,26 @@ vi.mock('@sarvinbox/core', () => ({
 type Scheduler = typeof import('../../../../electron/services/contact-enrichment-scheduler');
 
 /** Fresh module — the lock, cursor and timers are module state. */
-const load = async (): Promise<Scheduler> => {
+const load = async (ready = true): Promise<Scheduler> => {
   vi.resetModules();
-  return import('../../../../electron/services/contact-enrichment-scheduler');
+  const service = await import('../../../../electron/services/contact-enrichment-scheduler');
+  if (ready) service.setEnrichmentRendererReady(true);
+  return service;
 };
 
 interface AccountState {
   candidates: string[];
-  calls: Array<{ minAgeDays: number; limit: number }>;
+  calls: Array<{ minAgeDays: number; limit: number; excludeContactIds?: string[] }>;
   throws: boolean;
 }
 
 const makeAccount = (candidates: string[], over: Partial<AccountState> = {}) => {
   const state: AccountState = { candidates, calls: [], throws: false, ...over };
   const storage = {
-    getContactEnrichmentCandidates: async (opts: { minAgeDays: number; limit: number }) => {
+    getContactEnrichmentCandidates: async (opts: { minAgeDays: number; limit: number; excludeContactIds?: string[] }) => {
       state.calls.push(opts);
       if (state.throws) throw new Error('query failed');
-      return state.candidates.map((id) => ({ id }));
+      return state.candidates.filter(id => !opts.excludeContactIds?.includes(id)).slice(0, opts.limit).map((id) => ({ id }));
     },
   };
   return { state, storage };
@@ -199,7 +201,7 @@ describe('the dispatched batch', () => {
     await expect(svc.triggerEnrichmentNow()).resolves.toBe(3);
 
     expect(a.state.calls[0]).toEqual({ minAgeDays: MIN_AGE_DAYS, limit: BATCH_SIZE });
-    expect(dispatched()[0].payload).toEqual({ contactIds: ['c1', 'c2', 'c3'], accountId: undefined });
+    expect(dispatched()[0].payload).toEqual({ contactIds: ['c1', 'c2', 'c3'], accountId: undefined, batchId: expect.any(String) });
   });
 
   it('tags the batch with the owning accountId for a multi-account install', async () => {
@@ -208,7 +210,7 @@ describe('the dispatched batch', () => {
     h.runtimes = [['acct-a', runtime(a.storage)], ['acct-b', runtime(b.storage)]];
     const svc = await load();
     await expect(svc.triggerEnrichmentNow()).resolves.toBe(1);
-    expect(dispatched()[0].payload).toEqual({ contactIds: ['b1'], accountId: 'acct-b' });
+    expect(dispatched()[0].payload).toEqual({ contactIds: ['b1'], accountId: 'acct-b', batchId: expect.any(String) });
   });
 });
 
@@ -415,5 +417,130 @@ describe('reportContactEnrichmentProgress', () => {
     expect(() => svc.reportContactEnrichmentProgress({ contactId: 'c1', ok: true })).not.toThrow();
     expect(() => svc.reportContactEnrichmentProgress({ contactId: 'c2', ok: false, reason: 'no signals' })).not.toThrow();
     expect(() => svc.reportContactEnrichmentProgress({ contactId: 'c3', ok: false })).not.toThrow();
+  });
+});
+
+describe('automatic readiness and bounded retries', () => {
+  it('a deliberate provider change clears failed-call pacing while ordinary ready checks keep it', async () => {
+    h.activeStorage = makeAccount(['failed']).storage;
+    const svc = await load(false);
+    svc.setEnrichmentRendererReady(true, 'renderer', 'provider-a');
+    await svc.triggerEnrichmentNow();
+    const first = dispatched()[0].payload as { batchId: string };
+    svc.reportContactEnrichmentProgress({ ...first, contactId: 'failed', ok: false, reason: 'llm_failed' });
+    svc.reportBatchDone({ batchId: first.batchId });
+    svc.setEnrichmentRendererReady(true, 'renderer', 'provider-a');
+    await expect(svc.triggerEnrichmentNow()).resolves.toBe(0);
+    svc.setEnrichmentRendererReady(true, 'renderer', 'provider-b');
+    await expect(svc.triggerEnrichmentNow()).resolves.toBe(1);
+    svc.stopContactEnrichmentScheduler();
+  });
+  it('waits for the installed renderer and resumes an existing eligible backlog', async () => {
+    const a = makeAccount(['existing-contact']);
+    h.activeStorage = a.storage;
+    const svc = await load(false);
+    svc.startContactEnrichmentScheduler();
+    await advance(INITIAL_DELAY_MS);
+    expect(a.state.calls).toHaveLength(0);
+    svc.setEnrichmentRendererReady(true, 'renderer-a');
+    await advance(NEW_MAIL_DEBOUNCE_MS);
+    expect(dispatched()).toHaveLength(1);
+    svc.stopContactEnrichmentScheduler();
+  });
+
+  it('does not loop skipped batches while the renderer is paused', async () => {
+    h.activeStorage = makeAccount(['contact']).storage;
+    const svc = await load();
+    await svc.triggerEnrichmentNow();
+    svc.setEnrichmentRendererReady(false);
+    svc.reportBatchDone({ continue: false });
+    await advance(FOLLOWUP_DELAY_MS * 10);
+    expect(dispatched()).toHaveLength(1);
+  });
+
+  it('temporarily excludes failed contacts so the next batch can reach older eligible contacts', async () => {
+    const a = makeAccount(Array.from({ length: 51 }, (_, i) => `c${i}`));
+    h.activeStorage = a.storage;
+    const svc = await load();
+    await svc.triggerEnrichmentNow();
+    const first = dispatched()[0].payload as { batchId: string; contactIds: string[] };
+    for (const contactId of first.contactIds) svc.reportContactEnrichmentProgress({ batchId: first.batchId, contactId, ok: false, reason: 'llm_failed' });
+    svc.reportBatchDone({ batchId: first.batchId });
+    await advance(FOLLOWUP_DELAY_MS);
+    expect(dispatched()[1].payload).toMatchObject({ contactIds: ['c50'] });
+    expect(a.state.calls[1].excludeContactIds).toHaveLength(50);
+    // Ack without a watermark as another temporary failure. No contact is
+    // retried before the cooldown, then the scheduler wakes without new mail.
+    const second = dispatched()[1].payload as { batchId: string };
+    svc.reportContactEnrichmentProgress({ batchId: second.batchId, contactId: 'c50', ok: false, reason: 'llm_failed' });
+    svc.reportBatchDone({ batchId: second.batchId });
+    await advance(15 * 60_000 - FOLLOWUP_DELAY_MS - 1);
+    expect(dispatched()).toHaveLength(2);
+    await advance(1);
+    expect(dispatched()).toHaveLength(3);
+    svc.stopContactEnrichmentScheduler();
+  });
+
+  it('body arrival clears only missing-body cooldowns, preserving provider-failure pacing', async () => {
+    h.activeStorage = makeAccount(['waiting-body', 'failed-provider']).storage;
+    const svc = await load();
+    svc.startContactEnrichmentScheduler();
+    await svc.triggerEnrichmentNow();
+    const first = dispatched()[0].payload as { batchId: string };
+    svc.reportContactEnrichmentProgress({ ...first, contactId: 'waiting-body', ok: false, reason: 'no_inbound_mail' });
+    svc.reportContactEnrichmentProgress({ ...first, contactId: 'failed-provider', ok: false, reason: 'llm_failed' });
+    svc.reportBatchDone({ batchId: first.batchId });
+    h.bus.bodyReady[0]({ emailId: 'new-body' });
+    await advance(FOLLOWUP_DELAY_MS);
+    expect(dispatched()[1].payload).toMatchObject({ contactIds: ['waiting-body'] });
+    svc.stopContactEnrichmentScheduler();
+  });
+
+  it('drains fresh backlog promptly even when an older failed contact has a long retry timer', async () => {
+    const a = makeAccount(['failed']);
+    h.activeStorage = a.storage;
+    const svc = await load();
+    svc.startContactEnrichmentScheduler();
+    await svc.triggerEnrichmentNow();
+    const first = dispatched()[0].payload as { batchId: string };
+    svc.reportContactEnrichmentProgress({ ...first, contactId: 'failed', ok: false, reason: 'llm_failed' });
+    svc.reportBatchDone({ batchId: first.batchId });
+    await advance(FOLLOWUP_DELAY_MS); // Arms the long retry timer.
+    a.state.candidates = ['failed', ...Array.from({ length: 51 }, (_, i) => `fresh-${i}`)];
+    h.bus.synced[0]({ isNew: true });
+    await advance(NEW_MAIL_DEBOUNCE_MS);
+    const fresh = dispatched()[1].payload as { batchId: string; contactIds: string[] };
+    expect(fresh.contactIds).toHaveLength(50);
+    a.state.candidates = ['failed', 'fresh-50'];
+    svc.reportBatchDone({ batchId: fresh.batchId });
+    await advance(FOLLOWUP_DELAY_MS);
+    expect(dispatched()[2].payload).toMatchObject({ contactIds: ['fresh-50'] });
+    svc.stopContactEnrichmentScheduler();
+  });
+
+  it('a reloaded renderer can resume without an old acknowledgement releasing its batch', async () => {
+    h.activeStorage = makeAccount(['contact']).storage;
+    const svc = await load(false);
+    svc.setEnrichmentRendererReady(true, 'old-window');
+    await svc.triggerEnrichmentNow();
+    const old = dispatched()[0].payload as { batchId: string };
+    svc.setEnrichmentRendererReady(true, 'new-window');
+    await svc.triggerEnrichmentNow();
+    expect(dispatched()).toHaveLength(2);
+    svc.reportBatchDone({ batchId: old.batchId });
+    await expect(svc.triggerEnrichmentNow()).resolves.toBe(0);
+    expect(dispatched()).toHaveLength(2);
+    svc.stopContactEnrichmentScheduler();
+  });
+
+  it('does not dispatch a candidate read which resolved after stop or a readiness change', async () => {
+    let resolve!: (rows: { id: string }[]) => void;
+    h.activeStorage = { getContactEnrichmentCandidates: () => new Promise(done => { resolve = done; }) };
+    const svc = await load();
+    const tick = svc.triggerEnrichmentNow();
+    svc.stopContactEnrichmentScheduler();
+    resolve([{ id: 'stale-contact' }]);
+    await expect(tick).resolves.toBe(0);
+    expect(dispatched()).toHaveLength(0);
   });
 });

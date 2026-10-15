@@ -1594,7 +1594,7 @@ export class SQLiteStorage implements IEmailStorage {
 
   // ========== Contact Enrichment Operations (v39) ==========
 
-  async getContactEnrichmentCandidates(opts: { minAgeDays?: number; limit?: number } = {}) {
+  async getContactEnrichmentCandidates(opts: { minAgeDays?: number; limit?: number; excludeContactIds?: string[] } = {}) {
     this.ensureInitialized();
     return this.contactRepo.getEnrichmentCandidates(opts);
   }
@@ -1624,9 +1624,9 @@ export class SQLiteStorage implements IEmailStorage {
     this.contactRepo.applyLinkedInUrl(email, url);
   }
 
-  async recordContactEnrichmentWatermark(contactId: string, throughEmailAt: number): Promise<void> {
+  async recordContactEnrichmentWatermark(contactId: string, throughEmailAt: number, review?: import('@sarvinbox/core').ContactEnrichmentReview): Promise<void> {
     this.ensureInitialized();
-    return this.contactRepo.recordEnrichmentWatermark(contactId, throughEmailAt);
+    return this.contactRepo.recordEnrichmentWatermark(contactId, throughEmailAt, review);
   }
 
   async setContactAvatarCandidate(contactId: string, dataUri: string): Promise<void> {
@@ -1664,9 +1664,9 @@ export class SQLiteStorage implements IEmailStorage {
     return this.contactRepo.getRelatedByPerson(contactId);
   }
 
-  async getRecentInboundEmailsForContact(email: string, limit = 20) {
+  async getRecentInboundEmailsForContact(email: string, limit = 20, bodyReadyOnly = false) {
     this.ensureInitialized();
-    return this.contactRepo.getRecentInboundEmails(email, limit);
+    return this.contactRepo.getRecentInboundEmails(email, limit, bodyReadyOnly);
   }
 
   async extractContactsFromEmail(email: EmailRecord, direction: 'sent' | 'received'): Promise<void> {

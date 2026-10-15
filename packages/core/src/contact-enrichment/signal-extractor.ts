@@ -11,7 +11,8 @@ import { findPhoneNumbersInText } from 'libphonenumber-js';
 
 import { stripQuotedTail } from '../utils/quoted-text';
 
-import { scoreCandidate } from './phone-scoring';
+import { contactLinkKind, normalizeContactUrl } from './contact-links';
+import { looksLikeDisclaimer, scoreCandidate } from './phone-scoring';
 import { TITLE_REGEX } from './titles';
 
 export { stripQuotedTail } from '../utils/quoted-text';
@@ -50,7 +51,7 @@ function spaceOutDigitBoundaries(text: string): string {
     .replace(/(\d)([a-zA-Z])/g, '$1 $2');
 }
 
-const URL_REGEX = /https?:\/\/[^\s<>"']+/gi;
+const URL_REGEX = /(?:https?:\/\/|\bwww\.)[^\s<>"'|]+/gi;
 
 /**
  * Conference / meeting dial-in context.
@@ -85,24 +86,6 @@ function isLikelyPersonalPhone(raw: string, nationalNumber?: string): boolean {
   if (digits.startsWith('00') && digits.length > 14) return false;
   return true;
 }
-
-const SOCIAL_HOSTS: Record<string, 'linkedin' | 'twitter' | 'github' | 'other'> = {
-  'linkedin.com': 'linkedin',
-  'www.linkedin.com': 'linkedin',
-  'twitter.com': 'twitter',
-  'x.com': 'twitter',
-  'github.com': 'github',
-  'facebook.com': 'other',
-  'www.facebook.com': 'other',
-  'instagram.com': 'other',
-  'www.instagram.com': 'other',
-  'youtube.com': 'other',
-  'www.youtube.com': 'other',
-  'threads.net': 'other',
-  'mastodon.social': 'other',
-  'medium.com': 'other',
-  'bsky.app': 'other',
-};
 
 /**
  * Where a signature BEGINS. Exported because the chat view needs the same
@@ -201,12 +184,25 @@ function tailZone(plainText: string): string {
   return lines.slice(-12).join('\n').slice(-800);
 }
 
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return '';
+function ownProfileSignature(candidates: string[], ownText: string, fromAddress?: string): string | null {
+  const self = fromAddress?.toLowerCase().trim();
+  const owned: string[] = [];
+  for (const fragment of candidates) {
+    // A parser may return several non-quoted fragments. Establish ownership of
+    // EACH before combining evidence, rather than letting one self-address bless
+    // every colleague's signature in a forwarded chain.
+    const clean = stripQuotedTail(fragment).trim();
+    if (!clean) continue;
+    const addresses = (clean.match(EMAIL_REGEX) || []).map(address => address.toLowerCase());
+    const mentionsSelf = !!self && clean.toLowerCase().includes(self);
+    if (self && addresses.length && !mentionsSelf) continue;
+    if (!ownText.includes(clean) && !mentionsSelf) continue;
+    const lines = clean.split(/\r?\n/);
+    const disclaimer = lines.findIndex(looksLikeDisclaimer);
+    const withoutDisclaimer = (disclaimer < 0 ? lines : lines.slice(0, disclaimer)).join('\n').trim();
+    if (withoutDisclaimer) owned.push(withoutDisclaimer);
   }
+  return owned.find(block => !!self && block.toLowerCase().includes(self)) ?? owned[0] ?? null;
 }
 
 export function extractSignals(
@@ -228,9 +224,11 @@ export function extractSignals(
   // it against the FULL text when installed; the positional heuristics below
   // remain the fallback for the glued shapes it does not recognise.
   let sig: string | null = null;
+  let signatureFragments: string[] = [];
   if (injectedSplitter) {
     try {
       const frags = injectedSplitter(plainText || '').map((f) => f.trim()).filter(Boolean);
+      signatureFragments = frags;
       // Use EVERY signature fragment, not just the last.
       //
       // "Last one wins" assumed the sender's own sign-off is outermost. In a
@@ -244,6 +242,7 @@ export function extractSignals(
     }
   }
   if (!sig) sig = extractSignatureBlock(text);
+  if (signatureFragments.length === 0 && sig) signatureFragments = [sig];
 
   // If the surviving "signature" mentions only emails on a domain other
   // than the From: domain, it's likely a foreign signature that escaped
@@ -281,6 +280,15 @@ export function extractSignals(
       }
     }
   }
+  // Profile fields require the sender's own signature evidence. Phone mining
+  // below deliberately keeps its broader candidates for domain-wide ownership
+  // scoring, but links/names/titles must never inherit those candidate semantics.
+  if (signatureFragments.length === 0 && fromAddress) {
+    const tail = tailZone(text);
+    if (tail.toLowerCase().includes(fromAddress.toLowerCase().trim()) && (TITLE_REGEX.test(tail) || URL_REGEX.test(tail))) signatureFragments.push(tail);
+    URL_REGEX.lastIndex = 0;
+  }
+  const profileSig = ownProfileSignature(signatureFragments, text, fromAddress);
   // PROXIMITY, not a blanket ban. Rejecting an entire body because it mentions
   // one outside address throws away the sender's own number too — the kind of
   // hard rule that loses far more than it protects. Instead, note where each
@@ -384,19 +392,23 @@ export function extractSignals(
         phoneScores[e164] = value;
       }
     }
-    for (const match of src.matchAll(URL_REGEX)) {
-      const u = match[0].replace(/[,.);]+$/, '');
-      if (!seenUrls.has(u)) {
-        seenUrls.add(u);
-        urls.push(u);
-      }
+  }
+  const signatureUrls = [...(profileSig || '').matchAll(URL_REGEX)].map(match => match[0]);
+  // Plain-text signatures often print a bare domain rather than a hyperlink.
+  // Restrict those to a dedicated line or a Website label, never email domains.
+  for (const match of (profileSig || '').matchAll(/(?:^|\n)\s*(?:(?:website|web|site|portfolio)\s*:\s*)?((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s<>|]+)?)\s*(?=\n|$)/gim)) signatureUrls.push(match[1]);
+  for (const candidate of signatureUrls) {
+    const u = normalizeContactUrl(candidate);
+    if (u && contactLinkKind(u) && !seenUrls.has(u)) {
+      seenUrls.add(u);
+      urls.push(u);
     }
-    for (const match of src.matchAll(EMAIL_REGEX)) {
-      const e = match[0].toLowerCase();
-      if (!seenEmails.has(e)) {
-        seenEmails.add(e);
-        emails.push(e);
-      }
+  }
+  for (const match of (profileSig || '').matchAll(EMAIL_REGEX)) {
+    const e = match[0].toLowerCase();
+    if (!seenEmails.has(e)) {
+      seenEmails.add(e);
+      emails.push(e);
     }
   }
 
@@ -406,17 +418,16 @@ export function extractSignals(
   const otherSocials: string[] = [];
   const websites: string[] = [];
   for (const url of urls) {
-    const host = hostOf(url);
-    const cls = SOCIAL_HOSTS[host];
-    if (cls === 'linkedin') linkedinUrls.push(url);
+    const cls = contactLinkKind(url);
+    if (cls === 'linkedinPersonal' || cls === 'linkedinCompany') linkedinUrls.push(url);
     else if (cls === 'twitter') twitterUrls.push(url);
     else if (cls === 'github') githubUrls.push(url);
     else if (cls === 'other') otherSocials.push(url);
     else websites.push(url);
   }
 
-  if (sig) {
-    for (const line of sig.split(/\r?\n/)) {
+  if (profileSig) {
+    for (const line of profileSig.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       if (trimmed.length > 120) continue; // too long to be a title line
@@ -433,7 +444,7 @@ export function extractSignals(
     githubUrls,
     otherSocials,
     websites,
-    signatureBlock: sig,
+    signatureBlock: profileSig,
     phoneScores,
     titleCandidates,
   };

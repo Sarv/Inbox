@@ -30,6 +30,19 @@ import {
 } from './agent-eligibility';
 import { BaseRepository } from './base-repository';
 import { cleanBodyExpression } from './body-storage';
+import {
+  addRelationshipEvidence,
+  canReclassifyContact,
+  classificationAddress,
+  classificationDomains,
+  classifyContactRelationship,
+  CONTACT_TYPES,
+  CONTACT_TYPE_SOURCES,
+  emptyRelationshipEvidence,
+  isAutomatedContact,
+  type ContactClassificationRow,
+  type RelationshipEvidence,
+} from './contact-classification';
 
 /*
  * Contacts and their notes live in the SHARED directory (see shared-contacts.ts),
@@ -1797,92 +1810,95 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     confidence: number,
     source: ContactTypeSource,
   ): void {
-    this.db.prepare(`
-      UPDATE ${CONTACTS}
-      SET contact_type = ?, contact_type_confidence = ?, contact_type_source = ?
-      WHERE email = ?
-    `).run(contactType, confidence, source, this.normalizeEmailKey(email));
-
-    // Also update sender_stats
-    this.db.prepare(`
-      UPDATE sender_stats SET contact_type = ? WHERE email = ?
-    `).run(contactType, this.normalizeEmailKey(email));
+    if (!CONTACT_TYPES.has(contactType)) throw new Error('Invalid contact type');
+    if (!CONTACT_TYPE_SOURCES.has(source)) throw new Error('Invalid contact type source');
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error('Invalid contact type confidence');
+    const key = this.normalizeEmailKey(email);
+    this.db.transaction(() => {
+      const existing = this.db.prepare(`SELECT contact_type_source FROM ${CONTACTS} WHERE email = ?`).get(key) as { contact_type_source: string | null } | undefined;
+      if (existing?.contact_type_source === 'user' && source !== 'user') return;
+      this.db.prepare(`
+        UPDATE ${CONTACTS}
+        SET contact_type = ?, contact_type_confidence = ?, contact_type_source = ?, updated_at = ?
+        WHERE email = ?
+      `).run(contactType, confidence, source, this.now(), key);
+      this.db.prepare('UPDATE sender_stats SET contact_type = ? WHERE email = ?').run(contactType, key);
+    })();
   }
 
   /**
-   * Batch classify contacts by rule-based heuristics
+   * Read this account's original-message evidence without changing the shared
+   * directory. Main merges these maps before applying a cross-account pass.
    */
-  autoClassifyContacts(userEmail: string): number {
-    const userDomain = userEmail.split('@')[1]?.toLowerCase();
+  getContactClassificationEvidence(userEmail: string | readonly string[]): Map<string, RelationshipEvidence> {
+    const ownAddresses = new Set((typeof userEmail === 'string' ? [userEmail] : userEmail)
+      .map(classificationAddress).filter((email): email is string => email !== null));
+    const contacts = (this.db.prepare(`SELECT email, kind, contact_type, contact_type_source,
+      contact_type_confidence, received_count, sent_count FROM ${CONTACTS}`).all() as ContactClassificationRow[])
+      .filter(canReclassifyContact);
+    const candidates = new Map(contacts.map((contact) => [contact.email.toLowerCase(), emptyRelationshipEvidence()]));
+    if (candidates.size) {
+      // Narrow header projection: never load a mailbox's bodies to classify a
+      // contact. A forwarded subject is ignored by addRelationshipEvidence.
+      const messages = this.db.prepare(`SELECT from_address, to_address, subject, list_unsubscribe
+        FROM emails WHERE instr(tags, '|spam|') = 0 AND instr(tags, '|Spam|') = 0
+          AND instr(tags, '|Trash|') = 0 AND instr(tags, '|[Gmail]/Spam|') = 0
+          AND instr(tags, '|[Gmail]/Trash|') = 0 AND instr(tags, '|draft|') = 0
+          AND instr(tags, '|Junk|') = 0 AND instr(tags, '|Junk Email|') = 0
+          AND instr(tags, '|Deleted Items|') = 0 AND instr(tags, '|\\Deleted|') = 0
+          AND instr(tags, '|Drafts|') = 0 AND instr(tags, '|[Gmail]/Drafts|') = 0
+          AND folder_id NOT IN (SELECT id FROM folders WHERE special_use IN ('\\Drafts', '\\Junk', '\\Trash'))
+      `).all() as Array<{ from_address: string; to_address: string | null; subject: string | null; list_unsubscribe: string | null }>;
+      for (const message of messages) {
+        const sender = classificationAddress(message.from_address);
+        if (!sender) continue;
+        const outgoing = ownAddresses.has(sender);
+        if (outgoing) {
+          for (const recipient of parseAddresses(message.to_address)) {
+            const evidence = candidates.get(recipient.toLowerCase());
+            if (evidence) addRelationshipEvidence(evidence, message, true);
+          }
+        } else {
+          const evidence = candidates.get(sender);
+          if (evidence) addRelationshipEvidence(evidence, message, false);
+        }
+      }
+    }
+    return candidates;
+  }
+
+  /** Classify from complete mailbox evidence, keeping user edits authoritative. */
+  autoClassifyContacts(
+    userEmail: string | readonly string[],
+    combinedEvidence?: ReadonlyMap<string, RelationshipEvidence>,
+  ): number {
+    const ownAddresses = new Set((typeof userEmail === 'string' ? [userEmail] : userEmail)
+      .map(classificationAddress).filter((email): email is string => email !== null));
+    const ownDomains = classificationDomains(ownAddresses);
+    const contacts = (this.db.prepare(`SELECT email, kind, contact_type, contact_type_source,
+      contact_type_confidence, received_count, sent_count FROM ${CONTACTS}`).all() as ContactClassificationRow[])
+      .filter((contact) => canReclassifyContact(contact)
+        && (ownAddresses.size > 0 || contact.contact_type !== 'colleague' || isAutomatedContact(contact.email)));
+    const candidates = combinedEvidence ?? this.getContactClassificationEvidence(userEmail);
     let classified = 0;
-
-    const txn = this.db.transaction(() => {
-      // 1. Colleagues: same domain (exclude public email domains)
-      const publicDomains = ['gmail.com','yahoo.com','outlook.com','hotmail.com','live.com','aol.com','icloud.com','protonmail.com','mail.com','yandex.com','zoho.com','rediffmail.com'];
-      if (userDomain && !publicDomains.includes(userDomain)) {
-        const r = this.db.prepare(`
-          UPDATE ${CONTACTS}
-          SET contact_type = 'colleague', contact_type_confidence = 0.9, contact_type_source = 'rule'
-          WHERE email LIKE ? AND contact_type = 'unknown'
-        `).run(`%@${userDomain}`);
-        classified += r.changes;
+    this.db.transaction(() => {
+      const update = this.db.prepare(`UPDATE ${CONTACTS} SET contact_type = ?, contact_type_confidence = ?,
+        contact_type_source = ?, updated_at = ? WHERE email = ? AND COALESCE(contact_type_source, '') != 'user'`);
+      for (const contact of contacts) {
+        const next = classifyContactRelationship(contact, ownAddresses, ownDomains,
+          candidates.get(contact.email.toLowerCase()) ?? emptyRelationshipEvidence());
+        if ((contact.contact_type || 'unknown') === next.type && (contact.contact_type_confidence || 0) === next.confidence
+          && (contact.contact_type_source || 'unset') === next.source) continue;
+        classified += update.run(next.type, next.confidence, next.source, this.now(), contact.email).changes;
       }
-
-      // 2. Automated: no-reply addresses
-      const autoPatterns = ['noreply@', 'no-reply@', 'donotreply@', 'mailer-daemon@', 'postmaster@', 'notifications@'];
-      for (const pattern of autoPatterns) {
-        const r = this.db.prepare(`
-          UPDATE ${CONTACTS}
-          SET contact_type = 'automated', contact_type_confidence = 0.95, contact_type_source = 'rule'
-          WHERE email LIKE ? AND contact_type = 'unknown'
-        `).run(`${pattern}%`);
-        classified += r.changes;
-      }
-
-      // 3. Newsletter: high volume, low reply rate, unsubscribe-likely
-      const r3 = this.db.prepare(`
-        UPDATE ${CONTACTS}
-        SET contact_type = 'newsletter', contact_type_confidence = 0.8, contact_type_source = 'behavior'
-        WHERE contact_type = 'unknown'
-          AND received_count >= 10
-          AND sent_count = 0
-          AND email NOT LIKE ?
-      `).run(`%@${userDomain || 'NOMATCH'}`);
-      classified += r3.changes;
-
-      // 4. Potential customer: they contacted us (inbound) and we replied but low volume
-      const r4 = this.db.prepare(`
-        UPDATE ${CONTACTS}
-        SET contact_type = 'potential_customer', contact_type_confidence = 0.6, contact_type_source = 'behavior'
-        WHERE contact_type = 'unknown'
-          AND received_count >= 1 AND received_count <= 5
-          AND sent_count >= 1
-          AND email NOT LIKE ?
-      `).run(`%@${userDomain || 'NOMATCH'}`);
-      classified += r4.changes;
-
-      // 5. Existing customer: sustained two-way communication
-      const r5 = this.db.prepare(`
-        UPDATE ${CONTACTS}
-        SET contact_type = 'existing_customer', contact_type_confidence = 0.65, contact_type_source = 'behavior'
-        WHERE contact_type = 'unknown'
-          AND received_count >= 5
-          AND sent_count >= 3
-          AND email NOT LIKE ?
-      `).run(`%@${userDomain || 'NOMATCH'}`);
-      classified += r5.changes;
-
-      // Sync to sender_stats
+      // Sync resets too: stale sender classifications must not survive a move
+      // back to Unknown in the shared directory.
       this.db.prepare(`
-        UPDATE sender_stats SET contact_type = (
+        UPDATE sender_stats SET contact_type = COALESCE((
           SELECT c.contact_type FROM ${CONTACTS} c WHERE c.email = sender_stats.email
-        ) WHERE EXISTS (
-          SELECT 1 FROM ${CONTACTS} c WHERE c.email = sender_stats.email AND c.contact_type != 'unknown'
-        )
+        ), 'unknown') WHERE EXISTS (SELECT 1 FROM ${CONTACTS} c WHERE c.email = sender_stats.email)
       `).run();
-    });
-    txn();
-
+    })();
     return classified;
   }
 
@@ -1924,9 +1940,9 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
    */
   getContactTypeCounts(): Record<ContactType, number> {
     const rows = this.db.prepare(`
-      SELECT contact_type, COUNT(*) as count
+      SELECT COALESCE(NULLIF(contact_type, ''), 'unknown') AS contact_type, COUNT(*) as count
       FROM ${CONTACTS}
-      GROUP BY contact_type
+      GROUP BY COALESCE(NULLIF(contact_type, ''), 'unknown')
     `).all() as { contact_type: string; count: number }[];
 
     const counts: Record<string, number> = {};
