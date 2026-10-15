@@ -62,7 +62,7 @@ export function FoldersTab() {
   };
 
   return (
-    <div className="max-w-2xl">
+    <div className="w-full min-w-0">
       <h2 className="text-lg font-semibold mb-1">Folders</h2>
       <p className="text-sm text-muted-foreground mb-4">
         Choose how each folder syncs. Turn off folders you never read to keep a large

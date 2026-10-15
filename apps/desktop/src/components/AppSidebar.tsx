@@ -6,7 +6,6 @@ import {
   ChevronLeft,
   Puzzle,
   Wand2,
-  Bot,
   ShieldCheck,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -111,37 +110,21 @@ export function AppSidebar({ activeSection, onSectionChange }: AppSidebarProps) 
           )}
         </button>
         <button
-          onClick={() => onSectionChange('agent')}
-          className={`w-full flex items-center gap-3 px-4 py-3 transition-colors relative ${
-            activeSection === 'agent'
-              ? 'bg-primary/10 text-primary'
-              : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-          }`}
-          title={!isExpanded ? 'Email Agent' : undefined}
-        >
-          {activeSection === 'agent' && (
-            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full" />
-          )}
-          <Bot className="h-5 w-5 flex-shrink-0" />
-          {isExpanded && (
-            <span className="text-sm font-medium truncate">Email Agent</span>
-          )}
-        </button>
-        <button
           onClick={() => onSectionChange('ai-settings')}
           className={`w-full flex items-center gap-3 px-4 py-3 transition-colors relative ${
             activeSection === 'ai-settings'
               ? 'bg-primary/10 text-primary'
               : 'text-muted-foreground hover:bg-accent hover:text-foreground'
           }`}
-          title={!isExpanded ? 'AI Settings' : undefined}
+          title={!isExpanded ? 'AI' : undefined}
+          aria-label="AI"
         >
           {activeSection === 'ai-settings' && (
             <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full" />
           )}
           <Wand2 className="h-5 w-5 flex-shrink-0" />
           {isExpanded && (
-            <span className="text-sm font-medium truncate">AI Settings</span>
+            <span className="text-sm font-medium truncate">AI</span>
           )}
         </button>
         <button

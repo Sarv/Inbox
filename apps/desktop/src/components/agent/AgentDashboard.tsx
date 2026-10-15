@@ -157,9 +157,10 @@ const EMPTY_DATA: DashboardData = {
 
 // ========== Main component ==========
 
-export function AgentDashboard({ onNavigateToEmail, onNavigateToContacts }: {
+export function AgentDashboard({ onNavigateToEmail, onNavigateToContacts, onRefresh }: {
   onNavigateToEmail?: (emailId: string) => void;
   onNavigateToContacts?: () => void;
+  onRefresh?: () => void;
 }) {
   const [data, setData] = useState<DashboardData>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
@@ -265,31 +266,30 @@ export function AgentDashboard({ onNavigateToEmail, onNavigateToContacts }: {
     data.actions.length === 0 && (data.pipeline?.agentDone ?? 0) === 0;
 
   return (
-    <div className="flex-1 h-full overflow-hidden bg-background">
-      <div className="h-full flex flex-col">
-        <Header agentMode={agentMode} learning={data.learning} refreshing={refreshing || loading} onRefresh={() => load(false)} />
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-6xl mx-auto px-6 py-6">
-            {loading ? <DashboardSkeleton />
-              : loadError ? <ErrorState onRetry={() => load(true)} />
-              : isFirstRun ? <FirstRunState agentMode={agentMode} />
-              : (
-                <div className="space-y-6">
-                  <StatRow data={data} />
-                  <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-6 items-start">
-                    <div className="space-y-6 min-w-0">
-                      <ReviewSection proposals={data.proposals} onOpen={onNavigateToEmail} onDismiss={handleDismissProposal} />
-                      <DraftsSection drafts={data.draftsReady} onOpen={onNavigateToEmail} />
-                      <ActivitySection actions={data.actions} onOpen={onNavigateToEmail} />
-                    </div>
-                    <InsightsColumn data={data} onNavigateToContacts={onNavigateToContacts} />
-                  </div>
-                </div>
-              )}
+    <section aria-labelledby="email-agent-overview-heading" className="w-full min-w-0 space-y-6">
+      <Header
+        agentMode={agentMode}
+        learning={data.learning}
+        refreshing={refreshing || loading}
+        onRefresh={() => { void load(false); onRefresh?.(); }}
+      />
+      {loading ? <DashboardSkeleton />
+        : loadError ? <ErrorState onRetry={() => load(true)} />
+        : isFirstRun ? <FirstRunState agentMode={agentMode} />
+        : (
+          <div className="space-y-6">
+            <StatRow data={data} />
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-6 items-start">
+              <div className="space-y-6 min-w-0">
+                <ReviewSection proposals={data.proposals} onOpen={onNavigateToEmail} onDismiss={handleDismissProposal} />
+                <DraftsSection drafts={data.draftsReady} onOpen={onNavigateToEmail} />
+                <ActivitySection actions={data.actions} onOpen={onNavigateToEmail} />
+              </div>
+              <InsightsColumn data={data} onNavigateToContacts={onNavigateToContacts} />
+            </div>
           </div>
-        </div>
-      </div>
-    </div>
+        )}
+    </section>
   );
 }
 
@@ -306,36 +306,34 @@ function Header({ agentMode, learning, refreshing, onRefresh }: {
   }[agentMode];
 
   return (
-    <div className="px-6 py-4 border-b border-border">
-      <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="h-9 w-9 rounded-xl bg-violet-500/10 flex items-center justify-center flex-shrink-0">
-            <Bot className="h-5 w-5 text-violet-600 dark:text-violet-400" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h1 className="text-lg font-semibold leading-tight">Email Agent</h1>
-              {/* Informational only — agent settings live in AI Settings */}
-              <Tooltip maxWidth={260} content="Turn the agent on or off and tune autonomy in Settings → AI Settings → Email Agent.">
-                <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium cursor-help ${chip.cls}`}>{chip.label}</span>
-              </Tooltip>
-            </div>
-            <p className="text-xs text-muted-foreground truncate">
-              {learning && learning.totalActions > 0
-                ? `Learned from ${learning.totalActions.toLocaleString()} actions across ${learning.uniqueSenders.toLocaleString()} senders`
-                : 'Watches how you handle email and learns to help'}
-            </p>
-          </div>
+    <div className="w-full min-w-0 flex flex-wrap items-center justify-between gap-4">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="h-9 w-9 rounded-xl bg-violet-500/10 flex items-center justify-center flex-shrink-0">
+          <Bot className="h-5 w-5 text-violet-600 dark:text-violet-400" />
         </div>
-        <button
-          onClick={onRefresh}
-          disabled={refreshing}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border hover:bg-accent transition-colors disabled:opacity-60 flex-shrink-0"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 id="email-agent-overview-heading" className="text-lg font-semibold leading-tight">Email Agent</h2>
+            <Tooltip maxWidth={260} content="Change the agent mode and autonomy in AI → Email Agent.">
+              <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium cursor-help ${chip.cls}`}>{chip.label}</span>
+            </Tooltip>
+          </div>
+          <p className="text-xs text-muted-foreground truncate">
+            {learning && learning.totalActions > 0
+              ? `Learned from ${learning.totalActions.toLocaleString()} actions across ${learning.uniqueSenders.toLocaleString()} senders`
+              : 'Watches how you handle email and learns to help'}
+          </p>
+        </div>
       </div>
+      <button
+        onClick={onRefresh}
+        aria-label="Refresh email agent"
+        disabled={refreshing}
+        className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border hover:bg-accent transition-colors disabled:opacity-60 flex-shrink-0"
+      >
+        <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+        Refresh
+      </button>
     </div>
   );
 }
@@ -347,9 +345,8 @@ function StatRow({ data }: { data: DashboardData }) {
   const reviewed = data.accuracy?.total ?? 0;
   const disagree = reviewed > 0 ? Math.round(((data.accuracy?.rejected ?? 0) / reviewed) * 100) : null;
   const pending = data.pipeline?.agentPending ?? 0;
-
   const cards = [
-    { icon: <Inbox className="h-4 w-4 text-blue-500" />, label: 'Emails analyzed', value: (data.pipeline?.agentDone ?? 0).toLocaleString(), sub: pending > 0 ? `${pending.toLocaleString()} in queue` : 'all caught up' },
+    { icon: <Inbox className="h-4 w-4 text-blue-500" />, label: 'Downloaded emails finalized', value: (data.pipeline?.agentDone ?? 0).toLocaleString(), sub: `${pending.toLocaleString()} eligible pending across all dates`, hint: 'Agent completion and eligible backlog for downloaded mail across all dates.' },
     { icon: <Zap className="h-4 w-4 text-violet-500" />, label: 'Actions taken', value: agentActions.length.toLocaleString(), sub: 'auto + approved, recent' },
     { icon: <PenLine className="h-4 w-4 text-green-500" />, label: 'Drafts ready', value: data.draftsReady.length.toLocaleString(), sub: 'waiting in your Drafts' },
     { icon: <ThumbsDown className="h-4 w-4 text-orange-500" />, label: 'Disagreement rate', value: disagree === null ? '—' : `${disagree}%`, sub: reviewed > 0 ? `of ${reviewed} reviewed (30d)` : 'no reviewed decisions yet' },
@@ -357,13 +354,16 @@ function StatRow({ data }: { data: DashboardData }) {
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-      {cards.map(c => (
-        <div key={c.label} className="rounded-xl border border-border bg-card p-4">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">{c.icon}{c.label}</div>
-          <div className="text-2xl font-semibold leading-none">{c.value}</div>
-          <div className="text-[11px] text-muted-foreground mt-1.5">{c.sub}</div>
-        </div>
-      ))}
+      {cards.map(c => {
+        const label = <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">{c.icon}{c.label}</div>;
+        return (
+          <div key={c.label} className="rounded-xl border border-border bg-card p-4">
+            {c.hint ? <Tooltip content={c.hint}>{label}</Tooltip> : label}
+            <div className="text-2xl font-semibold leading-none">{c.value}</div>
+            <div className="text-[11px] text-muted-foreground mt-1.5">{c.sub}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -377,7 +377,7 @@ function SectionCard({ icon, title, count, children }: {
     <section className="rounded-xl border border-border bg-card overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
         {icon}
-        <h2 className="text-sm font-medium">{title}</h2>
+        <h3 className="text-sm font-medium">{title}</h3>
         {count !== undefined && count > 0 && (
           <span className="text-[11px] px-1.5 py-0.5 bg-muted rounded-full text-muted-foreground tabular-nums">{count}</span>
         )}
@@ -427,6 +427,7 @@ function ReviewSection({ proposals, onOpen, onDismiss }: {
                 <Tooltip content="Dismiss — the agent learns you didn't want this">
                   <button
                     onClick={() => onDismiss(p.id)}
+                    aria-label={`Dismiss proposal from ${p.fromName || p.fromAddress || p.senderAddress || 'Unknown sender'}`}
                     className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
                   >
                     <X className="h-3.5 w-3.5" />
@@ -776,13 +777,13 @@ function FirstRunState({ agentMode }: { agentMode: 'off' | 'suggest' | 'auto' })
     { icon: <Zap className="h-4 w-4 text-green-500" />, title: 'Acts', text: 'It drafts replies into your Drafts folder and, once a pattern is solid, can mark noise read or archive it for you.' },
   ];
   return (
-    <div className="max-w-2xl mx-auto py-12">
-      <div className="flex flex-col items-center text-center mb-8">
+    <div className="w-full min-w-0">
+      <div className="flex flex-col items-start mb-6">
         <div className="h-14 w-14 rounded-2xl bg-violet-500/10 flex items-center justify-center mb-4">
           <Bot className="h-7 w-7 text-violet-600 dark:text-violet-400" />
         </div>
-        <h2 className="text-lg font-semibold">Your email agent is getting set up</h2>
-        <p className="text-sm text-muted-foreground mt-1 max-w-md">
+        <h3 className="text-lg font-semibold">Your email agent is getting set up</h3>
+        <p className="text-sm text-muted-foreground mt-1">
           Nothing to show yet — it starts learning as soon as your mailbox syncs and you use your email.
         </p>
       </div>
@@ -795,8 +796,8 @@ function FirstRunState({ agentMode }: { agentMode: 'off' | 'suggest' | 'auto' })
         ))}
       </div>
       {agentMode === 'off' && (
-        <p className="text-xs text-muted-foreground text-center mt-6">
-          AI Assist is currently off — enable it in Settings → AI Settings → Email Agent to let the agent categorize, score, and draft.
+        <p className="text-xs text-muted-foreground mt-6">
+          AI Assist is currently off — enable it in AI → Email Agent to let the agent categorize, score, and draft.
         </p>
       )}
     </div>

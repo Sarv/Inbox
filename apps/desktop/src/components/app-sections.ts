@@ -16,7 +16,6 @@ export const APP_SECTIONS = [
   'contacts',
   'extensions',
   'ai-settings',
-  'agent',
   'settings',
   'security',
 ] as const;

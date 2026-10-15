@@ -74,7 +74,7 @@ export function BlocklistsTab() {
   const sarv = prefs.provider === 'sarv';
 
   return (
-    <div className="p-6 max-w-4xl space-y-8">
+    <div className="w-full p-6 space-y-8">
       <section>
         <div className="rounded-lg border border-border bg-card p-4 flex items-start gap-3">
           <Info className="h-5 w-5 mt-0.5 text-primary flex-shrink-0" />

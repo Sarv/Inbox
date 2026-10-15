@@ -967,7 +967,7 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
         response = await attempt(true);
       } catch (refreshErr) {
         const e = new Error(
-          `AI OAuth token refresh failed — re-authenticate the provider in Settings → AI → Providers. ` +
+          `AI OAuth token refresh failed — re-authenticate the provider in AI → Providers. ` +
           `(${(refreshErr as Error)?.message || refreshErr})`,
         );
         (e as any).status = 401;

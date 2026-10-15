@@ -136,7 +136,7 @@ export function CategorizationTab({ aiProviders, settings, updateSetting, onOpen
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       {/* Automatic sorting status — read-only; AI Assist is the switch */}
       <div
         data-testid="auto-sorting-status"

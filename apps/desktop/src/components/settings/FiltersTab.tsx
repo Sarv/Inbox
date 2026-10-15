@@ -198,7 +198,7 @@ export function FiltersTab() {
     setDraft(d => d && { ...d, actions: d.actions.map((a, idx) => (idx === i ? { ...a, ...patch } : a)) });
 
   return (
-    <div>
+    <div className="w-full min-w-0">
       {confirmDialog}
       {/* Sub-tabs: Filters | Blocked (nested inside the one Settings tab) */}
       <div className="flex gap-1 border-b border-border mb-6">

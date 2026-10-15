@@ -701,7 +701,7 @@ describe('adding another mailbox with the onboarding flow', () => {
     ] });
     const view = render(<AddAccountModal onClose={onClose} />); await choose(view, 'Sarv');
     expect(view.container.textContent).toContain('Already signed in as second@sarv.example');
-    expect(view.container.textContent).toContain('configure in AI settings');
+    expect(view.container.textContent).toContain('configure in AI → Providers');
     fire(button(view, 'Connect as second@sarv.example'), 'click'); await settle();
     expect(startFlow).not.toHaveBeenCalled(); expect(mocks.confirm).not.toHaveBeenCalled();
     expect(probeCredentials).toHaveBeenCalledWith(expect.objectContaining({ username: 'second@sarv.example', authMethod: 'oauth2' }));

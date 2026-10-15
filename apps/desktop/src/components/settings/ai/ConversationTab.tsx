@@ -175,7 +175,7 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       {/* Feature toggle card */}
       <div className={`rounded-lg border p-4 ${feature.enabled ? 'border-primary/50 bg-primary/5' : 'border-border bg-muted/30'}`}>
         <div className="flex items-center justify-between">

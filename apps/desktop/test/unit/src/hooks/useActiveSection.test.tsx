@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { AppSection } from '../../../../src/components/app-sections';
 import { useActiveSection } from '../../../../src/hooks/useActiveSection';
 import { ACTIVE_SECTION_KEY } from '../../../../src/utils/active-section-storage';
-import { render, fire } from '../../../helpers/render';
+import { cleanup, render, fire } from '../../../helpers/render';
 
 /**
  * A stand-in for App: shows the current section and can navigate, so a test can
@@ -26,6 +26,12 @@ const sectionOf = (mounted: ReturnType<typeof render>) =>
 describe('useActiveSection', () => {
   beforeEach(() => {
     sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   // The regression: before this, App held `useState<AppSection>('mail')`, so a
@@ -59,16 +65,39 @@ describe('useActiveSection', () => {
     mounted.unmount();
   });
 
+  it('restores legacy agent sessions directly to AI and persists the migration', () => {
+    sessionStorage.setItem(ACTIVE_SECTION_KEY, 'agent');
+    const mounted = render(<Probe goTo="mail" />);
+    expect(sectionOf(mounted)).toBe('ai-settings');
+    expect(sessionStorage.getItem(ACTIVE_SECTION_KEY)).toBe('ai-settings');
+  });
+
+  it('restores legacy agent sessions to AI even when storage writes are denied', () => {
+    sessionStorage.setItem(ACTIVE_SECTION_KEY, 'agent');
+    const storedSession = sessionStorage;
+    const write = vi.fn(() => {
+      throw new Error('storage denied');
+    });
+    vi.stubGlobal('sessionStorage', {
+      getItem: (key: string) => storedSession.getItem(key),
+      setItem: write,
+    });
+    const mounted = render(<Probe goTo="mail" />);
+    expect(sectionOf(mounted)).toBe('ai-settings');
+    expect(write).toHaveBeenCalledWith(ACTIVE_SECTION_KEY, 'ai-settings');
+    expect(sessionStorage.getItem(ACTIVE_SECTION_KEY)).toBe('agent');
+  });
+
   it('records every navigation, not just the first', () => {
     const toSecurity = render(<Probe goTo="security" />);
     fire(toSecurity.byLabel('navigate'), 'click');
     expect(sessionStorage.getItem(ACTIVE_SECTION_KEY)).toBe('security');
     toSecurity.unmount();
 
-    const toAgent = render(<Probe goTo="agent" />);
-    fire(toAgent.byLabel('navigate'), 'click');
-    expect(sessionStorage.getItem(ACTIVE_SECTION_KEY)).toBe('agent');
-    toAgent.unmount();
+    const toAI = render(<Probe goTo="ai-settings" />);
+    fire(toAI.byLabel('navigate'), 'click');
+    expect(sessionStorage.getItem(ACTIVE_SECTION_KEY)).toBe('ai-settings');
+    toAI.unmount();
   });
 
   // Mounting alone must persist too, so a reload that happens before the user

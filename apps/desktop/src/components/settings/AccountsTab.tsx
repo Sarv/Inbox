@@ -310,7 +310,7 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
   const authBadge = dIsOAuth ? `Signed in with ${dOauthLabel}` : 'Password sign-in';
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       {/* Top action: add another mailbox via the 3-step wizard */}
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">Accounts</h2>
@@ -433,7 +433,7 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
       ) : (
         /* Connected accounts — click one to open its details popup. */
         <div className="border-b border-border pb-6">
-          <div className="space-y-1 max-w-sm">
+          <div className="w-full min-w-0 space-y-1">
             {accounts.map((a) => {
               // Highlight ONLY the account whose details popup is currently open
               // — never the "active" account. Opening Settings shows no selection,

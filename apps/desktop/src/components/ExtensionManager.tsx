@@ -522,13 +522,13 @@ export function ExtensionManager() {
 
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
+    <div className="flex-1 w-full min-w-0 h-full overflow-y-auto p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <Puzzle className="h-6 w-6 text-purple-500" />
           <div>
-            <h1 className="text-xl font-semibold">Extensions</h1>
+            <h1 className="text-2xl font-semibold">Extensions</h1>
             <p className="text-sm text-muted-foreground">
               Manage and configure Sarv Inbox extensions
             </p>

@@ -43,13 +43,20 @@ export interface SectionStore {
  * Every failure falls back to the mailbox rather than throwing: this runs
  * during App's first render, where a throw is a white screen. A value written
  * by an older build whose section no longer exists is treated the same as no
- * value at all — `renderContent` would otherwise fall through to `null` and
- * show an empty pane with no way back.
+ * value at all, except the former Agent page now opens the unified AI page.
+ * Unrecognised values would otherwise leave an empty pane with no way back.
  */
 export const readActiveSection = (store: SectionStore | null | undefined): AppSection => {
   if (!store) return DEFAULT_SECTION;
   try {
     const stored = store.getItem(ACTIVE_SECTION_KEY);
+    if (stored === 'agent') {
+      // Keep the stable AI route when restoring a window from before the
+      // dashboard and its settings shared one sidebar item. A denied rewrite
+      // must not prevent navigation to the migrated destination.
+      try { store.setItem(ACTIVE_SECTION_KEY, 'ai-settings'); } catch { /* best-effort migration */ }
+      return 'ai-settings';
+    }
     return isAppSection(stored) ? stored : DEFAULT_SECTION;
   } catch {
     // Storage denied (a hardened profile, a sandboxed frame) — not worth a log

@@ -33,12 +33,12 @@ export function setAiConsent(value: AiConsent): void {
 export const SARV_AI_DISCLOSURE =
   'Sarv AI sorts your inbox, drafts replies and pulls out conversations by sending new messages — sender, ' +
   'recipients, subject and text — to Sarv AI as they arrive, for every connected account. Sarv does not use ' +
-  'your mail to train AI models. You can turn this off at any time in Settings → AI.';
+  'your mail to train AI models. You can turn this off at any time in AI → Email Agent.';
 
 /**
  * Ask once. Resolves to the recorded answer; "Not now", Escape and a backdrop
  * click all record `declined`, so the user isn't asked on every launch — they
- * can still turn Sarv AI on later by choosing a model in Settings → AI.
+ * can still turn Sarv AI on later by choosing a model in AI → Providers.
  */
 export async function askAiConsent(): Promise<AiConsent> {
   const yes = await requestConfirm({

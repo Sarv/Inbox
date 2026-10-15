@@ -288,7 +288,7 @@ export function AppearanceTab() {
     // The preview is sticky so it stays on screen while the controls scroll —
     // it is the thing being changed, and scrolling away from it is what made
     // the old bottom-of-page placement useless.
-    <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+    <div className="grid w-full min-w-0 items-start gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
       <div className="space-y-6 min-w-0">
         <Section title="Theme">
           <ChoiceCards

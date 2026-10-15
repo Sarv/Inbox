@@ -40,7 +40,7 @@ describe('isAppSection', () => {
   // A value written by an older build, or hand-edited, must not reach App's
   // renderContent switch — it falls through to `null` and paints an empty pane.
   it('rejects anything that is not a known section', () => {
-    for (const value of ['', 'inbox', 'Mail', 'settings ', 'nope']) {
+    for (const value of ['', 'inbox', 'Mail', 'settings ', 'nope', 'agent']) {
       expect(isAppSection(value)).toBe(false);
     }
   });
@@ -57,6 +57,19 @@ describe('readActiveSection', () => {
   it('returns the stored section', () => {
     const store = fakeStore({ [ACTIVE_SECTION_KEY]: 'settings' });
     expect(readActiveSection(store)).toBe('settings');
+  });
+
+  it('restores the legacy agent section as AI and replaces the stored value', () => {
+    const store = fakeStore({ [ACTIVE_SECTION_KEY]: 'agent' });
+    expect(readActiveSection(store)).toBe('ai-settings');
+    expect(store.data.get(ACTIVE_SECTION_KEY)).toBe('ai-settings');
+  });
+
+  it('still restores AI when the legacy section cannot be rewritten', () => {
+    const store = fakeStore({ [ACTIVE_SECTION_KEY]: 'agent' });
+    store.failWrite = true;
+    expect(readActiveSection(store)).toBe('ai-settings');
+    expect(store.data.get(ACTIVE_SECTION_KEY)).toBe('agent');
   });
 
   // A cold launch (new session, nothing stored) still opens on the mailbox.
@@ -153,8 +166,15 @@ describe('the bound sessionStorage wrappers', () => {
   it('uses sessionStorage when it is available', () => {
     const store = fakeStore();
     Object.defineProperty(globals, 'sessionStorage', { configurable: true, value: store });
-    persistActiveSection('agent');
-    expect(store.data.get(ACTIVE_SECTION_KEY)).toBe('agent');
-    expect(restoreActiveSection()).toBe('agent');
+    persistActiveSection('ai-settings');
+    expect(store.data.get(ACTIVE_SECTION_KEY)).toBe('ai-settings');
+    expect(restoreActiveSection()).toBe('ai-settings');
+  });
+
+  it('migrates a legacy sessionStorage section to AI', () => {
+    const store = fakeStore({ [ACTIVE_SECTION_KEY]: 'agent' });
+    Object.defineProperty(globals, 'sessionStorage', { configurable: true, value: store });
+    expect(restoreActiveSection()).toBe('ai-settings');
+    expect(store.data.get(ACTIVE_SECTION_KEY)).toBe('ai-settings');
   });
 });

@@ -200,7 +200,7 @@ export function AgentTab({ aiProviders }: AgentTabProps) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       {/* Master switch */}
       <div className={`rounded-lg border p-4 ${settings.enabled ? 'border-violet-500/40 bg-violet-500/5' : 'border-border bg-muted/30'}`}>
         <div className="flex items-center justify-between gap-4">
@@ -254,7 +254,7 @@ export function AgentTab({ aiProviders }: AgentTabProps) {
         </div>
         <p className="text-xs text-muted-foreground mt-3 flex items-center gap-1.5">
           <LayoutDashboard className="h-3.5 w-3.5" />
-          Watch what it's doing (and undo anything) in the Email Agent section of the main sidebar.
+          Watch what it's doing (and undo anything) in AI → Dashboard.
         </p>
       </div>
 

@@ -64,7 +64,7 @@ export function GeneralTab({ settings, updateSetting }: SettingsTabProps) {
     }
   };
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       {/* Sync Settings */}
       <div className="border-b border-border pb-6">
         <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wider">

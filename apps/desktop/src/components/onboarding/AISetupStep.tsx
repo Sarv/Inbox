@@ -259,7 +259,7 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
   const isOAuth = connection?.authMethod === 'oauth';
   const sarv = connection?.sarv;
   const disclosure = selected === 'sarv' ? SARV_AI_DISCLOSURE
-    : `AI sorts your inbox, drafts replies and pulls out conversations by sending sender, recipients, subject and message text to ${connection?.name || label}, for every connected email account. Your provider's terms and data policy apply. You can turn AI off in Settings → AI.`;
+    : `AI sorts your inbox, drafts replies and pulls out conversations by sending sender, recipients, subject and message text to ${connection?.name || label}, for every connected email account. Your provider's terms and data policy apply. You can turn AI off in AI → Email Agent.`;
 
   return (
     <section aria-label="AI setup" className="space-y-6">

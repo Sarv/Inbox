@@ -19,11 +19,11 @@ import { planBodyDownload, targetForChoice, DOWNLOAD_BATCH } from './body-downlo
 import type { AICategoryCounts, CategoryDefinition } from './types';
 import { ICON_MAP, COLOR_MAP } from './types';
 
-export function AIBoxDashboard() {
+export function AIBoxDashboard({ onNavigateToCategory }: { onNavigateToCategory?: (category: string) => void } = {}) {
   const {
     aiCategoryCountsLastUpdate,
     aiProcessing,
-    setAIBoxActiveTab,
+    loadAICategoryEmails,
     processEmailsForAICategorization,
   } = useEmailStore();
 
@@ -165,7 +165,11 @@ export function AIBoxDashboard() {
     else setDownloadError(res?.error || 'Could not start the download.');
   }, [breakdown?.unreadNoBody, choose]);
 
-  const totalCategorized = Object.values(categoryCounts).reduce((a, b) => a + b, 0);
+  // Category badges count unread conversations and can overlap. Processing
+  // counts are emails, so use the processing breakdown for this headline.
+  const unreadCategoryCount = Object.values(categoryCounts).reduce((a, b) => a + b, 0);
+  const totalCategorized = breakdown?.aiProcessed ?? unreadCategoryCount;
+  const hasCategorizedEmails = totalCategorized > 0 || unreadCategoryCount > 0;
   // ONE outstanding number. The panel used to carry two — the categorizer's
   // "0 pending" next to the agent's "196 to go" — which are the same idea with
   // different scopes, and reading as a contradiction was the whole complaint.
@@ -184,7 +188,7 @@ export function AIBoxDashboard() {
   const progressPercent = totalEmails > 0 ? Math.round((totalCategorized / totalEmails) * 100) : 0;
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="w-full min-w-0 space-y-4">
       {confirmDialog}
       {/* Live AI Processing Panel */}
       {aiProcessing && <AIProgressPanel />}
@@ -208,7 +212,7 @@ export function AIBoxDashboard() {
           </div>
           {!aiAssistOn && (
             <p data-testid="ai-assist-off-note" className="text-xs text-muted-foreground mb-3">
-              AI Assist is off, so no mail is sent to your AI provider for sorting. Turn it on in Settings → AI → Email Agent.
+              AI Assist is off, so no mail is sent to your AI provider for sorting. Turn it on in AI → Email Agent.
             </p>
           )}
 
@@ -263,8 +267,8 @@ export function AIBoxDashboard() {
                 <BreakdownRow label="Unread, body still missing"      value={breakdown.unreadNoBody} tone={breakdown.unreadNoBody > 0 ? 'warn' : undefined} />
                 <BreakdownRow label="Finished by the AI"              value={breakdown.aiProcessed} />
                 <BreakdownRow label="Waiting to be categorised"       value={breakdown.eligibleNow} tone={breakdown.eligibleNow > 0 ? 'info' : undefined} />
-                <BreakdownRow label="Waiting for priority + actions"  value={breakdown.agentPending} tone={breakdown.agentPending > 0 ? 'info' : undefined} />
-                <BreakdownRow label="Scored + actioned by the agent"  value={breakdown.agentDone} />
+                <BreakdownRow label="Waiting for priority + actions (current processing window)" value={breakdown.agentPending} tone={breakdown.agentPending > 0 ? 'info' : undefined} />
+                <BreakdownRow label="Agent processing finalized (all synced mail)" value={breakdown.agentDone} />
               </div>
               {breakdown.unreadNoBody > 0 && (
                 <div className="mt-3 flex items-start justify-between gap-3">
@@ -314,15 +318,17 @@ export function AIBoxDashboard() {
       )}
 
       {/* Empty state — no emails categorized yet */}
-      {totalCategorized === 0 && !aiProcessing && (
+      {!hasCategorizedEmails && !aiProcessing && (
         <div className="text-center py-8 text-muted-foreground">
           <p className="text-sm">No categories yet. Click "Start Processing" above to categorize your latest emails.</p>
         </div>
       )}
 
       {/* Dynamic category cards */}
-      {totalCategorized > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      {hasCategorizedEmails && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold">Unread conversations by category</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {categoryDefs.map((def) => {
             const Icon = ICON_MAP[def.icon] || Tag;
             const colorSet = COLOR_MAP[def.color] || COLOR_MAP.blue;
@@ -331,7 +337,10 @@ export function AIBoxDashboard() {
             return (
               <button
                 key={def.slug}
-                onClick={() => setAIBoxActiveTab(def.slug)}
+                onClick={() => {
+                  if (onNavigateToCategory) onNavigateToCategory(def.slug);
+                  else void loadAICategoryEmails(def.slug);
+                }}
                 className={`flex items-start gap-3 p-4 rounded-lg border text-left transition-colors hover:bg-accent/50 ${
                   count > 0 ? `${colorSet.bg} ${colorSet.border}` : 'bg-card border-border'
                 }`}
@@ -356,6 +365,7 @@ export function AIBoxDashboard() {
               </button>
             );
           })}
+          </div>
         </div>
       )}
     </div>

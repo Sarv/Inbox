@@ -57,11 +57,11 @@ export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
   const [activeTab, setActiveTab] = useState<SecurityTab>(initialTab ?? 'overview');
 
   return (
-    <div className="flex flex-col h-full bg-background">
+    <div className="flex flex-col min-w-0 w-full h-full bg-background">
       <div className="px-6 py-4 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-5 w-5 text-primary" />
-          <h1 className="text-xl font-semibold">Security</h1>
+          <h1 className="text-2xl font-semibold">Security</h1>
         </div>
       </div>
 
@@ -83,11 +83,11 @@ export function Security({ initialTab }: { initialTab?: SecurityTab } = {}) {
         </nav>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-w-0 overflow-y-auto">
         {activeTab === 'overview' && <OverviewTab />}
         {activeTab === 'links' && <LinksTab />}
         {activeTab === 'senders' && (
-          <div className="p-6"><BlockedSendersPanel /></div>
+          <div className="w-full p-6"><BlockedSendersPanel /></div>
         )}
         {activeTab === 'images' && <ImagesTab />}
         {activeTab === 'identity' && <IdentityTab />}
@@ -219,7 +219,7 @@ function ReputationStatus() {
 
 function OverviewTab() {
   return (
-    <div className="p-6 max-w-4xl space-y-8">
+    <div className="w-full p-6 space-y-8">
       <HeaderBackfillStatus />
       <ReputationStatus />
       <section>
@@ -283,7 +283,7 @@ function LinksTab() {
   };
 
   return (
-    <div className="p-6 max-w-4xl space-y-8">
+    <div className="w-full p-6 space-y-8">
       {confirmDialog}
       <p className="text-sm text-muted-foreground flex items-start gap-2">
         <Info className="h-4 w-4 mt-0.5 flex-shrink-0" />
@@ -574,7 +574,7 @@ function ImagesTab() {
   };
 
   return (
-    <div className="p-6 max-w-4xl space-y-8">
+    <div className="w-full p-6 space-y-8">
       {confirmDialog}
       <RemoteImageSwitches />
 
@@ -762,7 +762,7 @@ function IdentityTab() {
   };
 
   return (
-    <div className="p-6 max-w-5xl space-y-4">
+    <div className="w-full p-6 space-y-4">
       <p className="text-sm text-muted-foreground">
         Sender pictures come from, in order: the domain’s BIMI brand logo (only on mail that passed DMARC), the contact’s
         confirmed photo, the domain’s favicon, then initials. A domain whose Verified Mark Certificate chains to a Mark
@@ -908,7 +908,7 @@ function SpamTab() {
   const overruled = rows.filter((r) => r.spamUserVerdict === 'ham').length;
 
   return (
-    <div className="p-6 max-w-5xl space-y-4">
+    <div className="w-full p-6 space-y-4">
       <p className="text-sm text-muted-foreground">
         Messages the spam filter scored as suspicious or spam, and the ones you have ruled on. Scores come from the headers
         (authentication, a spoofed name, a forged reply…), then from sender and link reputation once the network has been asked.

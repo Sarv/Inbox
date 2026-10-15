@@ -14,7 +14,6 @@ import { FoldersTab } from './FoldersTab';
 import { GeneralTab } from './GeneralTab';
 import { InboxTab } from './InboxTab';
 import { KeyboardShortcutsTab } from './KeyboardShortcutsTab';
-import { settingsContentWidthClass } from './settings-layout';
 import { type SettingsTab, type AppSettings, defaultSettings } from './types';
 
 const tabs: { id: SettingsTab; label: string }[] = [
@@ -85,8 +84,8 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
   };
 
   return (
-    <div className="flex-1 h-full overflow-hidden bg-background">
-      <div className="h-full flex flex-col">
+    <div className="flex-1 min-w-0 w-full h-full overflow-hidden bg-background">
+      <div className="min-w-0 h-full flex flex-col">
         {/* Header */}
         <div className="px-6 py-4 border-b border-border flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Settings</h1>
@@ -129,8 +128,8 @@ export function Settings({ initialTab, openAddAccount, onAddAccountConsumed, onD
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-6">
-          <div className={settingsContentWidthClass(activeTab)}>
+        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-6">
+          <div className="w-full min-w-0">
             {activeTab === 'general' && <GeneralTab settings={settings} updateSetting={updateSetting} />}
             {activeTab === 'appearance' && <AppearanceTab />}
             {activeTab === 'inbox' && <InboxTab settings={settings} updateSetting={updateSetting} />}

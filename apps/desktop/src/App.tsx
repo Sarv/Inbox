@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
-import { AgentDashboard } from './components/agent/AgentDashboard';
 import { AIStatusBanner } from './components/AIStatusBanner';
 import { AntivirusSetupModal } from './components/antivirus/AntivirusSetupModal';
 import { UnscannedAttachmentWarning } from './components/antivirus/UnscannedAttachmentWarning';
@@ -97,9 +96,10 @@ function App() {
   // auth rejection no longer takes over the whole app — the cached mailbox and
   // other accounts stay usable; this only opens when the user clicks Reconnect.
   const [showReauth, setShowReauth] = useState(false);
-  // Deep-link the AI Settings screen to a specific tab (e.g. the "Fix" button in
+  // Deep-link the AI screen to a specific tab (e.g. the "Fix" button in
   // the AI-inactive banner opens Providers, where the provider is configured).
   const [aiSettingsInitialTab, setAiSettingsInitialTab] = useState<string | undefined>(undefined);
+  const [aiSettingsNavigationId, setAiSettingsNavigationId] = useState(0);
   // One-shot: open the add-account wizard once AccountsTab mounts. Set by the
   // shared add-account flow so every entry point (sidebar switcher, mailbox
   // empty state, in-tab button) lands on Settings → Accounts with the wizard open.
@@ -153,7 +153,7 @@ function App() {
     (document.querySelector('input[placeholder="Search emails..."]') as HTMLInputElement)?.focus();
   }, []);
 
-  // Unsaved-changes guard for the Settings / AI Settings screens (which have an
+  // Unsaved-changes guard for the Settings / AI screens (which have an
   // explicit "Save Changes" button). The screens report their dirty state here;
   // a user-initiated section switch (sidebar, keyboard) while dirty prompts to
   // discard before leaving, so edits aren't silently lost.
@@ -163,11 +163,16 @@ function App() {
   const doNavigate = useCallback((next: AppSection) => {
     setSettingsInitialTab(undefined);
     setAiSettingsInitialTab(undefined);
+    if (next === 'ai-settings') setAiSettingsNavigationId((id) => id + 1);
     setActiveSection(next);
   }, []);
 
   // Guarded navigation: confirm discard when leaving a dirty settings screen.
-  const requestSection = useCallback((next: AppSection) => {
+  const requestSection = useCallback((next: AppSection, onNavigate?: () => void) => {
+    const navigate = () => {
+      doNavigate(next);
+      onNavigate?.();
+    };
     const leavingSettings = activeSection === 'settings' || activeSection === 'ai-settings';
     if (leavingSettings && next !== activeSection && settingsDirtyRef.current) {
       void requestConfirm({
@@ -178,12 +183,12 @@ function App() {
       }).then((ok) => {
         if (ok) {
           settingsDirtyRef.current = false;
-          doNavigate(next);
+          navigate();
         }
       });
       return; // stay put until the user answers
     }
-    doNavigate(next);
+    navigate();
   }, [activeSection, doNavigate]);
 
   // Single entry to the add-account flow: go to Settings → Accounts and open the
@@ -783,7 +788,7 @@ function App() {
           return (
             <>
               <Sidebar />
-              <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                 <div className="flex-1 overflow-y-auto p-6">
                   <OutboxTab />
                 </div>
@@ -797,7 +802,7 @@ function App() {
           return (
             <>
               <Sidebar />
-              <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                 {selectedEmailId ? <MailDetailWithPanels /> : listPane}
               </div>
             </>
@@ -807,7 +812,7 @@ function App() {
           return (
             <>
               <Sidebar />
-              <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                 <div className="h-1/2 border-b border-border overflow-hidden flex flex-col">
                   {listPane}
                 </div>
@@ -843,14 +848,18 @@ function App() {
       case 'security':
         return <Security />;
       case 'ai-settings':
-        return <AISettings initialTab={aiSettingsInitialTab as any} onDirtyChange={(d) => { settingsDirtyRef.current = d; }} />;
-      case 'agent':
-        return <AgentDashboard
+        return <AISettings
+          initialTab={aiSettingsInitialTab as any}
+          tabRequestId={aiSettingsNavigationId}
+          onDirtyChange={(d) => { settingsDirtyRef.current = d; }}
           onNavigateToEmail={(emailId: string) => {
-            useEmailStore.getState().selectEmail(emailId);
-            setActiveSection('mail');
+            requestSection('mail', () => { void useEmailStore.getState().selectEmail(emailId); });
           }}
-          onNavigateToContacts={() => setActiveSection('contacts')}
+          onNavigateToContacts={() => requestSection('contacts')}
+          onNavigateToCategory={(category) => requestSection('mail', () => {
+            useEmailStore.setState({ selectedEmailId: null, highlightedEmailId: null });
+            void useEmailStore.getState().loadAICategoryEmails(category);
+          })}
         />;
       case 'extensions':
         return <ExtensionManager />;
@@ -861,8 +870,8 @@ function App() {
       case 'drive':
       case 'calendar':
         return (
-          <div className="flex-1 flex items-center justify-center text-muted-foreground">
-            <div className="text-center">
+          <div className="flex-1 min-w-0 h-full overflow-y-auto p-6 text-muted-foreground">
+            <div>
               <h2 className="text-xl font-semibold mb-2 capitalize">{activeSection}</h2>
               <p>Coming soon</p>
             </div>
@@ -917,7 +926,7 @@ function App() {
         <SecurityStatusBanner />
         {/* AI inactive banner — "Fix" jumps to AI provider settings, where a
             passing Test reactivates AI. */}
-        <AIStatusBanner onFix={() => { setAiSettingsInitialTab('providers'); setActiveSection('ai-settings'); }} />
+        <AIStatusBanner onFix={() => requestSection('ai-settings', () => setAiSettingsInitialTab('providers'))} />
         {/* Non-blocking account re-auth prompt (replaces the old full-screen gate). */}
         <ReauthBanner
           onReconnect={() => setShowReauth(true)}

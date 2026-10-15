@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { AIProvider, loadAISettings } from '../../../services/ai-service';
 import { useEmailStore } from '../../../store/email-store';
 import { readAppSettings, saveSettingsFromScreen } from '../../../utils/app-settings';
+import { AgentDashboard } from '../../agent/AgentDashboard';
 import { AIBoxDashboard } from '../../aibox/AIBoxDashboard';
 import { type AppSettings, defaultSettings } from '../types';
 
@@ -24,12 +25,26 @@ const tabs: { id: AISettingsTab; label: string }[] = [
   { id: 'agent', label: 'Email Agent' },
 ];
 
-export function AISettings({ initialTab, onDirtyChange }: { initialTab?: AISettingsTab; onDirtyChange?: (dirty: boolean) => void } = {}) {
+interface AISettingsProps {
+  initialTab?: AISettingsTab;
+  tabRequestId?: number;
+  onDirtyChange?: (dirty: boolean) => void;
+  onNavigateToCategory?: (category: string) => void;
+  onNavigateToEmail?: (emailId: string) => void;
+  onNavigateToContacts?: () => void;
+}
+
+export function AISettings({ initialTab, tabRequestId, onDirtyChange, onNavigateToCategory, onNavigateToEmail, onNavigateToContacts }: AISettingsProps = {}) {
   const [activeTab, setActiveTab] = useState<AISettingsTab>(initialTab ?? 'dashboard');
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [hasChanges, setHasChanges] = useState(false);
   const [saved, setSaved] = useState(false);
   const [aiProviders, setAiProviders] = useState<AIProvider[]>([]);
+
+  // A provider warning can deep-link here while this page is already open.
+  useEffect(() => {
+    setActiveTab(initialTab ?? 'dashboard');
+  }, [initialTab, tabRequestId]);
 
   // Report unsaved-changes state up so navigating away can prompt to discard.
   useEffect(() => {
@@ -66,11 +81,11 @@ export function AISettings({ initialTab, onDirtyChange }: { initialTab?: AISetti
   };
 
   return (
-    <div className="flex-1 h-full overflow-hidden bg-background">
-      <div className="h-full flex flex-col">
+    <div className="flex-1 min-w-0 w-full h-full overflow-hidden bg-background">
+      <div className="min-w-0 h-full flex flex-col">
         {/* Header */}
         <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">AI Settings</h1>
+          <h1 className="text-2xl font-semibold">AI</h1>
           {/* The header Save button only drives the Categorization tab (the one
               wired to updateSetting/localStorage). Every other tab self-saves
               (Providers persists immediately, Agent has per-prompt saves, etc.),
@@ -117,11 +132,18 @@ export function AISettings({ initialTab, onDirtyChange }: { initialTab?: AISetti
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-6">
           {activeTab === 'dashboard' && (
-            <AIBoxDashboard />
+            <div className="w-full min-w-0 space-y-8">
+              <AIBoxDashboard onNavigateToCategory={onNavigateToCategory} />
+              <AgentDashboard
+                onNavigateToEmail={onNavigateToEmail}
+                onNavigateToContacts={onNavigateToContacts}
+                onRefresh={() => useEmailStore.setState({ aiCategoryCountsLastUpdate: Date.now() })}
+              />
+            </div>
           )}
-          <div className="max-w-3xl">
+          <div className="w-full min-w-0">
             {activeTab === 'providers' && (
               <ProvidersTab aiProviders={aiProviders} setAiProviders={setAiProviders} />
             )}

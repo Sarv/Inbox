@@ -63,7 +63,7 @@ export function LabelsTab() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       {confirmDialog}
 
       <div>

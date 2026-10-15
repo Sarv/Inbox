@@ -49,7 +49,7 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       <div className="flex items-center justify-between gap-3">
         <div><h3 className="text-lg font-semibold">AI providers</h3><p className="mt-1 text-sm text-muted-foreground">Connect a provider and choose the model Inbox uses.</p></div>
         <button type="button" onClick={() => openFlow()} className="flex shrink-0 items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"><Plus className="h-4 w-4" />Add provider</button>
