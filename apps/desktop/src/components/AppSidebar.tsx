@@ -1,5 +1,6 @@
 import {
   Mail,
+  CalendarDays,
   Contact,
   Settings,
   ChevronRight,
@@ -24,6 +25,7 @@ interface AppSidebarProps {
 const menuItems: { id: AppSection; icon: typeof Mail; label: string }[] = [
   { id: 'mail', icon: Mail, label: 'Mail' },
   { id: 'contacts', icon: Contact, label: 'Contacts' },
+  { id: 'calendar', icon: CalendarDays, label: 'Calendar' },
 ];
 
 export function AppSidebar({ activeSection, onSectionChange }: AppSidebarProps) {
