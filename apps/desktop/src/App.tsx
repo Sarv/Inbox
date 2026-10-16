@@ -6,6 +6,7 @@ import { AIStatusBanner } from './components/AIStatusBanner';
 import { AntivirusSetupModal } from './components/antivirus/AntivirusSetupModal';
 import { UnscannedAttachmentWarning } from './components/antivirus/UnscannedAttachmentWarning';
 import { AppSidebar, AppSection } from './components/AppSidebar';
+import { CalendarView } from './components/calendar/CalendarView';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { ConnectionSecurityBanner } from './components/ConnectionSecurityBanner';
@@ -867,12 +868,15 @@ function App() {
         />;
       case 'extensions':
         return <ExtensionManager />;
+      case 'calendar':
+        // No calendar sync yet: the screen renders with no calendars until the
+        // Sarv Calendar API feeds it.
+        return <CalendarView calendars={[]} events={[]} />;
       case 'teams':
       case 'chat':
       case 'meet':
       case 'webinar':
       case 'drive':
-      case 'calendar':
         return (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">

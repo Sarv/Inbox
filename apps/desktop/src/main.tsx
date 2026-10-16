@@ -21,6 +21,7 @@ import './index.css';
 // friends are already declared for it to reference.
 import '@sarv-in/email-chat-view/style.css';
 import './styles/chat-view-theme.css';
+import './styles/calendar-view.css';
 
 // Initialize crash/error reporting before rendering anything.
 initSentryRenderer();
