@@ -1,0 +1,759 @@
+import type { EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
+import { describe, expect, it, vi } from 'vitest';
+
+import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
+import { emailRecord } from '../../../helpers/email-fixtures';
+
+const accounts = [{ id: 'a', email: 'owner@company.example' }, { id: 'b', email: 'second@other.example' }];
+const inbox = { id: 'inbox', name: 'Inbox', path: 'INBOX', specialUse: '\\Inbox', parentId: null, uidValidity: 1, lastSyncUid: null, lastSyncTime: null, totalCount: 0, unreadCount: 0, subscribed: true, createdAt: 0, updatedAt: 0 } satisfies FolderRecord;
+function email(id: string, overrides: Partial<EmailRecord> = {}): EmailRecord {
+  return emailRecord({ id, messageId: `<${id}@newsletter.example>`, threadId: `thread-${id}`, folderId: 'inbox', uid: 10, tags: '|INBOX|', fromAddress: 'offers@newsletter.example', toAddress: accounts[0]!.email,
+    subject: 'A seasonal sale', date: 1_791_600_000, rawBody: '<p>Enjoy our summer discount. No response needed.</p>', cleanBody: 'Enjoy our summer discount. No response needed.', hasBody: true, contentType: 'html', updatedAt: 10, ...overrides });
+}
+function fixture(records: EmailRecord[] = [email('one')], second: EmailRecord[] = []) {
+  const data = new Map([['a', new Map(records.map(row => [row.id, row]))], ['b', new Map(second.map(row => [row.id, row]))]]);
+  const mailboxes = new Map([...data].map(([accountId, byId]) => [accountId, {
+    aliases: [] as string[], storage: {
+      getFolders: vi.fn(async () => [inbox]), getContacts: vi.fn(async () => []), getAttachments: vi.fn(async () => []),
+      getCategoryDefinitions: () => [{ slug: 'promotions' }, { slug: 'important' }, { slug: 'finance' }],
+      getEmail: vi.fn(async (id: string) => byId.get(id) ?? null),
+      getEmailsByThread: vi.fn(async (threadId: string) => [...byId.values()].filter(row => row.threadId === threadId)),
+      searchEmails: vi.fn(async (query: SearchQuery) => {
+        const unread = [...byId.values()].filter(row => query.isUnread === undefined || row.tags.includes('|read|') !== query.isUnread);
+        const threads = [...new Set(unread.map(row => row.threadId || row.id))];
+        const selected = threads.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 25));
+        return unread.filter(row => selected.includes(row.threadId || row.id));
+      }),
+    },
+  }]));
+  const callAI = vi.fn(async (prompt: string) => {
+    const line = prompt.split('\n').find(value => value.startsWith('UNTRUSTED_CONVERSATIONS_JSON: '))!;
+    const items = JSON.parse(line.slice('UNTRUSTED_CONVERSATIONS_JSON: '.length)) as Array<{ id: string }>;
+    return JSON.stringify({ recommendations: items.map(item => ({ id: item.id, recommendation: 'mark_read', reason: 'Low-value unsolicited promotion with no requested response.', confidence: 0.98 })) });
+  });
+  const setRead = vi.fn(async (accountId: string, ids: string[], read: boolean): Promise<InboxAssistantReadReceipt> => {
+    for (const id of ids) {
+      const row = data.get(accountId)!.get(id)!;
+      row.tags = row.tags.replace('|read|', '|');
+      if (read) row.tags += 'read|';
+      row.updatedAt++;
+    }
+    return { appliedIds: ids, queuedIds: [], failedIds: [] };
+  });
+  const moveMail = vi.fn(async (accountId: string, ids: string[], action: 'archive' | 'trash'): Promise<InboxAssistantReadReceipt> => {
+    for (const id of ids) {
+      const row = data.get(accountId)!.get(id)!;
+      row.tags = row.tags.replace('|INBOX|', '|');
+      if (action === 'trash') row.tags += 'Trash|';
+      row.updatedAt++;
+    }
+    return { appliedIds: ids, queuedIds: [], failedIds: [] };
+  });
+  const deps: InboxAssistantActionDeps = { openMailbox: vi.fn(async id => { const mailbox = mailboxes.get(id); if (!mailbox) throw new Error('Account removed'); return mailbox; }), callAI, setRead, moveMail };
+  return { deps, mailboxes, data, callAI, setRead, moveMail };
+}
+
+describe('explicit reviewed archive and Trash actions', () => {
+  it.each(['archive', 'trash'] as const)('moves all trusted members of a manually chosen protected conversation to %s', async action => {
+    const f = fixture([
+      email('protected', { tags: '|INBOX|important|' }),
+      email('read-sibling', { threadId: 'thread-protected', tags: '|INBOX|read|' }),
+      email('other'),
+    ], [email('protected')]);
+    const review = await prepareInboxAssistantReview(accounts, 'unread', f.deps);
+    const chosen = review.items.find(item => item.accountId === 'a' && item.emailId === 'protected')!;
+    expect(chosen).toMatchObject({ recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true });
+    // Display fields are untrusted and cannot expand the host's IDs or owner.
+    chosen.unreadEmailIds.push('other'); chosen.targetEmailIds = ['other']; chosen.accountId = 'b';
+    const result = await applyInboxAssistantReview(review, [chosen.id], f.deps, undefined, { action, manualSelection: true });
+    expect(f.moveMail).toHaveBeenCalledExactlyOnceWith('a', ['protected', 'read-sibling'], action);
+    expect(f.setRead).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ appliedCount: 1, items: [{ action, appliedIds: ['protected', 'read-sibling'], status: 'applied' }] });
+    expect(chosen).toMatchObject({ appliedAction: action, undoAvailable: false, mailActionsAllowed: false });
+    expect(f.data.get('a')!.get('other')!.tags).toContain('|INBOX|');
+    expect(f.data.get('b')!.get('protected')!.tags).toContain('|INBOX|');
+    const again = await applyInboxAssistantReview(review, [chosen.id], f.deps, undefined, { action, manualSelection: true });
+    expect(again.items).toEqual(result.items);
+    expect(f.moveMail).toHaveBeenCalledTimes(1);
+    expect((await undoInboxAssistantReview(review, [chosen.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each(['archive', 'trash'] as const)('never lets automatic recommendations invoke %s', async action => {
+    const f = fixture();
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    await expect(applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, undefined, { action })).rejects.toThrow('explicit selection');
+    expect(f.moveMail).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each(['arrival', 'flag', 'owner', 'expiry', 'incomplete'] as const)('revalidates a manual move against %s', async change => {
+    const f = fixture();
+    if (change === 'incomplete') Object.assign(f.mailboxes.get('a')!.storage, { getEmailsByThread: undefined });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    if (change === 'arrival') f.data.get('a')!.set('arrival', email('arrival', { threadId: 'thread-one' }));
+    if (change === 'flag') f.data.get('a')!.get('one')!.tags += 'starred|';
+    if (change === 'owner') f.mailboxes.delete('a');
+    if (change === 'expiry') {
+      const now = vi.spyOn(Date, 'now').mockReturnValue(review.expiresAt);
+      await expect(applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, undefined, { action: 'trash', manualSelection: true })).rejects.toThrow('expired');
+      now.mockRestore();
+    } else {
+      review.items[0]!.mailActionsAllowed = true;
+      const result = await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, undefined, { action: 'trash', manualSelection: true });
+      expect(result.appliedCount + result.queuedCount).toBe(0);
+    }
+    expect(f.moveMail).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each(['archive', 'trash'] as const)('permits %s after an exact acknowledged read snapshot, while retiring read undo', async action => {
+    const f = fixture([email('one'), email('read-sibling', { threadId: 'thread-one', tags: '|INBOX|read|' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const item = review.items[0]!;
+    await applyInboxAssistantReview(review, [item.id], f.deps);
+    expect(item).toMatchObject({ appliedAction: 'mark_read', undoAvailable: true, mailActionsAllowed: true });
+    const moved = await applyInboxAssistantReview(review, [item.id], f.deps, undefined, { action, manualSelection: true });
+    expect(moved.appliedCount).toBe(1);
+    expect(f.moveMail).toHaveBeenCalledExactlyOnceWith('a', ['one', 'read-sibling'], action);
+    expect(item).toMatchObject({ appliedAction: action, undoAvailable: false, mailActionsAllowed: false });
+    await undoInboxAssistantReview(review, [item.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['one'], true);
+    expect(item).toMatchObject({ status: 'applied', appliedAction: action });
+    const different = await applyInboxAssistantReview(review, [item.id], f.deps, undefined, { action: action === 'archive' ? 'trash' : 'archive', manualSelection: true });
+    expect(different.skippedCount).toBe(1);
+    expect(f.moveMail).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a stale post-read snapshot before moving and preserves its read receipt', async () => {
+    const f = fixture();
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const id = review.items[0]!.id;
+    await applyInboxAssistantReview(review, [id], f.deps);
+    f.data.get('a')!.get('one')!.tags += 'starred|';
+    expect((await applyInboxAssistantReview(review, [id], f.deps, undefined, { action: 'archive', manualSelection: true })).skippedCount).toBe(1);
+    expect(f.moveMail).not.toHaveBeenCalled();
+  });
+
+  it('retains read undo if a move failed without acknowledging any mail', async () => {
+    const f = fixture();
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const item = review.items[0]!;
+    await applyInboxAssistantReview(review, [item.id], f.deps);
+    f.moveMail.mockResolvedValue({ appliedIds: [], queuedIds: [], failedIds: ['one'] });
+    expect((await applyInboxAssistantReview(review, [item.id], f.deps, undefined, { action: 'trash', manualSelection: true })).failedCount).toBe(1);
+    expect(item.undoAvailable).toBe(true);
+    await undoInboxAssistantReview(review, [item.id], f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['one'], false);
+  });
+
+  it('keeps acknowledged move receipts when stopping between conversations and never replays them', async () => {
+    const f = fixture([email('one'), email('two')]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const controller = new AbortController();
+    f.moveMail.mockImplementation(async (_account, ids) => { controller.abort(); return { appliedIds: [], queuedIds: ids, failedIds: [] }; });
+    const ids = review.items.map(item => item.id);
+    const result = await applyInboxAssistantReview(review, ids, f.deps, controller.signal, { action: 'trash', manualSelection: true });
+    expect(result).toMatchObject({ queuedCount: 1, skippedCount: 1, items: [{ action: 'trash', queuedIds: ['one'], status: 'queued' }, { status: 'skipped' }] });
+    await applyInboxAssistantReview(review, [ids[0]!], f.deps, undefined, { action: 'trash', manualSelection: true });
+    expect(f.moveMail).toHaveBeenCalledTimes(1);
+    expect(review.items[0]).toMatchObject({ appliedAction: 'trash', undoAvailable: false });
+  });
+});
+
+describe('reviewed Inbox Agent mark-read actions', () => {
+  it('prepares all unread threads including already-processed uncategorized mail without mutating anything', async () => {
+    const f = fixture([email('old', { aiProcessedAt: 100 }), email('labeled', { tags: '|INBOX|promotions|' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items).toHaveLength(2);
+    expect(review.items.find(item => item.emailId === 'old')).toMatchObject({ uncategorized: true, recommendation: 'mark_read', status: 'pending' });
+    expect(review.items.find(item => item.emailId === 'labeled')?.categories).toEqual(['promotions']);
+    expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ isUnread: true, collapseThreads: true, scope: 'mailbox' }));
+    expect(f.setRead).not.toHaveBeenCalled();
+    expect(review.expiresAt).toBeGreaterThan(review.createdAt);
+  });
+
+  it('uncategorized review is independent of AI processing state and preserves explicit/manual/provider categories', async () => {
+    const f = fixture([email('empty-ai', { aiProcessedAt: 99 }), email('user-clear', { manualCategories: [] }), email('provider', { serverCategories: ['promotions'] }), email('labeled', { tags: '|INBOX|promotions|' }), email('read', { tags: '|INBOX|read|' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'uncategorized', f.deps);
+    expect(review.items.map(item => item.emailId)).toEqual(['empty-ai', 'user-clear', 'provider']);
+    expect(review.items.find(item => item.emailId === 'user-clear')).toMatchObject({ uncategorized: true, recommendation: 'keep_unread' });
+    expect(review.items.find(item => item.emailId === 'provider')).toMatchObject({ uncategorized: true, recommendation: 'keep_unread' });
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('groups unread members once while never changing previously read members', async () => {
+    const rows = [email('one'), email('two', { threadId: 'thread-one' }), email('read', { threadId: 'thread-one', tags: '|INBOX|read|' })];
+    const f = fixture(rows);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]).toMatchObject({ unreadCount: 2, messageCount: 3 });
+    const result = await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(result.appliedCount).toBe(1);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['one', 'two'], true);
+  });
+
+  it('keeps duplicate email/thread IDs isolated by owning account', async () => {
+    const f = fixture([email('same')], [email('same')]);
+    const review = await prepareInboxAssistantReview(accounts, 'unread', f.deps);
+    const second = review.items.find(item => item.accountId === 'b')!;
+    await applyInboxAssistantReview(review, [second.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('b', ['same'], true);
+    expect(f.data.get('a')!.get('same')!.tags).not.toContain('|read|');
+  });
+
+  it.each([
+    { tags: '|INBOX|important|' }, { tags: '|INBOX|starred|' }, { tags: '|INBOX|needs_response|' }, { tags: '|INBOX|finance|' }, { tags: '|INBOX|invoices|' }, { tags: '|INBOX|meetings|' },
+    { fromAddress: accounts[0]!.email }, { fromAddress: 'teammate@company.example' }, { gmailImportant: true }, { subject: 'Invoice payment due' }, { pgpStatus: 'encrypted' as const }, { gmailCategoriesPending: true },
+  ])('protects business/action-required mail despite any AI choice: %j', async flags => {
+    const f = fixture([email('safe', flags)]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]!.recommendation).toBe('keep_unread');
+    expect(f.callAI).not.toHaveBeenCalled();
+    await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('protects known business contacts and unread attachment contents without requesting attachment access', async () => {
+    const f = fixture([email('known'), email('attachment', { hasAttachments: true, attachmentNames: '["proposal.xlsx"]' })]);
+    f.mailboxes.get('a')!.storage.getContacts.mockResolvedValue([{ email: 'offers@newsletter.example', sentCount: 1 }] as never);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items.every(item => item.recommendation === 'keep_unread')).toBe(true);
+    expect(review.items.find(item => item.emailId === 'attachment')!.attachmentsUnknown).toBe(true);
+    expect(f.callAI).not.toHaveBeenCalled();
+  });
+
+  it('permits an explicit manual keep-unread selection and undo without changing read siblings or other recommendations', async () => {
+    const f = fixture([
+      email('important', { tags: '|INBOX|important|' }),
+      email('read-sibling', { threadId: 'thread-important', tags: '|INBOX|read|' }),
+      email('keep-other', { tags: '|INBOX|finance|' }),
+    ]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const chosen = review.items.find(item => item.emailId === 'important')!;
+    expect(chosen).toMatchObject({ recommendation: 'keep_unread', manualSelectionAllowed: true });
+    const result = await applyInboxAssistantReview(review, [chosen.id], f.deps, undefined, { manualSelection: true });
+    expect(result.appliedCount).toBe(1);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['important'], true);
+    expect(review.items.find(item => item.emailId === 'keep-other')!.status).toBe('pending');
+    expect(chosen.undoAvailable).toBe(true);
+    await undoInboxAssistantReview(review, [chosen.id], f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['important'], false);
+    expect(f.data.get('a')!.get('read-sibling')!.tags).toContain('|read|');
+  });
+
+  it('allows a manual needs-review selection while the ordinary apply path still requires an eligible recommendation', async () => {
+    const f = fixture();
+    f.callAI.mockResolvedValue(JSON.stringify({ recommendations: [] }));
+    const ordinary = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(ordinary.items[0]).toMatchObject({ recommendation: 'needs_review', manualSelectionAllowed: true });
+    expect((await applyInboxAssistantReview(ordinary, [ordinary.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+    const manual = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect((await applyInboxAssistantReview(manual, [manual.items[0]!.id], f.deps, undefined, { manualSelection: true })).appliedCount).toBe(1);
+  });
+
+  it('never permits manual overrides of incomplete membership or trusts an edited display permission', async () => {
+    const f = fixture([email('incomplete', { tags: '|INBOX|important|' })]);
+    Object.assign(f.mailboxes.get('a')!.storage, { getEmailsByThread: undefined });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]!.manualSelectionAllowed).toBe(false);
+    review.items[0]!.manualSelectionAllowed = true;
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, undefined, { manualSelection: true })).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each(['arrival', 'flag', 'expiry'])('revalidates manual selections against %s before marking any mail', async change => {
+    const f = fixture([email('protected', { tags: '|INBOX|important|' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    if (change === 'arrival') f.data.get('a')!.set('arrival', email('arrival', { threadId: 'thread-protected' }));
+    if (change === 'flag') f.data.get('a')!.get('protected')!.tags += 'starred|';
+    if (change === 'expiry') {
+      const now = vi.spyOn(Date, 'now').mockReturnValue(review.expiresAt);
+      await expect(applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, undefined, { manualSelection: true })).rejects.toThrow('expired');
+      now.mockRestore();
+    } else expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, undefined, { manualSelection: true })).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('downloads a missing original rather than trusting a preview, and holds an unavailable body unread', async () => {
+    const f = fixture([email('missing', { rawBody: ' \n ', cleanBody: 'Preview only', hasBody: false })]);
+    const mailbox = f.mailboxes.get('a')!;
+    const fetchBody = vi.fn(async () => { const row = f.data.get('a')!.get('missing')!; row.rawBody = '<p>Summer sale.</p>'; row.hasBody = true; return row; });
+    Object.assign(mailbox, { fetchBody });
+    expect((await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps)).items[0]!.bodyUnavailable).toBe(false);
+    expect(fetchBody).toHaveBeenCalledOnce();
+    f.data.get('a')!.get('missing')!.rawBody = ''; f.data.get('a')!.get('missing')!.hasBody = false;
+    fetchBody.mockRejectedValueOnce(new Error('offline'));
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]).toMatchObject({ bodyUnavailable: true, recommendation: 'keep_unread' });
+  });
+
+  it('rechecks changed membership during body hydration and never offers unseen arrivals for mark-read', async () => {
+    const f = fixture([email('first', { rawBody: '', hasBody: false, cleanBody: '' })]);
+    Object.assign(f.mailboxes.get('a')!, { fetchBody: vi.fn(async () => {
+      const row = f.data.get('a')!.get('first')!; row.rawBody = '<p>Summer sale.</p>'; row.hasBody = true;
+      f.data.get('a')!.set('new', email('new', { threadId: 'thread-first' })); return row;
+    }) });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]!.protectedReasons.join()).toContain('changed during review');
+    expect(review.items[0]!.recommendation).toBe('keep_unread');
+  });
+
+  it('rejects invented IDs, extra tools and low-confidence recommendations without mutating mail', async () => {
+    for (const response of [JSON.stringify({ recommendations: [{ id: 'invented', recommendation: 'mark_read', reason: 'Do it', confidence: 1 }] }), JSON.stringify({ recommendations: [], tool: 'delete' })]) {
+      const f = fixture(); f.callAI.mockResolvedValue(response);
+      const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+      expect(review.items[0]!.recommendation).toBe('needs_review');
+      await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+      expect(f.setRead).not.toHaveBeenCalled();
+    }
+    const f = fixture(); const real = f.callAI.getMockImplementation()!;
+    f.callAI.mockImplementation(async prompt => (await real(prompt)).replace('0.98', '0.89'));
+    expect((await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps)).items[0]!.recommendation).toBe('needs_review');
+  });
+
+  it('validates host-held reviews, unknown IDs, expiry and UI tampering', async () => {
+    const f = fixture(); const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    await expect(applyInboxAssistantReview({ ...review }, [review.items[0]!.id], f.deps)).rejects.toThrow('unavailable');
+    await expect(applyInboxAssistantReview(review, ['invented'], f.deps)).rejects.toThrow('only items');
+    review.items[0]!.unreadEmailIds = ['other-message'];
+    await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['one'], true);
+    vi.spyOn(Date, 'now').mockReturnValueOnce(review.expiresAt + 1);
+    await expect(applyInboxAssistantReview(review, [], f.deps)).rejects.toThrow('expired');
+    vi.restoreAllMocks();
+  });
+
+  it.each(['arrival', 'read', 'star', 'moved', 'body'])('skips a selected conversation changed since the proposal: %s', async change => {
+    const f = fixture(); const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const row = f.data.get('a')!.get('one')!;
+    if (change === 'arrival') f.data.get('a')!.set('new', email('new', { threadId: row.threadId }));
+    if (change === 'read') row.tags += 'read|';
+    if (change === 'star') row.tags += 'starred|';
+    if (change === 'moved') row.tags = '|Trash|';
+    if (change === 'body') row.rawBody = '<p>Updated important information</p>';
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('rejects changed or removed account runtimes without active-account fallback', async () => {
+    const f = fixture(); const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    vi.mocked(f.deps.openMailbox).mockRejectedValueOnce(new Error('Removed'));
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).failedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('retains exact queued receipts, is idempotent and undoes only original unread messages', async () => {
+    const f = fixture([email('one'), email('already-read', { threadId: 'thread-one', tags: '|INBOX|read|' })]);
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, read) => { await set(account, ids, read); return { appliedIds: [], queuedIds: ids, failedIds: [] }; });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps); const ids = [review.items[0]!.id];
+    expect((await applyInboxAssistantReview(review, ids, f.deps)).queuedCount).toBe(1);
+    await applyInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenCalledOnce();
+    await undoInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['one'], false);
+    await undoInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenCalledTimes(2);
+    expect(f.data.get('a')!.get('already-read')!.tags).toContain('|read|');
+    expect(review.items[0]!.status).toBe('undone');
+    expect(review.items[0]!.undoAvailable).toBe(false);
+    expect((await applyInboxAssistantReview(review, ids, f.deps)).items[0]!.status).toBe('undone');
+    expect(f.setRead).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])('keeps undo available when a real storage read derives the Seen flag for targetRead=%s', async targetRead => {
+    const f = fixture([email('one', { tags: targetRead ? '|INBOX|' : '|INBOX|read|', flags: targetRead ? [] : ['\\Seen'], fromName: 'BigBlueButton' })]);
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, desired) => {
+      const receipt = await set(account, ids, desired);
+      for (const id of ids) f.data.get(account)!.get(id)!.flags = desired ? ['\\Seen'] : [];
+      return receipt;
+    });
+    const review = await prepareInboxAssistantReview([accounts[0]!], targetRead ? 'mark_read' : 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'sender' } });
+    const ids = [review.items[0]!.id];
+    await applyInboxAssistantReview(review, ids, f.deps);
+    expect(review.items[0]!.undoAvailable).toBe(true);
+    await undoInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['one'], !targetRead);
+    expect(f.data.get('a')!.get('one')!.tags.includes('|read|')).toBe(!targetRead);
+  });
+
+  it.each(['flag', 'body', 'attachment'])('retains protection for %s changes while ignoring joined thread projections', async change => {
+    const f = fixture([email('one', { tags: '|INBOX|read|', flags: ['\\Seen'], fromName: 'BigBlueButton', threadMessageCount: 1 })]);
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, desired) => {
+      const receipt = await set(account, ids, desired);
+      for (const id of ids) { const row = f.data.get(account)!.get(id)!; row.flags = desired ? ['\\Seen'] : []; delete row.threadMessageCount; }
+      return receipt;
+    });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'sender' } });
+    const ids = [review.items[0]!.id];
+    await applyInboxAssistantReview(review, ids, f.deps);
+    expect(review.items[0]!.undoAvailable).toBe(true);
+    const row = f.data.get('a')!.get('one')!;
+    if (change === 'flag') row.flags = ['\\Flagged'];
+    if (change === 'body') row.rawBody = '<p>Changed source body.</p>';
+    if (change === 'attachment') row.attachmentNames = '["changed-file.pdf"]';
+    expect((await undoInboxAssistantReview(review, ids, f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).toHaveBeenCalledOnce();
+  });
+
+  it('exposes an undo receipt for a partial success and restores only the acknowledged changed IDs', async () => {
+    const f = fixture([email('one'), email('two', { threadId: 'thread-one' })]);
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, read) => {
+      if (!read) return set(account, ids, read);
+      await set(account, ['one'], true);
+      return { appliedIds: ['one'], queuedIds: [], failedIds: ['two'] };
+    });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps); const ids = [review.items[0]!.id];
+    const applied = await applyInboxAssistantReview(review, ids, f.deps);
+    expect(applied.items[0]).toMatchObject({ status: 'failed', appliedIds: ['one'], failedIds: ['two'] });
+    expect(review.items[0]).toMatchObject({ status: 'failed', undoAvailable: true });
+    await undoInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['one'], false);
+    expect(f.data.get('a')!.get('two')!.tags).not.toContain('|read|');
+  });
+
+  it('a premature undo cannot consume the future successful receipt', async () => {
+    const f = fixture(); const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps); const ids = [review.items[0]!.id];
+    expect((await undoInboxAssistantReview(review, ids, f.deps)).skippedCount).toBe(1);
+    await applyInboxAssistantReview(review, ids, f.deps);
+    await undoInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('excludes Trash-only, Spam and Drafts conversations even if a search adapter returns them', async () => {
+    const f = fixture([email('trash', { tags: '|Trash|' }), email('spam', { tags: '|Spam|' }), email('draft', { tags: '|Drafts|draft|' }), email('localized', { tags: '|Corbeille|', folderId: 'localized-trash' }), email('live')]);
+    f.mailboxes.get('a')!.storage.getFolders.mockResolvedValue([inbox, { ...inbox, id: 'localized-trash', path: 'Corbeille', specialUse: '\\Trash' }]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items.map(item => item.emailId)).toEqual(['live']);
+  });
+
+  it('skips undo after a subsequent flag change or new message', async () => {
+    const f = fixture(); const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps); const ids = [review.items[0]!.id];
+    await applyInboxAssistantReview(review, ids, f.deps);
+    f.data.get('a')!.get('one')!.tags += 'starred|';
+    expect((await undoInboxAssistantReview(review, ids, f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).toHaveBeenCalledOnce();
+  });
+
+  it('retains completed receipts when cancellation arrives during a write and stops the remaining selection', async () => {
+    const f = fixture([email('one'), email('two')]); const controller = new AbortController();
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, read) => { const receipt = await set(account, ids, read); controller.abort(); return receipt; });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const result = await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps, controller.signal);
+    expect(result.appliedCount).toBe(1); expect(result.skippedCount).toBe(1);
+    expect(review.items[1]!.status).toBe('skipped');
+    expect(f.setRead).toHaveBeenCalledOnce();
+    await undoInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('pages beyond25 messages, caps at200 threads per account and reports continuation', async () => {
+    const f = fixture(Array.from({ length: 205 }, (_, index) => email(`m${index}`, { tags: '|INBOX|important|' })));
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items).toHaveLength(200);
+    expect(review.coverage[0]).toMatchObject({ hasMore: true, truncated: true, nextOffset: 225 });
+    expect(review.truncated).toBe(true);
+    expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenCalledTimes(9);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('continues past200 unchanged protected threads without revisiting or counting them in the next batch', async () => {
+    const f = fixture(Array.from({ length: 400 }, (_, index) => email(`m${index}`, { tags: '|INBOX|important|' })));
+    const first = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const second = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+      { excludeThreadIds: { a: first.items.map(item => item.threadId) } });
+    expect(first.items).toHaveLength(200);
+    expect(second.items.map(item => item.emailId)).toEqual(Array.from({ length: 200 }, (_, index) => `m${index + 200}`));
+    expect(second.coverage[0]).toMatchObject({ hasMore: false, truncated: false, reviewedThreads: 200, scannedThreads: 400 });
+    expect(second.items.every(item => item.recommendation === 'keep_unread')).toBe(true);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('rescans current headers after prior read actions remove rows instead of resuming a stale offset', async () => {
+    const f = fixture(Array.from({ length: 400 }, (_, index) => email(`m${index}`)));
+    const first = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect((await applyInboxAssistantReview(first, first.items.map(item => item.id), f.deps)).appliedCount).toBe(200);
+    f.mailboxes.get('a')!.storage.searchEmails.mockClear();
+    const second = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+      { excludeThreadIds: { a: first.items.map(item => item.threadId) } });
+    expect(second.items.map(item => item.emailId)).toEqual(Array.from({ length: 200 }, (_, index) => `m${index + 200}`));
+    expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenNthCalledWith(1, expect.objectContaining({ offset: 0 }));
+    expect(second.coverage[0]).toMatchObject({ hasMore: false, truncated: false, scannedThreads: 200 });
+  });
+
+  it('scopes continuation exclusions by account even when thread IDs collide', async () => {
+    const f = fixture([email('same')], [email('same')]);
+    const review = await prepareInboxAssistantReview(accounts, 'unread', f.deps, undefined, undefined,
+      { excludeThreadIds: { a: ['thread-same'] } });
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]).toMatchObject({ accountId: 'b', threadId: 'thread-same' });
+    expect(review.coverage.map(value => value.hasMore)).toEqual([false, false]);
+  });
+
+  it('reaches all500 remaining kept conversations beyond a known2,000-thread prefix', async () => {
+    const f = fixture(Array.from({ length: 2_500 }, (_, index) => email(`m${index}`, { tags: '|INBOX|important|' })));
+    const excluded = Array.from({ length: 2_000 }, (_, index) => `thread-m${index}`);
+    const found: string[] = [];
+    for (const count of [200, 200, 100]) {
+      const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+        { excludeThreadIds: { a: [...excluded] } });
+      expect(review.items).toHaveLength(count);
+      expect(review.coverage[0]).toMatchObject({ reviewedThreads: count, scannedThreads: excluded.length + count, hasMore: count === 200 });
+      found.push(...review.items.map(item => item.emailId));
+      excluded.push(...review.items.map(item => item.threadId));
+    }
+    expect(found).toEqual(Array.from({ length: 500 }, (_, index) => `m${index + 2_000}`));
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('bounds NEW uncategorized candidates independently of exclusions and reports incomplete coverage', async () => {
+    const f = fixture(Array.from({ length: 2_001 }, (_, index) => email(`m${index}`, { tags: '|INBOX|promotions|' })));
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+      { excludeThreadIds: { a: Array.from({ length: 2_000 }, (_, index) => `thread-m${index}`) } });
+    expect(review.items.map(item => item.emailId)).toEqual(['m2000']);
+    expect(review.coverage[0]).toMatchObject({ hasMore: false, truncated: false, reviewedThreads: 1, scannedThreads: 2_001 });
+    const unclassified = await prepareInboxAssistantReview([accounts[0]!], 'uncategorized', f.deps);
+    expect(unclassified.items).toHaveLength(0);
+    expect(unclassified.coverage[0]).toMatchObject({ hasMore: true, truncated: true, reviewedThreads: 0, scannedThreads: 2_000 });
+    expect(unclassified.coverage[0]!.warnings.join()).toContain('header scan reached its limit');
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps an honest absolute page bound for an unusually large excluded-only continuation', async () => {
+    const f = fixture();
+    f.mailboxes.get('a')!.storage.searchEmails.mockImplementation(async query => Array.from({ length: 25 }, (_, index) => email(`m${(query.offset ?? 0) + index}`)));
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+      { excludeThreadIds: { a: Array.from({ length: 20_000 }, (_, index) => `thread-m${index}`) } });
+    expect(review.items).toHaveLength(0);
+    expect(review.coverage[0]).toMatchObject({ hasMore: true, truncated: true, reviewedThreads: 0, scannedThreads: 20_000 });
+    expect(review.coverage[0]!.warnings.join()).toContain('header scan reached its limit');
+    expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenCalledTimes(800);
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('cancels preparation or apply before any mutation', async () => {
+    const f = fixture(); const cancelled = new AbortController(); cancelled.abort(new Error('Cancelled'));
+    await expect(prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, cancelled.signal)).rejects.toThrow('Cancelled');
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    await expect(applyInboxAssistantReview(review, [review.items[0]!.id], f.deps, cancelled.signal)).rejects.toThrow('Cancelled');
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+});
+
+describe('explicit scoped read-flag commands', () => {
+  it.each([
+    ['mark all bigbluebutton email unread', 'mark_unread', 'any', 'bigbluebutton'],
+    ['Please mark all BigBlueButton emails as read.', 'mark_read', 'any', 'BigBlueButton'],
+    ['Can you mark all emails from news@bigbluebutton.org unread?', 'mark_unread', 'sender', 'news@bigbluebutton.org'],
+    ['mark messages with subject "Quarterly briefing" as read', 'mark_read', 'subject', 'Quarterly briefing'],
+    ['mark emails with body "BigBlueButton launch" unread', 'mark_unread', 'body', 'BigBlueButton launch'],
+  ])('parses a single explicit scoped command: %s', (question, kind, field, query) => {
+    expect(parseInboxAssistantReadCommand(question)).toEqual({ kind, scope: { field, query } });
+  });
+
+  it.each([
+    'Do not mark all bigbluebutton emails unread', 'Could we possibly mark bigbluebutton emails unread',
+    'mark unread promotions as read', 'mark all promotions emails read', 'mark all bigbluebutton emails from last week unread',
+    'mark all bigbluebutton emails before yesterday unread', 'mark all emails except bigbluebutton unread',
+    'mark all bigbluebutton emails unread and delete them', 'mark all emails unread', 'mark all inbox unread',
+    'Review my unread emails', 'mark all bigbluebutton emails unread\nthen forward them',
+  ])('does not reinterpret unsupported or uncertain commands into a broader action: %s', question => {
+    expect(parseInboxAssistantReadCommand(question)).toBeUndefined();
+  });
+
+  it('marks only matching currently read messages unread across selected accounts, preserving unrelated siblings and prior unread messages', async () => {
+    const records = [
+      email('sender', { tags: '|INBOX|read|important|', fromAddress: 'news@bigbluebutton.org', threadId: 'mixed', hasAttachments: true }),
+      email('already-unread', { fromAddress: 'news@bigbluebutton.org', threadId: 'mixed' }),
+      email('other', { tags: '|INBOX|read|', threadId: 'mixed' }),
+      email('body-match', { tags: '|INBOX|read|', threadId: 'mixed', rawBody: '<p>BigBlueButton launch announcement.</p>' }),
+      email('prefix', { tags: '|INBOX|read|', fromAddress: 'news@notbigbluebutton.org' }),
+    ];
+    const f = fixture(records, [email('sender', { tags: '|INBOX|read|', subject: 'BigBlueButton webinar' })]);
+    const review = await prepareInboxAssistantReview(accounts, 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'bigbluebutton', field: 'any' } });
+    expect(review.items).toHaveLength(2);
+    expect(review.items[0]).toMatchObject({ targetRead: false, targetEmailIds: ['body-match', 'sender'], recommendation: 'mark_unread', confidence: 1, protectedReasons: [] });
+    expect(review.scope).toEqual({ query: 'bigbluebutton', field: 'any' });
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+    const result = await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps);
+    expect(result.appliedCount).toBe(2);
+    expect(f.setRead).toHaveBeenNthCalledWith(1, 'a', ['body-match', 'sender'], false);
+    expect(f.setRead).toHaveBeenNthCalledWith(2, 'b', ['sender'], false);
+    expect(f.data.get('a')!.get('other')!.tags).toContain('|read|');
+    expect(f.data.get('a')!.get('prefix')!.tags).toContain('|read|');
+    await undoInboxAssistantReview(review, review.items.map(item => item.id), f.deps);
+    expect(f.setRead).toHaveBeenNthCalledWith(3, 'a', ['body-match', 'sender'], true);
+    expect(f.data.get('a')!.get('already-unread')!.tags).not.toContain('|read|');
+  });
+
+  it.each(['sender', 'subject', 'body'] as const)('enforces the requested %s field rather than matching another field', async field => {
+    const f = fixture([
+      email('sender', { tags: '|INBOX|read|', fromName: 'BigBlueButton' }),
+      email('subject', { tags: '|INBOX|read|', subject: 'BigBlueButton announcement' }),
+      email('body', { tags: '|INBOX|read|', rawBody: '<p>BigBlueButton announcement.</p>' }),
+    ]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'bigbluebutton', field } });
+    expect(review.items.map(item => item.emailId)).toEqual([field]);
+    await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', [field], false);
+    expect(f.callAI).not.toHaveBeenCalled();
+  });
+
+  it('marks a precise explicit business scope read and undoes only its original unread matches', async () => {
+    const f = fixture([
+      email('match', { subject: 'BigBlueButton invoice', tags: '|INBOX|finance|' }),
+      email('other', { threadId: 'thread-match' }),
+      email('already-read', { subject: 'BigBlueButton invoice', threadId: 'thread-match', tags: '|INBOX|read|' }),
+    ]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_read', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'subject' } });
+    expect(review.items[0]).toMatchObject({ targetRead: true, targetEmailIds: ['match'], recommendation: 'mark_read', confidence: 1 });
+    // Public display data cannot substitute unrelated messages or the flag.
+    review.items[0]!.targetEmailIds = ['other']; review.items[0]!.targetRead = false;
+    await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['match'], true);
+    await undoInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['match'], false);
+    expect(f.data.get('a')!.get('other')!.tags).not.toContain('|read|');
+    expect(f.data.get('a')!.get('already-read')!.tags).toContain('|read|');
+  });
+
+  it('checks complete raw originals with a bounded fallback when the cleaned search index omitted the body match', async () => {
+    const f = fixture([email('raw', { tags: '|INBOX|read|', cleanBody: 'A stripped preview', rawBody: '<p>Original complete BigBlueButton details.</p>' })]);
+    const realSearch = f.mailboxes.get('a')!.storage.searchEmails.getMockImplementation()!;
+    f.mailboxes.get('a')!.storage.searchEmails.mockImplementation(async query => query.query ? [] : realSearch(query));
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'bigbluebutton', field: 'body' } });
+    expect(review.items[0]!.targetEmailIds).toEqual(['raw']);
+    expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ query: '', isUnread: false }));
+  });
+
+  it('downloads missing originals to verify body matches and never selects an unverifiable message', async () => {
+    const f = fixture([email('missing', { tags: '|INBOX|read|', rawBody: '', cleanBody: 'BigBlueButton preview', hasBody: false }), email('offline', { tags: '|INBOX|read|', rawBody: '', cleanBody: '', hasBody: false })]);
+    const fetchBody = vi.fn(async (record: EmailRecord) => {
+      if (record.id === 'offline') throw new Error('Offline');
+      const row = f.data.get('a')!.get(record.id)!; row.rawBody = '<p>BigBlueButton original.</p>'; row.hasBody = true; return row;
+    });
+    Object.assign(f.mailboxes.get('a')!, { fetchBody });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'body' } });
+    expect(review.items.map(item => item.emailId)).toEqual(['missing']);
+    expect(fetchBody).toHaveBeenCalledTimes(2);
+    expect(review.truncated).toBe(true);
+    expect(review.coverage[0]!.warnings.join()).toContain('could not be verified');
+  });
+
+  it.each(['any', 'body'] as const)('never downloads unrelated uncached originals in the broad %s fallback', async field => {
+    const f = fixture([
+      email('cached-match', { tags: '|INBOX|read|', cleanBody: 'Short stripped preview', rawBody: '<p>Complete BigBlueButton original.</p>' }),
+      email('random-missing', { tags: '|INBOX|read|', rawBody: '', cleanBody: '', hasBody: false }),
+    ]);
+    const real = f.mailboxes.get('a')!.storage.searchEmails.getMockImplementation()!;
+    f.mailboxes.get('a')!.storage.searchEmails.mockImplementation(async query => query.query ? [] : real(query));
+    const fetchBody = vi.fn(async () => { throw new Error('No speculative downloads'); });
+    Object.assign(f.mailboxes.get('a')!, { fetchBody });
+    const onProgress = vi.fn();
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, onProgress, { scope: { query: 'BigBlueButton', field } });
+    expect(review.items.map(item => item.emailId)).toEqual(['cached-match']);
+    expect(fetchBody).not.toHaveBeenCalled();
+    expect(review.truncated).toBe(true);
+    expect(review.coverage[0]).toMatchObject({ skippedUncachedBodies: 1, hasMore: false, reviewedThreads: 1 });
+    expect(review.coverage[0]!.warnings.join()).toContain('1 uncached message original was skipped');
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ stage: 'body', status: 'warning', message: expect.stringContaining('1 uncached') }));
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('downloads only actual indexed message IDs while checking cached siblings and skipping their unrelated missing bodies', async () => {
+    const f = fixture([
+      email('indexed', { tags: '|INBOX|read|', rawBody: '', cleanBody: 'BigBlueButton preview', hasBody: false }),
+      email('cached-sibling', { tags: '|INBOX|read|', threadId: 'thread-indexed', rawBody: '<p>Complete BigBlueButton sibling.</p>' }),
+      email('missing-sibling', { tags: '|INBOX|read|', threadId: 'thread-indexed', rawBody: '', cleanBody: '', hasBody: false }),
+    ]);
+    const real = f.mailboxes.get('a')!.storage.searchEmails.getMockImplementation()!;
+    f.mailboxes.get('a')!.storage.searchEmails.mockImplementation(async query => query.query ? [f.data.get('a')!.get('indexed')!] : real(query));
+    const fetchBody = vi.fn(async (record: EmailRecord) => {
+      if (record.id !== 'indexed') throw new Error('Unrelated sibling download');
+      const row = f.data.get('a')!.get(record.id)!; row.rawBody = '<p>Complete BigBlueButton indexed original.</p>'; row.hasBody = true; return row;
+    });
+    Object.assign(f.mailboxes.get('a')!, { fetchBody });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'any' } });
+    expect(fetchBody).toHaveBeenCalledOnce();
+    expect(fetchBody.mock.calls[0]![0].id).toBe('indexed');
+    expect(review.items[0]!.targetEmailIds).toEqual(['cached-sibling', 'indexed']);
+    expect(review.coverage[0]).toMatchObject({ skippedUncachedBodies: 1, hasMore: false });
+    await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['cached-sibling', 'indexed'], false);
+    expect(f.data.get('a')!.get('missing-sibling')!.tags).toContain('|read|');
+  });
+
+  it.each(['read', 'body', 'arrival'])('revalidates scoped membership and original state before applying: %s', async change => {
+    const f = fixture([email('match', { tags: '|INBOX|read|', rawBody: '<p>BigBlueButton original.</p>' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'body' } });
+    const row = f.data.get('a')!.get('match')!;
+    if (change === 'read') row.tags = '|INBOX|';
+    if (change === 'body') row.rawBody = '<p>Other content.</p>';
+    if (change === 'arrival') f.data.get('a')!.set('new', email('new', { threadId: row.threadId }));
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps partial mark-unread receipts reversible for only acknowledged original read messages', async () => {
+    const f = fixture([email('one', { tags: '|INBOX|read|', fromName: 'BigBlueButton' }), email('two', { tags: '|INBOX|read|', fromName: 'BigBlueButton', threadId: 'thread-one' })]);
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, desired) => {
+      if (desired) return set(account, ids, desired);
+      await set(account, ['one'], false); return { appliedIds: [], queuedIds: ['one'], failedIds: ['two'] };
+    });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'sender' } });
+    const ids = [review.items[0]!.id];
+    expect((await applyInboxAssistantReview(review, ids, f.deps)).failedCount).toBe(1);
+    expect(review.items[0]!.undoAvailable).toBe(true);
+    await undoInboxAssistantReview(review, ids, f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['one'], true);
+    expect(f.data.get('a')!.get('two')!.tags).toContain('|read|');
+  });
+
+  it('retains a completed mark-unread receipt after cancellation and never repeats its write', async () => {
+    const f = fixture([email('one', { tags: '|INBOX|read|', fromName: 'BigBlueButton' }), email('two', { tags: '|INBOX|read|', fromName: 'BigBlueButton' })]);
+    const controller = new AbortController();
+    const set = f.setRead.getMockImplementation()!;
+    f.setRead.mockImplementation(async (account, ids, desired) => { const receipt = await set(account, ids, desired); controller.abort(); return receipt; });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope: { query: 'BigBlueButton', field: 'sender' } });
+    const result = await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps, controller.signal);
+    expect(result).toMatchObject({ appliedCount: 1, skippedCount: 1 });
+    const first = [review.items[0]!.id];
+    expect((await applyInboxAssistantReview(review, first, f.deps)).appliedCount).toBe(1);
+    expect(f.setRead).toHaveBeenCalledOnce();
+    await undoInboxAssistantReview(review, first, f.deps);
+    expect(f.setRead).toHaveBeenLastCalledWith('a', ['one'], true);
+    expect(f.data.get('a')!.get('two')!.tags).toContain('|read|');
+  });
+
+  it('continues scoped mark-unread matching after the previous batch leaves the read search', async () => {
+    const f = fixture(Array.from({ length: 400 }, (_, index) => email(`m${index}`, { tags: '|INBOX|read|', fromName: 'BigBlueButton' })));
+    const scope = { query: 'BigBlueButton', field: 'sender' } as const;
+    const first = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined, { scope });
+    expect(first.items).toHaveLength(200);
+    expect(first.coverage[0]!.hasMore).toBe(true);
+    await applyInboxAssistantReview(first, first.items.map(item => item.id), f.deps);
+    const second = await prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps, undefined, undefined,
+      { scope, excludeThreadIds: { a: first.items.map(item => item.threadId) } });
+    expect(second.items.map(item => item.emailId)).toEqual(Array.from({ length: 200 }, (_, index) => `m${index + 200}`));
+    expect(second.coverage[0]).toMatchObject({ hasMore: false, reviewedThreads: 200, truncated: false });
+    expect(f.callAI).not.toHaveBeenCalled();
+  });
+
+  it('requires a specific typed scope and refuses empty/all-mail scope', async () => {
+    const f = fixture();
+    await expect(prepareInboxAssistantReview([accounts[0]!], 'mark_unread', f.deps)).rejects.toThrow('Specify');
+    await expect(prepareInboxAssistantReview([accounts[0]!], 'mark_read', f.deps, undefined, undefined, { scope: { field: 'any', query: '' } })).rejects.toThrow('Specify');
+    await expect(prepareInboxAssistantReview([accounts[0]!], 'mark_read', f.deps, undefined, undefined, { scope: { field: 'any', query: 'all' } })).rejects.toThrow('Specify');
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+});

@@ -8,7 +8,7 @@ import {
 } from '@sarvinbox/core/conversation-membership';
 import { createLogger } from '@sarvinbox/core/logger';
 import prettyBytes from 'pretty-bytes';
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 
 import { classifyFolder } from '../../../config/folder-mapping';
 import { useMountedTimeout, type MountedTimeout } from '../../../hooks/useMountedTimeout';
@@ -107,6 +107,9 @@ function focusComposerWhenMounted(
 }
 
 export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailContext | null {
+  const autoMarkRead = options.autoMarkRead !== false;
+  const autoMarkReadRef = useRef(autoMarkRead);
+  useLayoutEffect(() => { autoMarkReadRef.current = autoMarkRead; }, [autoMarkRead]);
   const {
     emails,
     folders,
@@ -308,6 +311,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   // mail read "on the go"; the already-read re-check below avoids a redundant
   // second markAsRead after the whole-thread-on-open pass.
   useEffect(() => {
+    if (!autoMarkRead) return;
     // Guard against stale data mid-navigation. selectEmail() now clears
     // threadEmails synchronously for cross-thread selections it can
     // resolve (emails-slice), which also kills the stale-thread content
@@ -357,6 +361,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
       try {
         const currentState = useEmailStore.getState();
         for (const emailId of timerEmailIds) {
+          if (!autoMarkReadRef.current) break;
           // Skip if it's already read — the 1.5s "mark whole thread read on
           // open" timer marks the opened email first (optimistic local update),
           // so without this the 3s timer fires a second, redundant markAsRead
@@ -391,7 +396,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     // Deliberately depends on STABLE primitives (not the selectedEmail/
     // threadEmails objects) so async body streaming / background syncs don't
     // perpetually reset the 3s timer. eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEmailId, selectedEmailUnread, mainEmailExpanded, expandedUnreadKey, markAsRead, manuallyMarkedUnreadId]);
+  }, [autoMarkRead, selectedEmailId, selectedEmailUnread, mainEmailExpanded, expandedUnreadKey, markAsRead, manuallyMarkedUnreadId]);
 
   // Clear scheduled set and retry counter when changing emails
   useEffect(() => {
@@ -525,6 +530,11 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
 
   // Auto-expand logic + mark all thread emails as read on open
   useEffect(() => {
+    if (!autoMarkRead) {
+      if (markThreadReadTimerRef.current) clearTimeout(markThreadReadTimerRef.current);
+      markThreadReadTimerRef.current = undefined;
+      scheduledAutoReadRef.current.clear();
+    }
     if (!loadingThread && threadEmails.length > 0 && selectedEmailId && displayEmail) {
       if (initialExpandSetRef.current !== selectedEmailId) {
         initialExpandSetRef.current = selectedEmailId;
@@ -552,7 +562,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         const allUnread = allThreadEmails.filter(
           (e) => !(e.tags || '').includes('|read|') && manuallyMarkedUnreadId !== e.id
         );
-        if (allUnread.length > 0) {
+        if (autoMarkRead && allUnread.length > 0) {
           allUnread.forEach((e) => {
             scheduledAutoReadRef.current.add(e.id);
           });
@@ -566,6 +576,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
           markThreadReadTimerRef.current = setTimeout(async () => {
             const currentState = useEmailStore.getState();
             for (const emailId of idsToMark) {
+              if (!autoMarkReadRef.current) break;
               if (currentState.manuallyMarkedUnreadId !== emailId) {
                 await markAsRead(emailId, true);
               }
@@ -595,7 +606,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         }
       }
     }
-  }, [loadingThread, threadEmails, allThreadEmails, selectedEmailId, displayEmail, latestThreadEmail, markAsRead, manuallyMarkedUnreadId, later]);
+  }, [autoMarkRead, loadingThread, threadEmails, allThreadEmails, selectedEmailId, displayEmail, latestThreadEmail, markAsRead, manuallyMarkedUnreadId, later]);
 
   // Clear the pending mark-thread-read timer on unmount so it can't fire
   // markAsRead(...) against a torn-down detail pane (e.g. the user closes the

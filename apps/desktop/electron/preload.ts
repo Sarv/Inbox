@@ -9,7 +9,7 @@ import '@sentry/electron/preload';
 import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
-import type { InboxAssistantAPI, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
+import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
 
 
 import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
@@ -110,12 +110,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     chat: (chatId: string) => ipcRenderer.invoke('inboxAssistant:chat', chatId),
     createChat: () => ipcRenderer.invoke('inboxAssistant:createChat'),
     renameChat: (request: { chatId: string; title: string }) => ipcRenderer.invoke('inboxAssistant:renameChat', request),
-    updateChat: (request: { chatId: string; pinned: boolean }) => ipcRenderer.invoke('inboxAssistant:updateChat', request),
+    updateChat: (request: { chatId: string; pinned?: boolean; actionMode?: InboxAssistantActionMode }) => ipcRenderer.invoke('inboxAssistant:updateChat', request),
     deleteChat: (chatId: string) => ipcRenderer.invoke('inboxAssistant:deleteChat', chatId),
+    rewindChat: (request: { chatId: string; exchangeId: string }) => ipcRenderer.invoke('inboxAssistant:rewindChat', request),
+    restoreRewindChat: (request: { chatId: string }) => ipcRenderer.invoke('inboxAssistant:restoreRewindChat', request),
     draftEmail: (request: InboxAssistantDraftRequest) => ipcRenderer.invoke('inboxAssistant:draftEmail', request),
     history: () => ipcRenderer.invoke('inboxAssistant:history'),
     ask: (request: InboxAssistantRequest) => ipcRenderer.invoke('inboxAssistant:ask', request),
-    cancel: async (requestId: string) => { await ipcRenderer.invoke('inboxAssistant:cancel', requestId); },
+    applyReview: (request: InboxAssistantReviewActionRequest) => ipcRenderer.invoke('inboxAssistant:applyReview', request),
+    cancel: (requestId: string) => ipcRenderer.invoke('inboxAssistant:cancel', requestId),
     clearHistory: () => ipcRenderer.invoke('inboxAssistant:clearHistory'),
     onActivity: (listener: (activity: InboxAssistantActivity) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, activity: InboxAssistantActivity) => listener(activity);

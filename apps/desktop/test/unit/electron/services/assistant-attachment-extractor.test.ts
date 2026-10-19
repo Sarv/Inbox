@@ -90,14 +90,14 @@ describe('assistant document evidence extraction', () => {
       'xl/workbook.xml': '<workbook xmlns:r="urn:rels"><sheets><sheet name="Software" r:id="r1"/><sheet name="Summary" r:id="r2"/><sheet name="Read Me" r:id="r3"/></sheets></workbook>',
       'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/a.xml"/><Relationship Id="r2" Target="worksheets/b.xml"/><Relationship Id="r3" Target="worksheets/c.xml"/></Relationships>',
       'xl/worksheets/a.xml': `<worksheet><sheetData>${padding}</sheetData></worksheet>`,
-      'xl/worksheets/b.xml': '<worksheet><sheetData><row r="17"><c r="C17" t="inlineStr"><is><t>Total Bid Value including GST</t></is></c><c r="D17"><f>SUM(D12:D16)</f><v>698870095.61</v></c></row><row r="18"><c r="C18" t="inlineStr"><is><t>Infrastructure inputs unpopulated</t></is></c><c r="D18"><f>SUM(A1:A3)</f><v>0</v></c></row></sheetData></worksheet>',
+      'xl/worksheets/b.xml': '<worksheet><sheetData><row r="17"><c r="C17" t="inlineStr"><is><t>Total Bid Value including GST</t></is></c><c r="D17"><f>SUM(D12:D16)</f><v>123456789.12</v></c></row><row r="18"><c r="C18" t="inlineStr"><is><t>Infrastructure inputs unpopulated</t></is></c><c r="D18"><f>SUM(A1:A3)</f><v>0</v></c></row></sheetData></worksheet>',
       'xl/worksheets/c.xml': '<worksheet><sheetData><row r="8"><c r="C8" t="inlineStr"><is><t>Infrastructure is included in evaluation TBV but excluded from payable TCV.</t></is></c></row><row r="9"><c r="C9" t="inlineStr"><is><t>Dummy seat quantities are only for evaluation. Actual efforts govern payments.</t></is></c></row></sheetData></worksheet>',
     });
     const result = await extractAssistantAttachment({ filename: 'final.xlsx', bytes });
     expect(result.status).toBe('ready');
     expect(result.truncated).toBe(false);
     expect(result.segments).toHaveLength(4);
-    expect(result.segments[0]).toMatchObject({ text: expect.stringContaining('698870095.61'), locator: { label: 'Summary!C17:D17', cellRange: 'C17:D17' } });
+    expect(result.segments[0]).toMatchObject({ text: expect.stringContaining('123456789.12'), locator: { label: 'Summary!C17:D17', cellRange: 'C17:D17' } });
     expect(result.segments[1].text).toContain('D18: 0 (saved formula value)');
     expect(result.segments[2].text).toContain('excluded from payable TCV');
     expect(result.segments[3].text).toContain('Actual efforts govern payments');

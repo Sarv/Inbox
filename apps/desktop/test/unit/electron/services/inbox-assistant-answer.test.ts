@@ -188,9 +188,9 @@ describe('Inbox Agent grounded answers', () => {
   });
 
   it.each([
-    ['The total commercial value is ₹9.5 Cr.', 'The quotation is INR 95,000,000 (₹9.5 crore).'],
-    ['The total commercial value is Rs. 9.5 crore.', 'The quotation is ₹9,50,00,000.'],
-    ['Total: 9,50,00,000 rupees.', 'The quotation is INR 9.5 crore.'],
+    ['The total commercial value is ₹7.25 Cr.', 'The quotation is INR 72,500,000 (₹7.25 crore).'],
+    ['The total commercial value is Rs. 7.25 crore.', 'The quotation is ₹7,25,00,000.'],
+    ['Total: 7,25,00,000 rupees.', 'The quotation is INR 7.25 crore.'],
     ['Total INR 25 lakh excluding GST.', 'The quotation is ₹2,500,000 excluding GST.'],
     ['Total USD 1.25 million.', 'The quotation is USD 1,250,000.'],
   ])('supports faithful monetary unit and currency formatting: %s', (quote, claim) => {
@@ -201,39 +201,39 @@ describe('Inbox Agent grounded answers', () => {
   });
 
   it('rejects changed monetary magnitude and keeps unrelated references and tax figures strict', () => {
-    const quote = 'Quotation Q-104. Total Rs. 9.5 crore excluding GST. GST 18%.';
+    const quote = 'Quotation Q-104. Total Rs. 7.25 crore excluding GST. GST 18%.';
     const source = makeSource({ text: quote });
     const result = parseInboxAssistantAnswer(answer([
-      fact('The quotation is ₹9.5 billion.', 'S1', quote),
-      fact('The quotation is INR 950,000,000.', 'S1', quote),
-      fact('Quotation Q-95000000 is ₹95,000,000.', 'S1', quote),
-      fact('The quotation is ₹95,000,000 with GST 28%.', 'S1', quote),
-      fact('The quotation Q-104 is INR 95,000,000 excluding GST, with GST 18%.', 'S1', quote),
+      fact('The quotation is ₹7.25 billion.', 'S1', quote),
+      fact('The quotation is INR 725,000,000.', 'S1', quote),
+      fact('Quotation Q-72500000 is ₹72,500,000.', 'S1', quote),
+      fact('The quotation is ₹72,500,000 with GST 28%.', 'S1', quote),
+      fact('The quotation Q-104 is INR 72,500,000 excluding GST, with GST 18%.', 'S1', quote),
     ]), [source], [makeCoverage()]);
     expect(result.facts).toHaveLength(1);
     expect(result.answer).toContain('Q-104');
   });
 
   it('accepts two-decimal INR presentation of a currency-labelled saved XLSX formula value', () => {
-    const quote = 'Currency: INR\nB17: Total Bid Value including GST | D17: 698870095.61000001 (saved formula value)';
+    const quote = 'Currency: INR\nB17: Total Bid Value including GST | D17: 123456789.12000001 (saved formula value)';
     const source = makeSource({ kind: 'attachment', filename: 'price-bid.xlsx', text: quote });
     const result = parseInboxAssistantAnswer(answer([
-      fact('The total bid value including GST is INR 69,88,70,095.61.', 'S1', quote),
-      fact('The total bid value including GST is INR 69,88,70,095.62.', 'S1', quote),
-      fact('The total bid value including GST is INR 6,98,87,00,956.10.', 'S1', quote),
-      fact('The total bid value including GST is USD 698,870,095.61.', 'S1', quote),
+      fact('The total bid value including GST is INR 12,34,56,789.12.', 'S1', quote),
+      fact('The total bid value including GST is INR 12,34,56,789.13.', 'S1', quote),
+      fact('The total bid value including GST is INR 1,23,45,67,891.20.', 'S1', quote),
+      fact('The total bid value including GST is USD 123,456,789.12.', 'S1', quote),
     ]), [source], [makeCoverage()]);
     expect(result.facts).toHaveLength(1);
-    expect(result.answer).toContain('INR 69,88,70,095.61');
+    expect(result.answer).toContain('INR 12,34,56,789.12');
     expect(result.answer).not.toContain('USD');
   });
 
   it('limits floating storage tolerance to monetary values and keeps reference/tax precision exact', () => {
-    const quote = 'Total INR 698870095.61000001. Tax 18.00000001%. Reference Q-104.00000001.';
+    const quote = 'Total INR 123456789.12000001. Tax 18.00000001%. Reference Q-104.00000001.';
     const source = makeSource({ text: quote });
     const result = parseInboxAssistantAnswer(answer([
-      fact('The total is INR 698,870,095.61.', 'S1', quote),
-      fact('The total is INR 698,870,095.62.', 'S1', quote),
+      fact('The total is INR 123,456,789.12.', 'S1', quote),
+      fact('The total is INR 123,456,789.13.', 'S1', quote),
       fact('The tax is 18%.', 'S1', quote),
       fact('The quotation reference is Q-104.', 'S1', quote),
     ]), [source], [makeCoverage()]);
@@ -241,13 +241,13 @@ describe('Inbox Agent grounded answers', () => {
   });
 
   it.each([
-    'B17: Total Bid Value including GST | D17: 698870095.61000001 (saved formula value)',
-    'Currency: INR\nB17: Quotation reference | D17: 698870095.61000001 (saved formula value)',
-    'Currency: INR and USD\nB17: Total Bid Value including GST | D17: 698870095.61000001 (saved formula value)',
-    'Currency: INR\nB17: Total Bid Value including GST | D17: 698870095.615 (saved formula value)',
+    'B17: Total Bid Value including GST | D17: 123456789.12000001 (saved formula value)',
+    'Currency: INR\nB17: Quotation reference | D17: 123456789.12000001 (saved formula value)',
+    'Currency: INR and USD\nB17: Total Bid Value including GST | D17: 123456789.12000001 (saved formula value)',
+    'Currency: INR\nB17: Total Bid Value including GST | D17: 123456789.125 (saved formula value)',
   ])('does not infer a currency or broadly round other spreadsheet numbers: %s', quote => {
     const source = makeSource({ text: quote });
-    const result = parseInboxAssistantAnswer(answer([fact('The total is INR 698,870,095.61.', 'S1', quote)]), [source], [makeCoverage()]);
+    const result = parseInboxAssistantAnswer(answer([fact('The total is INR 123,456,789.12.', 'S1', quote)]), [source], [makeCoverage()]);
     expect(result.facts).toHaveLength(0);
   });
 
@@ -362,10 +362,10 @@ describe('Inbox Agent grounded answers', () => {
       date: Date.UTC(2026, 9, 13) / 1000, sent: false, folder: 'INBOX',
       text: 'Forwarded message\nDate: Aug 6, 2026 at 7:01 PM\nPlease find the updated price bid attached.' });
     const price = makeSource({ id: 'S2', kind: 'attachment', filename: 'project-price-final.xlsx',
-      text: 'Currency: INR\nB17: Total Bid Value including GST | D17: 698870095.61000001 (saved formula value)' });
+      text: 'Currency: INR\nB17: Total Bid Value including GST | D17: 123456789.12000001 (saved formula value)' });
     const terms = makeSource({ id: 'S3', kind: 'attachment', filename: 'project-price-final.xlsx', location: 'Read Me!C9:C10',
       text: 'Dummy quantities are used for evaluation. Payment is based on actual effort.' });
-    const retained = fact('The saved total bid value including GST is INR 698,870,095.61000001.', 'S2', price.text);
+    const retained = fact('The saved total bid value including GST is INR 123,456,789.12000001.', 'S2', price.text);
     const callAI = vi.fn().mockResolvedValueOnce(answer([
       retained,
       fact('The coordinator forwarded the price bid on 2026-10-13.', 'S1', message.text),
@@ -381,11 +381,11 @@ describe('Inbox Agent grounded answers', () => {
     const result = await answerInboxAssistant('Check the final project proposal we sent', [message, price, terms], [makeCoverage()], callAI);
     expect(callAI).toHaveBeenCalledTimes(2);
     expect(result.facts).toHaveLength(3);
-    expect(result.answer).toContain('INR 69,88,70,095.61');
+    expect(result.answer).toContain('INR 12,34,56,789.12');
     expect(result.answer).toContain('internally on 2026-10-13');
     expect(result.answer).toContain('actual effort');
-    expect(result.answer).not.toContain('.61000001');
-    expect(result.facts[0]!.quotes[0]!.text).toContain('698870095.61000001');
+    expect(result.answer).not.toContain('.12000001');
+    expect(result.facts[0]!.quotes[0]!.text).toContain('123456789.12000001');
     expect(result.sourceIds).toEqual(['S2', 'S1', 'S3']);
     expect(result.warnings.join(' ')).not.toContain('omitted');
     const repair = callAI.mock.calls[1][0];
@@ -407,15 +407,15 @@ describe('Inbox Agent grounded answers', () => {
   });
 
   it('presents only sub-micro-unit monetary storage noise to cents and leaves quoted source values intact', () => {
-    const quote = 'Total INR 698870095.61000001. GST 18.00000001%. Reference Q-104.00000001. Rate USD 10.615. Offer ₹9.5 crore.';
+    const quote = 'Total INR 123456789.12000001. GST 18.00000001%. Reference Q-104.00000001. Rate USD 10.615. Offer ₹7.25 crore.';
     const source = makeSource({ text: quote });
-    const claim = 'Total INR 698870095.61000001 with GST 18.00000001%, reference Q-104.00000001, rate USD 10.615, and offer ₹9.5 crore.';
+    const claim = 'Total INR 123456789.12000001 with GST 18.00000001%, reference Q-104.00000001, rate USD 10.615, and offer ₹7.25 crore.';
     const result = parseInboxAssistantAnswer(answer([fact(claim, 'S1', quote)]), [source], [makeCoverage()]);
-    expect(result.answer).toContain('INR 69,88,70,095.61');
+    expect(result.answer).toContain('INR 12,34,56,789.12');
     expect(result.answer).toContain('GST 18.00000001%');
     expect(result.answer).toContain('Q-104.00000001');
     expect(result.answer).toContain('USD 10.615');
-    expect(result.answer).toContain('₹9.5 crore');
+    expect(result.answer).toContain('₹7.25 crore');
     expect(result.facts[0]!.quotes[0]!.text).toBe(quote);
   });
 

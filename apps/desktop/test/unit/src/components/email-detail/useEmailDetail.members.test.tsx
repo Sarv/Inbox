@@ -76,7 +76,7 @@ const baseState = () => ({
   selectEmail: vi.fn(),
   threadEmails: [A, B] as EmailRecord[],
   loadingThread: false,
-  markAsRead: vi.fn(async () => {}),
+  markAsRead: vi.fn<(emailId: string, read: boolean) => Promise<void>>(async () => {}),
   deleteEmail: vi.fn(),
   archiveEmail: vi.fn(),
   bulkRemoveEmails: vi.fn(),
@@ -125,15 +125,15 @@ const { useEmailDetail } = await import(
 );
 
 let latest: EmailDetailContext | null = null;
-function Harness() {
-  latest = useEmailDetail();
+function Harness({ autoMarkRead }: { autoMarkRead?: boolean } = {}) {
+  latest = useEmailDetail({ autoMarkRead });
   return null;
 }
 const ctx = () => latest!;
 
 let mounted: Mounted | undefined;
-const mount = async () => {
-  mounted = render(<Harness />);
+const mount = async (autoMarkRead?: boolean) => {
+  mounted = render(<Harness autoMarkRead={autoMarkRead} />);
   for (let i = 0; i < 3; i++) await settle();
 };
 const idsOf = (rows: Array<{ id: string }>) => rows.map((row) => row.id);
@@ -148,6 +148,80 @@ afterEach(() => {
   mounted = undefined;
   vi.clearAllTimers();
   vi.useRealTimers();
+});
+
+describe('useEmailDetail — unread-preserving review preview', () => {
+  const unreadThread = () => {
+    const rows = [A, B].map(row => ({ ...row, tags: '|INBOX|' }));
+    state.emails = rows;
+    state.threadEmails = rows;
+  };
+
+  it('opens and expands unread messages without automatically marking either the selected message or thread read', async () => {
+    unreadThread();
+    await mount(false);
+    expect(ctx().mainEmailExpanded).toBe(true);
+    expect(ctx().expandedThreads.has('b')).toBe(true);
+    ctx().toggleThread('b');
+    await settle();
+    ctx().toggleThread('b');
+    await settle();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(state.markAsRead).not.toHaveBeenCalled();
+    expect(state.threadEmails.every(row => row.tags === '|INBOX|')).toBe(true);
+  });
+
+  it('keeps ordinary reader automatic read behavior enabled by default', async () => {
+    unreadThread();
+    await mount();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(new Set(state.markAsRead.mock.calls.map(([id]) => id))).toEqual(new Set(['a', 'b']));
+    expect(state.markAsRead.mock.calls.every(([, read]) => read === true)).toBe(true);
+  });
+
+  it('cancels pending expanded-message and whole-thread read timers when switched into preview mode', async () => {
+    unreadThread();
+    await mount();
+    mounted!.rerender(<Harness autoMarkRead={false} />);
+    await settle();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(state.markAsRead).not.toHaveBeenCalled();
+  });
+
+  it('stops automatic read batches already awaiting a flag update when preview mode is enabled', async () => {
+    unreadThread();
+    const pending: Array<() => void> = [];
+    state.markAsRead.mockImplementation(() => new Promise<void>(resolve => { pending.push(resolve); }));
+    await mount();
+    vi.advanceTimersByTime(0);
+    const started = state.markAsRead.mock.calls.length;
+    expect(started).toBeGreaterThan(0);
+    mounted!.rerender(<Harness autoMarkRead={false} />);
+    await settle();
+    pending.forEach(resolve => resolve());
+    await settle();
+    expect(state.markAsRead).toHaveBeenCalledTimes(started);
+  });
+
+  it('preserves unread state when the thread finishes loading after the preview opens', async () => {
+    unreadThread();
+    state.loadingThread = true;
+    await mount(false);
+    state.loadingThread = false;
+    mounted!.rerender(<Harness autoMarkRead={false} />);
+    await settle();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(state.markAsRead).not.toHaveBeenCalled();
+    expect(idsOf(ctx().threadEmails)).toEqual(['a', 'b']);
+  });
+
+  it('still permits an explicit user mark-read action in preview mode', async () => {
+    unreadThread();
+    await mount(false);
+    await ctx().handleMarkRead();
+    expect(state.markAsRead).toHaveBeenCalledWith('a', true);
+    expect(state.markAsRead).toHaveBeenCalledWith('b', true);
+  });
 });
 
 describe('useEmailDetail — the conversation is its members', () => {

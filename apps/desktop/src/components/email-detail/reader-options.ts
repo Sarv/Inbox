@@ -5,6 +5,8 @@ export interface EmailReaderOptions {
   onBack?: () => void;
   /** Use the loaded, owning thread and prevent navigation into an unrelated inbox. */
   threadOnly?: boolean;
+  /** Review previews can preserve unread state; normal readers mark opened mail read. */
+  autoMarkRead?: boolean;
 }
 export function readerCurrentUserEmail(input: {
   threadOnly?: boolean;

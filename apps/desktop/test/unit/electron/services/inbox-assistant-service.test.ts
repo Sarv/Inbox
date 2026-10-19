@@ -11,6 +11,7 @@ vi.mock('../../../../electron/services/inbox-assistant-draft', () => ({ generate
 
 import { extractAssistantAttachment } from '../../../../electron/services/assistant-attachment-extractor';
 import type { AssistantAttachmentResult } from '../../../../electron/services/assistant-attachment-types';
+import { changeAssistantReadFlags } from '../../../../electron/services/assistant-mail-actions';
 import { InboxAssistantService, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
 import type { InboxAssistantAccount, InboxAssistantChat, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange } from '../../../../src/types/inbox-assistant';
 import { openTestAccount, type TestAccount } from '../../../helpers/account-storage';
@@ -188,6 +189,8 @@ beforeEach(async () => {
         const chat = chats.get(id); if (!chat) throw new Error('Chat unavailable');
         Object.assign(chat, changes); const { exchanges: _exchanges, ...summary } = chat; return structuredClone(summary);
       }),
+      rewind: vi.fn(),
+      restoreRewind: vi.fn(),
       delete: vi.fn(id => {
         if (!chats.has(id)) throw new Error('Chat unavailable');
         chats.delete(id); if (id === 'chat-main') saved = [];
@@ -344,6 +347,38 @@ afterEach(async () => {
 });
 
 describe('Inbox Agent with real account databases', () => {
+  it('matches BigBlueButton across real account databases and raw bodies, including Sent, without changing other members', async () => {
+    const readTags = '|INBOX|read|';
+    await primary.add('mixed-bbb', { id: 'shared-bbb', tags: readTags, fromAddress: 'updates@bigbluebutton.example', subject: 'BigBlueButton release' });
+    await primary.add('mixed-bbb', { id: 'unrelated-sibling', tags: readTags, subject: 'Other supplier update' });
+    await secondary.add('mixed-bbb', { id: 'shared-bbb', tags: readTags, subject: 'Deployment update', cleanBody: 'A short preview without the project name.', rawBody: '<p>The complete original discusses BigBlueButton deployment.</p>' });
+    await primary.add('sent-bbb', { id: 'sent-bbb', tags: '|Sent|read|', folderId: 'f-sent', subject: 'BigBlueButton follow-up' });
+    await primary.add('unread-bbb', { id: 'unread-bbb', tags: '|INBOX|', subject: 'BigBlueButton unread notice' });
+    await primary.add('draft-bbb', { id: 'draft-bbb', tags: '|INBOX.Drafts|read|', folderId: 'f-drafts', subject: 'BigBlueButton unsent draft' });
+    const queue = { bulkMarkAsRead: vi.fn(async () => 'queued' as const), bulkMarkAsUnread: vi.fn(async () => 'queued' as const) };
+    deps.setRead = vi.fn(async (accountId, ids, read) => changeAssistantReadFlags({
+      storage: accountId === 'primary' ? primary.storage : secondary.storage, engine: queue, assertCurrent: async () => {},
+    }, ids, read));
+    const result = await service.ask(request({ question: 'mark all bigbluebutton email unread' }));
+    expect(result.review?.kind).toBe('mark_unread');
+    expect(result.review?.items.map(item => [item.accountId, item.targetEmailIds])).toEqual(expect.arrayContaining([
+      ['primary', ['shared-bbb']], ['secondary', ['shared-bbb']], ['primary', ['sent-bbb']],
+    ]));
+    expect(result.review?.items).toHaveLength(3);
+    expect(deps.callAI).not.toHaveBeenCalled(); expect(deps.setRead).not.toHaveBeenCalled();
+    const action = { requestId: 'bbb-action', chatId: 'chat-main', exchangeId: result.id, reviewId: result.review!.id, itemIds: result.review!.items.map(item => item.id) };
+    const applied = await service.applyReview(action);
+    expect(applied.reviewResult).toMatchObject({ queuedCount: 3, failedCount: 0 });
+    expect((await primary.storage.getEmail('shared-bbb'))!.tags).not.toContain('|read|');
+    expect((await secondary.storage.getEmail('shared-bbb'))!.tags).not.toContain('|read|');
+    expect((await primary.storage.getEmail('unrelated-sibling'))!.tags).toContain('|read|');
+    expect((await primary.storage.getEmail('draft-bbb'))!.tags).toContain('|read|');
+    await service.applyReview({ ...action, requestId: 'bbb-undo', undo: true });
+    expect((await primary.storage.getEmail('shared-bbb'))!.tags).toContain('|read|');
+    expect((await secondary.storage.getEmail('shared-bbb'))!.tags).toContain('|read|');
+    expect((await primary.storage.getEmail('unread-bbb'))!.tags).not.toContain('|read|');
+  });
+
   it('updates chat pin metadata without loading messages or calling AI', () => {
     expect(service.updateChat({ chatId: 'chat-main', pinned: true })).toMatchObject({ id: 'chat-main', pinned: true });
     expect(service.updateChat({ chatId: 'chat-main', pinned: false })).toMatchObject({ pinned: false });
@@ -357,7 +392,7 @@ describe('Inbox Agent with real account databases', () => {
     { chatId: '../invalid', pinned: true }, { chatId: 'chat-main', pinned: undefined },
     { chatId: 'chat-main', pinned: true, archived: null },
   ])('rejects invalid chat metadata update %j', value => {
-    expect(() => service.updateChat(value)).toThrow('whether to pin');
+    expect(() => service.updateChat(value)).toThrow('conversation setting');
     expect(deps.history.update).not.toHaveBeenCalled();
   });
 

@@ -1,12 +1,16 @@
 // @vitest-environment happy-dom
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AssistantWorkspace } from '../../../../../src/components/assistant/AssistantWorkspace';
 import { InboxAssistant } from '../../../../../src/components/assistant/InboxAssistant';
-import type { InboxAssistantActivity, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult } from '../../../../../src/types/inbox-assistant';
+import type { ConfirmOptions } from '../../../../../src/components/ConfirmDialog';
+import type { InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult, InboxAssistantReviewActionRequest, InboxAssistantRewind } from '../../../../../src/types/inbox-assistant';
+import type { InboxAssistantReviewItem } from '../../../../../src/types/inbox-assistant-actions';
 import { act, cleanup, fire, render, settle, toggle, typeInto } from '../../../../helpers/render';
 
 const ok = <T,>(data: T): InboxAssistantResult<T> => ({ success: true, data });
-const confirm = vi.hoisted(() => vi.fn(async () => true));
+const confirm = vi.hoisted(() => vi.fn(async (_options: ConfirmOptions) => true));
 vi.mock('../../../../../src/store/confirm-service', () => ({ requestConfirm: confirm }));
 const accounts = [{ id: 'work', email: 'rc@sarv.com', name: 'Work' }, { id: 'other', email: 'rc@other.example' }];
 const source = {
@@ -32,6 +36,37 @@ function summary(id = 'chat-1'): InboxAssistantChatSummary {
   const { exchanges: _exchanges, ...result } = chat(id);
   return result;
 }
+function reviewItem(id: string, over: Partial<InboxAssistantReviewItem> = {}): InboxAssistantReviewItem {
+  return {
+    id, accountId: 'work', accountEmail: 'owner@example.test', threadId: `thread-${id}`, emailId: `mail-${id}`,
+    subject: `Unread ${id}`, from: 'sender@example.test', date: 1_720_000_000,
+    unreadCount: 2, messageCount: 3, unreadEmailIds: [`mail-${id}`, `reply-${id}`], uncategorized: true, categories: [],
+    recommendation: 'mark_read', reason: 'A routine update with no pending request.', confidence: 0.96,
+    protectedReasons: [], bodyUnavailable: false, attachmentsUnknown: false, status: 'pending', ...over,
+  };
+}
+function reviewExchange(over: Partial<InboxAssistantExchange> = {}): InboxAssistantExchange {
+  return {
+    ...exchange('review-exchange'), question: 'Review my unread emails and mark low-value conversations as read.',
+    answer: { text: 'Review the recommendations below.', sources: [], coverage: [], warnings: [] },
+    review: {
+      id: 'review-snapshot', kind: 'unread', createdAt: Date.now(), expiresAt: Date.now() + 60_000,
+      status: 'ready', accounts, truncated: false, coverage: [],
+      items: [reviewItem('item-a'), reviewItem('item-b', { accountId: 'other', accountEmail: 'other@example.test', unreadCount: 1, unreadEmailIds: ['mail-item-b'] }),
+        reviewItem('protected', { protectedReasons: ['Marked important by you'], recommendation: 'keep_unread' })],
+    }, ...over,
+  };
+}
+function reviewReceipt(original: InboxAssistantExchange, status: 'applied' | 'queued' | 'failed' | 'undone' = 'applied'): InboxAssistantExchange {
+  return {
+    ...original, answer: { ...original.answer, text: status === 'undone' ? 'The changed emails are unread again.' : status === 'failed' ? 'One message changed; another could not be marked read.' : 'Selected conversations were marked read.' },
+    review: { ...original.review!, status: 'partial', items: original.review!.items.map(item => item.id === 'item-a' ? { ...item, status, undoAvailable: status !== 'undone' } : item) },
+    reviewResult: { reviewId: original.review!.id, items: [{ itemId: 'item-a', accountId: 'work', threadId: 'thread-item-a', status,
+      appliedIds: status === 'undone' ? [] : ['mail-item-a'], queuedIds: status === 'queued' ? ['mail-item-a'] : [], failedIds: status === 'failed' ? ['reply-item-a'] : [] }],
+    appliedCount: status === 'undone' ? 0 : 1, queuedCount: status === 'queued' ? 1 : 0, failedCount: status === 'failed' ? 1 : 0, skippedCount: 0 },
+  };
+}
+type ChatUpdate = { chatId: string; pinned?: boolean; actionMode?: InboxAssistantActionMode };
 const api = {
   accounts: vi.fn(async () => ok(accounts)),
   history: vi.fn(async (): Promise<InboxAssistantResult<InboxAssistantExchange[]>> => ok([])),
@@ -39,11 +74,14 @@ const api = {
   chat: vi.fn(async (id: string): Promise<InboxAssistantResult<InboxAssistantChat>> => ok(chat(id))),
   createChat: vi.fn(async (): Promise<InboxAssistantResult<InboxAssistantChat>> => ok(chat('chat-new'))),
   renameChat: vi.fn(async ({ chatId, title }: { chatId: string; title: string }): Promise<InboxAssistantResult<InboxAssistantChatSummary>> => ok({ ...summary(chatId), title })),
-  updateChat: vi.fn(async ({ chatId, pinned }: { chatId: string; pinned: boolean }): Promise<InboxAssistantResult<InboxAssistantChatSummary>> => ok({ ...summary(chatId), pinned })),
+  updateChat: vi.fn(async ({ chatId, ...changes }: ChatUpdate): Promise<InboxAssistantResult<InboxAssistantChatSummary>> => ok({ ...summary(chatId), ...changes })),
   deleteChat: vi.fn(async (chatId: string): Promise<InboxAssistantResult<InboxAssistantChatList>> => { const remaining = [summary(), summary('chat-2')].filter(chat => chat.id !== chatId); return ok({ chats: remaining, activeChatId: remaining[0]?.id ?? null }); }),
+  rewindChat: vi.fn(async ({ chatId }: { chatId: string; exchangeId: string }): Promise<InboxAssistantResult<InboxAssistantRewind>> => ok({ chat: { ...chat(chatId), rewindAvailable: true }, question: exchange().question, accountIds: ['other'] })),
+  restoreRewindChat: vi.fn(async ({ chatId }: { chatId: string }): Promise<InboxAssistantResult<InboxAssistantChat>> => ok(chat(chatId, [exchange()]))),
   draftEmail: vi.fn(async (request: InboxAssistantDraftRequest): Promise<InboxAssistantResult<InboxAssistantDraft>> => ok({ chatId: request.chatId, accountId: request.accountId, to: ['buyer@tcs.example'], cc: [], subject: 'TCS quotation follow-up', body: 'Hello, please review our quotation.' })),
   ask: vi.fn(async (request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok({ ...exchange(), chatId: request.chatId })),
-  cancel: vi.fn(async () => {}),
+  applyReview: vi.fn(async (_request: InboxAssistantReviewActionRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok(reviewReceipt(reviewExchange()))),
+  cancel: vi.fn(async (requestId: string): Promise<InboxAssistantResult<InboxAssistantCancellation>> => ok({ requestId, cancelled: true })),
   clearHistory: vi.fn(async (): Promise<InboxAssistantResult<null>> => ok(null)),
   onActivity: vi.fn((listener: (activity: InboxAssistantActivity) => void) => {
     activityListeners.add(listener);
@@ -54,6 +92,7 @@ const api = {
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  confirm.mockReset();
   confirm.mockResolvedValue(true);
   activityListeners.clear();
   api.accounts.mockImplementation(async () => ok(accounts));
@@ -62,15 +101,74 @@ beforeEach(() => {
   api.chat.mockImplementation(async id => ok(chat(id)));
   api.createChat.mockImplementation(async () => ok(chat('chat-new')));
   api.renameChat.mockImplementation(async ({ chatId, title }) => ok({ ...summary(chatId), title }));
-  api.updateChat.mockImplementation(async ({ chatId, pinned }) => ok({ ...summary(chatId), pinned }));
+  api.updateChat.mockImplementation(async ({ chatId, ...changes }) => ok({ ...summary(chatId), ...changes }));
   api.deleteChat.mockImplementation(async chatId => { const remaining = [summary(), summary('chat-2')].filter(chat => chat.id !== chatId); return ok({ chats: remaining, activeChatId: remaining[0]?.id ?? null }); });
+  api.rewindChat.mockImplementation(async ({ chatId }) => ok({ chat: { ...chat(chatId), rewindAvailable: true }, question: exchange().question, accountIds: ['other'] }));
+  api.restoreRewindChat.mockImplementation(async ({ chatId }) => ok(chat(chatId, [exchange()])));
   api.draftEmail.mockImplementation(async request => ok({ chatId: request.chatId, accountId: request.accountId, to: ['buyer@tcs.example'], cc: [], subject: 'TCS quotation follow-up', body: 'Hello, please review our quotation.' }));
   api.ask.mockImplementation(async request => ok({ ...exchange(), chatId: request.chatId }));
-  api.cancel.mockImplementation(async () => {});
+  api.applyReview.mockReset().mockImplementation(async () => ok(reviewReceipt(reviewExchange())));
+  api.cancel.mockImplementation(async requestId => ok({ requestId, cancelled: true }));
   api.clearHistory.mockImplementation(async () => ok(null));
   Object.assign(window, { electronAPI: { inboxAssistant: api } });
 });
 afterEach(cleanup);
+
+function WorkspaceHarness() {
+  const [section, setSection] = useState('assistant');
+  return <><button onClick={() => setSection('mail')}>Open Inbox test</button><button onClick={() => setSection('settings')}>Open Settings test</button>
+    <AssistantWorkspace section={section} onOpenInbox={() => setSection('mail')} onOpenAssistant={() => setSection('assistant')}
+      renderAssistant={props => <InboxAssistant {...props} />}><div>Mail and settings workspace</div></AssistantWorkspace></>;
+}
+
+describe('Inbox Agent background workspace', () => {
+  it('keeps the same running chat alive through navigation, hiding, progress, completion and reopening', async () => {
+    let complete!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.ask.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const view = render(<WorkspaceHarness />); await settle();
+    const input = view.find('#inbox-assistant-question');
+    typeInto(input, 'Find the TCS quote'); fire(view.byLabel('Ask Inbox Agent'), 'click'); await settle();
+    const requestId = api.ask.mock.calls[0]![0].requestId;
+    fire(view.all('button').find(button => button.textContent === 'Open Inbox test')!, 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+    expect(view.find('#inbox-assistant-question')).toBe(input);
+    fire(view.all('button').find(button => button.textContent === 'Open Settings test')!, 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+    fire(view.byLabel('Hide AI view'), 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
+    expect(api.cancel).not.toHaveBeenCalled();
+    act(() => activityListeners.forEach(listener => listener({ requestId, chatId: 'chat-1', sequence: 1, at: Date.now(), stage: 'body', status: 'running', message: 'Downloading original email' })));
+    await settle();
+    expect(view.byLabel('Show running AI chat')?.textContent).toContain('Downloading original email');
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
+    await act(async () => { complete(ok(exchange())); }); await settle();
+    expect(view.byLabel('Show AI chat')).not.toBeNull();
+    expect(api.chat).toHaveBeenCalledTimes(1);
+    expect(api.ask).toHaveBeenCalledTimes(1);
+    expect(api.cancel).not.toHaveBeenCalled();
+    fire(view.byLabel('Show AI chat'), 'click'); await settle();
+    expect(view.find('#inbox-assistant-question')).toBe(input);
+    expect(view.container.textContent).toContain('You sent a revised quote');
+    fire(view.byLabel('Inbox + AI split view'), 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('split');
+    expect(view.find('#inbox-assistant-question')).toBe(input);
+    fire(view.byLabel('Open full AI chat'), 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('full');
+    expect(view.find('#inbox-assistant-question')).toBe(input);
+    expect(api.cancel).not.toHaveBeenCalled();
+  });
+
+  it('can be stopped explicitly from the floating view without treating Hide as Stop', async () => {
+    api.ask.mockImplementationOnce(() => new Promise(() => {}));
+    const view = render(<WorkspaceHarness />); await settle();
+    typeInto(view.find('#inbox-assistant-question'), 'Review unread mail'); fire(view.byLabel('Ask Inbox Agent'), 'click'); await settle();
+    fire(view.byLabel('Float AI chat'), 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+    fire(view.byLabel('Stop answering'), 'click'); await settle();
+    expect(api.cancel).toHaveBeenCalledExactlyOnceWith(api.ask.mock.calls[0]![0].requestId);
+    expect(view.container.textContent).toContain('Stopped');
+  });
+});
 
 async function mount(props = {}) {
   const view = render(<InboxAssistant {...props} />);
@@ -92,6 +190,550 @@ function emit(event: InboxAssistantActivity) {
 }
 
 describe('Inbox Agent', () => {
+  it('keeps Stop locked until acknowledgement, suppresses stale progress and then permits editing the stopped question', async () => {
+    let resolveCancel!: (value: InboxAssistantResult<InboxAssistantCancellation>) => void;
+    let resolveAsk!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.cancel.mockImplementationOnce(() => new Promise(resolve => { resolveCancel = resolve; }));
+    api.ask.mockImplementationOnce(() => new Promise(resolve => { resolveAsk = resolve; }));
+    const view = await mount();
+    submit(view, 'Find the current customer quote.');
+    const requestId = api.ask.mock.calls[0]![0].requestId;
+    emit(activity(1, 'Reading quote sources'));
+    fire(view.byLabel('Stop answering'), 'click');
+    expect((view.byLabel('Stopping request') as HTMLButtonElement).disabled).toBe(true);
+    expect(view.byLabel('View stopping activity')?.textContent).toContain('Stopping…');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+    fire(view.find('form'), 'submit');
+    expect(api.ask).toHaveBeenCalledOnce();
+    emit(activity(2, 'Stale quote source', { requestId }));
+    await act(async () => resolveCancel(ok({ requestId, cancelled: true })));
+    expect(view.byLabel('Stopping request')).toBeNull();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+    fire(view.byLabel('Edit question: Find the current customer quote.'), 'click');
+    typeInto(view.find('#inbox-assistant-question'), 'Find the revised customer quote.');
+    expect(api.rewindChat).not.toHaveBeenCalled();
+    await act(async () => resolveAsk(ok(exchange())));
+    expect(view.container.textContent).not.toContain('You sent a revised quote');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Find the revised customer quote.');
+    fire(view.byLabel('View stopped activity'), 'click');
+    expect(view.byLabel('Work timeline')?.textContent).toContain('Reading quote sources');
+    expect(view.container.textContent).not.toContain('Stale quote source');
+  });
+
+  it('shows a failed stop and permits retry without starting another request before acknowledgement', async () => {
+    api.ask.mockImplementationOnce(() => new Promise(() => {}));
+    api.cancel.mockResolvedValueOnce({ success: false, error: 'Could not acknowledge Stop.' });
+    const view = await mount();
+    submit(view);
+    const requestId = api.ask.mock.calls[0]![0].requestId;
+    fire(view.byLabel('Stop answering'), 'click');
+    await settle();
+    expect(view.find('[role="alert"]')?.textContent).toContain('Could not acknowledge Stop.');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
+    fire(view.find('form'), 'submit');
+    expect(api.ask).toHaveBeenCalledOnce();
+    fire(view.byLabel('Retry stop'), 'click');
+    await settle();
+    expect(api.cancel).toHaveBeenNthCalledWith(2, requestId);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it('retains a stopped automatic-action receipt without losing a newer question or treating the late result as a new answer', async () => {
+    let resolveAsk!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.ask.mockImplementationOnce(() => new Promise(resolve => { resolveAsk = resolve; }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    const saved = reviewExchange();
+    submit(view, saved.question);
+    fire(view.byLabel('Stop answering'), 'click');
+    await settle();
+    typeInto(view.find('#inbox-assistant-question'), 'Keep this next question.');
+    await act(async () => resolveAsk(ok(reviewReceipt(saved, 'failed'))));
+    expect(view.container.textContent).toContain('One message changed; another could not be marked read.');
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).not.toBeNull();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep this next question.');
+    expect(view.byLabel('View stopped activity')).not.toBeNull();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    expect(api.applyReview).not.toHaveBeenCalled();
+  });
+
+  it('opens an earlier question editor without changing history until Save and rewind succeeds', async () => {
+    const first = exchange('first');
+    first.question = 'Find the original quote.';
+    const second = { ...exchange('second'), question: 'What changed in the revision?', accountIds: ['other'] };
+    api.chat.mockImplementation(async id => ok(chat(id, [first, second])));
+    api.rewindChat.mockResolvedValueOnce(ok({ chat: { ...chat('chat-1', [first]), rewindAvailable: true }, question: second.question, accountIds: ['other'] }));
+    const onMailChanged = vi.fn();
+    const onCloseSourcePane = vi.fn();
+    const view = await mount({ onMailChanged, onCloseSourcePane });
+    typeInto(view.find('#inbox-assistant-question'), 'Unsaved next question.');
+    fire(view.byLabel(`Edit question: ${second.question}`), 'click');
+    expect((view.byLabel('Edit question') as HTMLTextAreaElement).value).toBe(second.question);
+    expect(view.container.textContent).toContain('Mail changes already made will remain.');
+    typeInto(view.byLabel('Edit question'), 'Compare the revised price and scope.');
+    expect(api.rewindChat).not.toHaveBeenCalled();
+    expect(view.byLabel(`Answer to ${second.question}`)).not.toBeNull();
+    fire(button(view, 'Save and rewind'), 'click');
+    await settle();
+    expect(api.rewindChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1', exchangeId: 'second' });
+    expect(view.byLabel(`Answer to ${first.question}`)).not.toBeNull();
+    expect(view.byLabel(`Answer to ${second.question}`)).toBeNull();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Compare the revised price and scope.');
+    expect(document.activeElement).toBe(view.find('#inbox-assistant-question'));
+    expect(view.find('button[aria-controls="assistant-account-picker"]')?.textContent).toContain('1 of 2 accounts');
+    expect(button(view, 'Restore previous conversation')).not.toBeNull();
+    expect(onCloseSourcePane).toHaveBeenCalledOnce();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.ask).not.toHaveBeenCalled();
+    fire(view.find('form'), 'submit');
+    await settle();
+    expect(api.ask).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', question: 'Compare the revised price and scope.', accountIds: ['other'], previousExchangeId: 'first' });
+  });
+
+  it('cancels editing locally and retains saved answers plus the unsent composer draft', async () => {
+    const saved = exchange();
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    const view = await mount();
+    typeInto(view.find('#inbox-assistant-question'), 'My pending question.');
+    fire(view.byLabel(`Edit question: ${saved.question}`), 'click');
+    typeInto(view.byLabel('Edit question'), 'Do not keep this edit.');
+    fire(button(view, 'Cancel edit'), 'click');
+    expect(view.byLabel(`Answer to ${saved.question}`)).not.toBeNull();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('My pending question.');
+    expect(api.rewindChat).not.toHaveBeenCalled();
+    expect(api.restoreRewindChat).not.toHaveBeenCalled();
+  });
+
+  it('keeps the original history and edited text when the host rejects rewind', async () => {
+    const saved = reviewReceipt(reviewExchange());
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    api.rewindChat.mockResolvedValueOnce({ success: false, error: 'The conversation is still stopping.' });
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(view.byLabel(`Edit question: ${saved.question}`), 'click');
+    typeInto(view.byLabel('Edit question'), 'Review only routine notifications.');
+    fire(button(view, 'Save and rewind'), 'click');
+    await settle();
+    expect(view.find('[role="alert"]')?.textContent).toContain('still stopping');
+    expect((view.byLabel('Edit question') as HTMLTextAreaElement).value).toBe('Review only routine notifications.');
+    expect(view.container.textContent).toContain('Selected conversations were marked read.');
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).not.toBeNull();
+    expect(onMailChanged).not.toHaveBeenCalled();
+  });
+
+  it('ignores a rewind response after switching chats and does not restore its question or account scope in the other chat', async () => {
+    const saved = exchange();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [saved] : [])));
+    let resolveRewind!: (value: InboxAssistantResult<InboxAssistantRewind>) => void;
+    api.rewindChat.mockImplementationOnce(() => new Promise(resolve => { resolveRewind = resolve; }));
+    const view = await mount();
+    fire(view.byLabel(`Edit question: ${saved.question}`), 'click');
+    typeInto(view.byLabel('Edit question'), 'Private edited question.');
+    fire(button(view, 'Save and rewind'), 'click');
+    fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
+    await settle();
+    await act(async () => resolveRewind(ok({ chat: { ...chat(), rewindAvailable: true }, question: saved.question, accountIds: ['other'] })));
+    expect(view.find('h1')?.textContent).toBe('Meeting follow-ups');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    expect(view.container.textContent).not.toContain('Private edited question.');
+    expect(button(view, 'All accounts (2)')).not.toBeNull();
+    expect(button(view, 'Restore previous conversation')).toBeNull();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it('restores a recoverable conversation including its action receipts without reversing or repeating mail changes', async () => {
+    const saved = reviewReceipt(reviewExchange());
+    api.chat.mockImplementation(async id => ok({ ...chat(id), rewindAvailable: true }));
+    api.restoreRewindChat.mockResolvedValueOnce(ok({ ...chat('chat-1', [saved]), rewindAvailable: true }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(button(view, 'Restore previous conversation'), 'click');
+    await settle();
+    expect(api.restoreRewindChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1' });
+    expect(view.container.textContent).toContain('Selected conversations were marked read.');
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).not.toBeNull();
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    expect(api.ask).not.toHaveBeenCalled();
+  });
+
+  it('fills each action starter into the composer without running a search or mail action', async () => {
+    const view = await mount();
+    const choices = [
+      ['Review unread', 'Review my unread emails and mark low-value conversations as read.'],
+      ['Check uncategorized', 'Review my uncategorized unread emails.'],
+      ['Find an answer', 'What quote did I send to TCS?'],
+      ['Find what needs a reply', 'Which recent customer emails need a response?'],
+    ];
+    for (const [title, question] of choices) {
+      const starter = view.all('button').find(element => element.textContent?.startsWith(title!))!;
+      fire(starter, 'click');
+      expect((view.find('textarea') as HTMLTextAreaElement).value).toBe(question);
+      expect(document.activeElement).toBe(view.find('textarea'));
+    }
+    expect(api.ask).not.toHaveBeenCalled();
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(api.updateChat).not.toHaveBeenCalled();
+  });
+
+  it('offers exactly two clearly named modes and defaults to asking for approval', async () => {
+    const view = await mount();
+    const select = view.byLabel('Action mode') as HTMLSelectElement;
+    expect([...select.options].map(option => ({ value: option.value, label: option.text }))).toEqual([
+      { value: 'review', label: 'Ask for approval' }, { value: 'approve_for_me', label: 'Approve for me' },
+    ]);
+    expect(select.value).toBe('review');
+    expect(select.title).toContain('before mail changes');
+    expect(api.updateChat).not.toHaveBeenCalled();
+  });
+
+  it('persists Approve for me across requests while retaining draft text and chosen account scope', async () => {
+    let savedMode: InboxAssistantActionMode = 'review';
+    api.updateChat.mockImplementation(async ({ chatId, ...changes }) => {
+      if (changes.actionMode) savedMode = changes.actionMode;
+      return ok({ ...summary(chatId), ...changes });
+    });
+    api.chats.mockImplementation(async () => ok({ chats: [{ ...summary(), actionMode: savedMode }, summary('chat-2')], activeChatId: 'chat-1' }));
+    const view = await mount();
+    fire(button(view, 'All accounts (2)'), 'click');
+    toggle(view.all('input[type="checkbox"]')[0]!);
+    typeInto(view.find('textarea'), 'Keep this unread review question.');
+    const select = view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { select.value = 'approve_for_me'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    await settle();
+    expect(api.updateChat).toHaveBeenCalledExactlyOnceWith({ chatId: 'chat-1', actionMode: 'approve_for_me' });
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
+    expect((view.byLabel('Action mode') as HTMLSelectElement).title).toContain('until changed');
+    expect((view.find('textarea') as HTMLTextAreaElement).value).toBe('Keep this unread review question.');
+    expect(view.find('button[aria-controls="assistant-account-picker"]')?.textContent).toContain('1 of 2 accounts');
+    expect(api.chat).toHaveBeenCalledExactlyOnceWith('chat-1');
+    expect(api.applyReview).not.toHaveBeenCalled();
+    fire(view.find('form'), 'submit');
+    await settle();
+    expect(api.ask).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', question: 'Keep this unread review question.', accountIds: ['other'] });
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
+    submit(view, 'Find another matching conversation.');
+    await settle();
+    expect(api.ask).toHaveBeenCalledTimes(2);
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
+    expect(api.updateChat).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a late action-mode save error in its original chat after switching', async () => {
+    let resolveMode!: (value: InboxAssistantResult<InboxAssistantChatSummary>) => void;
+    api.updateChat.mockImplementationOnce(() => new Promise(resolve => { resolveMode = resolve; }));
+    const view = await mount();
+    const select = view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { select.value = 'approve_for_me'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
+    await settle();
+    await act(async () => resolveMode({ success: false, error: 'Previous chat mode could not be saved.' }));
+    expect(view.find('h1')?.textContent).toBe('Meeting follow-ups');
+    expect(view.container.textContent).not.toContain('Previous chat mode could not be saved.');
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('review');
+    expect((view.find('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it('renders an already-applied ask receipt and refreshes mail counts while keeping Approve for me selected', async () => {
+    const saved = reviewExchange();
+    const mode: InboxAssistantActionMode = 'approve_for_me';
+    api.chat.mockImplementation(async id => ok({ ...chat(id), actionMode: mode }));
+    api.chats.mockImplementation(async () => ok({ chats: [{ ...summary(), actionMode: mode }, summary('chat-2')], activeChatId: 'chat-1' }));
+    api.ask.mockImplementationOnce(async () => ok(reviewReceipt(saved)));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
+    submit(view, saved.question);
+    await settle();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    expect(view.container.textContent).toContain('Selected conversations were marked read.');
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).not.toBeNull();
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe('approve_for_me');
+    expect(api.applyReview).not.toHaveBeenCalled();
+  });
+
+  it.each(['applied', 'queued', 'failed'] as const)('applies selected review tokens, renders a %s receipt and routes available undo through the original exchange', async status => {
+    const saved = reviewExchange();
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    api.applyReview.mockImplementationOnce(async () => ok(reviewReceipt(saved, status)));
+    api.applyReview.mockImplementationOnce(async () => ok(reviewReceipt(saved, 'undone')));
+    const onMailChanged = vi.fn();
+    const onNavigateToSource = vi.fn();
+    const view = await mount({ onMailChanged, onNavigateToSource });
+    fire(view.byLabel('Open conversation: Unread item-a (owner@example.test)'), 'click');
+    expect(onNavigateToSource).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'item-a', accountId: 'work', emailId: 'mail-item-a', threadId: 'thread-item-a' }));
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    toggle(view.byLabel('Select conversation: Unread item-b (other@example.test)'));
+    expect(view.container.textContent).toContain('1 conversation selected · 2 unread emails');
+    fire(button(view, 'Mark selected as read'), 'click');
+    await settle();
+    expect(api.applyReview).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', exchangeId: 'review-exchange', reviewId: 'review-snapshot', itemIds: ['item-a'] });
+    expect(view.container.textContent).toContain(status === 'failed' ? 'One message changed; another could not be marked read.' : 'Selected conversations were marked read.');
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    fire(view.byLabel('Undo marked read: Unread item-a (owner@example.test)'), 'click');
+    await settle();
+    expect(api.applyReview).toHaveBeenLastCalledWith({ requestId: expect.any(String), chatId: 'chat-1', exchangeId: 'review-exchange', reviewId: 'review-snapshot', itemIds: ['item-a'], undo: true });
+    expect(api.applyReview.mock.calls[1]![0].requestId).not.toBe(api.applyReview.mock.calls[0]![0].requestId);
+    expect(view.container.textContent).toContain('The changed emails are unread again.');
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).toBeNull();
+    expect(onMailChanged).toHaveBeenCalledTimes(2);
+    expect(api.ask).not.toHaveBeenCalled();
+  });
+
+  it('archives an explicitly selected kept-unread conversation using its exact snapshot without applying a read action first', async () => {
+    const saved = reviewExchange();
+    saved.review!.items = [
+      reviewItem('recommended', { mailActionsAllowed: true }),
+      reviewItem('keep', { recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true }),
+      reviewItem('unselected', { recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true }),
+    ];
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    api.applyReview.mockImplementationOnce(async () => ok(saved));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(button(view, 'Clear selection'), 'click');
+    fire(button(view, 'Keep unread 2'), 'click');
+    toggle(view.byLabel('Select conversation: Unread keep (owner@example.test)'));
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    fire(view.byLabel('Archive selected conversations'), 'click');
+    await settle();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(api.applyReview).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', exchangeId: saved.id,
+      reviewId: saved.review!.id, itemIds: ['keep'], manualSelection: true, action: 'archive' });
+    expect(api.ask).not.toHaveBeenCalled();
+  });
+
+  it.each(['review', 'approve_for_me'] as const)('requires a reversible Trash confirmation for selected conversations in %s mode', async actionMode => {
+    const saved = reviewExchange();
+    saved.review!.items = [
+      reviewItem('keep', { recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true }),
+      reviewItem('unselected', { recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true }),
+    ];
+    api.chat.mockImplementation(async id => ok({ ...chat(id, [saved]), actionMode }));
+    api.applyReview.mockImplementationOnce(async () => ok(saved));
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const view = await mount();
+    fire(button(view, 'Keep unread 2'), 'click');
+    toggle(view.byLabel('Select conversation: Unread keep (owner@example.test)'));
+    expect(confirm).not.toHaveBeenCalled();
+    fire(view.byLabel('Move selected conversations to Trash'), 'click');
+    expect(confirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: 'Move selected conversations to Trash?', confirmLabel: 'Move to Trash', destructive: true,
+      message: expect.stringContaining('Trash') }));
+    const message = confirm.mock.calls[0]![0].message as string;
+    expect(message).toMatch(/1 selected conversation|1 conversation/);
+    expect(message).toContain('3 emails');
+    expect(message).toContain('1 account');
+    expect(message).toMatch(/not permanently|not.*permanent|recover|restore/i);
+    expect(api.applyReview).not.toHaveBeenCalled();
+    fire(view.byLabel('Move selected conversations to Trash'), 'click');
+    expect(confirm).toHaveBeenCalledOnce();
+    await act(async () => { decide(true); });
+    await settle();
+    expect(api.applyReview).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', exchangeId: saved.id,
+      reviewId: saved.review!.id, itemIds: ['keep'], manualSelection: true, action: 'trash' });
+    expect(api.ask).not.toHaveBeenCalled();
+    expect(api.updateChat).not.toHaveBeenCalled();
+  });
+
+  it('does not move any mail or clear the explicit selection when Trash confirmation is rejected', async () => {
+    const saved = reviewExchange();
+    saved.review!.items = [reviewItem('keep', { recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true })];
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    confirm.mockResolvedValueOnce(false);
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(button(view, 'Keep unread 1'), 'click');
+    toggle(view.byLabel('Select conversation: Unread keep (owner@example.test)'));
+    fire(view.byLabel('Move selected conversations to Trash'), 'click');
+    await settle();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    expect((view.byLabel('Select conversation: Unread keep (owner@example.test)') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('does not move mail after a review expires while Trash confirmation is open', async () => {
+    const saved = reviewExchange();
+    saved.review!.items = [reviewItem('keep', { recommendation: 'keep_unread', manualSelectionAllowed: true, mailActionsAllowed: true })];
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const view = await mount();
+    fire(button(view, 'Keep unread 1'), 'click');
+    toggle(view.byLabel('Select conversation: Unread keep (owner@example.test)'));
+    fire(view.byLabel('Move selected conversations to Trash'), 'click');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(saved.review!.expiresAt);
+    try { await act(async () => { decide(true); }); }
+    finally { now.mockRestore(); }
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(view.find('[role="alert"]')?.textContent).toContain('This review has expired. Refresh it');
+  });
+
+  it('waits for manual recommendation-override approval and leaves mail untouched when approval is rejected', async () => {
+    const saved = reviewExchange();
+    saved.review!.items = [reviewItem('protected', { recommendation: 'keep_unread', protectedReasons: ['Marked important by you'], manualSelectionAllowed: true })];
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(view.all('button').find(element => element.textContent?.startsWith('Keep unread'))!, 'click');
+    toggle(view.byLabel('Select conversation: Unread protected (owner@example.test)'));
+    fire(button(view, 'Mark selected as read'), 'click');
+    expect(confirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: 'Override agent recommendation?', confirmLabel: 'Mark selected as read', message: expect.stringContaining('2 unread emails in 1 selected conversation') }));
+    expect(api.applyReview).not.toHaveBeenCalled();
+    // Repeated clicks while the same approval is pending cannot start another action.
+    fire(button(view, 'Mark selected as read'), 'click');
+    expect(confirm).toHaveBeenCalledOnce();
+    await act(async () => { decide(false); });
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(onMailChanged).not.toHaveBeenCalled();
+    expect((view.byLabel('Select conversation: Unread protected (owner@example.test)') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it.each(['review', 'approve_for_me'] as const)('requires and honors explicit override approval in %s mode, passing only the manually selected review IDs', async actionMode => {
+    const saved = reviewExchange();
+    saved.review!.items = [
+      reviewItem('protected', { recommendation: 'keep_unread', protectedReasons: ['Marked important by you'], manualSelectionAllowed: true }),
+      reviewItem('uncertain', { recommendation: 'needs_review', confidence: 0.4, manualSelectionAllowed: true }),
+      reviewItem('not-selected', { recommendation: 'keep_unread', manualSelectionAllowed: true }),
+    ];
+    api.chat.mockImplementation(async id => ok({ ...chat(id, [saved]), actionMode }));
+    api.applyReview.mockImplementationOnce(async () => ok(saved));
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const view = await mount();
+    expect((view.byLabel('Action mode') as HTMLSelectElement).value).toBe(actionMode);
+    fire(view.all('button').find(element => element.textContent?.startsWith('Keep unread'))!, 'click');
+    toggle(view.byLabel('Select conversation: Unread protected (owner@example.test)'));
+    fire(view.all('button').find(element => element.textContent?.startsWith('Needs review'))!, 'click');
+    toggle(view.byLabel('Select conversation: Unread uncertain (owner@example.test)'));
+    fire(button(view, 'Mark selected as read'), 'click');
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.applyReview).not.toHaveBeenCalled();
+    await act(async () => { decide(true); });
+    await settle();
+    expect(api.applyReview).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', exchangeId: saved.id, reviewId: saved.review!.id, itemIds: ['protected', 'uncertain'], manualSelection: true });
+    expect(api.ask).not.toHaveBeenCalled();
+    expect(api.updateChat).not.toHaveBeenCalled();
+  });
+
+  it('does not submit an override whose review expires while confirmation is open', async () => {
+    const saved = reviewExchange();
+    saved.review!.items = [reviewItem('protected', { recommendation: 'keep_unread', manualSelectionAllowed: true })];
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    let decide!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise(resolve => { decide = resolve; }));
+    const view = await mount();
+    fire(view.all('button').find(element => element.textContent?.startsWith('Keep unread'))!, 'click');
+    toggle(view.byLabel('Select conversation: Unread protected (owner@example.test)'));
+    fire(button(view, 'Mark selected as read'), 'click');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(saved.review!.expiresAt);
+    await act(async () => { decide(true); });
+    now.mockRestore();
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(view.find('[role="alert"]')?.textContent).toContain('This review has expired. Refresh it');
+  });
+
+  it('refreshes an expired review through a fresh scoped question rather than applying stale tokens', async () => {
+    const saved = reviewExchange();
+    saved.review = { ...saved.review!, accounts: [accounts[0]!], items: saved.review!.items.filter(item => item.accountId === 'work'), status: 'expired', kind: 'uncategorized', expiresAt: Date.now() - 1 };
+    api.chat.mockImplementation(async id => ok({ ...chat(id, [saved]), actionMode: 'approve_for_me' }));
+    const view = await mount();
+    fire(view.find('button[aria-controls="assistant-account-picker"]'), 'click');
+    toggle(view.find('#assistant-account-picker input[type="checkbox"]'));
+    expect(view.find('button[aria-controls="assistant-account-picker"]')?.textContent).toContain('1 of 2 accounts');
+    expect((button(view, 'Mark selected as read') as HTMLButtonElement).disabled).toBe(true);
+    fire(button(view, 'Refresh review'), 'click');
+    await settle();
+    expect(api.ask).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', question: saved.question, accountIds: ['work'], previousExchangeId: saved.id, reviewKind: 'uncategorized', reviewOnly: true });
+    expect(api.applyReview).not.toHaveBeenCalled();
+  });
+
+  it('requests the next review batch using the saved host review instead of applying its selected tokens', async () => {
+    const saved = reviewExchange();
+    saved.review = { ...saved.review!, accounts: [accounts[0]!], items: saved.review!.items.filter(item => item.accountId === 'work'), kind: 'uncategorized', truncated: true,
+      coverage: [{ accountId: 'work', email: accounts[0]!.email, status: 'reviewed', reviewedThreads: 2, scannedThreads: 40, truncated: true, hasMore: true, warnings: [] }] };
+    api.chat.mockImplementation(async id => ok({ ...chat(id, [saved]), actionMode: 'approve_for_me' }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(view.find('button[aria-controls="assistant-account-picker"]'), 'click');
+    toggle(view.find('#assistant-account-picker input[type="checkbox"]'));
+    expect(view.find('button[aria-controls="assistant-account-picker"]')?.textContent).toContain('1 of 2 accounts');
+    fire(button(view, 'Review next batch'), 'click');
+    await settle();
+    expect(api.ask).toHaveBeenCalledExactlyOnceWith({ requestId: expect.any(String), chatId: 'chat-1', question: saved.question,
+      accountIds: ['work'], previousExchangeId: saved.id, reviewKind: 'uncategorized', continueReviewId: 'review-snapshot', reviewOnly: true });
+    expect(api.applyReview).not.toHaveBeenCalled();
+    expect(onMailChanged).not.toHaveBeenCalled();
+  });
+
+  it('keeps rejected action attempts pending, surfaces their error and does not claim mail changed', async () => {
+    const saved = reviewExchange();
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    api.applyReview.mockImplementationOnce(async () => ({ success: false, error: 'Review snapshot expired. Refresh it first.' }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(button(view, 'Mark selected as read'), 'click');
+    await settle();
+    expect(view.find('[role="alert"]')?.textContent).toContain('Review snapshot expired.');
+    expect(onMailChanged).not.toHaveBeenCalled();
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).toBeNull();
+    expect((view.byLabel('Select conversation: Unread item-a (owner@example.test)') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('cancels an action on chat switching and keeps its acknowledged late receipt out of the other chat', async () => {
+    const saved = reviewExchange();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [saved] : [])));
+    let resolveAction!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.applyReview.mockImplementationOnce(() => new Promise(resolve => { resolveAction = resolve; }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    fire(button(view, 'Mark selected as read'), 'click');
+    const requestId = api.applyReview.mock.calls[0]![0].requestId;
+    fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
+    await settle();
+    expect(api.cancel).toHaveBeenCalledWith(requestId);
+    const receipt = reviewReceipt(saved);
+    receipt.answer.text = 'Old review receipt must remain in the original chat.';
+    await act(async () => resolveAction(ok(receipt)));
+    emit(activity(5, 'Old review action details', { requestId, chatId: 'chat-1', stage: 'action' }));
+    expect(onMailChanged).toHaveBeenCalledOnce(); // Acknowledged writes still refresh global mailbox counts.
+    expect(view.find('h1')?.textContent).toBe('Meeting follow-ups');
+    expect(view.container.textContent).not.toContain('Old review receipt');
+    expect(view.container.textContent).not.toContain('Old review action details');
+    expect(view.container.textContent).not.toContain('Unread mail review');
+    expect((view.find('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it('retains a confirmed partial receipt after cancelling in the same chat without accepting late activity', async () => {
+    const saved = reviewExchange();
+    api.chat.mockImplementation(async id => ok(chat(id, [saved])));
+    let resolveAction!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.applyReview.mockImplementationOnce(() => new Promise(resolve => { resolveAction = resolve; }));
+    const onMailChanged = vi.fn();
+    const view = await mount({ onMailChanged });
+    typeInto(view.find('textarea'), 'Keep my next question.');
+    fire(button(view, 'Mark selected as read'), 'click');
+    const requestId = api.applyReview.mock.calls[0]![0].requestId;
+    emit(activity(1, 'First conversation changed', { requestId, chatId: 'chat-1', stage: 'action' }));
+    fire(view.byLabel('Stop answering'), 'click');
+    expect(api.cancel).toHaveBeenCalledWith(requestId);
+    await act(async () => resolveAction(ok(reviewReceipt(saved, 'failed'))));
+    emit(activity(2, 'Late action activity', { requestId, chatId: 'chat-1', stage: 'action' }));
+    expect(view.container.textContent).toContain('One message changed; another could not be marked read.');
+    expect(view.byLabel('Undo marked read: Unread item-a (owner@example.test)')).not.toBeNull();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    expect((view.find('textarea') as HTMLTextAreaElement).value).toBe('Keep my next question.');
+    fire(view.byLabel('View stopped activity'), 'click');
+    expect(view.byLabel('Work timeline')?.textContent).toContain('First conversation changed');
+    expect(view.container.textContent).not.toContain('Late action activity');
+  });
+
   it('pins and unpins using summary updates without reading another chat or losing the current draft', async () => {
     const onCloseSourcePane = vi.fn();
     const view = await mount({ onCloseSourcePane });
@@ -495,6 +1137,7 @@ describe('Inbox Agent', () => {
     emit(activity(100, 'Other chat data', { chatId: 'chat-2' }));
     fire(view.byLabel('Stop answering'), 'click');
     emit(activity(5, 'Late step after stop'));
+    await settle();
     fire(view.byLabel('View stopped activity'), 'click');
     expect(view.byLabel('Work timeline')?.querySelectorAll('li')).toHaveLength(2);
     expect(view.find('aside')?.textContent).toContain('Stopped');

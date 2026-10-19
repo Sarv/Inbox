@@ -1,0 +1,130 @@
+/* Keep the assistant readable over the app's dark canvas without changing
+   the user's accent or the email reader's rendering of received messages. */
+.dark .assistant-theme {
+  --assistant-surface: color-mix(in srgb, hsl(var(--background)) 92%, hsl(var(--foreground)) 8%);
+  --assistant-raised: color-mix(in srgb, hsl(var(--background)) 88%, hsl(var(--foreground)) 12%);
+  --assistant-border: color-mix(in srgb, hsl(var(--border)) 65%, hsl(var(--foreground)) 35%);
+  --assistant-divider: color-mix(in srgb, hsl(var(--border)) 85%, hsl(var(--foreground)) 15%);
+  --assistant-accent-ink: color-mix(in srgb, hsl(var(--primary)) 80%, hsl(var(--foreground)) 20%);
+}
+
+.dark .assistant-theme .assistant-surface,
+.dark .assistant-theme .assistant-chrome {
+  background: var(--assistant-surface);
+  border-color: var(--assistant-divider);
+}
+
+.dark .assistant-theme .assistant-raised {
+  background: var(--assistant-raised);
+  border-color: var(--assistant-border);
+}
+
+.dark .assistant-theme button.assistant-surface:enabled:is(:hover, :focus-visible) {
+  background: var(--assistant-raised);
+  border-color: var(--assistant-border);
+}
+
+.dark .assistant-theme button.assistant-surface:focus-visible {
+  outline: 2px solid var(--assistant-accent-ink);
+  outline-offset: 2px;
+}
+
+.dark .assistant-launcher {
+  background: var(--assistant-surface);
+  border-color: var(--assistant-border);
+}
+
+.dark .assistant-theme .assistant-user-message {
+  background: color-mix(in srgb, hsl(var(--primary)) 20%, var(--assistant-surface) 80%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, hsl(var(--primary)) 45%, var(--assistant-divider) 55%);
+}
+
+.dark .assistant-theme .assistant-review-item[data-selected='true'] {
+  background: color-mix(in srgb, hsl(var(--primary)) 10%, var(--assistant-surface) 90%);
+}
+
+.dark .assistant-theme .assistant-review-item,
+.dark .assistant-theme .assistant-review-list {
+  border-color: var(--assistant-divider);
+}
+
+.dark .assistant-theme .assistant-review-filters button[aria-pressed='true'] {
+  background: var(--assistant-surface);
+  box-shadow: 0 0 0 1px var(--assistant-border);
+}
+
+.dark .assistant-theme .text-primary {
+  color: var(--assistant-accent-ink);
+}
+
+.dark .assistant-theme :is(input, textarea, select) {
+  color-scheme: dark;
+}
+
+.dark .assistant-theme textarea::placeholder {
+  color: hsl(var(--muted-foreground));
+  opacity: 1;
+}
+
+/* A disabled control needs to look unavailable while its label remains
+   readable. Whole-element opacity also fades the foreground into its fill. */
+.dark .assistant-theme :is(button, select, textarea):disabled {
+  color: hsl(var(--muted-foreground));
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.dark .assistant-theme .assistant-primary-action:disabled {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  box-shadow: inset 0 0 0 1px var(--assistant-divider);
+  filter: none;
+}
+
+.dark .assistant-theme .assistant-review-checkbox {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  border: 1px solid var(--assistant-border);
+  border-radius: 4px;
+  background: var(--assistant-surface);
+}
+
+.dark .assistant-theme .assistant-review-checkbox::before {
+  content: '';
+  width: 9px;
+  height: 5px;
+  margin-top: -2px;
+  border-left: 2px solid hsl(var(--primary-foreground));
+  border-bottom: 2px solid hsl(var(--primary-foreground));
+  transform: rotate(-45deg) scale(0);
+}
+
+.dark .assistant-theme .assistant-review-checkbox:checked {
+  background: hsl(var(--primary));
+  border-color: hsl(var(--primary));
+}
+
+.dark .assistant-theme .assistant-review-checkbox:checked::before {
+  transform: rotate(-45deg) scale(1);
+}
+
+.dark .assistant-theme .assistant-review-checkbox:disabled {
+  background: var(--assistant-raised);
+  border-color: var(--assistant-divider);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.dark .assistant-theme .assistant-review-checkbox:disabled::before {
+  border-color: hsl(var(--muted-foreground));
+}
+
+.dark .assistant-theme .assistant-review-checkbox:focus-visible {
+  outline: 2px solid var(--assistant-accent-ink);
+  outline-offset: 2px;
+}
+
+.dark .assistant-theme .assistant-raised:focus-within {
+  border-color: var(--assistant-accent-ink);
+}

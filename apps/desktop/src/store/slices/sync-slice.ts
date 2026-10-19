@@ -163,7 +163,7 @@ const createRealtimeBatch = (): RealtimeBatch => ({
  * no flicker, scroll position + selected email + compose drawer stay
  * put.
  */
-async function refreshVisibleViewForFolder(
+export async function refreshVisibleViewForFolder(
   get: () => any,
   folderPath: string,
 ): Promise<void> {

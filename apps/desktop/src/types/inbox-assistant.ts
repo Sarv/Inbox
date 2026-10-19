@@ -1,3 +1,7 @@
+import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewKind } from './inbox-assistant-actions';
+
+export type InboxAssistantActionMode = 'review' | 'approve_for_me';
+
 /** Type-only contract shared by the isolated renderer and main-process agent. */
 export interface InboxAssistantAccount {
   id: string;
@@ -51,7 +55,7 @@ export interface InboxAssistantAnswer {
 
 /** Observable work only: never model reasoning or private thinking tokens. */
 export interface InboxAssistantProgress {
-  stage: 'context' | 'search' | 'body' | 'attachment' | 'answer' | 'complete';
+  stage: 'context' | 'search' | 'body' | 'attachment' | 'answer' | 'action' | 'complete';
   status: 'running' | 'done' | 'warning';
   message: string;
   detail?: string;
@@ -75,6 +79,8 @@ export interface InboxAssistantExchange {
   answer: InboxAssistantAnswer;
   createdAt: number; // Unix milliseconds for conversation ordering.
   activities?: InboxAssistantActivity[];
+  review?: InboxAssistantReview;
+  reviewResult?: InboxAssistantReviewApplyResult;
 }
 
 export interface InboxAssistantRequest {
@@ -83,6 +89,23 @@ export interface InboxAssistantRequest {
   question: string;
   accountIds: string[];
   previousExchangeId?: string;
+  reviewKind?: InboxAssistantReviewKind;
+  continueReviewId?: string;
+  /** Prepare/refresh a review without applying saved delegated approval. */
+  reviewOnly?: boolean;
+}
+
+export interface InboxAssistantReviewActionRequest {
+  requestId: string;
+  chatId: string;
+  exchangeId: string;
+  reviewId: string;
+  itemIds: string[];
+  undo?: boolean;
+  /** Set only by a user's explicit selection, never by delegated approval. */
+  manualSelection?: boolean;
+  /** Manual mail actions never alter the review's automatic recommendation. */
+  action?: InboxAssistantReviewAction;
 }
 
 export interface InboxAssistantChatSummary {
@@ -92,6 +115,9 @@ export interface InboxAssistantChatSummary {
   updatedAt: number;
   exchangeCount: number;
   pinned?: boolean;
+  actionMode?: InboxAssistantActionMode;
+  /** An earlier conversation branch can be restored after rewinding. */
+  rewindAvailable?: boolean;
 }
 
 export interface InboxAssistantChat extends InboxAssistantChatSummary {
@@ -101,6 +127,17 @@ export interface InboxAssistantChat extends InboxAssistantChatSummary {
 export interface InboxAssistantChatList {
   chats: InboxAssistantChatSummary[];
   activeChatId: string | null;
+}
+
+export interface InboxAssistantRewind {
+  chat: InboxAssistantChat;
+  question: string;
+  accountIds: string[];
+}
+
+export interface InboxAssistantCancellation {
+  requestId: string;
+  cancelled: boolean;
 }
 
 export interface InboxAssistantDraftRequest {
@@ -130,12 +167,15 @@ export interface InboxAssistantAPI {
   chat(chatId: string): Promise<InboxAssistantResult<InboxAssistantChat>>;
   createChat(): Promise<InboxAssistantResult<InboxAssistantChat>>;
   renameChat(request: { chatId: string; title: string }): Promise<InboxAssistantResult<InboxAssistantChatSummary>>;
-  updateChat(request: { chatId: string; pinned: boolean }): Promise<InboxAssistantResult<InboxAssistantChatSummary>>;
+  updateChat(request: { chatId: string; pinned?: boolean; actionMode?: InboxAssistantActionMode }): Promise<InboxAssistantResult<InboxAssistantChatSummary>>;
   deleteChat(chatId: string): Promise<InboxAssistantResult<InboxAssistantChatList>>;
+  rewindChat(request: { chatId: string; exchangeId: string }): Promise<InboxAssistantResult<InboxAssistantRewind>>;
+  restoreRewindChat(request: { chatId: string }): Promise<InboxAssistantResult<InboxAssistantChat>>;
   draftEmail(request: InboxAssistantDraftRequest): Promise<InboxAssistantResult<InboxAssistantDraft>>;
   history(): Promise<InboxAssistantResult<InboxAssistantExchange[]>>;
   ask(request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
-  cancel(requestId: string): Promise<void>;
+  applyReview(request: InboxAssistantReviewActionRequest): Promise<InboxAssistantResult<InboxAssistantExchange>>;
+  cancel(requestId: string): Promise<InboxAssistantResult<InboxAssistantCancellation>>;
   clearHistory(): Promise<InboxAssistantResult<null>>;
   onActivity(listener: (activity: InboxAssistantActivity) => void): () => void;
   source(request: Pick<InboxAssistantSource, 'accountId' | 'emailId' | 'filename'>): Promise<InboxAssistantResult<{ emailId: string; threadId: string; filename?: string }>>;

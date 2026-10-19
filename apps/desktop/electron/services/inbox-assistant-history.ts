@@ -1,28 +1,41 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type Database from 'better-sqlite3';
 
-import type { InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange } from '../../src/types/inbox-assistant';
+import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange } from '../../src/types/inbox-assistant';
 
 import { getCoreDb } from './core-db';
 
 const LEGACY_KEY = 'inbox-assistant-history-v1';
 const INDEX_KEY = 'inbox-assistant-chats-index-v2';
 const CHAT_PREFIX = 'inbox-assistant-chat-v2:';
+const REWIND_PREFIX = 'inbox-assistant-rewind-v1:';
+const REWIND_AUDIT_PREFIX = 'inbox-assistant-rewind-audit-v1:';
 const NEW_TITLE = 'New chat';
 type HistoryDb = Pick<Database.Database, 'prepare' | 'transaction'>;
 interface StoredSummary extends InboxAssistantChatSummary { customTitle?: boolean }
-interface ChatIndex { version: 2; chats: StoredSummary[]; activeChatId: string | null }
+interface ChatIndex { version: 2; actionModeVersion?: 2; chats: StoredSummary[]; activeChatId: string | null }
+interface RewindSnapshot { version: 1; chat: InboxAssistantChat }
+
+export interface InboxAssistantRewindResult {
+  chat: InboxAssistantChat;
+  question: string;
+  accountIds: string[];
+}
 
 export interface InboxAssistantHistoryStore {
   list(): InboxAssistantChatList;
   load(chatId: string, options?: { select?: boolean }): InboxAssistantChat;
   create(): InboxAssistantChat;
   rename(chatId: string, title: string): InboxAssistantChatSummary;
-  update(chatId: string, changes: { pinned: boolean }): InboxAssistantChatSummary;
+  update(chatId: string, changes: { pinned?: boolean; actionMode?: InboxAssistantActionMode }): InboxAssistantChatSummary;
   delete(chatId: string): InboxAssistantChatList;
   writeChat(chat: InboxAssistantChat): void;
   clear(chatId: string): InboxAssistantChat;
+  /** Truncate before one question, retaining the complete prior branch for recovery. */
+  rewind(chatId: string, exchangeId: string): InboxAssistantRewindResult;
+  /** Restore the prior branch while retaining the current branch in its place. */
+  restoreRewind(chatId: string): InboxAssistantChat;
   /** Compatibility bridge: only the selected chat, never every conversation. */
   read(): InboxAssistantExchange[];
   write(exchanges: InboxAssistantExchange[]): void;
@@ -63,21 +76,53 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
       ON CONFLICT(key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`)
       .run(key, Buffer.from(JSON.stringify(value)), Date.now());
   };
+  const readRewind = (chatId: string): RewindSnapshot | undefined => {
+    const snapshot = readBlob(`${REWIND_PREFIX}${chatId}`) as RewindSnapshot | undefined;
+    if (snapshot === undefined) return undefined;
+    if (!snapshot || snapshot.version !== 1 || !snapshot.chat || snapshot.chat.id !== chatId || !validExchanges(snapshot.chat.exchanges)) {
+      throw new Error('This saved conversation recovery could not be read. Its stored data has been preserved.');
+    }
+    return snapshot;
+  };
+  const saveRewind = (chat: InboxAssistantChat): void => {
+    const previous = readRewind(chat.id);
+    if (previous?.chat.exchanges.some(exchange => exchange.reviewResult)) {
+      // One visible recovery slot stays simple, while older action receipts must
+      // survive another edit. Content addressing avoids duplicate audit copies.
+      const fingerprint = createHash('sha256').update(JSON.stringify(previous)).digest('hex');
+      writeBlob(`${REWIND_AUDIT_PREFIX}${chat.id}:${fingerprint}`, previous);
+    }
+    writeBlob(`${REWIND_PREFIX}${chat.id}`, { version: 1, chat } satisfies RewindSnapshot);
+  };
   const index = (): ChatIndex => getDb().transaction(() => {
     const stored = readBlob(INDEX_KEY) as ChatIndex | undefined;
     if (stored !== undefined) {
-      if (!stored || stored.version !== 2 || !Array.isArray(stored.chats) || stored.chats.some(item =>
+      if (!stored || stored.version !== 2 || (stored.actionModeVersion !== undefined && stored.actionModeVersion !== 2)
+        || !Array.isArray(stored.chats) || stored.chats.some(item =>
         !item || typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(item.id) || typeof item.title !== 'string'
         || !Number.isFinite(item.createdAt) || !Number.isFinite(item.updatedAt) || !Number.isInteger(item.exchangeCount)
-        || item.exchangeCount < 0 || (item.pinned !== undefined && typeof item.pinned !== 'boolean'))
+        || item.exchangeCount < 0 || (item.pinned !== undefined && typeof item.pinned !== 'boolean')
+        || (item.rewindAvailable !== undefined && typeof item.rewindAvailable !== 'boolean')
+        || (item.actionMode !== undefined && !['review', 'approve_for_me', ...(stored.actionModeVersion === undefined ? ['auto'] : [])].includes(item.actionMode)))
         || (stored.activeChatId !== null && !stored.chats.some(chat => chat.id === stored.activeChatId))) {
         throw new Error('The saved Inbox Agent chat list could not be read. Its stored data has been preserved.');
+      }
+      if (stored.actionModeVersion === undefined) {
+        for (const chat of stored.chats) {
+          const legacyMode = chat.actionMode as string | undefined;
+          // Earlier approve_for_me meant one request. Never turn that old
+          // delegation into persistent approval without a fresh user choice.
+          if (legacyMode === 'approve_for_me') chat.actionMode = 'review';
+          else if (legacyMode === 'auto') chat.actionMode = 'approve_for_me';
+        }
+        stored.actionModeVersion = 2;
+        writeBlob(INDEX_KEY, stored);
       }
       return stored;
     }
     const legacy = readBlob(LEGACY_KEY);
     if (legacy !== undefined && !validExchanges(legacy)) throw new Error('The previous Inbox Agent conversation could not be read. Its stored data has been preserved.');
-    const initial: ChatIndex = { version: 2, chats: [], activeChatId: null };
+    const initial: ChatIndex = { version: 2, actionModeVersion: 2, chats: [], activeChatId: null };
     getDb().transaction(() => {
       if (Array.isArray(legacy) && legacy.length) {
         const id = randomUUID();
@@ -143,13 +188,16 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
     },
     update(chatId, changes) {
       validateInboxAssistantChatId(chatId);
-      if (!changes || !Object.keys(changes).every(key => key === 'pinned') || typeof changes.pinned !== 'boolean') {
-        throw new Error('Choose whether to pin this chat.');
+      if (!changes || (changes.pinned === undefined && changes.actionMode === undefined) || !Object.keys(changes).every(key => ['pinned', 'actionMode'].includes(key))
+        || (changes.pinned !== undefined && typeof changes.pinned !== 'boolean')
+        || (changes.actionMode !== undefined && !['review', 'approve_for_me'].includes(changes.actionMode))) {
+        throw new Error('Choose a valid conversation setting.');
       }
       return mutate(current => {
         const summary = current.chats.find(chat => chat.id === chatId);
         if (!summary) throw new Error('This Inbox Agent chat is no longer available.');
-        summary.pinned = changes.pinned;
+        if (changes.pinned !== undefined) summary.pinned = changes.pinned;
+        if (changes.actionMode !== undefined) summary.actionMode = changes.actionMode;
         summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
         // Pin state is index metadata only. Never load or rewrite answers.
         writeBlob(INDEX_KEY, current);
@@ -164,6 +212,9 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         const summaries = current.chats.map(publicSummary).sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt);
         if (current.activeChatId === chatId) current.activeChatId = summaries[0]?.id ?? null;
         getDb().prepare('DELETE FROM core_blobs WHERE key = ?').run(`${CHAT_PREFIX}${chatId}`);
+        getDb().prepare('DELETE FROM core_blobs WHERE key = ?').run(`${REWIND_PREFIX}${chatId}`);
+        const auditPrefix = `${REWIND_AUDIT_PREFIX}${chatId}:`;
+        getDb().prepare('DELETE FROM core_blobs WHERE substr(key, 1, ?) = ?').run(auditPrefix.length, auditPrefix);
         writeBlob(INDEX_KEY, current);
         return { chats: summaries, activeChatId: current.activeChatId };
       });
@@ -190,6 +241,44 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         const cleared = { ...publicSummary(summary), exchanges: [] };
         writeBlob(`${CHAT_PREFIX}${chat.id}`, cleared); writeBlob(INDEX_KEY, current);
         return cleared;
+      });
+    },
+    rewind(chatId, exchangeId) {
+      validateInboxAssistantChatId(chatId);
+      validateInboxAssistantChatId(exchangeId);
+      return mutate(current => {
+        const chat = readChat(chatId, current);
+        const position = chat.exchanges.findIndex(exchange => exchange.id === exchangeId);
+        if (position < 0) throw new Error('This message does not belong to the selected conversation.');
+        const target = chat.exchanges[position]!;
+        const summary = current.chats.find(item => item.id === chatId)!;
+        // This lives in the same encrypted core database, outside the list index.
+        // A rewind changes conversation context, never the real mail or receipts.
+        saveRewind(chat);
+        summary.exchangeCount = position;
+        summary.rewindAvailable = true;
+        summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
+        const rewound = { ...publicSummary(summary), exchanges: chat.exchanges.slice(0, position) };
+        writeBlob(`${CHAT_PREFIX}${chatId}`, rewound); writeBlob(INDEX_KEY, current);
+        return { chat: rewound, question: target.question, accountIds: [...target.accountIds] };
+      });
+    },
+    restoreRewind(chatId) {
+      validateInboxAssistantChatId(chatId);
+      return mutate(current => {
+        const chat = readChat(chatId, current);
+        const snapshot = readRewind(chatId);
+        if (snapshot === undefined) throw new Error('There is no saved conversation to restore.');
+        const summary = current.chats.find(item => item.id === chatId)!;
+        // Swapping retains answers and mail-action audit receipts produced since
+        // the rewind, so restoring an older branch cannot silently discard them.
+        saveRewind(chat);
+        summary.exchangeCount = snapshot.chat.exchanges.length;
+        summary.rewindAvailable = true;
+        summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
+        const restored = { ...publicSummary(summary), exchanges: snapshot.chat.exchanges };
+        writeBlob(`${CHAT_PREFIX}${chatId}`, restored); writeBlob(INDEX_KEY, current);
+        return restored;
       });
     },
     read() { const current = index(); return current.activeChatId ? readChat(current.activeChatId, current).exchanges : []; },

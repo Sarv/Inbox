@@ -12,23 +12,27 @@ const h = vi.hoisted(() => ({
   registered: [{ id: 'active-account', email: 'rc@sarv.example' }, { id: 'sales-account', email: 'sales@sarv.example' }],
   registryError: false,
   storages: new Map<string, unknown>(),
-  activeStorage: { getEmail: vi.fn(), getAttachments: vi.fn() },
-  salesStorage: { getEmail: vi.fn(), getAttachments: vi.fn() },
+  activeStorage: { getEmail: vi.fn(), getAttachments: vi.fn(), getFolder: vi.fn() },
+  salesStorage: { getEmail: vi.fn(), getAttachments: vi.fn(), getFolder: vi.fn() },
+  activeEngine: { bulkMarkAsRead: vi.fn(), bulkMarkAsUnread: vi.fn() },
+  salesEngine: { bulkMarkAsRead: vi.fn(), bulkMarkAsUnread: vi.fn() },
+  setReadFlag: vi.fn(), logUserAction: vi.fn(),
   requireStorage: vi.fn(),
   ensureRuntime: vi.fn(),
   serviceDeps: undefined as unknown as InboxAssistantServiceDeps,
-  service: { accounts: vi.fn(), chats: vi.fn(), chat: vi.fn(), createChat: vi.fn(), renameChat: vi.fn(), updateChat: vi.fn(), deleteChat: vi.fn(), draftEmail: vi.fn(), history: vi.fn(), ask: vi.fn(), cancel: vi.fn(), clearHistory: vi.fn() },
+  service: { accounts: vi.fn(), chats: vi.fn(), chat: vi.fn(), createChat: vi.fn(), renameChat: vi.fn(), updateChat: vi.fn(), deleteChat: vi.fn(), rewindChat: vi.fn(), restoreRewindChat: vi.fn(), draftEmail: vi.fn(), history: vi.fn(), ask: vi.fn(), applyReview: vi.fn(), cancel: vi.fn(), clearHistory: vi.fn() },
 }));
 
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, handler: Handler) => h.handlers.set(channel, handler) } }));
-vi.mock('@sarvinbox/core', async importOriginal => ({ ...await importOriginal<typeof import('@sarvinbox/core')>(), callAIWithRetry: vi.fn() }));
+vi.mock('@sarvinbox/core', async importOriginal => ({ ...await importOriginal<typeof import('@sarvinbox/core')>(), callAIWithRetry: vi.fn(), setEmailReadFlag: h.setReadFlag }));
+vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: h.logUserAction }));
 vi.mock('../../../../electron/shared', () => ({
   getMainWindow: () => h.windowAvailable ? { webContents: h.sender } : null,
   getCurrentAccountId: () => h.current,
   requireStorage: h.requireStorage,
   getStorageFor: (id: string) => h.storages.get(id) ?? null,
-  getSyncEngineFor: () => null,
-  getSyncEngine: () => null,
+  getSyncEngineFor: (id: string) => id === 'sales-account' ? h.salesEngine : h.activeEngine,
+  getSyncEngine: () => h.activeEngine,
   getAllAccountRuntimes: () => [],
 }));
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: h.ensureRuntime }));
@@ -50,9 +54,12 @@ vi.mock('../../../../electron/services/inbox-assistant-service', () => ({
     renameChat(value: unknown) { return h.service.renameChat(value); }
     updateChat(value: unknown) { return h.service.updateChat(value); }
     deleteChat(value: unknown) { return h.service.deleteChat(value); }
+    rewindChat(value: unknown) { return h.service.rewindChat(value); }
+    restoreRewindChat(value: unknown) { return h.service.restoreRewindChat(value); }
     draftEmail(value: unknown, progress: (activity: InboxAssistantActivity) => void) { return h.service.draftEmail(value, progress); }
     history() { return h.service.history(); }
     ask(value: unknown, progress: (activity: InboxAssistantActivity) => void) { return h.service.ask(value, progress); }
+    applyReview(value: unknown) { return h.service.applyReview(value); }
     cancel(value: string) { return h.service.cancel(value); }
     clearHistory() { return h.service.clearHistory(); }
   },
@@ -82,6 +89,11 @@ beforeEach(() => {
   h.salesStorage.getEmail.mockResolvedValue({ id: ref.emailId, threadId: 'sales-sent-thread', folderId: 'sent', tags: '|Sent|', attachmentNames: JSON.stringify([ref.filename]) });
   h.activeStorage.getAttachments.mockResolvedValue([]);
   h.salesStorage.getAttachments.mockResolvedValue([{ id: 'quote-file', filename: ref.filename }]);
+  h.activeStorage.getFolder.mockResolvedValue({ path: 'INBOX' });
+  h.salesStorage.getFolder.mockResolvedValue({ path: 'Sales/Sent' });
+  h.activeEngine.bulkMarkAsRead.mockResolvedValue('success'); h.activeEngine.bulkMarkAsUnread.mockResolvedValue('success');
+  h.salesEngine.bulkMarkAsRead.mockResolvedValue('queued'); h.salesEngine.bulkMarkAsUnread.mockResolvedValue('success');
+  h.setReadFlag.mockResolvedValue(true);
   h.service.accounts.mockReturnValue(h.registered);
   h.service.history.mockReturnValue([]);
   h.service.ask.mockResolvedValue({ id: 'answer' });
@@ -99,7 +111,7 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     expect(fetchAssistantMessageBody).toHaveBeenCalledExactlyOnceWith('sales-account', ref.emailId, signal, { force: true });
   });
 
-  it.each(['accounts', 'chats', 'chat', 'createChat', 'renameChat', 'updateChat', 'deleteChat', 'draftEmail', 'history', 'ask', 'cancel', 'clearHistory', 'source'])('accepts %s only from the app main frame', async channel => {
+  it.each(['accounts', 'chats', 'chat', 'createChat', 'renameChat', 'updateChat', 'deleteChat', 'rewindChat', 'restoreRewindChat', 'draftEmail', 'history', 'ask', 'applyReview', 'cancel', 'clearHistory', 'source'])('accepts %s only from the app main frame', async channel => {
     for (const event of [{ sender: h.sender, senderFrame: {} }, { sender: { mainFrame: h.frame }, senderFrame: h.frame }, {}]) {
       expect(await call(channel, ref, event)).toEqual({ success: false, error: 'Inbox Agent requests must come from the main app window.' });
     }
@@ -108,6 +120,80 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     for (const method of Object.values(h.service)) expect(method).not.toHaveBeenCalled();
     expect(h.salesStorage.getEmail).not.toHaveBeenCalled();
     expect(h.requireStorage).not.toHaveBeenCalled();
+  });
+
+  it('waits for cancellation acknowledgement and forwards rewind/restore only to the service', async () => {
+    let finish!: () => void;
+    h.service.cancel.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({ requestId: 'stop-1', cancelled: true }); }));
+    const stopped = vi.fn();
+    const pending = call('cancel', 'stop-1').then(stopped);
+    await Promise.resolve();
+    expect(stopped).not.toHaveBeenCalled();
+    finish(); await pending;
+    expect(stopped).toHaveBeenCalledWith({ success: true, data: { requestId: 'stop-1', cancelled: true } });
+    const request = { chatId: 'chat-1', exchangeId: 'turn-1' };
+    h.service.rewindChat.mockResolvedValue({ chat: { id: 'chat-1', exchanges: [] }, question: 'Original question', accountIds: ['sales-account'] });
+    expect(await call('rewindChat', request)).toMatchObject({ success: true, data: { question: 'Original question' } });
+    expect(h.service.rewindChat).toHaveBeenCalledExactlyOnceWith(request);
+    h.service.restoreRewindChat.mockResolvedValue({ id: 'chat-1', exchanges: [{ id: 'turn-1' }] });
+    expect(await call('restoreRewindChat', { chatId: 'chat-1' })).toMatchObject({ success: true, data: { exchanges: [{ id: 'turn-1' }] } });
+  });
+
+  it('forwards reviewed actions only through the validated service method', async () => {
+    const request = { requestId: 'apply-1', chatId: 'chat-1', exchangeId: 'exchange-1', reviewId: 'review-1', itemIds: ['item-1'] };
+    h.service.applyReview.mockResolvedValue({ id: 'exchange-1', reviewResult: { appliedCount: 1 } });
+    expect(await call('applyReview', request)).toMatchObject({ success: true, data: { reviewResult: { appliedCount: 1 } } });
+    expect(h.service.applyReview).toHaveBeenCalledExactlyOnceWith(request);
+    h.service.applyReview.mockRejectedValueOnce(new Error('This review has expired.'));
+    expect(await call('applyReview', request)).toEqual({ success: false, error: 'This review has expired.' });
+  });
+
+  it('saves a reviewed read flag through the owning account queue and logs only the matching storage', async () => {
+    h.salesStorage.getEmail.mockResolvedValue({ id: ref.emailId, threadId: 'sales-thread', fromAddress: 'news@offers.example', folderId: 'sent', uid: 42, tags: '|Sent|' });
+    expect(await h.serviceDeps.setRead!('sales-account', [ref.emailId], true)).toEqual({ appliedIds: [], queuedIds: [ref.emailId], failedIds: [] });
+    expect(h.salesEngine.bulkMarkAsRead).toHaveBeenCalledExactlyOnceWith('Sales/Sent', [42]);
+    expect(h.setReadFlag).toHaveBeenCalledExactlyOnceWith(h.salesStorage, ref.emailId, true, 'Inbox Agent read action');
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith(ref.emailId, 'read', expect.objectContaining({ source: 'agent_approved', threadId: 'sales-thread' }), h.salesStorage);
+    expect(h.activeEngine.bulkMarkAsRead).not.toHaveBeenCalled();
+    expect(h.activeStorage.getEmail).not.toHaveBeenCalled();
+    expect(h.requireStorage).not.toHaveBeenCalled();
+  });
+
+  it('does not change local flags or log success when the owner queue fails', async () => {
+    h.salesStorage.getEmail.mockResolvedValue({ id: ref.emailId, folderId: 'sent', uid: 42, tags: '|Sent|' });
+    h.salesEngine.bulkMarkAsRead.mockResolvedValueOnce('failed');
+    expect(await h.serviceDeps.setRead!('sales-account', [ref.emailId], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: [ref.emailId] });
+    expect(h.setReadFlag).not.toHaveBeenCalled();
+    expect(h.logUserAction).not.toHaveBeenCalled();
+    expect(h.activeEngine.bulkMarkAsRead).not.toHaveBeenCalled();
+    expect(h.activeStorage.getEmail).not.toHaveBeenCalled();
+  });
+
+  it('rejects removed or unavailable mutation owners and refuses runtime replacement without using the active mailbox', async () => {
+    h.registered = h.registered.filter(account => account.id !== 'sales-account');
+    await expect(h.serviceDeps.setRead!('sales-account', [ref.emailId], true)).rejects.toThrow('no longer connected');
+    h.registered.push({ id: 'sales-account', email: 'sales@sarv.example' });
+    h.storages.delete('sales-account');
+    await expect(h.serviceDeps.setRead!('sales-account', [ref.emailId], true)).rejects.toThrow('not available');
+    h.ensureRuntime.mockResolvedValueOnce({ storage: h.salesStorage, syncEngine: h.salesEngine })
+      .mockResolvedValueOnce({ storage: h.activeStorage, syncEngine: h.activeEngine });
+    await expect(h.serviceDeps.setRead!('sales-account', [ref.emailId], true)).rejects.toThrow('changed');
+    expect(h.setReadFlag).not.toHaveBeenCalled();
+    expect(h.salesEngine.bulkMarkAsRead).not.toHaveBeenCalled();
+    expect(h.activeEngine.bulkMarkAsRead).not.toHaveBeenCalled();
+    expect(h.requireStorage).not.toHaveBeenCalled();
+  });
+
+  it('does not apply a local flag if its account is removed after the queue acknowledges', async () => {
+    h.salesStorage.getEmail.mockResolvedValue({ id: ref.emailId, folderId: 'sent', uid: 42, tags: '|Sent|' });
+    h.salesEngine.bulkMarkAsRead.mockImplementationOnce(async () => {
+      h.registered = h.registered.filter(account => account.id !== 'sales-account');
+      return 'queued';
+    });
+    expect(await h.serviceDeps.setRead!('sales-account', [ref.emailId], true)).toEqual({ appliedIds: [], queuedIds: [], failedIds: [ref.emailId] });
+    expect(h.setReadFlag).not.toHaveBeenCalled();
+    expect(h.logUserAction).not.toHaveBeenCalled();
+    expect(h.activeStorage.getEmail).not.toHaveBeenCalled();
   });
 
   it('forwards questions and conversation commands through the validated service', async () => {
@@ -119,7 +205,8 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     await call('cancel', 'ask-1');
     expect(h.service.cancel).toHaveBeenCalledExactlyOnceWith('ask-1');
     await call('cancel', { requestId: 'ask-1' });
-    expect(h.service.cancel).toHaveBeenCalledOnce();
+    expect(h.service.cancel).toHaveBeenCalledTimes(2);
+    expect(h.service.cancel).toHaveBeenLastCalledWith({ requestId: 'ask-1' });
     expect(await call('clearHistory')).toEqual({ success: true, data: null });
     expect(h.service.clearHistory).toHaveBeenCalledOnce();
   });

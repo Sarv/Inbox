@@ -6,6 +6,7 @@ import { AntivirusSetupModal } from './components/antivirus/AntivirusSetupModal'
 import { UnscannedAttachmentWarning } from './components/antivirus/UnscannedAttachmentWarning';
 import { AppSidebar, AppSection } from './components/AppSidebar';
 import { AssistantSourcePane } from './components/assistant/AssistantSourcePane';
+import { AssistantWorkspace } from './components/assistant/AssistantWorkspace';
 import { InboxAssistant } from './components/assistant/InboxAssistant';
 import { AttachmentViewer } from './components/attachment-viewer/AttachmentViewer';
 import { ComposeEmail } from './components/ComposeEmail';
@@ -49,6 +50,7 @@ import { ensureSarvAiProvider } from './services/sarv-ai-auto-register';
 import { requestConfirm } from './store/confirm-service';
 import { useEmailStore } from './store/email-store';
 import { migrateCredentialsToVault, canonicalizeAccountIds } from './store/helpers';
+import { refreshVisibleViewForFolder } from './store/slices/sync-slice';
 import type { InboxAssistantSource } from './types/inbox-assistant';
 import { shouldShowOnboarding, shouldShowNoAccountEmptyState } from './utils/app-gates';
 import { openInboxAssistantDraft } from './utils/inbox-assistant-draft';
@@ -107,6 +109,7 @@ function App() {
   const [aiSettingsNavigationId, setAiSettingsNavigationId] = useState(0);
   const [assistantAttachment, setAssistantAttachment] = useState<{ accountId: string; emailId: string; filename: string } | null>(null);
   const [assistantSource, setAssistantSource] = useState<InboxAssistantSource | null>(null);
+  const [assistantFocused, setAssistantFocused] = useState(false);
   const closeAssistantSource = useCallback(() => { setAssistantSource(null); setAssistantAttachment(null); }, []);
   // One-shot: open the add-account wizard once AccountsTab mounts. Set by the
   // shared add-account flow so every entry point (sidebar switcher, mailbox
@@ -169,7 +172,6 @@ function App() {
 
   // Perform the actual section switch, clearing any deep-link tab hints.
   const doNavigate = useCallback((next: AppSection) => {
-    if (next !== 'assistant') { setAssistantSource(null); setAssistantAttachment(null); }
     setSettingsInitialTab(undefined);
     setAiSettingsInitialTab(undefined);
     if (next === 'ai-settings') setAiSettingsNavigationId((id) => id + 1);
@@ -248,7 +250,7 @@ function App() {
     return () => { try { off?.(); } catch { /* ignore */ } };
   }, []);
 
-  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, enabled: !showOnboarding && (activeSection !== 'assistant' || !!assistantSource), allowListNavigation: activeSection !== 'assistant' });
+  useKeyboardShortcuts({ setActiveSection: requestSection, focusSearch, enabled: !showOnboarding && (activeSection === 'assistant' ? !!assistantSource : !assistantFocused), allowListNavigation: activeSection !== 'assistant' && !assistantFocused });
   useNotificationBridge();
 
   // Load user-defined labels once on mount (local DB — no connection needed).
@@ -871,13 +873,7 @@ function App() {
           })}
         />;
       case 'assistant':
-        return <InboxAssistant
-          defaultDraftAccountId={activeAccountId ?? undefined}
-          onOpenDraft={draft => openInboxAssistantDraft(draft, useEmailStore.getState())}
-          onNavigateToSource={setAssistantSource}
-          onCloseSourcePane={closeAssistantSource}
-          sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} onClose={closeAssistantSource} onOpenAttachment={target => setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename })} /> : undefined}
-        />;
+        return null; // The persistent workspace owns the sole assistant instance.
       case 'extensions':
         return <ExtensionManager />;
       case 'teams':
@@ -960,7 +956,30 @@ function App() {
             reassuring green "Live" while nothing arrives. Hidden when re-auth is
             needed (that banner takes over). */}
         <SyncTroubleBanner />
-        <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
+        <AssistantWorkspace
+          section={activeSection}
+          onOpenInbox={() => requestSection('mail')}
+          onOpenAssistant={() => requestSection('assistant')}
+          onFocusChange={setAssistantFocused}
+          renderAssistant={({ compact, visible, onStateChange }) => <InboxAssistant
+            compact={compact}
+            visible={visible}
+            onStateChange={onStateChange}
+            defaultDraftAccountId={activeAccountId ?? undefined}
+            onMailChanged={() => {
+              const store = useEmailStore.getState();
+              void Promise.allSettled([store.loadFolders(), store.refreshUnreadSummary()]).then(() => {
+                const current = useEmailStore.getState();
+                const folder = current.folders.find(value => value.id === current.selectedFolderId);
+                return refreshVisibleViewForFolder(() => useEmailStore.getState(), folder?.path ?? 'INBOX');
+              });
+            }}
+            onOpenDraft={draft => openInboxAssistantDraft(draft, useEmailStore.getState())}
+            onNavigateToSource={setAssistantSource}
+            onCloseSourcePane={closeAssistantSource}
+            sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} autoMarkRead={false} onClose={closeAssistantSource} onOpenAttachment={target => setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename })} /> : undefined}
+          />}
+        >
           {/* No account + on the mail view → show the empty state. Only overrides
               the mail section so Settings (and other sections) stay reachable and
               the user can add/configure there. "Add account" deep-links to
@@ -968,7 +987,7 @@ function App() {
           {shouldShowNoAccountEmptyState({ checkingConnection, onboardingComplete, hasAccounts, needsReauth, activeSection, onboardingInProgress })
             ? <NoAccountEmptyState onAddAccount={openAddAccountFlow} />
             : renderContent()}
-        </div>
+        </AssistantWorkspace>
       </div>
 
       {/* Compose Email Modal */}

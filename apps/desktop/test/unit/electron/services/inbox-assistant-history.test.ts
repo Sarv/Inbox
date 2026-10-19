@@ -11,6 +11,8 @@ let store: InboxAssistantHistoryStore;
 const LEGACY = 'inbox-assistant-history-v1';
 const INDEX = 'inbox-assistant-chats-index-v2';
 const CHAT = 'inbox-assistant-chat-v2:';
+const REWIND = 'inbox-assistant-rewind-v1:';
+const REWIND_AUDIT = 'inbox-assistant-rewind-audit-v1:';
 
 function exchange(index = 0): InboxAssistantExchange {
   return { id: `exchange-${index}`, question: index === 0 ? 'What quote did I send to TCS?' : `What changed in revision ${index}?`,
@@ -35,6 +37,328 @@ beforeEach(() => {
 afterEach(() => { db.close(); });
 
 describe('separate encrypted-store Inbox Agent chats', () => {
+  it('migrates legacy persistent Auto and one-request approval safely without rewriting conversations or recovery data', () => {
+    const ongoing = store.create(); store.writeChat({ ...ongoing, exchanges: [exchange()] });
+    store.update(ongoing.id, { pinned: true }); store.rename(ongoing.id, 'Ongoing delegation');
+    const oneRequest = store.create(); store.writeChat({ ...oneRequest, exchanges: [exchange(1), exchange(2)] });
+    store.rewind(oneRequest.id, 'exchange-2');
+    const review = store.create(); const unset = store.create();
+    const legacy = JSON.parse(blob(INDEX)!);
+    delete legacy.actionModeVersion;
+    for (const item of legacy.chats) {
+      if (item.id === ongoing.id) item.actionMode = 'auto';
+      else if (item.id === oneRequest.id) item.actionMode = 'approve_for_me';
+      else if (item.id === review.id) item.actionMode = 'review';
+      else delete item.actionMode;
+    }
+    seed(INDEX, legacy);
+    const recovery = JSON.parse(blob(`${REWIND}${oneRequest.id}`)!);
+    recovery.chat.actionMode = 'approve_for_me'; seed(`${REWIND}${oneRequest.id}`, recovery);
+    const originalBodies = new Map(legacy.chats.map((item: { id: string }) => [item.id, blob(`${CHAT}${item.id}`)]));
+    const originalRecovery = blob(`${REWIND}${oneRequest.id}`);
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    const listing = restarted.list();
+    expect(listing.activeChatId).toBe(unset.id);
+    expect(listing.chats.find(chat => chat.id === ongoing.id)).toMatchObject({ title: 'Ongoing delegation', actionMode: 'approve_for_me', pinned: true });
+    expect(listing.chats.find(chat => chat.id === oneRequest.id)).toMatchObject({ actionMode: 'review', rewindAvailable: true });
+    expect(listing.chats.find(chat => chat.id === review.id)?.actionMode).toBe('review');
+    expect(listing.chats.find(chat => chat.id === unset.id)?.actionMode ?? 'review').toBe('review');
+    const migrated = JSON.parse(blob(INDEX)!);
+    expect(migrated.actionModeVersion).toBe(2);
+    expect(migrated.chats.map((item: { id: string; updatedAt: number }) => [item.id, item.updatedAt]))
+      .toEqual(legacy.chats.map((item: { id: string; updatedAt: number }) => [item.id, item.updatedAt]));
+    for (const [id, before] of originalBodies) expect(blob(`${CHAT}${id}`)).toBe(before);
+    expect(blob(`${REWIND}${oneRequest.id}`)).toBe(originalRecovery);
+    const migratedIndex = blob(INDEX);
+    const secondRestart = createInboxAssistantHistoryStore(() => db);
+    expect(secondRestart.load(ongoing.id, { select: false }).actionMode).toBe('approve_for_me');
+    expect(secondRestart.load(oneRequest.id, { select: false }).actionMode).toBe('review');
+    expect(blob(INDEX)).toBe(migratedIndex);
+    expect(secondRestart.restoreRewind(oneRequest.id)).toMatchObject({ actionMode: 'review', exchangeCount: 2 });
+    expect(secondRestart.list().activeChatId).toBe(unset.id);
+  });
+
+  it.each(['list', 'load'] as const)('migrates an unversioned one-request approval to Ask for approval through %s', entry => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange()] });
+    const legacy = JSON.parse(blob(INDEX)!);
+    delete legacy.actionModeVersion; legacy.chats[0].actionMode = 'approve_for_me'; seed(INDEX, legacy);
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    if (entry === 'list') expect(restarted.list().chats[0]?.actionMode).toBe('review');
+    else expect(restarted.load(chat.id).actionMode).toBe('review');
+    expect(JSON.parse(blob(INDEX)!)).toMatchObject({ actionModeVersion: 2, chats: [{ actionMode: 'review' }] });
+    expect(restarted.load(chat.id).exchanges[0]?.answer).toEqual(exchange().answer);
+  });
+
+  it('creates the new action-mode marker immediately and does not reinterpret a fresh persistent approval on restart', () => {
+    const chat = store.create();
+    expect(JSON.parse(blob(INDEX)!).actionModeVersion).toBe(2);
+    store.update(chat.id, { actionMode: 'approve_for_me' });
+    store.writeChat({ ...chat, exchanges: [exchange()] });
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(restarted.load(chat.id).actionMode).toBe('approve_for_me');
+    const current = restarted.load(chat.id);
+    restarted.writeChat({ ...current, exchanges: [...current.exchanges, exchange(1)] });
+    expect(createInboxAssistantHistoryStore(() => db).load(chat.id)).toMatchObject({ actionMode: 'approve_for_me', exchangeCount: 2 });
+  });
+
+  it('rolls back the complete mode migration if writing the private marker fails', () => {
+    const chat = store.create();
+    const legacy = JSON.parse(blob(INDEX)!);
+    delete legacy.actionModeVersion; legacy.chats[0].actionMode = 'auto'; seed(INDEX, legacy);
+    const before = blob(INDEX); const body = blob(`${CHAT}${chat.id}`);
+    db.exec(`CREATE TRIGGER reject_mode_migration BEFORE UPDATE ON core_blobs WHEN NEW.key = '${INDEX}' BEGIN SELECT RAISE(ABORT, 'synthetic mode migration failure'); END`);
+    expect(() => createInboxAssistantHistoryStore(() => db).list()).toThrow('synthetic mode migration failure');
+    expect(blob(INDEX)).toBe(before); expect(blob(`${CHAT}${chat.id}`)).toBe(body);
+    db.exec('DROP TRIGGER reject_mode_migration');
+    expect(createInboxAssistantHistoryStore(() => db).list().chats[0]?.actionMode).toBe('approve_for_me');
+    expect(JSON.parse(blob(INDEX)!).actionModeVersion).toBe(2);
+  });
+
+  it('rejects unsupported mode-version markers and Auto in a current index without silently broadening approval', () => {
+    store.create();
+    const valid = JSON.parse(blob(INDEX)!);
+    for (const actionModeVersion of [1, 3, null, '2', true]) {
+      seed(INDEX, { ...valid, actionModeVersion });
+      const before = blob(INDEX);
+      expect(() => createInboxAssistantHistoryStore(() => db).list()).toThrow('preserved');
+      expect(blob(INDEX)).toBe(before);
+    }
+    const invalidCurrent = structuredClone(valid); invalidCurrent.chats[0].actionMode = 'auto';
+    seed(INDEX, invalidCurrent);
+    const before = blob(INDEX);
+    expect(() => createInboxAssistantHistoryStore(() => db).list()).toThrow('preserved');
+    expect(blob(INDEX)).toBe(before);
+  });
+
+  it('rewinds before the selected question and preserves its account scope, earlier turns and complete recovery receipts', () => {
+    const first = store.create();
+    const turns = [exchange(), { ...exchange(1), accountIds: ['sales', 'work'] }, { ...exchange(2),
+      reviewResult: { reviewId: 'saved-review', items: [{ itemId: 'reviewed-item', accountId: 'work', threadId: 'reviewed-thread',
+        status: 'queued' as const, appliedIds: [], queuedIds: ['changed-mail'], failedIds: [] }],
+      appliedCount: 0, queuedCount: 1, failedCount: 0, skippedCount: 0 } }];
+    store.writeChat({ ...first, exchanges: turns });
+    store.rename(first.id, 'Retain this name');
+    store.update(first.id, { pinned: true, actionMode: 'approve_for_me' });
+    const other = store.create(); store.writeChat({ ...other, exchanges: [exchange(9)] });
+    const otherBody = blob(`${CHAT}${other.id}`);
+    const result = store.rewind(first.id, 'exchange-1');
+    expect(result).toMatchObject({ question: turns[1]!.question, accountIds: ['sales', 'work'],
+      chat: { id: first.id, title: 'Retain this name', pinned: true, actionMode: 'approve_for_me', rewindAvailable: true, exchangeCount: 1 } });
+    expect(result.chat.exchanges.map(turn => turn.id)).toEqual(['exchange-0']);
+    expect(result.chat.exchanges[0]?.answer).toEqual(turns[0]!.answer);
+    expect(result.chat.exchanges[0]?.activities).toEqual(turns[0]!.activities);
+    const recovery = JSON.parse(blob(`${REWIND}${first.id}`)!);
+    expect(recovery.chat.exchanges.map((turn: InboxAssistantExchange) => turn.id)).toEqual(['exchange-0', 'exchange-1', 'exchange-2']);
+    expect(recovery.chat.exchanges[2].reviewResult).toEqual(turns[2]!.reviewResult);
+    expect(blob(INDEX)).not.toContain('SENSITIVE ANSWER');
+    expect(blob(INDEX)).not.toContain('changed-mail');
+    expect(blob(`${CHAT}${other.id}`)).toBe(otherBody);
+    expect(store.list().activeChatId).toBe(other.id);
+    expect(createInboxAssistantHistoryStore(() => db).load(first.id, { select: false }).exchanges).toHaveLength(1);
+    expect(store.list().activeChatId).toBe(other.id);
+  });
+
+  it('rewinds the first question to an empty conversation while retaining its name and recovery', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange(), exchange(1)] });
+    const before = store.load(chat.id);
+    const result = store.rewind(chat.id, 'exchange-0');
+    expect(result).toMatchObject({ question: before.exchanges[0]!.question, accountIds: ['work'],
+      chat: { title: before.title, exchangeCount: 0, exchanges: [], rewindAvailable: true } });
+    expect(store.list().chats[0]).toMatchObject({ title: before.title, exchangeCount: 0, rewindAvailable: true });
+    expect(JSON.parse(blob(`${REWIND}${chat.id}`)!).chat.exchanges).toHaveLength(2);
+  });
+
+  it('restores after restart and swaps in the edited branch so newer answers and receipts stay recoverable', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange(), exchange(1), exchange(2)] });
+    const rewound = store.rewind(chat.id, 'exchange-1');
+    const edited = { ...exchange(4), reviewResult: { reviewId: 'new-review', items: [], appliedCount: 1, queuedCount: 0, failedCount: 0, skippedCount: 0 } };
+    store.writeChat({ ...rewound.chat, exchanges: [...rewound.chat.exchanges, edited] });
+    store.rename(chat.id, 'Current title'); store.update(chat.id, { pinned: true, actionMode: 'review' });
+    const other = store.create();
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    const restored = restarted.restoreRewind(chat.id);
+    expect(restored).toMatchObject({ title: 'Current title', pinned: true, actionMode: 'review', rewindAvailable: true, exchangeCount: 3 });
+    expect(restored.exchanges.map(turn => turn.id)).toEqual(['exchange-0', 'exchange-1', 'exchange-2']);
+    expect(restarted.list().activeChatId).toBe(other.id);
+    const editedRecovery = JSON.parse(blob(`${REWIND}${chat.id}`)!).chat;
+    expect(editedRecovery.exchanges.map((turn: InboxAssistantExchange) => turn.id)).toEqual(['exchange-0', 'exchange-4']);
+    expect(editedRecovery.exchanges[1].reviewResult).toEqual(edited.reviewResult);
+    const swappedBack = createInboxAssistantHistoryStore(() => db).restoreRewind(chat.id);
+    expect(swappedBack.exchanges.map(turn => turn.id)).toEqual(['exchange-0', 'exchange-4']);
+    expect(swappedBack.exchanges[1]?.reviewResult).toEqual(edited.reviewResult);
+  });
+
+  it('keeps older action receipts in encrypted audit blobs when a later edit replaces the recovery slot', () => {
+    const chat = store.create();
+    const receipt = { reviewId: 'older-review', items: [{ itemId: 'older-item', accountId: 'work', threadId: 'older-thread',
+      status: 'applied' as const, appliedIds: ['originally-changed-mail'], queuedIds: [], failedIds: [] }],
+    appliedCount: 1, queuedCount: 0, failedCount: 0, skippedCount: 0 };
+    store.writeChat({ ...chat, exchanges: [exchange(), { ...exchange(1), reviewResult: receipt }] });
+    const first = store.rewind(chat.id, 'exchange-1');
+    store.writeChat({ ...first.chat, exchanges: [...first.chat.exchanges, exchange(4)] });
+    store.rewind(chat.id, 'exchange-4');
+    const audit = db.prepare('SELECT data FROM core_blobs WHERE substr(key, 1, ?) = ?')
+      .all(`${REWIND_AUDIT}${chat.id}:`.length, `${REWIND_AUDIT}${chat.id}:`) as Array<{ data: Buffer }>;
+    expect(audit).toHaveLength(1);
+    const saved = JSON.parse(Buffer.from(audit[0]!.data).toString('utf8'));
+    expect(saved.chat.exchanges[1].reviewResult).toEqual(receipt);
+    expect(blob(`${REWIND}${chat.id}`)).not.toContain('originally-changed-mail');
+    expect(store.restoreRewind(chat.id).exchanges.map(turn => turn.id)).toEqual(['exchange-0', 'exchange-4']);
+    expect(blob(INDEX)).not.toContain('originally-changed-mail');
+    store.delete(chat.id);
+    expect(db.prepare('SELECT key FROM core_blobs WHERE substr(key, 1, ?) = ?')
+      .all(`${REWIND_AUDIT}${chat.id}:`.length, `${REWIND_AUDIT}${chat.id}:`)).toEqual([]);
+  });
+
+  it('rejects invalid, missing and cross-chat rewind targets without changing saved conversations', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange()] });
+    const other = store.create(); store.writeChat({ ...other, exchanges: [exchange(1)] });
+    const beforeIndex = blob(INDEX); const beforeBody = blob(`${CHAT}${chat.id}`);
+    for (const [id, target] of [['../invalid', 'exchange-0'], ['missing-chat', 'exchange-0'], [chat.id, '../invalid'], [chat.id, 'missing'], [chat.id, 'exchange-1']]) {
+      expect(() => store.rewind(id!, target!)).toThrow();
+    }
+    expect(() => store.restoreRewind(chat.id)).toThrow('no saved conversation');
+    expect(() => store.restoreRewind('../invalid')).toThrow();
+    expect(blob(INDEX)).toBe(beforeIndex);
+    expect(blob(`${CHAT}${chat.id}`)).toBe(beforeBody);
+    expect(blob(`${REWIND}${chat.id}`)).toBeUndefined();
+  });
+
+  it('rolls back both recovery and conversation if the rewind or restoration index update fails', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange(), exchange(1)] });
+    const originalBody = blob(`${CHAT}${chat.id}`); const originalIndex = blob(INDEX);
+    db.exec(`CREATE TRIGGER reject_rewind_index BEFORE UPDATE ON core_blobs WHEN NEW.key = '${INDEX}' BEGIN SELECT RAISE(ABORT, 'synthetic rewind failure'); END`);
+    expect(() => store.rewind(chat.id, 'exchange-1')).toThrow('synthetic rewind failure');
+    expect(blob(`${CHAT}${chat.id}`)).toBe(originalBody);
+    expect(blob(INDEX)).toBe(originalIndex);
+    expect(blob(`${REWIND}${chat.id}`)).toBeUndefined();
+    db.exec('DROP TRIGGER reject_rewind_index');
+    store.rewind(chat.id, 'exchange-1');
+    const rewoundBody = blob(`${CHAT}${chat.id}`); const recovery = blob(`${REWIND}${chat.id}`); const rewoundIndex = blob(INDEX);
+    db.exec(`CREATE TRIGGER reject_restore_index BEFORE UPDATE ON core_blobs WHEN NEW.key = '${INDEX}' BEGIN SELECT RAISE(ABORT, 'synthetic restore failure'); END`);
+    expect(() => store.restoreRewind(chat.id)).toThrow('synthetic restore failure');
+    expect(blob(`${CHAT}${chat.id}`)).toBe(rewoundBody);
+    expect(blob(`${REWIND}${chat.id}`)).toBe(recovery);
+    expect(blob(INDEX)).toBe(rewoundIndex);
+  });
+
+  it('preserves unreadable or incorrectly owned recovery data rather than restoring another conversation', () => {
+    const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange(), exchange(1)] });
+    store.rewind(chat.id, 'exchange-1');
+    const beforeBody = blob(`${CHAT}${chat.id}`); const beforeIndex = blob(INDEX);
+    for (const recovery of [{ version: 1, chat: { ...chat, id: 'other-chat', exchanges: [exchange()] } }, { version: 1, chat: { ...chat, exchanges: 'invalid' } }]) {
+      seed(`${REWIND}${chat.id}`, recovery);
+      const beforeRecovery = blob(`${REWIND}${chat.id}`);
+      expect(() => store.restoreRewind(chat.id)).toThrow('preserved');
+      expect(() => store.rewind(chat.id, 'exchange-0')).toThrow('preserved');
+      expect(blob(`${REWIND}${chat.id}`)).toBe(beforeRecovery);
+    }
+    db.prepare('UPDATE core_blobs SET data = ? WHERE key = ?').run(Buffer.from('unreadable recovery'), `${REWIND}${chat.id}`);
+    expect(() => store.restoreRewind(chat.id)).toThrow('preserved');
+    expect(blob(`${REWIND}${chat.id}`)).toBe('unreadable recovery');
+    expect(blob(`${CHAT}${chat.id}`)).toBe(beforeBody);
+    expect(blob(INDEX)).toBe(beforeIndex);
+  });
+
+  it('deletes only the chosen chat recovery and leaves another chat recovery and legacy backup unchanged', () => {
+    seed(LEGACY, [exchange()]);
+    const first = store.load(store.list().activeChatId!); store.rewind(first.id, 'exchange-0');
+    const second = store.create(); store.writeChat({ ...second, exchanges: [exchange(1)] }); store.rewind(second.id, 'exchange-1');
+    const otherRecovery = blob(`${REWIND}${second.id}`); const legacy = blob(LEGACY);
+    store.delete(first.id);
+    expect(blob(`${REWIND}${first.id}`)).toBeUndefined();
+    expect(blob(`${REWIND}${second.id}`)).toBe(otherRecovery);
+    expect(blob(LEGACY)).toBe(legacy);
+    expect(store.restoreRewind(second.id).exchanges[0]?.id).toBe('exchange-1');
+  });
+
+  it.each(['review', 'approve_for_me'] as const)('persists approval mode %s across restart without rewriting the conversation', actionMode => {
+    const chat = store.create();
+    store.writeChat({ ...chat, exchanges: [exchange()] });
+    const before = blob(`${CHAT}${chat.id}`);
+    expect(store.update(chat.id, { actionMode })).toMatchObject({ id: chat.id, actionMode, pinned: false, exchangeCount: 1 });
+    expect(blob(`${CHAT}${chat.id}`)).toBe(before);
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(restarted.list().chats[0]).toMatchObject({ actionMode, pinned: false });
+    expect(restarted.load(chat.id)).toMatchObject({ actionMode, exchanges: [expect.objectContaining({ id: 'exchange-0' })] });
+    expect(restarted.load(chat.id).exchanges[0]?.answer).toEqual(exchange().answer);
+    expect(JSON.parse(blob(INDEX)!).actionModeVersion).toBe(2);
+  });
+
+  it('updates pin and approval mode independently or together without losing either setting or changing the active chat', () => {
+    const first = store.create(); const second = store.create();
+    expect(store.update(first.id, { pinned: true, actionMode: 'approve_for_me' })).toMatchObject({ pinned: true, actionMode: 'approve_for_me' });
+    expect(store.update(first.id, { pinned: false })).toMatchObject({ pinned: false, actionMode: 'approve_for_me' });
+    expect(store.update(first.id, { actionMode: 'review' })).toMatchObject({ pinned: false, actionMode: 'review' });
+    expect(store.list().activeChatId).toBe(second.id);
+    expect(createInboxAssistantHistoryStore(() => db).load(first.id, { select: false })).toMatchObject({ pinned: false, actionMode: 'review' });
+    expect(store.list().activeChatId).toBe(second.id);
+  });
+
+  it('changes approval mode using only metadata even when the saved chat body is unreadable', () => {
+    const chat = store.create();
+    db.prepare('UPDATE core_blobs SET data = ? WHERE key = ?').run(Buffer.from('unreadable preserved body'), `${CHAT}${chat.id}`);
+    db.exec(`CREATE TRIGGER forbid_mode_body_update BEFORE UPDATE ON core_blobs WHEN NEW.key = '${CHAT}${chat.id}' BEGIN SELECT RAISE(ABORT, 'body must not be rewritten'); END`);
+    expect(store.update(chat.id, { actionMode: 'approve_for_me', pinned: true })).toMatchObject({ actionMode: 'approve_for_me', pinned: true });
+    expect(blob(`${CHAT}${chat.id}`)).toBe('unreadable preserved body');
+    expect(createInboxAssistantHistoryStore(() => db).list().chats[0]).toMatchObject({ actionMode: 'approve_for_me', pinned: true });
+  });
+
+  it('preserves the latest approval mode across rename, stale answer completion, clear and reopening', () => {
+    const chat = store.create();
+    const stale = store.load(chat.id);
+    store.update(chat.id, { actionMode: 'approve_for_me', pinned: true });
+    store.rename(chat.id, 'Reviewed account tasks');
+    store.writeChat({ ...stale, actionMode: 'review', exchanges: [exchange()] });
+    expect(store.load(chat.id)).toMatchObject({ actionMode: 'approve_for_me', pinned: true, title: 'Reviewed account tasks', exchangeCount: 1 });
+    expect(store.clear(chat.id)).toMatchObject({ actionMode: 'approve_for_me', pinned: true, title: 'Reviewed account tasks', exchangeCount: 0 });
+    expect(createInboxAssistantHistoryStore(() => db).load(chat.id)).toMatchObject({ actionMode: 'approve_for_me', pinned: true, title: 'Reviewed account tasks', exchanges: [] });
+  });
+
+  it('keeps chats without an approval mode compatible with review behavior without rewriting their saved metadata', () => {
+    const chat = store.create();
+    store.writeChat({ ...chat, exchanges: [exchange()] });
+    const old = JSON.parse(blob(INDEX)!);
+    delete old.chats[0].actionMode;
+    seed(INDEX, old);
+    const beforeIndex = blob(INDEX);
+    const beforeBody = blob(`${CHAT}${chat.id}`);
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(restarted.list().chats[0]?.actionMode ?? 'review').toBe('review');
+    expect(restarted.load(chat.id).actionMode ?? 'review').toBe('review');
+    expect(blob(INDEX)).toBe(beforeIndex);
+    expect(blob(`${CHAT}${chat.id}`)).toBe(beforeBody);
+    expect(restarted.load(chat.id).exchanges).toHaveLength(1);
+  });
+
+  it('rejects unknown or malformed approval settings without changing either chat or metadata', () => {
+    const chat = store.create();
+    store.update(chat.id, { pinned: true, actionMode: 'approve_for_me' });
+    const beforeIndex = blob(INDEX); const beforeBody = blob(`${CHAT}${chat.id}`);
+    const invalid: unknown[] = [
+      {}, { actionMode: undefined }, { pinned: undefined }, { actionMode: 'approve' }, { actionMode: 'AUTO' }, { actionMode: 'auto' },
+      { actionMode: '' }, { actionMode: null }, { actionMode: false }, { actionMode: 1 }, { actionMode: [] },
+      { actionMode: {} }, { actionMode: 'auto', unknown: true }, { pinned: 'true', actionMode: 'review' },
+    ];
+    for (const changes of invalid) expect(() => store.update(chat.id, changes as Parameters<InboxAssistantHistoryStore['update']>[1])).toThrow();
+    expect(blob(INDEX)).toBe(beforeIndex);
+    expect(blob(`${CHAT}${chat.id}`)).toBe(beforeBody);
+    expect(store.load(chat.id)).toMatchObject({ pinned: true, actionMode: 'approve_for_me' });
+  });
+
+  it('preserves a malformed stored approval mode rather than silently replacing it with another approval policy', () => {
+    const chat = store.create();
+    const valid = JSON.parse(blob(INDEX)!);
+    for (const actionMode of ['approve', null, true, 1, {}, []]) {
+      const invalid = structuredClone(valid); invalid.chats[0].actionMode = actionMode;
+      seed(INDEX, invalid);
+      const before = blob(INDEX);
+      expect(() => createInboxAssistantHistoryStore(() => db).list()).toThrow('preserved');
+      expect(blob(INDEX)).toBe(before);
+      expect(blob(`${CHAT}${chat.id}`)).toBeDefined();
+    }
+  });
+
   it('persists pin state using only metadata while retaining every answer byte', () => {
     const chat = store.create(); store.writeChat({ ...chat, exchanges: [exchange()] });
     const before = blob(`${CHAT}${chat.id}`);

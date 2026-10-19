@@ -7,7 +7,7 @@ vi.mock('../../../../../src/store/email-store', async () => {
 });
 const reader = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock('../../../../../src/components/extensions/MailDetailWithPanels', () => ({
-  MailDetailWithPanels: (props: { threadOnly?: boolean; onBack?: () => void }) => {
+  MailDetailWithPanels: (props: { threadOnly?: boolean; autoMarkRead?: boolean; onBack?: () => void }) => {
     reader.render(props);
     return <div aria-label="Shared full mail reader"><button onClick={props.onBack}>Shared reader Back</button></div>;
   },
@@ -63,8 +63,15 @@ describe('embedded assistant source mail', () => {
     expect(reader.render).not.toHaveBeenCalled();
     await finishLoad();
     expect(view.byLabel('Shared full mail reader')).not.toBeNull();
-    expect(reader.render).toHaveBeenLastCalledWith(expect.objectContaining({ threadOnly: true, onBack: expect.any(Function) }));
+    expect(reader.render).toHaveBeenLastCalledWith(expect.objectContaining({ threadOnly: true, autoMarkRead: true, onBack: expect.any(Function) }));
     expect(view.container.textContent).toContain('sales@example.test');
+  });
+
+  it('passes unread-preserving review mode to the shared full reader', async () => {
+    const view = render(<AssistantSourcePane source={source} onClose={vi.fn()} autoMarkRead={false} />);
+    await settle(); await finishLoad();
+    expect(view.byLabel('Shared full mail reader')).not.toBeNull();
+    expect(reader.render).toHaveBeenLastCalledWith(expect.objectContaining({ threadOnly: true, autoMarkRead: false }));
   });
 
   it('clears old rows before loading and refuses a same-ID thread stamped with the wrong account', async () => {

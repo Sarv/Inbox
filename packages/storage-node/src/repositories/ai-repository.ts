@@ -447,7 +447,9 @@ export class AIRepository extends BaseRepository {
     logger.info(`[AIRepo] getEmailsByDynamicCategory(category=${categorySlug}, limit=${limit}, offset=${offset}, folderId=${options.folderId || 'all'})`);
 
     if (categorySlug === 'uncategorized') {
-      // Get all category slugs to exclude
+      // Category membership is independent of processing state: never-attempted,
+      // skipped and valid empty verdicts all need a visible place in the list.
+      // Exclude every defined category, including disabled but still-tagged ones.
       const allCats = this.db.prepare('SELECT slug FROM ai_category_definitions').all() as { slug: string }[];
       const excludeConditions = allCats
         .map(() => `AND instr(tags, '|' || ? || '|') = 0`)
@@ -462,8 +464,7 @@ export class AIRepository extends BaseRepository {
         params.push(folder.path);
       }
 
-      return this.pageCategoryThreads(`ai_processed_at IS NOT NULL
-          AND instr(tags, '|spam|') = 0
+      return this.pageCategoryThreads(`instr(tags, '|spam|') = 0
           ${this.excludeSpecialFolders}
           ${excludeConditions}
           ${folderCondition}`, params, limit, offset);
@@ -554,8 +555,7 @@ export class AIRepository extends BaseRepository {
 
     const uncategorized = this.db.prepare(`
       SELECT COUNT(DISTINCT COALESCE(NULLIF(thread_id, ''), id)) as count FROM emails
-      WHERE ai_processed_at IS NOT NULL
-        AND instr(tags, '|spam|') = 0
+      WHERE instr(tags, '|spam|') = 0
         ${unreadClause}
         ${this.excludeSpecialFolders}
         ${excludeConditions}

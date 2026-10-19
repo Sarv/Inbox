@@ -56,12 +56,12 @@ describe('Inbox Agent bounded retrieval priorities', () => {
     const preview = 'Dear customer, please find our User Directory licensing proposal for your existing deployment. '.repeat(2).slice(0, 181);
     const primary = mailbox([sentEmail('full-html', {
       cleanBody: preview,
-      rawBody: `<p>${preview}</p><p>The total commercial value is ₹9.5 Cr.</p>`,
+      rawBody: `<p>${preview}</p><p>The total commercial value is ₹7.25 Cr.</p>`,
     })]);
     const fetchBody = vi.fn();
     primary.fetchBody = fetchBody;
     const result = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
-    expect(result.evidence.find(source => source.emailId === 'full-html')?.text).toContain('₹9.5 Cr');
+    expect(result.evidence.find(source => source.emailId === 'full-html')?.text).toContain('₹7.25 Cr');
     expect(fetchBody).not.toHaveBeenCalled();
   });
 

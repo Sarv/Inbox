@@ -82,7 +82,7 @@ describe('category counters — total (pager) vs unread (chip)', () => {
     add(db, 'u1', 'INBOX');
     add(db, 'u2', 'INBOX|read');
     add(db, 's1', 'INBOX|spam');                    // AI-spam tag → not uncategorized
-    add(db, 'n1', 'INBOX', { aiProcessed: false }); // not processed → not uncategorized
+    add(db, 'n1', 'INBOX', { aiProcessed: false }); // never processed → still uncategorized
     add(db, 'd1', 'INBOX|social');                  // disabled category → not uncategorized
   });
 
@@ -111,24 +111,24 @@ describe('category counters — total (pager) vs unread (chip)', () => {
     const t = repo.getDynamicCategoryCounts(undefined, 'total');
     expect(t.promotions).toBe(5);   // p1..p4 + p5 (Invoices); x1 trashed
     expect(t.finance).toBe(2);      // f1, f2; x2 in Spam excluded
-    expect(t.uncategorized).toBe(2); // u1, u2 only
+    expect(t.uncategorized).toBe(3); // u1, u2, n1
 
     const ti = repo.getDynamicCategoryCounts('f-inbox', 'total');
     expect(ti.promotions).toBe(4);  // INBOX drops p5
     expect(ti.finance).toBe(2);
-    expect(ti.uncategorized).toBe(2);
+    expect(ti.uncategorized).toBe(3);
   });
 
   it('the chip (default mode) counts UNREAD mails — a strict subset of total', () => {
     const u = repo.getDynamicCategoryCounts(); // default: unread
     expect(u.promotions).toBe(4);   // p2,p3,p4 (INBOX) + p5; p1 read
     expect(u.finance).toBe(1);      // f2; f1 read
-    expect(u.uncategorized).toBe(1); // u1; u2 read
+    expect(u.uncategorized).toBe(2); // u1, n1; u2 read
 
     const ui = repo.getDynamicCategoryCounts('f-inbox'); // unread, INBOX-scoped
     expect(ui.promotions).toBe(3);  // p2,p3,p4
     expect(ui.finance).toBe(1);
-    expect(ui.uncategorized).toBe(1);
+    expect(ui.uncategorized).toBe(2);
 
     // unread can never exceed total for any category
     const ti = repo.getDynamicCategoryCounts('f-inbox', 'total');

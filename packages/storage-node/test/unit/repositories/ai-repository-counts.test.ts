@@ -202,7 +202,7 @@ describe('AIRepository read side (listings + counts)', () => {
       insertEmail(db, { id: 'c1', threadId: 't-c', tags: '|INBOX|invoice|meeting|', date: 504, aiProcessedAt: 1 });
       // thread t-d: unread, AI-processed, no category → uncategorized
       insertEmail(db, { id: 'd1', threadId: 't-d', tags: '|INBOX|', date: 505, aiProcessedAt: 1 });
-      // thread t-e: unread, never AI-processed → NOT uncategorized (unknown, not empty)
+      // thread t-e: unread, never AI-processed → uncategorized too
       insertEmail(db, { id: 'e1', threadId: 't-e', tags: '|INBOX|', date: 506, aiProcessedAt: null });
       // thread t-f: spam → excluded from uncategorized
       insertEmail(db, { id: 'f1', threadId: 't-f', tags: '|INBOX|spam|', date: 507, aiProcessedAt: 1 });
@@ -216,7 +216,7 @@ describe('AIRepository read side (listings + counts)', () => {
       expect(counts.invoice).toBe(2);       // t-a + t-c; b1 read, g1 trashed
       expect(counts.meeting).toBe(1);       // c1
       expect(counts.important).toBe(0);
-      expect(counts.uncategorized).toBe(1); // d1: unread, processed, no category, not spam/trashed
+      expect(counts.uncategorized).toBe(2); // d1 and e1, regardless of processing state
     });
 
     it("'total' mode counts ALL conversations per category (the pager denominator)", () => {
@@ -224,7 +224,7 @@ describe('AIRepository read side (listings + counts)', () => {
 
       expect(counts.invoice).toBe(3);       // t-a + t-b (read) + t-c; g1 trashed
       expect(counts.meeting).toBe(1);       // c1
-      expect(counts.uncategorized).toBe(1); // d1 only
+      expect(counts.uncategorized).toBe(2); // d1 and e1
     });
 
     // Disabling a category removes its chip; its mail is ALSO excluded from the
@@ -237,8 +237,8 @@ describe('AIRepository read side (listings + counts)', () => {
       expect(counts.invoice).toBeUndefined();
       expect(Object.keys(counts)).not.toContain('invoice');
       // a1/a2/a3/c1 carry the (now-disabled but still DEFINED) `invoice` tag, so
-      // they're excluded from uncategorized. Only d1 (no category) remains.
-      expect(counts.uncategorized).toBe(1);
+      // they're excluded from uncategorized. Only d1 and e1 have no category.
+      expect(counts.uncategorized).toBe(2);
       expect(counts.meeting).toBe(1);
     });
 
@@ -247,7 +247,7 @@ describe('AIRepository read side (listings + counts)', () => {
 
       const inbox = repo.getDynamicCategoryCounts('f-inbox'); // unread
       expect(inbox.invoice).toBe(2);       // t-a,t-c — the Archive copy is out of scope
-      expect(inbox.uncategorized).toBe(1);
+      expect(inbox.uncategorized).toBe(2);
       expect(repo.getDynamicCategoryCounts('f-inbox', 'total').invoice).toBe(3); // total, in scope
 
       const archive = repo.getDynamicCategoryCounts('f-archive');
@@ -351,9 +351,9 @@ describe('AIRepository read side (listings + counts)', () => {
   });
 
   // ==========================================================================
-  // The `uncategorized` pseudo-category: AI-processed mail that came back with NO
-  // category. It must exclude spam and every real category tag, or the user sees
-  // the same mail in two places.
+  // The `uncategorized` pseudo-category: mail carrying no known category,
+  // regardless of whether AI processing ever ran. It must exclude spam and
+  // every real category tag, or the user sees the same mail in two places.
   // ==========================================================================
   describe('getEmailsByDynamicCategory("uncategorized")', () => {
     beforeEach(() => {
@@ -365,16 +365,16 @@ describe('AIRepository read side (listings + counts)', () => {
       insertEmail(db, { id: 'trashed', tags: '|Trash|', date: 600, aiProcessedAt: 1 });     // special folder
     });
 
-    it('lists only processed, non-spam, category-less mail outside special folders', async () => {
+    it('lists never-processed and processed category-less mail outside spam and special folders', async () => {
       expect((await repo.getEmailsByDynamicCategory('uncategorized', { limit: 100 })).map((e) => e.id))
-        .toEqual(['u2', 'u1']);
+        .toEqual(['raw', 'u2', 'u1']);
     });
 
     it('honours the folder filter and pages like any other category', async () => {
       expect((await repo.getEmailsByDynamicCategory('uncategorized', { folderId: 'f-inbox' })).map((e) => e.id))
-        .toEqual(['u1']);
+        .toEqual(['raw', 'u1']);
       expect((await repo.getEmailsByDynamicCategory('uncategorized', { limit: 1 })).map((e) => e.id))
-        .toEqual(['u2']);
+        .toEqual(['raw']);
       expect(await repo.getEmailsByDynamicCategory('uncategorized', { folderId: 'f-missing' })).toEqual([]);
     });
 
@@ -388,9 +388,53 @@ describe('AIRepository read side (listings + counts)', () => {
       repo.toggleCategoryDefinition('meeting', false);
 
       expect((await repo.getEmailsByDynamicCategory('uncategorized', { limit: 100 })).map((e) => e.id))
-        .toEqual(['u2', 'u1']);
+        .toEqual(['raw', 'u2', 'u1']);
       // `cat` (disabled `meeting`) is excluded from the count too, matching the list.
-      expect(repo.getDynamicCategoryCounts().uncategorized).toBe(2); // u1, u2
+      expect(repo.getDynamicCategoryCounts().uncategorized).toBe(3); // raw, u1, u2
+    });
+
+    it('pages never-attempted, empty-verdict and failed members together without changing category authority', async () => {
+      insertEmail(db, { id: 'empty-reply', threadId: 't-raw', tags: '|INBOX|', date: 510, aiProcessedAt: 1 });
+      insertEmail(db, { id: 'failed-reply', threadId: 't-raw', tags: '|INBOX|', date: 520, aiProcessedAt: 1 });
+      insertEmail(db, { id: 'manual-none', tags: '|INBOX|starred|', date: 550 });
+      insertEmail(db, { id: 'provider-owned', tags: '|INBOX|promotions|', date: 600 });
+      insertEmail(db, { id: 'read-unprocessed', tags: '|INBOX|read|', date: 650 });
+      db.prepare("UPDATE emails SET ai_categories = '||', agent_status = 'done', ai_confidence = 0.9 WHERE id = 'empty-reply'").run();
+      db.prepare(`UPDATE emails SET agent_status = 'done', ai_parse_failure_count = 3,
+        ai_agent_failure_count = 10, ai_reasoning = 'LLM returned no usable result' WHERE id = 'failed-reply'`).run();
+      db.prepare("UPDATE emails SET manual_categories = '[]', server_categories = '[]' WHERE id = 'manual-none'").run();
+      db.prepare(`UPDATE emails SET server_categories = '["promotions"]' WHERE id = 'provider-owned'`).run();
+      const before = db.prepare('SELECT * FROM emails ORDER BY id').all();
+
+      const pages = await Promise.all([0, 2, 4].map(offset => repo.getEmailsByDynamicCategory('uncategorized', { limit: 2, offset })));
+      const ids = pages.flatMap(page => page.map(email => email.id));
+      expect(ids).toEqual(['read-unprocessed', 'manual-none', 'failed-reply', 'empty-reply', 'raw', 'u2', 'u1']);
+      const threadPages = pages.map(page => new Set(page.map(email => email.threadId)));
+      expect(threadPages.map(page => page.size)).toEqual([2, 2, 1]);
+      expect(new Set(threadPages.flatMap(page => [...page])).size).toBe(5);
+      expect(repo.getDynamicCategoryCounts(undefined, 'total').uncategorized).toBe(5);
+      expect(repo.getDynamicCategoryCounts().uncategorized).toBe(4);
+      expect(repo.getDynamicCategoryCounts('f-inbox', 'total').uncategorized).toBe(4);
+      expect(repo.getDynamicCategoryCounts('f-inbox').uncategorized).toBe(3);
+      expect(db.prepare('SELECT * FROM emails ORDER BY id').all()).toEqual(before);
+
+      // A mixed processing-state thread counts once until its LAST unread
+      // category-less member is read; its place in the pager remains stable.
+      db.prepare("UPDATE emails SET tags = tags || 'read|' WHERE id IN ('raw', 'empty-reply')").run();
+      expect(repo.getDynamicCategoryCounts().uncategorized).toBe(4);
+      db.prepare("UPDATE emails SET tags = tags || 'read|' WHERE id = 'failed-reply'").run();
+      expect(repo.getDynamicCategoryCounts().uncategorized).toBe(3);
+      expect(repo.getDynamicCategoryCounts(undefined, 'total').uncategorized).toBe(5);
+      expect((await repo.getEmailsByDynamicCategory('uncategorized', { folderId: 'f-archive' })).map(email => email.id)).toEqual(['u2']);
+    });
+
+    it('keeps never-processed Spam, Trash, Sent and Drafts outside the list and unread badge', async () => {
+      for (const folder of ['Spam', 'Trash', 'Sent', 'Drafts']) {
+        insertEmail(db, { id: `unprocessed-${folder}`, tags: `|${folder}|`, date: 700 });
+      }
+      expect((await repo.getEmailsByDynamicCategory('uncategorized')).map(email => email.id)).toEqual(['raw', 'u2', 'u1']);
+      expect(repo.getDynamicCategoryCounts().uncategorized).toBe(3);
+      expect(repo.getDynamicCategoryCounts(undefined, 'total').uncategorized).toBe(3);
     });
   });
 
