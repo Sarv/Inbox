@@ -104,6 +104,9 @@ export function IMAPStep({ onNext, onBack, onSyncStarted }: IMAPStepProps) {
         port: parseInt(port),
         username,
         password: cleanPassword,
+        // The choice itself, not just `secure`: without it STARTTLS and None
+        // were stored alike, and None was overruled by the required upgrade.
+        security,
         secure: security === 'ssl',
         allowInsecureTLS: allowInsecure || undefined,
       });

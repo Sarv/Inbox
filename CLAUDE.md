@@ -210,10 +210,38 @@ Established shared helpers (extend this list as you add more):
 - `withTimeout(promise, ms, message)` — `packages/core/src/utils/timeout.ts`.
   The single source for the "race a promise against a timeout" pattern; it also
   clears the timer. Use it instead of hand-rolling `Promise.race([p, setTimeout(reject)])`.
+- `sealJson` / `openJson` (and `sealString` / `openString`) —
+  `apps/desktop/electron/services/safe-storage-envelope.ts`. The ONE at-rest
+  envelope (`ENC1:` safeStorage / marked `PLAIN1:` fallback) for main-process
+  secret stores; opening throws on a locked keychain or unknown format, never
+  returns empty. Use it for any new store instead of hand-rolling the envelope.
 - `useMountedTimeout()` — `apps/desktop/src/hooks/useMountedTimeout.ts`. A
   renderer component's delayed DOM work (scroll into view, focus once mounted)
   that is skipped if the component has unmounted by then. Use it instead of a bare
   `setTimeout` that touches `document`.
+- `resolveConnectionSecurity(config)` — `packages/core/src/utils/connection-security.ts`
+  (renderer: `@sarvinbox/core/connection-security`). The one rule for how an
+  IMAP/SMTP connection is secured: 'ssl' | 'starttls' (upgrade REQUIRED) | 'none'
+  (explicit opt-out); legacy configs resolve from `secure`, OAuth never to 'none'.
+  Use it in clients and account forms instead of reading `secure`.
+- `conversationStarTargetIds(rows, starring, folders)` —
+  `packages/core/src/utils/conversation-membership.ts`. Which messages a
+  conversation-level star writes to: the LATEST message when starring, every
+  row when unstarring (Outlook / Sarv Mail behaviour). Use it for any new
+  thread-wide star control instead of passing the whole thread's ids.
+- `useSecureStorageProtected()` — `apps/desktop/src/hooks/useSecureStorageProtected.ts`.
+  Whether the OS key store really protects saved secrets on this device (false on
+  Linux `basic_text`). Use it for any renderer wording that says a secret is
+  "saved securely" or "in the keychain", instead of asking `secureCreds` again.
+- `isPublicAddress(ip)` / `checkPublicHttpsUrl(url, { site })` —
+  `packages/core/src/utils/public-destination.ts`. The rules for a fetch whose URL
+  a stranger chose (mail content, a sender's DNS): public addresses only (NAT64
+  only around a public IPv4), https on port 443, optionally one registrable
+  domain. The main-process transport that enforces them at CONNECT time is
+  `senderIdentityFetch()` (`apps/desktop/electron/services/sender-identity-fetch.ts`,
+  plain Node https with a guarded `lookup`). Use these for any new
+  stranger-named fetch instead of `chromiumFetch`, which cannot check the
+  address it connects to.
 
 ## Prefer a mature library over hand-rolled / regex logic
 

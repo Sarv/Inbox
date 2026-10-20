@@ -7,7 +7,7 @@ import './styles.css';
 // build alike, whereas a `../desktop/...` URL in the HTML became a broken image
 // under the dev server. The desktop app's icon, not a second copy of it.
 import inboxScreenshotUrl from '../../../docs/images/screenshot-inbox.png';
-import appIconUrl from '../../desktop/public/icon.svg';
+import appIconSvg from '../../desktop/public/icon.svg?raw';
 
 import { showAppIcon } from './app-icon.js';
 import { buildDownloadView } from './download-view.js';
@@ -30,7 +30,7 @@ export const readClientHints = async (nav) => {
 };
 
 export const start = async (win) => {
-  showAppIcon(win.document, appIconUrl);
+  showAppIcon(win.document, appIconSvg);
   const productImage = win.document.querySelector('[data-product-image]');
   if (productImage) productImage.src = inboxScreenshotUrl;
   const { navigator: nav } = win;

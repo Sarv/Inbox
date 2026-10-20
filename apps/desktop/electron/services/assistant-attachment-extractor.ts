@@ -309,10 +309,12 @@ let pdfLibrary: Promise<typeof import('pdfjs-dist')> | undefined;
 async function loadPdf(): Promise<typeof import('pdfjs-dist')> {
   pdfLibrary ??= (async () => {
     // Text extraction needs DOMMatrix at module load, but no native canvas or rendering.
+    // The legacy pair supplies PDF.js's runtime compatibility code (including
+    // Uint8Array.toHex, absent in supported Node 22/24 and some Electron builds).
     if (!globalThis.DOMMatrix) Object.defineProperty(globalThis, 'DOMMatrix', { value: DOMMatrix, configurable: true });
-    const worker = await import('pdfjs-dist/build/pdf.worker.mjs');
+    const worker = await import('pdfjs-dist/legacy/build/pdf.worker.mjs');
     Object.defineProperty(globalThis, 'pdfjsWorker', { value: { WorkerMessageHandler: worker.WorkerMessageHandler }, configurable: true });
-    return import('pdfjs-dist');
+    return import('pdfjs-dist/legacy/build/pdf.mjs');
   })();
   return pdfLibrary;
 }

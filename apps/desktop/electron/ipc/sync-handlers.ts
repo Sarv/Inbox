@@ -5,7 +5,7 @@
  */
 
 import type { IMAPConfig, SyncEngineOptions } from '@sarvinbox/core';
-import { withTimeout, resolveTlsOptions, accountIdFor, ImapFlowClient, isAuthError, isQuotaError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift } from '@sarvinbox/core';
+import { withTimeout, transportOptInsOf, limitTransport, ImapFlowClient, isAuthError, isQuotaError, isStartTlsUnavailableError, isTerminalOAuthError, createLogger, LogAggregator, planFolderDrift, applyFolderDrift, STARTTLS_UNAVAILABLE } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
 // Per-account connection back-off after a "too many simultaneous connections"
@@ -23,15 +23,15 @@ import { kickBackfillScheduler } from '../services/backfill-scheduler';
 import { kickBodyPrefetchScheduler } from '../services/body-prefetch-scheduler';
 import { markConnectionUnstable } from '../services/connection-health';
 import { saveImapAccount, loadImapAccount, clearImapAccount } from '../services/imap-account-store';
-import { getValidAccessToken, attachImapBearer } from '../services/oauth-service';
+import { getAccessTokenForMailHost, attachImapBearer } from '../services/oauth-service';
 import { createQuotaBackoff } from '../services/quota-backoff';
-import { getAccountSecrets } from '../services/secure-credential-store';
 import {
   getPipelineUserEmail,
   setPipelineUserProfile,
   provisionCategoryLabelsOnConnect,
   retryPipelineInitOnConnect,
 } from '../services/unified-pipeline-service';
+import { hostMismatchMessage, narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, withSavedPassword, type VaultPasswordFound, type VaultPasswordResult } from '../services/vault-credentials';
 import { getStorage, getSyncEngine, getMainWindow, requireSyncEngine, requireStorage, sendToWindow, getCurrentAccountId, getStorageFor, getSyncEngineFor, getIsQuitting, getSystemSuspended, setCurrentAccount } from '../shared';
 const logger = createLogger('sync-handlers');
 
@@ -56,51 +56,48 @@ const noteIdleEvent = (key: string): void => idleEvents.note(key);
 const disconnectBridged = new WeakSet<object>();
 
 /**
- * Resolve an account's IMAP password from the encrypted vault, trying the id
- * the caller holds PLUS the host-derived and email-only ids — a legacy account
- * may have been vaulted under any of them (the `accountIdFor` variants used over
- * time). Single source of truth so the active/reconnect AND background-sync
- * connect paths agree: the background path used to look up only the exact id and
+ * Resolve an account's IMAP password from the encrypted vault, trying every id
+ * a legacy account may have been vaulted under (see `vaultIdCandidates`), and
+ * returning it ONLY for the host it was saved for, with the transport saved
+ * alongside it (see vault-credentials.ts).
+ * Single source of truth so the active/reconnect AND background-sync connect
+ * paths agree: the background path used to look up only the exact id and
  * silently failed on legacy-keyed accounts ("No password configured") while the
- * active path found them. Returns undefined if no vaulted password matches.
+ * active path found them.
  */
-async function resolveVaultImapPassword(
+function resolveVaultImapPassword(
   accountId: string | undefined,
   username: string,
   host?: string,
-): Promise<string | undefined> {
-  const ids = [accountId, accountIdFor(username, host), accountIdFor(username)];
-  const tried = new Set<string>();
-  for (const id of ids) {
-    if (!id || tried.has(id)) continue;
-    tried.add(id);
-    const secrets = await getAccountSecrets(id);
-    if (secrets?.imap?.password) return secrets.imap.password;
-  }
-  return undefined;
+): Promise<VaultPasswordResult> {
+  return resolveVaultPassword(vaultIdCandidates(accountId, username, host), 'imap', host);
 }
 
 /**
  * Resolve the vault password as a PROMISE that settles the instant the data is
  * available, then the caller proceeds — no fixed delay. At app launch the connect
- * can fire before the OS keychain / vault is readable, so the first read may miss;
- * there's no OS "keychain ready" event to await, so we re-check on a short tick and
- * RESOLVE THE MOMENT the read succeeds (1s if it's ready in 1s, 5s if 5s). A
- * `timeoutMs` ceiling means a genuinely-missing password (needs re-auth) still
- * settles to undefined instead of blocking forever. Caller: `const pw = await …`.
+ * can fire before the OS keychain / vault is readable, so the first read may miss
+ * or throw; there's no OS "keychain ready" event to await, so we re-check on a
+ * short tick and RESOLVE THE MOMENT the read succeeds (1s if it's ready in 1s, 5s
+ * if 5s). A password saved for a DIFFERENT host is a settled answer too — waiting
+ * can't change it. A `timeoutMs` ceiling means a genuinely-missing password
+ * (needs re-auth) still settles to `none` instead of blocking forever.
  */
 function resolveVaultImapPasswordWaiting(
   accountId: string | undefined,
   username: string,
   host?: string,
   { timeoutMs = 10_000, pollMs = 150 }: { timeoutMs?: number; pollMs?: number } = {},
-): Promise<string | undefined> {
+): Promise<VaultPasswordResult> {
   return new Promise((resolve) => {
     const started = Date.now();
     const attempt = async () => {
-      const pw = await resolveVaultImapPassword(accountId, username, host);
-      if (pw) return resolve(pw);                                  // got it → proceed now
-      if (Date.now() - started >= timeoutMs) return resolve(undefined); // give up → re-auth
+      // A throw (vault not yet decryptable) is "not ready", never a rejection:
+      // left unhandled it would leave this promise — and the connect — pending forever.
+      const result = await resolveVaultImapPassword(accountId, username, host)
+        .catch((): VaultPasswordResult => ({ status: 'none' }));
+      if (result.status !== 'none') return resolve(result);              // got an answer → proceed now
+      if (Date.now() - started >= timeoutMs) return resolve(result);     // give up → re-auth
       setTimeout(attempt, pollMs);
     };
     void attempt();
@@ -133,7 +130,7 @@ async function probeImapCredentials(config: IMAPConfig): Promise<{ success: bool
   client.on('error', () => { /* reported via the returned error instead */ });
   try {
     await withTimeout(
-      client.connect({ ...config, tlsOptions: resolveTlsOptions(config) }),
+      client.connect(config),
       PROBE_CREDENTIALS_TIMEOUT_MS,
       'Connection probe timed out',
     );
@@ -377,6 +374,9 @@ export function registerSyncHandlers(): void {
     // Set when the oauth2→password self-heal below fires, so the renderer can
     // persist the correction instead of re-healing on every launch.
     let healedAuthMethod: 'password' | undefined;
+    // The vault hit when main injected the saved password, so a connection
+    // that works more strictly than it was saved for can narrow it.
+    let saved: VaultPasswordFound | undefined;
     try {
       // Self-activate the account if storage/engine isn't up yet. Main defers
       // storage to accounts:setActive, but if the renderer boots without its
@@ -434,7 +434,9 @@ export function registerSyncHandlers(): void {
         // OAuth-only account stores no password, so it never pays for the probe
         // below and can never be downgraded. Once healed the account is no longer
         // oauth2, so this runs at most once.
-        const vaultPw = await resolveVaultImapPassword(accountId, config.username, config.host);
+        const vaulted = await resolveVaultImapPassword(accountId, config.username, config.host).catch((): VaultPasswordResult => ({ status: 'none' }));
+        const vaultHit = vaulted.status === 'found' ? vaulted : undefined;
+        const vaultPw = vaultHit?.password;
 
         // Why the OAuth path is unusable, if it is — covers BOTH failure modes:
         // no token obtainable (missing/refresh rejected), or a token the mail
@@ -443,7 +445,7 @@ export function registerSyncHandlers(): void {
         try {
           config = {
             ...config,
-            accessToken: await getValidAccessToken(config.oauthProvider, config.username),
+            accessToken: await getAccessTokenForMailHost(config.oauthProvider, config.username, 'imap', config.host),
           };
           if (vaultPw) {
             const probe = await probeImapCredentials(config);
@@ -459,21 +461,24 @@ export function registerSyncHandlers(): void {
           oauthFailure = (tokenErr as Error).message;
         }
 
-        if (vaultPw && oauthFailure) {
+        if (vaultHit && oauthFailure) {
           logger.warn(
             `[Main] connect: OAuth unusable for ${config.username} on ${config.host} `
             + `(${oauthFailure}) — falling back to the vaulted app password and repairing the account`,
           );
-          config = {
+          // Sent no more loosely than the password was saved for: this config
+          // was an OAuth one, whose relaxations nobody chose for the password.
+          saved = vaultHit;
+          config = limitTransport({
             ...config,
             authMethod: 'password',
-            password: vaultPw,
+            password: vaultHit.password,
             accessToken: undefined,
             // Drop the provider link too, matching what the renderer persists —
             // an account left as password-auth WITH an oauthProvider is
             // ambiguous state that later reads have to second-guess.
             oauthProvider: undefined,
-          };
+          }, saved.transport);
           healedAuthMethod = 'password';
         }
       } else if (!config.password) {
@@ -481,8 +486,20 @@ export function registerSyncHandlers(): void {
         // from localStorage), so pull it from the encrypted vault via the shared
         // multi-id lookup (handles legacy account-key variants). Wait briefly for
         // the vault to become readable — at cold start this connect can beat it.
-        const pw = await resolveVaultImapPasswordWaiting(accountId, config.username, config.host);
-        if (pw) config = { ...config, password: pw };
+        const vaulted = await resolveVaultImapPasswordWaiting(accountId, config.username, config.host);
+        if (vaulted.status === 'host-mismatch') {
+          // Settled, not transient: retrying can't make the saved password valid
+          // for a server it wasn't saved for. The user re-enters it for this host.
+          return { success: false, error: hostMismatchMessage('imap', config.host, vaulted.boundHost), retryable: false };
+        }
+        if (vaulted.status === 'found') {
+          // Settled too: a config asking to send the saved password more loosely
+          // than it was saved for (self-signed, or unencrypted) needs it re-typed.
+          const applied = withSavedPassword(config, 'imap', vaulted);
+          if ('refusal' in applied) return { success: false, error: applied.refusal, retryable: false };
+          config = applied.config;
+          saved = vaulted;
+        }
       }
 
       // Never connect a password-auth account with no password. It fails with
@@ -495,16 +512,14 @@ export function registerSyncHandlers(): void {
         return { success: false, error: 'Credentials not ready — will retry', retryable: true };
       }
 
-      // TLS verification ON by default (resolveTlsOptions); insecure only when
-      // the account explicitly opts in via allowInsecureTLS. attachImapBearer
-      // wires a fresh-token resolver for OAuth so the pool + reconnects never
-      // authenticate with a token that expired after pool init (no-op for
-      // password auth). This single config flows into both connect() and
-      // initializePool(), and is what connection-manager stores for reconnects.
-      const connectConfig = attachImapBearer({
-        ...config,
-        tlsOptions: resolveTlsOptions(config),
-      });
+      // Certificate checks are decided in core (resolveTlsOptions): on unless a
+      // password account opted out, and a saved password's opt-out is the one
+      // saved with it (above). attachImapBearer wires a fresh-token resolver for
+      // OAuth so the pool + reconnects never authenticate with a token that
+      // expired after pool init (no-op for password auth). This single config
+      // flows into both connect() and initializePool(), and is what
+      // connection-manager stores for reconnects.
+      const connectConfig = attachImapBearer(config);
 
       // If we already think we're connected, that may be a ZOMBIE
       // (TCP socket open but server dropped) — the user clicking
@@ -513,13 +528,21 @@ export function registerSyncHandlers(): void {
       // same client instance whose internal state may be corrupted
       // by the dead socket; forceReconnect builds a fresh client
       // (and tears down the pool's stale sockets).
-      if (syncEngine.isConnected()) {
+      // Also while a forceReconnect is already running (a focus/online reset, a
+      // sync timeout): a plain connect() would meet its 'connecting' state and
+      // return without dialling these settings at all.
+      if (syncEngine.isConnected() || syncEngine.isForceReconnecting()) {
         logger.info('[Main] connect: already connected — forcing fresh socket via forceReconnect');
         try {
           // 35s outer > forceReconnect's own ~30s budget (resolveBearer ≤10s +
           // connect ≤22s) so this wrapper doesn't preempt a legit slow reconnect;
           // the client still force-closes any stalled socket on its inner timeout.
-          await withTimeout(syncEngine.forceReconnect(), 35000, 'Force-reconnect timed out (35s)');
+          // With THIS config: the renderer may have just saved new settings
+          // (e.g. a different connection security), which a reconnect on the
+          // latched config would silently ignore until restart. Behind a run
+          // already in flight it waits for that one first, so it can outlast
+          // the 35s; the fall-through below then connects with this config.
+          await withTimeout(syncEngine.forceReconnect(connectConfig), 35000, 'Force-reconnect timed out (35s)');
         } catch (frErr) {
           logger.warn('[Main] connect: forceReconnect failed, falling through to plain connect:', frErr);
           // Try a clean teardown then fall through to plain connect
@@ -534,6 +557,9 @@ export function registerSyncHandlers(): void {
       if (!syncEngine.isConnected()) {
         await withTimeout(syncEngine.connect(connectConfig), 25000, 'IMAP connect timed out (25s)');
       }
+      // Only once THIS config is the one connected: a connect() that met one
+      // already in flight returns without dialling, which proves nothing.
+      if (saved && syncEngine.isConnectedWith(connectConfig)) await narrowSavedTransport('imap', saved, config);
 
       // Initialize connection pool for parallel sync. Gmail-aware sizing: the
       // per-account connection budget (see connection-budget.ts) caps the TOTAL
@@ -631,6 +657,16 @@ export function registerSyncHandlers(): void {
             win.webContents.send('imap:auth-error');
           }
         });
+        // The server stopped encrypting a STARTTLS account mid-session (CASA
+        // M-5): reconnects have stopped. Tell the renderer what to change. The
+        // saved config is KEPT — the credentials were never rejected.
+        syncEngine.onSecurityError((error) => {
+          if (!isActiveEngine()) return;
+          const win = getMainWindow();
+          if (win && !win.isDestroyed()) {
+            win.webContents.send('imap:security-error', error.message);
+          }
+        });
       }
 
       // Process any pending operations from previous session
@@ -669,7 +705,12 @@ export function registerSyncHandlers(): void {
           password: (config as any).password ?? '',
           authMethod: config.authMethod,
           oauthProvider: config.oauthProvider,
-          tlsOptions: (config as any).tlsOptions,
+          // Connection security and the self-signed opt-in are part of the
+          // account: dropping them here made a recovered 'none' account dial
+          // as STARTTLS-required, and a self-signed one fail verification.
+          // What was actually used, not what the request asked for.
+          security: config.security,
+          allowInsecureTLS: transportOptInsOf(config).allowInsecureTLS,
         }).catch((e) => logger.error('[Main] saveImapAccount failed:', e));
       }
 
@@ -687,6 +728,13 @@ export function registerSyncHandlers(): void {
       if (isTerminalOAuthError(error)) {
         logger.warn(`[Main] connect refused — ${(error as Error).message}; only an interactive sign-in can fix this`);
         return { success: false, error: (error as Error).message, retryable: false };
+      }
+      // A STARTTLS account whose server would not encrypt (CASA M-5): settled
+      // until the user changes the account's connection security. One line,
+      // not retryable, and the saved config is kept (nothing was rejected).
+      if (isStartTlsUnavailableError(error)) {
+        logger.warn(`[Main] connect refused — STARTTLS is required for ${config.host} but the server did not encrypt the session`);
+        return { success: false, error: (error as Error).message, retryable: false, code: STARTTLS_UNAVAILABLE };
       }
       logger.error('IMAP connect error:', error);
       const quotaKey = accountId ?? getCurrentAccountId();
@@ -737,7 +785,7 @@ export function registerSyncHandlers(): void {
       try {
         probeConfig = {
           ...config,
-          accessToken: await getValidAccessToken(config.oauthProvider, config.username),
+          accessToken: await getAccessTokenForMailHost(config.oauthProvider, config.username, 'imap', config.host),
         };
       } catch (error) {
         return { success: false, error: (error as Error).message };
@@ -772,7 +820,13 @@ export function registerSyncHandlers(): void {
    */
   ipcMain.handle('imap:getSavedConfig', async () => {
     try {
-      return { success: true, data: await loadImapAccount() };
+      // The stored last-good config carries its password (encrypted at rest).
+      // The renderer gets it WITHOUT: reconnecting from it goes through
+      // imap:connect, where main injects the vaulted password for that host.
+      const saved = await loadImapAccount();
+      if (!saved) return { success: true, data: saved };
+      const { password: _password, accessToken: _accessToken, refreshToken: _refreshToken, ...withoutSecrets } = saved;
+      return { success: true, data: withoutSecrets };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
@@ -1291,8 +1345,9 @@ export function registerSyncHandlers(): void {
       // active account. Skips the connect on subsequent cycles.
       if (!engine.isConnected()) {
         let cfg = config;
+        let bgSaved: VaultPasswordFound | undefined;
         if (cfg.authMethod === 'oauth2' && cfg.oauthProvider) {
-          cfg = { ...cfg, accessToken: await getValidAccessToken(cfg.oauthProvider, cfg.username) };
+          cfg = { ...cfg, accessToken: await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'imap', cfg.host) };
         } else if (!cfg.password) {
           // Password auth: the renderer no longer ships the password (stripped
           // from localStorage), so inject it from the encrypted vault via the
@@ -1300,8 +1355,16 @@ export function registerSyncHandlers(): void {
           // lookup here silently missed legacy-keyed accounts ("No password
           // configured") while the active path found them. Wait briefly for the
           // vault at cold start (same startup race as the foreground path).
-          const pw = await resolveVaultImapPasswordWaiting(accountId, cfg.username, cfg.host);
-          if (pw) cfg = { ...cfg, password: pw };
+          const vaulted = await resolveVaultImapPasswordWaiting(accountId, cfg.username, cfg.host);
+          if (vaulted.status === 'host-mismatch') {
+            return { success: false, error: hostMismatchMessage('imap', cfg.host, vaulted.boundHost), retryable: false };
+          }
+          if (vaulted.status === 'found') {
+            const applied = withSavedPassword(cfg, 'imap', vaulted);
+            if ('refusal' in applied) return { success: false, error: applied.refusal, retryable: false };
+            cfg = applied.config;
+            bgSaved = vaulted;
+          }
         }
         // Don't connect password-less (fails "No password configured" and latches
         // that config for auto-reconnect to hammer). Skip this cycle; the next
@@ -1310,7 +1373,9 @@ export function registerSyncHandlers(): void {
           logger.warn(`[Accounts] backgroundSync: no password available yet for ${accountId} — skipping connect this cycle`);
           return { success: false, error: 'Credentials not ready', retryable: true };
         }
-        await withTimeout(engine.connect(attachImapBearer({ ...cfg, tlsOptions: resolveTlsOptions(cfg) })), 25_000, 'Background connect timed out');
+        const dialConfig = attachImapBearer(cfg);
+        await withTimeout(engine.connect(dialConfig), 25_000, 'Background connect timed out');
+        if (bgSaved && engine.isConnectedWith(dialConfig)) await narrowSavedTransport('imap', bgSaved, cfg);
         // Connected — a slot was free, so clear any escalating quota backoff.
         quotaBackoff.clear(accountId);
       }

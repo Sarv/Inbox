@@ -15,6 +15,7 @@
 
 import type { ContactType, UserActionType } from '../types/agent';
 import type { EmailRecord } from '../types/models';
+import { parseAddresses } from '../utils/email-address';
 import { logger } from '../utils/logger';
 
 import { computeContentUrgency } from './signals/content-urgency';
@@ -93,8 +94,11 @@ export class BehaviorIntelligence {
 
     // Detect recipient role — extract bare addresses and compare exactly,
     // otherwise "joann@example.com" substring-matches user "ann@example.com".
-    const toAddrs: string[] = (email.toAddress || '').toLowerCase().match(/[\w.+-]+@[\w.-]+/g) || [];
-    const ccAddrs: string[] = (email.ccAddress || '').toLowerCase().match(/[\w.+-]+@[\w.-]+/g) || [];
+    // Parsed with the shared RFC 5322 parser: the hand-written address regex it
+    // replaces went quadratic on a long header (80 KB took 3.5 s on the main
+    // process), and headers are attacker-controlled.
+    const toAddrs = parseAddresses(email.toAddress).map((a) => a.toLowerCase());
+    const ccAddrs = parseAddresses(email.ccAddress).map((a) => a.toLowerCase());
     const userLower = this.deps.userEmail.toLowerCase();
     const recipientRole: 'to' | 'cc' | 'bcc' =
       toAddrs.includes(userLower) ? 'to' :

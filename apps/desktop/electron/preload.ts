@@ -36,10 +36,27 @@ interface InAppToast {
   threadId?: string;
 }
 
+/** A request to an AI provider that needs its saved key (see ai-provider-proxy.ts). */
+interface AiProviderFetchRequest {
+  requestId: string;
+  providerId: string;
+  type: string;
+  url: string;
+  method?: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+type AiProviderFetchResult =
+  | { ok: true; status: number; statusText: string; contentType: string | null; body: string }
+  | { ok: false; reason: 'no-key' | 'origin-mismatch' | 'invalid-request' | 'network' | 'aborted'; error: string };
+
 /** Per-account secrets kept in the main-process vault (never renderer disk). */
+/** Write-only: secrets go INTO the vault with the host they're for; nothing
+ *  here reads one back out (main injects them when it connects). */
 interface SecureAccountSecrets {
-  imap?: { password?: string; accessToken?: string; refreshToken?: string };
-  smtp?: { password?: string; accessToken?: string; refreshToken?: string };
+  imap?: { password?: string; accessToken?: string; refreshToken?: string; host?: string };
+  smtp?: { password?: string; accessToken?: string; refreshToken?: string; host?: string };
 }
 
 interface AntivirusConfigureRequest {
@@ -272,6 +289,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     removeAuthErrorListener: () => {
       ipcRenderer.removeAllListeners('imap:auth-error');
     },
+    /** A STARTTLS account's server stopped encrypting mid-session (CASA M-5). */
+    onSecurityError: (callback: (message: string) => void) => {
+      ipcRenderer.on('imap:security-error', (_e, message: string) => callback(message));
+    },
+    removeSecurityErrorListener: () => {
+      ipcRenderer.removeAllListeners('imap:security-error');
+    },
   },
 
   // Folder operations
@@ -469,7 +493,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
-  // Crash/error reporting consent (Settings → General → Send crash reports).
+  // Crash/error reporting consent (the first-launch dialog and Settings →
+  // General → Send crash reports). Main owns the answer.
   diagnostics: {
     getCrashReports: () => ipcRenderer.invoke('diagnostics:getCrashReports'),
     setCrashReports: (enabled: boolean) => ipcRenderer.invoke('diagnostics:setCrashReports', enabled),
@@ -577,7 +602,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // SMTP operations (sending emails)
   smtp: {
-    connect: (config: SMTPConfig) => ipcRenderer.invoke('smtp:connect', config),
+    connect: (config: SMTPConfig, accountId?: string) => ipcRenderer.invoke('smtp:connect', config, accountId),
     // Connect a specific account's SMTP on demand (send-as another account).
     connectFor: (accountId: string, config: SMTPConfig) => ipcRenderer.invoke('smtp:connectFor', accountId, config),
     disconnect: () => ipcRenderer.invoke('smtp:disconnect'),
@@ -833,7 +858,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // uses this instead of persisting IMAP/SMTP passwords in plaintext localStorage.
   secureCreds: {
     set: (accountId: string, secrets: SecureAccountSecrets) => ipcRenderer.invoke('secureCreds:set', accountId, secrets),
-    get: (accountId: string) => ipcRenderer.invoke('secureCreds:get', accountId),
     delete: (accountId: string) => ipcRenderer.invoke('secureCreds:delete', accountId),
     has: (accountId: string) => ipcRenderer.invoke('secureCreds:has', accountId),
     hasPassword: (accountId: string, kind?: 'imap' | 'smtp') => ipcRenderer.invoke('secureCreds:hasPassword', accountId, kind),
@@ -886,11 +910,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // AI-provider API keys kept in the main-process safeStorage vault (never in
-  // renderer localStorage). Renderer holds only non-secret provider metadata.
+  // renderer localStorage). Write-only for the renderer: it learns which
+  // providers have a key, and main attaches keys to requests itself.
   aiSecrets: {
-    getAll: () => ipcRenderer.invoke('aiSecrets:getAll'),
-    set: (providerId: string, apiKey: string) => ipcRenderer.invoke('aiSecrets:set', providerId, apiKey),
+    list: () => ipcRenderer.invoke('aiSecrets:list'),
+    set: (providerId: string, apiKey: string, baseUrl?: string) => ipcRenderer.invoke('aiSecrets:set', providerId, apiKey, baseUrl),
     delete: (providerId: string) => ipcRenderer.invoke('aiSecrets:delete', providerId),
+    revert: (providerId: string, writeId: number) => ipcRenderer.invoke('aiSecrets:revert', providerId, writeId),
+  },
+
+  // AI provider requests that need a saved key — main adds it (for the
+  // endpoint it was saved for only) and makes the request.
+  aiProxy: {
+    fetch: (request: AiProviderFetchRequest) => ipcRenderer.invoke('ai:providerFetch', request),
+    abort: (requestId: string) => ipcRenderer.invoke('ai:providerFetchAbort', requestId),
   },
 
   // User-defined inbox filter rules
@@ -1041,7 +1074,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     draftReply: (emailId: string, accountId?: string) =>
       ipcRenderer.invoke('agent:draftReply', emailId, accountId),
     // Pipeline control
-    setAIConfig: (config: { type: string; apiKey: string; model: string; baseUrl?: string; authMethod?: 'apiKey' | 'oauth'; oauthProvider?: 'sarv'; oauthEmail?: string }) =>
+    setAIConfig: (config: { type: string; apiKey: string; providerId?: string; model: string; baseUrl?: string; authMethod?: 'apiKey' | 'oauth'; oauthProvider?: 'sarv'; oauthEmail?: string }) =>
       ipcRenderer.invoke('pipeline:setAIConfig', config),
     setCategoryLabels: (cfg: { enabled: boolean; folderMode: 'copy' | 'move' }) =>
       ipcRenderer.invoke('pipeline:setCategoryLabels', cfg),
@@ -1299,7 +1332,9 @@ export interface ElectronAPI {
   imap: {
     /** `healedAuthMethod` is set when main repaired an account that was marked
      *  oauth2 but whose server rejected the token; persist it to make it stick. */
-    connect: (config: IMAPConfig, accountId?: string) => Promise<{ success: boolean; error?: string; healedAuthMethod?: 'password' }>;
+    /** `code` 'STARTTLS_UNAVAILABLE': a STARTTLS account's server would not
+     *  encrypt; `error` says what the user can change. */
+    connect: (config: IMAPConfig, accountId?: string) => Promise<{ success: boolean; error?: string; healedAuthMethod?: 'password'; code?: 'STARTTLS_UNAVAILABLE' }>;
     /** Verify credentials against the server without touching the active
      *  connection or any stored account. Used to gate account overwrites. */
     probeCredentials: (config: IMAPConfig) => Promise<{ success: boolean; error?: string }>;
@@ -1335,6 +1370,8 @@ export interface ElectronAPI {
     removeReconnectingListener: () => void;
     onAuthError: (callback: () => void) => void;
     removeAuthErrorListener: () => void;
+    onSecurityError: (callback: (message: string) => void) => void;
+    removeSecurityErrorListener: () => void;
   };
   folders: {
     list: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
@@ -1437,7 +1474,9 @@ export interface ElectronAPI {
     onHeaderBackfillProgress: (cb: (state: HeaderBackfillState) => void) => () => void;
   };
   diagnostics: {
-    getCrashReports: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
+    /** The user's crash-report answer; 'unasked' until they give one (nothing is sent). */
+    getCrashReports: () => Promise<{ success: boolean; data?: 'yes' | 'no' | 'unasked'; error?: string }>;
+    /** Record an answer: true = send crash reports, false = don't. */
     setCrashReports: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   };
   antivirus: {
@@ -1550,7 +1589,9 @@ export interface ElectronAPI {
     triggerNow: () => Promise<{ success: boolean; data?: { queued: number }; error?: string }>;
   };
   smtp: {
-    connect: (config: SMTPConfig) => Promise<{ success: boolean; error?: string }>;
+    /** `code` 'STARTTLS_UNAVAILABLE': the sending server would not encrypt a
+     *  STARTTLS account; `error` says what the user can change. */
+    connect: (config: SMTPConfig, accountId?: string) => Promise<{ success: boolean; error?: string; code?: 'STARTTLS_UNAVAILABLE' }>;
     connectFor: (accountId: string, config: SMTPConfig) => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
     isConnected: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
@@ -1767,7 +1808,6 @@ export interface ElectronAPI {
   };
   secureCreds: {
     set: (accountId: string, secrets: SecureAccountSecrets) => Promise<{ success: boolean; encrypted?: boolean; error?: string }>;
-    get: (accountId: string) => Promise<{ success: boolean; data?: SecureAccountSecrets | null; error?: string }>;
     delete: (accountId: string) => Promise<{ success: boolean; error?: string }>;
     has: (accountId: string) => Promise<{ success: boolean; data?: boolean; error?: string }>;
     hasPassword: (accountId: string, kind?: 'imap' | 'smtp') => Promise<{ success: boolean; data?: boolean; error?: string }>;
@@ -1785,9 +1825,16 @@ export interface ElectronAPI {
     onReauthOpenSettings: (cb: (data: { provider: string; email: string }) => void) => () => void;
   };
   aiSecrets: {
-    getAll: () => Promise<{ success: boolean; data?: Record<string, string>; encrypted?: boolean; error?: string }>;
-    set: (providerId: string, apiKey: string) => Promise<{ success: boolean; encrypted?: boolean; error?: string }>;
-    delete: (providerId: string) => Promise<{ success: boolean; error?: string }>;
+    list: () => Promise<{ success: boolean; data?: string[]; encrypted?: boolean; error?: string }>;
+    /** `writeId` identifies this write, for `revert`. */
+    set: (providerId: string, apiKey: string, baseUrl?: string) => Promise<{ success: boolean; encrypted?: boolean; writeId?: number; error?: string }>;
+    delete: (providerId: string) => Promise<{ success: boolean; writeId?: number; error?: string }>;
+    /** Undo write `writeId` if it is still the latest for this provider. */
+    revert: (providerId: string, writeId: number) => Promise<{ success: boolean; error?: string }>;
+  };
+  aiProxy: {
+    fetch: (request: AiProviderFetchRequest) => Promise<AiProviderFetchResult>;
+    abort: (requestId: string) => Promise<void>;
   };
   filters: {
     list: () => Promise<{ success: boolean; data?: FilterRule[]; error?: string }>;
@@ -1927,7 +1974,9 @@ export interface ElectronAPI {
     removeCategoryLabels: () => Promise<{ success: boolean; data?: { accounts: number; removed: number }; error?: string }>;
     setAIConfig: (config: {
       type: string;
+      /** Empty for a saved key — main fills it in by `providerId`. */
       apiKey: string;
+      providerId?: string;
       model: string;
       baseUrl?: string;
       authMethod?: 'apiKey' | 'oauth';

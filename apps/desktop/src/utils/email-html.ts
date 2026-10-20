@@ -56,13 +56,13 @@ export function htmlLooksDesigned(html: string | null | undefined): boolean {
   // only (no <style>/table) from a plain hand-written reply — normalizing it
   // would flatten its buttons/boxes. AI-extracted markdown has NO inline styles,
   // so its tables still get the styledTables border help.
-  if (/<a\b[^>]*\sstyle=["'][^"']*(background|padding|border-radius)/i.test(html)) return true;
+  if (/<a\b[^<>]*\sstyle=["'][^"']*(background|padding|border-radius)/i.test(html)) return true;
   if ((html.match(/\bstyle\s*=/gi)?.length ?? 0) >= 4) return true;
   return false;
 }
 
 /** A `<p>`/`<div>` holding nothing but whitespace, `&nbsp;` and `<br>`. */
-const EMPTY_BLOCK_RE = /<(p|div)\b(?![^>]*\sstyle\s*=)[^>]*>(?:\s|&nbsp;|&#160;|<br\s*\/?>)*<\/\1>/gi;
+const EMPTY_BLOCK_RE = /<(p|div)\b(?![^<>]*\sstyle\s*=)[^<>]*>(?:\s|&nbsp;|&#160;|<br\s*\/?>)*<\/\1>/gi;
 /**
  * Placeholder standing in for a removed empty block. An HTML comment because it
  * survives every intermediate regex untouched, renders as nothing if anything
@@ -135,9 +135,9 @@ export function convertToEmailHtml(html: string): string {
     // left gutter for it, and modest spacing. (Previously these were FLATTENED to
     // <p>, which silently dropped every bullet/number the user added.) The <li>'s
     // inner <p> gets its margins zeroed so marker + text stay on one line.
-    emailHtml = emailHtml.replace(/<ul(\s[^>]*)?>/gi, '<ul style="margin: 0 0 10px; padding-left: 24px; list-style-type: disc;">');
-    emailHtml = emailHtml.replace(/<ol(\s[^>]*)?>/gi, '<ol style="margin: 0 0 10px; padding-left: 24px; list-style-type: decimal;">');
-    emailHtml = emailHtml.replace(/<li(\s[^>]*)?>/gi, '<li style="margin: 0 0 4px;">');
+    emailHtml = emailHtml.replace(/<ul(\s[^<>]*)?>/gi, '<ul style="margin: 0 0 10px; padding-left: 24px; list-style-type: disc;">');
+    emailHtml = emailHtml.replace(/<ol(\s[^<>]*)?>/gi, '<ol style="margin: 0 0 10px; padding-left: 24px; list-style-type: decimal;">');
+    emailHtml = emailHtml.replace(/<li(\s[^<>]*)?>/gi, '<li style="margin: 0 0 4px;">');
 
     // Add inline styles to paragraphs
     emailHtml = emailHtml.replace(/<p>/g, '<p style="margin: 0 0 10px 0;">');

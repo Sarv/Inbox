@@ -42,6 +42,11 @@ export interface ConnectionEvents {
   // invalid credentials). TERMINAL — retrying can't fix a bad password, so
   // the reconnect ladder stops and the renderer prompts re-authentication.
   'auth-error': (error: Error) => void;
+  // Fired when a STARTTLS account's server would not encrypt (CASA M-5): the
+  // upgrade was missing, refused or stripped. TERMINAL for the same reason as
+  // auth — retrying re-runs the identical refusal — but nothing secret was
+  // sent, so it must NOT be treated as rejected credentials.
+  'security-error': (error: Error) => void;
 }
 
 /**
@@ -168,6 +173,14 @@ export class ConnectionManager extends EventEmitter {
   // if it fails again the timer re-arms.
   private _authFailedAt: number | null = null;
   private readonly _authCooldownPeriod = 15 * 60 * 1000; // 15 minutes
+  // Set when a STARTTLS account's server would not encrypt (see the
+  // 'security-error' event). Stops the ladder and the automatic reconnects
+  // exactly like _authFailed, with the same cooldown, and is cleared by an
+  // explicit connect() — which is also how a move to a trustworthy network
+  // (the renderer reconnects on 'online'/focus) recovers on its own.
+  private _securityFailed = false;
+  private _securityFailedAt: number | null = null;
+  private _securityError: Error | null = null;
   // ImapFlow connections are single-use: once a client has connected it cannot
   // be reconnected after disconnect() (it throws "Unexpected close"). Set true
   // once the current client has been used, so the next connect() rebuilds a
@@ -232,6 +245,16 @@ export class ConnectionManager extends EventEmitter {
   }
 
   /**
+   * Connected, and dialled with exactly `config` (the same object). A
+   * connect() that met an in-flight or live connection returned without
+   * dialling, and its config was never latched, so this is how a caller tells
+   * "my settings work" from "something else is connected".
+   */
+  isConnectedWith(config: IMAPConfig): boolean {
+    return this.isConnected() && this._imapConfig === config;
+  }
+
+  /**
    * Resolve once the connection is usable, or false on timeout. Used to gate
    * IMAP commands (e.g. realtime IDLE) that must not run mid-handshake — issuing
    * them while state is 'connecting' throws "Connection not available". Resolves
@@ -242,7 +265,7 @@ export class ConnectionManager extends EventEmitter {
   async waitUntilConnected(timeoutMs = 20000): Promise<boolean> {
     if (this.isConnected()) return true;
     // A dead/latched connection will never emit — don't wait pointlessly.
-    if (this._state === 'error' || this._authFailed || this._isShuttingDown) return false;
+    if (this._state === 'error' || this._authFailed || this._securityFailed || this._isShuttingDown) return false;
 
     // Only an explicit connect() occupies 'connecting' — the ladder stays in
     // 'reconnecting' for the whole of its attempt — so entering here while
@@ -303,6 +326,15 @@ export class ConnectionManager extends EventEmitter {
    */
   isConnecting(): boolean {
     return this._state === 'connecting';
+  }
+
+  /**
+   * True while a forceReconnect() runs. An explicit connect with new settings
+   * must go through forceReconnect(…, config) then: a plain connect() would hit
+   * the run's 'connecting' state and return without using them.
+   */
+  isForceReconnecting(): boolean {
+    return this._forceReconnectInFlight !== null;
   }
 
   /**
@@ -368,6 +400,8 @@ export class ConnectionManager extends EventEmitter {
     // clears on a genuine re-auth or a post-cooldown retry.)
     this._authFailed = false;
     this._authFailedAt = null;
+    this._securityFailed = false;
+    this._securityFailedAt = null;
 
     // A previously-used client can't be reconnected (ImapFlow single-use — see
     // _clientDirty). Rebuild a fresh client + listeners before reconnecting,
@@ -397,6 +431,13 @@ export class ConnectionManager extends EventEmitter {
 
     try {
       await this._client.connect(config);
+      // A pooled socket was refused STARTTLS while this dial was in flight
+      // (reportSecurityFailure): the account is refused, so this session must
+      // not stand either. Fails like the refusal itself, below.
+      if (this._securityFailed) {
+        this.closeRefusedClient();
+        throw this._securityError!;
+      }
       this.transition('connected');
       this.emit('connected');
       this.startHealthCheck();
@@ -409,6 +450,8 @@ export class ConnectionManager extends EventEmitter {
         this._authFailed = true;
         this._authFailedAt = Date.now();
         this.emit('auth-error', error as Error);
+      } else if (this.isStartTlsUnavailableError(error)) {
+        this.latchSecurityFailure(error as Error);
       }
       this.emit('error', error as Error);
       throw error;
@@ -417,6 +460,56 @@ export class ConnectionManager extends EventEmitter {
 
   /** True when the server rejected the saved credentials (needs re-auth). */
   get authFailed(): boolean { return this._authFailed; }
+
+  /** True when a required STARTTLS was not available (needs a security change). */
+  get securityFailed(): boolean { return this._securityFailed; }
+
+  /** Latch a STARTTLS refusal; tells listeners once per latch. */
+  private latchSecurityFailure(error: Error): void {
+    const already = this._securityFailed;
+    this._securityFailed = true;
+    this._securityFailedAt = Date.now();
+    this._securityError = error;
+    if (!already) this.emit('security-error', error);
+  }
+
+  /** Close the current client without letting its 'end'/'close' start a ladder or re-emit. */
+  private closeRefusedClient(): void {
+    const client = this._client;
+    (client as unknown as EventEmitter).removeAllListeners();
+    (client as unknown as { setShuttingDown?: () => void }).setShuttingDown?.();
+    (client as unknown as EventEmitter).on('error', () => { /* refused-account teardown */ });
+    void (async () => { try { await client.disconnect(); } catch { /* already dead */ } })();
+  }
+
+  /**
+   * A NEW socket of this account (a pooled one) was refused STARTTLS while the
+   * primary may still be up on an older encrypted session (CASA M-5): someone
+   * on the network started stripping encryption, or one server behind a load
+   * balancer has none. Treat the account as refused, exactly as if the primary
+   * had been: latch (no automatic reconnects), tell the owner, and close the
+   * primary so "not connected, the server would not encrypt" is the truth
+   * rather than a half-working account whose message bodies fail one by one.
+   * An explicit connect() clears it. Idempotent while latched.
+   */
+  reportSecurityFailure(error: Error): void {
+    if (this._securityFailed) return;
+    this.stopReconnect();
+    this.stopHealthCheck();
+    this.latchSecurityFailure(error);
+    // A dial in flight (the ladder's, or connect()'s — 'connecting') checks
+    // the latch when it lands and fails instead of connecting.
+    if (this._state === 'reconnecting') {
+      this.transition('error');
+      return;
+    }
+    if (this._state !== 'connected') return;
+    // The client is already marked used (connect() did), so the next
+    // connect() builds a fresh one.
+    this.closeRefusedClient();
+    this.transition('error');
+    this.emit('disconnected');
+  }
 
   /**
    * Disconnect from IMAP server
@@ -483,8 +576,9 @@ export class ConnectionManager extends EventEmitter {
     this.transition('disconnected');
     this.emit('disconnected');
 
-    // Don't re-enter the ladder while credentials are known-bad.
-    if (this._authFailed) return;
+    // Don't re-enter the ladder while credentials are known-bad, or while the
+    // server is known not to encrypt a STARTTLS account.
+    if (this._authFailed || this._securityFailed) return;
 
     // Attempt reconnection if we have config
     if (this._imapConfig) {
@@ -646,6 +740,15 @@ export class ConnectionManager extends EventEmitter {
 
           await this._client.connect(this._imapConfig!);
 
+          // Refused while this dial was in flight (reportSecurityFailure):
+          // the session must not stand, and the ladder is over.
+          if (this._securityFailed) {
+            this.closeRefusedClient();
+            this.transition('error');
+            settle(false);
+            return;
+          }
+
           this._reconnectAttempts = 0;
           this._maxAttemptsReachedAt = null;
           this._quotaCooldownActive = false;
@@ -667,6 +770,27 @@ export class ConnectionManager extends EventEmitter {
             this._reconnectAttempts = 0;
             this.transition('error');
             this.emit('auth-error', error as Error);
+            settle(false);
+            return;
+          }
+
+          // A STARTTLS account whose server would not encrypt: terminal like
+          // auth (the next attempt is refused identically), but nothing was
+          // sent and the credentials are fine — a one-line warning, not an
+          // error with a stack per attempt.
+          if (this.isStartTlsUnavailableError(error)) {
+            logger.warn('Reconnect stopped: STARTTLS is required for this account but the server did not encrypt the session');
+            this._reconnectAttempts = 0;
+            this.transition('error');
+            this.latchSecurityFailure(error as Error);
+            settle(false);
+            return;
+          }
+
+          // Refused (reportSecurityFailure) while this dial failed for some
+          // other reason: the ladder is over; don't go round again.
+          if (this._securityFailed) {
+            this.transition('error');
             settle(false);
             return;
           }
@@ -746,8 +870,9 @@ export class ConnectionManager extends EventEmitter {
 
     // Credentials were rejected — don't auto-retry a known-bad password
     // (that's the endless AUTHENTICATIONFAILED loop). Wait for an explicit
-    // connect() with new credentials.
-    if (this._authFailed) {
+    // connect() with new credentials. Likewise a server known not to encrypt a
+    // STARTTLS account: wait for connect() with changed settings.
+    if (this._authFailed || this._securityFailed) {
       return false;
     }
 
@@ -902,6 +1027,10 @@ export class ConnectionManager extends EventEmitter {
    * retrying an auth-failed request just hammers the IMAP server and
    * will get the IP rate-limited or temporarily blocked by Gmail.
    */
+  isStartTlsUnavailableError(error: unknown): boolean {
+    return ImapErrors.isStartTlsUnavailableError(error);
+  }
+
   isAuthError(error: unknown): boolean {
     return ImapErrors.isAuthError(error);
   }
@@ -940,6 +1069,17 @@ export class ConnectionManager extends EventEmitter {
     return this._authFailed &&
       this._authFailedAt != null &&
       Date.now() - this._authFailedAt < this._authCooldownPeriod;
+  }
+
+  /**
+   * True while a STARTTLS refusal back-off is active: automatic reconnects
+   * would re-dial a server known not to encrypt. Same window as auth; after it
+   * one automatic retry is allowed, and an explicit connect() clears it.
+   */
+  isInSecurityCooldown(): boolean {
+    return this._securityFailed &&
+      this._securityFailedAt != null &&
+      Date.now() - this._securityFailedAt < this._authCooldownPeriod;
   }
 
   /**
@@ -1006,7 +1146,7 @@ export class ConnectionManager extends EventEmitter {
    * the fresh connect. Times out the connect attempt so the UI doesn't
    * spin forever if the new socket also hangs.
    */
-  async forceReconnect(connectTimeoutMs = 30000): Promise<void> {
+  async forceReconnect(connectTimeoutMs = 30000, config?: IMAPConfig): Promise<void> {
     // Default budget covers a slow-but-working OAuth resolve (≤10s) PLUS the connect
     // bound (≤22s) so a legitimate reconnect isn't reported as failed just because
     // the token refresh was slow. A genuinely stuck socket is still force-closed by
@@ -1014,14 +1154,33 @@ export class ConnectionManager extends EventEmitter {
     //
     // Coalesce concurrent callers onto ONE in-flight reconnect so a second call
     // can't overwrite `_client` mid-connect and orphan the first socket.
-    if (this._forceReconnectInFlight) return this._forceReconnectInFlight;
-    const run = this._doForceReconnect(connectTimeoutMs);
+    if (this._forceReconnectInFlight) {
+      if (!config) return this._forceReconnectInFlight;
+      // New settings must not be folded into a run that is dialling the OLD ones
+      // (it would report success while, say, an unencrypted session the user
+      // just switched to STARTTLS stays open). Let that run settle, then
+      // reconnect again with these.
+      return this._forceReconnectInFlight
+        .catch(() => { /* superseded by this reconnect */ })
+        .then(() => this.forceReconnect(connectTimeoutMs, config));
+    }
+    const run = this._doForceReconnect(connectTimeoutMs, config);
     this._forceReconnectInFlight = run.finally(() => { this._forceReconnectInFlight = null; });
     return this._forceReconnectInFlight;
   }
 
-  private async _doForceReconnect(connectTimeoutMs: number): Promise<void> {
-    if (!this._imapConfig) {
+  /**
+   * `config`, when given, replaces the latched one: an explicit reconnect of a
+   * live account (the user saved new settings) must dial with THOSE settings —
+   * reusing the old ones kept, for example, an unencrypted session open after
+   * the user switched the account to STARTTLS.
+   */
+  private async _doForceReconnect(connectTimeoutMs: number, config?: IMAPConfig): Promise<void> {
+    // Explicit settings are an explicit connect: like connect(), they are not
+    // held back by a latch the OLD settings earned (switching a refused
+    // STARTTLS account to None must dial).
+    const savedConfig = config ?? this._imapConfig;
+    if (!savedConfig) {
       // Wake-from-sleep race, not an error: the sleep/lock-time disconnect()
       // nulled _imapConfig (see below), and the fresh connect() that re-hydrates
       // it hasn't run yet. No-op and let that pending connect() drive the real
@@ -1035,11 +1194,14 @@ export class ConnectionManager extends EventEmitter {
     // brute-force lockout and keeps "Invalid credentials" alive. This is the main
     // entrypoint the periodic resetAndReconnect / connect handler use, so gating
     // here breaks the loop. Re-auth with new credentials goes through connect().
-    if (this.isInAuthCooldown()) {
+    if (!config && this.isInAuthCooldown()) {
       logger.info('forceReconnect skipped — auth cooldown active (credentials rejected); re-authentication required');
       return;
     }
-    const savedConfig = this._imapConfig;
+    if (!config && this.isInSecurityCooldown()) {
+      logger.info('forceReconnect skipped — the server did not encrypt this STARTTLS account; a security change is required');
+      return;
+    }
     logger.info('forceReconnect: tearing down current (possibly zombie) connection');
 
     // Stop the auto-reconnect ladder and health check so they don't

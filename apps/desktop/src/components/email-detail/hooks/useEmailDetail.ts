@@ -25,12 +25,14 @@ import { useEmailStore } from '../../../store/email-store';
 import { needsAttachmentMetadata } from '../../../utils/attachment-metadata';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
 import { toForwardSource } from '../../../utils/forward-quote';
+import { paneAccountOf } from '../../../utils/pane-account';
 import { savedDraftContent } from '../../../utils/saved-draft-content';
 import { isDraftEmail } from '../../../utils/thread-utils';
 import { composeAiTurns, firstEmailFacts } from '../ai-view-compose';
 import { polishEntriesOf, threadTurns } from '../chat-message-adapter';
 import { chatViewRulesFor } from '../chat-view-rules';
 import { composerDraftFor, type ComposerSeed } from '../composer-target';
+import { printDocumentFor } from '../print-document';
 import { readerCurrentUserEmail, readerFolderFlags, type EmailReaderOptions } from '../reader-options';
 import type { EmailDetailContext } from '../types';
 import {
@@ -1131,25 +1133,36 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     clearSelectedEmail();
   };
 
+  // Every row a whole-conversation action must reach. allThreadEmails, never
+  // the collapsed list: a whole-conversation action has to reach the duplicate
+  // copies we fold out of view, or deleting a thread leaves six identical rows
+  // behind that the next sync brings straight back.
+  const conversationTargets = () =>
+    allThreadEmails.length > 0 ? allThreadEmails : selectedEmail ? [selectedEmail] : [];
+
+  // markAsRead is optimistic locally; the IMAP flag writes are coalesced by the
+  // OperationQueue.
+  const markConversationRead = async (read: boolean) => {
+    for (const e of conversationTargets()) {
+      await markAsRead(e.id, read);
+    }
+  };
+
   const handleMarkRead = async () => {
     const markingUnread = isRead;
     // Gmail-style: the toolbar toggle acts on the WHOLE open conversation, not
     // just the shown message. Direction is still driven by the currently-shown
-    // `isRead` (mark everything read, or everything unread). markAsRead is
-    // optimistic locally; the IMAP flag writes are coalesced by the
-    // OperationQueue.
-    // allThreadEmails, never the collapsed list: a whole-conversation action has
-    // to reach the duplicate copies we fold out of view, or deleting a thread
-    // leaves six identical rows behind that the next sync brings straight back.
-    const targets = allThreadEmails.length > 0 ? allThreadEmails : selectedEmail ? [selectedEmail] : [];
-    for (const e of targets) {
-      await markAsRead(e.id, !isRead);
-    }
+    // `isRead` (mark everything read, or everything unread).
+    await markConversationRead(!isRead);
     // When marking as unread, go back to list view
     if (markingUnread) {
       clearSelectedEmail();
     }
   };
+
+  // The conversation menus' Mark unread (toolbar ⋮, anchor card ⋮): every
+  // message, not the anchor alone — the anchor is the FIRST message.
+  const handleMarkThreadUnread = () => markConversationRead(false);
 
   // Gmail-style: the detail toolbar acts on the WHOLE open conversation, not
   // just the message currently shown. Single deleteEmail/archiveEmail
@@ -1160,11 +1173,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   // single-message thread keeps the per-message path so its undo toast +
   // built-in auto-advance are preserved.
   const removeWholeThread = async (action: 'delete' | 'archive' | 'notspam' | 'spam') => {
-    // allThreadEmails, never the collapsed list: a whole-conversation action has
-    // to reach the duplicate copies we fold out of view, or deleting a thread
-    // leaves six identical rows behind that the next sync brings straight back.
-    const targets = allThreadEmails.length > 0 ? allThreadEmails : selectedEmail ? [selectedEmail] : [];
-    const ids = targets.map((e) => e.id);
+    const ids = conversationTargets().map((e) => e.id);
     if (ids.length === 0) return;
 
     if (ids.length === 1) {
@@ -1349,34 +1358,9 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
 
   const handlePrintEmail = (email: any) => {
     if (!email) return;
-    const emailDate = new Date(email.date * 1000);
-    const html = `<!DOCTYPE html>
-      <html>
-      <head>
-        <title>Print Email - ${email.subject || '(no subject)'}</title>
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px; max-width: 800px; margin: 0 auto; }
-          .header { border-bottom: 1px solid #e5e7eb; padding-bottom: 20px; margin-bottom: 20px; }
-          .subject { font-size: 24px; font-weight: bold; margin-bottom: 16px; }
-          .meta { color: #6b7280; font-size: 14px; line-height: 1.6; }
-          .meta strong { color: #374151; }
-          .body { line-height: 1.6; }
-          @media print { body { padding: 20px; } }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <div class="subject">${email.subject || '(no subject)'}</div>
-          <div class="meta">
-            <div><strong>From:</strong> ${email.fromName ? `${email.fromName} <${email.fromAddress}>` : email.fromAddress}</div>
-            <div><strong>To:</strong> ${email.toAddress || ''}</div>
-            ${email.ccAddress ? `<div><strong>Cc:</strong> ${email.ccAddress}</div>` : ''}
-            <div><strong>Date:</strong> ${emailDate.toLocaleString()}</div>
-          </div>
-        </div>
-        <div class="body">${email.rawBody || email.cleanBody || '(no content)'}</div>
-      </body>
-      </html>`;
+    // Remote images print only when the user's rules auto-load them for this
+    // sender and account — the same decision the on-screen frame starts from.
+    const html = printDocumentFor(email, paneAccountOf(useEmailStore.getState()));
 
     // Print via a hidden, sandboxed iframe rather than window.open — the main
     // process denies all window.open (setWindowOpenHandler → 'deny'), so the old
@@ -1588,6 +1572,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     aiBoxActiveTab: options.threadOnly ? null : aiBoxActiveTab,
     selectedEmail,
     displayEmail,
+    latestThreadEmail,
     isStandaloneDraft,
     isRead,
     isStarred,
@@ -1633,6 +1618,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     isRestoring,
     handleBack,
     handleMarkRead,
+    handleMarkThreadUnread,
     handleDelete,
     handleArchive,
     handleRemoveAICategory,

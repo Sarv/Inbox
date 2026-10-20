@@ -1,4 +1,5 @@
 import type { IMAPConfig, SMTPConfig } from '@sarvinbox/core';
+import { resolveConnectionSecurity } from '@sarvinbox/core/connection-security';
 import { CheckCircle2, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
@@ -47,7 +48,7 @@ interface FormValues {
   imapSecurity: ConnectionSecurity;
   smtpHost: string;
   smtpPort: string;
-  smtpSecurity: 'ssl' | 'starttls';
+  smtpSecurity: ConnectionSecurity;
   allowInsecure: boolean;
   skipSending: boolean;
 }
@@ -73,7 +74,8 @@ function activeConnection(): ConnectedEmail | null {
     },
     receivingConnected: state.connected && state.activeAccountId === account.id,
     smtp: account.smtpConfig ?? {
-      host: preset?.smtpHost ?? '', port: preset?.smtpPort ?? 465, secure: preset?.smtpSecurity !== 'starttls',
+      host: preset?.smtpHost ?? '', port: preset?.smtpPort ?? 465,
+      security: preset?.smtpSecurity ?? 'ssl', secure: (preset?.smtpSecurity ?? 'ssl') === 'ssl',
       username: account.email, from: account.email, password: '', authMethod,
       ...(authMethod === 'oauth2' && (providerId === 'sarv' || providerId === 'gmail') ? { oauthProvider: providerId } : {}),
     },
@@ -86,9 +88,10 @@ function savedForm(connection: ConnectedEmail): FormValues {
   return {
     ...initial, email: connection.result.email, username: imap?.username ?? '', imapHost: imap?.host ?? initial.imapHost,
     imapPort: String(imap?.port ?? initial.imapPort),
-    imapSecurity: imap?.security ?? (imap?.secure === false ? 'starttls' : initial.imapSecurity),
+    imapSecurity: imap ? resolveConnectionSecurity(imap) : initial.imapSecurity,
     smtpHost: connection.smtp.host, smtpPort: String(connection.smtp.port),
-    smtpSecurity: connection.smtp.secure === false ? 'starttls' : 'ssl',
+    // The saved choice, None included (resolveConnectionSecurity).
+    smtpSecurity: resolveConnectionSecurity(connection.smtp),
     allowInsecure: Boolean(imap?.allowInsecureTLS),
   };
 }
@@ -104,7 +107,7 @@ function initialForm(providerId: string): FormValues {
     email: '', username: '', password: '', imapHost: preset?.imapHost ?? '',
     imapPort: String(preset?.imapPort ?? 993), imapSecurity: preset?.imapSecurity ?? 'ssl',
     smtpHost: preset?.smtpHost ?? '', smtpPort: String(preset?.smtpPort ?? 465),
-    smtpSecurity: preset?.smtpSecurity === 'starttls' ? 'starttls' : 'ssl',
+    smtpSecurity: preset?.smtpSecurity ?? 'ssl',
     allowInsecure: false, skipSending: false,
   };
 }
@@ -350,8 +353,8 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected, purp
       const email = form.email.trim();
       if (!email || !form.password || !form.imapHost.trim()) throw new Error('Enter your email, password and incoming server.');
       const smtp: SMTPConfig = {
-        host: form.smtpHost.trim(), port: form.skipSending ? Number(form.smtpPort) || 465 : validPort(form.smtpPort),
-        secure: form.smtpSecurity === 'ssl', username: email, from: email,
+        host: form.smtpHost.trim(), port: form.skipSending ? Number(form.smtpPort) || defaultPort('smtp', form.smtpSecurity) : validPort(form.smtpPort),
+        security: form.smtpSecurity, secure: form.smtpSecurity === 'ssl', username: email, from: email,
         // Password whitespace can be meaningful. Never silently rewrite it.
         password: form.password, authMethod: 'password', allowInsecureTLS: form.allowInsecure || undefined,
       };
@@ -458,7 +461,7 @@ export function EmailSetupStep({ stage, active, onStageChange, onConnected, purp
               <details open={providerId === 'other' || undefined} className="rounded-lg border border-border p-3"><summary className="cursor-pointer text-sm font-medium">Incoming & sending server settings{providerId !== 'other' ? ' · prefilled' : ''}</summary><div className="mt-4 space-y-4">
                 <label className="block space-y-1 text-sm">Incoming login username (optional)<input aria-label="Incoming login username" autoComplete="username" value={form.username} onChange={(event) => changeField('username', event.target.value)} placeholder={form.email || 'Defaults to your email address'} disabled={busy !== null} className={inputClass} /><span className="block text-xs text-muted-foreground">Only needed if your server uses a login different from your email address.</span></label>
                 <div className="grid gap-3 sm:grid-cols-[1fr_90px_130px]"><label className="space-y-1 text-sm">IMAP server<input aria-label="IMAP server" value={form.imapHost} onChange={(event) => changeField('imapHost', event.target.value)} required disabled={busy !== null} className={inputClass} /></label><label className="space-y-1 text-sm">Port<input aria-label="IMAP port" type="number" min="1" max="65535" value={form.imapPort} onChange={(event) => changeField('imapPort', event.target.value)} required disabled={busy !== null} className={inputClass} /></label><label className="space-y-1 text-sm">Security<select aria-label="IMAP security" value={form.imapSecurity} disabled={busy !== null} onChange={(event) => { const value = event.target.value as ConnectionSecurity; setForm((old) => ({ ...old, imapSecurity: value, imapPort: String(defaultPort('imap', value)) })); }} className={inputClass}><option value="ssl">SSL / TLS</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></label></div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_90px_130px]"><label className="space-y-1 text-sm">SMTP server<input aria-label="SMTP server" value={form.smtpHost} onChange={(event) => changeField('smtpHost', event.target.value)} required={!form.skipSending} disabled={busy !== null || form.skipSending} className={inputClass} /></label><label className="space-y-1 text-sm">Port<input aria-label="SMTP port" type="number" min="1" max="65535" value={form.smtpPort} onChange={(event) => changeField('smtpPort', event.target.value)} required={!form.skipSending} disabled={busy !== null || form.skipSending} className={inputClass} /></label><label className="space-y-1 text-sm">Security<select aria-label="SMTP security" value={form.smtpSecurity} disabled={busy !== null || form.skipSending} onChange={(event) => { const value = event.target.value as 'ssl' | 'starttls'; setForm((old) => ({ ...old, smtpSecurity: value, smtpPort: String(defaultPort('smtp', value)) })); }} className={inputClass}><option value="ssl">SSL / TLS</option><option value="starttls">STARTTLS</option></select></label></div>
+                <div className="grid gap-3 sm:grid-cols-[1fr_90px_130px]"><label className="space-y-1 text-sm">SMTP server<input aria-label="SMTP server" value={form.smtpHost} onChange={(event) => changeField('smtpHost', event.target.value)} required={!form.skipSending} disabled={busy !== null || form.skipSending} className={inputClass} /></label><label className="space-y-1 text-sm">Port<input aria-label="SMTP port" type="number" min="1" max="65535" value={form.smtpPort} onChange={(event) => changeField('smtpPort', event.target.value)} required={!form.skipSending} disabled={busy !== null || form.skipSending} className={inputClass} /></label><label className="space-y-1 text-sm">Security<select aria-label="SMTP security" value={form.smtpSecurity} disabled={busy !== null || form.skipSending} onChange={(event) => { const value = event.target.value as ConnectionSecurity; setForm((old) => ({ ...old, smtpSecurity: value, smtpPort: String(defaultPort('smtp', value)) })); }} className={inputClass}><option value="ssl">SSL / TLS</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></label></div>
                 <p className="text-xs text-muted-foreground">Sending uses the same email and password. Separate sending credentials can be added in Settings.</p>
                 <label className="flex gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={form.allowInsecure} disabled={busy !== null} onChange={(event) => changeField('allowInsecure', event.target.checked)} />Allow self-signed or invalid certificates, only if you trust this server.</label>
               </div></details>

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import iconSvg from '../../desktop/public/icon.svg?raw';
 import { readClientHints, showAppIcon, start } from '../src/main.js';
 
 import { UA, releaseV122 } from './fixtures.js';
@@ -17,14 +18,44 @@ beforeEach(() => {
     '<img data-app-icon alt="" /><img data-product-image alt="" /><div id="app"></div>';
 });
 
+const DATA_SVG = 'data:image/svg+xml,';
+const parseDataSvg = (url) =>
+  new DOMParser().parseFromString(decodeURIComponent(url.slice(DATA_SVG.length)), 'image/svg+xml')
+    .documentElement;
+
 describe('showAppIcon', () => {
   // Breaks if the header logo renders as a broken image, or the tab loses its favicon.
-  it('sets the header image and the favicon to the icon', () => {
-    showAppIcon(document, '/assets/icon.svg');
-    expect(document.querySelector('[data-app-icon]').getAttribute('src')).toBe('/assets/icon.svg');
+  it('sets the header image to the plain icon and adds an SVG favicon', () => {
+    showAppIcon(document, iconSvg);
+    const headerSrc = document.querySelector('[data-app-icon]').getAttribute('src');
+    expect(headerSrc.startsWith(DATA_SVG)).toBe(true);
+    const header = parseDataSvg(headerSrc);
+    expect(header.getAttribute('viewBox')).toBe('0 0 551.21 551.21');
+    expect(header.querySelectorAll('path').length).toBeGreaterThan(1);
+    // The provenance blob is dropped: it is most of the file and draws nothing.
+    expect(header.querySelector('metadata')).toBeNull();
     const favicon = document.head.querySelector('link[rel="icon"]');
-    expect(favicon.getAttribute('href')).toBe('/assets/icon.svg');
     expect(favicon.getAttribute('type')).toBe('image/svg+xml');
+    expect(favicon.getAttribute('href').startsWith(DATA_SVG)).toBe(true);
+  });
+
+  // Breaks if the tab icon loses its white disc and the logo vanishes on a dark tab bar.
+  it('puts the real logo on a white disc for the favicon', () => {
+    showAppIcon(document, iconSvg);
+    const favicon = parseDataSvg(
+      document.head.querySelector('link[rel="icon"]').getAttribute('href')
+    );
+    expect(favicon.getAttribute('viewBox')).toBe('0 0 64 64');
+    const [disc, logo] = favicon.children;
+    expect(disc.tagName).toBe('circle');
+    expect(disc.getAttribute('fill')).toBe('white');
+    expect(disc.getAttribute('r')).toBe('32');
+    // The logo sits inside the disc, centred, with its paths intact.
+    expect(logo.tagName).toBe('svg');
+    expect(Number(logo.getAttribute('x')) + Number(logo.getAttribute('width'))).toBeLessThan(64);
+    expect(Number(logo.getAttribute('x'))).toBe(Number(logo.getAttribute('y')));
+    expect(logo.querySelectorAll('path').length).toBeGreaterThan(1);
+    expect(logo.querySelector('metadata')).toBeNull();
   });
 });
 
@@ -55,7 +86,9 @@ describe('start', () => {
     const win = fakeWindow({ userAgent: UA.linuxArmFirefox });
     await start(win);
     expect(win.fetch).toHaveBeenCalledTimes(1);
-    expect(document.querySelector('[data-app-icon]').getAttribute('src')).toMatch(/icon\.svg/);
+    expect(document.querySelector('[data-app-icon]').getAttribute('src')).toMatch(
+      /^data:image\/svg\+xml,/
+    );
     expect(document.querySelector('[data-product-image]').getAttribute('src')).toMatch(
       /screenshot-inbox\.png/
     );

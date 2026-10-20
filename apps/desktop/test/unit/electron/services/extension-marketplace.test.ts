@@ -9,9 +9,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 /**
  * Installing an extension published on GitHub.
  *
- * What this protects: an extension runs in the main process with real access to
- * the user's mail, and the app's only defences are a pinned SHA-256, a size
- * cap, an archive allowlist and a permission prompt the user actually saw. Each
+ * What this protects: an extension runs as full code in the extension process
+ * with real access to the user's mail, and the app's only defences are a pinned
+ * SHA-256, a size cap, an archive allowlist and a permission prompt the user
+ * actually saw. Each
  * of those is one `if` away from being decoration, and a regression in any of
  * them looks like nothing at all — the install still succeeds. So every refusal
  * is asserted here explicitly, including the ones that should never fire.

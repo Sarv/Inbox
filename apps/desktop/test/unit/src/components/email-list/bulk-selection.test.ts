@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { actionableEmailIds, selectedEmailIdsFor } from '../../../../../src/components/email-list/bulk-selection';
+import { actionableEmailIds, selectedEmailIdsFor, selectedStarTargetIdsFor } from '../../../../../src/components/email-list/bulk-selection';
 
 /**
  * What a bulk action in the list acts on.
@@ -225,5 +225,40 @@ describe('actionableEmailIds — the rule both paths share', () => {
 
   it('returns nothing for an empty thread', () => {
     expect(actionableEmailIds([], true, DRAFT_FOLDERS)).toEqual([]);
+  });
+});
+
+describe('selectedStarTargetIdsFor — what a list star writes to', () => {
+  const dated = (id: string, tags: string, date: number) => ({ id, tags, date }) as never;
+  const conversation = (threadId: string, rows: never[]) => ({ threadId, emails: rows }) as never;
+  // Rows arrive oldest first, as buildThreads hands them over.
+  const t1 = conversation('t1', [dated('t1-first', '|INBOX|', 100), dated('t1-reply', '|INBOX|', 200), dated('t1-latest', '|INBOX|', 300)]);
+  const t2 = conversation('t2', [dated('t2-only', '|INBOX|', 150)]);
+  const input = (selected: string[], viewIsDrafts = false) => ({
+    visibleThreads: [t1, t2], selectedThreadIds: new Set(selected), viewIsDrafts, conversationFolders: DRAFT_FOLDERS,
+  });
+
+  // Breaks: starring a thread flags every reply (or the first message) on the
+  // server instead of the latest, unlike Outlook and Sarv Mail.
+  it('stars only the latest message of each selected thread', () => {
+    expect(selectedStarTargetIdsFor(input(['t1', 't2']), true)).toEqual(['t1-latest', 't2-only']);
+  });
+
+  // Breaks: unstar leaves a star on an older copy and the thread stays starred.
+  it('unstars every message of each selected thread', () => {
+    expect(selectedStarTargetIdsFor(input(['t1']), false)).toEqual(['t1-first', 't1-reply', 't1-latest']);
+  });
+
+  // Breaks: a star on a draft row in Drafts reaches the received mail it replies to.
+  it('stays on the draft in the Drafts view', () => {
+    const drafts = conversation('d', [dated('received', '|INBOX|', 100), dated('draft', '|Drafts|draft|', 200)]);
+    expect(selectedStarTargetIdsFor({
+      visibleThreads: [drafts], selectedThreadIds: new Set(['d']), viewIsDrafts: true, conversationFolders: DRAFT_FOLDERS,
+    }, true)).toEqual(['draft']);
+  });
+
+  // Breaks: an empty selection stars something.
+  it('returns nothing when nothing is selected', () => {
+    expect(selectedStarTargetIdsFor(input([]), true)).toEqual([]);
   });
 });

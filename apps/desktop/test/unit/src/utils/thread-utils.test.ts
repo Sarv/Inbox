@@ -6,6 +6,7 @@ import {
   adjustTotalForFilteredOut,
   assignThreadsToSections,
   buildThreads,
+  conversationStarToggle,
   draftRecipientDisplay,
   NO_RECIPIENTS_LABEL,
   sectionIsVisible,
@@ -142,6 +143,37 @@ describe('flag predicates', () => {
     expect(isRead(email({ tags: '', flags: ['\\Seen'] }))).toBe(true);
     expect(isRead(email({ tags: '', flags: [] }))).toBe(false);
     expect(isRead(email({ tags: '' }))).toBe(false);
+  });
+});
+
+describe('conversationStarToggle — the `s` shortcut on a conversation', () => {
+  const first = email({ id: 'first', date: 100, tags: '|INBOX|' });
+  const latest = email({ id: 'latest', date: 300, tags: '|INBOX|' });
+
+  // Breaks: `s` on an unstarred thread flags the first message (or every reply)
+  // instead of the latest one Outlook and Sarv Mail flag.
+  it('stars only the latest message of an unstarred thread', () => {
+    expect(conversationStarToggle([first, latest])).toEqual({ starring: true, ids: ['latest'] });
+  });
+
+  // Breaks: the direction is read from the first message, which no longer
+  // carries the star, so `s` on a starred thread re-stars it forever.
+  it('unstars every message when only the latest carries the star', () => {
+    const starredLatest = email({ id: 'latest', date: 300, tags: '|INBOX|starred|' });
+    expect(conversationStarToggle([first, starredLatest])).toEqual({ starring: false, ids: ['first', 'latest'] });
+  });
+
+  // Breaks: an old star on an earlier message makes `s` star instead of clear.
+  it('treats a star on any message as a starred thread', () => {
+    const starredFirst = email({ id: 'first', date: 100, tags: '|INBOX|starred|' });
+    expect(conversationStarToggle([starredFirst, latest]).starring).toBe(false);
+  });
+
+  // Breaks: single-message threads stop toggling exactly as before.
+  it('toggles a single message on and off', () => {
+    expect(conversationStarToggle([first])).toEqual({ starring: true, ids: ['first'] });
+    const starred = email({ id: 'first', date: 100, tags: '|INBOX|starred|' });
+    expect(conversationStarToggle([starred])).toEqual({ starring: false, ids: ['first'] });
   });
 });
 

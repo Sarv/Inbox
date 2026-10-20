@@ -1,6 +1,8 @@
 import { Eye, EyeOff } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
+import { useSecureStorageProtected } from '../hooks/useSecureStorageProtected';
+
 import { Tooltip } from './Tooltip';
 
 interface VaultPasswordFieldProps {
@@ -43,6 +45,7 @@ export function VaultPasswordField({
   inputClassName,
   autoFocus,
 }: VaultPasswordFieldProps) {
+  const secretsProtected = useSecureStorageProtected();
   const [hasStored, setHasStored] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [show, setShow] = useState(false);
@@ -121,7 +124,8 @@ export function VaultPasswordField({
       {(isEditing || firstTimeHint) && (
         <p className="mt-1 text-xs text-muted-foreground">
           {isEditing
-            ? 'Saved securely — click the eye to view it (asks for Touch ID), or leave blank to keep it. Change only what actually changed.'
+            ? `${secretsProtected === false ? 'Saved, but not protected on this device (no system keyring)' : 'Saved securely'}`
+              + ' — click the eye to view it (asks for Touch ID), or leave blank to keep it. Change only what actually changed.'
             : firstTimeHint}
         </p>
       )}

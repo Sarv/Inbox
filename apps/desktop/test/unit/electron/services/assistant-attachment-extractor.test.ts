@@ -32,10 +32,20 @@ function pdf(text?: string, encrypted = false): Uint8Array {
 }
 
 describe('assistant document evidence extraction', () => {
-  it('reads quotation text from a real PDF with its page locator', async () => {
-    const result = await extractAssistantAttachment({ filename: 'TCS quote.pdf', bytes: pdf('TCS quotation Q-2026-18 Total INR 250000 plus GST') });
-    expect(result.status).toBe('ready');
-    expect(result.segments[0]).toMatchObject({ text: expect.stringContaining('INR 250000'), locator: { kind: 'page', page: 1, label: 'Page 1' } });
+  it('reads real PDF text and page locators without native Uint8Array.toHex support', async () => {
+    const nativeToHex = Object.getOwnPropertyDescriptor(Uint8Array.prototype, 'toHex');
+    // PDF.js 6's modern worker calls this while computing document fingerprints.
+    // Supported Node releases lack it; use the dependency's own compatibility build.
+    Object.defineProperty(Uint8Array.prototype, 'toHex', { value: undefined, configurable: true, writable: true });
+    try {
+      const result = await extractAssistantAttachment({ filename: 'TCS quote.pdf', bytes: pdf('TCS quotation Q-2026-18 Total INR 250000 plus GST') });
+      expect(result.status).toBe('ready');
+      expect(result.segments[0]).toMatchObject({ text: expect.stringContaining('INR 250000'), locator: { kind: 'page', page: 1, label: 'Page 1' } });
+    } finally {
+      // Preserve a native implementation if present. Otherwise the loaded PDF
+      // library retains its compatibility implementation for subsequent reads.
+      if (nativeToHex) Object.defineProperty(Uint8Array.prototype, 'toHex', nativeToHex);
+    }
   });
 
   it('reports a PDF without text as an explicit OCR coverage gap', async () => {

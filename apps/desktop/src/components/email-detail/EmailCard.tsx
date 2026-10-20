@@ -166,7 +166,7 @@ export function EmailCard({ ctx }: EmailCardProps) {
                   email={displayEmail}
                   // The anchor card stands for the conversation: Forward in the
                   // popup, and Delete / Archive take the whole thread.
-                  {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', removes: 'thread' })}
+                  {...buildEmailMenuHandlers(ctx, displayEmail, { forward: 'popup', scope: 'thread' })}
                 />
               </div>
             </div>

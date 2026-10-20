@@ -65,10 +65,13 @@ password.
   your operating system's secure storage (Keychain on macOS, DPAPI on Windows,
   Secret Service on Linux). On Linux systems with no Secret Service available,
   the key is stored unencrypted on disk, and the app tells you so. Attachments
-  you open are copied, unencrypted, to a cache in the app's data folder (up to
-  500 MB) so that other programs can open them, and the app keeps a diagnostic
-  log file there that can include email addresses and subjects. Neither leaves
-  your device unless you send it to us.
+  you open are kept in an encrypted cache in the app's data folder (up to
+  500 MB). When you open one in another program, the app writes a temporary,
+  unencrypted copy for that program and deletes it shortly after. The app also
+  keeps a diagnostic log file there, readable only by your user account, that
+  can include message subjects; in released versions email addresses are
+  removed from it. Neither the cache nor the log leaves your device unless you
+  send it to us.
 - **With your email provider.** Your mail stays on your provider's servers as
   usual. Changes you make in the app (reading, moving, deleting, sending,
   drafts, labels) are made on the provider's servers. By default the app also
@@ -150,23 +153,28 @@ If you enable **web research** for drafts, the search query goes to Tavily
 
 ### 4.2 Crash and error reports
 
-Official builds send crash and error reports to Sentry (Functional Software,
-Inc.), which we use to find and fix bugs. A report can contain:
+Official builds can send crash and error reports to Sentry (Functional
+Software, Inc.), which we use to find and fix bugs. This is off until you
+agree: the first time you open the app, it asks whether to send them, and
+nothing is sent unless you say yes. If you close the question without
+answering, the app asks again the next time it starts. A report can contain:
 
 - the error and where it happened;
 - your app version, operating system and language;
 - your mail server's host name;
 - a shortened one-way hash of your email address, to group reports from the
   same installation;
-- a trail of recent app activity, such as connection and sync steps.
+- a trail of recent app activity, such as connection and sync steps, which can
+  include the names of your mail folders.
 
-Email addresses are removed from reports before they leave your device, and
-web addresses are sent without their query strings. Reports do not include
-message bodies or attachments. A native crash can include a snapshot of app
-memory at the moment of the crash.
+Email addresses are removed from reports before they leave your device, and so
+are passwords and access tokens wherever the app can recognise them; web
+addresses are sent without their query strings. Reports do not include message
+bodies, attachments or memory dumps (snapshots of the app's memory).
 
-You can turn crash reports off in Settings → General → Send crash reports. When
-off, nothing is sent, including reports of crashes that happened earlier.
+You can change your answer at any time in Settings → General → Send crash
+reports. Until you say yes, and whenever it is off, nothing is sent, including
+reports of errors that happened earlier.
 
 ### 4.3 Spam and phishing protection
 
@@ -216,8 +224,12 @@ the rest it asks first. You can change this under Security → Remote images.
 - The app checks GitHub for new versions about once an hour. That request
   carries your IP address, app version and platform, but no personal data.
 - The extension catalogue and extensions you install are downloaded from GitHub
-  and jsDelivr. An extension can only make its own network requests if you
-  grant it that permission.
+  and jsDelivr. A download is checked against the checksum the registry
+  publishes; there is no publisher signature yet. An extension runs in a
+  separate process with full access to your user account on this computer,
+  including your files and the app's mail data, whatever permissions it asks
+  for. Its permissions only limit what it can ask the app to do: its own code
+  can still make network requests. Install only extensions you trust.
 - The app checks your internet connection by contacting `www.google.com`.
 
 ### 4.8 Sarv accounts

@@ -16,7 +16,7 @@ import { SearchBar } from '../SearchBar';
 import { canOfferServerSearch, hasServerSearchableParsedQuery } from '../server-search';
 import { Tooltip } from '../Tooltip';
 
-import { actionableEmailIds, selectedEmailIdsFor } from './bulk-selection';
+import { actionableEmailIds, selectedEmailIdsFor, selectedStarTargetIdsFor } from './bulk-selection';
 import { BulkActionBar } from './BulkActionBar';
 import { getCachedCategorySlugs } from './CategoryBadges';
 import { CategoryFilterBar } from './CategoryFilterBar';
@@ -461,25 +461,34 @@ export function EmailList() {
   // archive/delete/read/star/snooze operate on the entire conversation — matching
   // the detail toolbar and the bulk-select toolbar. Falls back to the lone id if
   // no thread is found (defensive; shouldn't happen for a rendered row).
+  const visibleThreadFor = useCallback((emailId: string) => visibleThreads.find(
+    t => t.emails.some(e => e.id === emailId) ||
+      t.latestEmail.id === emailId ||
+      t.badgeEmailId === emailId,
+  ), [visibleThreads]);
+
   const threadEmailIdsFor = useCallback((emailId: string): string[] => {
-    const thread = visibleThreads.find(
-      t => t.emails.some(e => e.id === emailId) ||
-        t.latestEmail.id === emailId ||
-        t.badgeEmailId === emailId,
-    );
+    const thread = visibleThreadFor(emailId);
     // Narrowed for Drafts by the SAME rule the bulk toolbar uses: the hover
     // trash icon on a draft row must not delete the mail it replies to either.
     return thread
       ? actionableEmailIds(thread.emails, viewIsDrafts, conversationFolders, trashFolderPaths)
       : [emailId];
-  }, [visibleThreads, viewIsDrafts, conversationFolders, trashFolderPaths]);
+  }, [visibleThreadFor, viewIsDrafts, conversationFolders, trashFolderPaths]);
 
   const toggleStar = useCallback((emailId: string, currentlyStarred: boolean, e: React.MouseEvent) => {
     e.stopPropagation();
-    // Star/unstar the whole conversation as one, via the shared batched action
-    // (covers every straggler copy in a single state update + one IMAP call).
-    bulkMarkStarred(threadEmailIdsFor(emailId), !currentlyStarred);
-  }, [bulkMarkStarred, threadEmailIdsFor]);
+    // Star the conversation's LATEST message, unstar every copy — the same rule
+    // as the bulk toolbar (one state update + one IMAP call either way).
+    const thread = visibleThreadFor(emailId);
+    const ids = thread
+      ? selectedStarTargetIdsFor({
+        visibleThreads: [thread], selectedThreadIds: new Set([thread.threadId]),
+        viewIsDrafts, conversationFolders, trashFolderPaths,
+      }, !currentlyStarred)
+      : [emailId];
+    bulkMarkStarred(ids, !currentlyStarred);
+  }, [bulkMarkStarred, visibleThreadFor, viewIsDrafts, conversationFolders, trashFolderPaths]);
 
   const handleArchive = useCallback(async (emailId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -576,7 +585,7 @@ export function EmailList() {
   };
 
   const handleBulkMarkStarred = (starred: boolean) => {
-    bulkMarkStarred(getSelectedEmailIds(), starred);
+    bulkMarkStarred(selectedStarTargetIdsFor({ visibleThreads, selectedThreadIds, viewIsDrafts, conversationFolders, trashFolderPaths }, starred), starred);
     setSelectedThreadIds(new Set());
   };
 

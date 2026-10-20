@@ -1,3 +1,4 @@
+import { createLogger } from '@sarvinbox/core/logger';
 import {
   Puzzle,
   Power,
@@ -18,6 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   describePermission,
+  EXTENSION_TRUST_NOTICE,
   findAvailableUpdates,
   sortPermissionsByRisk,
   type AvailableUpdate,
@@ -25,6 +27,7 @@ import {
   type SurfaceSource,
 } from '../utils/extension-marketplace-display';
 
+import { useConfirm } from './ConfirmDialog';
 import { ExtensionBrowser } from './extensions/ExtensionBrowser';
 import {
   ExtensionScreenshots,
@@ -32,6 +35,8 @@ import {
   type ScreenshotItem,
 } from './extensions/ExtensionSurfaces';
 import { Tooltip } from './Tooltip';
+
+const log = createLogger('ExtensionManager');
 
 // Extension types matching the core extension system
 interface InstalledExtension {
@@ -316,6 +321,9 @@ export function ExtensionManager() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   /** An update handed over to Browse because it needs a fresh consent. */
   const [browseExtensionId, setBrowseExtensionId] = useState<string | null>(null);
+  // Named so it cannot shadow the global confirm() Uninstall still uses: that
+  // returns a boolean, this a promise, and a promise is always truthy.
+  const { confirm: confirmInDialog, confirmDialog } = useConfirm();
 
   /**
    * Ask the catalogue what it is offering for what is already installed.
@@ -334,7 +342,7 @@ export function ExtensionManager() {
       if (!result?.success || !result.data) return;
       setUpdates(findAvailableUpdates(installed, result.data.items as CatalogOffer[]));
     } catch (err) {
-      console.warn('Could not check for extension updates:', err);
+      log.warn('Could not check for extension updates:', err);
     }
   }, []);
 
@@ -384,7 +392,7 @@ export function ExtensionManager() {
       await window.electronAPI?.extensions?.enable(extensionId);
       await loadExtensions();
     } catch (err) {
-      console.error('Failed to enable extension:', err);
+      log.error('Failed to enable extension:', err);
     } finally {
       setLoadingIds((prev) => {
         const next = new Set(prev);
@@ -400,7 +408,7 @@ export function ExtensionManager() {
       await window.electronAPI?.extensions?.disable(extensionId);
       await loadExtensions();
     } catch (err) {
-      console.error('Failed to disable extension:', err);
+      log.error('Failed to disable extension:', err);
     } finally {
       setLoadingIds((prev) => {
         const next = new Set(prev);
@@ -420,7 +428,7 @@ export function ExtensionManager() {
       await window.electronAPI?.extensions?.uninstall(extensionId);
       await loadExtensions();
     } catch (err) {
-      console.error('Failed to uninstall extension:', err);
+      log.error('Failed to uninstall extension:', err);
     } finally {
       setLoadingIds((prev) => {
         const next = new Set(prev);
@@ -430,14 +438,30 @@ export function ExtensionManager() {
     }
   };
 
+  /**
+   * Install from a local folder. This path has no registry entry, no checksum
+   * and no permission prompt — the folder's manifest is granted as written — so
+   * the same trust notice the registry prompt shows is the consent step, and
+   * nothing is picked or installed until it is confirmed.
+   */
   const handleInstall = async () => {
+    const confirmed = await confirmInDialog({
+      title: 'Install an extension from a folder?',
+      message:
+        `${EXTENSION_TRUST_NOTICE}\n\n` +
+        'A folder install is not checked against the registry, and the extension gets every ' +
+        'permission its manifest lists.',
+      confirmLabel: 'Choose folder',
+      destructive: false,
+    });
+    if (!confirmed) return;
     try {
       const result = await window.electronAPI?.extensions?.selectAndInstall();
       if (result?.success) {
         await loadExtensions();
       }
     } catch (err) {
-      console.error('Failed to install extension:', err);
+      log.error('Failed to install extension:', err);
     }
   };
 
@@ -523,6 +547,7 @@ export function ExtensionManager() {
 
   return (
     <div className="flex-1 w-full min-w-0 h-full overflow-y-auto p-6">
+      {confirmDialog}
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
@@ -739,8 +764,9 @@ export function ExtensionManager() {
           </h3>
           <p className="text-sm text-muted-foreground">
             Published extensions live in their own repository and are installed from the Browse
-            tab. Each download is checked against a published SHA-256 before anything runs, and
-            you are shown exactly what it can do first.
+            tab. Each download is checked against the SHA-256 its registry publishes before
+            anything runs, and you are shown the permissions it asks for first. An extension runs
+            as full code on your computer, so only install ones you trust.
           </p>
           <p className="text-sm text-muted-foreground mt-2">
             To try one you are writing yourself, install it from a local folder containing a{' '}

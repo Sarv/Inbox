@@ -1,0 +1,6 @@
+{
+  "_comment": "PUBLIC keys that sign each release's update-manifest.json (Ed25519, SPKI PEM). The installed app refuses any update whose manifest is not signed by one of these. The private half lives only in the UPDATE_SIGNING_KEY GitHub secret. To rotate: add the new key here, ship a release signed with the OLD key, then switch the secret. See docs/RELEASING.md.",
+  "ed25519": [
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAHbY1vmAAfgK88hmyxu13XJIEN2Wzpn9B/M3nBc1sgtw=\n-----END PUBLIC KEY-----"
+  ]
+}

@@ -20,7 +20,7 @@ export async function applyOnboardingAIChoice(enabled: boolean): Promise<void> {
       const provider = getDefaultProvider();
       if (!provider) throw new Error('Choose and test an AI model before enabling AI.');
       const configured = await api.agent.setAIConfig({
-        type: provider.type, apiKey: provider.apiKey, model: provider.model, baseUrl: provider.baseUrl,
+        type: provider.type, apiKey: provider.apiKey, providerId: provider.id, model: provider.model, baseUrl: provider.baseUrl,
         authMethod: provider.authMethod, oauthProvider: provider.oauthProvider, oauthEmail: provider.oauthEmail,
       });
       if (!configured.success) throw new Error('Could not save the AI connection.');

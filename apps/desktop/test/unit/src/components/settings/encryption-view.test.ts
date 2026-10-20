@@ -30,6 +30,18 @@ describe('encryption-view', () => {
     expect(protectionText('passphrase')).not.toContain('keychain');
   });
 
+  // Linux without a keyring (basic_text): a key sealed with the "keychain"
+  // there earlier is only obfuscated. Breaks: it is still called protected,
+  // or the user is not told how to protect it.
+  it('calls a keychain-sealed key unprotected where there is no real keychain, and says how to fix it', () => {
+    const text = protectionText('keychain', false);
+    expect(text).toMatch(/^Not protected/);
+    expect(text).not.toContain('Protected by');
+    expect(text).toContain('back up the secret key, then import that backup with its passphrase');
+    // A passphrase key is protected whatever the keychain is.
+    expect(protectionText('passphrase', false)).toBe(protectionText('passphrase'));
+  });
+
   // Breaks: a key fetched from a third-party server looks like one the user imported.
   it('names every key source', () => {
     expect(keySourceLabel('manual')).toBe('Imported by you');

@@ -131,8 +131,8 @@ export function EncryptionTab({ settings, updateSetting }: EncryptionTabProps) {
 
       {keychain === false && (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-          This system has no keychain to keep your keys in, so each key is protected by its own passphrase. You will be asked
-          for it once per session.
+          This system has no keychain to keep your keys in, so new keys are protected by their own passphrase. You will be
+          asked for it once per session.
         </div>
       )}
 
@@ -150,7 +150,7 @@ export function EncryptionTab({ settings, updateSetting }: EncryptionTabProps) {
                 <KeyHeading email={key.email} fingerprint={key.fingerprint} warnings={keyWarnings(key)} />
                 <div className="text-xs text-muted-foreground">
                   Created {localDate(key.createdAt)}
-                  {key.expiresAt ? ` · expires ${localDate(key.expiresAt)}` : ''} · {protectionText(key.protection)}
+                  {key.expiresAt ? ` · expires ${localDate(key.expiresAt)}` : ''} · {protectionText(key.protection, keychain !== false)}
                 </div>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input

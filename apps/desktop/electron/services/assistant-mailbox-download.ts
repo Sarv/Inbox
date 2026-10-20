@@ -1,7 +1,5 @@
 import {
-  accountIdFor,
   fetchBodyQueued,
-  resolveTlsOptions,
   waitForAbortableOperation,
   type IMAPConfig,
 } from '@sarvinbox/core';
@@ -10,8 +8,11 @@ import { getIsQuitting, getSystemSuspended } from '../shared';
 
 import { requireAccountStorage, requireTargetAccountId, resolveNamedOrActiveAccountTarget } from './account-target';
 import { readRegistryAccounts } from './accounts-registry';
-import { attachImapBearer, getValidAccessToken } from './oauth-service';
-import { getAccountSecrets } from './secure-credential-store';
+import { attachImapBearer, getAccessTokenForMailHost } from './oauth-service';
+import {
+  hostMismatchMessage, narrowSavedTransport, resolveVaultPassword, vaultIdCandidates,
+  withSavedPassword, type VaultPasswordFound,
+} from './vault-credentials';
 
 type Mailbox = Awaited<ReturnType<typeof resolveNamedOrActiveAccountTarget>>;
 type Engine = NonNullable<Mailbox['syncEngine']>;
@@ -25,28 +26,35 @@ async function assertOwner(accountId: string, mailbox: Mailbox): Promise<void> {
   if (await requireAccountStorage(accountId) !== mailbox.storage) throw new Error('The source account changed during download.');
 }
 
-async function credentials(accountId: string, signal: AbortSignal): Promise<IMAPConfig> {
+async function credentials(accountId: string, signal: AbortSignal): Promise<{ config: IMAPConfig; saved?: VaultPasswordFound }> {
   const raw = readRegistryAccounts().find(account => account.id === accountId)?.imapConfig;
   if (!raw || typeof raw.host !== 'string' || !raw.host || typeof raw.username !== 'string' || !raw.username ||
     typeof raw.port !== 'number' || !Number.isInteger(raw.port) || raw.port < 1 || raw.port > 65535)
     throw new Error('This account needs its IMAP settings completed.');
   let config = { ...raw } as unknown as IMAPConfig;
-  if (config.authMethod === 'oauth2' && config.oauthProvider) {
-    config = { ...config, accessToken: await waitForAbortableOperation(getValidAccessToken(config.oauthProvider, config.username), signal) };
+  let saved: VaultPasswordFound | undefined;
+  if (config.authMethod === 'oauth2') {
+    if (!config.oauthProvider) throw new Error('This account needs its OAuth provider configured.');
+    config = { ...config, accessToken: await waitForAbortableOperation(
+      getAccessTokenForMailHost(config.oauthProvider, config.username, 'imap', config.host), signal,
+    ) };
   } else {
-    // The registry is intentionally secret-free. Match the foreground path's
-    // legacy vault aliases without ever loading another account's saved config.
-    const ids = [...new Set([accountId, accountIdFor(config.username, config.host), accountIdFor(config.username)])];
-    let password: string | undefined;
-    for (const id of ids) {
-      signal.throwIfAborted();
-      const secrets = await waitForAbortableOperation(getAccountSecrets(id), signal);
-      if (secrets?.imap?.password) { password = secrets.imap.password; break; }
-    }
-    if (!password) throw new Error('This account needs its password or sign-in refreshed.');
-    config = { ...config, password };
+    // Use the foreground connection's host and transport bindings. Merely
+    // finding a password under a legacy account alias cannot authorize sending
+    // it to another host or over a less secure connection.
+    const vaulted = await waitForAbortableOperation(resolveVaultPassword(
+      vaultIdCandidates(accountId, config.username, config.host), 'imap', config.host,
+    ), signal);
+    if (vaulted.status === 'host-mismatch') throw new Error(hostMismatchMessage('imap', config.host, vaulted.boundHost));
+    if (vaulted.status === 'none') throw new Error('This account needs its password or sign-in refreshed.');
+    const applied = withSavedPassword(config, 'imap', vaulted);
+    if ('refusal' in applied) throw new Error(applied.refusal);
+    config = applied.config;
+    saved = vaulted;
   }
-  return attachImapBearer({ ...config, tlsOptions: resolveTlsOptions(config) });
+  // Core owns certificate/encryption checks. OAuth's refresh closure retains
+  // the same host binding for subsequent reconnects and pool connections.
+  return { config: attachImapBearer(config), saved };
 }
 
 /** Reuse the account's reconnect ladder; bootstrap credentials only for a fresh runtime. */
@@ -65,6 +73,7 @@ export async function ensureAssistantMailboxConnection(accountId: string, signal
   if (!pending) {
     pending = (async () => {
       let freshConnect = false;
+      let connectedCredentials: Awaited<ReturnType<typeof credentials>> | undefined;
       const deadline = AbortSignal.timeout(CONNECT_TIMEOUT_MS);
       try {
         if (engine.hasConnectionConfig() || engine.isConnecting()) {
@@ -73,7 +82,8 @@ export async function ensureAssistantMailboxConnection(accountId: string, signal
           if (!await waitForAbortableOperation(engine.ensureConnection(), deadline))
             throw new Error('This account could not reconnect. Check its connection or sign-in.');
         } else {
-          const config = await credentials(accountId, deadline);
+          const resolved = await credentials(accountId, deadline);
+          const { config } = resolved;
           await assertOwner(accountId, mailbox);
           if (engine.isConnected()) return;
           if (engine.hasConnectionConfig() || engine.isConnecting()) {
@@ -82,10 +92,14 @@ export async function ensureAssistantMailboxConnection(accountId: string, signal
           } else {
             freshConnect = true;
             await waitForAbortableOperation(engine.connect(config), deadline);
+            connectedCredentials = resolved;
           }
         }
         await assertOwner(accountId, mailbox);
         if (!engine.isConnected()) throw new Error('This account did not establish a mail connection.');
+        if (connectedCredentials?.saved && engine.isConnectedWith(connectedCredentials.config)) {
+          await waitForAbortableOperation(narrowSavedTransport('imap', connectedCredentials.saved, connectedCredentials.config), deadline);
+        }
         failedUntil.delete(engine);
       } catch (error) {
         failedUntil.set(engine, Date.now() + 60_000);

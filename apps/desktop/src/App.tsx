@@ -11,7 +11,9 @@ import { InboxAssistant } from './components/assistant/InboxAssistant';
 import { AttachmentViewer } from './components/attachment-viewer/AttachmentViewer';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
+import { ConnectionSecurityBanner } from './components/ConnectionSecurityBanner';
 import { Contacts } from './components/Contacts';
+import { CrashReportConsentDialog } from './components/CrashReportConsentDialog';
 import { EmailList } from './components/email-list';
 import { ExtensionManager } from './components/ExtensionManager';
 import { ExtensionNotification } from './components/ExtensionNotification';
@@ -537,6 +539,16 @@ function App() {
         useEmailStore.setState({ needsReauth: true });
       });
     }
+    // The server stopped encrypting a STARTTLS account mid-session (CASA M-5):
+    // reconnects stopped. Show what to change — NOT the re-auth prompt, the
+    // password was never sent or rejected.
+    if (window.electronAPI?.imap?.onSecurityError) {
+      window.electronAPI.imap.onSecurityError((message) => {
+        console.warn('[App] IMAP server would not encrypt a STARTTLS account');
+        useEmailStore.getState().handleDisconnection?.();
+        useEmailStore.setState({ connectionSecurityIssue: message });
+      });
+    }
 
     // The background first-email split: main's scheduler nominates threads
     // (per account); the job re-checks and splits the ones that qualify.
@@ -590,6 +602,7 @@ function App() {
       if (window.electronAPI?.imap?.removeReconnectingListener) {
         window.electronAPI.imap.removeReconnectingListener();
       }
+      window.electronAPI?.imap?.removeSecurityErrorListener?.();
       if (window.electronAPI?.imap?.removeAuthErrorListener) {
         window.electronAPI.imap.removeAuthErrorListener();
       }
@@ -945,6 +958,11 @@ function App() {
           onReconnect={() => setShowReauth(true)}
           onFix={() => { setSettingsInitialTab('accounts'); setActiveSection('settings'); }}
         />
+        {/* The server would not encrypt a STARTTLS account (CASA M-5): the
+            remedy is the account's connection security, not a password. */}
+        <ConnectionSecurityBanner
+          onFix={() => { setSettingsInitialTab('accounts'); setActiveSection('settings'); }}
+        />
         {/* An OAuth session that could not be refreshed. Separate from the
             password banner above: the remedy is the provider's sign-in, not a
             password prompt. Shown regardless of whether the OS notification
@@ -1021,6 +1039,9 @@ function App() {
       {/* Auto-update prompt. Self-hiding: renders nothing unless the main
           process says there is something to show. */}
       <UpdateDialog />
+      {/* One-time crash-report consent (CASA L-8). Self-hiding: only while main
+          reports the question unanswered, and never on top of onboarding. */}
+      <CrashReportConsentDialog suppressed={showOnboarding} />
 
       {/* Set-up-sending (SMTP) modal — dismissible, opened on demand via the
           'sarvinbox:open-smtp-setup' event from the compose/reply banner. */}

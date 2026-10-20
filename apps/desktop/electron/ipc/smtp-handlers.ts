@@ -7,19 +7,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { SMTPClient, emailContentHash, resolveStandardFolder, resolveTlsOptions, providerAutoSavesSentCopy, isAuthTokenError, withFolderSelected, messageIdKey, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { SMTPClient, emailContentHash, resolveStandardFolder, providerAutoSavesSentCopy, isAuthTokenError, isStarttlsRefusedError, withFolderSelected, messageIdKey, STARTTLS_UNAVAILABLE, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
 
 import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { seedAttachmentCache } from '../services/attachment-cache';
-import { getValidAccessToken } from '../services/oauth-service';
+import { getAccessTokenForMailHost } from '../services/oauth-service';
 import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
 import { sendTransformFor } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
 import { getPipelineUserName } from '../services/unified-pipeline-service';
-import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId } from '../shared';
+import { hostMismatchMessage, narrowSavedTransport, resolveVaultPassword, vaultIdCandidates, withSavedPassword, type VaultPasswordFound } from '../services/vault-credentials';
+import { getSmtpClient, setSmtpClient, getMainWindow, getStorage, getSyncEngine, getStorageFor, getSmtpClientFor, setSmtpClientFor, getSyncEngineFor, getCurrentAccountId, getAccountIdForStorage } from '../shared';
 
 // Static import (not require()): the bundled main.js has no on-disk services
 // file, so a runtime require() throws "Cannot find module".
@@ -62,12 +63,37 @@ function getMimeType(filename: string): string {
   return MIME_TYPES[ext] || 'application/octet-stream';
 }
 
+/**
+ * A password-auth SMTP config with its password filled in from the vault.
+ * The renderer never holds stored passwords, so a saved account's config
+ * arrives without one; main injects it — but only for the host it was saved
+ * for, and no more loosely than it was saved for (vault-credentials.ts), since
+ * the config comes from the renderer. `saved` is the vault hit, for
+ * `narrowSavedTransport` once the connection works.
+ * Configs that already carry a password (the user just typed it) or use
+ * OAuth pass through unchanged.
+ */
+export async function withVaultSmtpPassword(
+  config: SMTPConfig,
+  accountId: string | undefined,
+): Promise<{ config: SMTPConfig; saved?: VaultPasswordFound }> {
+  if (config.authMethod === 'oauth2' || config.password) return { config };
+  const vaulted = await resolveVaultPassword(vaultIdCandidates(accountId, config.username, config.host), 'smtp', config.host);
+  if (vaulted.status === 'host-mismatch') throw new Error(hostMismatchMessage('smtp', config.host, vaulted.boundHost));
+  if (vaulted.status === 'none') throw new Error(`No sending password saved for ${config.host} — set up sending for this account.`);
+  const applied = withSavedPassword(config, 'smtp', vaulted);
+  if ('refusal' in applied) throw new Error(applied.refusal);
+  return { config: applied.config, saved: vaulted };
+}
+
 export function registerSmtpHandlers(): void {
   /**
    * Connect to SMTP server
    */
-  ipcMain.handle('smtp:connect', async (_event, config: SMTPConfig) => {
+  ipcMain.handle('smtp:connect', async (_event, config: SMTPConfig, accountId?: string) => {
     try {
+      const vaulted = await withVaultSmtpPassword(config, accountId);
+      config = vaulted.config;
       let smtpClient = getSmtpClient();
 
       // Create new client if needed
@@ -83,23 +109,26 @@ export function registerSmtpHandlers(): void {
         }
         config = {
           ...config,
-          accessToken: await getValidAccessToken(config.oauthProvider, config.username),
+          accessToken: await getAccessTokenForMailHost(config.oauthProvider, config.username, 'smtp', config.host),
         };
       }
 
-      // TLS verification ON by default (resolveTlsOptions); insecure only when
-      // the account explicitly opts in via allowInsecureTLS.
-      const connectConfig = {
-        ...config,
-        tlsOptions: resolveTlsOptions(config),
-      };
-
-      await smtpClient.connect(connectConfig);
+      // Certificate checks are decided in core (resolveTlsOptions): on unless a
+      // password account opted out, and the opt-out of a saved password is the
+      // one saved with it (withVaultSmtpPassword).
+      await smtpClient.connect(config);
       logger.info('[SMTP] Connected successfully');
+      if (vaulted.saved) await narrowSavedTransport('smtp', vaulted.saved, config);
       // Now that SMTP is (re)connected, flush any sends waiting in the outbox.
       drainOutbox().catch((e) => logger.warn('[SMTP] Outbox drain after connect failed:', e));
       return { success: true };
     } catch (error) {
+      // The server would not encrypt a STARTTLS sending account (CASA M-5).
+      // The client already said so in one line; tag it so the window can show
+      // why mail is waiting in the Outbox instead of a silent queue.
+      if (isStarttlsRefusedError(error)) {
+        return { success: false, error: (error as Error).message, code: STARTTLS_UNAVAILABLE };
+      }
       logger.error('SMTP connect error:', error);
       return {
         success: false,
@@ -158,13 +187,15 @@ export function registerSmtpHandlers(): void {
       if (!accountId || !config) return { success: false, error: 'accountId + config required' };
       if (getSmtpClientFor(accountId)?.isConnected()) return { success: true };
       await ensureAccountRuntime(accountId); // ensure the runtime slot exists
-      let cfg = config;
+      const vaulted = await withVaultSmtpPassword(config, accountId);
+      let cfg = vaulted.config;
       if (cfg.authMethod === 'oauth2') {
         if (!cfg.oauthProvider) throw new Error('authMethod=oauth2 requires oauthProvider');
-        cfg = { ...cfg, accessToken: await getValidAccessToken(cfg.oauthProvider, cfg.username) };
+        cfg = { ...cfg, accessToken: await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'smtp', cfg.host) };
       }
       const client = new SMTPClient();
-      await client.connect({ ...cfg, tlsOptions: resolveTlsOptions(cfg) });
+      await client.connect(cfg);
+      if (vaulted.saved) await narrowSavedTransport('smtp', vaulted.saved, cfg);
       setSmtpClientFor(accountId, client);
       // Flush anything queued for this account now that it can send.
       drainOutboxForAccount(accountId).catch((e) => logger.warn('[SMTP] connectFor drain failed:', e));
@@ -430,7 +461,7 @@ export async function sendEmailFromMain(
   if (!result.success && cfg?.authMethod === 'oauth2' && cfg.oauthProvider && isAuthTokenError(result.error)) {
     logger.warn(`[SMTP] Send failed with an auth/token error for ${cfg.username} — refreshing token and retrying`);
     try {
-      const accessToken = await getValidAccessToken(cfg.oauthProvider, cfg.username, true /* forceRefresh */);
+      const accessToken = await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'smtp', cfg.host, true /* forceRefresh */);
       await smtpClient.connect({ ...cfg, accessToken });
       result = await smtpClient.sendEmail(options, transformMime);
     } catch (refreshErr) {
@@ -714,7 +745,9 @@ export async function writeLocalSentRow(row: {
   const cacheAttachments = async (emailId: string) => {
     if (attachments.length === 0) return;
     try {
-      await seedAttachmentCache(emailId, attachments);
+      // Sealed attachment entries belong to the same account as their Sent
+      // row, even if the user changed the active mailbox during SMTP submit.
+      await seedAttachmentCache(getAccountIdForStorage(storage), emailId, attachments);
     } catch (err) {
       logger.warn('[SMTP] Could not cache sent attachments locally:', err);
     }

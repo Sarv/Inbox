@@ -75,6 +75,7 @@ const context = (handlers: Handlers, overrides: Record<string, unknown> = {}) =>
   new Proxy(
     {
       displayEmail: ANCHOR,
+      latestThreadEmail: undefined,
       duplicatesByEmailId: new Map<string, unknown[]>(),
       isStarred: false,
       attachments: [],
@@ -143,23 +144,52 @@ describe('EmailCard — the reply row in the footer', () => {
 
 describe('EmailCard — the three-dot menu', () => {
   // Regression guard for the shared menu wiring: the anchor card stands for
-  // the conversation. Its menu forwards in the popup, and Delete / Archive take
-  // the whole thread — as they did before the wiring was shared.
-  it('forwards in the popup and removes the whole conversation', () => {
+  // the conversation. Its menu forwards the LATEST message in the popup (it
+  // used to forward the anchor — the first message), and Delete / Archive /
+  // Report spam take the whole thread.
+  it('forwards the latest message in the popup and removes the whole conversation', () => {
     const h = newHandlers();
-    const removal = { deleteEmail: vi.fn(), archiveEmail: vi.fn(), handleDelete: vi.fn(), handleArchive: vi.fn() };
+    const latest = email({ id: 'latest', date: TEN_AM + 60 });
+    const removal = {
+      latestThreadEmail: latest,
+      deleteEmail: vi.fn(),
+      archiveEmail: vi.fn(),
+      handleDelete: vi.fn(),
+      handleArchive: vi.fn(),
+      handleReportSpam: vi.fn(),
+      handleReportSpamThread: vi.fn(),
+    };
     mounted = render(<EmailCard ctx={context(h, removal)} />);
     const menu = menuProps.current!;
 
     menu.onForward();
     menu.onDelete();
     menu.onArchive();
+    menu.onReportSpam();
 
-    expect(h.handleForward.mock.calls).toEqual([[ANCHOR]]);
+    expect(h.handleForward.mock.calls).toEqual([[latest]]);
+    expect(removal.handleReportSpamThread).toHaveBeenCalledTimes(1);
+    expect(removal.handleReportSpam).not.toHaveBeenCalled();
     expect(h.handleInlineForward).not.toHaveBeenCalled();
     expect(removal.handleDelete).toHaveBeenCalledTimes(1);
     expect(removal.handleArchive).toHaveBeenCalledTimes(1);
     expect(removal.deleteEmail).not.toHaveBeenCalled();
     expect(removal.archiveEmail).not.toHaveBeenCalled();
+  });
+
+  // Breaks: the card's Print / Show original stop acting on the card they sit
+  // on — the anchor card is its own message even though it stands for the
+  // conversation.
+  it('keeps Print and Show original on the card\'s own message', () => {
+    const handlePrintEmail = vi.fn();
+    const handleShowOriginal = vi.fn();
+    const latest = email({ id: 'latest', date: TEN_AM + 60 });
+    mounted = render(
+      <EmailCard ctx={context(newHandlers(), { latestThreadEmail: latest, handlePrintEmail, handleShowOriginal })} />,
+    );
+    menuProps.current!.onPrint();
+    menuProps.current!.onShowOriginal();
+    expect(handlePrintEmail.mock.calls).toEqual([[ANCHOR]]);
+    expect(handleShowOriginal.mock.calls).toEqual([[ANCHOR]]);
   });
 });

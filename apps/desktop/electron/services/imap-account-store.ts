@@ -16,42 +16,32 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 
 import { createLogger } from '@sarvinbox/core';
-import { app, safeStorage } from 'electron';
+import { app } from 'electron';
 
 import { getBlob, setBlob, deleteBlob } from './core-db';
+import { sealJson, openJson, type EnvelopeErrors } from './safe-storage-envelope';
 import { createWriteQueue } from './write-queue';
 const logger = createLogger('imap-account-store');
 
 const LEGACY_FILE_NAME = 'imap-account.json';
 const BLOB_KEY = 'imap-account';
-const MAGIC_ENC = 'ENC1:';
-const MAGIC_PLAIN = 'PLAIN1:';
 
 function legacyFilePath(): string {
   return join(app.getPath('userData'), LEGACY_FILE_NAME);
 }
 
 function serialize(config: unknown): Buffer {
-  const payload = JSON.stringify(config);
-  if (safeStorage.isEncryptionAvailable()) {
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), safeStorage.encryptString(payload)]);
-  }
-  return Buffer.from(MAGIC_PLAIN + payload, 'utf8');
+  return sealJson(config);
 }
 
+/** This store's wording for an envelope it can't open (tests pin these). */
+const ENVELOPE_ERRORS: EnvelopeErrors = {
+  locked: 'IMAP account is encrypted but safeStorage is unavailable',
+  unknownFormat: 'Unknown imap-account file format',
+};
+
 function deserialize(buf: Buffer): any {
-  const enc = buf.subarray(0, MAGIC_ENC.length).toString('utf8');
-  if (enc === MAGIC_ENC) {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('IMAP account is encrypted but safeStorage is unavailable');
-    }
-    return JSON.parse(safeStorage.decryptString(buf.subarray(MAGIC_ENC.length)));
-  }
-  const plain = buf.subarray(0, MAGIC_PLAIN.length).toString('utf8');
-  if (plain === MAGIC_PLAIN) {
-    return JSON.parse(buf.subarray(MAGIC_PLAIN.length).toString('utf8'));
-  }
-  throw new Error('Unknown imap-account file format');
+  return openJson<any>(buf, ENVELOPE_ERRORS);
 }
 
 // Serialize writes so overlapping connects can't interleave.

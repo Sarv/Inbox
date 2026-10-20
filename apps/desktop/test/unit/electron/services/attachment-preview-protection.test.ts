@@ -5,6 +5,7 @@ import path from 'node:path';
 import { buildAttachmentUrl, parseAttachmentUrl } from '@sarvinbox/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { AttachmentError, MAX_ATTACHMENT_BYTES } from '../../../../electron/services/attachment-cache';
 import {
   AttachmentOperationProtection,
   type AttachmentOperationDependencies,
@@ -15,6 +16,19 @@ import {
   getAttachmentPreviewProtection,
   setAttachmentPreviewProtection,
 } from '../../../../electron/services/attachment-preview-protection';
+
+/**
+ * Stands in for the sealed attachment cache (CASA M-7): an entry on disk is
+ * never the attachment's plaintext, and only the `readLegacy` dependency turns
+ * it back into the bytes. So any test below that finds the plaintext in a file
+ * proves a private copy was written; finding the cache entry's path handed to
+ * the OS would hand it ciphertext.
+ */
+const SEALED = 'sealed-for-test:';
+function sealForTest(content: string): Buffer {
+  return Buffer.from(SEALED + Buffer.from(content).toString('base64'));
+}
+const CACHED_PLAINTEXT = '%PDF decrypted cache document';
 
 const directories: string[] = [];
 const controllers: AttachmentPreviewProtection[] = [];
@@ -55,11 +69,30 @@ async function fixture(options: { enabled?: boolean; ttlMs?: number; now?: () =>
     progress: vi.fn(),
   };
   const operations = new AttachmentOperationProtection(deps);
-  const resolveLegacy = vi.fn(async () => '/synthetic/legacy.pdf');
+  // The cache lives outside `root`: `root` holds only the private copies, so a
+  // test can assert it is empty after a failure.
+  const cacheDir = await fs.mkdtemp(path.join(tmpdir(), 'inbox-preview-cache-'));
+  directories.push(cacheDir);
+  const cacheFile = path.join(cacheDir, 'sealed-entry');
+  await fs.writeFile(cacheFile, sealForTest(CACHED_PLAINTEXT));
+  const resolveLegacy = vi.fn(async () => cacheFile);
+  // Every plaintext buffer the decrypting reader handed out, so tests can prove
+  // it was wiped once the operation was done with it.
+  const decrypted: Buffer[] = [];
+  const readLegacy = vi.fn(async (file: string, signal: AbortSignal) => {
+    signal.throwIfAborted();
+    const stored = await fs.readFile(file, 'utf8');
+    if (!stored.startsWith(SEALED))
+      throw new AttachmentError('The attachment could not be read. Try again.', 500);
+    const plaintext = Buffer.from(stored.slice(SEALED.length), 'base64');
+    decrypted.push(plaintext);
+    return plaintext;
+  });
   const openPath = vi.fn(async (_file: string) => '');
   const preview = new AttachmentPreviewProtection({
     operations,
     resolveLegacy,
+    readLegacy,
     openPath,
     temporaryRoot: () => root,
     ttlMs: options.ttlMs,
@@ -75,9 +108,13 @@ async function fixture(options: { enabled?: boolean; ttlMs?: number; now?: () =>
     preview.openPreview(ref.emailId, ref.accountId, ref.filename, requestId);
   return {
     root,
+    cacheDir,
+    cacheFile,
+    decrypted,
     deps,
     operations,
     resolveLegacy,
+    readLegacy,
     openPath,
     preview,
     receipts,
@@ -338,8 +375,9 @@ describe('protected in-app attachment previews', () => {
 describe('missing-setup preview continuation', () => {
   async function missingSetup(options: { ttlMs?: number } = {}) {
     const f = await fixture(options);
-    const file = path.join(f.root, 'local.pdf');
-    await fs.writeFile(file, '%PDF warning-approved local bytes');
+    // A sealed cache entry (see sealForTest); only readLegacy yields its bytes.
+    const file = path.join(f.cacheDir, 'local.pdf');
+    await fs.writeFile(file, sealForTest('%PDF warning-approved local bytes'));
     f.resolveLegacy.mockResolvedValue(file);
     const assertMissing = vi.fn(async () => {});
     f.deps.checkSetup = vi.fn(async () => ({ assertCurrent: assertMissing }));
@@ -371,7 +409,9 @@ describe('missing-setup preview continuation', () => {
     );
     const bytes = (await f.read(url))!;
     expect(bytes.toString()).toBe('%PDF warning-approved local bytes');
-    await fs.writeFile(f.file, 'cache changed after warning');
+    // The warning-approved snapshot is bounded like a fetch (CASA M-7 kept the cap).
+    expect(f.readLegacy).toHaveBeenCalledWith(f.file, expect.any(AbortSignal), MAX_ATTACHMENT_BYTES);
+    await fs.writeFile(f.file, sealForTest('cache changed after warning'));
     expect((await f.read(url))!.toString()).toBe('%PDF warning-approved local bytes');
     expect(f.deps.scan).not.toHaveBeenCalled();
     for (const forged of [
@@ -451,6 +491,9 @@ describe('missing-setup preview continuation', () => {
     });
     await expect(f.prepare()).rejects.toThrow(/setup changed after read/);
     await expect(f.read(buildAttachmentUrl(f.ref))).rejects.toMatchObject({ status: 403 });
+    // The decrypted snapshot it read is wiped, not left for the GC.
+    expect(f.decrypted).toHaveLength(1);
+    expect(f.decrypted[0].every((byte) => byte === 0)).toBe(true);
   });
 
   it('copies local unscanned bytes privately for the OS and removes them during shutdown', async () => {
@@ -472,9 +515,13 @@ describe('missing-setup preview continuation', () => {
     );
     expect(flag).toHaveBeenCalledOnce();
     expect(f.deps.scan).not.toHaveBeenCalled();
+    // The decrypted bytes held in memory for the copy are wiped once it is written.
+    expect(f.decrypted.at(-1)!.every((byte) => byte === 0)).toBe(true);
     await f.preview.dispose();
     await expect(fs.stat(openedFile)).rejects.toThrow();
-    expect(await fs.readFile(f.file, 'utf8')).toBe('%PDF warning-approved local bytes');
+    // Changed deliberately (CASA M-7): the cache entry is sealed now, so "the
+    // source is left untouched" compares its sealed form, not the plaintext.
+    expect(await fs.readFile(f.file)).toEqual(sealForTest('%PDF warning-approved local bytes'));
   });
 
   it('never launches a local OS copy if its missing-setup authorization changes before opening', async () => {
@@ -552,9 +599,14 @@ describe('protected OS attachment previews', () => {
     expect(f.openPath).toHaveBeenCalledTimes(2);
   });
 
+  // Changed deliberately (CASA M-7): every Open now leaves a private copy (the
+  // sealed cache has no plaintext file to hand over), so opened copies have
+  // their own, wider cap of 16 (was the previews' 4). In-memory viewer leases
+  // keep their cap of 4, checked at the end.
   it('bounds completed private copies and reserves capacity during parallel launches', async () => {
     const f = await fixture();
-    await Promise.all(Array.from({ length: 3 }, () => f.open()));
+    // Sequential: the operation layer separately allows only 4 in flight.
+    for (let i = 0; i < 15; i++) await f.open();
     let finish!: () => void;
     f.openPath.mockImplementationOnce(
       () =>
@@ -563,23 +615,83 @@ describe('protected OS attachment previews', () => {
         })
     );
     const pending = f.open();
-    await vi.waitFor(() => expect(f.openPath).toHaveBeenCalledTimes(4));
-    await expect(f.open()).rejects.toThrow(/Too many/);
+    await vi.waitFor(() => expect(f.openPath).toHaveBeenCalledTimes(16));
+    await expect(f.open()).rejects.toMatchObject({ status: 429, message: expect.stringMatching(/Too many/) });
     finish();
     await pending;
-    await expect(f.open()).rejects.toThrow(/Too many/);
-    expect(await fs.readdir(f.root)).toHaveLength(4);
+    await expect(f.open()).rejects.toMatchObject({ status: 429 });
+    expect(await fs.readdir(f.root)).toHaveLength(16);
+    expect(f.openPath).toHaveBeenCalledTimes(16);
+    // The in-memory viewer bound is separate and still 4.
+    await Promise.all(Array.from({ length: 4 }, () => f.prepare()));
+    await expect(f.prepare()).rejects.toThrow(/Too many attachment previews. Close a viewer/);
   });
 
-  it('preserves no-AV OS opening and rejects unsafe types before touching mail', async () => {
+  // Changed deliberately (CASA M-7): without AV, Open used to hand the OS the
+  // cache path itself. The cache is sealed now, so the OS gets a private 0600
+  // copy of the DECRYPTED bytes — never the cache path — removed on shutdown.
+  it('preserves no-AV OS opening through a private decrypted copy and rejects unsafe types before touching mail', async () => {
     const f = await fixture({ enabled: false });
+    let copy = '';
+    f.openPath.mockImplementation(async (file) => {
+      copy = file;
+      expect(await fs.readFile(file, 'utf8')).toBe(CACHED_PLAINTEXT);
+      return '';
+    });
     await f.open();
-    expect(f.openPath).toHaveBeenCalledWith('/synthetic/legacy.pdf');
+    expect(f.openPath).toHaveBeenCalledOnce();
+    expect(f.openPath).not.toHaveBeenCalledWith(f.cacheFile);
+    expect(copy.startsWith(f.root + path.sep)).toBe(true);
+    if (process.platform !== 'win32') expect((await fs.stat(copy)).mode & 0o777).toBe(0o600);
+    // With scanning off the file is the user's to open whatever its size: unbounded.
+    expect(f.readLegacy).toHaveBeenCalledWith(f.cacheFile, expect.any(AbortSignal), undefined);
+    expect(f.decrypted.at(-1)!.every((byte) => byte === 0)).toBe(true);
     expect(f.deps.scan).not.toHaveBeenCalled();
     await expect(
       f.preview.openPreview('message', 'account', 'invoice.pdf.exe')
     ).rejects.toMatchObject({ status: 403 });
     expect(f.resolveLegacy).toHaveBeenCalledOnce();
+    await f.preview.dispose();
+    await expect(fs.access(copy)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  // Breaks: a damaged/foreign cache entry (or one the reader refuses) is still
+  // handed to an app, or leaves a half-made private copy behind.
+  it('opens nothing without AV when the cache entry cannot be decrypted', async () => {
+    const f = await fixture({ enabled: false });
+    await fs.writeFile(f.cacheFile, 'not sealed: plaintext from an older build');
+    await expect(f.open()).rejects.toMatchObject({
+      status: 500,
+      message: 'The attachment could not be read. Try again.',
+    });
+    expect(f.openPath).not.toHaveBeenCalled();
+    expect(await fs.readdir(f.root)).toEqual([]);
+  });
+
+  // Breaks: AV switched on while an unscanned cache entry was being decrypted
+  // still launches it, or leaves its plaintext in memory or on disk.
+  it('opens nothing without AV when scanning is enabled during the cache read', async () => {
+    const f = await fixture({ enabled: false });
+    const original = f.readLegacy.getMockImplementation()!;
+    f.readLegacy.mockImplementationOnce(async (file, signal) => {
+      const plaintext = await original(file, signal);
+      f.scanners([{ id: 'clamav-scan', enabled: true, active: true, granted: true, scanner: true }]);
+      return plaintext;
+    });
+    await expect(f.open()).rejects.toThrow(/Retry the download/);
+    expect(f.openPath).not.toHaveBeenCalled();
+    expect(f.decrypted[0].every((byte) => byte === 0)).toBe(true);
+    expect(await fs.readdir(f.root)).toEqual([]);
+  });
+
+  // Breaks: a no-AV launch the OS refuses leaves the decrypted copy on disk
+  // (it would never be tracked for removal).
+  it('removes the decrypted copy when the OS cannot open it without AV', async () => {
+    const f = await fixture({ enabled: false });
+    f.openPath.mockResolvedValueOnce('No application registered');
+    await expect(f.open()).rejects.toThrow('No application registered');
+    expect(await fs.readdir(f.root)).toEqual([]);
+    expect(f.decrypted[0].every((byte) => byte === 0)).toBe(true);
   });
 
   it('retries a failed private-root initialization without opening partial bytes', async () => {
@@ -594,6 +706,16 @@ describe('protected OS attachment previews', () => {
     expect(f.openPath).toHaveBeenCalledOnce();
   });
 
+  // Breaks: Open's cleanup and slot release are skipped on the no-AV path, so a
+  // copy outlives its TTL or a slot leaks per open until the cap locks Open out.
+  it('removes a no-AV private copy after its TTL and frees its slot', async () => {
+    const f = await fixture({ enabled: false, ttlMs: 10 });
+    await f.open();
+    await vi.waitFor(async () => expect(await fs.readdir(f.root)).toEqual([]));
+    for (let i = 0; i < 16; i++) await f.open();
+    expect(f.openPath).toHaveBeenCalledTimes(17);
+  });
+
   it('exposes the initialized singleton and disposes its predecessor', async () => {
     const f = await fixture();
     const next = await fixture();
@@ -603,5 +725,127 @@ describe('protected OS attachment previews', () => {
     setAttachmentPreviewProtection(next.preview);
     expect(getAttachmentPreviewProtection()).toBe(next.preview);
     await expect(f.read(url)).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+// Breaks: the calendar invite (bytes that are no attachment of their own) is
+// opened from a file left in the attachment cache, kept forever, readable by
+// others, or launched after its request was cancelled.
+describe('openTemporaryCopy', () => {
+  const INVITE = 'BEGIN:VCALENDAR\r\nSUMMARY:Synthetic planning\r\nEND:VCALENDAR\r\n';
+
+  function operation(overrides: { signal?: AbortSignal; assertCurrent?: () => Promise<void> } = {}) {
+    return {
+      signal: overrides.signal ?? new AbortController().signal,
+      assertCurrent: vi.fn(overrides.assertCurrent ?? (async () => {})),
+    };
+  }
+
+  // Breaks: the invite is opened from somewhere other than a fresh private copy.
+  it('writes a private 0600 copy of the bytes, opens it, and removes it on shutdown', async () => {
+    const f = await fixture();
+    let opened = '';
+    f.openPath.mockImplementation(async (file) => {
+      opened = file;
+      expect(await fs.readFile(file, 'utf8')).toBe(INVITE);
+      return '';
+    });
+    const op = operation();
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), op)
+    ).resolves.toBe('');
+    expect(path.dirname(path.dirname(opened))).toBe(f.root);
+    expect(path.basename(path.dirname(opened))).toMatch(/^preview-/);
+    expect(path.basename(opened)).toBe('calendar-event.ics');
+    if (process.platform !== 'win32') expect((await fs.stat(opened)).mode & 0o777).toBe(0o600);
+    // Checked before the write, after it, and after the launch.
+    expect(op.assertCurrent).toHaveBeenCalledTimes(3);
+    await f.preview.dispose();
+    await expect(fs.access(opened)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readdir(f.root)).toEqual([]);
+  });
+
+  // Breaks: the invite copy outlives the TTL the other opened copies get.
+  it('removes the copy after the TTL', async () => {
+    const f = await fixture({ ttlMs: 10 });
+    await f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation());
+    expect(f.openPath).toHaveBeenCalledOnce();
+    await vi.waitFor(async () => expect(await fs.readdir(f.root)).toEqual([]));
+  });
+
+  // Breaks: "no calendar app" is reported as success (the caller shows its
+  // no-handler hint from this text), or the refused copy stays on disk.
+  it('returns the openPath error text and leaves no file when the OS cannot open it', async () => {
+    const f = await fixture();
+    f.openPath.mockResolvedValueOnce('No application knows how to open .ics');
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation())
+    ).resolves.toBe('No application knows how to open .ics');
+    expect(await fs.readdir(f.root)).toEqual([]);
+    // A refused launch holds no slot: the next one still opens.
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation())
+    ).resolves.toBe('');
+  });
+
+  // Breaks: a request that went stale after the copy was written (account
+  // removed, consent revoked) still launches it, or leaves the written copy.
+  it('launches nothing and removes the written copy when the request is no longer current', async () => {
+    const f = await fixture();
+    let checks = 0;
+    const op = operation({
+      assertCurrent: async () => {
+        if (++checks === 2) throw new Error('request no longer current');
+      },
+    });
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), op)
+    ).rejects.toThrow('request no longer current');
+    expect(f.openPath).not.toHaveBeenCalled();
+    expect(await fs.readdir(f.root)).toEqual([]);
+  });
+
+  // Breaks: cancelling while the OS is still launching leaves the copy behind
+  // with nothing tracking it for removal.
+  it('removes the copy when the request is cancelled during the launch', async () => {
+    const f = await fixture();
+    const abort = new AbortController();
+    f.openPath.mockImplementationOnce(() => {
+      abort.abort(new Error('Download cancelled.'));
+      return new Promise<string>(() => {});
+    });
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation({ signal: abort.signal }))
+    ).rejects.toThrow('Download cancelled.');
+    expect(await fs.readdir(f.root)).toEqual([]);
+  });
+
+  // Breaks: a hostile name escapes the private folder.
+  it('keeps a traversal filename inside its private folder', async () => {
+    const f = await fixture();
+    await f.preview.openTemporaryCopy('../../escape.ics', Buffer.from(INVITE), operation());
+    const opened = f.openPath.mock.calls[0][0];
+    expect(path.dirname(path.dirname(opened))).toBe(f.root);
+    expect(path.relative(f.root, opened).startsWith('..')).toBe(false);
+    expect(await fs.readdir(path.dirname(f.root))).not.toContain('escape.ics');
+  });
+
+  // Breaks: invites get their own unbounded budget beside attachment opens, or
+  // keep opening after shutdown.
+  it('shares the open-copy cap with attachment opens and refuses after shutdown', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 16; i++)
+      await f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation());
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation())
+    ).rejects.toMatchObject({ status: 429 });
+    await expect(f.open()).rejects.toMatchObject({ status: 429 });
+    expect(f.openPath).toHaveBeenCalledTimes(16);
+    await f.preview.dispose();
+    expect(await fs.readdir(f.root)).toEqual([]);
+    await expect(
+      f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation())
+    ).rejects.toMatchObject({ status: 403 });
+    expect(f.openPath).toHaveBeenCalledTimes(16);
   });
 });

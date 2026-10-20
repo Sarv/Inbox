@@ -1,3 +1,4 @@
+import { resolveConnectionSecurity } from '@sarvinbox/core/connection-security';
 import { Loader2, Mail, X } from 'lucide-react';
 import { useState } from 'react';
 
@@ -30,12 +31,19 @@ export function ConnectionDialog({ onClose }: { onClose?: () => void } = {}) {
       // Remove all spaces from password (Google App Passwords have spaces for readability)
       const cleanPassword = password.replace(/\s+/g, '');
 
+      // Keep the account's own connection security and self-signed choice: a
+      // re-entered password is not a reason to change them. This used to send
+      // `secure: true`, which turned a STARTTLS or None account into implicit
+      // TLS on its old port (and saved that), so it could not reconnect.
+      const security = resolveConnectionSecurity(imapConfig ?? {});
       await connect({
         host,
         port: parseInt(port),
         username,
         password: cleanPassword,
-        secure: true,
+        security,
+        secure: security === 'ssl',
+        allowInsecureTLS: (imapConfig as { allowInsecureTLS?: boolean } | null)?.allowInsecureTLS,
       });
       onClose?.(); // reconnected — close the on-demand dialog
     } catch (err) {

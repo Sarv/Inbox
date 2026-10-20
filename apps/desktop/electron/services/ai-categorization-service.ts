@@ -7,7 +7,7 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, AI_DEFAULT_BASE_URLS, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
 import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
@@ -918,10 +918,7 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
 
   private async callOpenAICompatibleAPI(systemPrompt: string, userMessage: string): Promise<string> {
     const config = this.config!;
-    const baseUrls: Record<string, string> = {
-      openai: 'https://api.openai.com/v1',
-    };
-    const baseUrl = config.baseUrl || baseUrls[config.type] || baseUrls.openai;
+    const baseUrl = config.baseUrl || AI_DEFAULT_BASE_URLS[config.type] || AI_DEFAULT_BASE_URLS.openai;
     const endpoint = `${baseUrl}/chat/completions`;
     // One HTTP attempt with a resolved bearer. `forceRefresh` forces a fresh
     // OAuth token (used on the 401 retry below). Other providers use apiKey.
@@ -988,12 +985,13 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
 
   private async callGeminiAPI(systemPrompt: string, userMessage: string): Promise<string> {
     const config = this.config!;
-    const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
-    const endpoint = `${baseUrl}/models/${config.model}:generateContent?key=${config.apiKey}`;
+    const baseUrl = effectiveAIBaseUrl(config);
+    const endpoint = `${baseUrl}/models/${config.model}:generateContent`;
 
     const response = await this.doFetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Key in the header, never the ?key= query string (logs, error text).
+      headers: { 'Content-Type': 'application/json', ...aiApiKeyHeaders('gemini', config.apiKey) },
       body: JSON.stringify({
         contents: [
           { parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] },

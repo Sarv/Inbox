@@ -29,7 +29,7 @@ describe('optional antivirus onboarding', () => {
   // Regression: a provider picker required an unnecessary Continue click and could start OAuth before selection.
   it('opens connection immediately when Sarv is selected and never connects automatically', async () => {
     const p = props({ stage: 'provider' }); const view = render(<AntivirusSetupStep {...p} />); await settle();
-    expect(view.find('img')?.getAttribute('src')).toBe('/provider-icons/sarv.png');
+    expect(view.find('img')?.getAttribute('src')).toBe('./provider-icons/sarv.png') // relative: '/x' is the filesystem root in the packaged file:// app;
     fire(button(view, 'Sarv Antivirus'), 'click');
     expect(p.onStageChange).toHaveBeenCalledWith('connection'); expect(api.connectSarvOAuth).not.toHaveBeenCalled();
     expect(view.container.textContent).toContain('https://av.sarv.com');

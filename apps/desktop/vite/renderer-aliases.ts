@@ -22,6 +22,10 @@ function coreSubpathAliases(desktopDir: string): Record<string, string> {
     '@': resolve(desktopDir, './src'),
     // Pure (zero imports) — all AI request paths apply the same bearer policy.
     '@sarvinbox/core/ai-provider-auth': resolve(desktopDir, '../../packages/core/src/utils/ai-provider-auth.ts'),
+    '@sarvinbox/core/html-escape': resolve(desktopDir, '../../packages/core/src/utils/html-escape.ts'),
+    // Pure (zero imports) — the account forms resolve ssl/starttls/none with the
+    // same rule the IMAP and SMTP clients connect with.
+    '@sarvinbox/core/connection-security': resolve(desktopDir, '../../packages/core/src/utils/connection-security.ts'),
     // Pure (libphonenumber-js only) — shared with core so the one implementation
     // doesn't drift into a second renderer copy.
     '@sarvinbox/core/contact-enrichment': resolve(

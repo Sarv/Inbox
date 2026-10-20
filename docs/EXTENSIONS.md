@@ -6,6 +6,12 @@ it a context object, and lets it act on mail as it arrives — tag it, star it,
 ask the AI about it, or put a card on screen. An extension that crashes or
 loops takes down nothing but itself.
 
+That process is **not a sandbox**. The file runs as ordinary Node code with full
+access to the user's account on the computer — the app's own data directory
+included — whatever permissions the manifest declares. Permissions gate the app
+APIs an extension can call, not what its code can do. See
+[Trust model](#trust-model).
+
 An extension can also contribute a **panel**: a page of its own, shown beside
 the open message or as a dialog. A panel needs no build step and no background
 code at all — an `index.html` in a folder is a complete extension. See
@@ -229,8 +235,13 @@ does not.
 ## Permissions
 
 Declared in the manifest, shown to the user before install, and enforced in the
-main process at the point of effect — not in the sandbox, which only makes an
-authoring mistake fail where it was written.
+main process at the point of effect — not in the extension's own process, which
+only makes an authoring mistake fail where it was written.
+
+What they enforce is the **app API**: `context.mail`, `context.ai`,
+`context.storage`, settings, the UI calls and what a workflow result may change.
+They do not confine the extension's code, which can use any Node module it likes
+(see [Trust model](#trust-model)).
 
 | Permission | Grants |
 | --- | --- |
@@ -241,7 +252,7 @@ authoring mistake fail where it was written.
 | `email:delete` | Move messages to the trash folder — never an expunge |
 | `ai:use` | `context.ai` — categorize, summarize, and raw completions |
 | `storage:local` | `context.storage` — a private JSON store under the app's data directory |
-| `network:fetch` | Outbound HTTP |
+| `network:fetch` | Declares that the extension talks to the internet, so the user is told before install. Not enforced on the extension's own code, which can reach the network either way |
 | `settings:read` | Read settings, including the ones the manifest contributes |
 | `settings:write` | Change settings |
 | `ui:notify` | `context.ui.notify()` — a card in the bottom-right of the window, and `context.ui.onAction()` to hear what the reader did with it |
@@ -261,8 +272,36 @@ which drops what the extension did not ask for:
 - a refusal is logged once per extension/label/reason and the rest of the
   result still applies.
 
-So an extension installed to read mail cannot quietly acquire the ability to
-change it. Ask for the permission you need, and no more: the user sees the list.
+So an extension installed to read mail cannot quietly use the app to change
+it. Ask for the permission you need, and no more: the user sees the list.
+
+### Trust model
+
+Be precise about what the host does and does not protect, both when writing an
+extension and when telling people what yours does:
+
+- **It runs as full code.** Every extension's module runs in one shared
+  separate process (`extension-sandbox.worker`, started with Electron's
+  `utilityProcess`) as plain Node. It can `require('fs')`,
+  `require('child_process')` or `require('net')`, read and write anything the
+  user's account can — including the app's data directory, its database key,
+  mail databases and logs — and make its own network requests. A separate
+  process isolates crashes, not access.
+- **Permissions gate the app API only.** They decide which `context` calls
+  succeed and what a workflow result may change. They are shown to the user and
+  enforced in the main process, but they are not a sandbox.
+- **Panels are the exception.** A panel page is served with a strict
+  Content-Security-Policy and framed in a sandboxed iframe, so it cannot reach
+  the network or Node on its own (see [Panels](#panels)).
+- **Registry downloads are checked against a checksum, not a signature.** The
+  archive must hash to the SHA-256 the registry publishes, and the manifest
+  inside must match what the user approved. That proves the bytes are the ones
+  the registry listed; it does not prove who wrote them. There is no publisher
+  signature yet.
+- **The user is told.** Both the registry install prompt and **Install from
+  folder** say that an extension runs as full code with the same access to the
+  user's files and mail data as the app, whatever it asks for, and ask the user
+  to install only extensions they trust.
 
 ---
 
@@ -713,7 +752,9 @@ What the app does with what it finds there:
    downloaded until they confirm.
 4. **Verify.** The archive is downloaded with a hard size cap, hashed, and
    compared against that digest. A mismatch aborts before a single byte is
-   unpacked.
+   unpacked. The digest comes from the same registry as the download URL, so
+   this proves the archive is the one the registry published, not who built
+   it — there is no publisher signature yet.
 5. **Unpack.** Only `sarvinbox-extension.json`, `dist/*.js`, `icon.svg`,
    `README.md` and `LICENSE` are extracted; anything else in the archive is
    ignored.
@@ -755,8 +796,12 @@ only consulted for an extension the build could not seed.
 
 **Settings -> Extensions -> Install from folder** takes any directory
 containing a `sarvinbox-extension.json` and its built `dist/`. That is the
-loop to use while developing — no registry, no release, no checksum.
+loop to use while developing — no registry, no release, no checksum. The app
+first shows the same trust notice as the registry prompt and installs nothing
+until it is confirmed; the extension then gets every permission its manifest
+lists, and is switched on.
 
-Because an extension runs in the main process with the permissions it declared,
-tell people what yours does and why it needs each one — the README in each of
-the three published extensions is the pattern to follow.
+Because an extension runs as full code on the user's computer, with the
+permissions it declared on top, tell people what yours does and why it needs
+each one — the README in each of the three published extensions is the pattern
+to follow.

@@ -12,7 +12,7 @@ describe('shared provider setup dialog', () => {
   it('centers the shared wizard and focuses each stage heading', () => {
     const view = render(<SetupDialog title="Add account" steps={steps} activeStep={0} onClose={vi.fn()}><h2>Choose provider</h2><button>Provider</button></SetupDialog>);
     expect(view.find('[role="dialog"]')?.getAttribute('aria-modal')).toBe('true');
-    expect(view.find('img')?.getAttribute('src')).toBe('/icon.png');
+    expect(view.find('img')?.getAttribute('src')).toBe('./icon.png') // relative: '/x' is the filesystem root in the packaged file:// app;
     expect(view.find('[aria-current="step"]')?.textContent).toBe('1Provider');
     expect(document.activeElement?.textContent).toBe('Choose provider');
     view.rerender(<SetupDialog title="Add account" steps={steps} activeStep={2} onClose={vi.fn()}><h2>Choose model</h2><button>Save model</button></SetupDialog>);

@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import * as fs from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { basename, dirname, join, relative, sep } from 'path';
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,16 +12,20 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
  * app — save, forward-as-base64, open-in-system-app and now the in-app viewer —
  * funnels through it. The regressions guarded here are the ones that look like
  * working software: an attachment that silently re-downloads on every open, a
- * truncated file cached forever as a corrupt document, and (the security one)
- * an executable handed to `shell.openPath` on a single click.
+ * truncated file cached forever as a corrupt document, and (the security ones)
+ * an executable handed to `shell.openPath` on a single click, and attachments
+ * lying on disk in plaintext (CASA M-7: the cache is sealed and per account, so
+ * every read here goes through `readCachedAttachment`, never a raw file read).
  *
- * Real filesystem, real cache logic; only IMAP, storage and the Electron
- * dialogs are faked.
+ * Real filesystem, real cache logic, real sealing; only IMAP, storage, the DB
+ * key and the Electron dialogs are faked.
  */
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, (...a: any[]) => any>(),
   userData: '',
+  /** What `getDbEncryptionKey` answers — the store derives both its keys from it. */
+  dbKey: 'k'.repeat(64),
   storage: { getEmail: vi.fn(), getFolder: vi.fn(), updateEmail: vi.fn() },
   /** Storage of a NON-active account, reachable only via getStorageFor. */
   otherStorage: { getEmail: vi.fn(), getFolder: vi.fn(), updateEmail: vi.fn() },
@@ -62,6 +66,9 @@ vi.mock('../../../../electron/shared', () => ({
   getSyncEngineFor: () => h.syncEngine,
   getCurrentAccountId: () => 'acct-1',
 }));
+vi.mock('../../../../electron/services/db-key-store', () => ({
+  getDbEncryptionKey: () => h.dbKey,
+}));
 vi.mock('../../../../electron/services/body-prefetch-scheduler', () => ({
   deferBodyPrefetch: vi.fn(),
 }));
@@ -86,30 +93,90 @@ vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: vi.fn
 
 import { registerEmailHandlers } from '../../../../electron/ipc/email-handlers';
 import {
+  accountAttachmentDir,
   ATTACHMENT_CACHE_MAX_BYTES,
-  attachmentCacheDir,
   attachmentErrorMessage,
+  cachedAttachmentSize,
   getOrCacheAttachment,
+  legacyAttachmentCacheRoot,
+  legacyAttachmentDir,
   MAX_ATTACHMENT_BYTES,
   pruneAttachmentCache,
+  readCachedAttachment,
+  resetAttachmentStoreKeys,
   resolveAttachmentFile,
   seedAttachmentCache,
+  storeCachedAttachment,
 } from '../../../../electron/services/attachment-cache';
 
 const TMP = mkdtempSync(join(tmpdir(), 'attachment-handlers-'));
 afterAll(() => rmSync(TMP, { recursive: true, force: true }));
 
+/** The active account in this harness, and the other registered one. */
+const ACTIVE = 'acct-1';
+const OTHER = 'acct-2';
 const EMAIL_ID = 'email-1';
 const FILENAME = 'report.pdf';
 const BYTES = Buffer.from('%PDF-1.7 body');
 const CALENDAR_ICS = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:synthetic@example.invalid\r\nDTSTART:20261005T090000Z\r\nSUMMARY:Synthetic\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n';
+const UNREADABLE = 'The attachment could not be read. Try again.';
 
 /** The sync engine as `getOrCacheAttachment` wants it. */
-const engine = () => h.syncEngine as unknown as Parameters<typeof getOrCacheAttachment>[4];
+const engine = () => h.syncEngine as unknown as Parameters<typeof getOrCacheAttachment>[5];
 
-const cache = (emailId = EMAIL_ID) => attachmentCacheDir(emailId);
-const cachedNames = (emailId = EMAIL_ID) =>
-  existsSync(cache(emailId)) ? readdirSync(cache(emailId)) : [];
+const storeRoot = () => join(h.userData, 'attachment-store');
+const previewRoot = () => join(h.userData, 'attachment-previews');
+const GENERATION_MARKER = '.cache-generation';
+
+/** Every file under `dir`, recursively. */
+function walk(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    return entry.isDirectory() ? walk(full) : [full];
+  });
+}
+
+/** Every file cached for one account (temp files included). The email and file
+ *  names on disk are keyed hashes, so tests count entries and read them back
+ *  through the API rather than look a name up. */
+const cachedFiles = (accountId = ACTIVE) => walk(accountAttachmentDir(accountId));
+/** Every entry in the sealed store, whichever account, bar the generation marker. */
+const storeFiles = () => walk(storeRoot()).filter((file) => basename(file) !== GENERATION_MARKER);
+/** The private copies handed to other apps. */
+const previewCopies = () => walk(previewRoot());
+const isInside = (dir: string, file: string) => file.startsWith(dir + sep);
+
+/**
+ * The store must not give away what it holds: no plaintext name (account,
+ * email or file) in any path, and no plaintext bytes in any file. `contents`
+ * should be long enough that a chance match in ciphertext is impossible.
+ */
+function expectStoreHidesPlaintext(names: string[], contents: Buffer[]) {
+  const files = walk(storeRoot());
+  expect(files.length).toBeGreaterThan(0); // an empty store would pass vacuously
+  for (const file of files) {
+    const shown = relative(h.userData, file);
+    for (const name of names) expect(shown, `a path names "${name}"`).not.toContain(name);
+    const onDisk = readFileSync(file);
+    for (const content of contents) expect(onDisk.includes(content), `${shown} holds plaintext`).toBe(false);
+  }
+}
+
+/** Step past the 5-minute prune throttle so an explicit prune actually runs. The
+ *  offset grows, because each run records the (faked) time it ran at. */
+let clockOffset = 0;
+async function pruneNow() {
+  clockOffset += 10 * 60 * 1000;
+  const at = Date.now() + clockOffset;
+  vi.useFakeTimers();
+  vi.setSystemTime(at);
+  try {
+    await pruneAttachmentCache();
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 const download = () => h.handlers.get('emails:downloadAttachment')!;
 const base64 = () => h.handlers.get('emails:getAttachmentBase64')!;
@@ -128,6 +195,8 @@ function enableScanner(options: { active?: boolean; granted?: boolean; manifest?
 
 beforeEach(() => {
   h.userData = mkdtempSync(join(TMP, 'ud-'));
+  h.dbKey = 'k'.repeat(64);
+  resetAttachmentStoreKeys();
   h.handlers.clear();
   h.manager = null;
   h.webContents.send.mockClear();
@@ -175,14 +244,14 @@ describe('getOrCacheAttachment', () => {
   // Breaks: every open of the same attachment re-downloads it from IMAP — slow,
   // and on a metered/large mailbox visibly so. The cache exists for this.
   it('serves a second request from disk without touching IMAP', async () => {
-    const first = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const first = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
     h.syncEngine.fetchAttachmentPart.mockClear();
 
-    const second = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const second = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
     expect(second).toBe(first);
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
-    expect(readFileSync(first)).toEqual(BYTES);
+    expect(await readCachedAttachment(first)).toEqual(BYTES);
   });
 
   // Breaks: servers that can't resolve the BODY[part] for an attachment would
@@ -193,9 +262,9 @@ describe('getOrCacheAttachment', () => {
     const whole = Buffer.from('whole-message bytes');
     h.syncEngine.fetchAttachment.mockResolvedValue({ content: whole });
 
-    const filePath = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
-    expect(readFileSync(filePath)).toEqual(whole);
+    expect(await readCachedAttachment(filePath)).toEqual(whole);
   });
 
   // Breaks: an oversized (or malicious) attachment fills the disk before the
@@ -206,9 +275,9 @@ describe('getOrCacheAttachment', () => {
     });
 
     await expect(
-      getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine()),
+      getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine()),
     ).rejects.toThrow(/over the 50 MB limit/);
-    expect(cachedNames()).toEqual([]);
+    expect(cachedFiles()).toEqual([]);
   });
 
   // TRANSIENT failure. Breaks: a connection blip during the fetch leaves a
@@ -221,13 +290,13 @@ describe('getOrCacheAttachment', () => {
       .mockRejectedValueOnce(new Error('EIO: interrupted'));
 
     await expect(
-      getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine()),
+      getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine()),
     ).rejects.toThrow(/interrupted/);
-    expect(cachedNames()).toEqual([]); // no .partial left behind either
+    expect(cachedFiles()).toEqual([]); // no .partial left behind either
 
     renameSpy.mockRestore();
-    const filePath = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
-    expect(readFileSync(filePath)).toEqual(BYTES);
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    expect(await readCachedAttachment(filePath)).toEqual(BYTES);
   });
 
   // TRANSIENT failure. Breaks: an offline app answers with a confusing deep
@@ -236,27 +305,28 @@ describe('getOrCacheAttachment', () => {
     h.syncEngine.isConnected.mockReturnValue(false);
 
     await expect(
-      getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine()),
+      getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine()),
     ).rejects.toThrow('Not connected to IMAP');
-    expect(cachedNames()).toEqual([]);
+    expect(cachedFiles()).toEqual([]);
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });
 
   // Breaks: a non-string argument from a misbehaving renderer throws deep inside
   // path handling instead of being rejected at the edge.
   it('rejects an empty or non-string request', async () => {
-    await expect(getOrCacheAttachment('', 'INBOX', 42, FILENAME, engine())).rejects.toThrow(
+    await expect(getOrCacheAttachment(ACTIVE, '', 'INBOX', 42, FILENAME, engine())).rejects.toThrow(
       /non-empty strings/,
     );
     await expect(
-      getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, null as unknown as string, engine()),
+      getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, null as unknown as string, engine()),
     ).rejects.toThrow(/non-empty strings/);
   });
 
-  // SECURITY. Breaks: a crafted attachment name escapes the per-email cache
+  // SECURITY. Breaks: a crafted attachment name escapes the account's cache
   // directory and clobbers a file elsewhere in userData (db-key.bin, a DB).
   it('keeps a traversing filename inside the cache directory', async () => {
     const filePath = await getOrCacheAttachment(
+      ACTIVE,
       EMAIL_ID,
       'INBOX',
       42,
@@ -264,8 +334,178 @@ describe('getOrCacheAttachment', () => {
       engine(),
     );
 
-    expect(filePath.startsWith(cache())).toBe(true);
+    expect(isInside(accountAttachmentDir(ACTIVE), filePath)).toBe(true);
     expect(existsSync(join(h.userData, 'db-key.bin'))).toBe(false);
+  });
+
+  // Breaks: mail opened before any account is registered (no account id yet)
+  // lands in a real account's folder — served to, and removed with, that account.
+  it('keeps the pre-account default slot apart from every account', async () => {
+    const filePath = await getOrCacheAttachment(null, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+
+    expect(isInside(storeRoot(), filePath)).toBe(true);
+    expect(isInside(accountAttachmentDir(ACTIVE), filePath)).toBe(false);
+    expect(isInside(accountAttachmentDir(OTHER), filePath)).toBe(false);
+    expect(await readCachedAttachment(filePath)).toEqual(BYTES);
+  });
+});
+
+/**
+ * The store at rest (CASA M-7).
+ *
+ * An attachment on disk must be as protected as the mail it came from: sealed
+ * with a key derived from the DB key, kept per account, and named so a listing
+ * reveals nothing. A file that will not open is never served — it is removed
+ * and fetched afresh.
+ */
+describe('the sealed store', () => {
+  const SECRET_NAME = 'salary-review-2026.pdf';
+  const SECRET = Buffer.from('%PDF-1.7 CONFIDENTIAL salary figures for the whole team');
+
+  // Breaks: attachments sit on disk in plaintext again — anyone who can read
+  // userData (a backup, another local user, malware) reads the mail's files, or
+  // learns from a directory listing who was sent what.
+  it('stores neither the bytes nor any name in plaintext, and reads back exactly', async () => {
+    h.storage.getEmail.mockResolvedValue({
+      id: EMAIL_ID, folderId: 'f1', uid: 42, attachmentNames: JSON.stringify([SECRET_NAME]),
+    });
+    h.syncEngine.fetchAttachmentPart.mockResolvedValue({ content: SECRET });
+
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: SECRET_NAME });
+
+    expect(readFileSync(filePath).includes(SECRET)).toBe(false);
+    expectStoreHidesPlaintext(
+      [SECRET_NAME, 'salary', EMAIL_ID, ACTIVE],
+      [SECRET, Buffer.from('CONFIDENTIAL')],
+    );
+    expect(await readCachedAttachment(filePath)).toEqual(SECRET);
+    expect(await cachedAttachmentSize(filePath)).toBe(SECRET.length);
+  });
+
+  // MULTI-ACCOUNT. Breaks: two accounts holding the same message (same id, same
+  // attachment name — a mail sent to both of your addresses, or ids that collide
+  // across servers) share one cache entry, so one account is served the other's
+  // bytes, and removing either account takes the other's attachments with it.
+  it('gives two accounts with the same email id and file name separate entries', async () => {
+    const OTHER_BYTES = Buffer.from('%PDF-1.7 the second account\'s own copy');
+    h.syncEngine.fetchAttachmentPart.mockImplementation(async (_id: string, folder: string) => ({
+      content: folder === 'Archive' ? OTHER_BYTES : BYTES,
+    }));
+
+    const mine = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+    const theirs = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME, accountId: OTHER });
+
+    expect(mine.filePath).not.toBe(theirs.filePath);
+    expect(isInside(accountAttachmentDir(ACTIVE), mine.filePath)).toBe(true);
+    expect(isInside(accountAttachmentDir(OTHER), theirs.filePath)).toBe(true);
+    expect(await readCachedAttachment(mine.filePath)).toEqual(BYTES);
+    expect(await readCachedAttachment(theirs.filePath)).toEqual(OTHER_BYTES);
+
+    // …and once both are cache hits, each account's request still answers with
+    // its own bytes.
+    h.syncEngine.fetchAttachmentPart.mockClear();
+    expect(await base64()({}, EMAIL_ID, FILENAME)).toEqual({ success: true, base64: BYTES.toString('base64') });
+    expect(await base64()({}, EMAIL_ID, FILENAME, OTHER)).toEqual({
+      success: true, base64: OTHER_BYTES.toString('base64'),
+    });
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+    expectStoreHidesPlaintext([ACTIVE, OTHER, EMAIL_ID, FILENAME], [BYTES, OTHER_BYTES]);
+  });
+
+  // Breaks: an entry that will not open (bit rot, a crash mid-write by some other
+  // tool, a plaintext file from older code left in its place) is either served as
+  // garbage, or fails on every open forever because nothing ever replaces it.
+  it.each([
+    ['damaged on disk', (file: string) => {
+      const sealed = readFileSync(file);
+      sealed[sealed.length - 1]! ^= 0xff;
+      writeFileSync(file, sealed);
+    }],
+    ['replaced by plaintext', (file: string) => writeFileSync(file, BYTES)],
+    ['truncated', (file: string) => fs.truncateSync(file, 10)],
+  ])('discards an entry %s, asks to try again, and the next request refetches', async (_label, spoil) => {
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    spoil(filePath);
+
+    await expect(readCachedAttachment(filePath)).rejects.toMatchObject({ status: 500, message: UNREADABLE });
+    expect(existsSync(filePath)).toBe(false);
+
+    h.syncEngine.fetchAttachmentPart.mockClear();
+    const again = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    expect(again).toBe(filePath);
+    expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledOnce();
+    expect(await readCachedAttachment(again)).toEqual(BYTES);
+  });
+
+  // The same, end to end. Breaks: the user is shown a raw crypto error (or a
+  // garbage attachment) instead of "try again" — and trying again fails too.
+  it('answers an unreadable entry with "try again" over IPC, and the retry works', async () => {
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+    writeFileSync(filePath, BYTES); // plaintext where a sealed entry belongs
+
+    expect(await base64()({}, EMAIL_ID, FILENAME)).toEqual({ success: false, error: UNREADABLE });
+    expect(await base64()({}, EMAIL_ID, FILENAME)).toEqual({ success: true, base64: BYTES.toString('base64') });
+    expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledTimes(2);
+  });
+
+  // SECURITY. Breaks: the seal does not bind an entry to its email and file, so
+  // a sealed file copied into another attachment's slot is served as that
+  // attachment.
+  it('refuses an entry moved into another attachment\'s slot', async () => {
+    h.syncEngine.fetchAttachmentPart.mockImplementation(async (emailId: string) => ({
+      content: Buffer.from(`bytes of ${emailId}`),
+    }));
+    const mine = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const other = await getOrCacheAttachment(ACTIVE, 'email-2', 'INBOX', 43, FILENAME, engine());
+
+    copyFileSync(mine, other);
+
+    await expect(readCachedAttachment(other)).rejects.toMatchObject({ status: 500, message: UNREADABLE });
+    expect(await readCachedAttachment(mine)).toEqual(Buffer.from(`bytes of ${EMAIL_ID}`));
+  });
+
+  // Breaks: after the DB key is replaced (its keychain entry lost, a new key
+  // minted), entries sealed under the old key are served as garbage, or fail on
+  // every open, instead of being fetched again under the new key.
+  it('never opens an entry sealed under a previous DB key, and refetches under the current one', async () => {
+    const old = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    h.dbKey = 'j'.repeat(64);
+    resetAttachmentStoreKeys();
+
+    await expect(readCachedAttachment(old)).rejects.toMatchObject({ status: 500, message: UNREADABLE });
+    expect(existsSync(old)).toBe(false);
+
+    h.syncEngine.fetchAttachmentPart.mockClear();
+    const fresh = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledOnce();
+    expect(await readCachedAttachment(fresh)).toEqual(BYTES);
+  });
+
+  // Changed deliberately (CASA M-7): the cap applies where it did before the
+  // cache was sealed — to a warning-approved snapshot read without scanning —
+  // and is checked BEFORE the file is read. Breaks: a huge entry is read into
+  // memory for an unscanned snapshot.
+  it('refuses a bounded read of an entry over the cap, before reading it', async () => {
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    fs.truncateSync(filePath, MAX_ATTACHMENT_BYTES + 1024); // sparse: reports the size, occupies nothing
+    const read = vi.spyOn(fs.promises, 'readFile');
+
+    await expect(readCachedAttachment(filePath, MAX_ATTACHMENT_BYTES)).rejects.toMatchObject({ status: 413 });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  // A draft's own attachment may be larger than a fetch is allowed to be (it
+  // was written by seedAttachmentCache, not fetched). Breaks: such a draft
+  // attachment can never be opened, saved or forwarded again.
+  it('reads a large draft attachment when no bound is asked for', async () => {
+    const big = Buffer.alloc(MAX_ATTACHMENT_BYTES + 1, 7);
+    await seedAttachmentCache(ACTIVE, 'draft-big', [{ filename: 'video.mov', content: big }]);
+    h.storage.getEmail.mockResolvedValue({ id: 'draft-big', folderId: 'f1', uid: 0, attachmentNames: JSON.stringify(['video.mov']) });
+
+    const { filePath } = await resolveAttachmentFile({ emailId: 'draft-big', filename: 'video.mov' });
+    const read = await readCachedAttachment(filePath);
+    expect(read.length).toBe(big.length);
+    expect(read.equals(big)).toBe(true);
   });
 });
 
@@ -309,14 +549,16 @@ describe('resolveAttachmentFile', () => {
 
   // MULTI-ACCOUNT. Breaks: in the unified All Inboxes view every attachment on a
   // non-active account's message failed with "Email not found", because the
-  // lookup always used the ACTIVE account's storage.
+  // lookup always used the ACTIVE account's storage — and now also: its file
+  // would be cached in the ACTIVE account's folder.
   it('reads the owning account when the request carries a non-active accountId', async () => {
-    await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME, accountId: 'acct-2' });
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME, accountId: OTHER });
 
     expect(h.otherStorage.getEmail).toHaveBeenCalledWith(EMAIL_ID);
     expect(h.storage.getEmail).not.toHaveBeenCalled();
     // …and fetched from that account's folder, not the active account's.
     expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledWith(EMAIL_ID, 'Archive', 7, FILENAME);
+    expect(isInside(accountAttachmentDir(OTHER), filePath)).toBe(true);
   });
 
   // Breaks: legacy rows store attachment names comma-separated rather than as a
@@ -332,7 +574,7 @@ describe('resolveAttachmentFile', () => {
 
     const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
 
-    expect(readFileSync(filePath)).toEqual(BYTES);
+    expect(await readCachedAttachment(filePath)).toEqual(BYTES);
   });
 });
 
@@ -359,15 +601,34 @@ describe('emails:previewAttachment', () => {
     expect(h.openPath).not.toHaveBeenCalled();
   });
 
-  it('hands an allow-listed file to the OS and reports a launch failure', async () => {
+  // Breaks: with the antivirus off, the OS app is handed the sealed cache entry
+  // (it shows garbage, or "damaged file") — or a launch failure is reported as
+  // success and the user is left waiting for a window that never opens.
+  // Changed deliberately (CASA M-7): the cache is sealed, so the OS now gets a
+  // private plaintext copy under attachment-previews named after the attachment,
+  // never the cache path; a copy that failed to open is not left behind.
+  it('hands an allow-listed file to the OS as a private copy and reports a launch failure', async () => {
+    let opened = '';
+    let openedBytes: Buffer | undefined;
+    h.openPath.mockImplementation(async (file: string) => {
+      opened = file;
+      openedBytes = readFileSync(file);
+      return '';
+    });
     expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: true });
-    expect(h.openPath).toHaveBeenCalledWith(join(cache(), FILENAME));
+    expect(isInside(previewRoot(), opened)).toBe(true);
+    expect(basename(opened)).toBe(FILENAME); // the OS picks the app by this extension
+    expect(openedBytes).toEqual(BYTES);
 
-    h.openPath.mockResolvedValue('No application is registered');
+    h.openPath.mockImplementation(async (file: string) => {
+      opened = file;
+      return 'No application is registered';
+    });
     expect(await preview()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({
       success: false,
       error: 'No application is registered',
     });
+    expect(existsSync(opened)).toBe(false);
   });
 
   // MULTI-ACCOUNT, at the IPC edge rather than inside the resolver.
@@ -452,22 +713,45 @@ describe('trusted attachment preview scan handlers', () => {
 describe('protected calendar import', () => {
   const calendar = () => h.handlers.get('emails:openCalendarInvite')!;
 
+  // Changed deliberately (CASA M-7): the invite is written as a private copy
+  // under attachment-previews, no longer into the cache, so "wrote nothing" now
+  // means neither place holds a file.
   it('blocks generated calendar imports while a scanner is enabled before reading or writing mail', async () => {
     enableScanner();
     expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toEqual({
       success: false, error: 'Calendar import blocked: save or open the calendar attachment after scanning it.',
     });
     expect(h.storage.getEmail).not.toHaveBeenCalled(); expect(h.otherStorage.getEmail).not.toHaveBeenCalled();
-    expect(h.openPath).not.toHaveBeenCalled(); expect(cachedNames()).toEqual([]); expect(h.scanDownload).not.toHaveBeenCalled();
+    expect(h.openPath).not.toHaveBeenCalled(); expect(h.scanDownload).not.toHaveBeenCalled();
+    expect(previewCopies()).toEqual([]); expect(storeFiles()).toEqual([]);
   });
 
+  // Breaks: "Add to calendar" with no scanner stops working, or leaves the
+  // invite (message content) behind in the attachment cache.
+  // Changed deliberately (CASA M-7): the calendar app is handed a private copy
+  // under attachment-previews/preview-*/calendar-event.ics, not a file in the
+  // attachment cache — which now holds no calendar-event.ics at all.
   it('requires the trusted main frame and preserves legacy import without an enabled scanner', async () => {
     expect(await calendar()({ sender: h.webContents, senderFrame: {} }, EMAIL_ID)).toEqual({
       success: false, error: 'Attachment downloads must be requested from Sarv Inbox.',
     });
     h.storage.getEmail.mockResolvedValue({ id: EMAIL_ID, calendarIcs: CALENDAR_ICS });
+    let opened = '';
+    let body = '';
+    h.openPath.mockImplementation(async (file: string) => {
+      opened = file;
+      body = readFileSync(file, 'utf8');
+      return '';
+    });
+
     expect(await calendar()(downloadEvent(), EMAIL_ID)).toEqual({ success: true });
-    expect(h.openPath).toHaveBeenCalledWith(join(cache(), 'calendar-event.ics'));
+
+    expect(isInside(previewRoot(), opened)).toBe(true);
+    expect(basename(opened)).toBe('calendar-event.ics');
+    expect(body).toContain('SUMMARY:Synthetic');
+    expect(body.endsWith('\r\n')).toBe(true);
+    expect(storeFiles()).toEqual([]);
+    expect(walk(h.userData).filter((file) => basename(file) === 'calendar-event.ics')).toEqual([opened]);
   });
 
   it('allows a generated calendar only after missing setup is explicitly accepted, using the owning account', async () => {
@@ -500,13 +784,16 @@ describe('protected calendar import', () => {
     expect(h.missingSetupAssert.mock.calls.length).toBeGreaterThan(6); expect(h.scanDownload).not.toHaveBeenCalled();
   });
 
+  // Changed deliberately (CASA M-7): "wrote nothing" now checks the private-copy
+  // folder (where the invite would be written) as well as the cache.
   it('rechecks setup after a calendar fallback read and before writing or opening the generated file', async () => {
     enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
     h.syncEngine.getCalendarIcs.mockImplementation(async () => {
       h.missingSetupAssert.mockRejectedValue(new Error('Antivirus setup changed. Try again.')); return CALENDAR_ICS;
     });
     expect(await calendar()(downloadEvent(), EMAIL_ID, 'acct-2')).toEqual({ success: false, error: 'Antivirus setup changed. Try again.' });
-    expect(h.openPath).not.toHaveBeenCalled(); expect(cachedNames()).toEqual([]);
+    expect(h.openPath).not.toHaveBeenCalled();
+    expect(previewCopies()).toEqual([]); expect(storeFiles()).toEqual([]);
   });
 
   it('preserves calendar missing-message, missing-invite and OS-handler errors after warning acceptance', async () => {
@@ -605,6 +892,9 @@ describe('per-action missing antivirus setup warnings', () => {
 
 describe('emails:downloadAttachment', () => {
 
+  // Breaks: Save writes the sealed ciphertext (or nothing) to the user's chosen
+  // file instead of the attachment — the cached source is not readable as-is,
+  // so the copy must decrypt, on the first save and on a cache hit alike.
   it('copies the cached file to the chosen path', async () => {
     const target = join(TMP, 'chosen.pdf');
     h.saveDialog = { canceled: false, filePath: target };
@@ -613,6 +903,12 @@ describe('emails:downloadAttachment', () => {
 
     expect(result).toEqual({ success: true, filePath: target });
     expect(readFileSync(target)).toEqual(BYTES);
+    expect(readFileSync(cachedFiles()[0]!)).not.toEqual(BYTES); // the source was sealed
+
+    rmSync(target);
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: true, filePath: target });
+    expect(readFileSync(target)).toEqual(BYTES);
+    expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledOnce();
   });
 
   // Breaks: the renderer distinguishes a cancelled dialog from a real failure by
@@ -699,11 +995,18 @@ describe('emails:downloadAttachment', () => {
 
 describe('emails:getAttachmentBase64', () => {
   // Breaks: forwarding an attachment re-attaches corrupt bytes — the encoding is
-  // the wire format the compose path re-attaches from.
-  it('returns the cached bytes base64-encoded', async () => {
+  // the wire format the compose path re-attaches from — or, with the cache
+  // sealed, the ciphertext itself: the handler must decrypt, on a fresh fetch
+  // and on a cache hit alike.
+  it('returns the decrypted bytes base64-encoded', async () => {
     const result = await base64()({}, EMAIL_ID, FILENAME);
 
     expect(result).toEqual({ success: true, base64: BYTES.toString('base64') });
+    expect(readFileSync(cachedFiles()[0]!)).not.toEqual(BYTES); // what is on disk is sealed
+
+    h.syncEngine.fetchAttachmentPart.mockClear();
+    expect(await base64()({}, EMAIL_ID, FILENAME)).toEqual(result);
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });
 
   it('honours accountId and reports failures as a message', async () => {
@@ -721,60 +1024,56 @@ describe('emails:getAttachmentBase64', () => {
 describe('the cache directory', () => {
   // SECURITY. Breaks: a crafted emailId ("../..") escapes the cache root, so the
   // per-email directory becomes a write primitive anywhere under userData.
-  it('keeps a traversing emailId inside the cache root', () => {
-    const root = join(h.userData, 'attachment-cache');
+  // Changed deliberately (CASA M-7): attachmentCacheDir is gone — the store
+  // names every folder and file by a hash — so this proves containment for the
+  // store's entry path and account folder, and for the one path still derived
+  // from the raw id: the old plaintext folder an unsynced draft is adopted from.
+  it('keeps a traversing emailId inside the cache root', async () => {
+    const filePath = await getOrCacheAttachment(ACTIVE, '../../escape', 'INBOX', 42, FILENAME, engine());
 
-    expect(attachmentCacheDir('../../escape').startsWith(root)).toBe(true);
+    expect(isInside(accountAttachmentDir(ACTIVE), filePath)).toBe(true);
+    expect(isInside(storeRoot(), accountAttachmentDir('../../escape'))).toBe(true);
+    expect(isInside(legacyAttachmentCacheRoot(), legacyAttachmentDir('../../escape'))).toBe(true);
+    expect(existsSync(join(h.userData, 'escape'))).toBe(false);
   });
 
   // Breaks: cached mail content becomes world-readable on a shared macOS/Linux
   // box. (A no-op on Windows, which uses ACLs — asserted only where modes mean
   // something.)
-  it.skipIf(process.platform === 'win32')('writes cached attachments 0o600', async () => {
-    const filePath = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+  it.skipIf(process.platform === 'win32')('writes cached attachments 0o600 in 0o700 folders', async () => {
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
     expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(dirname(filePath)).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(accountAttachmentDir(ACTIVE)).mode & 0o777).toBe(0o700);
   });
 });
 
 describe('pruneAttachmentCache', () => {
-  /** A sparse file: it REPORTS `bytes` to stat but occupies no disk, so the
-   *  500 MB cap can be crossed in a test without writing 500 MB. */
-  function sparse(emailId: string, bytes: number, ageMs: number): string {
-    const dir = attachmentCacheDir(emailId);
-    fs.mkdirSync(dir, { recursive: true });
+  /** A sparse file in the store's account/email/file layout: it REPORTS `bytes`
+   *  to stat but occupies no disk, so the 500 MB cap can be crossed in a test
+   *  without writing 500 MB. Changed deliberately (CASA M-7): the store is one
+   *  level deeper (per account), and the cap spans every account. */
+  function sparse(accountId: string, emailDir: string, bytes: number, ageMs: number): string {
+    const dir = join(accountAttachmentDir(accountId), emailDir);
+    mkdirSync(dir, { recursive: true });
     const filePath = join(dir, 'cached.bin');
-    fs.writeFileSync(filePath, '');
+    writeFileSync(filePath, '');
     fs.truncateSync(filePath, bytes);
     const seconds = (Date.now() - ageMs) / 1000;
     fs.utimesSync(filePath, seconds, seconds);
     return filePath;
   }
 
-  /** Step past the 5-minute throttle so an explicit prune actually runs. The
-   *  offset grows, because each run records the (faked) time it ran at. */
-  let clockOffset = 0;
-  async function pruneNow() {
-    clockOffset += 10 * 60 * 1000;
-    const at = Date.now() + clockOffset;
-    vi.useFakeTimers();
-    vi.setSystemTime(at);
-    try {
-      await pruneAttachmentCache();
-    } finally {
-      vi.useRealTimers();
-    }
-  }
-
   // Breaks: the cache grew without limit — every attachment ever opened stayed
-  // on disk forever. This is what bounds it, oldest-first and only as far as it
-  // has to go.
+  // on disk forever. This is what bounds it, oldest-first across every account,
+  // and only as far as it has to go.
   it('evicts least-recently-used files until back under the cap, and no further', async () => {
     const share = Math.ceil(ATTACHMENT_CACHE_MAX_BYTES * 0.3);
-    const oldest = sparse('email-old', share, 90_000);
-    const middle = sparse('email-mid', share, 60_000);
-    const recent = sparse('email-recent', share, 30_000);
-    const newest = sparse('email-new', share * 2, 0);
+    const oldest = sparse(ACTIVE, 'email-old', share, 90_000);
+    const middle = sparse(OTHER, 'email-mid', share, 60_000);
+    const recent = sparse(ACTIVE, 'email-recent', share, 30_000);
+    const newest = sparse(OTHER, 'email-new', share * 2, 0);
 
     await pruneNow(); // 1.5x the cap on disk
 
@@ -784,14 +1083,15 @@ describe('pruneAttachmentCache', () => {
     expect(existsSync(newest)).toBe(true);
     // …and an emptied per-email directory goes with its file, so the tree
     // doesn't accumulate stubs.
-    expect(existsSync(attachmentCacheDir('email-old'))).toBe(false);
-    expect(existsSync(attachmentCacheDir('email-recent'))).toBe(true);
+    expect(existsSync(dirname(oldest))).toBe(false);
+    expect(existsSync(dirname(middle))).toBe(false);
+    expect(existsSync(dirname(recent))).toBe(true);
   });
 
   // Breaks: a cache under its cap gets pruned anyway, so the next open of a
   // recently-read attachment re-downloads it.
   it('deletes nothing while under the cap', async () => {
-    const keep = sparse('email-1', 1024, 0);
+    const keep = sparse(ACTIVE, 'email-1', 1024, 0);
 
     await pruneNow();
 
@@ -802,16 +1102,18 @@ describe('pruneAttachmentCache', () => {
   // aborts the whole prune, so the cache never shrinks again.
   it('skips entries it cannot account for and prunes the rest', async () => {
     const share = Math.ceil(ATTACHMENT_CACHE_MAX_BYTES * 0.6);
-    const oldest = sparse('email-old', share, 90_000);
-    sparse('email-new', share, 0);
-    // A nested directory where a cached file would be, and a per-email entry
-    // that is a plain file rather than a directory.
-    fs.mkdirSync(join(attachmentCacheDir('email-new'), 'nested'), { recursive: true });
-    fs.writeFileSync(join(h.userData, 'attachment-cache', 'stray'), 'not a directory');
+    const oldest = sparse(ACTIVE, 'email-old', share, 90_000);
+    const newest = sparse(OTHER, 'email-new', share, 0);
+    // A nested directory where a cached file would be, a per-email entry that is
+    // a plain file rather than a directory, and the same at the account level.
+    mkdirSync(join(dirname(newest), 'nested'), { recursive: true });
+    writeFileSync(join(accountAttachmentDir(ACTIVE), 'stray'), 'not an email directory');
+    writeFileSync(join(storeRoot(), 'stray'), 'not an account directory');
 
     await pruneNow();
 
     expect(existsSync(oldest)).toBe(false);
+    expect(existsSync(newest)).toBe(true);
   });
 
   // Breaks: a first run (or a wiped userData) throws out of a best-effort
@@ -823,11 +1125,11 @@ describe('pruneAttachmentCache', () => {
   // Breaks: housekeeping runs on every single attachment open, re-scanning the
   // whole tree each time — a stall while the user is just reading mail.
   it('does no work again within the throttle window', async () => {
-    const over = sparse('email-1', ATTACHMENT_CACHE_MAX_BYTES * 2, 0);
+    const over = sparse(ACTIVE, 'email-1', ATTACHMENT_CACHE_MAX_BYTES * 2, 0);
     await pruneNow();
     expect(existsSync(over)).toBe(false);
 
-    const again = sparse('email-2', ATTACHMENT_CACHE_MAX_BYTES * 2, 0);
+    const again = sparse(ACTIVE, 'email-2', ATTACHMENT_CACHE_MAX_BYTES * 2, 0);
     await pruneAttachmentCache(); // immediately after — throttled
     expect(existsSync(again)).toBe(true);
   });
@@ -855,28 +1157,55 @@ describe('attachmentErrorMessage', () => {
  * case: a part that lied about being base64 decoded to 7 junk bytes, those 7
  * bytes were cached, and every later open was a cache hit on them — the fix to
  * the fetch path could not reach mail that had already been opened once.
+ *
+ * Changed deliberately (CASA M-7): the generation now governs the sealed
+ * `attachment-store` root (the old plaintext `attachment-cache` is handled by the
+ * legacy adoption/migration instead), and its entries live at hashed paths.
  */
 describe('the cache generation', () => {
-  const root = () => join(h.userData, 'attachment-cache');
-  const marker = () => join(root(), '.cache-generation');
+  const marker = () => join(storeRoot(), GENERATION_MARKER);
   const STALE = Buffer.from('7 junk bytes from the old decoder');
 
-  /** Put a file in the cache exactly where a previous generation left one. */
-  const seedCached = (generation: string) => {
-    fs.mkdirSync(cache(), { recursive: true });
-    fs.writeFileSync(join(cache(), FILENAME), STALE);
-    fs.writeFileSync(marker(), generation);
-  };
+  /**
+   * Leave a validly sealed STALE entry for EMAIL_ID/FILENAME exactly where an
+   * earlier run of an OLDER generation would have, under that generation's
+   * marker. Sealed in a scratch userData first — the hashed names and the seal
+   * depend only on the key and the ids, not on where userData is — because this
+   * test's own store must not have run its once-per-process generation check
+   * yet. Valid, so only the generation check stands between it and the user.
+   */
+  async function seedOlderGeneration(content: Buffer): Promise<string> {
+    const real = h.userData;
+    h.userData = mkdtempSync(join(TMP, 'earlier-'));
+    let earlier: string;
+    let entry: string;
+    let current: number;
+    try {
+      h.syncEngine.fetchAttachmentPart.mockResolvedValueOnce({ content });
+      earlier = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+      entry = relative(storeRoot(), earlier);
+      current = Number(readFileSync(marker(), 'utf8'));
+    } finally {
+      h.userData = real;
+    }
+    const target = join(storeRoot(), entry);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(earlier, target);
+    writeFileSync(marker(), String(current - 1));
+    h.syncEngine.fetchAttachmentPart.mockClear();
+    return target;
+  }
 
   // Breaks: the 7-byte file cached before the lying-encoding fix keeps being
   // served, so the attachment stays corrupt no matter how well the fetch path
   // is repaired. Only a generation bump can reach data already on disk.
   it('discards a cache written by an older generation and re-fetches', async () => {
-    seedCached('1');
+    const stale = await seedOlderGeneration(STALE);
 
-    const filePath = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
-    expect(readFileSync(filePath)).toEqual(BYTES);
+    expect(filePath).toBe(stale); // the stale entry sat exactly where this open looked
+    expect(await readCachedAttachment(filePath)).toEqual(BYTES);
     expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalled();
   });
 
@@ -885,48 +1214,54 @@ describe('the cache generation', () => {
   it('keeps a cache already at the current generation', async () => {
     // Let the code itself stamp the current generation, so this does not pin the
     // number — only that a matching one is honoured.
-    await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
-    fs.writeFileSync(join(cache(), FILENAME), STALE);
+    await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    await storeCachedAttachment(ACTIVE, EMAIL_ID, FILENAME, STALE);
     h.syncEngine.fetchAttachmentPart.mockClear();
 
-    const filePath = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
-    expect(readFileSync(filePath)).toEqual(STALE);
+    expect(await readCachedAttachment(filePath)).toEqual(STALE);
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });
 
   // Breaks: the clear happens once per process, so a second attachment opened
   // after the first would wipe the file the first just fetched.
   it('clears once, not on every attachment', async () => {
-    seedCached('1');
+    const stale = await seedOlderGeneration(STALE);
 
-    const first = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
-    await getOrCacheAttachment('email-2', 'INBOX', 43, 'other.pdf', engine());
+    const first = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    await getOrCacheAttachment(ACTIVE, 'email-2', 'INBOX', 43, 'other.pdf', engine());
 
+    expect(first).toBe(stale);
     expect(existsSync(first)).toBe(true);
-    expect(readFileSync(first)).toEqual(BYTES);
+    expect(await readCachedAttachment(first)).toEqual(BYTES);
   });
 
-  // Breaks: the marker is treated as a per-email directory, so the scan throws
+  // Breaks: the marker is treated as an account directory, so the scan throws
   // or counts it — and a cleared cache immediately re-clears on the next open.
   it('leaves the marker alone when the cache is pruned', async () => {
-    await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
-    await pruneAttachmentCache();
+    await pruneNow();
 
     expect(existsSync(marker())).toBe(true);
-    expect(cachedNames()).toEqual([FILENAME]);
+    expect(cachedFiles()).toEqual([filePath]);
+    h.syncEngine.fetchAttachmentPart.mockClear();
+    expect(await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine())).toBe(filePath);
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });
 
   // Breaks: a read-only or otherwise unclearable cache dir turns every
   // attachment open into a hard failure, which is far worse than a stale cache.
   it('still serves the attachment when the cache cannot be cleared', async () => {
-    seedCached('1');
+    const stale = await seedOlderGeneration(STALE);
     vi.spyOn(fs.promises, 'rm').mockRejectedValueOnce(new Error('EPERM'));
 
-    const filePath = await getOrCacheAttachment(EMAIL_ID, 'INBOX', 42, FILENAME, engine());
+    const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
+    expect(filePath).toBe(stale);
     expect(existsSync(filePath)).toBe(true);
+    await expect(readCachedAttachment(filePath)).resolves.toBeInstanceOf(Buffer);
   });
 });
 
@@ -937,7 +1272,9 @@ describe('the cache generation', () => {
  * whose part lied about its encoding was recorded at its collapsed decode length
  * — listed as "7 B" on the message and in the viewer header while the real file
  * is a kilobyte. Import runs once per message, so repairing the fetch does not
- * repair that number for mail already in the mailbox.
+ * repair that number for mail already in the mailbox. (The file on disk is
+ * sealed, so these also prove the PLAINTEXT size is what gets recorded, not the
+ * sealed file's.)
  */
 describe('stored attachment size reconciliation', () => {
   const withSizes = (sizes: number[], names: string[] = [FILENAME]) => {
@@ -1012,6 +1349,24 @@ describe('stored attachment size reconciliation', () => {
     expect(existsSync(filePath)).toBe(true);
   });
 
+  // Breaks: a file at a cache path that is not sealed data (damaged, or left by
+  // an older build) has its size written onto the email before anything
+  // checked it — the list then shows a wrong size.
+  it('does not take a size from a file that is not sealed data', async () => {
+    h.storage.getEmail.mockResolvedValue({
+      id: EMAIL_ID, folderId: 'f1', uid: 42,
+      attachmentNames: JSON.stringify([FILENAME]),
+      attachmentSizes: JSON.stringify([BYTES.length]),
+    });
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+    h.storage.updateEmail.mockClear();
+    fs.writeFileSync(filePath, 'not sealed: an older build left this here, and it is long');
+
+    await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+
+    expect(h.storage.updateEmail).not.toHaveBeenCalled();
+  });
+
   // Breaks: the non-active account's row is read but the ACTIVE account's row is
   // written — corrupting a different mailbox's metadata from All Inboxes.
   it('writes back to the account that owns the message', async () => {
@@ -1037,11 +1392,11 @@ describe('seedAttachmentCache (a locally-saved draft\'s files)', () => {
   // attachments, because the only place they exist is this cache.
   it('serves a seeded file for a row that has no UID yet, without touching IMAP', async () => {
     localDraft();
-    await seedAttachmentCache(EMAIL_ID, [{ filename: FILENAME, content: BYTES }]);
+    await seedAttachmentCache(ACTIVE, EMAIL_ID, [{ filename: FILENAME, content: BYTES }]);
 
     const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
 
-    expect(readFileSync(filePath)).toEqual(BYTES);
+    expect(await readCachedAttachment(filePath)).toEqual(BYTES);
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
     expect(h.syncEngine.fetchAttachment).not.toHaveBeenCalled();
   });
@@ -1057,23 +1412,149 @@ describe('seedAttachmentCache (a locally-saved draft\'s files)', () => {
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });
 
-  // SECURITY. Breaks: a draft attachment named "../../db-key.bin" is written
-  // outside the email's cache dir, clobbering app files.
-  it('keeps a traversal filename inside the email\'s cache dir', async () => {
-    await seedAttachmentCache(EMAIL_ID, [{ filename: '../../escape.bin', content: BYTES }]);
+  // MULTI-ACCOUNT. Breaks: a draft's files seeded for one account are served for
+  // another account's row with the same id — one mailbox reading another's draft.
+  it('keeps a seeded file to the account that saved the draft', async () => {
+    localDraft();
+    await seedAttachmentCache(OTHER, EMAIL_ID, [{ filename: FILENAME, content: BYTES }]);
 
-    expect(cachedNames()).toEqual(['escape.bin']);
+    await expect(
+      resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME }),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(cachedFiles(OTHER)).toHaveLength(1);
+    expect(cachedFiles(ACTIVE)).toEqual([]);
+  });
+
+  // SECURITY. Breaks: a draft attachment named "../../escape.bin" is written
+  // outside its account's store, clobbering app files.
+  // Changed deliberately (CASA M-7): names on disk are keyed hashes now, so the
+  // proof is that the one file written sits in the account's folder, no file
+  // named escape.bin exists anywhere, and that name still reads its bytes back.
+  it('keeps a traversal filename inside the email\'s cache dir', async () => {
+    await seedAttachmentCache(ACTIVE, EMAIL_ID, [{ filename: '../../escape.bin', content: BYTES }]);
+
+    const files = cachedFiles();
+    expect(files).toHaveLength(1);
+    expect(walk(h.userData).filter((file) => basename(file) === 'escape.bin')).toEqual([]);
     expect(existsSync(join(h.userData, 'escape.bin'))).toBe(false);
+    expect(existsSync(join(TMP, 'escape.bin'))).toBe(false);
+    const back = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'Drafts', 0, '../../escape.bin', null);
+    expect(back).toBe(files[0]);
+    expect(await readCachedAttachment(back)).toEqual(BYTES);
   });
 
   // Breaks: seeding leaves a `.partial` temp beside the file, which the cache
-  // then counts and serves forever.
+  // then counts and serves forever — or seeds the draft's files in plaintext.
+  // Changed deliberately (CASA M-7): names are hashed, so this counts the files
+  // and reads each back by its real name instead of listing the names.
   it('leaves only the finished files behind', async () => {
-    await seedAttachmentCache(EMAIL_ID, [
-      { filename: 'a.txt', content: Buffer.from('a') },
-      { filename: 'b.txt', content: Buffer.from('b') },
+    const A = Buffer.from('draft attachment A: the first seeded file');
+    const B = Buffer.from('draft attachment B: the second seeded file');
+    await seedAttachmentCache(ACTIVE, EMAIL_ID, [
+      { filename: 'a.txt', content: A },
+      { filename: 'b.txt', content: B },
     ]);
 
-    expect(cachedNames().sort()).toEqual(['a.txt', 'b.txt']);
+    const files = cachedFiles();
+    expect(files).toHaveLength(2);
+    expect(files.filter((file) => file.endsWith('.partial'))).toEqual([]);
+    for (const [name, content] of [['a.txt', A], ['b.txt', B]] as const) {
+      const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'Drafts', 0, name, null);
+      expect(await readCachedAttachment(filePath)).toEqual(content);
+    }
+    expectStoreHidesPlaintext(['a.txt', 'b.txt', EMAIL_ID, ACTIVE], [A, B]);
+  });
+});
+
+/**
+ * An unsynced draft (uid 0) saved by a build that cached attachments in
+ * PLAINTEXT at userData/attachment-cache/<emailId>/<name>. Its files exist
+ * nowhere else — not on the server, not in the sealed store — so the first open
+ * must adopt them: seal them in and remove the plaintext.
+ */
+describe('an unsynced draft cached in plaintext by an older build', () => {
+  const LEGACY = Buffer.from('draft attachment saved in plaintext by an older build');
+  const legacyFile = () => join(legacyAttachmentDir(EMAIL_ID), FILENAME);
+
+  /** The old cache as an upgraded install has it — its own generation marker
+   *  included, which the new store's generation check must leave alone. */
+  function plantLegacy() {
+    mkdirSync(legacyAttachmentDir(EMAIL_ID), { recursive: true });
+    writeFileSync(legacyFile(), LEGACY);
+    writeFileSync(join(legacyAttachmentCacheRoot(), GENERATION_MARKER), '2');
+  }
+
+  beforeEach(() => {
+    h.storage.getEmail.mockResolvedValue({
+      id: EMAIL_ID, folderId: 'f1', uid: 0, attachmentNames: JSON.stringify([FILENAME]),
+    });
+  });
+
+  // Breaks: after the upgrade an offline-saved draft reopens without its
+  // attachment (its only copy is the old plaintext cache), or the plaintext
+  // stays on disk forever beside the sealed copy — or the new store's first-run
+  // generation stamp wipes the old cache before the draft could be adopted.
+  it('serves it, seals it into the account store, and removes the plaintext', async () => {
+    plantLegacy();
+
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+
+    expect(isInside(accountAttachmentDir(ACTIVE), filePath)).toBe(true);
+    expect(await readCachedAttachment(filePath)).toEqual(LEGACY);
+    expect(existsSync(legacyFile())).toBe(false);
+    expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
+    expect(h.syncEngine.fetchAttachment).not.toHaveBeenCalled();
+    expectStoreHidesPlaintext([FILENAME, EMAIL_ID, ACTIVE], [LEGACY]);
+  });
+
+  // IDEMPOTENT RE-RUN. Breaks: the second open — the plaintext already gone —
+  // finds nothing and the draft loses its attachment after one view.
+  it('keeps serving the sealed copy on later opens', async () => {
+    plantLegacy();
+    const first = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+
+    const second = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+
+    expect(second.filePath).toBe(first.filePath);
+    expect(await readCachedAttachment(second.filePath)).toEqual(LEGACY);
+    expect(cachedFiles()).toHaveLength(1);
+  });
+
+  // TRANSIENT failure. Breaks: an interrupted adoption (disk full, quit
+  // mid-write) deletes the plaintext before its sealed copy exists — losing the
+  // only copy of an unsynced draft's attachment.
+  it('keeps the plaintext when sealing it is interrupted, and a retry adopts it', async () => {
+    plantLegacy();
+    const renameSpy = vi
+      .spyOn(fs.promises, 'rename')
+      .mockRejectedValueOnce(new Error('EIO: interrupted'));
+
+    await expect(
+      resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME }),
+    ).rejects.toThrow(/interrupted/);
+    expect(readFileSync(legacyFile())).toEqual(LEGACY);
+    expect(cachedFiles()).toEqual([]); // no sealed copy, no .partial
+
+    renameSpy.mockRestore();
+    const { filePath } = await resolveAttachmentFile({ emailId: EMAIL_ID, filename: FILENAME });
+    expect(await readCachedAttachment(filePath)).toEqual(LEGACY);
+    expect(existsSync(legacyFile())).toBe(false);
+  });
+
+  // SECURITY. Breaks: a crafted emailId points the adoption outside the old
+  // cache folder, so an app file (the DB key) is read into the store — and then
+  // DELETED as "adopted plaintext".
+  it('never adopts, or deletes, a file outside the old cache folder', async () => {
+    const appFile = join(h.userData, 'db-key.bin');
+    writeFileSync(appFile, 'not an attachment');
+
+    for (const emailId of ['..', '../', '../..', '.']) {
+      await expect(
+        getOrCacheAttachment(ACTIVE, emailId, 'Drafts', 0, 'db-key.bin', null),
+      ).rejects.toMatchObject({ status: 404 });
+    }
+
+    expect(readFileSync(appFile, 'utf8')).toBe('not an attachment');
+    expect(cachedFiles()).toEqual([]);
   });
 });

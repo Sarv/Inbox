@@ -2,6 +2,7 @@ import type { EmailRecord, ViewFilter } from '@sarvinbox/core';
 // Deep import, not the barrel: the core barrel pulls in Node-only transports
 // and crashes the renderer. See `vite/renderer-aliases.ts`.
 import {
+  conversationStarTargetIds,
   isDraftRow as isDraftRowTags,
   isLiveDraft,
   type ConversationFolders,
@@ -146,6 +147,22 @@ export function hasStarredFlag(email: EmailRecord): boolean {
   // Check tags for |starred| or fall back to derived isStarred
   if (email.tags) return email.tags.includes('|starred|');
   return email.isStarred === true;
+}
+
+/**
+ * A conversation-level star toggle (the `s` shortcut) over the rows of ONE
+ * conversation. The direction comes from the THREAD — any row starred means
+ * unstar, as the row's star icon shows — never from one representative row:
+ * once only the latest message carries the star, reading the first message's
+ * tags would re-star an already-starred thread forever. The ids it writes to
+ * come from {@link conversationStarTargetIds}.
+ */
+export function conversationStarToggle(
+  emails: readonly EmailRecord[],
+  folders?: ConversationFolders | null,
+): { starring: boolean; ids: string[] } {
+  const starring = !emails.some(hasStarredFlag);
+  return { starring, ids: conversationStarTargetIds(emails, starring, folders) };
 }
 
 export function isRead(email: EmailRecord): boolean {

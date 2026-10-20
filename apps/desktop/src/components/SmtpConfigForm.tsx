@@ -1,10 +1,13 @@
 import type { SMTPConfig } from '@sarvinbox/core';
+import { resolveConnectionSecurity, type ConnectionSecurity } from '@sarvinbox/core/connection-security';
 import { Loader2 } from 'lucide-react';
 import { useState } from 'react';
 
+import { defaultPort } from '../config/email-providers';
 import { useEmailStore } from '../store/email-store';
 import { deriveSmtpFromImap, accountIdFor } from '../store/helpers';
 
+import { ConnectionSecuritySelect } from './ConnectionSecuritySelect';
 import { VaultPasswordField } from './VaultPasswordField';
 
 interface SmtpConfigFormProps {
@@ -43,7 +46,9 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
   const accountEmail = imapConfig?.username ?? initial?.from ?? initial?.username ?? '';
 
   const [host, setHost] = useState(initial?.host ?? '');
-  const [security, setSecurity] = useState<'ssl' | 'starttls' | 'none'>(initial?.secure === false ? 'starttls' : 'ssl');
+  // The saved choice, including an explicit None (it used to be read from
+  // `secure` only, so None came back as STARTTLS and was never kept).
+  const [security, setSecurity] = useState<ConnectionSecurity>(initial ? resolveConnectionSecurity(initial) : 'ssl');
   const [port, setPort] = useState(String(initial?.port ?? 465));
   const [allowInsecure, setAllowInsecure] = useState<boolean>(!!initial?.allowInsecureTLS);
   const [username, setUsername] = useState(initial?.username ?? accountEmail);
@@ -55,10 +60,6 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const onSecurityChange = (value: 'ssl' | 'starttls' | 'none') => {
-    setSecurity(value);
-    setPort(value === 'ssl' ? '465' : value === 'starttls' ? '587' : '25');
-  };
 
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -67,7 +68,8 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
     try {
       const config: SMTPConfig = {
         host: host.trim(),
-        port: parseInt(port, 10) || (security === 'ssl' ? 465 : security === 'starttls' ? 587 : 25),
+        port: parseInt(port, 10) || defaultPort('smtp', security),
+        security,
         secure: security === 'ssl',
         username: username.trim(),
         password: isOAuth ? '' : password.replace(/\s+/g, ''),
@@ -75,7 +77,8 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
         from: accountEmail || username.trim(),
         authMethod: imapConfig?.authMethod,
         oauthProvider: imapConfig?.oauthProvider,
-        allowInsecureTLS: allowInsecure || undefined,
+        // OAuth always verifies (core resolveTlsOptions), so it never asks.
+        allowInsecureTLS: (!isOAuth && allowInsecure) || undefined,
       };
       await connectSmtp(config); // verifies via nodemailer transporter.verify()
       markSmtpConfigured(true);
@@ -118,28 +121,25 @@ export function SmtpConfigForm({ onVerified, onBack, submitLabel = 'Verify & Con
         </div>
       </div>
 
-      <div>
-        <label className="block text-sm font-medium mb-1">Connection security</label>
-        <select
-          value={security}
-          onChange={(e) => onSecurityChange(e.target.value as 'ssl' | 'starttls' | 'none')}
-          className={inputCls}
-        >
-          <option value="ssl">SSL/TLS (implicit, port 465)</option>
-          <option value="starttls">STARTTLS (port 587)</option>
-          <option value="none">None (not recommended)</option>
-        </select>
-      </div>
+      <ConnectionSecuritySelect
+        server="smtp"
+        value={security}
+        onChange={(value, defaultPortFor) => { setSecurity(value); setPort(String(defaultPortFor)); }}
+        className={inputCls}
+      />
 
-      <label className="flex items-center gap-2 text-sm text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={allowInsecure}
-          onChange={(e) => setAllowInsecure(e.target.checked)}
-          className="w-4 h-4 rounded"
-        />
-        Allow self-signed / invalid certificates (only if you trust this server)
-      </label>
+      {/* Not offered for OAuth: the provider's certificate is always checked. */}
+      {!isOAuth && (
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={allowInsecure}
+            onChange={(e) => setAllowInsecure(e.target.checked)}
+            className="w-4 h-4 rounded"
+          />
+          Allow self-signed / invalid certificates (only if you trust this server)
+        </label>
+      )}
 
       {error && (
         <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-md text-sm text-destructive">

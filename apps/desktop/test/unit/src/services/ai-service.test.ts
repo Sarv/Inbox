@@ -23,8 +23,12 @@ const installEnv = () => {
   };
   // saveAISettings/removeProvider push keys to the vault via window.electronAPI;
   // stub it so removal doesn't reach for real IPC.
+  // A saved key's requests go through main (aiProxy) — the renderer never holds it.
   (globalThis as any).window = {
-    electronAPI: { aiSecrets: { set: vi.fn(), delete: vi.fn() } },
+    electronAPI: {
+      aiSecrets: { set: vi.fn(), delete: vi.fn() },
+      aiProxy: { fetch: vi.fn(), abort: vi.fn() },
+    },
   };
 };
 
@@ -36,9 +40,10 @@ afterEach(() => {
 });
 
 describe('Gemini HTTP failures carry their status', () => {
+  // The provider has a saved key, so the request is made by main.
   const failWith = (status: number) =>
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      { ok: false, status, text: async () => 'nope' } as unknown as Response,
+    (globalThis as any).window.electronAPI.aiProxy.fetch.mockResolvedValue(
+      { ok: true, status, statusText: '', contentType: 'text/plain', body: 'nope' },
     );
   const errorOf = async () => {
     try {
@@ -68,6 +73,19 @@ describe('Gemini HTTP failures carry their status', () => {
     addProvider('gemini', 'key-123', 'gemini-model');
     failWith(400);
     expect(classifyAIError(await errorOf()).kind).toBe('client');
+  });
+
+  // Breaks: the saved Gemini key is read back into the renderer, or sent in
+  // the URL's query string (where it lands in logs and error messages).
+  it('asks main to make the request by provider id, with no key in the URL or headers', async () => {
+    const provider = addProvider('gemini', 'key-123', 'gemini-model');
+    failWith(500);
+    await errorOf();
+    const request = (globalThis as any).window.electronAPI.aiProxy.fetch.mock.calls[0][0];
+    expect(request).toMatchObject({ providerId: provider.id, type: 'gemini', method: 'POST' });
+    expect(request.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-model:generateContent');
+    expect(JSON.stringify(request)).not.toContain('key-123');
+    expect(provider.apiKey).toBe('');
   });
 });
 

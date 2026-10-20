@@ -44,6 +44,9 @@ function buildDefines(mode: string): Record<string, string> {
     if (env[key]) defines[`process.env.${key}`] = JSON.stringify(env[key]);
   }
   defines['process.env.SARVINBOX_SENTRY_DSN'] = JSON.stringify(env.SARVINBOX_SENTRY_DSN ?? '');
+  // The build mode itself, so a release bundle knows it is one whatever its
+  // environment says (dev-mode.ts isReleaseBundle — CASA L-3).
+  defines['process.env.SARVINBOX_BUILD_MODE'] = JSON.stringify(mode);
   defines['process.env.SARVINBOX_APP_VERSION'] = JSON.stringify(APP_VERSION);
   return defines;
 }

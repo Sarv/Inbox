@@ -6,7 +6,7 @@ import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
 import { isOnboardingPending } from '../../services/onboarding-progress';
 import { forgetImageTrustAccount, setImageTrustAccount } from '../../utils/remote-images';
-import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, extractSecrets, fetchVaultSecrets, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
+import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, vaultEntryFor, vaultHasPassword, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
 import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
 
 // Concurrent connects to the SAME account join one run.
@@ -61,20 +61,13 @@ async function doConnect(
   get: () => EmailStore,
 ): Promise<void> {
   console.log('[Store] connect() called with:', { host: config.host, username: config.username });
-  // Rehydrate secrets from the encrypted vault when handed a stripped config
-  // (loaded from localStorage after migration). In-memory only — never re-saved
-  // to disk. If the caller already supplied a secret (login form), use it as-is.
+  // A saved account's config arrives stripped of its password. The renderer
+  // never reads it back: main injects the vaulted password itself (only for the
+  // host it was saved for), keyed by the account id passed here. A password the
+  // user just typed (login / edit form) is sent as-is and re-vaulted below.
   let connectConfig = config;
-  const hasSecret = !!(config.password || config.accessToken || config.refreshToken);
-  if (!hasSecret) {
-    // Try the registry id AND the host-derived id — a legacy account's secret
-    // may be vaulted under either (its id can predate host-keying).
-    const secrets = await fetchVaultSecrets([acctId, accountIdFor(config.username, config.host)]);
-    if (secrets?.imap) connectConfig = { ...config, ...secrets.imap };
-  }
+  const activeAtStart = get().activeAccountId;
   try {
-    // Pass the account id so main can inject the vault password itself if the
-    // renderer-side rehydration missed it (belt-and-suspenders — main owns the vault).
     const result = await window.electronAPI.imap.connect(connectConfig, acctId);
     console.log('[Store] IPC connect result:', result);
 
@@ -103,6 +96,7 @@ async function doConnect(
         connectionStatus: 'connected',
         showConnectedMessage: true,
         needsReauth: false,
+        connectionSecurityIssue: null,
       });
 
       // Hide connected message after 5 seconds
@@ -113,7 +107,7 @@ async function doConnect(
       // Persist the secret to the encrypted vault (keyed by account id), then
       // save the NON-secret config to localStorage (saveCredentials strips).
       try {
-        await window.electronAPI.secureCreds.set(acctId, { imap: extractSecrets(connectConfig) });
+        await window.electronAPI.secureCreds.set(acctId, { imap: vaultEntryFor(connectConfig) });
       } catch (e) {
         console.warn('[Store] Failed to store IMAP secret in vault:', (e as Error)?.message);
       }
@@ -199,7 +193,18 @@ async function doConnect(
         console.warn('[Store] background syncEmails failed:', (e as Error)?.message),
       );
     } else {
-      throw new Error(result.error || 'Failed to connect');
+      // The server would not encrypt a STARTTLS account (CASA M-5): keep the
+      // message for the banner, and tag the error so callers can tell it from
+      // a blip or a rejected password.
+      // Not connected, said plainly: the banner keys off `connected`, which an
+      // account switch leaves describing the account switched away from.
+      // Only while the account it was for is still the active one: a late
+      // refusal from an account the user already switched away from must not
+      // mark the account now shown as disconnected.
+      if (result.code === 'STARTTLS_UNAVAILABLE' && get().activeAccountId === activeAtStart) {
+        set({ connectionSecurityIssue: result.error ?? null, connected: false, connectionStatus: 'disconnected' });
+      }
+      throw Object.assign(new Error(result.error || 'Failed to connect'), { code: result.code });
     }
   } catch (error) {
     // Transient startup/connection failures self-heal via the main-process
@@ -218,6 +223,12 @@ async function doConnect(
  * second account left them on the first, so the new account's mail was judged
  * against the old account's lists and "Load images" / "Trust this sender" were
  * written into the old account's database.
+ *
+ * The STARTTLS refusals (CASA M-5) follow it the same way: they describe the
+ * account they happened on, so a change of account drops them unless the same
+ * write sets them (a rollback restoring the previous account's). Kept, they
+ * made the banner blame one account's server while another was active — after
+ * an add, or with no account left at all.
  */
 export function followActiveAccount(
   set: Parameters<SliceCreator<ConnectionSlice>>[0],
@@ -227,7 +238,13 @@ export function followActiveAccount(
     const before = get()?.activeAccountId ?? null;
     (set as (p: typeof partial, r?: boolean) => void)(partial, replace);
     const after = get()?.activeAccountId ?? null;
-    if (after !== before) setImageTrustAccount(after);
+    if (after === before) return;
+    setImageTrustAccount(after);
+    const written = partial && typeof partial === 'object' ? partial : {};
+    const stale: Partial<EmailStore> = {};
+    if (!('connectionSecurityIssue' in written)) stale.connectionSecurityIssue = null;
+    if (!('smtpSecurityIssue' in written)) stale.smtpSecurityIssue = null;
+    if (Object.keys(stale).length > 0) (set as (p: Partial<EmailStore>) => void)(stale);
   }) as Parameters<SliceCreator<ConnectionSlice>>[0];
 }
 
@@ -258,6 +275,8 @@ const connectionSlice = (
   // set this, so they show the cached inbox + background reconnect instead
   // of a blocking sign-in dialog.
   needsReauth: false,
+  connectionSecurityIssue: null,
+  smtpSecurityIssue: null,
   showConnectedMessage: false,
   quota: initialActiveAccount ? (initialQuotaCache[initialActiveAccount.id] ?? null) : null,
   quotaByAccount: initialQuotaCache,
@@ -304,7 +323,7 @@ const connectionSlice = (
       console.log('[Store] checkConnection result:', result);
       if (result.success && result.data) {
         console.log('[Store] Main process reports connected, updating state');
-        set({ connected: true, checkingConnection: false, connectionStatus: 'connected', needsReauth: false });
+        set({ connected: true, checkingConnection: false, connectionStatus: 'connected', needsReauth: false, connectionSecurityIssue: null });
 
         // Set up sync progress listener if connected (remove old first to prevent accumulation)
         window.electronAPI.imap.removeSyncProgressListener();
@@ -372,19 +391,10 @@ const connectionSlice = (
     set({ connectionStatus: 'reconnecting' });
 
     try {
-      // Rehydrate the secret from the vault if the in-memory config is stripped
-      // (e.g. a manual reconnect on a cold start that never ran connect()).
-      let cfg = imapConfig;
-      if (!(imapConfig.password || (imapConfig as any).accessToken || (imapConfig as any).refreshToken)) {
-        const secrets = await fetchVaultSecrets([
-          findAccountByEmailHost(get().accounts, imapConfig.username, imapConfig.host)?.id,
-          accountIdFor(imapConfig.username, imapConfig.host),
-        ]);
-        if (secrets?.imap) cfg = { ...imapConfig, ...secrets.imap };
-      }
+      // Main injects the vaulted password for this account (see doConnect).
       const reconnectAcctId = findAccountByEmailHost(get().accounts, imapConfig.username, imapConfig.host)?.id
         ?? accountIdFor(imapConfig.username, imapConfig.host);
-      const result = await window.electronAPI.imap.connect(cfg, reconnectAcctId);
+      const result = await window.electronAPI.imap.connect(imapConfig, reconnectAcctId);
       if (result.success) {
         console.log('[Store] Reconnection successful');
         set({
@@ -392,6 +402,7 @@ const connectionSlice = (
           connectionStatus: 'connected',
           showConnectedMessage: true,
           needsReauth: false,
+          connectionSecurityIssue: null,
         });
 
         // Set up sync progress listener (remove old first to prevent accumulation)
@@ -411,6 +422,7 @@ const connectionSlice = (
         // Restart IDLE
         await get().startIdle('INBOX');
       } else {
+        if (result.code === 'STARTTLS_UNAVAILABLE') set({ connectionSecurityIssue: result.error ?? null, connected: false });
         throw new Error(result.error || 'Reconnection failed');
       }
     } catch (error) {
@@ -438,6 +450,7 @@ const connectionSlice = (
       connected: true,
       connectionStatus: 'connected',
       needsReauth: false,
+      connectionSecurityIssue: null,
       showConnectedMessage: true,
       // A fresh socket gets a clean sync-health slate: drop the failure streak and
       // any "Sync issue" surface. If sync keeps failing on the new connection it
@@ -472,35 +485,32 @@ const connectionSlice = (
 
   connectSmtp: async (explicit?: SMTPConfig) => {
     const { imapConfig, smtpConfig, activeAccountId } = get();
+    // The refusal flag is the active account's: only write it while the
+    // account this attempt was for is still active.
+    const stillActive = () => get().activeAccountId === activeAccountId;
     // Prefer an explicitly supplied config (from the SMTP setup form), then the
     // saved SMTP config, then a best-effort derivation from IMAP.
-    let config: SMTPConfig | null =
+    const config: SMTPConfig | null =
       explicit ?? smtpConfig ?? (imapConfig ? deriveSmtpFromImap(imapConfig) : null);
     if (!config) throw new Error('No IMAP or SMTP config available');
 
     // SMTP secrets are stored in the vault under the OWNING account's id.
     const acctId = activeAccountId
       ?? (imapConfig ? accountIdFor(imapConfig.username, imapConfig.host) : null);
-    // Rehydrate the SMTP secret from the vault when the config is stripped and
-    // the caller didn't supply one (e.g. reconnecting a saved account).
-    if (acctId && !(config.password || (config as any).accessToken || (config as any).refreshToken)) {
-      const secrets = await fetchVaultSecrets([
-        acctId,
-        imapConfig ? accountIdFor(imapConfig.username, imapConfig.host) : null,
-      ]);
-      if (secrets?.smtp) config = { ...config, ...secrets.smtp };
-    }
 
     // Nothing to authenticate with. nodemailer turns this into
     // `Missing credentials for "LOGIN"` plus a full stack trace — and because
     // SmtpConnector re-runs on every IMAP connect, that fired on every startup.
     // Fail fast and quietly instead: sending genuinely isn't set up, so the
     // "Set up sending" affordance is the real fix, not a doomed connection.
+    // A saved account's config is stripped; main injects the vaulted password
+    // (for this host only), so here we only need to know one exists.
     const hasSmtpCredential = !!(
       config.password
       || (config as any).accessToken
       || (config as any).refreshToken
       || config.authMethod === 'oauth2'
+      || (await vaultHasPassword([acctId, imapConfig ? accountIdFor(imapConfig.username, imapConfig.host) : null], 'smtp'))
     );
     if (!hasSmtpCredential) {
       throw new Error(`No sending credentials stored for ${config.host} — set up sending for this account.`);
@@ -508,15 +518,16 @@ const connectionSlice = (
 
     try {
       console.log('[Store] Connecting to SMTP server:', config.host);
-      const result = await window.electronAPI.smtp.connect(config);
+      const result = await window.electronAPI.smtp.connect(config, acctId ?? undefined);
 
       if (result.success) {
         // Store the SMTP secret in the encrypted vault; state/disk keep metadata only.
         if (acctId) {
-          try { await window.electronAPI.secureCreds.set(acctId, { smtp: extractSecrets(config as any) }); }
+          try { await window.electronAPI.secureCreds.set(acctId, { smtp: vaultEntryFor(config as any) }); }
           catch (e) { console.warn('[Store] Failed to store SMTP secret in vault:', (e as Error)?.message); }
         }
         set({ smtpConnected: true, smtpConfig: config });
+        if (stillActive()) set({ smtpSecurityIssue: null });
         saveSmtpCredentials(config);
         // Persist the SMTP config onto the ACTIVE account in the registry, so
         // switching away and back (or reconnecting) restores it from the DB
@@ -528,6 +539,10 @@ const connectionSlice = (
         if (acct) set({ accounts: upsertAccount(accounts, { ...acct, smtpConfig: config }) });
         console.log('[Store] SMTP connected');
       } else {
+        // The sending server would not encrypt (CASA M-5). Every caller but the
+        // settings form swallows this error (startup, lazy send), so without
+        // the flag mail just waits in the Outbox with no reason shown.
+        if (result.code === 'STARTTLS_UNAVAILABLE' && stillActive()) set({ smtpSecurityIssue: result.error ?? null });
         throw new Error(result.error || 'Failed to connect to SMTP server');
       }
     } catch (error) {
@@ -568,7 +583,7 @@ const connectionSlice = (
     // switches and restarts (the persisted registry is the source of truth).
     const { accounts, activeAccountId } = get();
     const acct = activeAccountId ? accounts.find((a) => a.id === activeAccountId) : null;
-    const patch: any = { smtpConnected: false, smtpConfigured: false, smtpConfig: null };
+    const patch: any = { smtpConnected: false, smtpConfigured: false, smtpConfig: null, smtpSecurityIssue: null };
     if (acct) patch.accounts = upsertAccount(accounts, { ...acct, smtpConfigured: false, smtpConfig: null });
     set(patch);
     console.log('[Store] SMTP removed for active account');
@@ -706,6 +721,9 @@ const connectionSlice = (
       smtpConfigured: get().smtpConfigured,
       smtpConnected: get().smtpConnected,
       connected: get().connected,
+      connectionStatus: get().connectionStatus,
+      connectionSecurityIssue: get().connectionSecurityIssue,
+      smtpSecurityIssue: get().smtpSecurityIssue,
       folders: get().folders,
       emails: get().emails,
       selectedFolderId: get().selectedFolderId,

@@ -1,12 +1,19 @@
 // SMTP client interface for Sarv Inbox
 
+import type { ConnectionSecurity } from '../utils/connection-security';
+
 /**
  * SMTP configuration
  */
 export interface SMTPConfig {
   host: string;
   port: number;
-  secure: boolean; // true for 465, false for other ports (STARTTLS)
+  secure: boolean; // legacy: true for 465, false for other ports (STARTTLS); `security` wins when set
+  /** Connection security (resolveConnectionSecurity, CASA M-5): 'ssl' =
+   *  implicit TLS (465); 'starttls' = upgrade REQUIRED (587) — the session
+   *  stops before AUTH if the server will not encrypt; 'none' = the user's
+   *  explicit opt-out (upgrades only if offered). Absent: from `secure`. */
+  security?: ConnectionSecurity;
   username: string;
   password: string; // ignored when authMethod === 'oauth2'
   authMethod?: 'password' | 'oauth2';
@@ -15,14 +22,15 @@ export interface SMTPConfig {
   /** Bearer access token — required when authMethod === 'oauth2'. */
   accessToken?: string;
   from?: string; // Default "from" address
-  tlsOptions?: {
-    rejectUnauthorized?: boolean;
-  };
   /**
    * Opt-in escape hatch for servers with self-signed / untrusted certs.
    * Default (undefined/false) keeps TLS verification ON — disabling it exposes
    * credentials and mail to man-in-the-middle attacks, so it must be an explicit
-   * per-account choice, never the default.
+   * per-account choice, never the default. It relaxes CERTIFICATE checks only;
+   * it never makes encryption optional (that is `security: 'none'`).
+   * Ignored for OAuth (resolveTlsOptions). For a saved password the main
+   * process injects, it is the choice saved WITH that password, not the
+   * config's (vault-credentials.ts).
    */
   allowInsecureTLS?: boolean;
 }

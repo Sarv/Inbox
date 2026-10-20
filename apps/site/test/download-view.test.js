@@ -4,7 +4,7 @@ import { LATEST_RELEASE_URL, VIEW, buildDownloadView, toLink } from '../src/down
 import { ARCH, OS } from '../src/platform.js';
 import { classifyAsset } from '../src/release-assets.js';
 
-import { releaseV122 } from './fixtures.js';
+import { releaseV122, releaseV134Mac } from './fixtures.js';
 
 const view = (os, arch = ARCH.UNKNOWN, release = releaseV122()) =>
   buildDownloadView({ platform: { os, arch }, release });
@@ -25,6 +25,26 @@ describe('buildDownloadView', () => {
     });
     expect(built.alternatives.map((link) => link.label)).toEqual(['Zip archive (.zip)']);
     expect(sectionNames(built)).toEqual(['Windows', 'Linux']);
+  });
+
+  // Breaks if Mac visitors can no longer tell the Apple Silicon and Intel builds
+  // apart in the list under the main button.
+  it('macOS with per-arch zips: dmg primary, chips named Apple Silicon / Intel below', () => {
+    const built = view(OS.MAC, ARCH.ARM64, releaseV134Mac());
+    expect(built.primary).toMatchObject({
+      name: 'sarv-inbox-1.3.4-mac-arm64-amd64.dmg',
+      detail: 'Apple Silicon and Intel',
+    });
+    expect(built.alternatives.map(({ label, detail }) => `${label} · ${detail}`)).toEqual([
+      'Zip archive (.zip) · Apple Silicon',
+      'Zip archive (.zip) · Intel',
+    ]);
+  });
+
+  // Breaks if the Mac chip wording leaks into Windows/Linux, where x64/ARM64 is the norm.
+  it('keeps x64 / ARM64 wording off the Mac', () => {
+    expect(toLink(classifyAsset({ name: 'sarv-inbox-1.2.2-arm64.deb' })).detail).toBe('ARM64');
+    expect(toLink(classifyAsset({ name: 'sarv-inbox-1.2.2-amd64.deb' })).detail).toBe('x64');
   });
 
   // Breaks if the version/date/notes line stops tracking the release it was given.

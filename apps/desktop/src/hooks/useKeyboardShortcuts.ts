@@ -1,3 +1,5 @@
+import type { EmailRecord } from '@sarvinbox/core';
+import { conversationFoldersOf, latestConversationMember } from '@sarvinbox/core/conversation-membership';
 import { useEffect, useRef } from 'react';
 
 import type { AppSection } from '../components/AppSidebar';
@@ -9,6 +11,7 @@ import {
   type GotoTarget,
 } from '../config/keyboard-shortcuts';
 import { useEmailStore } from '../store/email-store';
+import { conversationStarToggle } from '../utils/thread-utils';
 
 interface UseKeyboardShortcutsOptions {
   setActiveSection: (section: AppSection) => void;
@@ -70,7 +73,7 @@ function getSelectedEmail() {
 // behaviour) — matching the detail toolbar and the list's row/bulk actions.
 // Detail view open → the open thread (threadEmails); list view → the highlighted
 // thread resolved from the navigation set. Falls back to the lone active id.
-function getActiveThreadEmailIds(): string[] {
+function getActiveThreadEmails(): EmailRecord[] {
   const state = useEmailStore.getState();
   const activeId = state.selectedEmailId || state.highlightedEmailId;
   if (!activeId) return [];
@@ -79,13 +82,32 @@ function getActiveThreadEmailIds(): string[] {
     state.threadEmails.length > 0 &&
     state.threadEmails.some(e => e.id === activeId)
   ) {
-    return state.threadEmails.map(e => e.id);
+    return state.threadEmails;
   }
   const threads = state.getNavigationThreads();
   const thread = threads.find(
     t => t.threadId === activeId || t.emails.some((e: any) => e.id === activeId),
   );
-  return thread ? thread.emails.map((e: any) => e.id) : [activeId];
+  if (thread) return thread.emails;
+  const email = getSelectedEmail();
+  return email ? [email] : [];
+}
+
+function getActiveThreadEmailIds(): string[] {
+  const rows = getActiveThreadEmails();
+  if (rows.length > 0) return rows.map(e => e.id);
+  const activeId = getActiveEmailId();
+  return activeId ? [activeId] : [];
+}
+
+// The message a popup Reply all / Forward answers: the NEWEST in the active
+// conversation, as the toolbar and the inline shortcuts do. The active id is
+// whichever row opened the thread — often its first unread — so answering it
+// quoted an older message than the one on top.
+function getActiveConversationLatest() {
+  const rows = getActiveThreadEmails();
+  const folders = conversationFoldersOf(useEmailStore.getState().folders);
+  return latestConversationMember(rows, folders) ?? getSelectedEmail();
 }
 
 function buildComposePayload(email: ReturnType<typeof getSelectedEmail>) {
@@ -433,12 +455,12 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
         }
 
         case 'STAR_TOGGLE': {
-          // Direction from the representative message; apply across the thread.
-          const email = getSelectedEmail();
-          if (!email) break;
-          const isStarred = (email.tags || '').includes('|starred|');
-          const ids = getActiveThreadEmailIds();
-          store.bulkMarkStarred(ids, !isStarred);
+          // Same rule as the list row's star: direction from the whole thread,
+          // star the latest message, unstar every copy.
+          const rows = getActiveThreadEmails();
+          if (rows.length === 0) break;
+          const { starring, ids } = conversationStarToggle(rows, conversationFoldersOf(store.folders));
+          store.bulkMarkStarred(ids, starring);
           break;
         }
 
@@ -484,7 +506,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
         }
 
         case 'REPLY_ALL_POPUP': {
-          const email = getSelectedEmail();
+          const email = getActiveConversationLatest();
           if (email) {
             store.openCompose('replyAll', buildComposePayload(email));
           }
@@ -505,7 +527,7 @@ export function useKeyboardShortcuts({ setActiveSection, focusSearch, enabled = 
         }
 
         case 'FORWARD_POPUP': {
-          const email = getSelectedEmail();
+          const email = getActiveConversationLatest();
           if (email) {
             store.openCompose('forward', buildComposePayload(email));
           }

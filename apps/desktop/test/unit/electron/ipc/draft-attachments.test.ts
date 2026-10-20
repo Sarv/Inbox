@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, sep } from 'path';
 
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -29,6 +29,9 @@ vi.mock('../../../../electron/shared', () => ({
 }));
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
 vi.mock('../../../../electron/services/account-target', () => ({ resolveAccountTarget: vi.fn() }));
+// The attachment cache seals with a key derived from the DB key (CASA M-7);
+// the real store would reach for the OS keychain.
+vi.mock('../../../../electron/services/db-key-store', () => ({ getDbEncryptionKey: vi.fn(() => 'k'.repeat(64)) }));
 
 // eslint-disable-next-line import/order -- see local-mirror-content-hash.test.ts
 import { newMigratedDb } from '../../../../../../packages/storage-node/src/test-support/test-db';
@@ -39,7 +42,13 @@ import {
 } from '../../../../electron/ipc/draft-attachments';
 import { registerDraftHandlers, saveDraftToIMAP, writeLocalDraftRow } from '../../../../electron/ipc/draft-handlers';
 import { resolveAccountTarget } from '../../../../electron/services/account-target';
-import { attachmentCacheDir } from '../../../../electron/services/attachment-cache';
+import {
+  accountAttachmentDir,
+  getOrCacheAttachment,
+  readCachedAttachment,
+  resetAttachmentStoreKeys,
+} from '../../../../electron/services/attachment-cache';
+import { getDbEncryptionKey } from '../../../../electron/services/db-key-store';
 
 const TMP = mkdtempSync(join(tmpdir(), 'draft-attachments-'));
 afterAll(() => rmSync(TMP, { recursive: true, force: true }));
@@ -68,7 +77,19 @@ const attachmentColumnsOf = (db: any, messageId: string) =>
 beforeEach(() => {
   h.userData = mkdtempSync(join(TMP, 'ud-'));
   vi.clearAllMocks();
+  // The store memoizes its derived keys; a test that makes the key store fail
+  // must not be masked by keys an earlier test derived.
+  resetAttachmentStoreKeys();
 });
+
+/**
+ * What the reopen path gets for a draft row's file: the row has no UID yet, so
+ * only the copy the save seeded can answer (a miss is a 404).
+ */
+async function reopenedFile(accountId: string, rowId: string, filename: string): Promise<{ path: string; content: Buffer }> {
+  const path = await getOrCacheAttachment(accountId, rowId, DRAFTS, 0, filename, null);
+  return { path, content: await readCachedAttachment(path) };
+}
 
 describe('decodeDraftAttachments', () => {
   // Breaks: the file's bytes are stored as their base64 text, so the reopened
@@ -158,30 +179,79 @@ describe('saveDraftToIMAP with attachments', () => {
 
   // Breaks: OFFLINE. The row has no UID, so nothing can be fetched from the
   // server — the cache is the only copy of the file the reopen can reach.
+  // Changed deliberately (CASA M-7): the cache is sealed and per account, so the
+  // seed is checked through the reopen path (the owning account + the row id)
+  // instead of as a plaintext file under the row id; and it must be sealed at rest.
   it('seeds the files into the cache under the local row id', async () => {
     const db = draftsDb();
     vi.mocked(resolveAccountTarget).mockResolvedValue({
-      storage: storageOver(db), syncEngine: { isConnected: () => false },
+      storage: storageOver(db), syncEngine: { isConnected: () => false }, accountId: 'acct-1',
     } as any);
 
     const res = await saveDraftToIMAP({ to: 'a@x.com', htmlBody: '<p>x</p>', accountEmail: 'me@x.com', attachments: [invoice] });
 
     const { id } = attachmentColumnsOf(db, res.messageId!);
-    expect(readFileSync(join(attachmentCacheDir(id), 'invoice.pdf')).equals(PDF)).toBe(true);
+    const reopened = await reopenedFile('acct-1', id, 'invoice.pdf');
+    expect(reopened.content.equals(PDF)).toBe(true);
+    expect(reopened.path.startsWith(accountAttachmentDir('acct-1') + sep)).toBe(true);
+    expect(readFileSync(reopened.path).includes(PDF)).toBe(false);
+  });
+
+  // Breaks: a draft saved from a NON-active account (unified view, or a reply
+  // from another mailbox) seeds its files under the active account, so its own
+  // reopen misses them and the other account can open them; or removing that
+  // account leaves them behind.
+  it("seeds a non-active account's draft into that account's store only", async () => {
+    const db = draftsDb();
+    vi.mocked(resolveAccountTarget).mockResolvedValue({
+      storage: storageOver(db), syncEngine: { isConnected: () => false }, accountId: 'acct-2',
+    } as any);
+
+    const res = await saveDraftToIMAP({
+      accountId: 'acct-2', to: 'a@x.com', htmlBody: '<p>x</p>', accountEmail: 'me2@x.com', attachments: [invoice],
+    });
+
+    expect(resolveAccountTarget).toHaveBeenCalledWith('acct-2');
+    const { id } = attachmentColumnsOf(db, res.messageId!);
+    expect((await reopenedFile('acct-2', id, 'invoice.pdf')).content.equals(PDF)).toBe(true);
+    await expect(reopenedFile('acct-1', id, 'invoice.pdf')).rejects.toMatchObject({ status: 404 });
+    expect(existsSync(accountAttachmentDir('acct-1'))).toBe(false);
+  });
+
+  // Breaks: a cache that cannot be written (key store locked) fails the whole
+  // save, losing the draft text along with the files it could not cache.
+  it('still saves the draft when its files cannot be cached', async () => {
+    const db = draftsDb();
+    vi.mocked(resolveAccountTarget).mockResolvedValue({
+      storage: storageOver(db), syncEngine: { isConnected: () => false }, accountId: 'acct-1',
+    } as any);
+    vi.mocked(getDbEncryptionKey).mockImplementationOnce(() => {
+      throw new Error('DB key is encrypted but safeStorage is unavailable');
+    });
+
+    const res = await saveDraftToIMAP({ to: 'a@x.com', htmlBody: '<p>x</p>', accountEmail: 'me@x.com', attachments: [invoice] });
+
+    expect(res.success).toBe(true);
+    expect(attachmentColumnsOf(db, res.messageId!)).toMatchObject({ hasAttachments: 1, attachmentNames: '["invoice.pdf"]' });
+    // Nothing half-written: no entry the reopen would trust.
+    await expect(reopenedFile('acct-1', attachmentColumnsOf(db, res.messageId!).id, 'invoice.pdf'))
+      .rejects.toMatchObject({ status: 404 });
   });
 
   // Breaks: a plain draft creates an empty cache dir per autosave, piling up.
+  // Changed deliberately (CASA M-7): the per-email folder name is a keyed hash
+  // now, so "no folder" is checked at the owning account's folder.
   it('writes nothing to the cache for a draft without files', async () => {
     const db = draftsDb();
     vi.mocked(resolveAccountTarget).mockResolvedValue({
-      storage: storageOver(db), syncEngine: { isConnected: () => false },
+      storage: storageOver(db), syncEngine: { isConnected: () => false }, accountId: 'acct-1',
     } as any);
 
     const res = await saveDraftToIMAP({ to: 'a@x.com', htmlBody: '<p>x</p>', accountEmail: 'me@x.com' });
 
-    const { id, hasAttachments } = attachmentColumnsOf(db, res.messageId!);
+    const { hasAttachments } = attachmentColumnsOf(db, res.messageId!);
     expect(hasAttachments).toBe(0);
-    expect(existsSync(attachmentCacheDir(id))).toBe(false);
+    expect(existsSync(accountAttachmentDir('acct-1'))).toBe(false);
   });
 });
 

@@ -9,6 +9,7 @@ import { readRegistryAccounts } from './accounts-registry';
 import { initializeAntivirusScanService, type ScanSource, type ScannerConfiguration } from './antivirus-scan-service';
 import { unscannedWarningPreferences } from './attachment-warning-preferences';
 import { getBlob, getCoreDb, setBlob, deleteBlob } from './core-db';
+import { isOsBackedEncryption } from './os-encryption';
 
 const key = (id: string) => {
   if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(id)) throw new Error('Invalid scanner extension.');
@@ -16,8 +17,7 @@ const key = (id: string) => {
 };
 
 export function requireScannerSecureStorage(): void {
-  if (!safeStorage.isEncryptionAvailable() ||
-    (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text')) {
+  if (!isOsBackedEncryption()) {
     throw new Error('An operating system secure key store is required for scanner credentials.');
   }
 }

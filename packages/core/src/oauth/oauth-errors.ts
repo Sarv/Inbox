@@ -50,6 +50,7 @@ const OAUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'TOKEN_REVOKE_ABORTED',
   'TOKEN_REVOKE_NETWORK_ERROR',
   'TOKEN_REVOKE_TIMEOUT',
+  'TOKEN_DESTINATION_REFUSED',
   'USERINFO_FAILED',
   'USERINFO_NO_EMAIL',
 ]);
@@ -90,6 +91,10 @@ export function isTerminalOAuthError(err: unknown): boolean {
     // that exists to stop a retry storm would itself read as transient and
     // feed one.
     if (code === 'REAUTH_REQUIRED') return true;
+    // The bearer was refused for the HOST it was about to be sent to (see
+    // token-destinations.ts). Retrying the same config can never change that,
+    // so the reconnect ladder must stop rather than redial it forever.
+    if (code === 'TOKEN_DESTINATION_REFUSED') return true;
     if (code === 'TOKEN_REFRESH_NETWORK_ERROR') return false;
     // A refresh we cut short (deadline, suspend) or never started (asleep) says
     // NOTHING about the credentials. Treating these as terminal would sign the

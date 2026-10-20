@@ -68,8 +68,11 @@ the UI optimistically and revert on failure.
 - **Pipeline & Agent** (`src/pipeline/`, `src/agent/`) — the AI layer:
   categorization, behavior-based prioritization, conversation extraction, reply
   drafting. Provider-agnostic (any OpenAI-compatible LLM/embeddings endpoint).
-- **Extensions** (`src/extensions/`) — a permission-checked, sandboxed API
-  surface for extending pipeline behavior.
+- **Extensions** (`src/extensions/`) — a permission-checked API surface for
+  extending pipeline behavior. Extensions run in a separate process
+  (`extension-sandbox.worker`) as full Node code with the user's access to the
+  computer; the permissions gate only the `context` APIs they call, not what
+  their code can do. See [EXTENSIONS.md](EXTENSIONS.md#trust-model).
 - **Utils** (`src/utils/`) — shared, framework-agnostic helpers (ids, logger,
   validators, tags, `withTimeout`, TLS options, error classifiers). This is the
   home for logic reused across core and the Electron main process.

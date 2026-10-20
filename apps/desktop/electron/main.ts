@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from 'fs';
 import netModule from 'net';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 
 import { SyncEngine, ExtensionManager, createLogger, getEventBus, getLogLevel, setLogLevel, isConnectionError, raiseAutoSelectFamilyAttemptTimeout } from '@sarvinbox/core';
 import { SQLiteStorage } from '@sarvinbox/storage-node';
@@ -45,6 +46,8 @@ import {
 import { loadAgentConfig } from './services/agent-config-store';
 import { getAllAiSecrets } from './services/ai-secret-store';
 import { createAntivirusDesktopBackend } from './services/antivirus-desktop-backend';
+import { cleanupOrphanedAttachmentStores } from './services/attachment-cache';
+import { migrateLegacyAttachmentCache } from './services/attachment-cache-legacy';
 import { attachmentScanRequired } from './services/attachment-download-protection';
 import { getAttachmentPreviewProtection } from './services/attachment-preview-protection';
 import {
@@ -81,6 +84,7 @@ import { installNativeAttachmentDownloadGuard } from './services/native-attachme
 import { startNotificationService, stopNotificationService } from './services/notification-service';
 import { startOAuthRefreshScheduler, stopOAuthRefreshScheduler } from './services/oauth-refresh-scheduler';
 import { initializeOAuth, abortInFlightTokenRefreshes } from './services/oauth-service';
+import { isOsBackedEncryption, secretStorageDescription } from './services/os-encryption';
 import { initOutbox, stopOutbox, rebindOutboxStorage } from './services/outbox-service';
 import { attachAutocrypt } from './services/pgp-service';
 import { loadPipelineAIConfigSync } from './services/pipeline-ai-config-store';
@@ -114,6 +118,7 @@ import { startSpamVerdictRepair, stopSpamVerdictRepair } from './services/spam-v
 import { startStartupThreadRepair, stopStartupThreadRepair } from './services/startup-thread-repair';
 import { initializeUnifiedPipeline, stopUnifiedPipeline } from './services/unified-pipeline-service';
 import { checkForUpdates, startUpdateService, stopUpdateService } from './services/update-service';
+import { captureRegistryForLegacyBinding } from './services/vault-credentials';
 import {
   setMainWindow,
   getMainWindow,
@@ -136,10 +141,14 @@ import {
   hasAccountRuntime,
 } from './shared';
 import { resolveAppIconPath } from './utils/app-icon';
-import { isDevBuild } from './utils/dev-mode';
+import { devServerUrlFor, isDevBuild, isReleaseBundle } from './utils/dev-mode';
 import { initFileLogger, flushFileLogger, muteTerminalOutput, appendExternalLog } from './utils/file-logger';
+import { installIpcSenderGuard } from './utils/ipc-sender-guard';
 import { loadDotEnv, defaultDotEnvPaths } from './utils/load-env';
-import { classifyNavigation, type NavigationScope } from './utils/navigation-policy';
+import { mainWindowWebPreferences } from './utils/main-window-preferences';
+import { installNavigationGuards } from './utils/navigation-guards';
+import { installPermissionPolicy } from './utils/permission-policy';
+import { restoreAndFocusWindow } from './utils/window-focus';
 
 // App identity MUST be set before ANYTHING reads app.getPath('userData') —
 // initSentryMain(), the file logger, and the DB key store all derive their paths
@@ -186,15 +195,30 @@ app.setAppUserModelId(isDev ? 'com.sarv.sarvinbox.dev' : 'com.sarv.sarvinbox');
 
 // Load local .env (gitignored) into process.env before anything reads it, so
 // OAuth secrets / dev overrides are available without exporting them by hand.
-loadDotEnv(defaultDotEnvPaths());
+// Dev bundles only: a release bundle has its client IDs inlined at build time,
+// and a `.env` it found in the launch directory (on Linux often $HOME) could
+// only be someone else's — re-pointing the Sarv sign-in server, say (CASA L-3).
+if (!isReleaseBundle()) loadDotEnv(defaultDotEnvPaths());
 
 // Release builds default to INFO — the logger's built-in default is 'debug' (so
 // the IMAP command + pool trace is visible in dev without any config), but that
 // floods a shipped app's app.log (tens of thousands of "Pool: acquired…" lines).
-// Dev stays at debug; an explicit SARV_LOG_LEVEL (env or .env) always wins.
+// Dev stays at debug; an explicit SARV_LOG_LEVEL (env, or .env in dev) always wins.
 if (!isDev && !process.env['SARV_LOG_LEVEL']) {
   setLogLevel('info');
 }
+
+// Every IPC listener — the Sentry SDK's (registered during its init below),
+// log:forward, and everything registerAllHandlers adds — only ever sees the
+// app's own window: its top frame, on the app URL. Installed before anything
+// registers; refuses everyone until the app URL is set below (CASA L-1).
+let ipcAppUrl: string | null = null;
+const ipcGuardLog = createLogger('ipc-guard');
+installIpcSenderGuard(ipcMain, {
+  mainWindow: getMainWindow,
+  appUrl: () => ipcAppUrl,
+  onRefused: (channel, url) => ipcGuardLog.warn(`refused IPC "${channel}" from ${url}: not the app window`),
+});
 
 // Initialize crash/error reporting as early as possible, before any app work.
 initSentryMain();
@@ -305,7 +329,7 @@ const viewMenu = buildViewMenu((clickedWindow, command) => {
     BrowserWindow.getFocusedWindow() ??
     BrowserWindow.getAllWindows()[0];
   target?.webContents.send('appearance:zoom-command', command);
-});
+}, { devTools: isDev });
 
 const checkForUpdatesItem: Electron.MenuItemConstructorOptions = {
   // The ellipsis is the platform convention for "this opens something".
@@ -386,18 +410,29 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('log-level', '3');
 
 // App paths
-const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'] || (isDev ? 'http://localhost:5173' : null);
+const VITE_DEV_SERVER_URL = devServerUrlFor({ envUrl: process.env['VITE_DEV_SERVER_URL'], releaseBundle: isReleaseBundle(), isDev });
+// The bundled renderer entry, and the one URL the window counts as the app:
+// the dev server in development, this exact file in production (CASA M-6 —
+// see navigation-policy.ts). Built once, so the window, its navigation guards
+// and the two protocol handlers all agree on it.
+const APP_ENTRY_FILE = join(__dirname, '../dist/index.html');
+const APP_URL = VITE_DEV_SERVER_URL ?? pathToFileURL(APP_ENTRY_FILE).href;
+ipcAppUrl = APP_URL;
 
-// Tee the main-process console to a rolling app.log (dev AND release).
-initFileLogger();
+// Tee the main-process console to a rolling app.log (dev AND release). A
+// release's log redacts email addresses (CASA L-7); dev keeps them for
+// debugging. `isDev`, never `app.isPackaged` — see isDevBuild.
+initFileLogger({ redactAddresses: !isDev });
 // Renderer logs → the SAME app.log (redacted in appendExternalLog), so a bug
 // report's log file carries the renderer's trail too — not just DevTools. The
 // renderer forwards fire-and-forget (ipcRenderer.send), and its own level gate
 // (set in bootstrap/renderer-logging.ts) decides what's forwarded, so trace/debug
 // stay off in release. Registered right after the sink exists so nothing is lost.
-ipcMain.on('log:forward', (_e, rec: { level?: string; name?: string; text?: string } | undefined) => {
+// The record is untrusted: appendExternalLog keeps it to one capped line with a
+// known level, whatever the renderer sent.
+ipcMain.on('log:forward', (_e, rec: { level?: unknown; name?: unknown; text?: unknown } | undefined) => {
   if (rec && typeof rec.text === 'string') {
-    appendExternalLog('renderer', rec.level ?? 'info', rec.name ?? '?', rec.text);
+    appendExternalLog('renderer', rec.level, rec.name, rec.text);
   }
 });
 // Announce the active log level up front so it's obvious in app.log what will
@@ -454,24 +489,7 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 600,
     center: true,
-    webPreferences: {
-      preload: join(__dirname, 'preload.js'),
-      nodeIntegration: false,
-      contextIsolation: true,
-      // Chromium OS sandbox ON: a compromised renderer (e.g. via malicious email
-      // HTML) is confined to the process and can only reach main through the
-      // explicit contextBridge IPC. Safe here because the bundled preload only
-      // `require("electron")` (contextBridge/ipcRenderer) — no fs/os/stream/etc.,
-      // which the sandbox would forbid. If a future preload dep pulls a Node
-      // builtin, the app blank-screens at launch and this must go back to false.
-      sandbox: true,
-      // Chromium's built-in PDF viewer is a plugin; without this an <iframe>
-      // pointing at a PDF downloads instead of rendering, which is the exact
-      // behaviour the in-app viewer exists to remove. This does NOT widen the
-      // email-content surface: the sandboxed email-body iframe runs under
-      // `default-src 'none'`, which already blocks <embed>/<object>.
-      plugins: true,
-    },
+    webPreferences: mainWindowWebPreferences({ preload: join(__dirname, 'preload.js'), isDev }),
     title: 'Sarv Inbox',
     show: false,
     icon: resolveAppIconPath(__dirname, isDev),
@@ -518,7 +536,7 @@ function createWindow(): void {
       logger.error('[Main] Page failed to load:', errorCode, errorDescription);
     });
   } else {
-    mainWindow.loadFile(join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(APP_ENTRY_FILE);
   }
 
   // Open all external links in the default browser
@@ -529,41 +547,11 @@ function createWindow(): void {
     return { action: 'deny' };
   });
 
-  // Both guards below share one decision (electron/utils/navigation-policy.ts)
-  // so a rule can never be added to one and forgotten in the other.
-  const applyNavigationPolicy = (event: Electron.Event, url: string, scope: NavigationScope) => {
-    const verdict = classifyNavigation(url, VITE_DEV_SERVER_URL || 'file://', scope);
-    if (verdict === 'allow') return;
-    event.preventDefault();
-    if (verdict === 'external') {
-      shell.openExternal(url).catch((err) => logger.warn('[Main] openExternal failed:', err));
-    } else {
-      logger.warn(`[Main] Blocked ${scope}-level navigation to an unsupported scheme:`, url);
-    }
-  };
-
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    applyNavigationPolicy(event, url, 'top');
+  // Both navigation guards share one decision (electron/utils/navigation-policy.ts).
+  installNavigationGuards(mainWindow.webContents, APP_URL, {
+    openExternal: (url) => shell.openExternal(url),
+    warn: (message, ...args) => logger.warn(message, ...args),
   });
-
-  // Same rule for a navigation started INSIDE a frame. `will-navigate` fires
-  // for the top-level frame only, so an email body's iframe could navigate
-  // itself to a remote page and render it inside the inbox — the sandbox
-  // (`allow-same-origin allow-popups`, no `allow-top-navigation`) stops it
-  // taking over the window but not from replacing its own content. The renderer
-  // rewrites anchors to target="_blank" so they route through the
-  // setWindowOpenHandler above, and it also intercepts clicks at runtime; this
-  // is the backstop that cannot be raced or bypassed by markup neither of those
-  // anticipated. Guarded because `will-frame-navigate` is Electron 25+.
-  if (typeof (mainWindow.webContents as { on?: unknown }).on === 'function') {
-    try {
-      mainWindow.webContents.on('will-frame-navigate' as never, ((event: Electron.Event, url: string) => {
-        applyNavigationPolicy(event, url, 'frame');
-      }) as never);
-    } catch (err) {
-      logger.warn('[Main] will-frame-navigate unavailable on this Electron:', err);
-    }
-  }
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -648,6 +636,10 @@ async function initializeAccountRegistry(): Promise<void> {
   } catch (e) {
     logger.warn('[Main] Account registry seed failed:', (e as Error)?.message);
   }
+  // Before any IPC handler or window exists: saved passwords from older
+  // versions are bound to what the registry says NOW, not to anything the
+  // window writes later (vault-credentials.ts).
+  captureRegistryForLegacyBinding();
 
   // The credential vault isn't read during seed (only on connect/reveal), so
   // force its file→DB migration now, before the legacy-file cleanup below.
@@ -656,6 +648,11 @@ async function initializeAccountRegistry(): Promise<void> {
   } catch (e) {
     logger.warn('[Main] Secure-credentials migration deferred (keychain locked?):', (e as Error)?.message);
   }
+
+  // Say once where secrets live. On Linux without a keyring this is the line
+  // that explains why the "not encrypted" banner is showing.
+  if (isOsBackedEncryption()) logger.info(`[Security] secret storage: ${secretStorageDescription()}`);
+  else logger.warn(`[Security] secret storage: ${secretStorageDescription()}`);
 
   // The last three standalone settings/secret stores (agent config, AI API keys,
   // pipeline AI config) migrate file→core-DB on first read. Force those reads NOW
@@ -694,6 +691,10 @@ async function initializeAccountRegistry(): Promise<void> {
     const keepAccountIds = readRegistryAccounts().map((a) => a.id);
     const removed = cleanupOrphanedAccountDbs({ keepAccountIds });
     if (removed.length) logger.info(`[Main] Cleaned ${removed.length} orphaned DB file(s):`, removed.join(', '));
+    // The same keep-set and rules for the accounts' cached attachments.
+    void cleanupOrphanedAttachmentStores(keepAccountIds)
+      .then((count) => { if (count) logger.info(`[Main] Cleaned ${count} orphaned attachment folder(s)`); })
+      .catch((e) => logger.warn('[Main] Orphaned attachment cleanup failed:', (e as Error)?.message));
   } catch (e) {
     logger.error('[Main] Orphaned DB cleanup SKIPPED — the account registry could not be read, so nothing was deleted:', (e as Error)?.message);
   }
@@ -916,9 +917,7 @@ app.on('second-instance', () => {
     && !existing.webContents.isCrashed();
   const action = decideSecondInstanceAction({ hasWindow: !!existing, windowUsable, isReady: app.isReady() });
   if (action === 'focus' && existing) {
-    if (existing.isMinimized()) existing.restore();
-    existing.show();
-    existing.focus();
+    restoreAndFocusWindow(existing);
   } else if (action === 'create') {
     createWindow();
   }
@@ -991,6 +990,13 @@ app.whenReady().then(async () => {
     // Without these, whole newsletters render with broken pictures.
     installEmailImageRequestHandlers(session.defaultSession.webRequest);
 
+    // Web permissions: with no handler Electron grants every request (the
+    // microphone, clipboard READ, notifications — to any frame). Only the app
+    // window's own top frame gets clipboard write and fullscreen (CASA L-2).
+    installPermissionPolicy(session.defaultSession, APP_URL, {
+      onDenied: (permission, origin) => logger.warn(`[Main] denied web permission "${permission}" to ${origin}`),
+    });
+
     // BEFORE anything opens a database: prove the native SQLite module actually
     // loads in this process. It dlopens lazily and every core-DB read swallows
     // the failure into an empty result, so a mismatched ABI does not look like
@@ -1024,20 +1030,23 @@ app.whenReady().then(async () => {
     // request; before the window loads, so the first render can already fetch.
     // Given the SAME url the window loads, so the handler allows exactly our own
     // renderer's origin to fetch attachment bytes and nothing else.
-    registerAttachmentProtocol(VITE_DEV_SERVER_URL ?? `file://${join(__dirname, '../dist/index.html')}`);
+    registerAttachmentProtocol(APP_URL);
     await initializeSyncEngine();
     // Seed the durable accounts registry + auto-activate the persisted account
     // so main is self-sufficient (survives a lost renderer localStorage and
     // never bricks on "Storage not initialized"). Must run AFTER storage init.
     await initializeAccountRegistry();
+    // Retire the plaintext attachment cache of older builds (CASA M-7) once the
+    // accounts it may belong to are known. Off the startup path: it opens each
+    // account's database to match folders to mail.
+    void migrateLegacyAttachmentCache().catch((e) =>
+      logger.warn('[Main] Legacy attachment cache migration failed:', (e as Error)?.message)
+    );
     await initializeExtensionManager();
     // After the manager, because the handler asks it which extensions may serve
     // panels at all. The lookup is evaluated per request, so an extension
     // disabled later stops serving immediately.
-    registerPanelProtocol(
-      VITE_DEV_SERVER_URL ?? `file://${join(__dirname, '../dist/index.html')}`,
-      resolvePanelExtensionDir
-    );
+    registerPanelProtocol(APP_URL, resolvePanelExtensionDir);
 
     // Start background services
     startSnoozeChecker();

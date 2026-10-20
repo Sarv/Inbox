@@ -139,25 +139,45 @@ describe('electron-builder configuration', () => {
     }
   });
 
-  // Both macOS targets must say "universal", not "arm64"/"x64". That single
-  // word is what turns two dmgs and two zips into one of each: electron-builder
-  // packs both arches and merges them with lipo into one fat binary that macOS
-  // picks a slice from at launch. Listing the arches separately instead builds
-  // fine and produces four downloads, putting a "which Mac do I have?" question
-  // back in front of every user.
+  // The DMG must say "universal", not "arm64"/"x64". That single word is what
+  // turns two first-time downloads into one: electron-builder packs both arches
+  // and merges them with lipo into one fat binary that macOS picks a slice from
+  // at launch. Listing the arches instead builds fine and puts a "which Mac do
+  // I have?" question back in front of every new user.
   //
   // The filename spells both arches out because "universal" means nothing to
   // someone deciding whether a download will run on their Mac. That makes the
-  // name a CLAIM, and the two assertions here have to stay together: a name
-  // promising arm64 and amd64 on top of a build that quietly went back to a
-  // single arch would send half of all Mac users to a file that cannot run.
-  it('merges both macOS arches into one universal download and says so in the filename', () => {
+  // name a CLAIM, and the assertions have to stay together: a name promising
+  // arm64 and amd64 on top of a build that went back to a single arch would
+  // send half of all Mac users to a file that cannot run.
+  it('merges both macOS arches into one universal DMG and says so in the filename', () => {
+    const mac = buildConfig['mac'] as { target?: Array<{ target: string; arch?: string[] }> };
+    const dmg = buildConfig['dmg'] as { artifactName?: string };
+    expect(mac.target?.find((entry) => entry.target === 'dmg')?.arch).toEqual(['universal']);
+    expect(dmg.artifactName).toContain('arm64');
+    expect(dmg.artifactName).toContain('amd64');
+  });
+
+  // The update ZIPs must be one PER ARCH, named by ${arch}. A universal zip
+  // broke auto-update two ways: its blockmap diffed badly (the arm64 code
+  // signature sits mid-file, so every release re-sent the x64 half -- 97 MB
+  // where Windows sent 12 MB), and electron-updater treats any file named
+  // "arm64" as Apple Silicon only, so Intel Macs found no update at all. Two
+  // zips sharing one name would overwrite each other in the release.
+  it('builds one auto-update zip per macOS arch, each named for its arch', () => {
     const mac = buildConfig['mac'] as { target?: Array<{ target: string; arch?: string[] }>; artifactName?: string };
-    for (const entry of mac.target ?? []) {
-      expect(entry.arch, `mac target ${entry.target}`).toEqual(['universal']);
-    }
-    expect(mac.artifactName).toContain('arm64');
-    expect(mac.artifactName).toContain('amd64');
+    expect(mac.target?.find((entry) => entry.target === 'zip')?.arch).toEqual(['arm64', 'x64']);
+    expect(mac.artifactName).toContain('${arch}');
+  });
+
+  // The packaged app ships only the node_modules the production bundles still
+  // load: vite bundles everything else (vite.config.ts mainExternals), and the
+  // unbundled copies were ~180 MB of every update. Breaks if the allowlist
+  // drops better-sqlite3 or its loader chain -- the app boots with no database,
+  // which reads as no accounts and no mail, not as a crash.
+  it('packs only better-sqlite3 and its loader from node_modules', () => {
+    const files = buildConfig['files'] as string[];
+    expect(files).toContain('!node_modules/!(better-sqlite3|bindings|file-uri-to-path){,/**}');
   });
 
   // The regression: @electron/universal refuses to merge two packs whose files
@@ -187,7 +207,10 @@ describe('electron-builder configuration', () => {
     for (const entry of win.target ?? []) {
       expect(entry.arch, `win target ${entry.target}`).toEqual(['x64', 'arm64']);
     }
-    const effectivePattern = win.artifactName ?? (buildConfig['artifactName'] as string | undefined) ?? '';
+    // electron-builder resolves the NSIS name target-first: nsis, then win,
+    // then the top level (platformPackager artifactPatternConfig).
+    const nsis = buildConfig['nsis'] as { artifactName?: string } | undefined;
+    const effectivePattern = nsis?.artifactName ?? win.artifactName ?? (buildConfig['artifactName'] as string | undefined) ?? '';
     expect(effectivePattern).not.toContain('${arch}');
   });
 

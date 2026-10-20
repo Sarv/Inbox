@@ -8,6 +8,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Ask your inbox.** Ask questions such as “What quote did I send to TCS?”
+  and review answers linked to the original emails. The Inbox Assistant searches
+  connected accounts, including Sent, reads relevant messages and supported
+  attachments, and shows which accounts and sources it could review.
+- **Keep working with the assistant.** Save, name and pin conversations; inspect
+  its research; edit a question and rewind the conversation. Use a split view
+  beside the source email or keep the assistant in a floating panel. Separate
+  chats can continue in the background while you switch chats or pages, with
+  controls to stop each request.
+- **Turn research into drafts and reviewed actions.** Prepare an email draft
+  from a conversation and open it in the composer to review before sending.
+  Review matching mail before marking it read, archiving it or moving it to
+  Trash, then follow progress and use the available undo controls.
+- **See assistant usage.** Each answer and saved conversation shows reported
+  input/output tokens, provider and model details, and estimated USD cost when
+  pricing is available. Missing usage or prices are shown as unavailable or
+  incomplete instead of counted as zero.
+- **Contacts fill in from signatures automatically.** New signatures and
+  previously skipped contacts are reviewed in the background. Profiles organize
+  available names, roles, companies, departments, phone numbers, LinkedIn and
+  other links, with progress, missing details and the last-reviewed date visible.
+
+### Changed
+- **One place for AI.** The AI dashboard and Email Agent now share the AI page,
+  with provider and processing settings still available in their tabs. Settings,
+  Extensions, Contacts and their inner tabs use a consistent full-width layout.
+- **More useful contact categories.** Categorization considers correspondence
+  across connected accounts to distinguish colleagues, customers, vendors and
+  automated senders, while preserving your manual choices. Signature analysis
+  separates the sender's details from quoted signatures and protects newer
+  profile information from older messages.
+
+### Fixed
+- **An emptied page loads more mail.** Deleting all messages on a page or
+  marking the visible unread messages as read now refills the active view when
+  more matching conversations remain, including category tabs and search filters.
+- **Counts match conversations.** Search results and pagination count a thread
+  once even when several messages in it are unread, and page ranges follow the
+  conversations actually shown.
+- **Forwarded attachments appear in both views.** Attachments carried with a
+  forwarded message now display in the conversation and email views, rather than
+  showing only a paperclip in the header.
+
+## [1.3.7] - 2026-10-13
+
+### Added
+- **You're told when an update is ready.** With automatic updates on, a
+  downloaded update used to wait silently for the next quit — and on a Mac,
+  closing the window isn't quitting, so it could wait for weeks. A system
+  notification now says once that the new version is ready; click it to
+  restart now, or ignore it and it installs the next time you quit.
+
+### Fixed
+- **"Couldn't check for updates" no longer appears for an update that is
+  already downloaded.** A later check that was slow or offline replaced the
+  "ready to install" state with an error saying the release could not be
+  verified, and "Restart now" stopped working. A downloaded update now stays
+  ready until it is installed or a newer one replaces it.
+- **Update checks work on slow connections.** On networks where reaching
+  GitHub's download server takes longer than 20 seconds, every check failed
+  and every new release was refused as unverifiable. Checks now wait up to a
+  minute.
+- Pressing **Check for Updates…** shortly after launch now always shows its
+  result; a background check starting at the same moment used to hide it.
+
+## [1.3.6] - 2026-10-13
+
+Not published: its release build failed on a flaky test before anything was
+built. Its changes ship in 1.3.7.
+
+## [1.3.5] - 2026-10-13
+
+### Fixed
+- **Logos show again when adding an account.** In the installed app, the Sarv,
+  Gmail, Outlook and Yahoo logos and the Sarv Inbox icon at the top of the
+  Add account screen appeared as broken images. They load correctly again.
+
+## [1.3.4] - 2026-10-13
+
+### Changed
+- **Mac updates download far less.** Updates now come as a separate download
+  for Apple Silicon and for Intel Macs instead of one that carried both, so an
+  update only fetches the parts that changed — tens of MB rather than ~100 MB.
+  The first update after this one is still a full download, once. The installer
+  on the website is unchanged and still runs on every Mac.
+- **The app is smaller.** About 180 MB of unused copies of libraries the app
+  already contains were removed from the package, which also shrinks every
+  update on every platform.
+- The update log in `app.log` now records how each update was downloaded (only
+  the changed parts, or the whole file) and why, so a slow update can be
+  diagnosed.
+
+### Fixed
+- **Intel Macs receive automatic updates again.** The updater skipped the
+  combined Mac update because its file name mentioned Apple Silicon, so Intel
+  Macs reported an error instead of updating.
+
+### Security
+- **Saved passwords and sign-ins are only sent over the connection you chose.**
+  "Allow self-signed certificates" and connection security None now apply to a
+  saved password only if you chose them when you entered it. A compromised
+  window could otherwise switch certificate checks off for a saved account, or
+  for a Gmail, Outlook, Yahoo or Sarv sign-in, and let someone on your network
+  read the password or token. Sign-ins now always check the server's
+  certificate, and "allow self-signed" is no longer offered for them. Accounts
+  set up in earlier versions keep the choices they already had. If you turn
+  either option on later without re-entering your password, you are asked to
+  re-enter it. Once a stricter connection works, the option is switched off for
+  that saved password.
+- **Only the app's own window can talk to the app's core.** Every request the
+  window sends to the part of the app that holds your mail and passwords is now
+  checked: it must come from the app's main page in its main window. Before,
+  only a few requests were checked.
+- **Web pages inside the app can no longer use your microphone, camera or
+  clipboard.** The app had no rule for these requests, so they were allowed
+  without asking. Now only copying to the clipboard and full-screen video are
+  allowed, and only for the app itself. Extension panels and email content are
+  refused.
+- **A released app always loads its own files.** A setting meant only for
+  development could make an installed copy load its window from another
+  address, including from a file left in the folder the app was started from.
+  Installed copies now ignore it and no longer read such files.
+- **Crash reports are now your choice.** The app asks once whether to send
+  crash reports, and sends nothing until you say yes; until now they were on
+  unless you turned them off. If you close the question without answering, it
+  asks again next time. Reports no longer include snapshots of the app's memory,
+  and more of each report is checked for email addresses, passwords and tokens
+  before it is sent. You can change your answer in Settings → General.
+- **The app's log file no longer records email addresses.** In released
+  versions, email addresses are removed from the diagnostic log, the file can
+  only be read by your own user account, and text forwarded from the app window
+  can no longer be made to look like separate log lines.
+- **Sender logos can no longer reach devices on your network.** Looking up a
+  sender's website icon could be pointed at addresses inside your local network
+  (your router, say). The lookup now goes only to public internet addresses,
+  over a secure connection.
+- **Extensions are described as what they are.** Installing an extension now
+  always says that it runs as full code on your computer, with the same access
+  to your files and mail as the app, whatever permissions it asks for.
+  Installing from a folder asks you to confirm first. The checksum shown when
+  you install is described as a check for a damaged download, not as a check
+  on who made the extension.
+- **Signatures are cleaned before they are shown.** A saved signature is
+  stripped of scripts and other unsafe content before the signature editor
+  displays it, not only when it is saved.
+
+## [1.3.3] - 2026-10-12
+
+### Fixed
+- **Conversation menus answer the latest message.** Reply, Reply all and
+  Forward from the message toolbar's ⋮ menu or the conversation card's ⋮ menu
+  now answer the newest message, as the toolbar's Reply button already did,
+  instead of quoting the first one. The toolbar's Forward and Print buttons,
+  and the Shift+A / Shift+F popup shortcuts, do the same. Report spam from a
+  conversation menu now moves the whole conversation to spam rather than only
+  its first message. A single reply's menu still acts on that reply.
+
+### Security
+- **Emails can no longer hide a lookup that reports when you opened them.**
+  An email could carry a hidden hint (a DNS prefetch, also tucked inside an
+  embedded frame) that made the app look up a web address the moment you opened
+  it, even with remote images blocked, so the sender could learn when, and from
+  which network, you read it. Several forms got past the filter, and printing
+  skipped it entirely. Such hints and embedded frames are now removed from email
+  content, on screen and when printing.
+
+## [1.3.2] - 2026-10-12
+
+### Added
 - **Edit email categories and sync Important.** Use the Categories menu in the
   message toolbar or email list to review and change assignments. Important
   remains independent of categories and stars. Sarv uses its native `Important`
@@ -36,7 +205,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanning token is stored in the device keychain. Existing scanner connections
   are preserved, and Skip retains the unscanned attachment warning.
 
+### Changed
+- **Settings uses the same setup steps as onboarding.** Adding an email
+  account or an AI provider in Settings now walks through the same provider,
+  connection and model steps as first-run setup. Editing an existing account
+  or provider keeps it as it was, including which one is the default, and
+  Cancel changes nothing. Keyboard focus returns to where you were after a
+  confirmation dialog closes.
+
 ### Fixed
+- **Starring and marking a conversation unread now match Outlook and Sarv
+  Mail.** Starring a conversation from the list, the bulk toolbar or the `s`
+  shortcut flags only its latest message, instead of every reply; unstarring
+  still clears the star from every message. "Mark as unread" in the open
+  conversation's menu now marks every message unread — it used to mark only
+  the first, so the conversation came back as read after the next sync and
+  showed differently in other mail apps. Single messages behave as before.
+- **A specially built email can no longer freeze the app when you open it.**
+  Some unusual (or deliberately malformed) email markup made the message
+  viewer do work that grew with the square of the email's size — a large one
+  could lock the window for minutes, every time it was opened. Opening any
+  email is now fast regardless of its content, and ordinary emails look
+  exactly as before.
+- **AI features work with OpenAI and other providers.** Every request carried
+  options meant only for Sarv's models, which OpenAI rejects, so connecting an
+  OpenAI key or using it for sorting and drafting could fail. Other providers
+  now receive only standard request fields, and an error names the provider
+  that actually failed.
 - **Business conversations are classified by purpose.** Requested quotes,
   customer questions, negotiations and internal approvals are distinguished
   from promotional outreach. Categorization uses outgoing correspondence as
@@ -59,6 +254,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned as garbled bytes.
 
 ### Security
+- **Opened attachments are now encrypted on disk and removed with their
+  account.** Attachments you open, save or forward are kept in a local cache so
+  they don't download again. That cache used to hold plain copies, shared by all
+  accounts, that stayed after you removed an account. Cached attachments are now
+  encrypted with the same key as your mail, kept per account, and deleted when
+  you remove the account; their file names on disk no longer reveal what they
+  are. Opening an attachment in another app always uses a short-lived private
+  copy. The old unencrypted cache is cleared on the first launch after updating,
+  and the attachments of drafts you saved offline are kept.
+- **Local files can no longer open inside the app.** The app treated any file
+  on your computer as part of itself, so a link in an email could load a saved
+  web page (for example an HTML attachment in Downloads) into the reading pane,
+  where the email's protections did not apply. Only the app's own page is
+  allowed now; anything else is blocked. Dropping a file onto the window still
+  does nothing, and that is now set explicitly rather than left to a default.
+- **Accounts set to STARTTLS now refuse to connect without encryption.** The
+  app used to carry on unencrypted when a mail server did not offer STARTTLS, so
+  anyone on the same network could hide it and read your password or sign-in.
+  Now it stops before sending the password and tells you why, for both incoming
+  (IMAP) and sending (SMTP) mail. "Allow self-signed certificates" no longer
+  turns this off either; it only relaxes the certificate check. If your server
+  really has no encryption, choose Connection security: None, which is now
+  offered and remembered everywhere you set up or edit an account, including
+  Settings → Accounts. Accounts that already use SSL/TLS are unchanged.
+- **Sign-in tokens only go to their own provider's servers.** A Gmail,
+  Outlook, Yahoo or Sarv mail sign-in is now used only with that provider's own
+  IMAP and SMTP servers, and a Sarv sign-in authenticates only Sarv AI
+  endpoints. Any other destination is refused before the token is read, and the
+  refusal is logged. Accounts set up normally are unaffected. An account that
+  was switched to OAuth on a different server falls back to its saved app
+  password, as before.
+- **A crafted email can no longer freeze the app.** Priority scoring checked
+  every email's subject, body and To/Cc with patterns that slowed down sharply
+  on specially built input: one message could stall the app for seconds to
+  minutes, and again after each restart. Scoring now reads at most the first
+  20,000 characters, uses patterns whose cost grows only with the text's
+  length, and reads To/Cc with the app's standard address parser. Priority
+  scores for ordinary mail are unchanged.
+- **Saved mailbox passwords never leave the app's background process.** The
+  window no longer has any way to read a saved IMAP or SMTP password back; the
+  app supplies it itself when it connects, and only to the server it was saved
+  for. Changing an account's server now asks you to re-enter the password, and
+  showing a saved password still requires Touch ID. Developer Tools are no
+  longer available in release builds.
+- **Saved AI API keys never leave the app's background process.** The window
+  no longer has a way to read a saved OpenAI, Gemini or custom-provider key;
+  requests that need one are made by the background process, which sends the
+  key only to the address it was saved for. Settings shows "API key saved"
+  instead of part of the key, a blank key field keeps the saved key, and
+  changing a provider's address asks for the key again. Gemini keys are sent in
+  a request header rather than in the URL. A temporarily locked keychain can no
+  longer wipe saved AI keys.
+- **Linux without a system keyring now gets an honest warning.** When no
+  keyring (gnome-keyring, KWallet) is running, Linux falls back to a storage
+  mode whose "encryption" key is public, but the app used to treat it as
+  encrypted. It now shows the warning banner, which also names what is
+  exposed: passwords, sign-in tokens, AI keys, OpenPGP keys kept without a
+  passphrase, and the key to your stored mail. Nothing else claims otherwise:
+  a saved mailbox password no longer says "Saved securely", and Security's
+  "Encrypted mail cache" no longer says its key is in the keychain. New
+  OpenPGP private keys there are protected with your passphrase instead. Keys
+  saved earlier still open, but Settings → Encryption now marks them "Not
+  protected" and explains how to fix it: back up the secret key, then import
+  that backup with its passphrase. macOS, Windows and Linux with a keyring are
+  unchanged.
+- **Other programs on your computer can no longer run code as Sarv Inbox.**
+  Release builds now switch off the ways a local program could start the app
+  in a debugging or scripting mode (and so reach its saved passwords and keys
+  without asking you), and the app refuses to start if its own files have been
+  modified. On macOS the app also no longer allows other code to be loaded into
+  it through environment variables. Every release checks these settings in the
+  built app before it is published.
+- **Updates are verified before they download.** Each release now carries a
+  list of its files' fingerprints, signed with a key only Sarv holds. The app
+  downloads an update only if every file matches that signed list, so a
+  tampered release can't be installed on Windows, macOS or Linux. Releases also
+  include a GPG-signed `SHA256SUMS` for checking downloads by hand (key:
+  `docs/release-signing-key.asc`), and an unsigned macOS build can no longer be
+  published.
+- **In-app updates now work on Windows.** The Windows installer is now named
+  `Sarv-Inbox-Setup-<version>.exe`, the same name the update feed uses. In every
+  earlier release it was stored as `Sarv.Inbox.Setup.<version>.exe`, so Windows
+  copies looked for a file that wasn't there and never updated themselves.
+- **Blocked remote images now stay blocked in every email, and when printing.**
+  An email could be built so the image-blocking rule never applied, letting a
+  tracking pixel report when and where you opened it without you clicking
+  "Load images". The rule now applies to every message whatever its HTML looks
+  like. Printing used to load remote images regardless of your choice; it now
+  follows the same image settings as the message view, for the account the
+  message arrived in, and a crafted subject or sender name can no longer add
+  content to the printout. The Outbox preview of a reply or forward no longer
+  loads the original sender's images until you click "Load images".
 - **Local scanner setup works in the development app.** The renamed development
   executable is recognised correctly, so a scanner at `http://localhost:8080`
   can be verified when launching with `sh scripts/dev.sh`. Released apps still
@@ -758,7 +1045,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.7...HEAD
+[1.3.7]: https://github.com/Sarv/Inbox/releases/tag/v1.3.7
+[1.3.6]: https://github.com/Sarv/Inbox/releases/tag/v1.3.6
+[1.3.5]: https://github.com/Sarv/Inbox/releases/tag/v1.3.5
+[1.3.4]: https://github.com/Sarv/Inbox/releases/tag/v1.3.4
+[1.3.3]: https://github.com/Sarv/Inbox/releases/tag/v1.3.3
+[1.3.2]: https://github.com/Sarv/Inbox/releases/tag/v1.3.2
 [1.3.1]: https://github.com/Sarv/Inbox/releases/tag/v1.3.1
 [1.3.0]: https://github.com/Sarv/Inbox/releases/tag/v1.3.0
 [1.2.6]: https://github.com/Sarv/Inbox/releases/tag/v1.2.6

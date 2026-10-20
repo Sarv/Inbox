@@ -16,7 +16,20 @@ export interface Logger {
   isLevelEnabled(level: LogLevel): boolean;
 }
 
-export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
+/** Every level the logger knows, lowest first. */
+export const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error'] as const;
+
+export type LogLevel = typeof LOG_LEVELS[number];
+
+/**
+ * Whether `value` names one of the logger's levels — exactly, lower-case. The
+ * one check for a level that arrives from outside the code (an env var, a
+ * record forwarded by the renderer); `in` on a lookup table would also accept
+ * prototype keys such as `constructor`.
+ */
+export function isLogLevel(value: unknown): value is LogLevel {
+  return typeof value === 'string' && (LOG_LEVELS as readonly string[]).includes(value);
+}
 
 // Numeric severities (pino-style). A message prints only when its level is >=
 // the configured minimum. Default 'info' → trace AND debug are dropped cheaply.
@@ -24,7 +37,7 @@ const LEVEL_VALUE: Record<LogLevel, number> = { trace: 10, debug: 20, info: 30, 
 
 function envLogLevel(): LogLevel | undefined {
   const v = (typeof process !== 'undefined' ? process.env?.['SARV_LOG_LEVEL'] : undefined)?.toLowerCase();
-  return v && v in LEVEL_VALUE ? (v as LogLevel) : undefined;
+  return isLogLevel(v) ? v : undefined;
 }
 
 // Default 'debug' so the IMAP command trace + diagnostics are visible without

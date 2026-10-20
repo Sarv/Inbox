@@ -65,6 +65,15 @@ describe('isTerminalOAuthError', () => {
     expect(isTerminalOAuthError(coded('REAUTH_REQUIRED'))).toBe(true);
   });
 
+  // A bearer refused for the host it was about to be sent to. Breaks if
+  // transient: the IMAP reconnect ladder redials the refused config forever.
+  // Breaks if unrecognised: the auth latch never sees it at all.
+  it('is terminal, and ours, for a token refused for its destination host', () => {
+    expect(isTerminalOAuthError(new OAuthError('x', 'TOKEN_DESTINATION_REFUSED'))).toBe(true);
+    expect(isTerminalOAuthError(coded('TOKEN_DESTINATION_REFUSED'))).toBe(true);
+    expect(isOAuthTokenError(coded('TOKEN_DESTINATION_REFUSED'))).toBe(true);
+  });
+
   // THE laptop-lid guarantee. A refresh we cut short or never started says
   // nothing about the credentials; marking it terminal signs the user out for
   // closing their laptop.

@@ -6,10 +6,12 @@ import {
   getUpdateSupport,
   parseUpdatePrefs,
   remindLater,
+  sameUpdate,
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
   shouldPromptForUpdate,
+  shouldNotifyUpdateReady,
   shouldShowDialog,
   skipVersion,
   type UpdatePhase,
@@ -240,6 +242,34 @@ describe('shouldShowDialog', () => {
   });
 });
 
+describe('shouldNotifyUpdateReady', () => {
+  const ready = { version: '1.2.0', now: NOW, prompted: false, notifiedVersion: null };
+
+  // The whole point: with automatic updates on, a staged update is otherwise
+  // invisible until the user happens to quit.
+  it('announces a staged update nobody has been told about', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs() })).toBe(true);
+  });
+
+  // The dialog already says it; a toast on top is the same news twice.
+  it('stays quiet while the dialog is showing it', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs(), prompted: true })).toBe(false);
+  });
+
+  // Once per version, or the hourly cycle becomes an hourly nag.
+  it('announces each version once, and the next version again', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs(), notifiedVersion: '1.2.0' })).toBe(false);
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs(), notifiedVersion: '1.1.0' })).toBe(true);
+  });
+
+  // "Skip this version" and "Remind me later" cover notifications too.
+  it('respects skip and snooze', () => {
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs({ skippedVersion: '1.2.0' }) })).toBe(false);
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs({ remindAfter: NOW + 1 }) })).toBe(false);
+    expect(shouldNotifyUpdateReady({ ...ready, prefs: prefs({ remindAfter: NOW - 1 }) })).toBe(true);
+  });
+});
+
 describe('getUpdateSupport', () => {
   /** A packaged, updatable build: every signal pointing the supported way. */
   const shipped = {
@@ -369,5 +399,30 @@ describe('automatic updates default', () => {
     expect(parseUpdatePrefs({ autoUpdate: 0 }).autoUpdate).toBe(true);
     expect(parseUpdatePrefs({ autoUpdate: null }).autoUpdate).toBe(true);
     expect(parseUpdatePrefs({ autoUpdate: false }).autoUpdate).toBe(false);
+  });
+});
+
+describe('sameUpdate', () => {
+  const files = [
+    { url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' },
+    { url: 'Sarv-Inbox-Setup-1.3.0.exe.blockmap', sha512: 'b' },
+  ];
+
+  // Ties a download to its verification. Breaks: a download of different
+  // files under the same version string is treated as the verified update.
+  it('matches only the same version with the same files and hashes', () => {
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.0', files: [...files].reverse() })).toBe(true);
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.1', files })).toBe(false);
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.0', files: [{ ...files[0], sha512: 'x' }, files[1]] })).toBe(false);
+    expect(sameUpdate({ version: '1.3.0', files }, { version: '1.3.0', files: [files[0]] })).toBe(false);
+  });
+
+  // electron-updater reports a file by URL in one place and by name in another.
+  it('compares file names, not the URL they were fetched from, and treats no files as none', () => {
+    expect(sameUpdate(
+      { version: '1.3.0', files: [{ url: 'https://example/x/Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' }] },
+      { version: '1.3.0', files: [{ url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' }] },
+    )).toBe(true);
+    expect(sameUpdate({ version: '1.3.0' }, { version: '1.3.0', files: [] })).toBe(true);
   });
 });

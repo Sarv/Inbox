@@ -10,7 +10,7 @@ import {
   rankAssetsFor,
 } from '../src/release-assets.js';
 
-import { releaseV122 } from './fixtures.js';
+import { releaseV122, releaseV134Mac } from './fixtures.js';
 
 const installables = () => classifyAssets(releaseV122().assets);
 const names = (assets) => assets.map((asset) => asset.name);
@@ -28,6 +28,8 @@ describe('classifyAsset', () => {
     ['sarv-inbox-1.2.2-x86_64.rpm', OS.LINUX, PACKAGE.RPM, ARCH.X64],
     ['sarv-inbox-1.2.2-aarch64.rpm', OS.LINUX, PACKAGE.RPM, ARCH.ARM64],
     ['Sarv Inbox Setup 1.3.0-x64.exe', OS.WINDOWS, PACKAGE.EXE, ARCH.X64],
+    // The name releases use from the signed-manifest change on (nsis.artifactName).
+    ['Sarv-Inbox-Setup-1.3.2.exe', OS.WINDOWS, PACKAGE.EXE, ANY_ARCH],
   ])('%s', (name, os, kind, arch) => {
     expect(classifyAsset({ name, size: 1, browser_download_url: 'u' })).toEqual({
       os,
@@ -73,6 +75,44 @@ describe('rankAssetsFor / pickDownloads', () => {
     });
     expect(primary.name).toBe('sarv-inbox-1.2.2-mac-arm64-amd64.dmg');
     expect(names(alternatives)).toEqual(['sarv-inbox-1.2.2-mac-arm64-amd64.zip']);
+  });
+
+  // Breaks if a per-arch .zip (v1.3.4+) outranks the universal .dmg as the Mac's
+  // main download: Safari hides the chip, so it would hand every Safari user the
+  // Intel zip, and Chrome on Apple Silicon a bare zip instead of the installer.
+  it.each([ARCH.ARM64, ARCH.X64, ARCH.UNKNOWN])(
+    'macOS %s with per-arch zips: the universal dmg stays primary',
+    (arch) => {
+      const assets = classifyAssets(releaseV134Mac().assets);
+      const { primary } = pickDownloads(assets, { os: OS.MAC, arch });
+      expect(primary.name).toBe('sarv-inbox-1.3.4-mac-arm64-amd64.dmg');
+    }
+  );
+
+  // Breaks if the chip-specific zips stop following the detected chip.
+  it.each([
+    [ARCH.ARM64, ['sarv-inbox-1.3.4-mac-arm64.zip', 'sarv-inbox-1.3.4-mac-x64.zip']],
+    [ARCH.X64, ['sarv-inbox-1.3.4-mac-x64.zip', 'sarv-inbox-1.3.4-mac-arm64.zip']],
+    [ARCH.UNKNOWN, ['sarv-inbox-1.3.4-mac-x64.zip', 'sarv-inbox-1.3.4-mac-arm64.zip']],
+  ])('macOS %s: both per-arch zips listed, matching chip first', (arch, expected) => {
+    const assets = classifyAssets(releaseV134Mac().assets);
+    expect(names(pickDownloads(assets, { os: OS.MAC, arch }).alternatives)).toEqual(expected);
+  });
+
+  // Breaks if per-arch DMGs (no universal one) send a known chip the wrong build,
+  // or an undetected Mac the Apple Silicon build that cannot run on Intel.
+  it.each([
+    [ARCH.ARM64, 'sarv-inbox-2.0.0-mac-arm64.dmg'],
+    [ARCH.X64, 'sarv-inbox-2.0.0-mac-x64.dmg'],
+    [ARCH.UNKNOWN, 'sarv-inbox-2.0.0-mac-x64.dmg'],
+  ])('macOS %s with only per-arch dmgs picks %s', (arch, expected) => {
+    const assets = classifyAssets([
+      { name: 'sarv-inbox-2.0.0-mac-arm64.zip' },
+      { name: 'sarv-inbox-2.0.0-mac-arm64.dmg' },
+      { name: 'sarv-inbox-2.0.0-mac-x64.dmg' },
+      { name: 'sarv-inbox-2.0.0-mac-x64.zip' },
+    ]);
+    expect(pickDownloads(assets, { os: OS.MAC, arch }).primary.name).toBe(expected);
   });
 
   // Breaks if Windows (any arch) doesn't get the combined installer.

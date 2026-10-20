@@ -28,3 +28,40 @@ export function buildAIChatRequestOptions(
   // The Responses API's `reasoning` object is not a Chat Completions parameter.
   return {};
 }
+
+/**
+ * The endpoint each provider type uses when none is configured. The single
+ * source for the renderer's provider presets, both main-process categorizers
+ * and the stored-key binding (which must bind to the URL a request actually
+ * goes to). Sarv and Custom have none: their base URL is always configured.
+ */
+export const AI_DEFAULT_BASE_URLS: Readonly<Record<string, string>> = {
+  openai: 'https://api.openai.com/v1',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta',
+};
+
+/** The base URL a provider's requests go to: its own, else its type's default. */
+export function effectiveAIBaseUrl(provider: { type: string; baseUrl?: string }): string | undefined {
+  return provider.baseUrl || AI_DEFAULT_BASE_URLS[provider.type];
+}
+
+/** `scheme://host[:port]` of an endpoint URL, or null when it isn't one. */
+export function aiEndpointOrigin(url: string | undefined | null): string | null {
+  if (typeof url !== 'string' || !url.trim()) return null;
+  try {
+    const parsed = new URL(url.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The header that carries an API key for a provider type. Gemini takes it in
+ * `x-goog-api-key` — never in the `?key=` query string, which ends up in logs
+ * and error messages; everything else is an OpenAI-style Bearer token.
+ */
+export function aiApiKeyHeaders(type: string, apiKey: string): Record<string, string> {
+  return type === 'gemini' ? { 'x-goog-api-key': apiKey } : { Authorization: `Bearer ${apiKey}` };
+}

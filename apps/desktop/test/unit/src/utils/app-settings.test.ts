@@ -5,6 +5,7 @@ import {
   readAppSettings,
   readUndoSendDelayMs,
   saveSettingsFromScreen,
+  RETIRED_SETTINGS,
   settingsForSave,
   SETTINGS_OWNED_ELSEWHERE,
   undoSendDelayMs,
@@ -135,6 +136,23 @@ describe('settingsForSave', () => {
       for (const key of SETTINGS_OWNED_ELSEWHERE) expect(key in next).toBe(false);
       expect(next.maxEmailsPerFolder).toBe(250);
     }
+  });
+
+  // Breaks if Save writes a legacy `crashReports` back into the blob: main
+  // owns the crash-report answer now (CASA L-8), and a stale copy here is
+  // what used to overwrite it on every launch.
+  it('drops the retired crashReports key a legacy blob carried in', () => {
+    const legacyScreen = { ...screen, crashReports: true } as typeof screen;
+    const next = settingsForSave(legacyScreen, { crashReports: true, maxEmailsPerFolder: 1000 });
+    expect(RETIRED_SETTINGS).toContain('crashReports');
+    expect('crashReports' in next).toBe(false);
+    expect(next.maxEmailsPerFolder).toBe(250);
+  });
+
+  // Breaks if a fresh install's defaults (also what SEED writes) carry a
+  // crash-report choice again — "not yet asked" must stay representable.
+  it('has no crash-report default in the settings blob', () => {
+    expect('crashReports' in defaultSettings).toBe(false);
   });
 
   // Breaks if the helper mutates the screen's working copy (React state).

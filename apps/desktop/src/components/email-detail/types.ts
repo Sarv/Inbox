@@ -28,6 +28,8 @@ export interface EmailDetailContext {
   // Computed
   selectedEmail: any | undefined;
   displayEmail: any | undefined;
+  /** The conversation's newest message — what a conversation-level Reply / Forward answers. */
+  latestThreadEmail: any | undefined;
   isStandaloneDraft: boolean;
   isRead: boolean;
   isStarred: boolean;
@@ -121,6 +123,8 @@ export interface EmailDetailContext {
   // Handlers
   handleBack: () => void;
   handleMarkRead: () => Promise<void>;
+  /** Mark every message of the open conversation unread (no navigation). */
+  handleMarkThreadUnread: () => Promise<void>;
   handleDelete: () => Promise<void>;
   handleArchive: () => Promise<void>;
   handleRemoveAICategory: () => Promise<void>;

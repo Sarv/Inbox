@@ -42,10 +42,13 @@ function initialConnections(context: 'onboarding' | 'settings', editingProvider?
     if (!connections[stored.type] || connections[stored.type].model) continue;
     connections[stored.type] = {
       ...connections[stored.type], name: stored.name, baseUrl: stored.baseUrl || connections[stored.type].baseUrl,
-      apiKey: stored.apiKey, useApiKey: stored.type === 'custom' ? Boolean(stored.apiKey) : stored.authMethod !== 'oauth', model: stored.model,
+      // A saved key never comes back to the renderer: the field starts blank
+      // and requests use the saved key through main (storedProviderId).
+      apiKey: '', useApiKey: stored.type === 'custom' ? Boolean(stored.apiKey || stored.hasStoredKey) : stored.authMethod !== 'oauth', model: stored.model,
+      storedProviderId: stored.hasStoredKey ? stored.id : undefined,
       authMethod: stored.authMethod || 'apiKey',
       models: [{ id: stored.model, name: stored.model }],
-      verified: context === 'onboarding' && stored.authMethod !== 'oauth' && (Boolean(stored.apiKey) || stored.type === 'custom'),
+      verified: context === 'onboarding' && stored.authMethod !== 'oauth' && (Boolean(stored.hasStoredKey) || stored.type === 'custom'),
       ...(context === 'settings' && stored.type === 'sarv' && stored.authMethod === 'oauth' ? { savedSarvProvider: stored } : {}),
     };
   }
@@ -235,9 +238,11 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
       onSavingChange?.(true);
       let saved;
       try {
+        // Onboarding that kept a saved key updates THAT provider in place (its
+        // key stays with its id) rather than adding one with no key.
         saved = context === 'settings'
           ? await addValidatedProvider(draft, isCurrent, { existingId: editingProvider?.id, createNew: !editingProvider, makeDefault: false })
-          : await addValidatedProvider(draft, isCurrent);
+          : await addValidatedProvider(draft, isCurrent, provider.hasStoredKey ? { existingId: provider.id } : {});
       } finally {
         setSaving(false);
         onSavingChange?.(false);
@@ -306,7 +311,7 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
               {selected === 'custom' && <label className="block space-y-2 text-sm font-medium">Provider name<input value={connection.name} onChange={(event) => edit({ name: event.target.value })} disabled={busy} className={fieldClass} placeholder="My AI server" /></label>}
               {(selected === 'custom' || selected === 'sarv') && <label className="block space-y-2 text-sm font-medium">API endpoint<input type="url" value={connection.baseUrl} onChange={(event) => edit({ baseUrl: event.target.value })} disabled={busy} className={fieldClass} placeholder="https://your-server.example/v1" /><span className="block text-xs font-normal text-muted-foreground">Use the API base URL, without /chat/completions.</span></label>}
               {selected === 'custom' && <label className="block space-y-2 text-sm font-medium">Authentication<select aria-label="Authentication" value={connection.useApiKey ? 'key' : 'none'} onChange={(event) => edit({ useApiKey: event.target.value === 'key' })} disabled={busy} className={fieldClass}><option value="key">API key</option><option value="none">No authentication</option></select></label>}
-              {connection.useApiKey && <label className="block space-y-2 text-sm font-medium">API key<input type="password" value={connection.apiKey} onChange={(event) => edit({ apiKey: event.target.value })} disabled={busy} autoComplete="off" spellCheck={false} className={fieldClass} placeholder="Paste your API key" /><span className="block text-xs font-normal leading-5 text-muted-foreground">Saved in your device credential vault after you choose and test a model. A system keyring is needed for encrypted key storage.</span></label>}
+              {connection.useApiKey && <label className="block space-y-2 text-sm font-medium">API key<input type="password" value={connection.apiKey} onChange={(event) => edit({ apiKey: event.target.value })} disabled={busy} autoComplete="off" spellCheck={false} className={fieldClass} placeholder={connection.storedProviderId ? 'Saved — leave blank to keep it' : 'Paste your API key'} /><span className="block text-xs font-normal leading-5 text-muted-foreground">Saved in your device credential vault after you choose and test a model. A system keyring is needed for encrypted key storage.</span></label>}
               {selected === 'sarv' && <button type="button" onClick={() => { edit({ authMethod: 'oauth' }); void loadSarv({ ...connection, authMethod: 'oauth' }); }} disabled={busy} className="text-sm text-primary hover:underline">Use Sarv sign-in instead</button>}
               <button type="submit" disabled={busy} className={`${primaryClass} w-full`}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}Check connection</button>
               <p className="text-xs leading-5 text-muted-foreground">This checks your configuration and lists models. It does not send any email content.</p>

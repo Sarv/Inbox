@@ -28,7 +28,7 @@ vi.mock('../../../../electron/shared', () => ({
   getAllAccountIds: vi.fn(() => []),
   sendToWindow: vi.fn(),
 }));
-vi.mock('../../../../electron/services/oauth-service', () => ({ getValidAccessToken: vi.fn(async () => 'fresh-token') }));
+vi.mock('../../../../electron/services/oauth-service', () => ({ getAccessTokenForMailHost: vi.fn(async () => 'fresh-token') }));
 vi.mock('../../../../electron/services/unified-pipeline-service', () => ({ getPipelineUserName: vi.fn(() => 'Me') }));
 vi.mock('../../../../electron/services/outbox-service', () => ({
   getOutboxQueue: vi.fn(),

@@ -32,8 +32,13 @@ macOS is the single exception to the per-platform rule: Xcode ships both the
 arm64 and x64 SDKs, so one macOS runner legitimately produces both Mac arches.
 It then merges them: `--mac --universal` packs each arch and `lipo`s the two
 into one *universal* binary — a single file carrying both instruction sets, from
-which macOS picks the matching slice at launch. That is why the Mac rows below
-say "universal" rather than listing two downloads. The merge is strict and
+which macOS picks the matching slice at launch. The `.dmg` people download is
+that universal build. The `.zip`s auto-update downloads are not: there is one
+per arch, because a universal binary diffs badly — the arm64 slice's code
+signature sits in the middle of the file, so every release re-sent the whole
+x64 half and a Mac update cost ~97 MB where Windows cost ~12 MB. (A universal
+zip also never reached Intel Macs: electron-updater treats any file name
+containing `arm64` as Apple Silicon only.) The merge is strict and
 refuses to reconcile files that differ between the arches, which is why
 `build.files` excludes node-gyp's `obj/` and `.deps/` intermediates; the release
 workflow then reads the Mach-O fat header of every packaged `.node` to prove
@@ -43,7 +48,7 @@ both slices actually survived.
 
 | Runner | Artifacts |
 | --- | --- |
-| `macos-latest` | one universal `.dmg` and one universal `.zip` (arm64 + x64 in each), signed and notarized |
+| `macos-latest` | one universal `.dmg` (arm64 + x64) for downloads, plus an arm64 `.zip` and an x64 `.zip` for auto-update, all signed and notarized |
 | `ubuntu-latest` | `.deb`, `.rpm`, `.AppImage` — x64 |
 | `ubuntu-24.04-arm` | the same three — arm64 |
 | `windows-latest` | one NSIS installer `.exe` carrying x64 + arm64 |
@@ -64,9 +69,10 @@ openSUSE; the AppImage runs on anything else without installing.
 
 #### macOS signing and notarization
 
-Without these the macOS build still runs but produces an **unsigned** app that
-Gatekeeper blocks. The workflow warns loudly in the log rather than failing, so
-check the log on your first run.
+Without these the macOS build **fails**: the workflow refuses to build an
+unsigned macOS release (one that Gatekeeper would block on every user's Mac),
+and since publishing waits for every platform, no release is published at all
+until they are set.
 
 | Secret | How to get it |
 | --- | --- |
@@ -104,6 +110,36 @@ and runs fine, so this failure is invisible until a user tries to sign in.
 > the installed-app client secret as non-confidential — but it does mean it is
 > effectively public once you ship. Use a client dedicated to the desktop app,
 > never one shared with a web property.
+
+#### Release signing secrets (required — a release fails without them)
+
+Every release is signed twice in the `publish` job (CASA M-3). Both fail closed:
+with a secret missing or wrong, **nothing is published**.
+
+| Secret | What it signs | Checked against |
+| --- | --- | --- |
+| `UPDATE_SIGNING_KEY` | `update-manifest.json` — every artifact's sha512. The installed app refuses any update whose files aren't in a manifest signed by this key. | `apps/desktop/build/update-signing-keys.json` (public key shipped in the app) |
+| `GPG_SIGNING_KEY`, `GPG_PASSPHRASE` | `SHA256SUMS` → `SHA256SUMS.asc`, for verifying downloads by hand | the fingerprint pinned in `release.yml` (`97EA7E45F5EF280A9EF4B72F99955D8F79A76EF2`); public key at `docs/release-signing-key.asc` |
+
+`UPDATE_SIGNING_KEY` is an Ed25519 private key in PKCS#8 PEM; paste the whole
+file (`-----BEGIN PRIVATE KEY-----` … `-----END PRIVATE KEY-----`).
+`GPG_SIGNING_KEY` is the ASCII-armoured secret key (`gpg --armor
+--export-secret-keys <fingerprint>`).
+
+> **Back up both private keys offline (password manager or hardware).** Losing
+> `UPDATE_SIGNING_KEY` means every installed copy refuses every future update —
+> users would have to reinstall by hand. It must never be committed or put
+> anywhere but the GitHub secret and the backup.
+
+**Rotating the update key** (planned, or after a suspected leak):
+
+1. Generate a new key pair; add the new PUBLIC key to the `ed25519` list in
+   `apps/desktop/build/update-signing-keys.json` (keep the old one).
+2. Release with the OLD key still in the secret. Installed copies verify it with
+   the old key and receive an app that trusts both.
+3. Switch `UPDATE_SIGNING_KEY` to the new key; a later release can drop the old
+   public key. After a leak, do step 2 immediately and treat any release signed
+   in between as suspect.
 
 ### 1b. Your local `.env` vs. repository secrets
 
@@ -250,9 +286,17 @@ Three things make that work, and each is a way to break it:
    (`gh release edit vX --draft`) before users update.
 3. **macOS updates require the build to be signed.** Squirrel.Mac validates the
    signature of the downloaded `.zip` against the running app, so an unsigned
-   release installs for nobody. If `APPLE_CERTIFICATE_P12` was missing, the
-   macOS build warns rather than failing (see above) — publishing that release
-   ships a Mac app that can never update itself again.
+   release installs for nobody. The macOS build therefore FAILS when
+   `APPLE_CERTIFICATE_P12` is missing, rather than shipping an app that can
+   never update itself again.
+4. **Every update is checked against the signed manifest before it downloads.**
+   `latest*.yml` lives in the same release as the binaries it vouches for, and
+   Windows/Linux builds aren't OS-signed, so the app also fetches
+   `update-manifest.json` + `.sig` from the release and refuses the update unless
+   every file it would download matches a hash signed by `UPDATE_SIGNING_KEY`
+   (`electron/services/update-manifest.ts`). A release without them is refused
+   by every copy that has this check — which is why the publish job won't create
+   one.
 
 ### What each platform gets
 
@@ -270,8 +314,11 @@ same way — there is no `app-update.yml` in a `pnpm dev` tree.
 ### If a user says updates never arrive
 
 Check, in this order: the release is published rather than draft; `latest.yml`
-(or `latest-mac.yml`/`latest-linux.yml`) is attached to it; the version in that
-file is higher than theirs; and their build is not a `.deb`/`.rpm`. The app logs
+(or `latest-mac.yml`/`latest-linux.yml`) is attached to it, and so are
+`update-manifest.json` and `update-manifest.json.sig`; the version in that file
+is higher than theirs; and their build is not a `.deb`/`.rpm`. A refused
+verification logs `[Update] Refused <version>: could not verify it …` with the
+reason. The app logs
 every check to `app.log` with the `[Update]` prefix, including the reason a check
 was refused.
 

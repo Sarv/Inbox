@@ -1,8 +1,9 @@
-import { AlertTriangle, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, FileCheck, X } from 'lucide-react';
 import { useEffect, useMemo, useRef } from 'react';
 
 import {
   describePermission,
+  EXTENSION_TRUST_NOTICE,
   formatDownloadSize,
   hasHighRiskPermission,
   sortPermissionsByRisk,
@@ -15,10 +16,13 @@ import { ExtensionScreenshots, ExtensionSurfaces, type ScreenshotItem } from './
 /**
  * The consent step before anything from the registry is installed.
  *
- * An extension runs in the main process with whatever its manifest asks for, so
- * the only thing standing between "a stranger published this" and "it can read
- * every message you have" is this dialog. It therefore states the permissions
- * in plain language, riskiest first, and never pre-selects or collapses them.
+ * An extension runs in a separate process as full Node code, with the same
+ * access to the user's files and mail data as the app itself, so the only thing
+ * standing between "a stranger published this" and "it can read every message
+ * you have" is this dialog. Its permissions gate only the app APIs it can call,
+ * not what its code can do. The dialog therefore ALWAYS says so, whatever the
+ * extension asks for, and states the permissions in plain language, riskiest
+ * first, never pre-selected or collapsed.
  *
  * What the user sees here is sent back to the main process on confirm and
  * re-checked against the registry: if the extension's permissions changed
@@ -125,12 +129,15 @@ export function ExtensionPermissionPrompt({
             className="mt-4"
           />
 
+          {/* "What it asks the app for", never "what it will be able to do": the
+              list limits only what it can ask the app to do. What its code can
+              do on its own is the notice below. */}
           <h3 className="text-sm font-medium mt-4 mb-2">
-            This extension will be able to:
+            What it asks the app for:
           </h3>
           {permissions.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              Nothing — it asks for no permissions at all.
+              No app permissions.
             </p>
           ) : (
             <ul className="space-y-2">
@@ -158,20 +165,23 @@ export function ExtensionPermissionPrompt({
             </ul>
           )}
 
-          {sensitive && (
-            <div className="mt-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-start gap-2.5">
-              <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-muted-foreground">
-                Only install extensions from an author you trust. This one can reach your
-                messages or the internet, and it runs with the same access the app has.
-              </p>
+          {/* Always shown, even with no permissions at all: an extension's code is
+              not confined to what it asks the app for. */}
+          <div
+            role="note"
+            className="mt-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-start gap-2.5"
+          >
+            <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+            <div className="text-xs text-muted-foreground space-y-1">
+              <p>{EXTENSION_TRUST_NOTICE}</p>
+              {sensitive && <p>It also asks for sensitive permissions, marked above.</p>}
             </div>
-          )}
+          </div>
 
           <div className="mt-4 p-3 rounded-lg bg-muted/50">
             <div className="flex items-center gap-2 text-xs font-medium mb-1.5">
-              <ShieldCheck className="h-3.5 w-3.5 text-green-500" />
-              Verified download
+              <FileCheck className="h-3.5 w-3.5 text-muted-foreground" />
+              Download checksum
             </div>
             <dl className="text-xs text-muted-foreground space-y-1">
               <div className="flex gap-2">
@@ -188,7 +198,9 @@ export function ExtensionPermissionPrompt({
               </div>
             </dl>
             <p className="text-[11px] text-muted-foreground mt-2">
-              The download is rejected if it does not match this checksum.
+              The download is rejected if it does not match this checksum. The
+              checksum comes from the same registry as the extension, so it
+              catches a damaged download, not a malicious author.
             </p>
           </div>
 

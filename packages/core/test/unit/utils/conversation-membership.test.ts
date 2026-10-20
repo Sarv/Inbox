@@ -8,6 +8,7 @@ import {
   conversationFoldersOf,
   conversationMembers,
   conversationSenders,
+  conversationStarTargetIds,
   draftFolderPathsOf,
   firstConversationMember,
   hasLiveUserDraftAmong,
@@ -285,6 +286,48 @@ describe('latestConversationMember — the default reply target', () => {
     const rows = [row('real', 'INBOX', 100), row('d', 'INBOX.Drafts', 300), row('t', 'Trash', 400)];
     expect(latestConversationMember(rows, ROLES)?.id).toBe('real');
     expect(latestConversationMember([row('d', 'Drafts')])).toBeNull();
+  });
+});
+
+describe('conversationStarTargetIds — what a conversation star writes to', () => {
+  // Breaks: starring a thread flags the FIRST message (or every reply) on the
+  // server, so Outlook and Sarv Mail show a different message starred than the
+  // one they would have — the reported thread star mismatch.
+  it('stars only the latest member, whatever row order it is given in', () => {
+    const rows = [row('first', 'INBOX', 100), row('latest', 'INBOX', 300), row('middle', 'INBOX', 200)];
+    expect(conversationStarTargetIds(rows, true)).toEqual(['latest']);
+    expect(conversationStarTargetIds([...rows].reverse(), true)).toEqual(['latest']);
+  });
+
+  // Breaks: a newer draft or Trash copy takes the star instead of the real
+  // latest message, so the star vanishes on send or on emptying Trash.
+  it('never stars a draft or a Trash copy while a real message exists', () => {
+    const rows = [row('real', 'INBOX', 100), row('d', 'INBOX.Drafts', 300), row('t', 'Trash', 400)];
+    expect(conversationStarTargetIds(rows, true, ROLES)).toEqual(['real']);
+  });
+
+  // Breaks: a single-message thread is no longer starred exactly as before.
+  it('stars the lone message of a single-message thread', () => {
+    expect(conversationStarTargetIds([row('only', 'INBOX')], true)).toEqual(['only']);
+  });
+
+  // Breaks: unstarring clears only the latest, a star left on an older copy
+  // keeps the thread aggregate starred, and the click looks like a no-op.
+  it('unstars every row, drafts and copies included', () => {
+    const rows = [row('a', 'INBOX', 100), row('b', 'INBOX', 200), row('d', 'Drafts', 300)];
+    expect(conversationStarTargetIds(rows, false)).toEqual(['a', 'b', 'd']);
+  });
+
+  // Breaks: starring a row in the Drafts view (only drafts, no members) does nothing.
+  it('falls back to the newest row when the thread has no members', () => {
+    const rows = [row('d1', 'Drafts', 100), row('d2', 'Drafts', 200)];
+    expect(conversationStarTargetIds(rows, true)).toEqual(['d2']);
+  });
+
+  // Breaks: an empty thread invents a target id.
+  it('returns nothing for no rows', () => {
+    expect(conversationStarTargetIds([], true)).toEqual([]);
+    expect(conversationStarTargetIds([], false)).toEqual([]);
   });
 });
 

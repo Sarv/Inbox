@@ -50,16 +50,17 @@ export const FIRST_CHECK_DELAY_MS = 30 * 1000;
  * check can legitimately sit there for minutes — which is exactly what it did:
  * "Checking for updates..." with no end and no log line.
  *
- * 20s is chosen against a measured worst case, not a guess. The GitHub feed is
+ * 60s is chosen against a measured worst case, not a guess. The GitHub feed is
  * two requests: the releases atom feed, and `latest-mac.yml` from
  * `release-assets.githubusercontent.com`. On a network that slow-paths that
- * asset host the TCP connect alone was reproducibly ~14.8s (15.5s wall, three
- * runs). So the budget must clear ~16s to avoid failing a check that would
- * have succeeded, and must stay far enough under a minute that the dialog
- * always answers. Below this, an honest "couldn't reach the server, the next
- * check is in an hour" beats a spinner that never resolves.
+ * asset host the TCP connect alone was ~14.8s when first measured, and 45.0s
+ * on 2026-10-13 (curl, three runs, while github.com itself answered in 0.7s).
+ * The old 20s budget failed EVERY check on that network — the update was found
+ * a minute later, after the dialog had already said "Couldn't check". 60s
+ * clears 45s and matches the transport's own socket timeout, so ours fires
+ * only when it is retrying, which is the spinner this bound exists to end.
  */
-export const UPDATE_CHECK_TIMEOUT_MS = 20 * 1000;
+export const UPDATE_CHECK_TIMEOUT_MS = 60 * 1000;
 
 /** Who asked. A manual check always reports back, even to say "you're current". */
 export type UpdateTrigger = 'manual' | 'scheduled';
@@ -345,7 +346,8 @@ export const getUpdateSupport = ({
  *     though they may have hidden the progress in the meantime.
  *  4. **Otherwise, a background cycle interrupts only when there is a decision
  *     to make.** With automatic updates ON there is none — the download and the
- *     install both happen without the user, so the dialog never opens. With
+ *     install both happen without the user, so the dialog never opens (a
+ *     staged update is announced by {@link shouldNotifyUpdateReady} instead). With
  *     them OFF the app cannot proceed without an answer, so it asks once the
  *     update is found (and again when a requested download is staged), subject
  *     to the user's earlier "skip" and "later".
@@ -381,6 +383,37 @@ export const shouldShowDialog = ({
 };
 
 /**
+ * Should a freshly staged update announce itself with a system notification?
+ *
+ * The quiet counterpart of the dialog. With automatic updates on, a background
+ * download never opens the dialog (rule 4 above), and on macOS closing the
+ * window is not quitting — so "installs on next quit" could wait weeks with
+ * nothing on screen saying an update was waiting. A notification tells the user
+ * once, without taking focus or blocking a half-written reply.
+ *
+ * Not when the dialog is already saying it (`prompted`), not twice for the same
+ * version, and not against the user's own "skip" or "later".
+ */
+export const shouldNotifyUpdateReady = ({
+  version,
+  prefs,
+  now,
+  prompted,
+  notifiedVersion,
+}: {
+  version: string;
+  prefs: UpdatePrefs;
+  now: number;
+  /** The dialog is showing this update already. */
+  prompted: boolean;
+  /** The version a notification was last shown for in this process. */
+  notifiedVersion: string | null;
+}): boolean =>
+  !prompted
+  && notifiedVersion !== version
+  && shouldPromptForUpdate({ version, prefs, now, trigger: 'scheduled' });
+
+/**
  * May a downloaded update install ITSELF the next time the app quits, with no
  * button pressed and nothing for the user to do?
  *
@@ -398,3 +431,22 @@ export const shouldShowDialog = ({
  */
 export const shouldAutoInstallOnQuit = (prefs: UpdatePrefs, version: string | null): boolean =>
   version === null || prefs.skippedVersion !== version;
+
+/** The parts of an update description that identify what would be downloaded. */
+export interface UpdateIdentity {
+  version: string;
+  files?: Array<{ url: string; sha512: string }>;
+}
+
+/**
+ * Whether two update descriptions name the same version AND the same files
+ * (each file's name and sha512). A version string alone is not enough to tie a
+ * download to its verification: electron-updater downloads whatever its LATEST
+ * check returned, so an approval must hold for exactly those files.
+ */
+export const sameUpdate = (a: UpdateIdentity, b: UpdateIdentity): boolean => {
+  if (a.version !== b.version) return false;
+  const key = (info: UpdateIdentity) =>
+    (info.files ?? []).map((file) => `${String(file.url).split('/').pop()}\u0000${file.sha512}`).sort().join('\n');
+  return key(a) === key(b);
+};

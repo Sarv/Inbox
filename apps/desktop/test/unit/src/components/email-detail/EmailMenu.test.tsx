@@ -99,6 +99,16 @@ describe('EmailMenu — the three-dot button', () => {
     expect(button.getAttribute('aria-controls')).toBe(menu()!.id);
   });
 
+  // Regression: a block wrapper laid the button on a text line whose descender
+  // space hung below it, lifting the ⋮ 3.5px above the chat bubble's star. A
+  // flex wrapper is exactly the button's height, so a row can centre it.
+  it('wraps the trigger in a flex box, not a text line', () => {
+    const view = mount(<EmailMenu email={{ id: 'm1' }} {...newHandlers()} />);
+    const wrapper = view.container.firstElementChild as HTMLElement;
+    expect(wrapper.contains(trigger(view))).toBe(true);
+    expect(wrapper.classList.contains('flex')).toBe(true);
+  });
+
   // The shared Tooltip at the project's 40ms, not sooner.
   it('shows its tooltip at 40ms', () => {
     vi.useFakeTimers();

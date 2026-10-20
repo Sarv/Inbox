@@ -55,7 +55,7 @@ export function SetupDialog({ title, steps, activeStep, onClose, closeDisabled =
       <div className="relative my-auto w-full max-w-2xl">
         <div className="mb-6 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <img src="/icon.png" alt="" aria-hidden="true" className="h-10 w-10 rounded-xl" />
+            <img src="./icon.png" alt="" aria-hidden="true" className="h-10 w-10 rounded-xl" />
             <div><span className="text-xl font-semibold tracking-tight">Inbox</span><p id={labelId} className="text-sm text-muted-foreground">{title}</p></div>
           </div>
           <Tooltip content="Close setup" delayMs={40}>

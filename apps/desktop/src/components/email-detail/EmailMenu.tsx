@@ -340,7 +340,10 @@ export function EmailMenu({ email: _email, className = '', ...handlers }: EmailM
   };
 
   return (
-    <div ref={menuRef} className={`relative ${className}`}>
+    // `flex`, not a plain block: a block lays the button out on a text line,
+    // whose descender space hangs below it and lifts the ⋮ off the centre line
+    // of whatever row it sits in (3.5px above the chat bubble's star).
+    <div ref={menuRef} className={`relative flex ${className}`}>
       {/* Icon-only, so it is an IconButton: the shared Tooltip AND a name. The
           native `title` it had took ~500ms to appear and named nothing for a
           screen reader. The tooltip hides while the menu is open, which it

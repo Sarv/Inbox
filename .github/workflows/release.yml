@@ -59,7 +59,9 @@ jobs:
     name: ${{ matrix.name }}
     needs: verify
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90 # notarization alone can take 20+ minutes
+    # notarization alone can take 20+ minutes, and macOS notarizes three apps
+    # (universal, arm64, x64)
+    timeout-minutes: 150
     env:
       # Evaluated once at job level: a step cannot read env it sets on itself,
       # and this gates both signing and the verification step below.
@@ -68,26 +70,38 @@ jobs:
       fail-fast: false # one platform failing must not discard the others
       matrix:
         include:
-          - name: macOS (universal)
-            id: mac-universal
+          - name: macOS
+            id: mac
             os: macos-latest
             platform: mac
             # Both macOS arches build on one runner: Xcode ships both SDKs, so
             # the native addons cross-compile between arm64 and x64 fine. This
             # is the ONLY cross-arch case that works.
             #
-            # --universal packs each arch separately and then merges them with
-            # lipo into ONE fat binary, so the job emits a single dmg and a
-            # single zip instead of one of each per arch. Users stop having to
-            # know which Mac they own; the cost is that each download carries
-            # both slices. The merge is strict -- it refuses to reconcile files
-            # that differ between the two packs -- which is why build.files
-            # excludes the node-gyp intermediates (obj/, .deps/) whose contents
-            # are arch-specific.
-            args: --mac --universal
+            # Two different shapes, on purpose (build.mac.target):
+            #  - the DMG is UNIVERSAL: both packs merged with lipo into one fat
+            #    binary, so a first-time download never asks which Mac you own;
+            #  - the auto-update ZIPs are PER ARCH (arm64, x64). electron-
+            #    updater only fetches the blocks that changed (.blockmap), and
+            #    in a universal binary the arm64 code signature sits mid-file,
+            #    so every release re-shipped the whole x64 half of the 168 MB
+            #    Electron Framework: 97 MB of a 258 MB zip for 1.3.2 -> 1.3.3,
+            #    against 12 MB on Windows. Per-arch, the signature is at the
+            #    end. It also fixes Intel Macs: electron-updater treats any
+            #    file with "arm64" in its name as Apple Silicon, so the
+            #    universal "...-mac-arm64-amd64.zip" was filtered out for them
+            #    and they had NO update to download.
+            # The merge is strict -- it refuses to reconcile files that differ
+            # between the two packs -- which is why build.files excludes the
+            # node-gyp intermediates (obj/, .deps/) whose contents are
+            # arch-specific. No arch flag here: every target pins its own.
+            args: --mac
             # The binary inside the .app bundle, launched directly: `open`
-            # returns before the app has done anything.
-            smoke: apps/desktop/release/mac-universal/Sarv Inbox.app/Contents/MacOS/Sarv Inbox
+            # returns before the app has done anything. The universal app (the
+            # DMG) and the arm64 app (what auto-update ships to Apple Silicon)
+            # both run on this runner; the x64 zip is covered by the arch check.
+            smoke: apps/desktop/release/mac-universal/Sarv Inbox.app/Contents/MacOS/Sarv Inbox|apps/desktop/release/mac-arm64/Sarv Inbox.app/Contents/MacOS/Sarv Inbox
+            fuses: apps/desktop/release/mac-universal/Sarv Inbox.app|apps/desktop/release/mac-arm64/Sarv Inbox.app|apps/desktop/release/mac/Sarv Inbox.app
           # Each Linux arch gets its OWN runner: unlike Xcode and MSVC, the
           # stock gcc on a GitHub runner has no cross toolchain, so the arm64
           # machine cannot compile x64 (`cc: unrecognized command-line option
@@ -114,12 +128,14 @@ jobs:
             platform: linux
             args: --linux --x64
             unpacked: apps/desktop/release/linux-unpacked
+            fuses: apps/desktop/release/linux-unpacked/sarv-inbox
           - name: Linux arm64
             id: linux-arm64
             os: ubuntu-22.04-arm
             platform: linux
             args: --linux --arm64
             unpacked: apps/desktop/release/linux-arm64-unpacked
+            fuses: apps/desktop/release/linux-arm64-unpacked/sarv-inbox
           - name: Windows (x64 + arm64)
             id: win-x64-arm64
             os: windows-latest
@@ -136,6 +152,8 @@ jobs:
             # x64 only: an x64 runner cannot execute the arm64 build, whose
             # addon CPU is verified from its PE header instead.
             smoke: apps/desktop/release/win-unpacked/Sarv Inbox.exe
+            # '|'-separated: both arches come out of this one job.
+            fuses: apps/desktop/release/win-unpacked/Sarv Inbox.exe|apps/desktop/release/win-arm64-unpacked/Sarv Inbox.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -296,8 +314,11 @@ jobs:
             EXTRA+=(-c.mac.notarize=true)
             echo "Signing and notarizing with the Developer ID certificate."
           elif [[ "${{ matrix.platform }}" == "mac" ]]; then
-            echo "WARN: APPLE_CERTIFICATE_P12 is not set — building an UNSIGNED app."
-            echo "      Gatekeeper will block it. See docs/RELEASING.md."
+            # Fail closed (CASA M-3): an unsigned macOS build used to be
+            # published with a warning, which Gatekeeper then blocked on every
+            # user's Mac. Nothing unsigned reaches a release.
+            echo "::error::APPLE_CERTIFICATE_P12 is not set — refusing to build an unsigned macOS release. See docs/RELEASING.md."
+            exit 1
           fi
           pnpm exec electron-builder ${{ matrix.args }} "${EXTRA[@]}" --publish never
         env:
@@ -319,11 +340,14 @@ jobs:
         if: matrix.platform == 'mac' && env.HAS_APPLE_CERT == 'true'
         run: |
           set -euo pipefail
-          APP=$(find apps/desktop/release -name '*.app' -maxdepth 3 | head -1)
-          echo "Verifying $APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
-            || { echo "FAIL: signed app carries no entitlements"; exit 1; }
+          # Every app that ships: the universal one in the DMG and the two
+          # per-arch ones in the update zips.
+          for APP in apps/desktop/release/{mac-universal,mac-arm64,mac}/"Sarv Inbox.app"; do
+            echo "Verifying $APP"
+            codesign --verify --deep --strict --verbose=2 "$APP"
+            codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
+              || { echo "FAIL: $APP carries no entitlements"; exit 1; }
+          done
           echo "OK: signature and entitlements present"
 
       # A cross-compiled addon that silently fell back to the host CPU still
@@ -341,12 +365,19 @@ jobs:
       # The universal merge is the step that can silently halve the app: if
       # lipo ever keeps one slice, the dmg still builds, signs, notarizes and
       # installs, and fails only for users on the missing CPU -- as an app with
-      # no mail, not as a crash, because every DB read is try/catch'd. Reading
-      # the Mach-O fat header costs milliseconds.
-      - name: Verify the macOS build is really universal
+      # no mail, not as a crash, because every DB read is try/catch'd. The
+      # per-arch update zips are the same risk one step earlier: an x64 app
+      # carrying the arm64 addon (beforeBuild rebuilds it per arch, in place)
+      # is what auto-update would hand every Intel Mac. Reading the Mach-O
+      # headers costs milliseconds.
+      - name: Verify the macOS builds carry the right architectures
         if: matrix.platform == 'mac'
         shell: bash
-        run: node scripts/verify-mac-arch.mjs apps/desktop/release/mac-universal=x64,arm64
+        run: |
+          node scripts/verify-mac-arch.mjs \
+            apps/desktop/release/mac-universal=x64,arm64 \
+            apps/desktop/release/mac-arm64=arm64 \
+            apps/desktop/release/mac=x64
 
       # The v1.2.0 tag built four green artifacts that were all EMPTY: a false
       # from build/beforeBuild.js told electron-builder 26 that node_modules
@@ -358,6 +389,18 @@ jobs:
         if: matrix.platform != 'win'
         shell: bash
         run: node scripts/verify-packaged-addons.mjs apps/desktop/release
+
+      # build.files ships only the node_modules the production bundles still
+      # load (better-sqlite3 and its loader) -- the rest duplicated what vite
+      # had already bundled and was ~180 MB of every update. The cost is that
+      # a module newly made external in vite.config.ts must be added there
+      # too, or the app throws the first time it is required, which for a
+      # lazy chunk is on a user's machine, not in the smoke launch below.
+      # This reads every require() out of the packed bundles and fails if one
+      # names a package the asar does not carry.
+      - name: Verify the packed app carries every module it requires
+        shell: bash
+        run: node scripts/verify-asar-requires.mjs apps/desktop/release
 
       # glibc is backward compatible and never forward, so a binary linked on a
       # newer distribution than the user's refuses to load there -- and the
@@ -393,6 +436,21 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb "$DEB"
 
+      # Fuses are bits in the Electron binary that switch off running the app as
+      # plain Node, NODE_OPTIONS and --inspect, and turn on asar integrity. Left
+      # at Electron's defaults, any local process can run code AS the signed app
+      # and read its Keychain / DPAPI secrets without a prompt (CASA M-2).
+      # electron-builder flips them from build.electronFuses; this reads them
+      # back out of every binary that ships -- Windows arm64 included, which the
+      # smoke launch below cannot execute -- so a builder change that silently
+      # stops flipping them fails here, not in an audit.
+      - name: Verify the Electron fuses
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS='|' read -ra TARGETS <<< "${{ matrix.fuses }}"
+          node scripts/verify-fuses.mjs "${TARGETS[@]}"
+
       # Every check above reads the artifact, and reading a binary cannot tell
       # you it runs: v1.2.2 was signed, verified, uploaded and dead on launch.
       # This starts the packaged app for real -- SARV_SMOKE_TEST makes it boot,
@@ -406,7 +464,8 @@ jobs:
           if [[ "${{ matrix.platform }}" == "linux" ]]; then
             xvfb-run -a node scripts/smoke-launch.mjs "/opt/Sarv Inbox/sarv-inbox"
           else
-            node scripts/smoke-launch.mjs "${{ matrix.smoke }}"
+            IFS='|' read -ra APPS <<< "${{ matrix.smoke }}"
+            for APP in "${APPS[@]}"; do node scripts/smoke-launch.mjs "$APP"; done
           fi
 
       - name: Upload artifacts
@@ -453,6 +512,47 @@ jobs:
       # if the version has no section, rather than publishing empty notes.
       - name: Extract release notes
         run: node scripts/changelog.mjs notes "${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+
+      # Only for the signer below (it parses latest*.yml); the artifacts
+      # themselves were built and verified in the `build` jobs.
+      - uses: ./.github/actions/setup-workspace
+
+      # The update feed (latest*.yml) sits in the SAME release as the binaries
+      # it vouches for, and Windows/Linux builds aren't OS-signed — so anyone
+      # who could alter a release could ship every installed copy anything.
+      # The app now refuses any update whose files aren't in a manifest signed
+      # by UPDATE_SIGNING_KEY (CASA M-3). The script fails — nothing is
+      # published — if the key is missing, isn't the key the app trusts, or the
+      # feed disagrees with the artifacts.
+      - name: Sign the update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs artifacts "${{ steps.version.outputs.version }}"
+
+      # SHA256SUMS + a detached GPG signature, for anyone verifying a download
+      # by hand (and Linux package tooling). The public key is
+      # docs/release-signing-key.asc; the fingerprint is pinned here so a
+      # wrong key in the secret fails the release instead of signing it.
+      - name: Write and GPG-sign SHA256SUMS
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_GPG_FINGERPRINT: 97EA7E45F5EF280A9EF4B72F99955D8F79A76EF2
+        run: |
+          set -euo pipefail
+          if [[ -z "${GPG_SIGNING_KEY}" || -z "${GPG_PASSPHRASE}" ]]; then
+            echo "::error::GPG_SIGNING_KEY / GPG_PASSPHRASE are not set — refusing to publish unsigned checksums."
+            exit 1
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s' "${GPG_SIGNING_KEY}" | gpg --batch --import
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --local-user "${RELEASE_GPG_FINGERPRINT}" --armor --detach-sign SHA256SUMS
+          gpg --batch --status-fd 1 --verify SHA256SUMS.asc SHA256SUMS | grep -q "VALIDSIG ${RELEASE_GPG_FINGERPRINT}" \
+            || { echo "::error::SHA256SUMS.asc is not signed by ${RELEASE_GPG_FINGERPRINT}"; exit 1; }
+          rm -rf "${GNUPGHOME}"
 
       - name: List artifacts
         run: ls -lh artifacts/

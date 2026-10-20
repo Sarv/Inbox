@@ -94,7 +94,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/5 via-background to-primary/10" />
       <div className="relative my-auto w-full max-w-2xl">
         <div className="mb-6 flex items-center justify-center gap-3">
-          <img src="/icon.png" alt="" aria-hidden="true" className="h-10 w-10 rounded-xl" />
+          <img src="./icon.png" alt="" aria-hidden="true" className="h-10 w-10 rounded-xl" />
           <span className="text-xl font-semibold tracking-tight">Inbox</span>
         </div>
         <ol aria-label="Setup progress" className="mb-6 flex justify-center gap-2 sm:gap-4">

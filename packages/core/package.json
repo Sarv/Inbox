@@ -58,7 +58,7 @@
     "libqp": "^2.1.1",
     "lru-cache": "^11.5.3",
     "mailparser": "^3.9.33",
-    "nodemailer": "^10.0.10",
+    "nodemailer": "^10.0.14",
     "openpgp": "^6.3.2",
     "p-retry": "^8.0.1",
     "sanitize-filename": "^1.6.4",

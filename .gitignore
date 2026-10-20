@@ -77,6 +77,8 @@ apps/desktop/electron/**/*.d.ts.map
 # Hand-written, not compiler output: brings in Vite's ambient types so
 # `import.meta.env` type-checks (tsc fails on src/sentry.ts without it).
 !apps/desktop/src/vite-env.d.ts
+# Hand-written PDF worker module declaration required for attachment extraction.
+!apps/desktop/electron/services/assistant-attachment-modules.d.ts
 !apps/desktop/tailwind.config.js
 packages/**/src/**/*.js
 
@@ -103,6 +105,8 @@ apps/mobile/ios/
 *.mobileprovision
 *.p7b
 *.asc
+# PUBLIC release-signing key (verifies SHA256SUMS.asc); the private half is a GitHub secret.
+!docs/release-signing-key.asc
 *.gpg
 
 # SQLite databases (local dev) and their journals / backups
@@ -167,3 +171,5 @@ apps/desktop/build/*
 !apps/desktop/build/afterPack.js
 !apps/desktop/build/beforeBuild.js
 !apps/desktop/build/entitlements.mac.plist
+# PUBLIC keys the app trusts for signed update manifests (update-manifest.ts).
+!apps/desktop/build/update-signing-keys.json

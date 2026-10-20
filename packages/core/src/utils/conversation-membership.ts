@@ -284,6 +284,33 @@ export function latestConversationMember<T extends ConversationRow>(
 }
 
 /**
+ * The ids a conversation-level star or unstar writes to — the list row's star,
+ * the bulk toolbar, the `s` shortcut. Matches Outlook and Sarv Mail, whose
+ * server state the user compares against:
+ *
+ *   * STARRING flags only the LATEST message ({@link latestConversationMember}).
+ *     Flagging every message made the thread look different in other clients
+ *     (every reply starred), and flagging the representative row the caller
+ *     happened to hold flagged the first message when that was the anchor.
+ *   * UNSTARRING clears EVERY row: a star left on any copy keeps the thread
+ *     starred (the thread aggregate is "any row starred"), so the click would
+ *     appear to do nothing.
+ *
+ * A thread with no members (only drafts — the Drafts view) stars its newest
+ * row in the conversation order instead of nothing. Empty input → empty.
+ */
+export function conversationStarTargetIds<T extends ConversationRow>(
+  rows: readonly T[],
+  starring: boolean,
+  folders?: ConversationFolders | null,
+): string[] {
+  if (!starring) return rows.map((row) => row.id);
+  const ordered = [...rows].sort(compareConversationOrder);
+  const latest = latestConversationMember(rows, folders) ?? ordered[ordered.length - 1];
+  return latest ? [latest.id] : [];
+}
+
+/**
  * Does the conversation hold a message AFTER `email`? The auto-draft gate's
  * question — "has somebody already answered this?" — so every doubt resolves
  * to YES (skipping an auto-draft is cheap; drafting, or auto-sending, a reply

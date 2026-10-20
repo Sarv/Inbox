@@ -23,11 +23,13 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 
 import { join } from 'path';
 
 import { createLogger, isTimeoutError, withTimeout } from '@sarvinbox/core';
-import { app } from 'electron';
-import { autoUpdater } from 'electron-updater';
+import { app, Notification } from 'electron';
+import { autoUpdater, type Logger as UpdaterLogger } from 'electron-updater';
 
 import { getMainWindow } from '../shared';
+import { restoreAndFocusWindow } from '../utils/window-focus';
 
+import { verifyUpdate } from './update-manifest';
 import {
   CHECK_INTERVAL_MS,
   DEFAULT_UPDATE_PREFS,
@@ -37,17 +39,38 @@ import {
   getUpdateSupport,
   parseUpdatePrefs,
   remindLater,
+  sameUpdate,
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
+  shouldNotifyUpdateReady,
   shouldShowDialog,
   skipVersion,
+  type UpdateIdentity,
   type UpdatePrefs,
   type UpdateState,
   type UpdateTrigger,
 } from './update-policy';
 
 const logger = createLogger('update-service');
+
+/**
+ * electron-updater's own log, written to app.log. It is the only record of
+ * whether an update came down as a differential (blockmap) download or fell
+ * back to the whole file, and why: "Full: 258 MB, To download: 12 MB (5%)".
+ * Without it a release that quietly ships every user the full installer looks
+ * exactly like one that ships them a few MB. No `debug`: electron-updater only
+ * calls it when it exists, and it is per-request noise.
+ */
+const electronUpdaterLog = createLogger('electron-updater');
+/** Keeps an Error's stack; electron-updater mostly logs plain strings. */
+const describeUpdaterMessage = (message: unknown): string =>
+  message instanceof Error ? (message.stack ?? message.message) : String(message);
+const updaterLogger: UpdaterLogger = {
+  info: (message) => electronUpdaterLog.info(describeUpdaterMessage(message)),
+  warn: (message) => electronUpdaterLog.warn(describeUpdaterMessage(message)),
+  error: (message) => electronUpdaterLog.error(describeUpdaterMessage(message)),
+};
 
 const PREFS_FILE_NAME = 'update-prefs.json';
 
@@ -90,6 +113,34 @@ let downloadRequested = false;
  * begins: a dismissal answers this check, not every future one.
  */
 let dialogDismissed = false;
+/**
+ * The update (version AND files) the release's SIGNED manifest vouched for (see
+ * update-manifest.ts). electron-updater never downloads on its own (autoDownload
+ * is forced off before any check, in wireEvents); this service starts every
+ * download, only for this update, and stages only a download that matches it.
+ */
+let verifiedInfo: UpdateIdentity | null = null;
+/**
+ * The update the most recent check offered — what electron-updater would now
+ * download. Cleared when a new check starts. A verification that finishes after
+ * its update was replaced must not start (or approve) a download, because the
+ * download would be of the newer, unverified update.
+ */
+let offeredInfo: UpdateIdentity | null = null;
+/** The verification started by the last 'update-available', so a check awaits it. */
+let pendingVerification: Promise<void> | null = null;
+/**
+ * The update that is downloaded, verified and waiting to install on quit.
+ *
+ * Checks keep running hourly after an update is staged (a newer release may
+ * come out), and each used to overwrite the 'downloaded' phase: a slow check
+ * timed out, or re-offered the SAME version and failed to re-verify it, and the
+ * state became 'error'. A manual check then said "could not be verified" about
+ * an update that was sitting on disk, and "Restart now" refused to run.
+ */
+let stagedInfo: UpdateIdentity | null = null;
+/** The version the "ready to install" notification was shown for. Once each. */
+let notifiedVersion: string | null = null;
 
 const loadPrefs = (): UpdatePrefs => {
   try {
@@ -166,37 +217,120 @@ export const getUpdateState = (): UpdateState => state;
 const checkDurationMs = (): number => (checkStartedAt === 0 ? 0 : Date.now() - checkStartedAt);
 
 /**
+ * A check that brought nothing newer leaves a staged update exactly where it
+ * was: 'downloaded', installable now and on quit. Returns false when nothing is
+ * staged, so the caller reports its own outcome.
+ */
+const keepStagedUpdate = (outcome: string): boolean => {
+  if (!stagedInfo) return false;
+  logger.info(`[Update] ${outcome}; keeping the staged ${stagedInfo.version}, which still installs on quit`);
+  setState({ phase: 'downloaded', version: stagedInfo.version, percent: 100, error: null });
+  return true;
+};
+
+/**
+ * Show the update dialog as if the user had asked — the click on the "ready to
+ * install" notification. 'manual' is what makes the dialog open with automatic
+ * updates on; the next check resets the trigger.
+ */
+const openUpdateDialog = (): void => {
+  restoreAndFocusWindow(getMainWindow());
+  currentTrigger = 'manual';
+  dialogDismissed = false;
+  setState({});
+};
+
+/** Tell the user, once, that an update is staged. A failure only costs the notice. */
+const notifyUpdateReady = (version: string): void => {
+  notifiedVersion = version;
+  try {
+    if (!Notification.isSupported()) return;
+    const notice = new Notification({
+      title: `Sarv Inbox ${version} is ready`,
+      body: 'It installs the next time you quit the app. Click to restart now.',
+      silent: true,
+    });
+    notice.on('click', openUpdateDialog);
+    notice.show();
+  } catch (error) {
+    logger.warn('[Update] Could not show the update-ready notification:', error);
+  }
+};
+
+/**
  * Wire electron-updater's events onto {@link setState}. Called once; the
  * listeners live for the process lifetime.
  */
 const wireEvents = (): void => {
+  // Before ANY check, not just the scheduled ones: electron-updater starts with
+  // autoDownload on, and a "Check for Updates..." click can arrive before
+  // startUpdateService runs. A download it started on its own would skip the
+  // signed-manifest verification below.
+  autoUpdater.autoDownload = false;
   if (wired) return;
   wired = true;
 
   autoUpdater.on('checking-for-update', () => {
+    // Whatever was on offer is being replaced; an older verification still in
+    // flight must not download the result of this check.
+    offeredInfo = null;
     setState({ phase: 'checking', error: null });
   });
 
   autoUpdater.on('update-available', (info) => {
-    // Logged with its cost: a check that takes 15 seconds and a check that
-    // hangs are indistinguishable in a log that only records the outcome, and
-    // that is precisely the gap that made "Checking for updates..." impossible
-    // to diagnose from app.log.
-    logger.info(
-      `[Update] Update available: ${info.version} (check took ${checkDurationMs()}ms,`,
-      prefs.autoUpdate ? 'downloading now)' : 'waiting for the user to ask)',
-    );
-    // With automatic updates on, electron-updater is already fetching it — say
-    // so. With them off nothing is moving until the user presses the button,
-    // and 'available' is the phase that asks.
-    setState(
-      shouldAutoDownload(prefs)
-        ? { phase: 'downloading', version: info.version, percent: 0, error: null }
-        : { phase: 'available', version: info.version, percent: 0, error: null },
-    );
+    offeredInfo = info;
+    // Already downloaded and verified: nothing to verify or fetch again.
+    if (stagedInfo && sameUpdate(info, stagedInfo)) {
+      pendingVerification = null;
+      keepStagedUpdate(`Check found ${info.version} again`);
+      return;
+    }
+    // Verify BEFORE anything is downloaded: the found update must be one the
+    // release's signed manifest vouches for, file for file (CASA M-3). The
+    // check that found it awaits this, so the dialog never shows an
+    // unverified update as available.
+    pendingVerification = (async () => {
+      verifiedInfo = null;
+      const verdict = await verifyUpdate(info);
+      if (offeredInfo !== info) {
+        logger.info(`[Update] Verification of ${info.version} finished after a newer check replaced it; ignoring it`);
+        return;
+      }
+      if (!verdict.ok) {
+        logger.warn(`[Update] Refused ${info.version}: could not verify it against the signed release manifest (${verdict.reason})`);
+        if (keepStagedUpdate(`Refused ${info.version}`)) return;
+        setState({
+          phase: 'error',
+          version: null,
+          error: `Version ${info.version} could not be verified as a genuine Sarv Inbox release, so it was not downloaded.`,
+          checkedAt: Date.now(),
+        });
+        return;
+      }
+      verifiedInfo = info;
+      // Logged with its cost: a check that takes 15 seconds and a check that
+      // hangs are indistinguishable in a log that only records the outcome, and
+      // that is precisely the gap that made "Checking for updates..." impossible
+      // to diagnose from app.log.
+      logger.info(
+        `[Update] Update available and verified: ${info.version} (check took ${checkDurationMs()}ms,`,
+        prefs.autoUpdate ? 'downloading now)' : 'waiting for the user to ask)',
+      );
+      if (shouldAutoDownload(prefs)) {
+        setState({ phase: 'downloading', version: info.version, percent: 0, error: null });
+        startVerifiedDownload();
+      } else {
+        // With automatic updates off nothing moves until the user presses the
+        // button, and 'available' is the phase that asks.
+        setState({ phase: 'available', version: info.version, percent: 0, error: null });
+      }
+    })();
   });
 
   autoUpdater.on('update-not-available', () => {
+    offeredInfo = null;
+    verifiedInfo = null;
+    if (keepStagedUpdate('No newer update')) return;
     logger.info(`[Update] No update available (check took ${checkDurationMs()}ms)`);
     setState({ phase: 'up-to-date', version: null, checkedAt: Date.now(), error: null });
   });
@@ -206,6 +340,20 @@ const wireEvents = (): void => {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    // Stage only what was verified, file for file. Anything else (a download
+    // electron-updater started of a newer check's result) is never installed:
+    // install-on-quit is disarmed and 'Restart now' needs phase 'downloaded'.
+    if (!verifiedInfo || !sameUpdate(info, verifiedInfo)) {
+      autoUpdater.autoInstallOnAppQuit = false;
+      logger.warn(`[Update] Refused to stage ${info.version}: it is not the update verified against the signed manifest`);
+      setState({
+        phase: 'error',
+        version: null,
+        error: `Version ${info.version} could not be verified as a genuine Sarv Inbox release, so it will not be installed.`,
+        checkedAt: Date.now(),
+      });
+      return;
+    }
     // Re-evaluated per version, not once at startup: a user who skipped 1.2.0
     // must still receive 1.2.1 automatically.
     autoUpdater.autoInstallOnAppQuit = shouldAutoInstallOnQuit(prefs, info.version);
@@ -218,6 +366,7 @@ const wireEvents = (): void => {
     // the progress dialog while it ran. Without this the "ready to install"
     // prompt was swallowed by the dismissal of the dialog it replaces.
     if (downloadRequested) dialogDismissed = false;
+    stagedInfo = info;
     setState({
       phase: 'downloaded',
       version: info.version,
@@ -225,6 +374,17 @@ const wireEvents = (): void => {
       checkedAt: Date.now(),
       error: null,
     });
+    if (
+      shouldNotifyUpdateReady({
+        version: info.version,
+        prefs,
+        now: Date.now(),
+        prompted: state.prompt,
+        notifiedVersion,
+      })
+    ) {
+      notifyUpdateReady(info.version);
+    }
   });
 
   autoUpdater.on('error', (error) => {
@@ -233,6 +393,7 @@ const wireEvents = (): void => {
     // stays false unless the user asked or is waiting on a download they
     // started — so it cannot become a recurring popup.
     logger.warn(`[Update] Update check failed after ${checkDurationMs()}ms:`, error);
+    if (keepStagedUpdate('Check failed')) return;
     setState({
       phase: 'error',
       error: error instanceof Error ? error.message : String(error),
@@ -276,10 +437,18 @@ const currentUpdateSupport = () =>
  */
 export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateState> => {
   const support = currentUpdateSupport();
+  const coalescing = checkInFlight || state.phase === 'downloading';
 
-  currentTrigger = trigger;
-  // A new check is a new question, so an earlier "Close" no longer applies.
-  dialogDismissed = false;
+  // A background tick that lands on a run already in progress asks nothing
+  // new. Letting it set the trigger turned a manual check into a scheduled one
+  // mid-flight (the first check fires 30s after launch, inside the check
+  // timeout), so the answer the user pressed for was never shown — and
+  // clearing the dismissal reopened a dialog they had closed.
+  if (!(coalescing && trigger === 'scheduled')) {
+    currentTrigger = trigger;
+    // A new check is a new question, so an earlier "Close" no longer applies.
+    dialogDismissed = false;
+  }
 
   if (!support.supported) {
     setState({ phase: 'unsupported', error: support.message, version: null });
@@ -290,7 +459,7 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
   // running — re-shows the dialog against the run already in progress rather
   // than starting a second one. Re-checking during a download is the worse of
   // the two: electron-updater would start fetching the same file again.
-  if (checkInFlight || state.phase === 'downloading') {
+  if (coalescing) {
     setState({});
     return state;
   }
@@ -303,12 +472,16 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
     // Bounded, because nothing below us is. builder-util-runtime's transport
     // defaults to a 60s socket timeout and retries server errors three times,
     // so an unbounded await can leave the dialog on "Checking for updates..."
-    // for minutes. An honest failure at 20s is a better answer than a spinner.
+    // for minutes. An honest failure at the deadline beats a spinner.
+    pendingVerification = null;
     await withTimeout(
       autoUpdater.checkForUpdates(),
       UPDATE_CHECK_TIMEOUT_MS,
       `The update server did not respond within ${Math.round(UPDATE_CHECK_TIMEOUT_MS / 1000)} seconds.`,
     );
+    // An update found is verified before the check counts as finished (the
+    // verification bounds its own requests and never throws).
+    if (pendingVerification) await pendingVerification;
   } catch (error) {
     // Two different failures land here. A rejection from electron-updater has
     // already fired the 'error' event, so the state is set and there is nothing
@@ -316,11 +489,13 @@ export const checkForUpdates = async (trigger: UpdateTrigger): Promise<UpdateSta
     // so it has to report itself.
     if (isTimeoutError(error)) {
       logger.warn(`[Update] Check timed out after ${checkDurationMs()}ms`);
-      setState({
-        phase: 'error',
-        error: error.message,
-        checkedAt: Date.now(),
-      });
+      if (!keepStagedUpdate('Check timed out')) {
+        setState({
+          phase: 'error',
+          error: error.message,
+          checkedAt: Date.now(),
+        });
+      }
     } else {
       logger.warn('[Update] Check rejected:', error);
     }
@@ -349,17 +524,30 @@ export const downloadUpdate = (): boolean => {
     return false;
   }
 
+  if (verifiedInfo?.version !== state.version) {
+    logger.warn('[Update] Download refused: version', state.version, 'was not verified against a signed manifest');
+    return false;
+  }
+
   logger.info('[Update] User asked to download', state.version);
   downloadRequested = true;
   dialogDismissed = false;
   setState({ phase: 'downloading', percent: 0, error: null });
+  startVerifiedDownload();
+  return true;
+};
+
+/** Start electron-updater's download of the update just verified. */
+function startVerifiedDownload(): void {
+  // A new download replaces whatever was staged (electron-updater clears its
+  // cache for it), so a failure from here on must not resurrect the old one.
+  stagedInfo = null;
   // The rejection path is the 'error' event, which is already wired; this
   // catch only stops an unhandled rejection from reaching the process.
   void autoUpdater.downloadUpdate().catch((error) => {
     logger.warn('[Update] Download rejected:', error);
   });
-  return true;
-};
+}
 
 /**
  * Turn background downloading on or off.
@@ -371,7 +559,6 @@ export const downloadUpdate = (): boolean => {
  */
 export const setAutoUpdateEnabled = (enabled: boolean): UpdateState => {
   savePrefs(setAutoUpdate(prefs, enabled));
-  autoUpdater.autoDownload = shouldAutoDownload(prefs);
   logger.info('[Update] Automatic updates', enabled ? 'enabled' : 'disabled');
 
   if (enabled && state.phase === 'available' && state.version) {
@@ -467,7 +654,10 @@ export const startUpdateService = (): void => {
     return;
   }
 
-  autoUpdater.autoDownload = shouldAutoDownload(prefs);
+  // electron-updater never downloads on its own (wireEvents, below, forces
+  // autoDownload off before any check): every download starts in this service,
+  // after the update is verified against the release's signed manifest.
+  // "Install updates automatically" is honoured there instead.
   // Updates are automatic by default: downloaded in the background, then
   // applied during the next ordinary quit, so a user who never touches the
   // dialog still ends up on the new version without doing anything. The
@@ -475,7 +665,7 @@ export const startUpdateService = (): void => {
   // `skipCurrentVersion()` is the one thing that turns this off, and only for
   // the version that was skipped.
   autoUpdater.autoInstallOnAppQuit = shouldAutoInstallOnQuit(prefs, null);
-  autoUpdater.logger = null;
+  autoUpdater.logger = updaterLogger;
   state = { ...state, currentVersion: runningVersion(), autoUpdate: prefs.autoUpdate };
 
   wireEvents();
@@ -516,4 +706,9 @@ export const __resetUpdateServiceForTests = (): void => {
   downloadRequested = false;
   dialogDismissed = false;
   wired = false;
+  verifiedInfo = null;
+  offeredInfo = null;
+  pendingVerification = null;
+  stagedInfo = null;
+  notifiedVersion = null;
 };

@@ -5,13 +5,14 @@ import type { Transporter } from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer';
 
 import type { OutgoingMimeTransform, SMTPConfig, SendEmailOptions, SendResult } from '../types/smtp';
+import { resolveConnectionSecurity, starttlsUnavailableMessage } from '../utils/connection-security';
 import { createLogger } from '../utils/logger';
 import { resolveTlsOptions } from '../utils/tls';
 import { isValidEmail, extractEmailAddress } from '../utils/validators';
 
 const logger = createLogger('SMTPClient');
 
-import { isTransientSendError } from './smtp-errors';
+import { isStarttlsRefusedError, isTransientSendError } from './smtp-errors';
 
 /**
  * Extract the bare email address from a "Display Name <addr@host>" string (or
@@ -43,6 +44,38 @@ function generateMessageId(fromAddress: string): string {
 }
 
 /**
+ * The user-facing text for a required-STARTTLS refusal: what happened and what
+ * to change (starttlsUnavailableMessage), plus the server's own reply when it
+ * gave one. The reply is the only clue when the cause is not encryption at all
+ * — e.g. a server policy rejecting EHLO ("550 HELO/EHLO must not be an address
+ * literal"), which nodemailer reports the same way under requireTLS.
+ */
+function starttlsRefusalText(error: unknown, host: string): string {
+  const base = starttlsUnavailableMessage('outgoing', host);
+  const reply = (error as { response?: unknown }).response;
+  if (typeof reply !== 'string') return base;
+  const said = reply.split(/\s+/).filter(Boolean).join(' ').slice(0, 300);
+  return said ? `${base} The server replied: "${said}".` : base;
+}
+
+/**
+ * A required-STARTTLS refusal, re-worded for the user (starttlsRefusalText)
+ * but keeping nodemailer's code / responseCode / command, which the send-retry
+ * classification (isTransientSendError) keys off.
+ */
+function withStarttlsMessage(error: Error, host: string): Error {
+  const e = error as Error & { code?: string; responseCode?: number; command?: string; response?: unknown };
+  return Object.assign(new Error(starttlsRefusalText(error, host)), {
+    starttlsRefused: true,
+    cause: error,
+    code: e.code,
+    responseCode: e.responseCode,
+    command: e.command,
+    response: e.response,
+  });
+}
+
+/**
  * SMTP client for sending emails
  */
 export class SMTPClient {
@@ -53,7 +86,8 @@ export class SMTPClient {
    * Connect to SMTP server
    */
   async connect(config: SMTPConfig): Promise<void> {
-    logger.info('[SMTPClient] Connecting to SMTP server:', config.host);
+    const security = resolveConnectionSecurity(config);
+    logger.info('[SMTPClient] Connecting to SMTP server:', config.host, `(security: ${security})`);
 
     // This client is a reused singleton — smtp:connect re-calls connect() on
     // every (re)auth / token refresh. Close the previous transporter before
@@ -88,12 +122,16 @@ export class SMTPClient {
     this.transporter = nodemailer.createTransport({
       host: config.host,
       port: config.port,
-      secure: config.secure,
-      // On a non-implicit-TLS connection (STARTTLS, e.g. port 587), REQUIRE the
-      // STARTTLS upgrade so the session can never silently fall back to sending
-      // credentials/mail in cleartext. Skipped only if the account explicitly
-      // opted into insecure TLS. No-op when `secure` (implicit TLS on 465/993).
-      requireTLS: !config.secure && !config.allowInsecureTLS,
+      // Connection security (resolveConnectionSecurity, CASA M-5): implicit TLS
+      // for 'ssl'; for 'starttls' the upgrade is REQUIRED, so a server that will
+      // not encrypt — or a network that strips STARTTLS — stops the session
+      // before AUTH instead of sending the password or token in cleartext. Only
+      // the user's explicit 'none' upgrades opportunistically. allowInsecureTLS
+      // (self-signed certificates) no longer turns the requirement off: it
+      // relaxes certificate checks (resolveTlsOptions), not encryption.
+      secure: security === 'ssl',
+      requireTLS: security === 'starttls',
+      opportunisticTLS: security === 'none',
       auth: auth as any,
       // TLS verification ON by default + TLS 1.2 floor (see resolveTlsOptions).
       tls: resolveTlsOptions(config),
@@ -104,9 +142,13 @@ export class SMTPClient {
       await this.transporter.verify();
       logger.info('[SMTPClient] Connected and verified');
     } catch (error) {
-      logger.error('[SMTPClient] Connection failed:', error);
       this.transporter = null;
       this.config = null;
+      if (isStarttlsRefusedError(error)) {
+        logger.warn(`[SMTPClient] Refused: STARTTLS is required for ${config.host} but the server did not encrypt the session`);
+        throw withStarttlsMessage(error as Error, config.host);
+      }
+      logger.error('[SMTPClient] Connection failed:', error);
       throw error;
     }
   }
@@ -257,7 +299,12 @@ export class SMTPClient {
       logger.error('[SMTPClient] Failed to send email:', error);
       return {
         success: false,
-        error: (error as Error).message,
+        // nodemailer opens a fresh session per send, so a STARTTLS refusal can
+        // happen here too: say what the user can do. Retry class comes from the
+        // ORIGINAL error (responseCode), as for any other failure.
+        error: isStarttlsRefusedError(error) && this.config
+          ? starttlsRefusalText(error, this.config.host)
+          : (error as Error).message,
         transient: isTransientSendError(error),
       };
     }

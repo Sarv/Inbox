@@ -49,6 +49,23 @@ afterEach(() => {
 });
 
 describe('removeAccountById', () => {
+  // CASA M-5. Breaks: removing the only account, whose server refused
+  // STARTTLS, leaves its "Not connected … your existing mail is still
+  // available" banner above the no-account screen.
+  it("drops the removed last account's STARTTLS refusals", async () => {
+    const { state } = await loadSlice({
+      accounts: [account('a')], activeAccountId: 'a', connected: false,
+      connectionSecurityIssue: 'The incoming mail server imap.a did not agree.',
+      smtpSecurityIssue: 'The outgoing mail server smtp.a did not agree.',
+    }, baseElectronAPI());
+
+    await state.removeAccountById('a');
+
+    expect(state.activeAccountId).toBeNull();
+    expect(state.connectionSecurityIssue).toBeNull();
+    expect(state.smtpSecurityIssue).toBeNull();
+  });
+
   it('removes an inactive account and clears the deleting marker on success', async () => {
     const api = baseElectronAPI();
     const { state } = await loadSlice(

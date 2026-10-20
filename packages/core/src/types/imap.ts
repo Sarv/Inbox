@@ -1,3 +1,5 @@
+import type { ConnectionSecurity } from '../utils/connection-security';
+
 // IMAP client interface for Sarv Inbox
 
 /**
@@ -391,10 +393,13 @@ export interface IMAPConfig {
   host: string;
   port: number;
   secure: boolean; // Use TLS/SSL (legacy boolean; `security` is authoritative when set)
-  /** First-class connection security. 'ssl' = implicit TLS (993); 'starttls' =
-   *  upgrade on 143; 'none' = plain (best-effort STARTTLS if offered). Persisted
-   *  so the choice round-trips on reconnect/edit instead of collapsing to `secure`. */
-  security?: 'ssl' | 'starttls' | 'none';
+  /** First-class connection security (resolveConnectionSecurity, CASA M-5):
+   *  'ssl' = implicit TLS (993); 'starttls' = upgrade on 143, REQUIRED — the
+   *  connect stops before sending credentials if the server will not encrypt;
+   *  'none' = the user's explicit opt-out (upgrades only if offered). Absent:
+   *  secure true → 'ssl', false → 'starttls'. Persisted so the choice
+   *  round-trips on reconnect/edit instead of collapsing to `secure`. */
+  security?: ConnectionSecurity;
   username: string;
   password: string; // ignored when authMethod === 'oauth2'
   authMethod?: 'password' | 'oauth2';
@@ -414,14 +419,14 @@ export interface IMAPConfig {
    * it takes precedence over the static `accessToken`.
    */
   resolveBearer?: (forceRefresh?: boolean) => Promise<string>;
-  tlsOptions?: {
-    rejectUnauthorized?: boolean;
-  };
   /**
    * Opt-in escape hatch for servers with self-signed / untrusted certs.
    * Default (undefined/false) keeps TLS verification ON — disabling it exposes
    * credentials and mail to man-in-the-middle attacks, so it must be an explicit
    * per-account choice, never the default.
+   * Ignored for OAuth (resolveTlsOptions). For a saved password the main
+   * process injects, it is the choice saved WITH that password, not the
+   * config's (vault-credentials.ts).
    */
   allowInsecureTLS?: boolean;
   connectionTimeout?: number; // Milliseconds

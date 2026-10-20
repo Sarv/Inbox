@@ -1,3 +1,4 @@
+import { resolveConnectionSecurity, type ConnectionSecurity } from '@sarvinbox/core/connection-security';
 import { Mail, Loader2, Check, X, Trash2, Send, Pencil, Plus, ChevronRight, AlertTriangle, LogIn } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 
@@ -6,7 +7,9 @@ import { useReauthSessions } from '../../hooks/useReauthSessions';
 import { useEmailStore } from '../../store/email-store';
 import { accountHost, isAccountEmailDuplicated, effectiveSmtpConfig } from '../../store/helpers';
 import { findReauthSession } from '../../utils/reauth-sessions';
+import { savedAccountSecurity } from '../../utils/saved-account-security';
 import { AddAccountModal } from '../AddAccountModal';
+import { ConnectionSecuritySelect } from '../ConnectionSecuritySelect';
 import { GmailPrivacyNotice, openInboxPrivacyPolicy } from '../GmailPrivacyNotice';
 import { SmtpConfigForm } from '../SmtpConfigForm';
 import { Tooltip } from '../Tooltip';
@@ -70,11 +73,12 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
       }
     };
   }, []);
-  const [imapForm, setImapForm] = useState({
+  const [imapForm, setImapForm] = useState<{ host: string; port: string; username: string; password: string; security: ConnectionSecurity }>({
     host: '',
     port: '993',
     username: '',
     password: '',
+    security: 'ssl',
   });
   const [imapLoading, setImapLoading] = useState(false);
   const [imapError, setImapError] = useState('');
@@ -92,6 +96,8 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
         ...imapConfig,
         ...(imapForm.host.trim() ? { host: imapForm.host.trim() } : {}),
         port: parseInt(imapForm.port) || imapConfig.port || 993,
+        security: imapForm.security,
+        secure: imapForm.security === 'ssl',
         ...(imapForm.password ? { password: imapForm.password } : {}),
       });
       setShowImapEdit(false);
@@ -175,6 +181,7 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
         port: String(imapConfig.port || 993),
         username: imapConfig.username || '',
         password: imapConfig.password || '',
+        security: resolveConnectionSecurity(imapConfig),
       });
     }
   }, [imapConfig]);
@@ -207,8 +214,12 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
         port: String(savedAccount.port || 993),
         username: savedAccount.username || '',
         password: savedAccount.password || '',
+        security: savedAccountSecurity(savedAccount, imapConfig),
       });
     }
+    // imapConfig only fills in a choice an older saved file lacks; re-seeding
+    // on its every change would overwrite what the user is typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedAccount]);
 
   // Reconnect the saved account with the (possibly corrected) port. Spreads the
@@ -224,7 +235,8 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
         ...savedAccount,
         ...(imapForm.host.trim() ? { host: imapForm.host.trim() } : {}),
         port: parseInt(imapForm.port) || savedAccount.port,
-        secure: savedAccount.secure ?? true,
+        security: imapForm.security,
+        secure: imapForm.security === 'ssl',
         ...(imapForm.password ? { password: imapForm.password } : {}),
       });
       setImapForm((prev) => ({ ...prev, password: '' }));
@@ -255,7 +267,7 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
       // in main as part of accounts:remove, for whichever account is removed.
       if (targetId) await removeAccountById(targetId);
       else await disconnect();
-      setImapForm({ host: 'imap.gmail.com', port: '993', username: '', password: '' });
+      setImapForm({ host: 'imap.gmail.com', port: '993', username: '', password: '', security: 'ssl' });
     } catch (err) {
       setImapError((err as Error).message || 'Failed to disconnect');
     }
@@ -550,6 +562,12 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
                     />
                   </div>
                 </div>
+                <ConnectionSecuritySelect
+                  server="imap"
+                  value={imapForm.security}
+                  onChange={(security, port) => setImapForm(prev => ({ ...prev, security, port: String(port) }))}
+                  className="w-full px-3 py-2 bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
+                />
                 <VaultPasswordField
                   accountId={detailsAccountId}
                   kind="imap"
@@ -592,7 +610,7 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
                       {!dIsOAuth && (
                         <Tooltip content="Edit incoming (IMAP host / port / password)" delayMs={40}>
                           <button
-                            onClick={() => { setImapError(''); setImapForm((prev) => ({ ...prev, host: String(dImap.host || ''), port: String(dImap.port || 993), password: '' })); setShowImapEdit((v) => !v); }}
+                            onClick={() => { setImapError(''); setImapForm((prev) => ({ ...prev, host: String(dImap.host || ''), port: String(dImap.port || 993), password: '', security: resolveConnectionSecurity(dImap) })); setShowImapEdit((v) => !v); }}
                             disabled={!detailIsActive}
                             aria-label="Edit incoming (IMAP)"
                             className="p-1.5 text-primary hover:bg-primary/10 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -636,6 +654,12 @@ export function AccountsTab({ settings, updateSetting, openAddAccount, onAddAcco
                           />
                         </div>
                       </div>
+                      <ConnectionSecuritySelect
+                        server="imap"
+                        value={imapForm.security}
+                        onChange={(security, port) => setImapForm((prev) => ({ ...prev, security, port: String(port) }))}
+                        className="w-full px-3 py-2 bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
+                      />
                       <VaultPasswordField
                         accountId={detailsAccountId}
                         kind="imap"

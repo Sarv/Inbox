@@ -9,7 +9,8 @@
  * zoom setting, applies it, and saves it. Cmd +/- and the slider are then the
  * same control.
  *
- * Everything else here reproduces the stock viewMenu role exactly.
+ * Everything else here reproduces the stock viewMenu role, except that
+ * Toggle Developer Tools is dev-only.
  *
  * Kept free of runtime Electron imports (the `Electron.*` types are erased) so
  * the unit suite can build and click the template without an Electron process.
@@ -38,12 +39,21 @@ const zoomItem = (
   click: (_menuItem, browserWindow) => dispatch(browserWindow, command),
 });
 
-export const buildViewMenu = (dispatch: ZoomDispatch): Electron.MenuItemConstructorOptions => ({
+/**
+ * `devTools` adds Toggle Developer Tools — dev builds only. In a release build
+ * DevTools is a console onto the renderer's whole IPC bridge for anyone at an
+ * unlocked machine, and the window's `webPreferences.devTools` is off too, so
+ * the shortcut can't open it either.
+ */
+export const buildViewMenu = (
+  dispatch: ZoomDispatch,
+  { devTools = false }: { devTools?: boolean } = {},
+): Electron.MenuItemConstructorOptions => ({
   label: 'View',
   submenu: [
     { role: 'reload' },
     { role: 'forceReload' },
-    { role: 'toggleDevTools' },
+    ...(devTools ? [{ role: 'toggleDevTools' } as const] : []),
     { type: 'separator' },
     zoomItem('Actual Size', 'reset', 'CommandOrControl+0', dispatch),
     zoomItem('Zoom In', 'in', 'CommandOrControl+Plus', dispatch),
