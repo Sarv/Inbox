@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-10-20
+
 ### Added
 - **Ask your inbox.** Ask questions such as “What quote did I send to TCS?”
   and review answers linked to the original emails. The Inbox Assistant searches
@@ -1045,7 +1047,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.7...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.8...HEAD
+[1.3.8]: https://github.com/Sarv/Inbox/releases/tag/v1.3.8
 [1.3.7]: https://github.com/Sarv/Inbox/releases/tag/v1.3.7
 [1.3.6]: https://github.com/Sarv/Inbox/releases/tag/v1.3.6
 [1.3.5]: https://github.com/Sarv/Inbox/releases/tag/v1.3.5
