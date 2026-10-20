@@ -9,6 +9,7 @@ interface ChatSidebarProps {
   chats: InboxAssistantChatSummary[];
   activeChatId: string | null;
   pendingChatIds: ReadonlySet<string>;
+  runningChatIds?: ReadonlySet<string>;
   deletePending: boolean;
   error: string | null;
   onSelect: (chatId: string) => void;
@@ -26,7 +27,7 @@ function updatedLabel(at: number): string {
 }
 
 /** Metadata-only navigation: opening an info card never loads a chat's messages. */
-export function ChatSidebar({ chats, activeChatId, pendingChatIds, deletePending, error, onSelect, onTogglePinned, onDelete }: ChatSidebarProps) {
+export function ChatSidebar({ chats, activeChatId, pendingChatIds, runningChatIds, deletePending, error, onSelect, onTogglePinned, onDelete }: ChatSidebarProps) {
   const [pinnedOpen, setPinnedOpen] = useState(true);
   const [info, setInfo] = useState<{ chatId: string; top: number; left: number } | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -49,6 +50,7 @@ export function ChatSidebar({ chats, activeChatId, pendingChatIds, deletePending
   const infoChat = chats.find(chat => chat.id === info?.chatId);
   const row = (chat: InboxAssistantChatSummary) => {
     const pending = pendingChatIds.has(chat.id);
+    const running = runningChatIds?.has(chat.id) || !!chat.activeRun;
     return (
       <div key={chat.id} data-chat-row={chat.id} aria-busy={pending} className={`group relative flex h-9 min-w-0 items-center rounded-md transition-colors ${chat.id === activeChatId ? 'bg-muted text-foreground' : 'text-foreground/80 hover:bg-muted/70'}`}>
         <button type="button" aria-current={chat.id === activeChatId ? 'page' : undefined} aria-label={`Open conversation: ${chat.title}`} aria-describedby={info?.chatId === chat.id ? infoId : undefined} disabled={pending}
@@ -56,6 +58,7 @@ export function ChatSidebar({ chats, activeChatId, pendingChatIds, deletePending
           className="h-full min-w-0 flex-1 rounded-md pl-3 pr-3 text-left text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-primary/40 group-hover:pr-16 group-focus-within:pr-16 disabled:opacity-50">
           <span className="block overflow-hidden whitespace-nowrap [mask-image:linear-gradient(to_right,black_86%,transparent)]">{chat.title}</span>
         </button>
+        {running && <Loader2 role="status" aria-label={`Working in conversation: ${chat.title}`} className="pointer-events-none mr-3 h-3.5 w-3.5 shrink-0 animate-spin text-primary group-hover:invisible group-focus-within:invisible" />}
         <div className="absolute right-1 flex items-center gap-0.5 rounded bg-card opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           {pending ? <Loader2 aria-label="Updating conversation" className="mx-1 h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <>
             <IconButton tooltip={`${chat.pinned ? 'Unpin' : 'Pin'} conversation: ${chat.title}`} icon={chat.pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />} size="xs" disabled={deletePending} onClick={() => { dismissInfo(); onTogglePinned(chat); }} className="text-muted-foreground hover:text-foreground" />

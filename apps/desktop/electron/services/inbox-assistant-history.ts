@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import type Database from 'better-sqlite3';
 
-import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange } from '../../src/types/inbox-assistant';
+import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
 
 import { getCoreDb } from './core-db';
+import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
 
 const LEGACY_KEY = 'inbox-assistant-history-v1';
 const INDEX_KEY = 'inbox-assistant-chats-index-v2';
@@ -56,7 +57,20 @@ function validExchanges(value: unknown): value is InboxAssistantExchange[] {
     && Array.isArray(item.accountIds) && item.accountIds.every((id: unknown) => typeof id === 'string')
     && Number.isFinite(item.createdAt) && item.answer && typeof item.answer.text === 'string'
     && Array.isArray(item.answer.sources) && Array.isArray(item.answer.coverage) && Array.isArray(item.answer.warnings)
-    && (item.activities === undefined || Array.isArray(item.activities)));
+    && (item.activities === undefined || Array.isArray(item.activities))
+    && (item.status === undefined || ['pending', 'running', 'completed', 'stopped', 'failed'].includes(item.status))
+    && (item.requestId === undefined || typeof item.requestId === 'string')
+    && (item.updatedAt === undefined || Number.isFinite(item.updatedAt))
+    && (item.error === undefined || typeof item.error === 'string'));
+}
+
+function validRuns(value: unknown): value is InboxAssistantRunRecord[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.every(item => item && typeof item.requestId === 'string'
+    && typeof item.chatId === 'string' && ['question', 'draft', 'action'].includes(item.kind)
+    && typeof item.question === 'string' && Array.isArray(item.accountIds) && item.accountIds.every((id: unknown) => typeof id === 'string')
+    && ['pending', 'running', 'completed', 'stopped', 'failed'].includes(item.status)
+    && Number.isFinite(item.startedAt) && Number.isFinite(item.updatedAt) && Array.isArray(item.activities)
+    && (item.exchangeId === undefined || typeof item.exchangeId === 'string') && (item.error === undefined || typeof item.error === 'string')));
 }
 
 function publicSummary({ customTitle: _customTitle, ...summary }: StoredSummary): InboxAssistantChatSummary {
@@ -79,7 +93,7 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
   const readRewind = (chatId: string): RewindSnapshot | undefined => {
     const snapshot = readBlob(`${REWIND_PREFIX}${chatId}`) as RewindSnapshot | undefined;
     if (snapshot === undefined) return undefined;
-    if (!snapshot || snapshot.version !== 1 || !snapshot.chat || snapshot.chat.id !== chatId || !validExchanges(snapshot.chat.exchanges)) {
+    if (!snapshot || snapshot.version !== 1 || !snapshot.chat || snapshot.chat.id !== chatId || !validExchanges(snapshot.chat.exchanges) || !validRuns(snapshot.chat.runs)) {
       throw new Error('This saved conversation recovery could not be read. Its stored data has been preserved.');
     }
     return snapshot;
@@ -145,8 +159,8 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
     const summary = current.chats.find(chat => chat.id === chatId);
     if (!summary) throw new Error('This Inbox Agent chat is no longer available.');
     const chat = readBlob(`${CHAT_PREFIX}${chatId}`) as InboxAssistantChat | undefined;
-    if (!chat || chat.id !== chatId || !validExchanges(chat.exchanges)) throw new Error('This saved Inbox Agent chat could not be read. Its stored data has been preserved.');
-    return { ...publicSummary(summary), exchanges: chat.exchanges };
+    if (!chat || chat.id !== chatId || !validExchanges(chat.exchanges) || !validRuns(chat.runs)) throw new Error('This saved Inbox Agent chat could not be read. Its stored data has been preserved.');
+    return { ...publicSummary(summary), exchanges: chat.exchanges, ...(chat.runs ? { runs: chat.runs } : {}), ...(chat.usage ? { usage: chat.usage } : {}) };
   };
   const mutate = <T>(run: (current: ChatIndex) => T): T => getDb().transaction(() => run(index()))();
   const store: InboxAssistantHistoryStore = {
@@ -221,7 +235,7 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
     },
     writeChat(chat) {
       validateInboxAssistantChatId(chat.id);
-      if (!validExchanges(chat.exchanges)) throw new Error('Invalid Inbox Agent conversation.');
+      if (!validExchanges(chat.exchanges) || !validRuns(chat.runs)) throw new Error('Invalid Inbox Agent conversation.');
       mutate(current => {
         const summary = current.chats.find(item => item.id === chat.id);
         if (!summary) throw new Error('This Inbox Agent chat is no longer available.');
@@ -229,7 +243,15 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         summary.exchangeCount = chat.exchanges.length;
         summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
         const exchanges = chat.exchanges.map(exchange => ({ ...exchange, chatId: chat.id }));
-        writeBlob(`${CHAT_PREFIX}${chat.id}`, { ...publicSummary(summary), exchanges }); writeBlob(INDEX_KEY, current);
+        const prior = readChat(chat.id, current);
+        const runs = chat.runs ?? prior.runs;
+        if (runs?.some(run => run.chatId !== chat.id)) throw new Error('Invalid Inbox Agent run owner.');
+        // The append-only spending ledger survives edits to conversation
+        // branches. Only unique provider call IDs are summed; exchanged answer
+        // copies of the same accounting are never charged again.
+        const usageCalls = [...(prior.usage?.calls ?? []), ...(chat.usage?.calls ?? []), ...(runs ?? []).flatMap(run => run.usage?.calls ?? [])];
+        const usage = usageCalls.length ? aggregateInboxAssistantUsage(usageCalls) : undefined;
+        writeBlob(`${CHAT_PREFIX}${chat.id}`, { ...publicSummary(summary), exchanges, ...(runs ? { runs } : {}), ...(usage ? { usage } : {}) }); writeBlob(INDEX_KEY, current);
       });
     },
     clear(chatId) {
@@ -238,7 +260,7 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         const summary = current.chats.find(item => item.id === chatId)!;
         if (!summary.customTitle) summary.title = NEW_TITLE;
         summary.exchangeCount = 0; summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
-        const cleared = { ...publicSummary(summary), exchanges: [] };
+        const cleared = { ...publicSummary(summary), exchanges: [], ...(chat.usage ? { usage: chat.usage } : {}) };
         writeBlob(`${CHAT_PREFIX}${chat.id}`, cleared); writeBlob(INDEX_KEY, current);
         return cleared;
       });
@@ -258,7 +280,9 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         summary.exchangeCount = position;
         summary.rewindAvailable = true;
         summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
-        const rewound = { ...publicSummary(summary), exchanges: chat.exchanges.slice(0, position) };
+        const keptIds = new Set(chat.exchanges.slice(0, position).map(exchange => exchange.id));
+        const rewound = { ...publicSummary(summary), exchanges: chat.exchanges.slice(0, position),
+          ...(chat.runs ? { runs: chat.runs.filter(run => !run.exchangeId || keptIds.has(run.exchangeId)) } : {}), ...(chat.usage ? { usage: chat.usage } : {}) };
         writeBlob(`${CHAT_PREFIX}${chatId}`, rewound); writeBlob(INDEX_KEY, current);
         return { chat: rewound, question: target.question, accountIds: [...target.accountIds] };
       });
@@ -276,7 +300,9 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
         summary.exchangeCount = snapshot.chat.exchanges.length;
         summary.rewindAvailable = true;
         summary.updatedAt = Math.max(Date.now(), summary.updatedAt + 1);
-        const restored = { ...publicSummary(summary), exchanges: snapshot.chat.exchanges };
+        const usageCalls = [...(chat.usage?.calls ?? []), ...(snapshot.chat.usage?.calls ?? [])];
+        const restored = { ...publicSummary(summary), exchanges: snapshot.chat.exchanges, ...(snapshot.chat.runs ? { runs: snapshot.chat.runs } : {}),
+          ...(usageCalls.length ? { usage: aggregateInboxAssistantUsage(usageCalls) } : {}) };
         writeBlob(`${CHAT_PREFIX}${chatId}`, restored); writeBlob(INDEX_KEY, current);
         return restored;
       });

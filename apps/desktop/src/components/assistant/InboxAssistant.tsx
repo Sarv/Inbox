@@ -13,12 +13,14 @@ import type {
   InboxAssistantChatSummary,
   InboxAssistantDraft,
   InboxAssistantExchange,
+  InboxAssistantRunRecord,
   InboxAssistantSource,
 } from '../../types/inbox-assistant';
 import type { InboxAssistantReviewAction, InboxAssistantReviewKind } from '../../types/inbox-assistant-actions';
 import { AccountSelectorTrigger } from '../AccountSelectorTrigger';
 
 import { AssistantReviewCard } from './AssistantReviewCard';
+import { AssistantUsage } from './AssistantUsage';
 import { ChatSidebar } from './ChatSidebar';
 
 export interface InboxAssistantViewState {
@@ -97,6 +99,7 @@ function coverageWarnings(exchange: InboxAssistantExchange): string[] {
 }
 
 interface WorkInspection {
+  requestId?: string;
   kind?: 'question' | 'draft' | 'action';
   question: string;
   activities: InboxAssistantActivity[];
@@ -104,6 +107,23 @@ interface WorkInspection {
   coverage: InboxAssistantAccountCoverage[];
   warnings: string[];
   error?: string;
+}
+
+interface ChatWork {
+  requestId: string;
+  chatId: string;
+  work: WorkInspection;
+  sequence: number;
+  stopping: boolean;
+  stopFailed: boolean;
+  /** A run restored from main-process history has no local promise to await. */
+  external?: boolean;
+}
+
+function workFromRun(run: InboxAssistantRunRecord): WorkInspection {
+  return { requestId: run.requestId, kind: run.kind, question: run.question, activities: run.activities,
+    status: run.status === 'failed' ? 'error' : run.status === 'stopped' ? 'cancelled' : run.status === 'completed' ? 'done' : 'running',
+    coverage: [], warnings: [], ...(run.error ? { error: run.error } : {}) };
 }
 
 function ActivitySidebar({ inspection, accounts, onClose, compact, visible, stopButton }: { inspection: WorkInspection; accounts: InboxAssistantAccount[]; onClose: () => void; compact: boolean; visible: boolean; stopButton?: ReactNode }) {
@@ -249,6 +269,8 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
           </div>
       {/* Mail and model output are untrusted text. Never interpret HTML here. */}
       <div className={`whitespace-pre-wrap break-words text-sm ${compact ? 'leading-6' : 'leading-7'}`}><AnswerText text={exchange.answer.text} sources={exchange.answer.sources} onNavigate={onNavigateToSource} /></div>
+      {exchange.status && exchange.status !== 'completed' && <p className="text-xs text-muted-foreground">{exchange.status === 'failed' ? exchange.error || 'Request failed. Your question and activity have been saved.' : exchange.status === 'stopped' ? 'Stopped. Your question and activity have been saved.' : 'In progress…'}</p>}
+      <AssistantUsage usage={exchange.usage} compact={compact} />
       {exchange.review && <AssistantReviewCard review={exchange.review} busy={actionBusy} onApply={onApply} onUndo={onUndo} onRefresh={onRefresh} onContinue={onContinue} onOpen={source => onNavigateToSource?.(source)} />}
       {exchange.answer.sources.length > 0 && (
         <details aria-label="Answer sources" className="assistant-surface rounded-lg border border-border p-3">
@@ -264,12 +286,23 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
 }
 
 function chatSummary(chat: InboxAssistantChat): InboxAssistantChatSummary {
-  const { exchanges: _exchanges, ...summary } = chat;
+  const { exchanges: _exchanges, runs: _runs, usage: _usage, ...summary } = chat;
   return summary;
 }
 
 function updateSummary(chats: InboxAssistantChatSummary[], summary: InboxAssistantChatSummary): InboxAssistantChatSummary[] {
   return [...chats.filter(chat => chat.id !== summary.id), summary].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Preserve a completion racing navigation, while preferring newer saved usage/receipts. */
+function mergeChatExchanges(saved: InboxAssistantExchange[], cached?: Map<string, InboxAssistantExchange>): InboxAssistantExchange[] {
+  const merged = new Map(saved.map(exchange => [exchange.id, exchange]));
+  for (const exchange of cached?.values() ?? []) {
+    const current = merged.get(exchange.id);
+    if (!current || (exchange.updatedAt ?? exchange.createdAt) > (current.updatedAt ?? current.createdAt)
+      || (exchange.requestId === current.requestId && exchange.status === 'completed' && (current.status === 'pending' || current.status === 'running'))) merged.set(exchange.id, exchange);
+  }
+  return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
 export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePane, onOpenDraft, defaultDraftAccountId, onMailChanged, compact = false, visible = true, onStateChange }: InboxAssistantProps) {
@@ -332,6 +365,9 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const messages = useRef<HTMLDivElement>(null);
   const pendingChatMutations = useRef(new Set<string>());
   const pendingDeletion = useRef(false);
+  const chatWork = useRef(new Map<string, ChatWork>());
+  const completedExchanges = useRef(new Map<string, Map<string, InboxAssistantExchange>>());
+  const [workRevision, setWorkRevision] = useState(0);
   useEffect(() => { visibleRef.current = visible; stateListener.current = onStateChange; }, [visible, onStateChange]);
   useEffect(() => {
     if (!accountPickerOpen) return;
@@ -342,18 +378,52 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     return () => document.removeEventListener('pointerdown', dismiss);
   }, [accountPickerOpen]);
 
+  const showWork = useCallback((run?: ChatWork) => {
+    request.current = run?.requestId ?? null;
+    requestChatId.current = run?.chatId ?? null;
+    activitySequence.current = run?.sequence ?? 0;
+    liveActivities.current = run?.work.activities ?? [];
+    setLiveWork(run?.work ?? null);
+    setPendingQuestion(run && !run.stopping && run.work.kind === 'question' ? run.work.question : null);
+    setDraftCreating(!!run && !run.stopping && run.work.kind === 'draft');
+    setActionCreating(!!run && !run.stopping && run.work.kind === 'action');
+    setStoppingRequestId(run?.stopping ? run.requestId : null);
+    setStopFailed(run?.stopFailed ?? false);
+  }, []);
+
+  const restoreExternalRuns = useCallback((summaries: InboxAssistantChatSummary[]) => {
+    let changed = false;
+    for (const chat of summaries) {
+      if (!chat.activeRun || chatWork.current.has(chat.id)) continue;
+      chatWork.current.set(chat.id, { requestId: chat.activeRun.requestId, chatId: chat.id, work: workFromRun(chat.activeRun),
+        sequence: chat.activeRun.activities.at(-1)?.sequence ?? 0, stopping: false, stopFailed: false, external: true });
+      changed = true;
+    }
+    if (changed) setWorkRevision(value => value + 1);
+  }, []);
+
   const applyChat = useCallback((chat: InboxAssistantChat, knownAccounts: InboxAssistantAccount[]) => {
     activeChatRef.current = chat.id;
     setActiveChatId(chat.id);
     setActiveChat(chat);
-    setExchanges(chat.exchanges);
+    const cached = completedExchanges.current.get(chat.id);
+    setExchanges(mergeChatExchanges(chat.exchanges, cached));
     setChats(current => updateSummary(current, chatSummary(chat)));
+    let run = chatWork.current.get(chat.id);
+    const alreadyCompleted = chat.activeRun && [...(cached?.values() ?? [])].some(exchange => exchange.requestId === chat.activeRun!.requestId && exchange.status === 'completed');
+    if (!run && chat.activeRun && !alreadyCompleted) {
+      run = { requestId: chat.activeRun.requestId, chatId: chat.id, work: workFromRun(chat.activeRun),
+        sequence: chat.activeRun.activities.at(-1)?.sequence ?? 0, stopping: false, stopFailed: false, external: true };
+      chatWork.current.set(chat.id, run);
+      setWorkRevision(value => value + 1);
+    }
+    showWork(run);
     const draft = drafts.current.get(chat.id);
     const last = chat.exchanges[chat.exchanges.length - 1];
     const knownIds = new Set(knownAccounts.map(account => account.id));
     setQuestion(draft?.question ?? '');
     setSelectedAccountIds((draft?.accountIds ?? last?.accountIds ?? knownAccounts.map(account => account.id)).filter(id => knownIds.has(id)));
-  }, []);
+  }, [showWork]);
 
   const load = useCallback(async () => {
     const version = ++generation.current;
@@ -368,6 +438,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       if (!listResult.success) throw new Error(listResult.error);
       setAccounts(accountResult.data);
       setChats(listResult.data.chats);
+      restoreExternalRuns(listResult.data.chats);
       const targetId = listResult.data.chats.some(chat => chat.id === listResult.data.activeChatId)
         ? listResult.data.activeChatId : listResult.data.chats[0]?.id;
       activeChatRef.current = targetId ?? null;
@@ -381,19 +452,19 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     } finally {
       if (version === generation.current) setLoading(false);
     }
-  }, [applyChat]);
+  }, [applyChat, restoreExternalRuns]);
 
   useEffect(() => {
     mounted.current = true;
     void load();
     const unsubscribe = window.electronAPI?.inboxAssistant?.onActivity?.(activity => {
-      if (!request.current || activity.requestId !== request.current
-        || cancelledRequests.current.has(activity.requestId)
-        || (activity.chatId !== undefined && activity.chatId !== activeChatRef.current)
-        || !Number.isInteger(activity.sequence) || activity.sequence <= activitySequence.current) return;
-      activitySequence.current = activity.sequence;
-      liveActivities.current = [...liveActivities.current, activity].slice(-400);
-      setLiveWork(current => current ? { ...current, activities: liveActivities.current } : current);
+      const run = [...chatWork.current.values()].find(value => value.requestId === activity.requestId);
+      if (!run || cancelledRequests.current.has(activity.requestId)
+        || (activity.chatId !== undefined && activity.chatId !== run.chatId)
+        || !Number.isInteger(activity.sequence) || activity.sequence <= run.sequence) return;
+      run.sequence = activity.sequence;
+      run.work = { ...run.work, activities: [...run.work.activities, activity].slice(-400) };
+      if (activeChatRef.current === run.chatId) showWork(run);
     });
     return () => {
       mounted.current = false;
@@ -401,9 +472,9 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       // eslint-disable-next-line react-hooks/exhaustive-deps
       generation.current++;
       unsubscribe?.();
-      if (request.current) void window.electronAPI?.inboxAssistant?.cancel(request.current).catch(() => {});
+      // Main-process runs belong to their chat and survive renderer navigation.
     };
-  }, [load]);
+  }, [load, showWork]);
 
   useEffect(() => { if (sourcePane) setActivityOpen(false); }, [sourcePane]);
   useEffect(() => {
@@ -428,7 +499,26 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const saveDraft = () => {
     if (activeChatId && !chatLoading) drafts.current.set(activeChatId, { question, accountIds: [...selectedAccountIds] });
   };
+  const startWork = (chatId: string, requestId: string, work: WorkInspection) => {
+    const run: ChatWork = { chatId, requestId, work: { ...work, requestId }, sequence: 0, stopping: false, stopFailed: false };
+    chatWork.current.set(chatId, run);
+    setWorkRevision(value => value + 1);
+    if (activeChatRef.current === chatId) showWork(run);
+    return run;
+  };
+  const cacheExchange = (chatId: string, exchange: InboxAssistantExchange, revision: number) => {
+    if (!mounted.current || (chatRevisions.current.get(chatId) ?? 0) !== revision) return;
+    const acknowledged = { ...exchange, updatedAt: exchange.updatedAt ?? Date.now() };
+    const cached = completedExchanges.current.get(chatId) ?? new Map<string, InboxAssistantExchange>();
+    cached.set(exchange.id, acknowledged);
+    completedExchanges.current.set(chatId, cached);
+    if (activeChatRef.current === chatId) setExchanges(current => [...current.filter(item => item.id !== acknowledged.id), acknowledged].sort((a, b) => a.createdAt - b.createdAt));
+  };
+  const isVisibleRequest = (chatId: string, requestId: string) => mounted.current && activeChatRef.current === chatId && request.current === requestId;
   const releaseRequest = (requestId: string) => {
+    const run = [...chatWork.current.values()].find(value => value.requestId === requestId);
+    if (run) chatWork.current.delete(run.chatId);
+    if (mounted.current) setWorkRevision(value => value + 1);
     if (request.current !== requestId) return;
     request.current = null;
     requestChatId.current = null;
@@ -445,17 +535,18 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     if (!cancelPending.current.has(requestId)) releaseRequest(requestId);
   };
   const stop = () => {
-    generation.current++;
     const requestId = request.current;
     if (!requestId) return;
+    const originChatId = requestChatId.current;
+    const run = originChatId ? chatWork.current.get(originChatId) : undefined;
     cancelledRequests.current.add(requestId);
     setPendingQuestion(null);
     setDraftCreating(false);
     setActionCreating(false);
     setStoppingRequestId(requestId);
     setLiveWork(current => current ? { ...current, status: 'stopping' } : current);
+    if (run) { run.stopping = true; run.stopFailed = false; run.work = { ...run.work, status: 'stopping' }; }
     if (cancelPending.current.has(requestId)) return;
-    const originChatId = requestChatId.current;
     cancelPending.current.add(requestId);
     setStopFailed(false);
     if (activeChatRef.current === originChatId) setError(null);
@@ -463,10 +554,11 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       if (!result.success) throw new Error(result.error);
       if (result.data.requestId !== requestId) throw new Error('The stop acknowledgement belongs to a different request.');
       releaseRequest(requestId);
+      if (originChatId) void refreshSelectedChat(originChatId);
     }).catch(cause => {
-      if (!mounted.current || request.current !== requestId) return;
+      if (!mounted.current) return;
       if (settledRequests.current.has(requestId)) { releaseRequest(requestId); return; }
-      setStopFailed(true);
+      if (run) { run.stopFailed = true; if (activeChatRef.current === originChatId) showWork(run); }
       if (activeChatRef.current === originChatId) setError(cause instanceof Error ? cause.message : 'Could not confirm the request stopped. Try Stop again.');
     }).finally(() => cancelPending.current.delete(requestId));
   };
@@ -499,11 +591,11 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const selectChat = async (chatId: string, retry = false) => {
     if (!retry && activeChatRef.current === chatId) { setChatListOpen(false); return; }
     saveDraft();
-    stop();
     const version = ++generation.current;
     activeChatRef.current = chatId;
     setActiveChatId(chatId);
     resetChatView();
+    showWork();
     setCreating(false);
     setLoading(false);
     setChatLoading(true);
@@ -522,12 +614,12 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const newChat = async () => {
     if (loading || creating) return;
     saveDraft();
-    stop();
     const version = ++generation.current;
     metadataGeneration.current++;
     activeChatRef.current = null;
     setActiveChatId(null);
     resetChatView();
+    showWork();
     setCreating(true);
     setChatLoading(true);
     try {
@@ -547,8 +639,23 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     const version = ++metadataGeneration.current;
     try {
       const result = await window.electronAPI.inboxAssistant.chats();
-      if (mounted.current && version === metadataGeneration.current && result.success) setChats(result.data.chats);
+      if (mounted.current && version === metadataGeneration.current && result.success) {
+        setChats(result.data.chats);
+        restoreExternalRuns(result.data.chats);
+      }
     } catch { /* The active answer remains usable if the summary refresh fails. */ }
+  };
+
+  const refreshSelectedChat = async (chatId: string) => {
+    if (!mounted.current || activeChatRef.current !== chatId) return;
+    const revision = chatRevisions.current.get(chatId) ?? 0;
+    try {
+      const result = await window.electronAPI.inboxAssistant.chat(chatId);
+      if (!mounted.current || activeChatRef.current !== chatId || (chatRevisions.current.get(chatId) ?? 0) !== revision || !result.success) return;
+      setActiveChat(result.data);
+      setExchanges(mergeChatExchanges(result.data.exchanges, completedExchanges.current.get(chatId)));
+      setLiveWork(current => current?.kind === 'question' && result.data.exchanges.some(exchange => exchange.requestId === current.requestId && exchange.status !== 'pending' && exchange.status !== 'running') ? null : current);
+    } catch { /* The saved answer and live activity remain usable offline. */ }
   };
 
   const rewindChat = async (exchange: InboxAssistantExchange) => {
@@ -565,6 +672,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       if (!result.success) throw new Error(result.error);
       if (result.data.chat.id !== chatId) throw new Error('The conversation rewind belongs to a different chat.');
       chatRevisions.current.set(chatId, (chatRevisions.current.get(chatId) ?? 0) + 1);
+      completedExchanges.current.delete(chatId);
       drafts.current.set(chatId, { question: text, accountIds: result.data.accountIds });
       applyChat(result.data.chat, accounts);
       setLiveWork(null);
@@ -595,6 +703,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       if (!result.success) throw new Error(result.error);
       if (result.data.id !== chatId) throw new Error('The restored conversation belongs to a different chat.');
       chatRevisions.current.set(chatId, (chatRevisions.current.get(chatId) ?? 0) + 1);
+      completedExchanges.current.delete(chatId);
       drafts.current.delete(chatId);
       applyChat(result.data, accounts);
       setLiveWork(null);
@@ -617,20 +726,15 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     const chatId = activeChatRef.current;
     const accountIds = override?.accountIds ?? selectedAccountIds;
     if (!text || !chatId || accountIds.length === 0 || loading || chatLoading || creating || rewinding || editingExchangeId || request.current) return;
-    const version = ++generation.current;
     const requestId = globalThis.crypto.randomUUID();
     const chatRevision = chatRevisions.current.get(chatId) ?? 0;
-    request.current = requestId;
-    requestChatId.current = chatId;
-    activitySequence.current = 0;
-    liveActivities.current = [];
-    setLiveWork({ question: text, activities: [], status: 'running', coverage: [], warnings: [] });
+    const run = startWork(chatId, requestId, { kind: 'question', question: text, activities: [], status: 'running', coverage: [], warnings: [] });
     setActivitySelection('live');
     setPendingQuestion(text);
     setAccountPickerOpen(false);
     setError(null);
     try {
-      const previous = exchanges[exchanges.length - 1];
+      const previous = exchanges.filter(exchange => !exchange.status || exchange.status === 'completed').at(-1);
       const result = await window.electronAPI.inboxAssistant.ask({
         requestId, chatId, question: text, accountIds: [...accountIds],
         ...(previous ? { previousExchangeId: previous.id } : {}),
@@ -640,31 +744,34 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       });
       if (result.success && (!result.data.chatId || result.data.chatId === chatId) && result.data.reviewResult) {
         onMailChanged?.();
-        if (mounted.current && activeChatRef.current === chatId && (chatRevisions.current.get(chatId) ?? 0) === chatRevision
-          && cancelledRequests.current.has(requestId)) {
-          setExchanges(current => [...current.filter(exchange => exchange.id !== result.data.id), result.data]);
+        if (cancelledRequests.current.has(requestId)) {
+          cacheExchange(chatId, result.data, chatRevision);
+          if (isVisibleRequest(chatId, requestId)) {
           setLiveWork(current => (current?.status === 'cancelled' || current?.status === 'stopping') && current.question === text ? { ...current, kind: 'action' } : current);
-          void refreshSummaries();
+          }
         }
       }
-      if (version !== generation.current || activeChatRef.current !== chatId) return;
       if (!result.success) throw new Error(result.error);
       if (result.data.chatId && result.data.chatId !== chatId) throw new Error('The answer belongs to a different conversation.');
-      const completed = { ...result.data, activities: result.data.activities ?? liveActivities.current };
-      setExchanges(current => [...current.filter(exchange => exchange.id !== completed.id), completed]);
+      if (cancelledRequests.current.has(requestId)) return;
+      const completed = { ...result.data, requestId: result.data.requestId ?? requestId, status: result.data.status ?? 'completed' as const, updatedAt: result.data.updatedAt ?? Date.now(), activities: result.data.activities ?? run.work.activities };
+      cacheExchange(chatId, completed, chatRevision);
+      drafts.current.set(chatId, { question: '', accountIds: [...accountIds] });
+      if (!isVisibleRequest(chatId, requestId)) return;
       setLiveWork(null);
       setActivitySelection(current => current === 'live' ? completed.id : current);
       setQuestion('');
-      drafts.current.set(chatId, { question: '', accountIds: [...selectedAccountIds] });
-      void refreshSummaries();
     } catch (cause) {
-      if (version === generation.current) {
+      if (isVisibleRequest(chatId, requestId) && !cancelledRequests.current.has(requestId)) {
         const message = cause instanceof Error ? cause.message : 'Could not answer this question. Please try again.';
+        run.work = { ...run.work, status: 'error', error: message };
         setError(message);
         setLiveWork(current => current ? { ...current, status: 'error', error: message } : current);
       }
     } finally {
       finishRequest(requestId);
+      void refreshSummaries();
+      void refreshSelectedChat(chatId);
     }
   };
 
@@ -706,39 +813,34 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       if (!confirmed || !mounted.current || activeChatRef.current !== chatId || request.current) return;
     }
     if (exchange.review.status === 'expired' || !Number.isFinite(exchange.review.expiresAt) || exchange.review.expiresAt <= Date.now()) { setError('This review has expired. Refresh it before changing mail.'); return; }
-    const version = ++generation.current;
     const requestId = globalThis.crypto.randomUUID();
     const chatRevision = chatRevisions.current.get(chatId) ?? 0;
-    request.current = requestId;
-    requestChatId.current = chatId;
-    activitySequence.current = 0;
-    liveActivities.current = [];
     const message = undo ? 'Restoring the previous read status of changed emails' : action === 'archive' ? 'Archiving selected conversations' : action === 'trash' ? 'Moving selected conversations to Trash' : exchange.review.kind === 'mark_unread' ? 'Marking selected emails as unread' : 'Marking selected conversations as read';
-    setActionCreating(true);
     setError(null);
-    setLiveWork({ kind: 'action', question: message, activities: [], status: 'running', coverage: [], warnings: [] });
+    const run = startWork(chatId, requestId, { kind: 'action', question: message, activities: [], status: 'running', coverage: [], warnings: [] });
     setActivitySelection('live');
     onCloseSourcePane?.();
     try {
       const result = await window.electronAPI.inboxAssistant.applyReview({ requestId, chatId, exchangeId: exchange.id, reviewId: exchange.review.id, itemIds, ...(undo ? { undo: true } : { ...(manualSelection || moveAction ? { manualSelection: true } : {}), ...(action ? { action } : {}) }) });
       if (result.success && result.data.chatId && result.data.chatId !== chatId) throw new Error('The receipt belongs to a different conversation.');
       if (result.success) onMailChanged?.();
-      if (activeChatRef.current !== chatId) return;
       if (!result.success) throw new Error(result.error);
       // Cancellation stops later conversations; acknowledged writes still
       // update the receipt in the originating conversation.
-      if (mounted.current && (chatRevisions.current.get(chatId) ?? 0) === chatRevision) setExchanges(current => current.map(item => item.id === result.data.id ? result.data : item));
-      if (version !== generation.current) return;
+      cacheExchange(chatId, result.data, chatRevision);
+      if (!isVisibleRequest(chatId, requestId) || cancelledRequests.current.has(requestId)) return;
       setLiveWork(null);
-      void refreshSummaries();
     } catch (cause) {
-      if (version === generation.current) {
+      if (isVisibleRequest(chatId, requestId) && !cancelledRequests.current.has(requestId)) {
         const message = cause instanceof Error ? cause.message : 'Could not apply the reviewed actions.';
+        run.work = { ...run.work, status: 'error', error: message };
         setError(message);
         setLiveWork(current => current ? { ...current, status: 'error', error: message } : current);
       }
     } finally {
       finishRequest(requestId);
+      void refreshSummaries();
+      void refreshSelectedChat(chatId);
     }
   };
 
@@ -774,33 +876,30 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     event.preventDefault();
     const chatId = activeChatRef.current;
     if (!chatId || !exchanges.length || !onOpenDraft || request.current || !accounts.some(account => account.id === draftAccountId)) return;
-    const version = ++generation.current;
     const requestId = globalThis.crypto.randomUUID();
-    request.current = requestId;
-    requestChatId.current = chatId;
-    activitySequence.current = 0;
-    liveActivities.current = [];
-    setLiveWork({ kind: 'draft', question: 'Draft email from conversation', activities: [], status: 'running', coverage: [], warnings: [] });
+    const run = startWork(chatId, requestId, { kind: 'draft', question: 'Draft email from conversation', activities: [], status: 'running', coverage: [], warnings: [] });
     setActivitySelection('live');
-    setDraftCreating(true);
     setDraftFormOpen(false);
     setError(null);
     try {
       const instructions = draftInstructions.trim();
       const result = await window.electronAPI.inboxAssistant.draftEmail({ requestId, chatId, accountId: draftAccountId, ...(instructions ? { instructions } : {}) });
-      if (version !== generation.current || activeChatRef.current !== chatId) return;
       if (!result.success) throw new Error(result.error);
       if (result.data.chatId !== chatId || result.data.accountId !== draftAccountId) throw new Error('The draft belongs to a different conversation or sending account.');
+      if (!isVisibleRequest(chatId, requestId) || cancelledRequests.current.has(requestId)) return;
       setLiveWork(current => current ? { ...current, status: 'done' } : current);
       onOpenDraft(result.data);
     } catch (cause) {
-      if (version === generation.current) {
+      if (isVisibleRequest(chatId, requestId) && !cancelledRequests.current.has(requestId)) {
         const message = cause instanceof Error ? cause.message : 'Could not prepare this draft.';
+        run.work = { ...run.work, status: 'error', error: message };
         setError(message);
         setLiveWork(current => current ? { ...current, status: 'error', error: message } : current);
       }
     } finally {
       finishRequest(requestId);
+      void refreshSummaries();
+      void refreshSelectedChat(chatId);
     }
   };
   const togglePinned = async (chat: InboxAssistantChatSummary) => {
@@ -836,6 +935,9 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       metadataGeneration.current++;
       setChats(result.data.chats);
       drafts.current.delete(chat.id);
+      completedExchanges.current.delete(chat.id);
+      chatWork.current.delete(chat.id);
+      chatRevisions.current.set(chat.id, (chatRevisions.current.get(chat.id) ?? 0) + 1);
       if (activeChatRef.current === chat.id) {
         const next = result.data.chats.find(item => item.id === result.data.activeChatId) ?? result.data.chats[0];
         if (next) await selectChat(next.id);
@@ -854,10 +956,12 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const scopeLabel = allAccountsSelected ? `All accounts (${accounts.length})` : `${selectedAccountIds.length} of ${accounts.length} accounts`;
   const singleAccount = selectedAccountIds.length === 1 ? accounts.find(account => account.id === selectedAccountIds[0]) : undefined;
   const selectedExchange = exchanges.find(exchange => exchange.id === activitySelection);
+  const selectedRun = activeChat?.runs?.find(run => `run:${run.requestId}` === activitySelection);
   const inspection: WorkInspection | null = activitySelection === 'live' ? liveWork : selectedExchange ? {
-    question: selectedExchange.question, activities: selectedExchange.activities ?? [], status: 'done',
+    question: selectedExchange.question, activities: selectedExchange.activities ?? [], status: selectedExchange.status === 'failed' ? 'error' : selectedExchange.status === 'stopped' ? 'cancelled' : selectedExchange.status === 'pending' || selectedExchange.status === 'running' ? 'running' : 'done',
     coverage: selectedExchange.answer.coverage, warnings: coverageWarnings(selectedExchange),
-  } : null;
+    error: selectedExchange.error,
+  } : selectedRun ? workFromRun(selectedRun) : null;
   const viewActivity = (selection: string, trigger: HTMLButtonElement) => {
     onCloseSourcePane?.();
     activityTrigger.current = trigger;
@@ -875,11 +979,71 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const busy = loading || chatLoading || creating || draftCreating || actionCreating || modeSaving || rewinding || !!stoppingRequestId;
   const workRunning = !!pendingQuestion || draftCreating || actionCreating;
   const runningRequest = request.current;
+  const backgroundRuns = [...chatWork.current.values()].filter(run => run.chatId !== activeChatId);
+  const backgroundRunCount = backgroundRuns.length;
+  const backgroundRequestId = backgroundRuns[0]?.requestId ?? null;
+  const runningChatIds = new Set(chatWork.current.keys());
+  const displayedExchanges = exchanges.filter(exchange => !runningRequest || exchange.requestId !== runningRequest || (exchange.status !== 'pending' && exchange.status !== 'running'));
   const workStatus = stoppingRequestId ? 'Stopping…' : workRunning ? liveWork?.activities.at(-1)?.message || (liveWork?.kind === 'draft' ? 'Preparing draft from conversation' : liveWork?.kind === 'action' ? liveWork.question : 'Preparing email search')
     : liveWork?.status === 'error' ? 'Request failed' : liveWork?.status === 'cancelled' ? 'Stopped' : 'Ready';
   useEffect(() => {
-    stateListener.current?.({ chatId: activeChatId, title: activeTitle, requestId: runningRequest, running: !!runningRequest, status: workStatus });
-  }, [activeChatId, activeTitle, runningRequest, workStatus]);
+    stateListener.current?.({ chatId: activeChatId, title: activeTitle, requestId: runningRequest ?? backgroundRequestId, running: !!runningRequest || backgroundRunCount > 0, status: runningRequest || !backgroundRunCount ? workStatus : `${backgroundRunCount} ${backgroundRunCount === 1 ? 'chat working' : 'chats working'} in background` });
+  }, [activeChatId, activeTitle, runningRequest, workStatus, backgroundRequestId, backgroundRunCount]);
+
+  useEffect(() => {
+    if (!activeChatId || !chatWork.current.has(activeChatId)) return;
+    let disposed = false;
+    let fetching = false;
+    const chatId = activeChatId;
+    const poll = async () => {
+      if (fetching || disposed || activeChatRef.current !== chatId) return;
+      fetching = true;
+      try {
+        const result = await window.electronAPI.inboxAssistant.chat(chatId);
+        if (disposed || activeChatRef.current !== chatId || !result.success) return;
+        const local = chatWork.current.get(chatId);
+        if (!local) return;
+        setActiveChat(result.data);
+        setExchanges(mergeChatExchanges(result.data.exchanges, completedExchanges.current.get(chatId)));
+        if (!local.external) return;
+        if (result.data.activeRun?.requestId === local.requestId) {
+          local.work = { ...workFromRun(result.data.activeRun), ...(local.stopping ? { status: 'stopping' as const } : {}) };
+          local.sequence = result.data.activeRun.activities.at(-1)?.sequence ?? local.sequence;
+          showWork(local);
+        } else {
+          chatWork.current.delete(chatId);
+          showWork();
+          setWorkRevision(value => value + 1);
+        }
+      } catch { /* Keep the existing live record and retry while offline. */ }
+      finally { fetching = false; }
+    };
+    const timer = setInterval(() => void poll(), 1_500);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [activeChatId, workRevision, showWork]);
+
+  useEffect(() => {
+    if (![...chatWork.current.values()].some(run => run.external)) return;
+    let disposed = false;
+    let fetching = false;
+    const timer = setInterval(() => {
+      if (fetching) return;
+      fetching = true;
+      void window.electronAPI.inboxAssistant.chats().then(result => {
+        if (disposed || !result.success) return;
+        setChats(result.data.chats);
+        let changed = false;
+        for (const run of chatWork.current.values()) {
+          if (run.external && run.chatId !== activeChatRef.current && !result.data.chats.some(chat => chat.id === run.chatId && chat.activeRun?.requestId === run.requestId)) {
+            chatWork.current.delete(run.chatId); changed = true;
+          }
+        }
+        restoreExternalRuns(result.data.chats);
+        if (changed) setWorkRevision(value => value + 1);
+      }).catch(() => {}).finally(() => { fetching = false; });
+    }, 2_000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [workRevision, restoreExternalRuns]);
 
   const renderAccountPicker = () => <div ref={accountPicker} className={compact ? 'min-w-0 flex-1' : 'relative'} onKeyDown={event => {
     if (event.key === 'Escape' && accountPickerOpen) { event.stopPropagation(); setAccountPickerOpen(false); accountPicker.current?.querySelector('button')?.focus(); }
@@ -912,7 +1076,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
           {!compact && renderAccountPicker()}
           <button type="button" onClick={() => void newChat()} disabled={loading || creating || deletePending} className="assistant-primary-action brand-fill flex w-full items-center justify-center gap-2 rounded-full px-4 py-2.5 font-medium text-primary-foreground shadow-md transition-all hover:shadow-lg disabled:opacity-50">{creating ? <Loader2 className="h-5 w-5 animate-spin" /> : <Plus className="h-5 w-5" />}New conversation</button>
         </div>
-        <ChatSidebar chats={chats} activeChatId={activeChatId} pendingChatIds={pendingChatIds} deletePending={deletePending} error={chatListError} onSelect={chatId => void selectChat(chatId)} onTogglePinned={chat => void togglePinned(chat)} onDelete={chat => void deleteChat(chat)} />
+        <ChatSidebar chats={chats} activeChatId={activeChatId} pendingChatIds={pendingChatIds} runningChatIds={runningChatIds} deletePending={deletePending} error={chatListError} onSelect={chatId => void selectChat(chatId)} onTogglePinned={chat => void togglePinned(chat)} onDelete={chat => void deleteChat(chat)} />
       </nav>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -930,12 +1094,15 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
         </header>
 
         {workActive && renderWorkBar()}
+        {backgroundRuns.length > 0 && <div aria-label="Background agent work" className="flex shrink-0 flex-wrap gap-2 border-b border-border px-4 py-2">{backgroundRuns.map(run => <button key={run.requestId} type="button" onClick={() => void selectChat(run.chatId)} className="flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"><Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin text-primary" /><span className="truncate">{chats.find(chat => chat.id === run.chatId)?.title ?? 'Another conversation'} · Working in background</span></button>)}</div>}
+        {(exchanges.length > 0 || !!activeChat?.runs?.length || workActive) && <div className="shrink-0 border-b border-border px-4 py-2"><AssistantUsage usage={activeChat?.usage} variant="conversation" compact={compact} /></div>}
 
         <div ref={messages} aria-label="Conversation messages" className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${compact ? 'space-y-6 px-4 py-5' : 'space-y-8 px-5 py-6'}`} aria-live="polite" aria-busy={busy || !!pendingQuestion}>
           {loading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading conversations…</p> : loadError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{loadError}</p><button onClick={() => void load()} className="mt-3 font-medium underline">Try again</button></div> : chatLoading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{creating ? 'Creating conversation…' : 'Loading conversation…'}</p> : chatError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{chatError}</p><button type="button" onClick={() => activeChatId ? void selectChat(activeChatId, true) : void newChat()} className="mt-3 font-medium underline">Try again</button></div> : <>
             {accounts.length === 0 && <p role="status" className="text-sm text-muted-foreground">Connect an email account to ask Inbox Agent about your mail.</p>}
             {exchanges.length === 0 && !liveWork && <div className={`mx-auto flex w-full max-w-3xl flex-col justify-center ${compact ? 'space-y-5 py-3' : 'space-y-6 py-10'}`}><div className="space-y-3"><span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Bot className="h-6 w-6" /></span><h2 className={`${compact ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight`}>What can I help you with?</h2><p className="text-sm text-muted-foreground">Search your mail, review unread conversations, and catch messages that missed categorization.</p></div><div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'sm:grid-cols-2'}`}>{starterActions.map(({ title, description, question: text, Icon }) => <button key={title} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className={`assistant-surface flex items-start gap-3 rounded-xl border border-border text-left transition-colors hover:bg-accent hover:border-primary/20 disabled:opacity-50 ${compact ? 'p-3' : 'p-4'}`}><Icon className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><span className="space-y-1"><span className="block text-sm font-medium">{title}</span><span className="block text-xs leading-5 text-muted-foreground">{description}</span></span></button>)}</div><div className="flex flex-wrap gap-2">{starterQuestions.map(text => <button key={text} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className="rounded-full border border-border px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">{text}</button>)}</div></div>}
-            {exchanges.map(exchange => <Answer key={exchange.id} compact={compact} exchange={exchange} onNavigateToSource={onNavigateToSource} onViewActivity={viewActivity} activityExpanded={activityOpen && activitySelection === exchange.id} userMessage={{ visible, onEdit: () => { setEditingExchangeId(exchange.id); setEditQuestion(exchange.question); }, disabled: busy || !!pendingQuestion, ...(editingExchangeId === exchange.id ? { editValue: editQuestion, onEditChange: setEditQuestion, onCancelEdit: () => setEditingExchangeId(null), onSaveEdit: () => void rewindChat(exchange) } : {}) }} actionBusy={busy || !!pendingQuestion || !!editingExchangeId} onApply={(ids, manualSelection, action) => void applyReview(exchange, ids, false, manualSelection, action)} onUndo={ids => void applyReview(exchange, ids, true)} onRefresh={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} onContinue={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, continueReviewId: exchange.review?.id, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} />)}
+            {displayedExchanges.map(exchange => <Answer key={exchange.id} compact={compact} exchange={exchange} onNavigateToSource={onNavigateToSource} onViewActivity={viewActivity} activityExpanded={activityOpen && activitySelection === exchange.id} userMessage={{ visible, onEdit: () => { setEditingExchangeId(exchange.id); setEditQuestion(exchange.question); }, disabled: busy || !!pendingQuestion, ...(editingExchangeId === exchange.id ? { editValue: editQuestion, onEditChange: setEditQuestion, onCancelEdit: () => setEditingExchangeId(null), onSaveEdit: () => void rewindChat(exchange) } : {}) }} actionBusy={busy || !!pendingQuestion || !!editingExchangeId} onApply={(ids, manualSelection, action) => void applyReview(exchange, ids, false, manualSelection, action)} onUndo={ids => void applyReview(exchange, ids, true)} onRefresh={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} onContinue={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, continueReviewId: exchange.review?.id, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} />)}
+            {!!activeChat?.runs?.some(run => run.kind !== 'question' && run.requestId !== runningRequest) && <details aria-label="Drafts and mail actions" className="assistant-surface rounded-xl border border-border p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">Drafts and mail actions</summary><div className="mt-3 space-y-4">{activeChat.runs.filter(run => run.kind !== 'question' && run.requestId !== runningRequest).map(run => <article key={run.requestId} aria-label={`Work record: ${run.question}`} className="space-y-2 border-t border-border pt-3"><p className="text-sm font-medium">{run.question}</p><p className="text-xs text-muted-foreground">{run.status === 'completed' ? 'Completed' : run.status === 'stopped' ? 'Stopped' : run.status === 'failed' ? 'Failed' : 'In progress'}</p>{run.error && <p className="text-xs text-destructive">{run.error}</p>}<div className="flex flex-wrap gap-3"><button type="button" onClick={event => viewActivity(`run:${run.requestId}`, event.currentTarget)} className="text-xs text-primary hover:underline">View activity</button>{run.draft && onOpenDraft && <button type="button" onClick={() => onOpenDraft(run.draft!)} className="text-xs text-primary hover:underline">Open draft</button>}</div><AssistantUsage usage={run.usage} compact={compact} /></article>)}</div></details>}
             {liveWork && <div className="space-y-5" role={workRunning ? 'status' : undefined}>{liveWork.kind !== 'draft' && liveWork.kind !== 'action' && <UserMessage question={liveWork.question} visible={visible} onEdit={!workRunning && !stoppingRequestId ? () => { setQuestion(liveWork.question); if (visibleRef.current) questionInput.current?.focus(); } : undefined} />}{!workActive && <button type="button" onClick={event => viewActivity('live', event.currentTarget)} aria-label={workRunning ? 'View current activity' : liveWork.status === 'stopping' ? 'View stopping activity' : liveWork.status === 'done' ? 'View draft activity' : liveWork.status === 'error' ? 'View failed activity' : 'View stopped activity'} aria-expanded={activityOpen && activitySelection === 'live'} aria-controls="assistant-activity-panel" className="flex max-w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground">{workRunning ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Activity className="h-3.5 w-3.5 shrink-0" />}<span className="truncate">{liveWork.status === 'running' ? liveWork.activities[liveWork.activities.length - 1]?.message || (liveWork.kind === 'draft' ? 'Preparing draft from conversation' : 'Preparing email search') : liveWork.status === 'done' ? 'Draft ready · View activity' : liveWork.status === 'stopping' ? 'Stopping… · View activity' : liveWork.status === 'cancelled' ? 'Stopped · View activity' : 'Failed · View activity'}</span><ChevronDown className="h-3.5 w-3.5 shrink-0 -rotate-90" /></button>}</div>}
           </>}
         </div>

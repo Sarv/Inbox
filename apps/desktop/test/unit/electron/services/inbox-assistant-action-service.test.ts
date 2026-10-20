@@ -6,7 +6,7 @@ vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { thr
 
 import { createInboxAssistantHistoryStore, type InboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
 import { InboxAssistantService, inboxAssistantGenericReviewRequest, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
-import type { InboxAssistantAccount, InboxAssistantExchange, InboxAssistantReviewActionRequest } from '../../../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantAIUsage, InboxAssistantExchange, InboxAssistantReviewActionRequest } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
 const ACCOUNTS: InboxAssistantAccount[] = [{ id: 'primary', email: 'owner@company.example' }, { id: 'secondary', email: 'sales@company.example' }];
@@ -90,14 +90,114 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); db.close(); });
 
 describe('Inbox Agent conversation approval orchestration', () => {
+  it.each(['rewind', 'clear', 'delete'] as const)('keeps late provider accounting after Stop and %s without reviving removed work', async change => {
+    const base = await service.ask(request('base-question'));
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const usage: InboxAssistantAIUsage = { id: 'late-billed-call', provider: 'fixture', model: 'fixture', status: 'cancelled', startedAt: 1, completedAt: 2,
+      attempts: 1, inputTokens: 123, outputTokens: 7, tokenSource: 'provider', usageComplete: true, estimatedCostUsd: 0.0123, costComplete: true };
+    deps.callAI = vi.fn(async (prompt, _signal, onUsage) => {
+      started();
+      await gate;
+      onUsage?.(usage); onUsage?.(usage);
+      return recommendation(prompt);
+    });
+    const pending = service.ask(request('late-provider-question'));
+    const stopped = expect(pending).rejects.toThrow(/cancel/i);
+    await ready;
+    await service.cancel('late-provider-question');
+    await stopped;
+    const stoppedExchange = history.load(chatId, { select: false }).exchanges.at(-1)!;
+    expect(stoppedExchange.status).toBe('stopped');
+    expect(history.load(chatId, { select: false }).usage).toBeUndefined();
+    if (change === 'rewind') await service.rewindChat({ chatId, exchangeId: stoppedExchange.id });
+    else if (change === 'clear') service.clearHistory();
+    else service.deleteChat(chatId);
+    const other = service.createChat();
+    const before = change === 'delete' ? undefined : history.load(chatId, { select: false });
+    release();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(history.list().activeChatId).toBe(other.id);
+    expect(deps.setRead).not.toHaveBeenCalled();
+    if (change === 'delete') {
+      expect(history.list().chats.some(chat => chat.id === chatId)).toBe(false);
+      expect(history.load(other.id).exchanges).toEqual([]);
+    } else {
+      const after = history.load(chatId, { select: false });
+      expect(after.exchanges).toEqual(before!.exchanges);
+      expect(after.runs).toEqual(before!.runs);
+      expect(after.exchanges.some(exchange => exchange.id === stoppedExchange.id)).toBe(false);
+      expect(after.usage).toMatchObject({ inputTokens: 123, outputTokens: 7, estimatedCostUsd: 0.0123, calls: [usage] });
+      expect(after.exchanges).toHaveLength(change === 'rewind' ? 1 : 0);
+      if (change === 'rewind') expect(after.exchanges[0]!.id).toBe(base.id);
+    }
+  });
+
+  it('serializes overlapping mail actions from independent chats and revalidates the second snapshot after waiting', async () => {
+    const first = await service.ask(request());
+    const other = service.createChat();
+    const second = await service.ask({ ...request('prepare-other'), chatId: other.id });
+    const original = deps.setRead!;
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let firstWrite = true;
+    deps.setRead = vi.fn(async (accountId: string, ids: string[], read: boolean) => {
+      if (firstWrite) { firstWrite = false; started(); await gate; }
+      return original(accountId, ids, read);
+    });
+    const one = service.applyReview(applyRequest(first, { requestId: 'mail-first' }));
+    await ready;
+    const two = service.applyReview(applyRequest(second, { requestId: 'mail-second', chatId: other.id }));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(deps.setRead).toHaveBeenCalledTimes(1);
+    release();
+    expect((await one).reviewResult?.appliedCount).toBe(2);
+    expect((await two).reviewResult?.skippedCount).toBe(2);
+    expect(deps.setRead).toHaveBeenCalledTimes(2);
+    expect(history.list().activeChatId).toBe(other.id);
+    expect(history.load(chatId, { select: false }).runs?.at(-1)).toMatchObject({ requestId: 'mail-first', kind: 'action', status: 'completed' });
+  });
+
+  it('stops only a queued action while another chat finishes its acknowledged mail work', async () => {
+    const first = await service.ask(request());
+    const other = service.createChat();
+    const second = await service.ask({ ...request('prepare-other'), chatId: other.id });
+    const original = deps.setRead!;
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    deps.setRead = vi.fn(async (accountId: string, ids: string[], read: boolean) => { started(); await gate; return original(accountId, ids, read); });
+    const one = service.applyReview(applyRequest(first, { requestId: 'mail-first' }));
+    await ready;
+    const two = service.applyReview(applyRequest(second, { requestId: 'mail-second', chatId: other.id }));
+    const stopped = expect(two).rejects.toThrow(/cancel/i);
+    expect(await service.cancel('mail-second')).toEqual({ requestId: 'mail-second', cancelled: true });
+    await stopped;
+    expect(service.chats().chats.find(chat => chat.id === chatId)?.activeRun?.requestId).toBe('mail-first');
+    expect(history.load(other.id, { select: false }).runs?.at(-1)).toMatchObject({ requestId: 'mail-second', kind: 'action', status: 'stopped' });
+    release();
+    expect((await one).reviewResult?.appliedCount).toBe(2);
+    expect(deps.setRead).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['archive', 'trash'] as const)('persists a manually selected %s receipt for protected reviewed mail', async action => {
     const exchange = await service.ask(request());
     const item = exchange.review!.items.find(value => value.emailId === 'important')!;
     expect(item.mailActionsAllowed).toBe(true);
+    const questionUpdatedAt = exchange.updatedAt!;
+    vi.spyOn(Date, 'now').mockReturnValue(questionUpdatedAt);
     const applied = await service.applyReview(applyRequest(exchange, { itemIds: [item.id], action, manualSelection: true }));
     expect(deps.moveMail).toHaveBeenCalledExactlyOnceWith('primary', ['important'], action);
     expect(deps.setRead).not.toHaveBeenCalled();
     expect(applied.reviewResult).toMatchObject({ appliedCount: 1, items: [{ action, status: 'applied' }] });
+    expect(applied.updatedAt).toBeGreaterThan(questionUpdatedAt);
+    expect(applied).toMatchObject({ requestId: exchange.requestId, status: exchange.status });
+    expect(history.load(chatId).exchanges[0]!.updatedAt).toBe(applied.updatedAt);
     expect(history.load(chatId).exchanges[0]!.review!.items.find(value => value.id === item.id)).toMatchObject({ appliedAction: action, undoAvailable: false, mailActionsAllowed: false });
   });
 
@@ -163,7 +263,7 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(deps.openMailbox).not.toHaveBeenCalled();
     expect(deps.callAI).not.toHaveBeenCalled();
     expect(deps.setRead).not.toHaveBeenCalled();
-    expect(history.load(chatId)).toMatchObject({ actionMode: 'approve_for_me', exchanges: [] });
+    expect(history.load(chatId)).toMatchObject({ actionMode: 'approve_for_me', exchanges: [expect.objectContaining({ status: 'failed' })], runs: [expect.objectContaining({ status: 'failed' })] });
     expect([...rows.values()].every(row => !row.tags.includes('|read|'))).toBe(true);
   });
 
@@ -227,7 +327,7 @@ describe('Inbox Agent conversation approval orchestration', () => {
     release(await open('primary'));
     await new Promise(resolve => setImmediate(resolve));
     expect(events).toHaveBeenCalledTimes(count);
-    expect(history.load(chatId).exchanges.map(exchange => exchange.id)).toEqual([next.id]);
+    expect(history.load(chatId).exchanges).toEqual([expect.objectContaining({ status: 'stopped', requestId: 'hung-search' }), expect.objectContaining({ id: next.id, status: 'completed' })]);
     await expect(service.cancel({ requestId: 'wrong' })).rejects.toThrow('Invalid');
   });
 
@@ -263,7 +363,7 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(deps.openMailbox).not.toHaveBeenCalled();
     expect(deps.callAI).not.toHaveBeenCalled();
     expect(deps.setRead).not.toHaveBeenCalled();
-    expect(history.load(chatId)).toMatchObject({ actionMode: 'approve_for_me', exchanges: [] });
+    expect(history.load(chatId)).toMatchObject({ actionMode: 'approve_for_me', exchanges: [expect.objectContaining({ status: 'failed' })], runs: [expect.objectContaining({ status: 'failed' })] });
   });
 
   it('prepares a real read-only review without changing flags or calling the QA provider flow', async () => {
@@ -452,9 +552,9 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(result.reviewResult).toMatchObject({ appliedCount: 1, skippedCount: 1 });
     expect(deps.setRead).toHaveBeenCalledTimes(1);
     expect(history.list().activeChatId).toBe(other.id);
-    expect(history.load(other.id, { select: false }).exchanges).toEqual([]);
+    expect(history.load(other.id, { select: false }).exchanges.every(exchange => exchange.status === 'failed')).toBe(true);
     expect(history.load(chatId, { select: false }).exchanges[0]?.reviewResult).toEqual(result.reviewResult);
-    expect(history.load(chatId, { select: false }).exchanges).toHaveLength(1);
+    expect(history.load(chatId, { select: false }).exchanges.filter(exchange => exchange.status !== 'failed')).toHaveLength(1);
   });
 
   it('invalidates a prepared review when its origin conversation is cleared', async () => {
@@ -486,8 +586,8 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(deps.openMailbox).toHaveBeenCalledTimes(openCalls);
     expect(deps.callAI).toHaveBeenCalledTimes(aiCalls);
     expect(deps.setRead).not.toHaveBeenCalled();
-    expect(history.load(chatId, { select: false }).exchanges).toHaveLength(1);
-    expect(history.load(other.id, { select: false }).exchanges).toEqual([]);
+    expect(history.load(chatId, { select: false }).exchanges.filter(exchange => exchange.status !== 'failed')).toHaveLength(1);
+    expect(history.load(other.id, { select: false }).exchanges.every(exchange => exchange.status === 'failed')).toBe(true);
     expect(history.list().activeChatId).toBe(other.id);
   });
 

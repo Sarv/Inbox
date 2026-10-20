@@ -71,6 +71,57 @@ export interface InboxAssistantActivity extends InboxAssistantProgress {
   at: number;
 }
 
+/** Provider-reported accounting only. Prompts and API credentials are excluded. */
+export interface InboxAssistantAIUsage {
+  id: string;
+  provider: string;
+  model: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  completedAt: number;
+  attempts: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  tokenSource: 'provider' | 'unavailable';
+  /** False when one or more provider attempts did not report both counts. */
+  usageComplete: boolean;
+  estimatedCostUsd?: number;
+  /** False when counts or the exact provider/model rate are unavailable. */
+  costComplete: boolean;
+  pricingSource?: string;
+  pricingAsOf?: string;
+}
+
+export interface InboxAssistantUsage {
+  calls: InboxAssistantAIUsage[];
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  tokenCountsComplete: boolean;
+  estimatedCostUsd?: number;
+  costComplete: boolean;
+  currency: 'USD';
+}
+
+export type InboxAssistantRunStatus = 'pending' | 'running' | 'completed' | 'stopped' | 'failed';
+
+export interface InboxAssistantRunRecord {
+  requestId: string;
+  chatId: string;
+  kind: 'question' | 'draft' | 'action';
+  question: string;
+  accountIds: string[];
+  exchangeId?: string;
+  status: InboxAssistantRunStatus;
+  startedAt: number;
+  updatedAt: number;
+  activities: InboxAssistantActivity[];
+  error?: string;
+  usage?: InboxAssistantUsage;
+  draft?: InboxAssistantDraft;
+}
+
 export interface InboxAssistantExchange {
   id: string;
   chatId?: string;
@@ -81,6 +132,11 @@ export interface InboxAssistantExchange {
   activities?: InboxAssistantActivity[];
   review?: InboxAssistantReview;
   reviewResult?: InboxAssistantReviewApplyResult;
+  requestId?: string;
+  status?: InboxAssistantRunStatus;
+  updatedAt?: number;
+  error?: string;
+  usage?: InboxAssistantUsage;
 }
 
 export interface InboxAssistantRequest {
@@ -118,10 +174,14 @@ export interface InboxAssistantChatSummary {
   actionMode?: InboxAssistantActionMode;
   /** An earlier conversation branch can be restored after rewinding. */
   rewindAvailable?: boolean;
+  /** Live metadata only; the persisted summary index does not duplicate runs. */
+  activeRun?: InboxAssistantRunRecord;
 }
 
 export interface InboxAssistantChat extends InboxAssistantChatSummary {
   exchanges: InboxAssistantExchange[];
+  runs?: InboxAssistantRunRecord[];
+  usage?: InboxAssistantUsage;
 }
 
 export interface InboxAssistantChatList {

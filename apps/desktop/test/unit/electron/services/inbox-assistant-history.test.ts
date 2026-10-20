@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { throw new Error('Use the isolated test database.'); } }));
 
 import { createInboxAssistantHistoryStore, type InboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
-import type { InboxAssistantExchange } from '../../../../src/types/inbox-assistant';
+import { aggregateInboxAssistantUsage } from '../../../../electron/services/inbox-assistant-usage';
+import type { InboxAssistantExchange, InboxAssistantRunRecord } from '../../../../src/types/inbox-assistant';
 
 let db: Database.Database;
 let store: InboxAssistantHistoryStore;
@@ -37,6 +38,72 @@ beforeEach(() => {
 afterEach(() => { db.close(); });
 
 describe('separate encrypted-store Inbox Agent chats', () => {
+  it('persists in-flight questions and run records privately while background updates preserve selection', () => {
+    const origin = store.create();
+    const other = store.create();
+    const pending: InboxAssistantExchange = { ...exchange(), answer: { text: '', sources: [], coverage: [], warnings: [] }, status: 'running', requestId: 'live-request', updatedAt: 10 };
+    const run: InboxAssistantRunRecord = { requestId: 'live-request', chatId: origin.id, exchangeId: pending.id, kind: 'question', question: 'PRIVATE RUN QUESTION', accountIds: ['work'],
+      status: 'running', startedAt: 1, updatedAt: 10, activities: [{ requestId: 'live-request', chatId: origin.id, sequence: 1, at: 10, stage: 'search', status: 'running', message: 'PRIVATE PROGRESS' }] };
+    store.writeChat({ ...origin, exchanges: [pending], runs: [run] });
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    expect(restarted.load(origin.id, { select: false })).toMatchObject({ exchanges: [{ status: 'running', requestId: 'live-request' }], runs: [run] });
+    expect(restarted.list().activeChatId).toBe(other.id);
+    expect(blob(INDEX)).not.toContain('PRIVATE RUN QUESTION');
+    expect(blob(INDEX)).not.toContain('PRIVATE PROGRESS');
+    expect(blob(INDEX)).not.toContain('live-request');
+    // Legacy writes that update exchanges alone cannot drop durable run logs.
+    restarted.writeChat({ ...origin, exchanges: [{ ...pending, status: 'stopped' }] });
+    expect(restarted.load(origin.id, { select: false }).runs).toEqual([run]);
+  });
+
+  it('retains saved draft output and failed usage receipts across rewinds, restoration and restart', () => {
+    const origin = store.create();
+    const runs: InboxAssistantRunRecord[] = [{ requestId: 'draft-run', chatId: origin.id, kind: 'draft', question: 'Draft my reply', accountIds: ['work'], status: 'completed', startedAt: 1, updatedAt: 2, activities: [],
+      draft: { chatId: origin.id, accountId: 'work', to: ['recipient@example.test'], cc: [], subject: 'Saved draft', body: 'PRIVATE DRAFT BODY' } },
+    { requestId: 'failed-run', chatId: origin.id, exchangeId: 'exchange-1', kind: 'question', question: 'Failed question', accountIds: ['work'], status: 'failed', startedAt: 3, updatedAt: 4, activities: [], error: 'Provider unavailable' }];
+    store.writeChat({ ...origin, exchanges: [exchange(), { ...exchange(1), status: 'failed', requestId: 'failed-run' }], runs });
+    const rewound = store.rewind(origin.id, 'exchange-1');
+    expect(rewound.chat.runs).toEqual([runs[0]]);
+    expect(createInboxAssistantHistoryStore(() => db).restoreRewind(origin.id).runs).toEqual(runs);
+    expect(blob(INDEX)).not.toContain('PRIVATE DRAFT BODY');
+  });
+
+  it('keeps one spending ledger across edited branches without summing duplicate exchanged receipts', () => {
+    const origin = store.create();
+    const makeRun = (id: string, exchangeId: string, inputTokens: number): InboxAssistantRunRecord => ({ requestId: id, chatId: origin.id, exchangeId, kind: 'question', question: 'Private billed request', accountIds: ['work'],
+      status: 'completed', startedAt: 1, updatedAt: 2, activities: [], usage: aggregateInboxAssistantUsage([{ id: `call-${id}`, provider: 'fixture', model: 'fixture', status: 'completed', startedAt: 1, completedAt: 2, attempts: 1,
+        inputTokens, outputTokens: 5, tokenSource: 'provider', usageComplete: true, estimatedCostUsd: inputTokens / 1000, costComplete: true }]) });
+    const first = makeRun('first', 'exchange-0', 100);
+    const second = makeRun('second', 'exchange-1', 50);
+    store.writeChat({ ...origin, runs: [first, second], exchanges: [{ ...exchange(), usage: first.usage }, { ...exchange(1), usage: second.usage }] });
+    expect(store.load(origin.id).usage).toMatchObject({ inputTokens: 150, outputTokens: 10 });
+    expect(store.load(origin.id).usage?.estimatedCostUsd).toBeCloseTo(0.15);
+    const rewound = store.rewind(origin.id, 'exchange-1').chat;
+    expect(rewound.runs).toEqual([first]);
+    expect(rewound.usage?.inputTokens).toBe(150);
+    const third = makeRun('third', 'exchange-2', 75);
+    store.writeChat({ ...rewound, exchanges: [...rewound.exchanges, { ...exchange(2), usage: third.usage }], runs: [...rewound.runs!, third] });
+    expect(store.load(origin.id).usage).toMatchObject({ inputTokens: 225, outputTokens: 15 });
+    expect(store.load(origin.id).usage?.estimatedCostUsd).toBeCloseTo(0.225);
+    const restored = createInboxAssistantHistoryStore(() => db).restoreRewind(origin.id);
+    expect(restored.runs).toEqual([first, second]);
+    expect(restored.usage).toMatchObject({ inputTokens: 225, outputTokens: 15 });
+    expect(restored.usage?.estimatedCostUsd).toBeCloseTo(0.225);
+    expect(restored.usage?.calls.map(call => call.id)).toEqual(['call-first', 'call-second', 'call-third']);
+    expect(store.restoreRewind(origin.id).usage?.inputTokens).toBe(225);
+    expect(blob(INDEX)).not.toContain('call-first');
+  });
+
+  it('rejects malformed or foreign run records without replacing prior stored data', () => {
+    const origin = store.create();
+    const before = blob(`${CHAT}${origin.id}`);
+    const run: InboxAssistantRunRecord = { requestId: 'run', chatId: 'foreign-chat', kind: 'action', question: 'Archive', accountIds: ['work'], status: 'completed', startedAt: 1, updatedAt: 2, activities: [] };
+    expect(() => store.writeChat({ ...origin, runs: [run] })).toThrow('run owner');
+    expect(blob(`${CHAT}${origin.id}`)).toBe(before);
+    expect(() => store.writeChat({ ...origin, runs: [{ ...run, chatId: origin.id, status: 'invented' as never }] })).toThrow('Invalid');
+    expect(blob(`${CHAT}${origin.id}`)).toBe(before);
+  });
+
   it('migrates legacy persistent Auto and one-request approval safely without rewriting conversations or recovery data', () => {
     const ongoing = store.create(); store.writeChat({ ...ongoing, exchanges: [exchange()] });
     store.update(ongoing.id, { pinned: true }); store.rename(ongoing.id, 'Ongoing delegation');

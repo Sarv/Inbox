@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { waitForAbortableOperation } from '@sarvinbox/core';
 
-import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind } from '../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReview, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
 
 import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
@@ -11,13 +11,26 @@ import { buildInboxAssistantContext } from './inbox-assistant-context';
 import { generateInboxAssistantDraft } from './inbox-assistant-draft';
 import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
 import { researchInboxAssistant, type AssistantResearchDeps } from './inbox-assistant-retrieval';
+import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
 
 export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   accounts(): InboxAssistantAccount[];
-  callAI(prompt: string, signal: AbortSignal): Promise<string>;
+  callAI(prompt: string, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void): Promise<string>;
   history: InboxAssistantHistoryStore;
   setRead?: InboxAssistantActionDeps['setRead'];
   moveMail?: InboxAssistantActionDeps['moveMail'];
+}
+
+interface ActiveRun {
+  id: string;
+  chatId: string;
+  controller: AbortController;
+  generation: number;
+  record: InboxAssistantRunRecord;
+  mutating: boolean;
+  cancelled: boolean;
+  settled: Promise<void>;
+  finish(): void;
 }
 
 function validateRequest(value: unknown): InboxAssistantRequest {
@@ -85,27 +98,120 @@ function validateDraftRequest(value: unknown): InboxAssistantDraftRequest {
 }
 
 export class InboxAssistantService {
-  private running: { id: string; chatId: string; controller: AbortController; mutating?: boolean; settled: Promise<void>; finish(): void } | null = null;
+  private running = new Map<string, ActiveRun>();
+  private mailActionTail: Promise<void> = Promise.resolve();
   private generations = new Map<string, number>();
   private actionReviews = new Map<string, { chatId: string; exchangeId: string; review: InboxAssistantReview; excludedThreads: Record<string, string[]> }>();
 
   constructor(private deps: InboxAssistantServiceDeps) {}
 
-  private beginRequest(id: string, chatId: string, controller: AbortController, mutating = false): void {
+  private assertIdle(chatId: string, requestId: string): void {
+    if (this.running.has(chatId)) throw new Error('Another Inbox Agent request is still running in this conversation. Stop it before starting another.');
+    if ([...this.running.values()].some(run => run.id === requestId)) throw new Error('This Inbox Agent request is already running.');
+  }
+
+  private beginRequest(id: string, chatId: string, controller: AbortController, kind: InboxAssistantRunRecord['kind'], question: string, accountIds: string[], exchangeId?: string): ActiveRun {
+    this.assertIdle(chatId, id);
     let finish!: () => void;
     const settled = new Promise<void>(resolve => { finish = resolve; });
-    this.running = { id, chatId, controller, mutating, settled, finish };
+    const now = Date.now();
+    const run: ActiveRun = { id, chatId, controller, generation: this.generations.get(chatId) ?? 0,
+      record: { requestId: id, chatId, kind, question, accountIds: [...accountIds], ...(exchangeId ? { exchangeId } : {}), status: 'pending', startedAt: now, updatedAt: now, activities: [] },
+      mutating: false, cancelled: false, settled, finish };
+    this.running.set(chatId, run);
+    try { this.persistRun(run); } catch (error) { this.running.delete(chatId); finish(); throw error; }
+    return run;
   }
 
   private finishRequest(controller: AbortController): void {
-    if (this.running?.controller !== controller) return;
-    const run = this.running;
-    this.running = null;
+    const run = [...this.running.values()].find(value => value.controller === controller);
+    if (!run) return;
+    this.running.delete(run.chatId);
     run.finish();
   }
 
   private markRequestMutating(controller: AbortController): void {
-    if (this.running?.controller === controller) this.running.mutating = true;
+    const run = [...this.running.values()].find(value => value.controller === controller);
+    if (run) run.mutating = true;
+  }
+
+  private persistRun(run: ActiveRun, exchange?: InboxAssistantExchange): void {
+    if (run.generation !== (this.generations.get(run.chatId) ?? 0)) return;
+    const current = this.deps.history.load(run.chatId, { select: false });
+    const runs = [...(current.runs ?? [])];
+    const index = runs.findIndex(value => value.requestId === run.id);
+    run.record.updatedAt = Math.max(run.record.updatedAt, Date.now());
+    const record = { ...run.record, activities: [...run.record.activities] };
+    if (index < 0) runs.push(record); else runs[index] = record;
+    let exchanges = exchange ? current.exchanges.some(value => value.id === exchange.id)
+      ? current.exchanges.map(value => value.id === exchange.id ? exchange : value) : [...current.exchanges, exchange] : current.exchanges;
+    if (run.record.kind === 'question' && run.record.exchangeId && !exchange) {
+      const previous = exchanges.find(value => value.id === run.record.exchangeId);
+      const question: InboxAssistantExchange = { ...(previous ?? { id: run.record.exchangeId, chatId: run.chatId, question: run.record.question,
+        accountIds: run.record.accountIds, createdAt: run.record.startedAt, answer: { text: '', sources: [], coverage: [], warnings: [] } }),
+        requestId: run.id, status: run.record.status, updatedAt: record.updatedAt, activities: record.activities, ...(record.usage ? { usage: record.usage } : {}),
+        ...(run.record.error ? { error: run.record.error } : {}) };
+      exchanges = previous ? exchanges.map(value => value.id === question.id ? question : value) : [...exchanges, question];
+    }
+    this.deps.history.writeChat({ ...current, runs, exchanges });
+  }
+
+  private reportRun(run: ActiveRun, progress: InboxAssistantProgress, listener?: (activity: InboxAssistantActivity) => void): void {
+    if (run.controller.signal.aborted || run.generation !== (this.generations.get(run.chatId) ?? 0)) return;
+    run.record.status = 'running';
+    const activity: InboxAssistantActivity = { ...progress, requestId: run.id, chatId: run.chatId,
+      sequence: (run.record.activities.at(-1)?.sequence ?? 0) + 1, at: Date.now() };
+    run.record.activities.push(activity);
+    if (run.record.activities.length > 400) run.record.activities.shift();
+    this.persistRun(run);
+    try { listener?.(activity); } catch { /* The requesting window may have closed. */ }
+  }
+
+  private settleRun(run: ActiveRun, error?: unknown, exchange?: InboxAssistantExchange): InboxAssistantExchange | undefined {
+    run.record.status = run.cancelled ? 'stopped' : error !== undefined ? 'failed' : 'completed';
+    if (error !== undefined) run.record.error = error instanceof Error ? error.message : 'Inbox Agent could not finish this request.';
+    else delete run.record.error;
+    run.record.updatedAt = run.record.kind === 'action' && exchange
+      ? Math.max(Date.now(), (exchange.updatedAt ?? exchange.createdAt) + 1) : Date.now();
+    const saved = exchange ? run.record.kind === 'question' ? { ...exchange, requestId: run.id, status: run.record.status, updatedAt: run.record.updatedAt,
+      activities: [...run.record.activities], ...(run.record.error ? { error: run.record.error } : {}), ...(run.record.usage ? { usage: run.record.usage } : {}) } : { ...exchange, updatedAt: run.record.updatedAt } : undefined;
+    this.persistRun(run, saved);
+    return saved;
+  }
+
+  /** Serialize mutations while allowing independent chats to research in parallel. */
+  private async withMailActions<T>(run: ActiveRun, action: () => Promise<T>): Promise<T> {
+    const before = this.mailActionTail.catch(() => {});
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    this.mailActionTail = before.then(() => gate);
+    try {
+      await waitForAbortableOperation(before, run.controller.signal);
+      run.controller.signal.throwIfAborted();
+      this.markRequestMutating(run.controller);
+      return await action();
+    } finally { release(); }
+  }
+
+  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted();
+    return waitForAbortableOperation(this.deps.callAI(prompt, signal, usage => {
+      run.record.usage = aggregateInboxAssistantUsage([...(run.record.usage?.calls ?? []), usage]);
+      // Reported accounting can arrive during cancellation. Keep the saved
+      // receipt on its originating run without waking or selecting that chat.
+      if (run.generation === (this.generations.get(run.chatId) ?? 0)) this.persistRun(run);
+      else this.persistStaleUsage(run);
+    }), signal);
+  }
+
+  private persistStaleUsage(run: ActiveRun): void {
+    // The caller may have rewound/cleared the request before the aborted
+    // provider returned its billable counts. Merge only the spending ledger:
+    // never restore a removed question/run or recreate a deleted conversation.
+    if (!run.record.usage?.calls.length || !this.deps.history.list().chats.some(chat => chat.id === run.chatId)) return;
+    const current = this.deps.history.load(run.chatId, { select: false });
+    const usage = aggregateInboxAssistantUsage([...(current.usage?.calls ?? []), ...run.record.usage.calls]);
+    this.deps.history.writeChat({ ...current, usage });
   }
 
   accounts(): InboxAssistantAccount[] { return this.deps.accounts(); }
@@ -118,12 +224,33 @@ export class InboxAssistantService {
     });
   }
 
-  chats(): InboxAssistantChatList { return this.deps.history.list(); }
+  chats(): InboxAssistantChatList {
+    const list = this.deps.history.list();
+    return { ...list, chats: list.chats.map(chat => {
+      const run = this.running.get(chat.id);
+      return { ...chat, ...(run ? { activeRun: structuredClone(run.record) } : {}) };
+    }) };
+  }
+
+  private recoverChat(chat: InboxAssistantChat): InboxAssistantChat {
+    const live = this.running.get(chat.id);
+    let changed = false;
+    const stopOrphan = <T extends { status?: string; requestId?: string; error?: string; updatedAt?: number }>(value: T): T => {
+      if (!['pending', 'running'].includes(value.status ?? '') || (live && value.requestId === live.id)) return value;
+      changed = true;
+      return { ...value, status: 'stopped', updatedAt: Date.now(), error: 'Interrupted when the app restarted. The saved conversation is available; start a new request to continue.' };
+    };
+    const recovered: InboxAssistantChat = { ...chat, exchanges: chat.exchanges.map(stopOrphan),
+      ...(chat.runs ? { runs: chat.runs.map(stopOrphan) } : {}) };
+    if (changed) this.deps.history.writeChat(recovered);
+    return recovered;
+  }
 
   chat(id: unknown): InboxAssistantChat {
     if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid Inbox Agent chat.');
-    const chat = this.deps.history.load(id);
-    return { ...chat, exchanges: this.visibleExchanges(chat.exchanges) };
+    const chat = this.recoverChat(this.deps.history.load(id));
+    const live = this.running.get(id);
+    return { ...chat, exchanges: this.visibleExchanges(chat.exchanges), ...(live ? { activeRun: structuredClone(live.record) } : {}) };
   }
 
   createChat(): InboxAssistantChat { return this.deps.history.create(); }
@@ -148,16 +275,17 @@ export class InboxAssistantService {
       ...(typeof request.pinned === 'boolean' ? { pinned: request.pinned } : {}),
       ...(request.actionMode !== undefined ? { actionMode: request.actionMode as InboxAssistantActionMode } : {}),
     });
-    if (request.actionMode === 'review' && this.running?.chatId === request.chatId && this.running.mutating) this.running.controller.abort();
+    const run = this.running.get(request.chatId);
+    if (request.actionMode === 'review' && run?.mutating) { run.cancelled = true; run.controller.abort(new Error('Delegated approval stopped.')); }
     return result;
   }
 
   deleteChat(value: unknown): InboxAssistantChatList {
-    if (this.running?.mutating && this.running.chatId === value) throw new Error('Wait for the current mail action to finish before deleting this conversation.');
+    if (typeof value === 'string' && this.running.get(value)?.mutating) throw new Error('Wait for the current mail action to finish before deleting this conversation.');
     if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new Error('Invalid Inbox Agent chat.');
     const result = this.deps.history.delete(value);
     this.generations.set(value, (this.generations.get(value) ?? 0) + 1);
-    if (this.running?.chatId === value) this.running.controller.abort(new Error('This conversation was deleted.'));
+    this.running.get(value)?.controller.abort(new Error('This conversation was deleted.'));
     for (const [id, entry] of this.actionReviews) if (entry.chatId === value) this.actionReviews.delete(id);
     return result;
   }
@@ -170,7 +298,7 @@ export class InboxAssistantService {
     const current = this.deps.history.load(request.chatId, { select: false });
     if (!current.exchanges.some(exchange => exchange.id === request.exchangeId)) throw new Error('This message is no longer available.');
     await this.stopForHistoryChange(request.chatId);
-    if (this.running?.chatId === request.chatId) throw new Error('A new request started in this conversation. Stop it before rewinding.');
+    if (this.running.has(request.chatId)) throw new Error('A new request started in this conversation. Stop it before rewinding.');
     const result = this.deps.history.rewind(request.chatId, request.exchangeId);
     this.invalidateReviews(request.chatId);
     return { ...result, chat: { ...result.chat, exchanges: this.visibleExchanges(result.chat.exchanges) } };
@@ -181,16 +309,17 @@ export class InboxAssistantService {
     if (!request || Array.isArray(request) || !Object.keys(request).every(key => key === 'chatId')
       || typeof request.chatId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(request.chatId)) throw new Error('Choose a conversation to restore.');
     await this.stopForHistoryChange(request.chatId);
-    if (this.running?.chatId === request.chatId) throw new Error('A new request started in this conversation. Stop it before restoring.');
+    if (this.running.has(request.chatId)) throw new Error('A new request started in this conversation. Stop it before restoring.');
     const chat = this.deps.history.restoreRewind(request.chatId);
     this.invalidateReviews(request.chatId);
     return { ...chat, exchanges: this.visibleExchanges(chat.exchanges) };
   }
 
   private async stopForHistoryChange(chatId: string): Promise<void> {
-    if (this.running?.chatId !== chatId) return;
-    if (this.running.mutating) throw new Error('Stop the current mail action and wait for its receipt before rewinding this conversation.');
-    await this.cancel(this.running.id);
+    const run = this.running.get(chatId);
+    if (!run) return;
+    if (run.mutating) throw new Error('Stop the current mail action and wait for its receipt before rewinding this conversation.');
+    await this.cancel(run.id);
   }
 
   private invalidateReviews(chatId: string): void {
@@ -198,12 +327,16 @@ export class InboxAssistantService {
     for (const [id, entry] of this.actionReviews) if (entry.chatId === chatId) this.actionReviews.delete(id);
   }
 
-  history(): InboxAssistantExchange[] { return this.visibleExchanges(this.deps.history.read()); }
+  history(): InboxAssistantExchange[] {
+    const active = this.deps.history.list().activeChatId;
+    return active ? this.visibleExchanges(this.recoverChat(this.deps.history.load(active, { select: false })).exchanges) : [];
+  }
 
   async cancel(value: unknown): Promise<InboxAssistantCancellation> {
     if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new Error('Invalid Inbox Agent request to stop.');
-    const run = this.running;
-    if (run?.id !== value) return { requestId: value, cancelled: false };
+    const run = [...this.running.values()].find(item => item.id === value);
+    if (!run) return { requestId: value, cancelled: false };
+    run.cancelled = true;
     run.controller.abort(new Error('Request cancelled.'));
     // A mail write already acknowledged by the durable queue must finish its
     // receipt. New work can begin once this exact run has released ownership.
@@ -214,9 +347,9 @@ export class InboxAssistantService {
   clearHistory(): void {
     const active = this.deps.history.list().activeChatId;
     if (!active) return;
-    if (this.running?.mutating && this.running.chatId === active) throw new Error('Wait for the current mail action to finish before clearing this conversation.');
+    if (this.running.get(active)?.mutating) throw new Error('Wait for the current mail action to finish before clearing this conversation.');
     this.generations.set(active, (this.generations.get(active) ?? 0) + 1);
-    if (this.running?.chatId === active) this.running.controller.abort();
+    this.running.get(active)?.controller.abort();
     this.deps.history.clear(active);
     for (const [id, entry] of this.actionReviews) if (entry.chatId === active) this.actionReviews.delete(id);
   }
@@ -231,7 +364,9 @@ export class InboxAssistantService {
       callAI: (prompt, stepSignal) => {
         const effective = stepSignal ? AbortSignal.any([signal, stepSignal]) : signal;
         if (effective.aborted) throw new Error('Request stopped.');
-        return waitForAbortableOperation(this.deps.callAI(prompt, effective), effective);
+        const run = [...this.running.values()].find(value => value.controller.signal === signal);
+        if (!run) throw new Error('This Inbox Agent request is no longer running.');
+        return this.callRunAI(run, prompt, effective);
       },
       setRead: async (accountId, ids, read) => {
         if (signal.aborted) throw new Error('Request stopped.');
@@ -259,7 +394,7 @@ export class InboxAssistantService {
       || (request.action !== undefined && !['mark_read', 'mark_unread', 'archive', 'trash'].includes(request.action))
       || ((request.action === 'archive' || request.action === 'trash') && request.manualSelection !== true)
       || (request.undo && (request.manualSelection || request.action !== undefined))) throw new Error('Choose valid reviewed conversations.');
-    if (this.running) throw new Error('Wait for the current Inbox Agent request to finish.');
+    this.assertIdle(request.chatId, request.requestId);
     const held = this.actionReviews.get(request.reviewId);
     const chat = this.deps.history.load(request.chatId, { select: false });
     const exchange = chat.exchanges.find(item => item.id === request.exchangeId && item.review?.id === request.reviewId);
@@ -269,17 +404,21 @@ export class InboxAssistantService {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), 300_000);
     timeout.unref?.();
-    this.beginRequest(request.requestId, request.chatId, controller, true);
+    const actionText = request.undo ? 'Undo the previous read action' : request.action === 'trash' ? 'Move selected conversations to Trash'
+      : request.action === 'archive' ? 'Archive selected conversations' : held.review.kind === 'mark_unread' ? 'Mark selected emails unread' : 'Mark selected conversations read';
+    const run = this.beginRequest(request.requestId, request.chatId, controller, 'action', actionText, [...exchange.accountIds], exchange.id);
     try {
+      this.reportRun(run, { stage: 'action', status: 'running', message: actionText });
       const ids = [...new Set(request.itemIds)];
-      const result = request.undo
+      const result = await this.withMailActions(run, async () => request.undo
         ? await undoInboxAssistantReview(held.review, ids, this.reviewDeps(controller.signal), controller.signal)
-        : await applyInboxAssistantReview(held.review, ids, this.reviewDeps(controller.signal), controller.signal, { manualSelection: request.manualSelection === true, action: request.action });
+        : await applyInboxAssistantReview(held.review, ids, this.reviewDeps(controller.signal), controller.signal, { manualSelection: request.manualSelection === true, action: request.action }));
       const completed: InboxAssistantExchange = { ...exchange, review: held.review, reviewResult: result,
         answer: { ...exchange.answer, text: reviewText(held.review) } };
-      const current = this.deps.history.load(request.chatId, { select: false });
-      this.deps.history.writeChat({ ...current, exchanges: current.exchanges.map(item => item.id === completed.id ? completed : item) });
-      return completed;
+      return this.settleRun(run, undefined, completed)!;
+    } catch (error) {
+      this.settleRun(run, error);
+      throw error;
     } finally {
       clearTimeout(timeout);
       this.finishRequest(controller);
@@ -288,10 +427,11 @@ export class InboxAssistantService {
 
   async draftEmail(value: unknown, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantDraft> {
     const request = validateDraftRequest(value);
-    if (this.running) throw new Error('Another Inbox Agent request is still running. Cancel it before preparing an email draft.');
+    this.assertIdle(request.chatId, request.requestId);
     const account = this.accounts().find(item => item.id === request.accountId);
     if (!account) throw new Error('The sending account is no longer connected. Choose another account.');
-    const chat = this.deps.history.load(request.chatId, { select: false });
+    const origin = this.recoverChat(this.deps.history.load(request.chatId, { select: false }));
+    const chat = { ...origin, exchanges: origin.exchanges.filter(exchange => !exchange.status || exchange.status === 'completed') };
     if (!chat.exchanges.length) throw new Error('Ask Inbox Agent a question before drafting an email from this conversation.');
     const requiredAccounts = new Set([request.accountId, ...chat.exchanges.flatMap(exchange => [
       ...exchange.accountIds, ...exchange.answer.sources.map(source => source.accountId),
@@ -303,30 +443,25 @@ export class InboxAssistantService {
       }
     };
     assertAccounts();
-    const exchangeIds = chat.exchanges.map(exchange => exchange.id);
+    const exchangeIds = origin.exchanges.map(exchange => exchange.id);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error('Draft preparation took too long. Try again with shorter instructions.')), 300_000);
     timeout.unref?.();
     const generation = this.generations.get(request.chatId) ?? 0;
-    let sequence = 0;
     const assertCurrent = () => {
       if (controller.signal.aborted || generation !== (this.generations.get(request.chatId) ?? 0)) {
         throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('Draft preparation cancelled.');
       }
       assertAccounts();
     };
-    const report = (progress: InboxAssistantProgress) => {
-      if (controller.signal.aborted || generation !== (this.generations.get(request.chatId) ?? 0)) return;
-      try { onActivity?.({ ...progress, requestId: request.requestId, chatId: request.chatId, sequence: ++sequence, at: Date.now() }); }
-      catch { /* The requesting window may have closed. */ }
-    };
-    this.beginRequest(request.requestId, request.chatId, controller);
+    const run = this.beginRequest(request.requestId, request.chatId, controller, 'draft', request.instructions?.trim() || 'Draft an email from this conversation', [request.accountId, ...new Set(chat.exchanges.flatMap(exchange => exchange.accountIds))]);
+    const report = (progress: InboxAssistantProgress) => this.reportRun(run, progress, onActivity);
     try {
       report({ stage: 'context', status: 'done', message: 'Loaded this conversation for drafting', detail: `${chat.exchanges.length} conversation ${chat.exchanges.length === 1 ? 'message' : 'messages'} included.` });
       report({ stage: 'answer', status: 'running', message: 'Preparing email draft', detail: account.email });
       const callAI = (prompt: string) => {
         assertCurrent();
-        return waitForAbortableOperation(this.deps.callAI(prompt, controller.signal), controller.signal);
+        return this.callRunAI(run, prompt, controller.signal);
       };
       const draft = await waitForAbortableOperation(
         generateInboxAssistantDraft(chat, account, request.instructions ?? '', callAI, controller.signal), controller.signal,
@@ -339,11 +474,14 @@ export class InboxAssistantService {
       if (draft.chatId !== request.chatId || draft.accountId !== request.accountId) throw new Error('The email draft did not match the requested conversation and account.');
       assertCurrent();
       report({ stage: 'complete', status: 'done', message: 'Email draft ready', detail: 'Review recipients and content in the composer.' });
+      run.record.draft = draft;
+      this.settleRun(run);
       return draft;
     } catch (error) {
       if (!controller.signal.aborted && generation === (this.generations.get(request.chatId) ?? 0)) {
         report({ stage: 'complete', status: 'warning', message: 'Could not prepare this draft', detail: error instanceof Error ? error.message : 'Please try again.' });
       }
+      this.settleRun(run, error);
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -353,15 +491,15 @@ export class InboxAssistantService {
 
   async ask(value: unknown, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
     const request = validateRequest(value);
-    if (this.running) throw new Error('Another Inbox Agent question is still running. Cancel it before starting a new question.');
+    this.assertIdle(request.chatId, request.requestId);
     const known = this.accounts();
     const selected = request.accountIds.map(id => {
       const account = known.find(item => item.id === id);
       if (!account) throw new Error('A selected account is no longer connected. Update the account selection and try again.');
       return account;
     });
-    const origin = this.deps.history.load(request.chatId, { select: false });
-    const history = this.visibleExchanges(origin.exchanges);
+    const origin = this.recoverChat(this.deps.history.load(request.chatId, { select: false }));
+    const history = this.visibleExchanges(origin.exchanges).filter(exchange => !exchange.status || exchange.status === 'completed');
     if (request.previousExchangeId && !history.some(exchange => exchange.id === request.previousExchangeId)) {
       throw new Error('The previous message does not belong to this chat or is no longer available.');
     }
@@ -371,28 +509,17 @@ export class InboxAssistantService {
     const timeout = setTimeout(() => controller.abort(new Error('Search took too long. Narrow the question or date range and try again.')), 300_000);
     timeout.unref?.();
     const generation = this.generations.get(request.chatId) ?? 0;
-    const activities: InboxAssistantActivity[] = [];
-    let sequence = 0;
     const assertCurrent = () => {
       if (controller.signal.aborted || generation !== (this.generations.get(request.chatId) ?? 0)) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('Search cancelled.');
       const current = new Set(this.accounts().map(account => account.id));
       if (request.accountIds.some(id => !current.has(id))) throw new Error('A selected account was disconnected during the search.');
     };
-    const report = (progress: InboxAssistantProgress) => {
-      // A queued network operation may settle after cancellation. Progress must
-      // neither reach a new run nor throw inside the sync engine's callbacks.
-      if (controller.signal.aborted || generation !== (this.generations.get(request.chatId) ?? 0)) return;
-      const activity: InboxAssistantActivity = { ...progress, requestId: request.requestId, chatId: request.chatId, sequence: ++sequence, at: Date.now() };
-      activities.push(activity);
-      if (activities.length > 400) activities.shift();
-      // A closed renderer must not interrupt mailbox research or persistence.
-      try { onActivity?.(activity); } catch { /* The caller may have closed its window. */ }
-    };
-    this.beginRequest(request.requestId, request.chatId, controller);
+    const run = this.beginRequest(request.requestId, request.chatId, controller, 'question', request.question, request.accountIds, randomUUID());
+    const report = (progress: InboxAssistantProgress) => this.reportRun(run, progress, onActivity);
     try {
       if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
       report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
-      const callAI = (prompt: string) => { assertCurrent(); return waitForAbortableOperation(this.deps.callAI(prompt, controller.signal), controller.signal); };
+      const callAI = (prompt: string) => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal); };
       const command = parseInboxAssistantReadCommand(request.question);
       // Never reinterpret a rejected mark-unread command as low-value triage
       // (which has the opposite flag direction). Only parsed literal scopes can
@@ -425,7 +552,7 @@ export class InboxAssistantService {
         const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads, ...(command ? { scope: command.scope } : {}) }), controller.signal);
         assertCurrent();
         const exchange: InboxAssistantExchange = {
-          id: randomUUID(), chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: Date.now(), review,
+          id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt, review,
           answer: { text: reviewText(review), sources: [], coverage: [], warnings: review.coverage.flatMap(account => account.warnings) },
         };
         for (const [id, held] of this.actionReviews) if (held.review.expiresAt <= Date.now()) this.actionReviews.delete(id);
@@ -441,16 +568,12 @@ export class InboxAssistantService {
               && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown).map(item => item.id);
           if (ids.length) {
             report({ stage: 'action', status: 'running', message: command ? `Marking matching emails as ${command.kind === 'mark_unread' ? 'unread' : 'read'}` : 'Marking high-confidence low-value conversations as read', detail: command ? 'Changing only the matching messages in the reviewed account scope.' : 'Protected and uncertain conversations stay unread.' });
-            this.markRequestMutating(controller);
-            exchange.reviewResult = await applyInboxAssistantReview(review, ids, this.reviewDeps(controller.signal), controller.signal);
+            exchange.reviewResult = await this.withMailActions(run, () => applyInboxAssistantReview(review, ids, this.reviewDeps(controller.signal), controller.signal));
             exchange.answer.text = reviewText(review);
           }
         }
         report({ stage: 'complete', status: 'done', message: command ? 'Matching email review ready' : 'Unread review ready', detail: `${review.items.length} conversations reviewed.` });
-        exchange.activities = activities;
-        const current = this.deps.history.load(request.chatId, { select: false });
-        this.deps.history.writeChat({ ...current, exchanges: [...current.exchanges, exchange] });
-        return exchange;
+        return this.settleRun(run, undefined, exchange)!;
       }
       const plan = await planInboxAssistantSearch(context.contextualizedQuestion, callAI, {
         historyContext, topicTerms: context.topicTerms, participantTerms: context.participantTerms, intent: context.intent,
@@ -471,20 +594,18 @@ export class InboxAssistantService {
           excerpt: grounded.facts.flatMap(fact => fact.quotes).find(quote => quote.sourceId === source.id)?.text.slice(0, 1000) || source.excerpt,
         }));
       const exchange: InboxAssistantExchange = {
-        id: randomUUID(), chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: Date.now(),
+        id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt,
         answer: { text: grounded.answer, sources, coverage: research.coverage,
           warnings: grounded.warnings },
       };
       assertCurrent();
       report({ stage: 'complete', status: 'done', message: 'Answer ready', detail: `${sources.length} linked ${sources.length === 1 ? 'source' : 'sources'}.` });
-      exchange.activities = activities;
-      const currentOrigin = this.deps.history.load(request.chatId, { select: false });
-      this.deps.history.writeChat({ ...currentOrigin, exchanges: [...currentOrigin.exchanges, exchange] });
-      return exchange;
+      return this.settleRun(run, undefined, exchange)!;
     } catch (error) {
       if (!controller.signal.aborted && generation === (this.generations.get(request.chatId) ?? 0)) {
         report({ stage: 'complete', status: 'warning', message: 'Could not finish this question', detail: error instanceof Error ? error.message : 'Please try again.' });
       }
+      this.settleRun(run, error);
       throw error;
     } finally {
       clearTimeout(timeout);

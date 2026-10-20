@@ -143,7 +143,8 @@ describe('Inbox Agent background workspace', () => {
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
     await act(async () => { complete(ok(exchange())); }); await settle();
     expect(view.byLabel('Show AI chat')).not.toBeNull();
-    expect(api.chat).toHaveBeenCalledTimes(1);
+    // Startup and completion both fetch the active chat, including its durable run accounting.
+    expect(api.chat.mock.calls.map(([id]) => id)).toEqual(['chat-1', 'chat-1']);
     expect(api.ask).toHaveBeenCalledTimes(1);
     expect(api.cancel).not.toHaveBeenCalled();
     fire(view.byLabel('Show AI chat'), 'click'); await settle();
@@ -686,7 +687,7 @@ describe('Inbox Agent', () => {
     expect((view.byLabel('Select conversation: Unread item-a (owner@example.test)') as HTMLInputElement).checked).toBe(true);
   });
 
-  it('cancels an action on chat switching and keeps its acknowledged late receipt out of the other chat', async () => {
+  it('keeps an action running on chat switching and retains its receipt in the originating chat', async () => {
     const saved = reviewExchange();
     api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [saved] : [])));
     let resolveAction!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
@@ -697,7 +698,7 @@ describe('Inbox Agent', () => {
     const requestId = api.applyReview.mock.calls[0]![0].requestId;
     fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
     await settle();
-    expect(api.cancel).toHaveBeenCalledWith(requestId);
+    expect(api.cancel).not.toHaveBeenCalled();
     const receipt = reviewReceipt(saved);
     receipt.answer.text = 'Old review receipt must remain in the original chat.';
     await act(async () => resolveAction(ok(receipt)));
@@ -708,6 +709,9 @@ describe('Inbox Agent', () => {
     expect(view.container.textContent).not.toContain('Old review action details');
     expect(view.container.textContent).not.toContain('Unread mail review');
     expect((view.find('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    fire(view.byLabel('Open conversation: TCS quotations'), 'click');
+    await settle();
+    expect(view.container.textContent).toContain('Old review receipt must remain in the original chat.');
   });
 
   it('retains a confirmed partial receipt after cancelling in the same chat without accepting late activity', async () => {
@@ -849,7 +853,7 @@ describe('Inbox Agent', () => {
     expect(view.container.textContent).not.toContain('Hello, please review our quotation.');
   });
 
-  it('cancels an in-flight draft on chat switching and never opens a late draft for another conversation', async () => {
+  it('keeps an in-flight draft running on chat switching without opening its late result over another conversation', async () => {
     let resolveDraft!: (value: InboxAssistantResult<InboxAssistantDraft>) => void;
     api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [exchange()] : [])));
     api.draftEmail.mockImplementation(() => new Promise(resolve => { resolveDraft = resolve; }));
@@ -861,7 +865,7 @@ describe('Inbox Agent', () => {
     expect(view.byLabel('Stop drafting')).not.toBeNull();
     fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
     await settle();
-    expect(api.cancel).toHaveBeenCalledWith(api.draftEmail.mock.calls[0]![0].requestId);
+    expect(api.cancel).not.toHaveBeenCalled();
     await act(async () => resolveDraft(ok({ chatId: 'chat-1', accountId: 'work', to: [], cc: [], subject: 'Old draft', body: 'Old conversation content' })));
     expect(onOpenDraft).not.toHaveBeenCalled();
     expect(view.find('h1')?.textContent).toBe('Meeting follow-ups');
@@ -975,11 +979,11 @@ describe('Inbox Agent', () => {
     fire(view.find('form'), 'submit');
     await settle();
     expect(api.ask).toHaveBeenLastCalledWith({ requestId: expect.any(String), chatId: 'chat-1', question: 'What changed in that quotation?', accountIds: ['other'], previousExchangeId: 'tcs-context' });
-    // A completed answer refreshes summaries, not every conversation's contents.
-    expect(api.chat.mock.calls.map(([id]) => id)).toEqual(['chat-1', 'chat-2', 'chat-1']);
+    // Only the selected chat is refreshed on each completion for its persisted run and usage records.
+    expect(api.chat.mock.calls.map(([id]) => id)).toEqual(['chat-1', 'chat-2', 'chat-2', 'chat-1', 'chat-1']);
   });
 
-  it('cancels a chat question on switching and rejects its late answer and progress events', async () => {
+  it('keeps a chat question running on switching and confines its answer and progress to its original conversation', async () => {
     let resolveFirst!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
     api.ask.mockImplementation(() => new Promise(resolve => { resolveFirst = resolve; }));
     const view = await mount();
@@ -988,7 +992,7 @@ describe('Inbox Agent', () => {
     emit(activity(1, 'Reading first chat evidence', { chatId: 'chat-1' }));
     fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
     await settle();
-    expect(api.cancel).toHaveBeenCalledWith(previousRequestId);
+    expect(api.cancel).not.toHaveBeenCalled();
     emit(activity(2, 'Late first chat evidence', { chatId: 'chat-1', requestId: previousRequestId }));
     await act(async () => resolveFirst(ok(exchange())));
     expect(view.find('h1')?.textContent).toBe('Meeting follow-ups');
@@ -996,6 +1000,9 @@ describe('Inbox Agent', () => {
     expect(view.container.textContent).not.toContain('You sent a revised quote');
     expect(view.container.textContent).not.toContain('Late first chat evidence');
     expect(view.byLabel('View current activity')).toBeNull();
+    fire(view.byLabel('Open conversation: TCS quotations'), 'click');
+    await settle();
+    expect(view.container.textContent).toContain('You sent a revised quote');
   });
 
   it('shows chat-load failures without retaining another chat answer and supports retry', async () => {
@@ -1268,12 +1275,12 @@ describe('Inbox Agent', () => {
     expect((view.find('textarea') as HTMLTextAreaElement).disabled).toBe(true);
   });
 
-  it('cancels an active request when leaving the page', async () => {
+  it('leaves an active main-process request running when its renderer unmounts', async () => {
     api.ask.mockImplementation(() => new Promise(() => {}));
     const view = await mount();
     submit(view);
     view.unmount();
-    expect(api.cancel).toHaveBeenCalledWith(api.ask.mock.calls[0]?.[0].requestId);
+    expect(api.cancel).not.toHaveBeenCalled();
     expect(offActivity).toHaveBeenCalledOnce();
   });
 });

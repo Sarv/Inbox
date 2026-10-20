@@ -13,7 +13,7 @@ import { extractAssistantAttachment } from '../../../../electron/services/assist
 import type { AssistantAttachmentResult } from '../../../../electron/services/assistant-attachment-types';
 import { changeAssistantReadFlags } from '../../../../electron/services/assistant-mail-actions';
 import { InboxAssistantService, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
-import type { InboxAssistantAccount, InboxAssistantChat, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange } from '../../../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantAIUsage, InboxAssistantChat, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange } from '../../../../src/types/inbox-assistant';
 import { openTestAccount, type TestAccount } from '../../../helpers/account-storage';
 
 const ACCOUNTS: InboxAssistantAccount[] = [
@@ -212,8 +212,85 @@ beforeEach(async () => {
   service = new InboxAssistantService(deps);
 });
 
+describe('independent durable Inbox Agent runs', () => {
+  it('keeps separate questions and provider accounting across chat switches, exact Stop, and a late provider response', async () => {
+    await seedQuotes();
+    const releases: Array<() => void> = [];
+    let aiCalls = 0;
+    deps.callAI = vi.fn(async (prompt, _signal, onUsage) => {
+      const call = ++aiCalls;
+      const usage: InboxAssistantAIUsage = { id: `usage-${call}`, provider: 'fixture', model: 'fixture-model', status: 'completed', startedAt: 10, completedAt: 20,
+        attempts: 1, inputTokens: call * 10, outputTokens: call, tokenSource: 'provider', usageComplete: true,
+        estimatedCostUsd: call / 100, costComplete: true };
+      onUsage?.(usage); onUsage?.(usage); // A duplicate callback must not double bill the display.
+      if (prompt.startsWith('You plan')) await new Promise<void>(resolve => { releases.push(resolve); });
+      return prompt.startsWith('You plan') ? PLAN : groundedQuotes(prompt);
+    });
+    const first = service.ask(request());
+    const stopped = expect(first).rejects.toThrow(/cancel/i);
+    expect(service.chat('chat-main')).toMatchObject({ activeRun: { requestId: 'request-1', kind: 'question', status: 'running', question: QUESTION },
+      exchanges: [expect.objectContaining({ question: QUESTION, status: 'running', requestId: 'request-1' })] });
+    await expect(service.ask(request({ requestId: 'same-chat-overlap' }))).rejects.toThrow('still running');
+    const other = service.createChat();
+    const second = service.ask(request({ chatId: other.id, requestId: 'request-other' }));
+    expect(service.chats().chats.filter(chat => chat.activeRun)).toHaveLength(2);
+    expect(activeChatId).toBe(other.id);
+    expect(await service.cancel('request-1')).toEqual({ requestId: 'request-1', cancelled: true });
+    await stopped;
+    expect(service.chats().chats.find(chat => chat.id === other.id)?.activeRun?.requestId).toBe('request-other');
+    releases[1]!();
+    const completed = await second;
+    expect(completed.status).toBe('completed');
+    expect(completed.answer.text).toContain(NEW_QUOTE);
+    expect(completed.usage).toMatchObject({ inputTokens: 50, outputTokens: 5, estimatedCostUsd: 0.05, tokenCountsComplete: true, costComplete: true });
+    expect(completed.usage?.calls.map(call => call.id)).toEqual(['usage-2', 'usage-3']);
+    releases[0]!();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(activeChatId).toBe(other.id);
+    expect(chats.get('chat-main')?.exchanges).toEqual([expect.objectContaining({ status: 'stopped', answer: expect.objectContaining({ text: '' }), usage: expect.objectContaining({ inputTokens: 10, outputTokens: 1 }) })]);
+    expect(chats.get('chat-main')?.runs?.[0]).toMatchObject({ status: 'stopped', usage: { calls: [expect.objectContaining({ id: 'usage-1' })] } });
+    expect(service.chats().chats.some(chat => chat.activeRun)).toBe(false);
+  });
+
+  it('leaves a failed question and its last observed work in its original chat', async () => {
+    const failed = request({ question: 'Review unread emails before October' });
+    await expect(service.ask(failed)).rejects.toThrow('restrictions are not supported');
+    expect(saved).toEqual([expect.objectContaining({ requestId: failed.requestId, question: failed.question, status: 'failed', error: expect.stringContaining('restrictions are not supported') })]);
+    expect(saved[0]!.activities?.length).toBeGreaterThan(0);
+    expect(chats.get('chat-main')?.runs?.[0]).toMatchObject({ status: 'failed', question: failed.question });
+    expect(service.chat('chat-main').activeRun).toBeUndefined();
+  });
+
+  it('restores orphan running records as stopped without rerunning them or changing the selected chat', () => {
+    const original = chats.get('chat-main')!;
+    original.exchanges = [{ id: 'interrupted', requestId: 'lost-run', question: QUESTION, accountIds: ['primary'], createdAt: 1, status: 'running', answer: { text: '', sources: [], coverage: [], warnings: [] } }];
+    original.runs = [{ requestId: 'lost-run', chatId: original.id, kind: 'question', exchangeId: 'interrupted', question: QUESTION, accountIds: ['primary'], startedAt: 1, updatedAt: 2, status: 'running', activities: [] }];
+    const restarted = new InboxAssistantService(deps);
+    const restored = restarted.chat(original.id);
+    expect(restored).toMatchObject({ exchanges: [{ status: 'stopped', error: expect.stringContaining('restarted') }], runs: [{ status: 'stopped' }] });
+    expect(restored.activeRun).toBeUndefined();
+    expect(deps.callAI).not.toHaveBeenCalled();
+    expect(deps.openMailbox).not.toHaveBeenCalled();
+    expect(chats.get(original.id)?.runs?.[0]?.status).toBe('stopped');
+  });
+
+  it('lets a draft finish in the background while another chat answers, retaining the draft in the origin run', async () => {
+    seedDraftConversation();
+    let finish!: (draft: InboxAssistantDraft) => void;
+    draftGenerator.mockReturnValueOnce(new Promise<InboxAssistantDraft>(resolve => { finish = resolve; }));
+    const pending = service.draftEmail(draftRequest());
+    const other = service.createChat();
+    await service.ask(request({ chatId: other.id, requestId: 'other-question' }));
+    expect(service.chats().chats.find(chat => chat.id === 'chat-main')?.activeRun).toMatchObject({ kind: 'draft', requestId: 'draft-request' });
+    finish(preparedDraft());
+    await expect(pending).resolves.toEqual(preparedDraft());
+    expect(activeChatId).toBe(other.id);
+    expect(chats.get('chat-main')?.runs?.at(-1)).toMatchObject({ kind: 'draft', status: 'completed', draft: preparedDraft() });
+  });
+});
+
 describe('Inbox Agent email draft orchestration', () => {
-  it('drafts the entire requested chat with the explicit sender, leaving active chat and stored messages unchanged', async () => {
+  it('drafts the entire requested chat with the explicit sender, retaining its run without selecting the chat', async () => {
     const origin = seedDraftConversation();
     const before = structuredClone(origin);
     const other = service.createChat();
@@ -222,9 +299,10 @@ describe('Inbox Agent email draft orchestration', () => {
     expect(draftGenerator).toHaveBeenCalledExactlyOnceWith(before, ACCOUNTS[1], 'Send a concise follow-up.', expect.any(Function), expect.any(AbortSignal));
     expect(result).toEqual(preparedDraft({ accountId: 'secondary' }));
     expect(activeChatId).toBe(other.id);
-    expect(chats.get('chat-main')).toEqual(before);
+    expect(chats.get('chat-main')?.exchanges).toEqual(before.exchanges);
+    expect(chats.get('chat-main')?.runs).toEqual([expect.objectContaining({ kind: 'draft', status: 'completed', draft: preparedDraft({ accountId: 'secondary' }) })]);
     expect(deps.history.load).toHaveBeenCalledWith('chat-main', { select: false });
-    expect(deps.history.writeChat).not.toHaveBeenCalled();
+    expect(deps.history.writeChat).toHaveBeenCalled();
     expect(deps.history.write).not.toHaveBeenCalled();
     expect(deps.openMailbox).not.toHaveBeenCalled();
     expect(deps.readAttachment).not.toHaveBeenCalled();
@@ -242,7 +320,7 @@ describe('Inbox Agent email draft orchestration', () => {
       await callAI('Prepare this conversation draft'); return preparedDraft();
     });
     await service.draftEmail(draftRequest());
-    expect(deps.callAI).toHaveBeenCalledExactlyOnceWith('Prepare this conversation draft', expect.any(AbortSignal));
+    expect(deps.callAI).toHaveBeenCalledExactlyOnceWith('Prepare this conversation draft', expect.any(AbortSignal), expect.any(Function));
   });
 
   it.each([null, [], {}, { ...draftRequest(), unknown: 'value' }, { ...draftRequest(), requestId: '../invalid' },
@@ -283,12 +361,14 @@ describe('Inbox Agent email draft orchestration', () => {
     draftGenerator.mockReturnValueOnce(new Promise<InboxAssistantDraft>(resolve => { finish = resolve; }));
     const pending = service.draftEmail(draftRequest());
     const rejected = expect(pending).rejects.toThrow(/cancel|abort|deleted/i);
+    const writesBeforeStop = vi.mocked(deps.history.writeChat).mock.calls.length;
     if (action === 'cancel') service.cancel('draft-request');
     else if (action === 'clear') service.clearHistory();
     else service.deleteChat('chat-main');
     finish(preparedDraft());
     await rejected;
-    expect(deps.history.writeChat).not.toHaveBeenCalled();
+    if (action === 'cancel') expect(chats.get('chat-main')?.runs?.at(-1)).toMatchObject({ kind: 'draft', status: 'stopped' });
+    else expect(deps.history.writeChat).toHaveBeenCalledTimes(writesBeforeStop);
     expect(deps.history.write).not.toHaveBeenCalled();
   });
 
@@ -425,11 +505,12 @@ describe('Inbox Agent with real account databases', () => {
     await ready;
     const other = service.createChat();
     service.deleteChat('chat-main');
+    const writesBeforeLateAnswer = vi.mocked(deps.history.writeChat).mock.calls.length;
     finish(groundedQuotes(answerPrompt));
     await rejected;
     expect(chats.has('chat-main')).toBe(false);
     expect(chats.get(other.id)?.exchanges).toEqual([]);
-    expect(deps.history.writeChat).not.toHaveBeenCalled();
+    expect(deps.history.writeChat).toHaveBeenCalledTimes(writesBeforeLateAnswer);
   });
   it('lists named chats without loading their messages and loads only a requested chat', () => {
     const created = service.createChat();
@@ -604,12 +685,18 @@ describe('Inbox Agent with real account databases', () => {
     if (action === 'clear') service.clearHistory();
     else service.cancel('request-1');
     const eventsBeforeLateAnswer = progress.mock.calls.length;
+    const writesBeforeLateAnswer = vi.mocked(deps.history.writeChat).mock.calls.length;
     resolveAnswer(groundedQuotes(answerPrompt));
     await failed;
     expect(progress).toHaveBeenCalledTimes(eventsBeforeLateAnswer);
-    expect(saved).toEqual([]);
+    if (action === 'cancel') {
+      expect(saved).toEqual([expect.objectContaining({ question: QUESTION, status: 'stopped', answer: expect.objectContaining({ text: '' }) })]);
+      expect(chats.get('chat-main')?.runs?.at(-1)).toMatchObject({ status: 'stopped' });
+    } else {
+      expect(saved).toEqual([]);
+      expect(deps.history.writeChat).toHaveBeenCalledTimes(writesBeforeLateAnswer);
+    }
     expect(deps.history.clear).toHaveBeenCalledTimes(action === 'clear' ? 1 : 0);
-    expect(deps.history.writeChat).not.toHaveBeenCalled();
     deps.callAI = vi.fn(async prompt => prompt.startsWith('You plan') ? PLAN : groundedQuotes(prompt));
     const next = await service.ask(request({ requestId: 'request-2', accountIds: ['primary'] }));
     expect(next.answer.text).toContain(OLD_QUOTE);
