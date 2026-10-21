@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0] - 2026-10-21
+## [1.4.1] - 2026-10-21
 
 ### Added
 - **A local calendar inside Inbox.** Create appointments, all-day events and
@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Scanner sign-in can use credentials held for the current app session while
   preserving existing locked credentials. The setup screen explains when
   another sign-in will be needed after quitting.
+- Patched Markdown parsing and HTTP redirect dependencies, while preserving
+  compatible email parsing.
+- Corrected a packaging check that mistook a macOS framework call for a missing
+  JavaScript package, and allowed the large-mailbox regression tests enough time
+  to run with coverage on shared CI runners.
 
 ### Current scope
 - Calendar storage and availability checks are local. Google, Microsoft, Sarv
@@ -42,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   links are displayed without fetching them.
 - Forwarded or delegated invitations and unsupported recurring updates need
   manual review. Calendar reminders run while Inbox is open.
+
+## [1.4.0] - 2026-10-21
+
+This tag was not published. Its calendar and default-app changes ship in 1.4.1.
 
 ## [1.3.8] - 2026-10-20
 
@@ -1083,7 +1092,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/Sarv/Inbox/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sarv/Inbox/releases/tag/v1.4.0
 [1.3.8]: https://github.com/Sarv/Inbox/releases/tag/v1.3.8
 [1.3.7]: https://github.com/Sarv/Inbox/releases/tag/v1.3.7
