@@ -1,6 +1,6 @@
 {
   "name": "@sarvinbox/desktop",
-  "version": "1.3.8",
+  "version": "1.4.0",
   "productName": "Sarv Inbox",
   "desktopName": "com.sarv.sarvinbox.desktop",
   "description": "Sarv Inbox — AI-powered email client by Sarv",
@@ -182,12 +182,17 @@
       "protocols": [
         {
           "name": "Sarv Inbox email",
-          "schemes": ["mailto"],
+          "schemes": [
+            "mailto"
+          ],
           "role": "Editor"
         },
         {
           "name": "Sarv Inbox calendar",
-          "schemes": ["webcal", "webcals"],
+          "schemes": [
+            "webcal",
+            "webcals"
+          ],
           "role": "Editor"
         }
       ],

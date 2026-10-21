@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-21
+
+### Added
+- **A local calendar inside Inbox.** Create appointments, all-day events and
+  recurring meetings in encrypted local calendars. Switch between Day, Week,
+  Month and Agenda, see overlapping appointments, and manage calendar visibility,
+  working hours, timezones and reminders.
+- **Meeting drafts check your availability.** Inbox Agent can suggest meeting
+  times using your local busy events, working hours, notice and buffers. Drafts
+  keep their calendar context when saved and reopened, and the proposed times
+  are checked again before sending.
+- **Meeting invitations update your calendar.** Supported incoming requests,
+  organizer updates and cancellations are processed across receiving accounts,
+  including invitations whose bodies still need downloading. Respond with
+  Accept, Tentative or Decline from the email card. Offline responses stay in
+  Outbox; newer decisions and organizer revisions prevent stale replies from
+  sending later.
+- **Choose Inbox as your default email and calendar app.** The installed app
+  asks at startup, with separate email and calendar choices, Not now and Don't
+  ask again. Email links open the existing composer; calendar files open a
+  local-calendar import dialog. The app checks what the operating system
+  confirms instead of assuming that a default changed.
+
+### Fixed
+- **Antivirus setup works when the operating system key store is unavailable.**
+  Scanner sign-in can use credentials held for the current app session while
+  preserving existing locked credentials. The setup screen explains when
+  another sign-in will be needed after quitting.
+
+### Current scope
+- Calendar storage and availability checks are local. Google, Microsoft, Sarv
+  and CalDAV synchronization will follow after this calendar test; subscription
+  links are displayed without fetching them.
+- Forwarded or delegated invitations and unsupported recurring updates need
+  manual review. Calendar reminders run while Inbox is open.
+
 ## [1.3.8] - 2026-10-20
 
 ### Added
@@ -1047,7 +1083,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.3.8...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Sarv/Inbox/releases/tag/v1.4.0
 [1.3.8]: https://github.com/Sarv/Inbox/releases/tag/v1.3.8
 [1.3.7]: https://github.com/Sarv/Inbox/releases/tag/v1.3.7
 [1.3.6]: https://github.com/Sarv/Inbox/releases/tag/v1.3.6
