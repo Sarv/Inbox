@@ -1,42 +1,42 @@
-import { ShieldAlert, X } from 'lucide-react';
+import { KeyRound, RefreshCw, ShieldAlert, X } from 'lucide-react';
 import { useState } from 'react';
 
-import { useSecureStorageProtected } from '../hooks/useSecureStorageProtected';
+import { useSecureStorageStatus } from '../hooks/useSecureStorageStatus';
+import { secureStorageNotice } from '../utils/secure-storage-status';
 
 import { Tooltip } from './Tooltip';
 
 /**
- * Inline warning shown ONLY when no OS key store protects secrets at rest:
- * Linux without a Secret Service / KWallet (where Chromium falls back to its
- * `basic_text` backend, whose key is public), or a locked/unavailable
- * keychain. Passwords, sign-in tokens, AI keys, OpenPGP keys kept without a
- * passphrase and the mail database key are then readable by anyone who copies
- * the profile — the user should know.
- *
- * On macOS (Keychain) and Windows (DPAPI) this renders nothing.
+ * Current key-store access and saved protection are separate observations.
+ * Only a confirmed unprotected store is described as unprotected.
  */
 export function SecurityStatusBanner() {
-  // null = not yet checked; true/false = keychain-backed encryption available.
-  const available = useSecureStorageProtected();
-  const [dismissed, setDismissed] = useState(false);
+  const { status, loading, error, retry, requestAccess, requestingAccess, restarting, accessMessage } = useSecureStorageStatus();
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const notice = secureStorageNotice(status, error);
+  const noticeKey = notice ? JSON.stringify(notice) : null;
+  const allowKeychain = status?.platform === 'darwin' && status.keyStore === 'unavailable';
+  const busy = loading || requestingAccess || restarting;
 
-  if (available !== false || dismissed) return null;
+  if (!notice || dismissed === noticeKey) return null;
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-sm text-amber-800 dark:text-amber-300">
+    <div role="status" className="flex items-start gap-3 px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-sm text-amber-800 dark:text-amber-300">
       <ShieldAlert className="h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-400" />
-      <span className="flex-1 min-w-0 truncate">
-        <span className="font-semibold">Saved sign-ins aren&apos;t protected on this device.</span>{' '}
-        <span className="opacity-90">
-          No system keyring was found, so passwords, sign-in tokens, AI keys, OpenPGP keys kept without a passphrase and the key to your stored mail can be read by anyone who copies your profile.
-        </span>{' '}
-        <span className="opacity-70">
-          Install and unlock a keyring (e.g. gnome-keyring or KWallet), then restart Sarv Inbox.
-        </span>
+      <span className="flex-1 min-w-0 break-words">
+        <span className="font-semibold">{notice.title}</span>{' '}
+        <span className="opacity-90">{notice.detail}</span>{' '}
+        {notice.advice && <span className="opacity-80">{notice.advice}</span>}
+        {accessMessage && <span className="mt-1 block font-medium">{accessMessage}</span>}
       </span>
+      <div className="flex shrink-0 flex-col gap-1 sm:flex-row sm:items-start">
+        {allowKeychain && <button type="button" onClick={() => void requestAccess()} disabled={busy} aria-label="Allow Keychain access" className="flex items-center gap-1 rounded border border-amber-500/30 px-2 py-1 text-xs hover:bg-amber-500/20 disabled:opacity-50"><KeyRound className="h-3 w-3" />{restarting ? 'Restarting Inbox…' : requestingAccess ? 'Waiting for macOS…' : 'Allow Keychain access'}</button>}
+        <button type="button" onClick={() => void retry()} disabled={busy} aria-label="Retry credential protection check" className="flex items-center gap-1 rounded border border-amber-500/30 px-2 py-1 text-xs hover:bg-amber-500/20 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />{loading ? 'Checking…' : 'Retry'}</button>
+      </div>
       <Tooltip content="Dismiss" delayMs={40}>
         <button
-          onClick={() => setDismissed(true)}
+          type="button"
+          onClick={() => setDismissed(noticeKey)}
           aria-label="Dismiss"
           className="p-1 rounded hover:bg-amber-500/20 transition-colors flex-shrink-0"
         >

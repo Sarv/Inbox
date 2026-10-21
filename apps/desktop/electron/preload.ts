@@ -12,6 +12,7 @@ import { contextBridge, ipcRenderer, webFrame } from 'electron';
 import type { DefaultAppsAPI } from '../src/types/default-apps';
 import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
 import type { LocalCalendarAPI, LocalCalendarAvailability, LocalCalendarOpenEvent } from '../src/types/local-calendar';
+import type { SecureStorageAccessResult, SecureStorageStatus } from '../src/types/secure-storage';
 
 
 import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
@@ -903,6 +904,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     hasPassword: (accountId: string, kind?: 'imap' | 'smtp') => ipcRenderer.invoke('secureCreds:hasPassword', accountId, kind),
     reveal: (accountId: string, kind?: 'imap' | 'smtp') => ipcRenderer.invoke('secureCreds:reveal', accountId, kind),
     available: () => ipcRenderer.invoke('secureCreds:available'),
+    status: () => ipcRenderer.invoke('secureCreds:status'),
+    requestAccess: () => ipcRenderer.invoke('secureCreds:requestAccess'),
   },
 
   // New-mail OS notifications. The renderer pushes the live config (mode, sound,
@@ -1856,6 +1859,8 @@ export interface ElectronAPI {
     hasPassword: (accountId: string, kind?: 'imap' | 'smtp') => Promise<{ success: boolean; data?: boolean; error?: string }>;
     reveal: (accountId: string, kind?: 'imap' | 'smtp') => Promise<{ success: boolean; data?: { password: string }; error?: string }>;
     available: () => Promise<{ success: boolean; data?: boolean; error?: string }>;
+    status: () => Promise<{ success: boolean; data?: SecureStorageStatus; error?: string }>;
+    requestAccess: () => Promise<{ success: boolean; data?: SecureStorageAccessResult; error?: string }>;
   };
   notifications: {
     setConfig: (config: unknown) => Promise<{ success: boolean; error?: string }>;

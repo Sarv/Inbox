@@ -1,7 +1,8 @@
 import { Eye, EyeOff } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-import { useSecureStorageProtected } from '../hooks/useSecureStorageProtected';
+import { useSecureStorageStatus } from '../hooks/useSecureStorageStatus';
+import { credentialStoreProtection } from '../utils/secure-storage-status';
 
 import { Tooltip } from './Tooltip';
 
@@ -22,7 +23,8 @@ interface VaultPasswordFieldProps {
 }
 
 /**
- * Shared password field for IMAP/SMTP credentials, backed by the OS keychain.
+ * Shared password field for saved IMAP/SMTP credentials. Storage protection
+ * comes from metadata independently of the authenticated reveal policy.
  *
  * Intelligent per state:
  *  - Vault HAS a password  → shows masked dots, field is OPTIONAL ("leave blank
@@ -45,7 +47,10 @@ export function VaultPasswordField({
   inputClassName,
   autoFocus,
 }: VaultPasswordFieldProps) {
-  const secretsProtected = useSecureStorageProtected();
+  const { status } = useSecureStorageStatus();
+  const savedProtection = credentialStoreProtection(status, 'credentials');
+  const savedLabel = savedProtection === 'encrypted' ? 'Saved with encryption' : savedProtection === 'unprotected' ? 'Saved; some credential data is unprotected' : 'Saved';
+  const authentication = status?.platform === 'darwin' ? 'Touch ID' : 'system authentication';
   const [hasStored, setHasStored] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [show, setShow] = useState(false);
@@ -80,7 +85,7 @@ export function VaultPasswordField({
         } else if (res?.error === 'auth-cancelled') {
           setMsg('Authentication cancelled — password stays hidden.');
         } else if (res?.error === 'biometric-unavailable') {
-          setMsg("Can't reveal here (no Touch ID on this device). Type a new password to change it.");
+          setMsg(`Can't reveal here (${authentication} is unavailable). Type a new password to change it.`);
         } else if (res?.error === 'no-stored-password') {
           setHasStored(false);
         } else {
@@ -95,7 +100,7 @@ export function VaultPasswordField({
   };
 
   const inputCls = inputClassName ?? 'w-full px-3 py-2 bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring';
-  const eyeHint = needsReveal ? 'Show saved password (Touch ID)' : (show ? 'Hide password' : 'Show password');
+  const eyeHint = needsReveal ? `Show saved password (${authentication})` : (show ? 'Hide password' : 'Show password');
 
   return (
     <div>
@@ -114,7 +119,7 @@ export function VaultPasswordField({
           <button
             type="button"
             onClick={handleEye}
-            aria-label={needsReveal ? 'Show saved password (requires Touch ID)' : eyeHint}
+            aria-label={needsReveal ? `Show saved password (requires ${authentication})` : eyeHint}
             className="flex items-center h-full px-3 text-muted-foreground hover:text-foreground"
           >
             {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -124,8 +129,7 @@ export function VaultPasswordField({
       {(isEditing || firstTimeHint) && (
         <p className="mt-1 text-xs text-muted-foreground">
           {isEditing
-            ? `${secretsProtected === false ? 'Saved, but not protected on this device (no system keyring)' : 'Saved securely'}`
-              + ' — click the eye to view it (asks for Touch ID), or leave blank to keep it. Change only what actually changed.'
+            ? `${savedLabel} — click the eye to view it (asks for ${authentication}), or leave blank to keep it. Change only what actually changed.`
             : firstTimeHint}
         </p>
       )}

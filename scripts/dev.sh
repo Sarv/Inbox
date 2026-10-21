@@ -138,6 +138,7 @@ find "$BETTER_SQLITE3_DIR" packages apps/desktop/electron apps/desktop/src -maxd
 # start; the shared path now returns immediately when the addon already reports
 # Electron's ABI. Pass --force to rebuild regardless.
 node scripts/native-abi.mjs electron
+node scripts/build-keychain-helper.mjs
 
 echo "=== Building core package ==="
 pnpm --filter @sarvinbox/core build

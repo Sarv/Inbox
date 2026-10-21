@@ -17,9 +17,10 @@ vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => h.encAvailable,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
-      const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
+      const m = /^(?:v11)?enc\((.*)\)$/s.exec(b.toString('utf8'));
       if (!m) throw new Error('cannot decrypt');
       return m[1];
     },
@@ -111,12 +112,11 @@ describe('saveAccount / getAccount', () => {
     expect(await store.listAccounts()).toHaveLength(2);
   });
 
-  it('falls back to the marked plaintext envelope without a keychain', async () => {
+  it('refuses new persistent tokens without an OS key store', async () => {
     h.encAvailable = false;
     const { store, db } = await setup();
-    await store.saveAccount(acct());
-    expect(db.blobs.get(BLOB_KEY)!.subarray(0, 7).toString()).toBe('PLAIN1:');
-    await expect(store.getAccount('gmail' as never, 'me@gmail.com')).resolves.toBeTruthy();
+    await expect(store.saveAccount(acct())).rejects.toThrow(/Keychain|secure storage|system keyring/);
+    expect(db.blobs.has(BLOB_KEY)).toBe(false);
   });
 });
 

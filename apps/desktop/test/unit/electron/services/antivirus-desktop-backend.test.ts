@@ -6,7 +6,7 @@ import { consentFingerprint, scannerOrigin, type ScannerCapabilities } from '../
 
 const h = vi.hoisted(() => ({
   deps: null as AntivirusDependencies | null,
-  available: true, storageBackend: 'keychain', blobs: new Map<string, Buffer>(), ignoreWrite: false, isPackaged: false,
+  available: true, storageBackend: 'gnome_libsecret', blobs: new Map<string, Buffer>(), ignoreWrite: false, isPackaged: false,
   accounts: [{ id: 'account-a', email: 'a@example.test' }, { id: 'account-b', email: 'b@example.test' }],
   storages: new Map<string, any>(), engines: new Map<string, any>(),
   requireStorage: vi.fn(), encrypt: vi.fn(), decrypt: vi.fn(), send: vi.fn(), resetWarnings: vi.fn(),
@@ -40,11 +40,11 @@ const cap = (): ScannerCapabilities => ({ protocolVersion: 1,
 const configuration = (): ScannerConfiguration => { const capabilities = cap(); return { endpoint: 'https://scanner.test', credential: 'synthetic-test-key', allowedAccountIds: ['account-b'], allowBody: false, capabilities, fingerprint: consentFingerprint(capabilities) }; };
 
 beforeEach(() => {
-  vi.resetAllMocks(); h.available = true; h.storageBackend = 'keychain'; h.ignoreWrite = false; h.blobs.clear(); h.storages.clear(); h.engines.clear();
+  vi.resetAllMocks(); h.available = true; h.storageBackend = 'gnome_libsecret'; h.ignoreWrite = false; h.blobs.clear(); h.storages.clear(); h.engines.clear();
   h.isPackaged = false; vi.stubEnv('VITE_DEV_SERVER_URL', undefined);
   h.accounts = [{ id: 'account-a', email: 'a@example.test' }, { id: 'account-b', email: 'b@example.test' }];
-  h.encrypt.mockImplementation((value: string) => Buffer.from(`sealed(${value})`));
-  h.decrypt.mockImplementation((value: Buffer) => { const match = /^sealed\((.*)\)$/s.exec(value.toString()); if (!match) throw new Error('Unreadable'); return match[1]; });
+  h.encrypt.mockImplementation((value: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}sealed(${value})`));
+  h.decrypt.mockImplementation((value: Buffer) => { const match = /^(?:v11)?sealed\((.*)\)$/s.exec(value.toString()); if (!match) throw new Error('Unreadable'); return match[1]; });
   h.requireStorage.mockImplementation(async (id: string) => { const storage = h.storages.get(id); if (!storage) throw new Error('Unavailable'); return storage; });
   createAntivirusDesktopBackend();
 });

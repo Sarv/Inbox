@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- macOS requests native Keychain authorization before opening encrypted stores,
+  with an in-app retry after process-cached failures. Pending email links and
+  calendar imports survive the restart without storing their contents in plaintext.
+- Saved-credential protection is reported separately from current secure-store
+  access, with platform-specific recovery guidance and per-store verification.
+- New persistent secrets require OS-backed protection on every platform. Older
+  unprotected mail keys are safely rewrapped when secure storage becomes
+  available, preserving the existing encrypted mail database.
+- The default-app and calendar-import primary buttons remain visible on hover,
+  including disabled states in light and dark themes.
+
 ## [1.4.1] - 2026-10-21
 
 ### Added

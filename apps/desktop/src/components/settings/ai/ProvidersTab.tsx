@@ -8,6 +8,7 @@ import {
 } from '../../../services/ai-service';
 import { AISetupStep, type AISetupStage } from '../../onboarding/AISetupStep';
 import { ProviderIcon } from '../../onboarding/ProviderIcon';
+import { SavedAIKeyStorageNotice } from '../../SavedAIKeyStorageNotice';
 import { SetupDialog } from '../../SetupDialog';
 import { IconButton } from '../../Tooltip';
 
@@ -54,7 +55,7 @@ export function ProvidersTab({ aiProviders, setAiProviders }: ProvidersTabProps)
         <div><h3 className="text-lg font-semibold">AI providers</h3><p className="mt-1 text-sm text-muted-foreground">Connect a provider and choose the model Inbox uses.</p></div>
         <button type="button" onClick={() => openFlow()} className="flex shrink-0 items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"><Plus className="h-4 w-4" />Add provider</button>
       </div>
-      {keyStorageWarning && <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">Your device has no available system keyring. This API key is saved without encryption. Enable a system keyring for encrypted storage.</p>}
+      {keyStorageWarning && <SavedAIKeyStorageNotice className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm" />}
       {aiProviders.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border p-8 text-center"><p className="font-medium">No AI providers connected</p><p className="mt-2 text-sm text-muted-foreground">Add Sarv AI, OpenAI, Google Gemini or your own AI server.</p></div>
       ) : (

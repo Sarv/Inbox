@@ -118,6 +118,11 @@ export class ExternalOpenService {
     return intent ? JSON.parse(JSON.stringify(intent)) as ExternalOpenIntent : null;
   }
 
+  /** Main-only input handoff for a secure-storage restart; never sent to the renderer. */
+  getPendingLaunchInputs(): string[] {
+    return [...new Set([...this.queue.map(item => item.key), ...this.inFlight])];
+  }
+
   acknowledgeOpen(id: unknown): null {
     if (typeof id !== 'string' || !id || id.length > 200) throw new Error('Choose a valid pending application request.');
     const index = this.queue.findIndex(item => item.intent.id === id);

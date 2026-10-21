@@ -10,6 +10,7 @@ import { initializeAntivirusScanService, type ScanSource, type ScannerConfigurat
 import { unscannedWarningPreferences } from './attachment-warning-preferences';
 import { getBlob, getCoreDb, setBlob, deleteBlob } from './core-db';
 import { isOsBackedEncryption } from './os-encryption';
+import { encryptProtectedString } from './safe-storage-envelope';
 
 const key = (id: string) => {
   if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(id)) throw new Error('Invalid scanner extension.');
@@ -65,7 +66,7 @@ function scannerConfigurationStore() {
       unscannedWarningPreferences.resetAll();
       return;
     }
-    const encoded = Buffer.concat([Buffer.from('ENC1:'), safeStorage.encryptString(JSON.stringify(config))]);
+    const encoded = Buffer.concat([Buffer.from('ENC1:'), encryptProtectedString(JSON.stringify(config))]);
     setBlob(storageKey, encoded);
     if (!getBlob(storageKey)?.equals(encoded)) throw new Error('Scanner configuration could not be securely saved.');
     session.delete(id);

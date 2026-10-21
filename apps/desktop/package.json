@@ -13,7 +13,7 @@
   },
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "node ../../scripts/native-abi.mjs electron && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
+    "dev": "node ../../scripts/native-abi.mjs electron && node ../../scripts/build-keychain-helper.mjs && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
     "build": "tsc && vite build && node scripts/prefetch-default-extensions.mjs && electron-builder",
     "prefetch:extensions": "node scripts/prefetch-default-extensions.mjs",
     "gen:dev-icon": "electron scripts/gen-dev-icon.mjs",
@@ -25,7 +25,7 @@
     "lint": "eslint electron src test vite --ext .ts,.tsx",
     "check:renderer-bundle": "vite build --config vite/check-renderer-bundle.config.ts",
     "clean": "rm -rf dist dist-electron node_modules/.vite && node ../../scripts/clean-stale-js.mjs src electron",
-    "electron:dev": "node ../../scripts/native-abi.mjs electron && pnpm clean && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
+    "electron:dev": "node ../../scripts/native-abi.mjs electron && node ../../scripts/build-keychain-helper.mjs && pnpm clean && pnpm --filter @sarvinbox/core build && pnpm --filter @sarvinbox/storage-node build && vite </dev/null",
     "electron:build": "pnpm clean && vite build && electron-builder",
     "test:unit": "node ../../scripts/native-abi.mjs node && vitest run test/unit",
     "test:integration": "node ../../scripts/native-abi.mjs node && vitest run test/integration"

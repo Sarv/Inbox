@@ -23,10 +23,11 @@ provider remains available. AI processing starts only after model choice, explic
 consent and Open inbox. It applies to all connected mailboxes, as disclosed.
 
 AI keys stay in memory until a tested choice is saved to the native credential
-vault. A Linux keyring fallback is disclosed if the native vault reports
-unencrypted storage. Configuration/catalog/model requests refuse redirects and
-never display server bodies containing keys. Custom services may omit API-key
-authentication and enter an exact model ID when no catalog is published.
+vault. Persistent secrets require OS-backed secure storage on every platform;
+missing Keychain, DPAPI or Linux keyring access blocks saving with recovery
+instructions rather than writing plaintext. Configuration/catalog/model requests
+refuse redirects and never display server bodies containing keys. Custom services
+may omit API-key authentication and enter an exact model ID when no catalog is published.
 
 Email connection starts sync in the background. Back, retry and restart preserve
 saved accounts and temporary provider choices. The durable pending marker keeps

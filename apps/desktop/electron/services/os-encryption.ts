@@ -15,19 +15,36 @@
 import { safeStorage } from 'electron';
 
 export function isOsBackedEncryption(): boolean {
+  if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') return false;
   if (!safeStorage.isEncryptionAvailable()) return false;
   if (process.platform !== 'linux') return true;
   // Linux-only API; absent or throwing means we can't vouch for the backend.
   try {
-    return safeStorage.getSelectedStorageBackend() !== 'basic_text';
+    return ['gnome_libsecret', 'kwallet', 'kwallet5', 'kwallet6'].includes(safeStorage.getSelectedStorageBackend());
   } catch {
     return false;
   }
 }
 
+/**
+ * Stored Linux v10 ciphertext uses Chromium's public hardcoded password; v11
+ * uses a keyring key. The currently selected backend cannot prove how an OLD
+ * payload was sealed. Unknown future versions remain unverified.
+ */
+export function storedEncryptionProtection(version: string): 'encrypted' | 'unprotected' | 'unknown' {
+  if (process.platform === 'darwin' || process.platform === 'win32') return 'encrypted';
+  if (process.platform !== 'linux') return 'unknown';
+  return version === 'v11' ? 'encrypted' : version === 'v10' ? 'unprotected' : 'unknown';
+}
+
 /** One-word description of where secrets are kept, for the startup log. */
 export function secretStorageDescription(): string {
-  if (!safeStorage.isEncryptionAvailable()) return 'unavailable (marked plaintext)';
+  if (!safeStorage.isEncryptionAvailable()) return 'unavailable (saved protection checked separately)';
   if (isOsBackedEncryption()) return 'os-keychain';
-  return 'basic_text (no system keyring — NOT protected at rest)';
+  if (process.platform === 'linux') {
+    try {
+      if (safeStorage.getSelectedStorageBackend() === 'basic_text') return 'basic_text (not OS-backed; new secret writes blocked)';
+    } catch { /* unknown backend */ }
+  }
+  return 'unavailable (OS-backed storage could not be verified)';
 }

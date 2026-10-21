@@ -16,9 +16,9 @@
  * removed later by the startup cleanup.
  *
  * Envelope: `ENC1:<safeStorage ciphertext of {"<providerId>":{"key","origin"},…}>`,
- * or a clearly-marked `PLAIN1:` fallback when no OS keychain exists. Entries
- * written before origin binding are a bare key string; they are bound to the
- * first origin they're used with.
+ * with legacy `PLAIN1:` envelopes accepted for recovery only. New writes require
+ * an OS secure store. Entries written before origin binding are a bare key
+ * string; they are bound to the first origin they're used with.
  */
 import { promises as fs, renameSync } from 'fs';
 import { join } from 'path';

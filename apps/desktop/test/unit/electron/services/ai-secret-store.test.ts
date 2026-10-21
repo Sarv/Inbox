@@ -20,9 +20,9 @@ vi.mock('electron', () => ({
     isEncryptionAvailable: () => h.encAvailable,
     // Linux only in Electron; a real keyring unless a test says otherwise.
     getSelectedStorageBackend: () => h.backend,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
-      const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
+      const m = /^(?:v11)?enc\((.*)\)$/s.exec(b.toString('utf8'));
       if (!m) throw new Error('cannot decrypt');
       return m[1];
     },
@@ -109,11 +109,10 @@ describe('setAiSecret', () => {
     await expect(getAllAiSecrets()).resolves.toEqual({ openai: 'a', gemini: 'b', custom: 'c' });
   });
 
-  it('falls back to the marked plaintext envelope with no keychain', async () => {
+  it('refuses new persistent AI keys without an OS key store', async () => {
     h.encAvailable = false;
-    await setAiSecret('openai', 'sk-1');
-    expect(dbState.blobs.get(BLOB_KEY)!.subarray(0, 7).toString()).toBe('PLAIN1:');
-    await expect(getAllAiSecrets()).resolves.toEqual({ openai: 'sk-1' });
+    await expect(setAiSecret('openai', 'sk-1')).rejects.toThrow(/Keychain|secure storage|system keyring/);
+    expect(dbState.blobs.has(BLOB_KEY)).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@ import { applyOnboardingAIChoice, suspendOnboardingAI } from '../../services/onb
 import { beginOnboarding, completeOnboarding, getOnboardingEmailProgress, isOnboardingPending, saveOnboardingEmailProgress } from '../../services/onboarding-progress';
 import { useEmailStore } from '../../store/email-store';
 import { trapDialogTab } from '../../utils/modal-focus';
+import { SavedAIKeyStorageNotice } from '../SavedAIKeyStorageNotice';
 
 import { AISetupStep } from './AISetupStep';
 import { AntivirusSetupStep } from './AntivirusSetupStep';
@@ -144,7 +145,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
               </div>
               <div className="flex items-start gap-3 py-4">
                 <Sparkles aria-hidden="true" className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" />
-                <div className="min-w-0 flex-1"><dt className="text-sm font-medium">AI</dt><dd className="break-words text-sm text-muted-foreground">{ai?.enabled ? `${ai.providerName} · ${ai.modelName}` : 'Skipped · automatic AI is off'}</dd>{ai?.enabled && ai.keyStorageEncrypted === false && <dd className="mt-1 text-xs text-amber-700 dark:text-amber-400">Device keyring unavailable; your API key is stored without encryption.</dd>}</div>
+                <div className="min-w-0 flex-1"><dt className="text-sm font-medium">AI</dt><dd className="break-words text-sm text-muted-foreground">{ai?.enabled ? `${ai.providerName} · ${ai.modelName}` : 'Skipped · automatic AI is off'}</dd>{ai?.enabled && ai.keyStorageEncrypted === false && <SavedAIKeyStorageNotice as="dd" className="mt-1 text-xs text-amber-700 dark:text-amber-400" />}</div>
                 <button disabled={finishing} onClick={() => setPhase(ai?.enabled ? 'model' : 'ai-provider')} className="text-xs font-medium text-primary">Edit AI</button>
               </div>
               <div className="flex items-start gap-3 py-4">

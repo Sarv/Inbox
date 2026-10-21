@@ -46,7 +46,10 @@ const h = vi.hoisted(() => {
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
   app: { getPath: () => '/tmp/sarvinbox-imap-security-test', getName: () => 'Sarv Inbox Test', isPackaged: false },
-  safeStorage: { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(s), decryptString: (b: Buffer) => b.toString() },
+  safeStorage: {
+    isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (s: string) => Buffer.from(`v11${s}`), decryptString: (b: Buffer) => b.subarray(3).toString(),
+  },
 }));
 vi.mock('@sarvinbox/core', async () => ({
   // The real transport rules (pure): which relaxations a config asks for and may have.

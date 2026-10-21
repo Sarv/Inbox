@@ -95,6 +95,8 @@ import { startPipelineEventPersister, stopPipelineEventPersister } from './servi
 import { bootPipelineConfig } from './services/pipeline-init-config';
 import { attachReputation } from './services/reputation-service';
 import { migrateSecureCredsFromFile } from './services/secure-credential-store';
+import { relaunchForSecureStorage, restoreSecureStorageLaunchInputs } from './services/secure-storage-relaunch';
+import { ensureSecureStorageForStartup, reportStartupInitializationFailure } from './services/secure-storage-startup';
 import { startSenderIdentityScheduler, stopSenderIdentityScheduler } from './services/sender-identity-service';
 import {
   defaultDevReclaimDeps,
@@ -412,7 +414,9 @@ app.commandLine.appendSwitch('js-flags', `--max-old-space-size=2048${V8_PROFILE}
 // Suppress EGL/GPU driver error messages
 app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
 app.commandLine.appendSwitch('disable-software-rasterizer');
-app.commandLine.appendSwitch('log-level', '3');
+// Keep native Keychain/OS errors visible; level 3 hid the first OSStatus and
+// made an authorization failure indistinguishable from a missing keyring.
+app.commandLine.appendSwitch('log-level', '2');
 
 // App paths
 const VITE_DEV_SERVER_URL = devServerUrlFor({ envUrl: process.env['VITE_DEV_SERVER_URL'], releaseBundle: isReleaseBundle(), isDev });
@@ -950,6 +954,7 @@ app.on('open-file', (event, path) => {
     if (externalOpenReady) dialog.showErrorBox('Calendar file could not be opened', error instanceof Error ? error.message : 'Choose a valid local .ics calendar file.');
   });
 });
+restoreSecureStorageLaunchInputs();
 
 // ========== App Lifecycle ==========
 
@@ -1012,19 +1017,6 @@ app.whenReady().then(async () => {
       }
     }
 
-    // Everything that has to happen at the network layer for the images in an
-    // email to appear: unwrap sender-chosen image proxies, send a referer hosts
-    // will accept, and drop the cross-origin embedding blocks Chromium honours.
-    // Without these, whole newsletters render with broken pictures.
-    installEmailImageRequestHandlers(session.defaultSession.webRequest);
-
-    // Web permissions: with no handler Electron grants every request (the
-    // microphone, clipboard READ, notifications — to any frame). Only the app
-    // window's own top frame gets clipboard write and fullscreen (CASA L-2).
-    installPermissionPolicy(session.defaultSession, APP_URL, {
-      onDenied: (permission, origin) => logger.warn(`[Main] denied web permission "${permission}" to ${origin}`),
-    });
-
     // BEFORE anything opens a database: prove the native SQLite module actually
     // loads in this process. It dlopens lazily and every core-DB read swallows
     // the failure into an empty result, so a mismatched ABI does not look like
@@ -1051,6 +1043,19 @@ app.whenReady().then(async () => {
     // so this has to happen before storage, keychains and IMAP, and the launch
     // stops here when it does.
     if ((await offerMoveToApplications()) === 'moving') return;
+
+    // Fail before any database, credential migration or account runtime opens.
+    // A temporarily locked OS store must never produce plaintext credentials or
+    // a partial startup that looks like the user's saved accounts disappeared.
+    if (!await ensureSecureStorageForStartup({ restart: relaunchForSecureStorage })) return;
+
+    // Session creation can initialize Chromium's cookie encryption provider.
+    // Request native Keychain authorization before either encryption backend
+    // can cache a failed lookup. Permissions are installed before any renderer.
+    installEmailImageRequestHandlers(session.defaultSession.webRequest);
+    installPermissionPolicy(session.defaultSession, APP_URL, {
+      onDenied: (permission, origin) => logger.warn(`[Main] denied web permission "${permission}" to ${origin}`),
+    });
 
     // Initialize core services
     await initializeStorage();
@@ -1239,7 +1244,8 @@ app.whenReady().then(async () => {
     logger.info('[Main] App initialization complete');
   } catch (error) {
     logger.error('[Main] Failed to initialize app:', error);
-    app.quit();
+    await reportStartupInitializationFailure(error, { restart: relaunchForSecureStorage });
+    return;
   }
 
   app.on('activate', () => {

@@ -53,6 +53,34 @@ only affect unsupported/self-modified builds.
 
 Thank you for helping keep Sarv Inbox and its users safe.
 
+## Local credential protection
+
+New persistent secrets require the operating system's secure store: Keychain on
+macOS, DPAPI on Windows, or a supported Secret Service/KWallet backend on Linux.
+Inbox refuses new plaintext writes and Chromium's Linux `basic_text` fallback.
+Startup checks secure-store access before opening persistent app services and
+offers recovery instructions and an explicit restart when access is unavailable.
+On macOS, Inbox first requests authorization through Security.framework's native
+dialog. The app never collects the Mac login password or changes Keychain access
+controls. A successful unlock status is followed by an actual encryption and
+decryption check: macOS can report an unlocked Keychain while operations still
+fail. An in-app retry uses a fresh process when Electron has cached the failure.
+If macOS continues rejecting access, OS session recovery may still be required.
+Inbox does not reset or replace the user's Keychain.
+
+Current secure-store availability and saved-data protection are separate facts.
+Security → Overview reports the database key and the saved credential, OAuth,
+AI, scanner and OpenPGP stores independently. An unavailable or failed check is
+not proof that existing encrypted data is plaintext. These checks return protection
+metadata only; they do not expose passwords, tokens, private keys or mail keys.
+
+Older plaintext database keys remain readable for recovery. When OS protection
+is available, Inbox verifies and atomically rewraps the same key with owner-only
+permissions. It does not rotate the database key, reset the profile, replace
+unreadable encrypted keys, or leave a plaintext recovery copy. Existing Linux
+`v10` ciphertext is treated as unprotected; `v11` identifies the OS-backed form.
+Any separate legacy credential copies remain visible in the protection report.
+
 ## Dependency advisories
 
 `pnpm audit --audit-level=high` runs on every push and pull request

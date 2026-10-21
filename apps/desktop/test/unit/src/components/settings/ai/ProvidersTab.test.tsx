@@ -6,6 +6,7 @@ import { ProvidersTab } from '../../../../../../src/components/settings/ai/Provi
 import { setAiConsent } from '../../../../../../src/services/ai-consent';
 import { addValidatedProvider, loadAISettings, removeProvider, setDefaultProvider, syncAIProviderToMain, testProvider, type AIProvider } from '../../../../../../src/services/ai-service';
 import { checkAIConnection, loadSarvAIConnection } from '../../../../../../src/services/onboarding-ai-connection';
+import type { SecureStorageStatus } from '../../../../../../src/types/secure-storage';
 import { cleanup, fire, render, settle, toggle, typeInto, type Mounted } from '../../../../../helpers/render';
 
 vi.mock('../../../../../../src/services/ai-consent', () => ({ setAiConsent: vi.fn(), SARV_AI_DISCLOSURE: 'Sarv processes your email.' }));
@@ -20,6 +21,11 @@ vi.mock('../../../../../../src/services/onboarding-ai-connection', async (import
 
 const button = (view: Mounted, label: string) => view.all('button').find((element) => element.textContent?.includes(label)) || null;
 let stored: AIProvider[];
+const storageStatus = vi.fn();
+const protectedStorage: SecureStorageStatus = {
+  platform: 'darwin', keyStore: 'available', databaseKey: 'encrypted', databaseKeyProtection: 'encrypted', databaseReadable: true,
+  stores: [{ id: 'ai-keys', label: 'AI API keys', envelope: 'plaintext', protectedByDatabase: true, protection: 'encrypted' }],
+};
 // A saved provider as the renderer sees it: the key stays in main (hasStoredKey).
 const existing = (): AIProvider => ({ id: 'existing', name: 'Existing OpenAI', type: 'openai', apiKey: '', hasStoredKey: true, model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1', isDefault: true });
 function Harness() {
@@ -46,7 +52,8 @@ beforeEach(() => {
   });
   vi.mocked(removeProvider).mockImplementation((id) => { stored = stored.filter((provider) => provider.id !== id); if (stored.length && !stored.some((provider) => provider.isDefault)) stored[0].isDefault = true; });
   vi.mocked(setDefaultProvider).mockImplementation((id) => { stored = stored.map((provider) => ({ ...provider, isDefault: provider.id === id })); });
-  window.electronAPI = { oauth: { cancel: vi.fn(async () => ({ success: true })) } } as unknown as typeof window.electronAPI;
+  storageStatus.mockReset().mockResolvedValue({ success: true, data: protectedStorage });
+  window.electronAPI = { oauth: { cancel: vi.fn(async () => ({ success: true })) }, secureCreds: { status: storageStatus } } as unknown as typeof window.electronAPI;
 });
 afterEach(() => { cleanup(); document.body.innerHTML = ''; vi.useRealTimers(); });
 
@@ -121,11 +128,30 @@ describe('AI Providers settings onboarding flow', () => {
     fire(view.byLabel('Remove Existing OpenAI'), 'click'); expect(view.container.textContent).toContain('No AI providers connected'); expect(syncAIProviderToMain).toHaveBeenCalledTimes(3);
   });
 
-  // Native keyring fallback must remain visible after a successful save, so the UI doesn't imply encryption.
-  it('reports unencrypted vault storage after a successful settings save', async () => {
+  // The saved metadata, rather than the save envelope flag alone, establishes
+  // whether data is unprotected. A plaintext inner envelope may have DB protection.
+  it('reports metadata-confirmed unprotected AI key data after a successful save', async () => {
+    vi.mocked(addValidatedProvider).mockImplementationOnce(async (draft) => { const provider = { ...draft, id: 'new-provider', isDefault: true }; stored = [provider]; return { ...provider, keyStorageEncrypted: false }; });
+    storageStatus.mockResolvedValue({ success: true, data: { ...protectedStorage, stores: [{ ...protectedStorage.stores[0]!, protectedByDatabase: false, protection: 'unprotected' }] } });
+    const view = render(<Harness />); await configure(view); fire(button(view, 'Test model and save provider'), 'click'); await settle();
+    expect(view.find('[role="status"]')?.textContent).toContain('Some saved AI key data is not protected at rest.');
+    expect(view.container.textContent).not.toContain('no available system keyring');
+  });
+
+  it('does not call a plaintext inner AI key envelope exposed when its database protects it', async () => {
     vi.mocked(addValidatedProvider).mockImplementationOnce(async (draft) => { const provider = { ...draft, id: 'new-provider', isDefault: true }; stored = [provider]; return { ...provider, keyStorageEncrypted: false }; });
     const view = render(<Harness />); await configure(view); fire(button(view, 'Test model and save provider'), 'click'); await settle();
-    expect(view.find('[role="status"]')?.textContent).toContain('saved without encryption');
+    expect(storageStatus).toHaveBeenCalledOnce();
+    expect(view.find('[role="status"]')).toBeNull();
+    expect(view.container.textContent).not.toMatch(/not protected at rest|saved without encryption/);
+  });
+
+  it('keeps the saved key warning visible when protection could not be verified', async () => {
+    vi.mocked(addValidatedProvider).mockImplementationOnce(async (draft) => { const provider = { ...draft, id: 'new-provider', isDefault: true }; stored = [provider]; return { ...provider, keyStorageEncrypted: false }; });
+    storageStatus.mockResolvedValue({ success: false, error: 'Synthetic metadata failure' });
+    const view = render(<Harness />); await configure(view); fire(button(view, 'Test model and save provider'), 'click'); await settle();
+    expect(view.find('[role="status"]')?.textContent).toContain('at-rest protection could not be verified');
+    expect(view.find('[role="status"]')?.textContent).not.toContain('not protected at rest');
   });
 
   // Older concurrent test results/timers cannot replace the latest provider status.

@@ -18,9 +18,10 @@ vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => h.encAvailable,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
-      const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
+      const m = /^(?:v11)?enc\((.*)\)$/s.exec(b.toString('utf8'));
       if (!m) throw new Error('cannot decrypt');
       return m[1];
     },
@@ -116,11 +117,10 @@ describe('savePipelineAIConfig', () => {
     expect(dbState.blobs.has(BLOB_KEY)).toBe(false);
   });
 
-  it('uses the marked plaintext envelope with no keychain', async () => {
+  it('refuses new persistent AI configuration without an OS key store', async () => {
     h.encAvailable = false;
-    await savePipelineAIConfig(config());
-    expect(dbState.blobs.get(BLOB_KEY)!.subarray(0, 7).toString()).toBe('PLAIN1:');
-    expect(loadPipelineAIConfigSync()).toMatchObject({ model: 'gpt-5' });
+    await expect(savePipelineAIConfig(config())).rejects.toThrow(/Keychain|secure storage|system keyring/);
+    expect(dbState.blobs.has(BLOB_KEY)).toBe(false);
   });
 
   it('never throws when the DB write fails', async () => {

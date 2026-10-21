@@ -31,10 +31,11 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/sarvinbox-imap-vault-test', getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => true,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
       if (h.vaultLocked) throw new Error('keychain locked');
-      return /^enc\((.*)\)$/s.exec(b.toString('utf8'))![1];
+      return /^(?:v11)?enc\((.*)\)$/s.exec(b.toString('utf8'))![1];
     },
   },
 }));

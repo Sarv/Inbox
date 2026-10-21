@@ -165,7 +165,9 @@ export function DefaultAppsStartupPrompt({ suppressed = false, onOpenChange }: D
     }
   };
 
-  const buttonClass = 'rounded-md border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted/50 disabled:cursor-default disabled:opacity-50';
+  const buttonBaseClass = 'rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-default disabled:opacity-50';
+  const buttonClass = `${buttonBaseClass} border-border enabled:hover:bg-muted/50`;
+  const primaryButtonClass = `${buttonBaseClass} border-transparent bg-foreground text-background enabled:hover:bg-foreground/90`;
   return <div role="dialog" aria-modal="true" aria-labelledby="default-apps-title" aria-describedby="default-apps-description" className="fixed inset-0 z-[245] flex items-center justify-center bg-black/45 p-4" onMouseDown={event => { if (event.target === event.currentTarget) void dismiss(); }}>
     <div ref={dialog} className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground shadow-xl">
       <header className="flex items-start justify-between gap-4 px-6 pt-6"><h2 id="default-apps-title" ref={heading} tabIndex={-1} className="text-lg font-semibold outline-none">Use Inbox by default</h2><button type="button" onClick={() => void dismiss()} disabled={!!busy} aria-label="Close default app prompt" className="rounded p-1 text-muted-foreground hover:bg-muted/50 disabled:opacity-40"><X size={18} /></button></header>
@@ -188,7 +190,7 @@ export function DefaultAppsStartupPrompt({ suppressed = false, onOpenChange }: D
         {hasSettings && <button type="button" onClick={() => void openSettings()} disabled={!!busy} className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"><ExternalLink size={13} />Open system default app settings</button>}
         <label className="mt-5 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={dontAskAgain} disabled={!!busy} onChange={event => setDontAskAgain(event.target.checked)} className="h-3.5 w-3.5 accent-current" />Don’t ask again</label>
       </div>
-      <footer className="mt-4 flex flex-wrap justify-end gap-2 border-t border-border px-6 py-4"><button type="button" disabled={!!busy} onClick={() => void dismiss()} className={buttonClass}>{busy === 'saving' ? 'Saving…' : receipts.length ? 'Done' : 'Not now'}</button><button type="button" disabled={!!busy || !applicable.length} onClick={() => void makeDefault()} className={`${buttonClass} border-transparent bg-foreground text-background hover:bg-foreground/90`}>{busy === 'applying' ? 'Making default…' : 'Make default'}</button></footer>
+      <footer className="mt-4 flex flex-wrap justify-end gap-2 border-t border-border px-6 py-4"><button type="button" disabled={!!busy} onClick={() => void dismiss()} className={buttonClass}>{busy === 'saving' ? 'Saving…' : receipts.length ? 'Done' : 'Not now'}</button><button type="button" disabled={!!busy || !applicable.length} onClick={() => void makeDefault()} className={primaryButtonClass}>{busy === 'applying' ? 'Making default…' : 'Make default'}</button></footer>
     </div>
   </div>;
 }

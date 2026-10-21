@@ -21,8 +21,9 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/sarvinbox-smtp-vault-test', getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => true,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
-    decryptString: (b: Buffer) => /^enc\((.*)\)$/s.exec(b.toString('utf8'))![1],
+    getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
+    decryptString: (b: Buffer) => /^(?:v11)?enc\((.*)\)$/s.exec(b.toString('utf8'))![1],
   },
 }));
 vi.mock('@sarvinbox/core', async (orig) => ({

@@ -21,10 +21,11 @@ vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
   safeStorage: {
     isEncryptionAvailable: () => h.encAvailable,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
       const raw = b.toString('utf8');
-      const m = /^enc\((.*)\)$/s.exec(raw);
+      const m = /^(?:v11)?enc\((.*)\)$/s.exec(raw);
       if (!m) throw new Error('cannot decrypt');
       return m[1];
     },
@@ -78,12 +79,10 @@ describe('saveImapAccount', () => {
     await expect(loadImapAccount()).resolves.toEqual(config);
   });
 
-  it('falls back to a clearly-MARKED plaintext envelope with no keychain (Linux)', async () => {
+  it('refuses new persistent mailbox sign-ins without an OS key store', async () => {
     h.encAvailable = false;
-    await saveImapAccount(config);
-    const blob = dbState.blobs.get(BLOB_KEY)!;
-    expect(blob.subarray(0, 7).toString()).toBe('PLAIN1:');
-    await expect(loadImapAccount()).resolves.toEqual(config);
+    await expect(saveImapAccount(config)).rejects.toThrow(/Keychain|secure storage|system keyring/);
+    expect(dbState.blobs.has(BLOB_KEY)).toBe(false);
   });
 
   it('no-ops on an incomplete config so a partial connect cannot clobber the good one', async () => {

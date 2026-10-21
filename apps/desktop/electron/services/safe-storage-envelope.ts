@@ -5,9 +5,8 @@
  *                                   Secret Service / KWallet — or Linux
  *                                   `basic_text`, which is NOT protected at
  *                                   rest: see os-encryption.ts).
- *   PLAIN1:<utf-8 payload>          no safeStorage at all: a clearly MARKED
- *                                   plaintext fallback rather than silently
- *                                   dropping the secret.
+ *   PLAIN1:<utf-8 payload>          legacy plaintext. Read for recovery only;
+ *                                   new persistent writes require OS storage.
  *
  * The single implementation of what the credential vault, AI key store, DB key
  * store, OAuth token store, last-good IMAP config and pipeline AI config each
@@ -16,6 +15,8 @@
  * unreadable blob, some degrade) and their own error wording, passed in here.
  */
 import { safeStorage } from 'electron';
+
+import { isOsBackedEncryption, storedEncryptionProtection } from './os-encryption';
 
 const MAGIC_ENC = 'ENC1:';
 const MAGIC_PLAIN = 'PLAIN1:';
@@ -31,12 +32,29 @@ export interface EnvelopeErrors {
 const startsWith = (buf: Buffer, magic: string): boolean =>
   buf.subarray(0, magic.length).toString('utf8') === magic;
 
-/** Seal a string: ENC1 when safeStorage can encrypt, else marked PLAIN1. */
-export function sealString(payload: string): Buffer {
-  if (safeStorage.isEncryptionAvailable()) {
-    return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), safeStorage.encryptString(payload)]);
+/** Raw ciphertext for stores with their own envelope; all persisted secrets use this policy. */
+export function encryptProtectedString(payload: string): Buffer {
+  if (isOsBackedEncryption()) {
+    const ciphertext = safeStorage.encryptString(payload);
+    if (process.platform === 'linux' && storedEncryptionProtection(ciphertext.subarray(0, 3).toString('ascii')) !== 'encrypted') {
+      throw new Error('Linux secure storage did not protect this secret. Unlock a Secret Service keyring or KWallet, then restart Sarv Inbox.');
+    }
+    return ciphertext;
   }
-  return Buffer.from(MAGIC_PLAIN + payload, 'utf8');
+  // A temporary Keychain/DPAPI failure must never silently downgrade a saved
+  // secret. Existing PLAIN1 envelopes remain readable for recovery below.
+  if (process.platform === 'darwin') {
+    throw new Error('macOS Keychain is unavailable. Choose Allow Keychain access under Security → Overview and approve the macOS prompt. Sarv Inbox may restart to retry secure storage before saving secrets.');
+  }
+  if (process.platform === 'win32') {
+    throw new Error('Windows secure storage is unavailable. Sign in to your Windows account again, then restart Sarv Inbox before saving secrets.');
+  }
+  throw new Error('A system keyring is required to save secrets securely. Install and unlock a Secret Service keyring (such as GNOME Keyring) or KWallet, then restart Sarv Inbox.');
+}
+
+/** New secrets always require real OS storage; legacy fallbacks remain readable. */
+export function sealString(payload: string): Buffer {
+  return Buffer.concat([Buffer.from(MAGIC_ENC, 'utf8'), encryptProtectedString(payload)]);
 }
 
 /**

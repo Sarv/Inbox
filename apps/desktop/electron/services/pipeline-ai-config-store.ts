@@ -18,8 +18,9 @@
  * the container changed. The legacy file is migrated on first read (write-to-DB
  * FIRST) and removed later by the startup cleanup.
  *
- * Envelope: `ENC1:<safeStorage ciphertext of {type,apiKey,model,baseUrl,…}>`, or
- * a clearly-marked `PLAIN1:` fallback when no OS keychain exists.
+ * Envelope: `ENC1:<safeStorage ciphertext of {type,apiKey,model,baseUrl,…}>`.
+ * Legacy `PLAIN1:` envelopes remain readable for recovery; new writes require
+ * an OS secure store.
  */
 import { readFileSync, renameSync, promises as fs } from 'fs';
 import { join } from 'path';

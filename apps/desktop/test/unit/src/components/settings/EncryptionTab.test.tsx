@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EncryptionTab } from '../../../../../src/components/settings/EncryptionTab';
 import type { AppSettings } from '../../../../../src/components/settings/types';
+import type { SecureStorageStatus } from '../../../../../src/types/secure-storage';
 import { render, settle, toggle, typeInto, type Mounted } from '../../../../helpers/render';
 
 /**
@@ -72,6 +73,11 @@ const api = {
   importContactKeys: vi.fn(),
   deleteContactKey: vi.fn(),
 };
+const storageStatus = vi.fn();
+const protectedStorage: SecureStorageStatus = {
+  platform: 'darwin', keyStore: 'available', databaseKey: 'encrypted', databaseKeyProtection: 'encrypted', databaseReadable: true,
+  stores: [{ id: 'pgp-keys', label: 'OpenPGP keys', envelope: 'encrypted', protectedByDatabase: false, protection: 'encrypted' }],
+};
 
 const settings = { pgpWkdLookup: true, pgpKeyserverLookup: false, pgpAutoEncrypt: true } as AppSettings;
 const updateSetting = vi.fn();
@@ -105,7 +111,8 @@ beforeEach(() => {
   api.status.mockResolvedValue(ok({ keychainAvailable: true }));
   api.listOwnKeys.mockResolvedValue(ok([ownKey()]));
   api.listContactKeys.mockResolvedValue(ok([contactKey]));
-  (window as unknown as { electronAPI: unknown }).electronAPI = { pgp: api };
+  storageStatus.mockReset().mockResolvedValue(ok(protectedStorage));
+  (window as unknown as { electronAPI: unknown }).electronAPI = { pgp: api, secureCreds: { status: storageStatus } };
 });
 afterEach(() => {
   mounted?.unmount();
@@ -118,7 +125,7 @@ describe('EncryptionTab', () => {
     const view = await mount();
     const own = view.find(`[data-own-key="${FP}"]`);
     expect(own?.textContent).toContain('me@work.example');
-    expect(own?.textContent).toContain('system keychain');
+    expect(own?.textContent).toContain('Saved with encryption');
     expect(own?.textContent).not.toContain('Locked');
     expect(buttonNamed(view, 'Unlock')).toBeNull();
     expect(view.find('[data-contact-key]')?.textContent).toContain('From their mail domain (WKD)');
@@ -137,26 +144,41 @@ describe('EncryptionTab', () => {
   });
 
   // Breaks: a first-time user sees an empty box with no idea what to do.
-  it('explains the empty state and warns when there is no keychain', async () => {
+  it('explains the empty state and passphrase policy when OS-backed storage is currently unavailable', async () => {
     api.status.mockResolvedValue(ok({ keychainAvailable: false }));
     api.listOwnKeys.mockResolvedValue(ok([]));
     api.listContactKeys.mockResolvedValue(ok([]));
     const view = await mount();
     expect(view.container.textContent).toContain('You have no OpenPGP key yet');
-    expect(view.container.textContent).toContain('no keychain');
+    expect(view.container.textContent).toContain('OS-backed key storage is currently unavailable');
     expect(view.container.textContent).toContain('No keys yet');
   });
 
-  // Linux without a keyring, with a key sealed there before the app could
-  // tell. Breaks: the row says "Protected by your system keychain" under a
-  // notice that says keys are passphrase-protected — both false for it.
-  it('flags a keychain-sealed key as not protected when there is no keychain', async () => {
+  it('warns about saved OpenPGP data only when metadata confirms it is unprotected', async () => {
     api.status.mockResolvedValue(ok({ keychainAvailable: false }));
+    storageStatus.mockResolvedValue(ok({ ...protectedStorage, platform: 'linux', keyStore: 'basic-text', stores: [{ ...protectedStorage.stores[0]!, protection: 'unprotected' }] }));
     const view = await mount();
     const own = view.find(`[data-own-key="${FP}"]`)?.textContent ?? '';
-    expect(own).toContain('Not protected');
+    expect(own).toContain('Some saved OpenPGP key data is unprotected');
     expect(own).not.toContain('Protected by your system keychain');
-    expect(view.container.textContent).toContain('new keys are protected by their own passphrase');
+    expect(view.container.textContent).toContain('New keys require their own passphrase');
+  });
+
+  it('keeps saved encrypted OpenPGP keys protected while Mac Keychain access is unavailable', async () => {
+    api.status.mockResolvedValue(ok({ keychainAvailable: false }));
+    storageStatus.mockResolvedValue(ok({ ...protectedStorage, keyStore: 'unavailable' }));
+    const view = await mount();
+    const own = view.find(`[data-own-key="${FP}"]`)?.textContent ?? '';
+    expect(own).toContain('Saved with encryption');
+    expect(own).not.toMatch(/unprotected|no keychain|Not protected/);
+    expect(view.container.textContent).toContain('New keys require their own passphrase');
+  });
+
+  it('does not guess saved OpenPGP protection when the storage metadata check fails', async () => {
+    storageStatus.mockResolvedValue(fail('Metadata unavailable'));
+    const view = await mount();
+    expect(view.find(`[data-own-key="${FP}"]`)?.textContent).toContain('At-rest protection has not been verified');
+    expect(view.find(`[data-own-key="${FP}"]`)?.textContent).not.toContain('Saved with encryption');
   });
 
   // Breaks: a failing key list reads as "no keys" with no hint anything went wrong.

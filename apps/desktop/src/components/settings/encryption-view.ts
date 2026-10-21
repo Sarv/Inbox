@@ -6,6 +6,7 @@
  */
 import type { ContactKeySummary, OwnKeySummary } from '../../../electron/services/pgp-keyring';
 import { normalizeIdentities } from '../../store/identities';
+import type { SecureStorageStoreStatus } from '../../types/secure-storage';
 import { shortFingerprint } from '../email-detail/pgp-view-model';
 
 export type { ContactKeySummary, OwnKeySummary };
@@ -24,15 +25,16 @@ export function keyWarnings(key: KeyState): string[] {
 }
 
 /**
- * Where a key's secret lives. `keychainProtects` is false where the system has
- * no real keychain (Linux `basic_text`): a key sealed there earlier — before
- * the app could tell — is only obfuscated, and must not be called protected.
+ * Describe saved protection from storage metadata. Current key-store access
+ * controls new-key creation, but cannot establish how an existing key is saved.
+ * Storage metadata is aggregated, so an unprotected store does not identify a
+ * particular affected key.
  */
-export const protectionText = (protection: OwnKeySummary['protection'], keychainProtects = true): string => {
+export const protectionText = (protection: OwnKeySummary['protection'], savedProtection?: SecureStorageStoreStatus['protection']): string => {
   if (protection === 'passphrase') return 'Protected by its passphrase — asked for once per session.';
-  if (keychainProtects) return 'Protected by your system keychain — no passphrase to type.';
-  return 'Not protected: kept without a passphrase, and this system has no keychain, so anyone who copies your profile can read it. '
-    + 'To protect it, back up the secret key, then import that backup with its passphrase.';
+  if (savedProtection === 'encrypted') return 'Saved with encryption — no key passphrase to type.';
+  if (savedProtection === 'unprotected') return 'Some saved OpenPGP key data is unprotected. Review Security → Overview. To protect affected keys, back up the secret key, then import that backup with its passphrase.';
+  return 'Saved without a key passphrase. At-rest protection has not been verified.';
 };
 
 const SOURCE_LABELS: Record<ContactKeySummary['source'], string> = {

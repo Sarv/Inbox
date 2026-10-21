@@ -2,7 +2,9 @@ import { KeyRound, Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
 import type { PgpIpcResult } from '../../../electron/ipc/pgp-handlers';
+import { useSecureStorageStatus } from '../../hooks/useSecureStorageStatus';
 import { useEmailStore } from '../../store/email-store';
+import { credentialStoreProtection } from '../../utils/secure-storage-status';
 import { useConfirm } from '../ConfirmDialog';
 
 import {
@@ -40,6 +42,7 @@ export function EncryptionTab({ settings, updateSetting }: EncryptionTabProps) {
   const accounts = useEmailStore((s) => s.accounts);
   const { confirm, confirmDialog } = useConfirm();
   const [keychain, setKeychain] = useState<boolean | null>(null);
+  const { status: storageStatus, retry: retryStorageStatus } = useSecureStorageStatus();
   const [ownKeys, setOwnKeys] = useState<OwnKeySummary[] | null>(null);
   const [contactKeys, setContactKeys] = useState<ContactKeySummary[] | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -77,7 +80,7 @@ export function EncryptionTab({ settings, updateSetting }: EncryptionTabProps) {
       }
       const text = success(result.data);
       if (text) setNotice({ text, tone: 'success' });
-      await reload();
+      await Promise.all([reload(), retryStorageStatus()]);
       return true;
     } catch (error) {
       setNotice({ text: errorText(error), tone: 'error' });
@@ -131,8 +134,7 @@ export function EncryptionTab({ settings, updateSetting }: EncryptionTabProps) {
 
       {keychain === false && (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-          This system has no keychain to keep your keys in, so new keys are protected by their own passphrase. You will be
-          asked for it once per session.
+          OS-backed key storage is currently unavailable. New keys require their own passphrase, asked for once per session.
         </div>
       )}
 
@@ -150,7 +152,7 @@ export function EncryptionTab({ settings, updateSetting }: EncryptionTabProps) {
                 <KeyHeading email={key.email} fingerprint={key.fingerprint} warnings={keyWarnings(key)} />
                 <div className="text-xs text-muted-foreground">
                   Created {localDate(key.createdAt)}
-                  {key.expiresAt ? ` · expires ${localDate(key.expiresAt)}` : ''} · {protectionText(key.protection, keychain !== false)}
+                  {key.expiresAt ? ` · expires ${localDate(key.expiresAt)}` : ''} · {protectionText(key.protection, credentialStoreProtection(storageStatus, 'pgp-keys'))}
                 </div>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input

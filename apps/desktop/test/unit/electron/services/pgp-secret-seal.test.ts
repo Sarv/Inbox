@@ -5,8 +5,8 @@ const h = vi.hoisted(() => ({
     isEncryptionAvailable: vi.fn(() => true),
     // Linux only in Electron; a real keyring unless a test says otherwise.
     getSelectedStorageBackend: vi.fn(() => 'gnome_libsecret'),
-    encryptString: vi.fn((text: string) => Buffer.from(`sealed(${text})`)),
-    decryptString: vi.fn((buf: Buffer) => buf.toString().replace(/^sealed\(|\)$/g, '')),
+    encryptString: vi.fn((text: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}sealed(${text})`)),
+    decryptString: vi.fn((buf: Buffer) => buf.toString().replace(/^(?:v11)?sealed\(|\)$/g, '')),
   },
 }));
 vi.mock('electron', () => ({ safeStorage: h.safeStorage }));

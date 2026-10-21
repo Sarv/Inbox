@@ -23,9 +23,9 @@ vi.mock('electron', () => ({
     isEncryptionAvailable: () => h.encAvailable,
     // Linux only in Electron; a real keyring unless a test says otherwise.
     getSelectedStorageBackend: () => h.backend,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    encryptString: (s: string) => Buffer.from(`${process.platform === 'linux' ? 'v11' : ''}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
-      const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
+      const m = /^(?:v11)?enc\((.*)\)$/s.exec(b.toString('utf8'));
       if (!m) throw new Error('cannot decrypt');
       return m[1];
     },
@@ -142,11 +142,10 @@ describe('setAccountSecrets / getAccountSecrets', () => {
     await expect(getAccountSecrets('acct-c')).resolves.toEqual({ imap: { password: 'c', ...STRICT } });
   });
 
-  it('uses the marked plaintext envelope when there is no keychain', async () => {
+  it('refuses new persistent credentials when there is no OS key store', async () => {
     h.encAvailable = false;
-    await setAccountSecrets('acct-a', { imap: { password: 'pw' } });
-    expect(dbState.blobs.get(BLOB_KEY)!.subarray(0, 7).toString()).toBe('PLAIN1:');
-    await expect(getAccountSecrets('acct-a')).resolves.toEqual({ imap: { password: 'pw', ...STRICT } });
+    await expect(setAccountSecrets('acct-a', { imap: { password: 'pw' } })).rejects.toThrow(/Keychain|secure storage|system keyring/);
+    expect(dbState.blobs.has(BLOB_KEY)).toBe(false);
   });
 });
 
@@ -353,7 +352,6 @@ describe('bindAccountSecretTransport', () => {
 
   // Upgrade path: entries saved before transport binding are bound on first use.
   it('fills in the relaxations a legacy entry lacks, leaving the other kind alone', async () => {
-    h.encAvailable = false;
     legacy({ 'acct-a': { imap: { password: 'pw', host: 'imap.x.com' }, smtp: { password: 's' } } });
     await bindAccountSecretTransport('acct-a', 'imap', { allowInsecureTLS: true, allowPlaintext: false });
     expect(await getAccountSecrets('acct-a')).toEqual({
@@ -364,7 +362,6 @@ describe('bindAccountSecretTransport', () => {
 
   // Breaks: a later "first use" asking for more rewrites an existing choice.
   it('never changes a recorded relaxation, and is a no-op for missing entries', async () => {
-    h.encAvailable = false;
     legacy({ 'acct-a': { imap: { password: 'pw', allowInsecureTLS: false } } });
     await bindAccountSecretTransport('acct-a', 'imap', { allowInsecureTLS: true, allowPlaintext: true });
     await bindAccountSecretTransport('acct-a', 'smtp', { allowInsecureTLS: true, allowPlaintext: true });

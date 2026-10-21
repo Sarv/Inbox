@@ -17,6 +17,7 @@ import { safeStorage } from 'electron';
 
 import { isOsBackedEncryption } from './os-encryption';
 import type { OwnKeyProtection } from './pgp-key-store';
+import { encryptProtectedString } from './safe-storage-envelope';
 
 const MAGIC_KEYCHAIN = 'ENC1:';
 const MAGIC_PASSPHRASE = 'LOCK1:';
@@ -41,7 +42,7 @@ export const electronKeychain: Keychain = {
   // passphrase path there instead.
   isAvailable: () => isOsBackedEncryption(),
   canOpen: () => safeStorage.isEncryptionAvailable(),
-  encrypt: (plaintext) => safeStorage.encryptString(plaintext),
+  encrypt: (plaintext) => encryptProtectedString(plaintext),
   decrypt: (sealed) => safeStorage.decryptString(sealed),
 };
 

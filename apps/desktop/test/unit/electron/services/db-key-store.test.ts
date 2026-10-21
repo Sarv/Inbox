@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -13,7 +13,7 @@ import { asPlatform } from '../../../helpers/as-platform';
  * key file by minting a new one — it throws instead.
  */
 
-const h = vi.hoisted(() => ({ userData: '', encAvailable: true, backend: 'gnome_libsecret' }));
+const h = vi.hoisted(() => ({ userData: '', encAvailable: true, backend: 'gnome_libsecret', badRoundTrip: false, version: '' }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
@@ -21,11 +21,11 @@ vi.mock('electron', () => ({
     isEncryptionAvailable: () => h.encAvailable,
     // Linux only in Electron; a real keyring unless a test says otherwise.
     getSelectedStorageBackend: () => h.backend,
-    encryptString: (s: string) => Buffer.from(`enc(${s})`, 'utf8'),
+    encryptString: (s: string) => Buffer.from(`${h.version || (process.platform === 'linux' ? 'v11' : '')}enc(${s})`, 'utf8'),
     decryptString: (b: Buffer) => {
-      const m = /^enc\((.*)\)$/s.exec(b.toString('utf8'));
+      const m = /^(?:v10|v11)?enc\((.*)\)$/s.exec(b.toString('utf8'));
       if (!m) throw new Error('cannot decrypt');
-      return m[1];
+      return h.badRoundTrip ? '0'.repeat(64) : m[1];
     },
   },
 }));
@@ -51,6 +51,8 @@ beforeAll(() => { h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-dbkey-')); 
 beforeEach(() => {
   h.encAvailable = true;
   h.backend = 'gnome_libsecret';
+  h.badRoundTrip = false;
+  h.version = '';
   rmSync(h.userData, { recursive: true, force: true });
   mkdirSync(h.userData, { recursive: true });
 });
@@ -64,7 +66,7 @@ describe('getDbEncryptionKey', () => {
     expect(key).toMatch(/^[0-9a-f]{64}$/);
     const bytes = readFileSync(join(h.userData, FILE));
     expect(bytes.subarray(0, 5).toString()).toBe('ENC1:');
-    expect(bytes.toString()).toBe(`ENC1:enc(${key})`);
+    expect(bytes.toString()).toBe(`ENC1:${process.platform === 'linux' ? 'v11' : ''}enc(${key})`);
     // The atomic-write temp file is gone (renamed into place).
     expect(existsSync(join(h.userData, `${FILE}.tmp`))).toBe(false);
   });
@@ -88,13 +90,90 @@ describe('getDbEncryptionKey', () => {
     expect(second).toBe(first);
   });
 
-  it('falls back to a MARKED plaintext key file when there is no keychain (Linux)', async () => {
+  it('reads a legacy plaintext key without a Linux keyring, preserving recovery access', async () => {
     h.encAvailable = false;
+    const key = 'd'.repeat(64);
+    writeFileSync(join(h.userData, FILE), `PLAIN1:${key}`);
     const store = await load();
-    const key = store.getDbEncryptionKey();
+    expect(asPlatform('linux', () => store.getDbEncryptionKey())).toBe(key);
     expect(readFileSync(join(h.userData, FILE)).toString()).toBe(`PLAIN1:${key}`);
     // ...and it round-trips on the next start.
+    const next = await load();
+    expect(asPlatform('linux', () => next.getDbEncryptionKey())).toBe(key);
+  });
+
+  it.each(['darwin', 'win32', 'linux'] as const)('does not create an unprotected new profile on %s', async (platform) => {
+    h.encAvailable = false;
+    const store = await load();
+    expect(() => asPlatform(platform, () => store.getDbEncryptionKey())).toThrow(/secure storage is unavailable|Keychain is unavailable|system keyring is required/);
+    expect(readdirSync(h.userData)).toEqual([]);
+  });
+
+  it('refuses new database keys under Linux basic_text', async () => {
+    h.backend = 'basic_text';
+    const store = await load();
+    expect(() => asPlatform('linux', () => store.getDbEncryptionKey())).toThrow('A system keyring is required');
+    expect(readdirSync(h.userData)).toEqual([]);
+  });
+
+  it('rewraps a legacy Linux v10 key into v11 with the same database key', async () => {
+    const key = 'f'.repeat(64);
+    writeFileSync(join(h.userData, FILE), `ENC1:v10enc(${key})`);
+    h.version = 'v11';
+    const store = await load();
+    expect(asPlatform('linux', () => store.getDbEncryptionKey())).toBe(key);
+    expect(readFileSync(join(h.userData, FILE)).toString()).toBe(`ENC1:v11enc(${key})`);
+    expect(readdirSync(h.userData)).toEqual([FILE]);
+  });
+
+  it('rewraps the existing plaintext key with Keychain without changing it or leaving a plaintext backup', async () => {
+    const key = 'a'.repeat(64);
+    const path = join(h.userData, FILE);
+    writeFileSync(path, `PLAIN1:${key}`, { mode: 0o644 });
+    const store = await load();
+    expect(asPlatform('darwin', () => store.getDbEncryptionKey())).toBe(key);
+    expect(readFileSync(path).toString()).toBe(`ENC1:enc(${key})`);
+    expect(readdirSync(h.userData)).toEqual([FILE]);
+    if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('keeps an existing plaintext profile readable while Keychain is unavailable, then protects the cached key on recovery', async () => {
+    const key = 'b'.repeat(64);
+    const path = join(h.userData, FILE);
+    writeFileSync(path, `PLAIN1:${key}`);
+    h.encAvailable = false;
+    const store = await load();
+    expect(asPlatform('darwin', () => store.getDbEncryptionKey())).toBe(key);
+    expect(readFileSync(path).toString()).toBe(`PLAIN1:${key}`);
+    h.encAvailable = true;
+    expect(asPlatform('darwin', () => store.getDbEncryptionKey())).toBe(key);
+    expect(readFileSync(path).toString()).toBe(`ENC1:enc(${key})`);
+  });
+
+  it('preserves the exact original file if the encrypted round-trip check fails', async () => {
+    const key = 'a'.repeat(64);
+    const path = join(h.userData, FILE);
+    writeFileSync(path, `PLAIN1:${key}`);
+    h.badRoundTrip = true;
     expect((await load()).getDbEncryptionKey()).toBe(key);
+    expect(readFileSync(path).toString()).toBe(`PLAIN1:${key}`);
+    expect(readdirSync(h.userData)).toEqual([FILE]);
+  });
+
+  it('does not rewrap a plaintext key under Linux basic_text', async () => {
+    const key = 'c'.repeat(64);
+    writeFileSync(join(h.userData, FILE), `PLAIN1:${key}`);
+    h.backend = 'basic_text';
+    const store = await load();
+    expect(asPlatform('linux', () => store.getDbEncryptionKey())).toBe(key);
+    expect(readFileSync(join(h.userData, FILE)).toString()).toBe(`PLAIN1:${key}`);
+  });
+
+  it('rejects an invalid existing key without modifying it', async () => {
+    writeFileSync(join(h.userData, FILE), 'PLAIN1:broken');
+    const store = await load();
+    expect(() => store.getDbEncryptionKey()).toThrow('Invalid database encryption key');
+    expect(readFileSync(join(h.userData, FILE)).toString()).toBe('PLAIN1:broken');
   });
 
   it('THROWS on an encrypted key file with no keychain to open it (never re-mints)', async () => {

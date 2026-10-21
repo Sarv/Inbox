@@ -15,15 +15,15 @@
  * Example:
  *   node scripts/verify-mac-arch.mjs apps/desktop/release/mac-universal=x64,arm64
  *
- * Every .node under the directory must carry EVERY listed architecture. A
- * directory that does not exist is an error, not a pass.
+ * Every .node and the required Keychain helper in every app must carry EVERY
+ * listed architecture. A missing app, helper or directory is an error.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { readMachOArchs } from './lib/macho-arch.mjs';
-import { findNativeAddons, readFileHeader } from './lib/native-addons.mjs';
+import { findNativeAddons, findPackagedApps, readFileHeader } from './lib/native-addons.mjs';
 
 /**
  * @param {string[]} args `<dir>=<arch>[,<arch>]` pairs.
@@ -68,12 +68,19 @@ function main(args) {
       continue;
     }
 
-    for (const addon of addons) {
-      const relative = path.relative(directory, addon);
+    const macApps = findPackagedApps(directory).filter(resources => path.basename(path.dirname(resources)) === 'Contents');
+    if (macApps.length === 0) problems.push(`FAIL: no packaged Mac app found under ${directory}`);
+    const helpers = macApps.map(resources => path.join(path.dirname(resources), 'MacOS', 'Sarv Inbox Keychain'));
+    for (const helper of helpers) {
+      if (!fs.existsSync(helper)) problems.push(`FAIL: ${helper} is missing -- Keychain startup authorization would fail`);
+    }
+
+    for (const binary of [...addons, ...helpers.filter(helper => fs.existsSync(helper))]) {
+      const relative = path.relative(directory, binary);
       /** @type {string[]} */
       let actual;
       try {
-        actual = readMachOArchs(readFileHeader(addon));
+        actual = readMachOArchs(readFileHeader(binary));
       } catch (error) {
         problems.push(`FAIL: ${directory} -> ${relative}: ${error.message}`);
         continue;
@@ -93,11 +100,12 @@ function main(args) {
     console.error('');
     console.error('A universal app missing one slice does not crash on the CPU it lost -- every');
     console.error('database read is wrapped in a try/catch, so it looks like an account with no');
-    console.error('mail. Check that @electron/universal still lipos the addon. Do not publish.');
+    console.error('mail. A missing Keychain helper also blocks secure startup. Check the helper');
+    console.error('build and @electron/universal architecture merge. Do not publish.');
     return 1;
   }
 
-  console.log('OK: every packaged addon carries every expected architecture');
+  console.log('OK: every packaged addon and Keychain helper carries every expected architecture');
   return 0;
 }
 

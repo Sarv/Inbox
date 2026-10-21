@@ -2,7 +2,7 @@
 //
 // NOTE: the original hook was never committed — `.gitignore` ignores everything
 // under apps/desktop/build/ except icon.icns — so this is a reconstruction.
-// It deliberately does only work that is provably safe: deleting node-gyp
+// It originally only deleted node-gyp
 // build intermediates that are left inside the unpacked better-sqlite3 native
 // module. Those directories (obj.target, .deps, and the intermediate .o/.a
 // files) are compiler leftovers, never opened at runtime, and add tens of MB
@@ -10,9 +10,13 @@
 //
 // Anything that prunes locales, prebuilds, or bundle contents was NOT restored:
 // guessing there risks shipping a broken app, and the cost is only file size.
+// It also builds the small native Keychain authorization helper into the Mac
+// bundle before signing. Installed apps never depend on a local compiler.
 
 const { rm, readdir, stat } = require('node:fs/promises')
 const { join } = require('node:path')
+
+const { buildKeychainHelper } = require('./keychain-helper.js')
 
 // Directory names that node-gyp leaves behind and nothing loads at runtime.
 const DEAD_BUILD_DIRS = new Set(['obj.target', 'obj', '.deps'])
@@ -50,6 +54,16 @@ const removeAll = async (paths) => {
 exports.default = async (context) => {
   const { appOutDir, packager, electronPlatformName } = context
   const appName = packager.appInfo.productFilename
+
+  if (electronPlatformName === 'darwin') {
+    // afterPack precedes @electron/osx-sign's recursive bundle signing. A native
+    // executable in Contents/MacOS is discovered and signed with the app. Build
+    // each slice before the universal merge; a missing helper must fail release.
+    await buildKeychainHelper({
+      directory: join(appOutDir, `${appName}.app`, 'Contents', 'MacOS'),
+      arch: context.arch,
+    })
+  }
 
   // Where the asarUnpack'd native modules land, per platform.
   const unpacked =

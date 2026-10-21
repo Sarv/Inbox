@@ -345,6 +345,7 @@ jobs:
           for APP in apps/desktop/release/{mac-universal,mac-arm64,mac}/"Sarv Inbox.app"; do
             echo "Verifying $APP"
             codesign --verify --deep --strict --verbose=2 "$APP"
+            codesign --verify --strict --verbose=2 "$APP/Contents/MacOS/Sarv Inbox Keychain"
             codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q 'allow-jit' \
               || { echo "FAIL: $APP carries no entitlements"; exit 1; }
           done

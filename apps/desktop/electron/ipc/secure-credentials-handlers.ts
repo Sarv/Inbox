@@ -15,6 +15,8 @@ import {
   isSecureStorageAvailable,
   type AccountSecrets,
 } from '../services/secure-credential-store';
+import { requestSecureStorageAccess } from '../services/secure-storage-access';
+import { getSecureStorageStatus } from '../services/secure-storage-status';
 const logger = createLogger('secure-credentials-handlers');
 
 export function registerSecureCredentialsHandlers(): void {
@@ -52,10 +54,20 @@ export function registerSecureCredentialsHandlers(): void {
     }
   });
 
-  // Lets the renderer warn the user when we'd have to fall back to plaintext
-  // (no OS keychain), so "encrypted" is never silently assumed.
+  // Saving requires current OS-store access; existing saved protection is
+  // reported separately by secureCreds:status.
   ipcMain.handle('secureCreds:available', async () => {
     return { success: true, data: isSecureStorageAvailable() };
+  });
+
+  ipcMain.handle('secureCreds:status', async () => {
+    try { return { success: true, data: getSecureStorageStatus() }; }
+    catch { return { success: false, error: 'Secure-storage protection could not be checked.' }; }
+  });
+
+  ipcMain.handle('secureCreds:requestAccess', async () => {
+    try { return { success: true, data: await requestSecureStorageAccess() }; }
+    catch { return { success: false, error: 'macOS could not authorize secure storage. Try again after signing out and back in, or restarting your Mac.' }; }
   });
 
   // Reveal a stored password to the renderer ONLY after an OS-level auth prompt

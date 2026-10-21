@@ -131,4 +131,17 @@ describe('OS launch request queue', () => {
     const first = service.enqueueFile('/tmp/meeting.ics'); expect(await service.enqueueFile('/tmp/meeting.ics')).toBe(false);
     finish({ text: ics, filename: 'meeting.ics' }); expect(await first).toBe(true); expect(read).toHaveBeenCalledOnce();
   });
+
+  it('retains original links and in-flight calendar paths during a Keychain restart', async () => {
+    let finish!: (value: { text: string; filename: string }) => void;
+    const service = new ExternalOpenService({ createId: () => 'request', readCalendarFile: () => new Promise(resolve => { finish = resolve; }) });
+    service.enqueueUrl('mailto:person@example.test?body=synthetic-private-text');
+    const reading = service.enqueueFile('/tmp/meeting.ics');
+    const inputs = service.getPendingLaunchInputs();
+    expect(inputs).toEqual(['mailto:person@example.test?body=synthetic-private-text', '/tmp/meeting.ics']);
+    inputs.length = 0;
+    expect(service.getPendingLaunchInputs()).toHaveLength(2);
+    finish({ text: ics, filename: 'meeting.ics' }); await reading;
+    expect(service.getPendingLaunchInputs()).toEqual(['mailto:person@example.test?body=synthetic-private-text', '/tmp/meeting.ics']);
+  });
 });

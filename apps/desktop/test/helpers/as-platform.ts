@@ -12,3 +12,11 @@ export function asPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
     Object.defineProperty(process, 'platform', original);
   }
 }
+
+/** Keep the platform override active through queued asynchronous store writes. */
+export async function asPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...original, value: platform });
+  try { return await fn(); }
+  finally { Object.defineProperty(process, 'platform', original); }
+}

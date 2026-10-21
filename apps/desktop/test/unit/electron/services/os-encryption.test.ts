@@ -22,7 +22,7 @@ vi.mock('electron', () => ({
   },
 }));
 
-import { isOsBackedEncryption, secretStorageDescription } from '../../../../electron/services/os-encryption';
+import { isOsBackedEncryption, secretStorageDescription, storedEncryptionProtection } from '../../../../electron/services/os-encryption';
 import { asPlatform } from '../../../helpers/as-platform';
 
 beforeEach(() => {
@@ -47,6 +47,13 @@ describe('isOsBackedEncryption', () => {
     expect(asPlatform('linux', isOsBackedEncryption)).toBe(false);
   });
 
+  it('is false for an unknown or unrecognized Linux backend', () => {
+    h.backend = 'unknown';
+    expect(asPlatform('linux', isOsBackedEncryption)).toBe(false);
+    h.backend = 'unexpected';
+    expect(asPlatform('linux', isOsBackedEncryption)).toBe(false);
+  });
+
   it('is true on macOS and Windows without asking about a Linux backend', () => {
     h.backendThrows = true;
     expect(asPlatform('darwin', isOsBackedEncryption)).toBe(true);
@@ -60,12 +67,22 @@ describe('isOsBackedEncryption', () => {
   });
 });
 
+describe('protection of existing ciphertext', () => {
+  it('uses Linux payload version rather than the currently selected keyring', () => {
+    expect(asPlatform('linux', () => storedEncryptionProtection('v10'))).toBe('unprotected');
+    expect(asPlatform('linux', () => storedEncryptionProtection('v11'))).toBe('encrypted');
+    expect(asPlatform('linux', () => storedEncryptionProtection('v99'))).toBe('unknown');
+    expect(asPlatform('darwin', () => storedEncryptionProtection('v10'))).toBe('encrypted');
+    expect(asPlatform('win32', () => storedEncryptionProtection('v10'))).toBe('encrypted');
+  });
+});
+
 describe('secretStorageDescription', () => {
   // The startup log line support reads to explain the warning banner.
   it('names the three states', () => {
     expect(asPlatform('linux', secretStorageDescription)).toBe('os-keychain');
     h.backend = 'basic_text';
-    expect(asPlatform('linux', secretStorageDescription)).toMatch(/basic_text.*NOT protected/);
+    expect(asPlatform('linux', secretStorageDescription)).toMatch(/basic_text.*blocked/);
     h.available = false;
     expect(asPlatform('linux', secretStorageDescription)).toMatch(/unavailable/);
   });

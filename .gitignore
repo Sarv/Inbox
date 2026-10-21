@@ -169,6 +169,7 @@ apps/desktop/build/*
 # afterPack hook was already lost to this rule once and had to be
 # reconstructed; see its header.
 !apps/desktop/build/afterPack.js
+!apps/desktop/build/keychain-helper.js
 !apps/desktop/build/beforeBuild.js
 !apps/desktop/build/entitlements.mac.plist
 !apps/desktop/build/default-apps.nsh
