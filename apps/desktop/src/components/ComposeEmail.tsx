@@ -20,10 +20,12 @@ import { useEmailStore } from '../store/email-store';
 import { accountDisplayLabel } from '../store/helpers';
 import { normalizeIdentities, sendAsFrom } from '../store/identities';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
+import { recheckDraftCalendarAvailability } from '../utils/calendar-draft';
 import { parseAddresses } from '../utils/email-address';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { reportSendFailure } from '../utils/send-failure';
 
+import { CalendarDraftBanner } from './assistant/CalendarDraftBanner';
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
 import { ForwardAttachmentStatus } from './ForwardAttachmentStatus';
@@ -174,6 +176,7 @@ export function ComposeEmail({ mode, replyToEmail, draft, draftBody, onClose }: 
     prepareAttachments: forwardAttachments.prepareAttachments,
     encrypt: pgp.state.encrypt,
     initialDraftEncrypted: draft?.pgpEncrypted,
+    calendarAvailability: draft?.calendarAvailability,
   });
 
   const [quotedHtml, setQuotedHtml] = useState('');
@@ -391,6 +394,7 @@ ${createQuotedHeader(prefix, extraInfo)}
 
     setSending(true);
     try {
+      await recheckDraftCalendarAvailability(draft?.calendarAvailability, plainBody);
       const emailFriendlyBody = convertToEmailHtml(htmlBody);
       const fullHtmlBody = assembleOutgoingHtml(emailFriendlyBody, signatureHtml, quotedHtml);
       // Do NOT delete the draft here. markDiscarded stops the autosave churn (and
@@ -440,6 +444,7 @@ ${createQuotedHeader(prefix, extraInfo)}
           threadId: (draft as any)?.threadId,
           accountId: cleanupAccountId,
           unsaved: true,
+          calendarAvailability: draft?.calendarAvailability,
         },
       });
     } catch (error) {
@@ -708,6 +713,7 @@ ${createQuotedHeader(prefix, extraInfo)}
               </div>
             </div>
 
+            <CalendarDraftBanner proposal={draft?.calendarAvailability} body={plainBody} />
             {/* Body - Rich Text Editor - takes remaining space */}
             <div className="flex-1 min-h-0 overflow-y-auto" onContextMenu={handleContextMenu}>
               <RichTextEditor
@@ -924,6 +930,7 @@ ${createQuotedHeader(prefix, extraInfo)}
           </div>
         </div>
 
+        <CalendarDraftBanner proposal={draft?.calendarAvailability} body={plainBody} />
         {/* Body - Rich Text Editor - takes remaining space */}
         <div className="flex-1 min-h-0 overflow-y-auto" onContextMenu={handleContextMenu}>
           <RichTextEditor

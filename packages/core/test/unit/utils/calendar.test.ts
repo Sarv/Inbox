@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { MAX_ICS_CHARS, sanitizeIcsText } from '../../../src/utils/calendar';
+import { hasCalendarMimePart, MAX_ICS_CHARS, sanitizeIcsText } from '../../../src/utils/calendar';
 
 // sanitizeIcsText is the single gate between an attacker-controlled
 // `text/calendar` MIME part and (a) the DB column that stores it and (b) the
@@ -9,6 +9,21 @@ import { MAX_ICS_CHARS, sanitizeIcsText } from '../../../src/utils/calendar';
 // input and the DB grows without bound.
 
 const ICS = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'SUMMARY:Standup', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+
+describe('calendar MIME detection', () => {
+  it('finds unnamed calendar parts nested inside multipart alternatives', () => {
+    expect(hasCalendarMimePart({ type: 'multipart', parts: [{ type: 'text', subtype: 'plain' }, { type: 'multipart', parts: [{ type: 'text', subtype: 'calendar' }] }] })).toBe(true);
+    expect(hasCalendarMimePart({ type: 'text/calendar' })).toBe(true);
+    expect(hasCalendarMimePart({ type: 'application', subtype: 'octet-stream', disposition: { params: { filename: 'meeting.ICS' } } })).toBe(true);
+  });
+  it('does not download ordinary mail and bounds hostile metadata', () => {
+    expect(hasCalendarMimePart({ type: 'text', subtype: 'html' })).toBe(false);
+    expect(hasCalendarMimePart(null)).toBe(false);
+    const cyclic: { parts: unknown[] } = { parts: [] }; cyclic.parts.push(cyclic);
+    expect(hasCalendarMimePart(cyclic)).toBe(false);
+    expect(hasCalendarMimePart({ parts: Array.from({ length: 2000 }, () => ({ type: 'text', subtype: 'plain' })) })).toBe(false);
+  });
+});
 
 describe('sanitizeIcsText — accepts real invites', () => {
   it('returns a well-formed iCalendar object unchanged', () => {

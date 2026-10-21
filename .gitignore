@@ -171,5 +171,6 @@ apps/desktop/build/*
 !apps/desktop/build/afterPack.js
 !apps/desktop/build/beforeBuild.js
 !apps/desktop/build/entitlements.mac.plist
+!apps/desktop/build/default-apps.nsh
 # PUBLIC keys the app trusts for signed update manifests (update-manifest.ts).
 !apps/desktop/build/update-signing-keys.json

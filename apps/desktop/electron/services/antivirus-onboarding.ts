@@ -8,7 +8,7 @@ import { getExtensionManager } from '../shared';
 import { isDevBuild } from '../utils/dev-mode';
 
 import { readRegistryAccounts } from './accounts-registry';
-import { requireScannerSecureStorage } from './antivirus-desktop-backend';
+import { prepareScannerCredentialStorage } from './antivirus-desktop-backend';
 import { AntivirusOAuthService, SARV_SCANNER_EXTENSION_ID } from './antivirus-oauth-service';
 import { getAntivirusScanService } from './antivirus-scan-service';
 
@@ -65,7 +65,7 @@ const oauth = new AntivirusOAuthService({
   scanService: getAntivirusScanService,
   prepareExtension: prepareBundledAntivirusExtension,
   assertAuthorized,
-  assertSecureStorage: requireScannerSecureStorage,
+  assertCredentialStorage: prepareScannerCredentialStorage,
   openExternal: url => shell.openExternal(url),
 });
 

@@ -20,7 +20,7 @@ import type { FilterRule } from '../types/filters';
 import { IMAPError, type IMAPMessage, type IIMAPClient } from '../types/imap';
 import type { EmailRecord, FolderRecord, PgpStatus } from '../types/models';
 import type { IEmailStorage } from '../types/storage';
-import { sanitizeIcsText } from '../utils/calendar';
+import { hasCalendarMimePart, sanitizeIcsText } from '../utils/calendar';
 import { hasCidRefs, resolveCidImages, type CidImagePart } from '../utils/cid-images';
 import { createDeferredFetchError } from '../utils/deferred-fetch-error';
 import { collectFilterActions, computeFilterActionResult } from '../utils/filters';
@@ -573,6 +573,12 @@ export class MessageProcessor {
             } else {
               result.skipped++;
             }
+            // Header refresh/backfill can discover a calendar part on mail
+            // saved before local calendar sync existed. The durable calendar
+            // queue deduplicates this independently of categorization.
+            if (existing.calendarIcs || hasCalendarMimePart(message.bodyStructure)) {
+              getEventBus().emit({ type: 'email:calendar-candidate', emailId: existing.id, timestamp: Date.now() });
+            }
             continue;
           }
 
@@ -746,6 +752,16 @@ export class MessageProcessor {
         result.inserted += emailRecords.length;
         for (const email of emailRecords) {
           result.insertedIds.push(email.id);
+        }
+
+        // A meeting must reach the local calendar even when AI is disabled or
+        // this batch is historical. Only calendar MIME parts wake this path;
+        // it does not download unrelated message bodies.
+        const calendarUids = new Set(batch.filter(message => hasCalendarMimePart(message.bodyStructure)).map(message => message.uid));
+        for (const email of emailRecords) {
+          if (email.calendarIcs || calendarUids.has(email.uid)) {
+            getEventBus().emit({ type: 'email:calendar-candidate', emailId: email.id, timestamp: Date.now() });
+          }
         }
 
         // Emit email:synced events for the pipeline (agent, categorization,

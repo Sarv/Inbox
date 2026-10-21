@@ -24,8 +24,9 @@ export function AntivirusSetupStep({ stage, active, accountId, onStageChange, on
   const generation = useRef(0);
   const mounted = useRef(true);
   const api = window.electronAPI?.antivirus;
-  const protectedAccount = Boolean(accountId && setup?.configured && setup.enabled && setup.allowedAccountIds.includes(accountId));
+  const protectedAccount = Boolean(accountId && setup?.configured && setup.enabled && !setup.savedCredentialsLocked && setup.allowedAccountIds.includes(accountId));
   const account = setup?.accounts?.find(value => value.id === accountId);
+  const sessionOnly = setup?.credentialStorage === 'session';
 
   useEffect(() => {
     mounted.current = true;
@@ -69,7 +70,7 @@ export function AntivirusSetupStep({ stage, active, accountId, onStageChange, on
   };
 
   const connect = async () => {
-    if (!api?.connectSarvOAuth || busy || !accountId || setup?.configured) return;
+    if (!api?.connectSarvOAuth || busy || !accountId || (setup?.configured && !setup.savedCredentialsLocked)) return;
     const current = ++generation.current;
     setBusy('connecting'); setChallenge(null); setAttachmentConsent(false); setError('');
     try {
@@ -118,6 +119,12 @@ export function AntivirusSetupStep({ stage, active, accountId, onStageChange, on
         <h2 className="text-2xl font-semibold tracking-tight">{stage === 'provider' ? 'Protect your attachments.' : 'Connect Sarv Antivirus'}</h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{stage === 'provider' ? 'Add virus scanning before opening or downloading email attachments.' : 'Approve scanner access with Sarv, then review its privacy terms.'}</p>
       </header>
+      {setup?.savedCredentialsLocked && <p role="status" aria-label="Saved scanner sign-in" className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm leading-relaxed text-amber-900 dark:text-amber-100">Saved scanner sign-in is locked. Sign in again for this session, or unlock the system keychain. Your saved scanner settings will be kept.</p>}
+      {sessionOnly && <section role="status" aria-label="Scanner credential storage" className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+        <h3 className="font-semibold">Scanner sign-in lasts for this session</h3>
+        <p className="leading-relaxed">Without system-keychain storage, your scanner credential stays only in app memory and is never saved to disk. Sign in again after quitting Inbox.</p>
+        <p className="leading-relaxed">Once the keychain is available, verify the scanner and enable scanning again in scanner settings to save it securely.</p>
+      </section>}
       {stage === 'provider' ? (
         <>
           <button type="button" disabled={Boolean(busy)} onClick={() => onStageChange('connection')} className="flex w-full items-center gap-4 rounded-xl border border-border bg-background p-5 text-left transition-colors hover:border-primary hover:bg-primary/5 disabled:opacity-50">
@@ -132,7 +139,7 @@ export function AntivirusSetupStep({ stage, active, accountId, onStageChange, on
         <>
           <section className="space-y-4 rounded-xl border border-border bg-muted/20 p-5">
             <div className="flex items-center gap-3"><ProviderIcon id="sarv" /><div><h3 className="font-medium">Sarv Antivirus</h3><p className="text-sm text-muted-foreground">https://av.sarv.com</p></div></div>
-            {protectedAccount ? <p className="flex items-center gap-2 text-sm text-primary"><CheckCircle2 aria-hidden="true" className="h-4 w-4" />{providerName(setup)} is already protecting this mailbox.</p> : setup?.configured ? (
+            {protectedAccount ? <p className="flex items-center gap-2 text-sm text-primary"><CheckCircle2 aria-hidden="true" className="h-4 w-4" />{providerName(setup)} is already protecting this mailbox.</p> : setup?.configured && !setup.savedCredentialsLocked ? (
               <p className="text-sm text-muted-foreground">Your existing scanner connection is kept. Review its approved accounts in Extensions settings after onboarding to add this mailbox.</p>
             ) : challenge ? (
               <>
@@ -155,7 +162,7 @@ export function AntivirusSetupStep({ stage, active, accountId, onStageChange, on
             ) : (
               <>
                 <p className="text-sm leading-relaxed text-muted-foreground">Sign in with Sarv in your browser. An existing Sarv session can reuse your sign-in; scanner access is approved separately from email and AI.</p>
-                <p className="text-sm leading-relaxed text-muted-foreground">Connecting installs the optional attachment-scanning extension. After you review the scanner’s privacy terms, Inbox creates a scanning credential valid for 90 days and saves it securely on this device. Reconnect when it expires.</p>
+                <p className="text-sm leading-relaxed text-muted-foreground">Connecting installs the optional attachment-scanning extension. After you review the scanner’s privacy terms, Inbox creates a scanning credential valid for 90 days. {sessionOnly ? 'It stays only in app memory for this session. Sign in again after quitting Inbox.' : 'When the system keychain is available, Inbox saves it securely on this device. Reconnect when it expires.'}</p>
                 <button type="button" disabled={Boolean(busy) || !accountId || !api?.connectSarvOAuth} onClick={() => { void connect(); }} className="flex items-center justify-center gap-2 rounded-lg bg-primary px-5 py-3 text-sm font-medium text-primary-foreground disabled:opacity-50">{busy === 'connecting' ? <><Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />Waiting for browser sign-in…</> : error ? 'Retry Sarv sign-in' : 'Connect with Sarv'}</button>
                 {busy === 'connecting' && <button type="button" onClick={() => { generation.current += 1; void api.cancelSarvOAuth().catch(() => {}); setBusy(null); setError('Antivirus sign-in was cancelled. You can retry or skip for now.'); }} className="text-sm text-primary underline underline-offset-2">Cancel sign-in</button>}
                 {!accountId && <p className="text-sm text-muted-foreground">Connect an email account before enabling scanner sharing.</p>}

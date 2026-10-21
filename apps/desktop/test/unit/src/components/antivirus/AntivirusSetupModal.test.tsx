@@ -15,12 +15,17 @@ const verified: AntivirusSetupStatus = {
   scanPolicyVersion: 'scan-v1', metadataRetentionSeconds: 3600,
   contentLifetimeSeconds: 300, resultLifetimeSeconds: 3600,
 };
+const locked: AntivirusSetupStatus = { ...base, endpoint: 'https://av.sarv.com', configured: true, enabled: false, savedCredentialsLocked: true, credentialStorage: 'session' };
+const recovered: AntivirusSetupStatus = { ...verified, endpoint: 'https://av.sarv.com', credentialStorage: 'session' };
 let openSetup: ((payload: { extensionId: string }) => void) | undefined;
 let mounted: Mounted;
 const api = {
   getSetup: vi.fn(async () => ({ success: true, data: base })),
   probe: vi.fn(async (_extensionId: string, _endpoint: string, _credential?: string) => ({ success: true, data: { challenge: 'verified-challenge', setup: verified } })),
   configure: vi.fn(async () => ({ success: true })),
+  connectSarvOAuth: vi.fn(async (_accountId: string) => ({ success: true, data: { challenge: 'oauth-challenge', setup: recovered } })),
+  completeSarvOAuth: vi.fn(async (_input: { challenge: string; accountId: string; attachmentConsent: boolean }) => ({ success: true, data: { ...recovered, configured: true, enabled: true, allowedAccountIds: ['work'] } })),
+  cancelSarvOAuth: vi.fn(async () => ({ success: true })),
   disable: vi.fn(async () => ({ success: true })),
   getUnscannedWarningPreferences: vi.fn(async () => ({ success: true, data: { suppressedAccountIds: [] as string[] } })),
   resetUnscannedWarningPreference: vi.fn(async (_accountId: string) => ({ success: true })),
@@ -45,6 +50,9 @@ beforeEach(() => {
   api.getSetup.mockReset().mockResolvedValue({ success: true, data: base });
   api.probe.mockReset().mockResolvedValue({ success: true, data: { challenge: 'verified-challenge', setup: verified } });
   api.configure.mockReset().mockResolvedValue({ success: true });
+  api.connectSarvOAuth.mockReset().mockResolvedValue({ success: true, data: { challenge: 'oauth-challenge', setup: recovered } });
+  api.completeSarvOAuth.mockReset().mockResolvedValue({ success: true, data: { ...recovered, configured: true, enabled: true, allowedAccountIds: ['work'] } });
+  api.cancelSarvOAuth.mockReset().mockResolvedValue({ success: true });
   api.disable.mockReset().mockResolvedValue({ success: true });
   api.getUnscannedWarningPreferences.mockReset().mockResolvedValue({ success: true, data: { suppressedAccountIds: [] } });
   api.resetUnscannedWarningPreference.mockReset().mockResolvedValue({ success: true });
@@ -55,6 +63,159 @@ beforeEach(() => {
 afterEach(() => { cleanup(); document.body.innerHTML = ''; });
 
 describe('trusted antivirus setup', () => {
+  // Regression: locked saved sign-in must not block existing users or silently select an account for recovery.
+  it('requires exactly one chosen mailbox before starting intentional locked-sign-in recovery', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: locked });
+    await open();
+    expect(mounted.byLabel('Saved scanner sign-in')?.textContent).toContain('Saved scanner sign-in is locked');
+    expect(mounted.byLabel('Saved scanner sign-in')?.textContent).toContain('Your saved scanner settings will be kept');
+    expect(api.connectSarvOAuth).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+    expect(button('Sign in with Sarv for this session').disabled).toBe(true);
+    toggle(checkbox('Work')); toggle(checkbox('Personal'));
+    expect(button('Sign in with Sarv for this session').disabled).toBe(true);
+    toggle(checkbox('Personal'));
+    expect(button('Sign in with Sarv for this session').disabled).toBe(false);
+    fire(button('Sign in with Sarv for this session'), 'click'); await settle();
+    expect(api.connectSarvOAuth).toHaveBeenCalledExactlyOnceWith('work');
+    expect(api.configure).not.toHaveBeenCalled(); expect(api.completeSarvOAuth).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+    expect(checkbox('Personal')?.closest('fieldset')?.hasAttribute('disabled')).toBe(true);
+    expect((checkbox('Allow email body scanning') as HTMLInputElement).disabled).toBe(true);
+    expect((checkbox('Allow email body scanning') as HTMLInputElement).checked).toBe(false);
+    expect(button('Enable scanning').disabled).toBe(true);
+    toggle(checkbox('I agree to send selected attachments'));
+    fire(button('Enable scanning'), 'click'); await settle();
+    expect(api.completeSarvOAuth).toHaveBeenCalledExactlyOnceWith({ challenge: 'oauth-challenge', accountId: 'work', attachmentConsent: true });
+    expect(api.configure).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+    expect(mounted.find('[role="dialog"]')).toBeNull();
+  });
+
+  // Regression: an unreadable saved endpoint may recover the bundled Sarv scanner but never another scanner's credentials.
+  it.each(['', 'https://another-scanner.example.test'])('offers recovery only for a known Sarv or unknown bundled endpoint (%s)', async endpoint => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: { ...locked, endpoint } });
+    await open();
+    if (!endpoint) {
+      expect((mounted.byLabel('Scanner endpoint') as HTMLInputElement).value).toBe('https://av.sarv.com');
+      expect(button('Sign in with Sarv for this session')).toBeDefined();
+    } else expect(button('Sign in with Sarv for this session')).toBeUndefined();
+    expect(api.connectSarvOAuth).not.toHaveBeenCalled();
+  });
+
+  // Regression: regular configured connections must not expose replacement as locked-credential recovery.
+  it('keeps unlocked existing configurations out of the recovery flow', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: { ...recovered, configured: true, enabled: true, allowedAccountIds: ['work'] } });
+    await open();
+    expect(mounted.byLabel('Saved scanner sign-in')).toBeNull();
+    expect(button('Sign in with Sarv for this session')).toBeUndefined();
+    expect(api.connectSarvOAuth).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+  });
+
+  // Regression: changing a recovery mailbox must clear its OAuth challenge and privacy consent before another account can sign in.
+  it('invalidates recovery before changing mailbox and binds the next sign-in to the new selection', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: locked });
+    await open(); toggle(checkbox('Work')); fire(button('Sign in with Sarv for this session'), 'click'); await settle();
+    toggle(checkbox('I agree to send selected attachments'));
+    fire(button('Change mailbox'), 'click'); await settle();
+    expect(api.cancelSarvOAuth).toHaveBeenCalledOnce();
+    expect(checkbox('Work')?.closest('fieldset')?.hasAttribute('disabled')).toBe(false);
+    expect((checkbox('I agree to send selected attachments') as HTMLInputElement).checked).toBe(false);
+    expect(button('Enable scanning').disabled).toBe(true);
+    toggle(checkbox('Work')); toggle(checkbox('Personal'));
+    fire(button('Sign in with Sarv for this session'), 'click'); await settle();
+    expect(api.connectSarvOAuth).toHaveBeenLastCalledWith('personal');
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled(); expect(api.configure).not.toHaveBeenCalled();
+  });
+
+  // Regression: cancelled browser callbacks cannot revive a stale challenge or activate scanning after cancellation.
+  it('cancels pending recovery and ignores a late browser result', async () => {
+    let resolve!: (response: Awaited<ReturnType<typeof api.connectSarvOAuth>>) => void;
+    api.getSetup.mockResolvedValueOnce({ success: true, data: locked });
+    api.connectSarvOAuth.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    await open(); toggle(checkbox('Work')); fire(button('Sign in with Sarv for this session'), 'click'); await settle();
+    fire(button('Cancel sign-in'), 'click'); await settle();
+    expect(api.cancelSarvOAuth).toHaveBeenCalledOnce();
+    await act(async () => resolve({ success: true, data: { challenge: 'late-challenge', setup: recovered } }));
+    expect(button('Change mailbox')).toBeUndefined();
+    expect(button('Enable scanning').disabled).toBe(true);
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled(); expect(api.configure).not.toHaveBeenCalled();
+    expect(api.disable).not.toHaveBeenCalled();
+  });
+
+  // Regression: closing an OAuth recovery must release its main-process transaction without disabling saved scanning.
+  it('cancels a verified recovery when the setup dialog closes without enabling', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: locked });
+    await open(); toggle(checkbox('Work')); fire(button('Sign in with Sarv for this session'), 'click'); await settle();
+    fire(button('Cancel'), 'click'); await settle();
+    expect(api.cancelSarvOAuth).toHaveBeenCalledOnce();
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled(); expect(api.configure).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+  });
+
+  // Regression: a failed account-bound activation consumes its challenge and must require a fresh sign-in and consent.
+  it('keeps saved settings after failed OAuth activation and requires another sign-in', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: locked });
+    api.completeSarvOAuth.mockRejectedValueOnce(new Error('Synthetic activation failure'));
+    await open(); toggle(checkbox('Work')); fire(button('Sign in with Sarv for this session'), 'click'); await settle();
+    toggle(checkbox('I agree to send selected attachments')); fire(button('Enable scanning'), 'click'); await settle();
+    expect(mounted.find('[role="alert"]')?.textContent).toContain('Synthetic activation failure');
+    expect(button('Enable scanning').disabled).toBe(true);
+    expect(button('Sign in with Sarv for this session').disabled).toBe(false);
+    expect(api.cancelSarvOAuth).toHaveBeenCalledOnce(); expect(api.configure).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+  });
+
+  // Regression: recovery must also allow manual verification with a fresh credential without destroying the locked saved sign-in.
+  it('continues to support manual scanner verification and explicit consent for locked configurations', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: locked });
+    await open(); await probe();
+    expect(api.probe).toHaveBeenCalledWith('clamav-scan', verified.endpoint, 'synthetic-credential');
+    expect(button('Enable scanning').disabled).toBe(true);
+    toggle(checkbox('Work'));
+    toggle(checkbox('I agree to send selected attachments')); fire(button('Enable scanning'), 'click'); await settle();
+    expect(api.configure).toHaveBeenCalledWith('clamav-scan', { challenge: 'verified-challenge', allowedAccountIds: ['work'], allowBody: false, attachmentConsent: true, bodyConsent: false });
+    expect(api.connectSarvOAuth).not.toHaveBeenCalled(); expect(api.completeSarvOAuth).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+  });
+
+  // Regression: scanner setup must explain that session-only sign-in cannot survive quitting the app.
+  it('shows a prominent session warning and memory-only credential copy for an existing session connection', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: { ...verified, configured: true, enabled: true, allowedAccountIds: ['work'], credentialStorage: 'session' } });
+    await open();
+    const warning = mounted.byLabel('Scanner credential storage');
+    expect(warning?.textContent).toContain('Scanner sign-in lasts for this session');
+    expect(warning?.textContent).toContain('Without system-keychain storage');
+    expect(warning?.textContent).toContain('only in app memory and is never saved to disk');
+    expect(warning?.textContent).toContain('Sign in again after quitting Inbox');
+    expect(warning?.textContent).toContain('verify the scanner and enable scanning again to save it securely');
+    expect(mounted.container.textContent).toContain('Kept only in app memory for this session and never returned to the extension');
+    expect(mounted.container.textContent).not.toContain('Stored by the app in its credential store');
+    expect(button('Enable scanning').disabled).toBe(true);
+    expect(api.configure).not.toHaveBeenCalled();
+  });
+
+  // Regression: storage mode may change between opening setup and verification; consent must remain required.
+  it('updates session storage disclosure from verified host status and clears it after keychain recovery', async () => {
+    api.probe.mockResolvedValueOnce({ success: true, data: { challenge: 'session-challenge', setup: { ...verified, credentialStorage: 'session' } } });
+    await open(); await probe();
+    expect(mounted.byLabel('Scanner credential storage')).not.toBeNull();
+    expect(button('Enable scanning').disabled).toBe(true);
+    toggle(checkbox('Work')); toggle(checkbox('I agree to send selected attachments'));
+    expect(button('Enable scanning').disabled).toBe(false);
+    api.probe.mockResolvedValueOnce({ success: true, data: { challenge: 'keychain-challenge', setup: { ...verified, credentialStorage: 'os-keychain' } } });
+    fire(button('Verify scanner'), 'click'); await settle();
+    expect(mounted.byLabel('Scanner credential storage')).toBeNull();
+    expect(mounted.container.textContent).toContain('Stored by the app in its credential store and never returned to the extension');
+    expect((checkbox('I agree to send selected attachments') as HTMLInputElement).checked).toBe(false);
+    expect(button('Enable scanning').disabled).toBe(true);
+    expect(api.configure).not.toHaveBeenCalled();
+  });
+
+  // Regression: ordinary OS-backed scanner setup must not be described as temporary sign-in.
+  it('retains keychain-backed credential copy without the session warning', async () => {
+    api.getSetup.mockResolvedValueOnce({ success: true, data: { ...base, credentialStorage: 'os-keychain' } });
+    await open();
+    expect(mounted.byLabel('Scanner credential storage')).toBeNull();
+    expect(mounted.container.textContent).toContain('Stored by the app in its credential store and never returned to the extension');
+    expect(button('Enable scanning').disabled).toBe(true);
+    expect(api.configure).not.toHaveBeenCalled();
+  });
+
   // Breaks: consent still describes manual scans alone, hiding the automatic
   // attachment upload on Download or implying that email bodies are uploaded.
   it('discloses scan-before-save for approved accounts across mail providers', async () => {

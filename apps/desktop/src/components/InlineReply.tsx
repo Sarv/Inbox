@@ -20,12 +20,14 @@ import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
+import { recheckDraftCalendarAvailability } from '../utils/calendar-draft';
 import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { replyRecipients } from '../utils/reply-recipients';
 import type { ReplySource } from '../utils/reply-source';
 import { reportSendFailure } from '../utils/send-failure';
 
+import { CalendarDraftBanner } from './assistant/CalendarDraftBanner';
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
 import { FromAccountBar } from './FromAccountBar';
@@ -143,6 +145,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
     attachments,
     encrypt: pgp.state.encrypt,
     initialDraftEncrypted: draft?.pgpEncrypted,
+    calendarAvailability: draft?.calendarAvailability,
   });
 
   const [showDropdown, setShowDropdown] = useState(false);
@@ -232,6 +235,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
 
     setSending(true);
     try {
+      await recheckDraftCalendarAvailability(draft?.calendarAvailability, plainBody);
       // Build quoted content - preserve original HTML structure
       const originalDate = new Date(replyToEmail.date * 1000).toLocaleString();
       const originalHtmlBody = replyToEmail.rawBody;
@@ -308,6 +312,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
           threadId: (replyToEmail as any).threadId,
           accountId: replyAccountId,
           unsaved: true,
+          calendarAvailability: draft?.calendarAvailability,
         },
       });
     } catch (error) {
@@ -588,6 +593,7 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
         </button>
       )}
 
+      <CalendarDraftBanner proposal={draft?.calendarAvailability} body={plainBody} />
       {/* Editor Area */}
       <div className="min-h-[150px]" onContextMenu={(e) => handleSelectionContextMenu(e, hasAIProvider)}>
         <RichTextEditor

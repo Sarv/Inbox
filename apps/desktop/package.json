@@ -2,6 +2,7 @@
   "name": "@sarvinbox/desktop",
   "version": "1.3.8",
   "productName": "Sarv Inbox",
+  "desktopName": "com.sarv.sarvinbox.desktop",
   "description": "Sarv Inbox — AI-powered email client by Sarv",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Sarv",
@@ -178,6 +179,26 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": false,
+      "protocols": [
+        {
+          "name": "Sarv Inbox email",
+          "schemes": ["mailto"],
+          "role": "Editor"
+        },
+        {
+          "name": "Sarv Inbox calendar",
+          "schemes": ["webcal", "webcals"],
+          "role": "Editor"
+        }
+      ],
+      "fileAssociations": [
+        {
+          "ext": "ics",
+          "name": "iCalendar calendar",
+          "role": "Editor",
+          "rank": "Alternate"
+        }
+      ],
       "target": [
         {
           "target": "dmg",
@@ -228,16 +249,23 @@
     },
     "linux": {
       "executableName": "sarv-inbox",
+      "syncDesktopName": true,
       "icon": "build/icon.png",
       "category": "Office;Network;Email",
       "synopsis": "Privacy-first email client with AI-powered features",
       "description": "Sarv Inbox is a source-available IMAP email client with encrypted local mail storage, optional AI providers and optional user-authorized ClamAV scans.",
       "maintainer": "Sarv Webs Private Limited <support@sarv.com>",
       "artifactName": "sarv-inbox-${version}-${arch}.${ext}",
+      "mimeTypes": [
+        "x-scheme-handler/mailto",
+        "x-scheme-handler/webcal",
+        "x-scheme-handler/webcals",
+        "text/calendar"
+      ],
       "desktop": {
         "entry": {
-          "StartupWMClass": "Sarv Inbox",
-          "MimeType": "x-scheme-handler/mailto;"
+          "StartupWMClass": "com.sarv.sarvinbox",
+          "MimeType": "x-scheme-handler/mailto;x-scheme-handler/webcal;x-scheme-handler/webcals;text/calendar;"
         }
       },
       "target": [
@@ -259,6 +287,7 @@
       "packageName": "sarv-inbox"
     },
     "nsis": {
+      "include": "build/default-apps.nsh",
       "artifactName": "Sarv-Inbox-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,

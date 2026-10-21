@@ -12,8 +12,10 @@ import { registerAICategorizationHandlers } from './ai-categorization-handlers';
 import { registerAIHandlers } from './ai-handlers';
 import { registerAntivirusHandlers } from './antivirus-handlers';
 import { registerAppHandlers } from './app-handlers';
+import { registerCalendarHandlers } from './calendar-handlers';
 import { registerContactEnrichmentHandlers } from './contact-enrichment-handlers';
 import { registerContactsHandlers } from './contacts-handlers';
+import { registerDefaultAppHandlers } from './default-app-handlers';
 import { registerDraftHandlers } from './draft-handlers';
 import { registerEmailHandlers } from './email-handlers';
 import { registerExtensionHandlers } from './extension-handlers';
@@ -43,6 +45,7 @@ import { registerUpdateHandlers } from './update-handlers';
  */
 export function registerAllHandlers(): void {
   registerAppHandlers();
+  registerDefaultAppHandlers();
   registerUpdateHandlers();
   // Give the shared enrichment code the better (Node-only) signature parser.
   // core stays browser-safe by default; the renderer never installs one and
@@ -74,6 +77,7 @@ export function registerAllHandlers(): void {
   registerStorageHandlers();
   registerIdentityHandlers();
   registerInboxAssistantHandlers();
+  registerCalendarHandlers();
   registerSpamHandlers();
   registerUnsubscribeHandlers();
   registerPgpHandlers();

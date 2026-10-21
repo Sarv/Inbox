@@ -9,7 +9,9 @@ import '@sentry/electron/preload';
 import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, RealtimeEvent, SMTPConfig, SendEmailOptions, FilterRule, FilterRuleInput, FilterCondition, Label, LabelInput, EmailRecord, ViewFilter , SpamUserVerdict, AvailablePanel, PanelResponse, AccountFollowUp, DraftResult, FirstSplitClearAllResult, FirstSplitGetResult, FirstSplitSaveRequest, FirstSplitSaveResult } from '@sarvinbox/core';
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
+import type { DefaultAppsAPI } from '../src/types/default-apps';
 import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
+import type { LocalCalendarAPI, LocalCalendarAvailability, LocalCalendarOpenEvent } from '../src/types/local-calendar';
 
 
 import type { PgpComposeDefaults, PgpIpcResult } from './ipc/pgp-handlers';
@@ -34,6 +36,7 @@ interface InAppToast {
   emailId?: string;
   /** Set when the mail may not be in the list on screen (a sent message). */
   threadId?: string;
+  calendarEvent?: LocalCalendarOpenEvent;
 }
 
 /** A request to an AI provider that needs its saved key (see ai-provider-proxy.ts). */
@@ -121,6 +124,43 @@ interface RegistryAccountDTO {
 
 // Expose protected methods that allow the renderer process to use ipcRenderer
 contextBridge.exposeInMainWorld('electronAPI', {
+  defaultApps: {
+    getStatus: () => ipcRenderer.invoke('defaultApps:getStatus'),
+    requestDefault: (target: Parameters<DefaultAppsAPI['requestDefault']>[0]) => ipcRenderer.invoke('defaultApps:requestDefault', target),
+    openSettings: (target?: Parameters<DefaultAppsAPI['openSettings']>[0]) => ipcRenderer.invoke('defaultApps:openSettings', target),
+    setPromptSuppressed: (value: boolean) => ipcRenderer.invoke('defaultApps:setPromptSuppressed', value),
+    getPendingOpen: () => ipcRenderer.invoke('defaultApps:getPendingOpen'),
+    acknowledgeOpen: (id: string) => ipcRenderer.invoke('defaultApps:acknowledgeOpen', id),
+    onPendingOpen: (listener: () => void) => {
+      const handler = () => listener();
+      ipcRenderer.on('defaultApps:pendingOpen', handler);
+      return () => ipcRenderer.removeListener('defaultApps:pendingOpen', handler);
+    },
+  },
+  calendar: {
+    invitation: (value: Parameters<LocalCalendarAPI['invitation']>[0]) => ipcRenderer.invoke('calendar:invitation', value),
+    respondToInvitation: (value: Parameters<LocalCalendarAPI['respondToInvitation']>[0]) => ipcRenderer.invoke('calendar:respondToInvitation', value),
+    snapshot: (range: Parameters<LocalCalendarAPI['snapshot']>[0]) => ipcRenderer.invoke('calendar:snapshot', range),
+    saveCalendar: (value: Parameters<LocalCalendarAPI['saveCalendar']>[0]) => ipcRenderer.invoke('calendar:saveCalendar', value),
+    deleteCalendar: (id: string) => ipcRenderer.invoke('calendar:deleteCalendar', id),
+    saveEvent: (value: Parameters<LocalCalendarAPI['saveEvent']>[0]) => ipcRenderer.invoke('calendar:saveEvent', value),
+    deleteEvent: (value: Parameters<LocalCalendarAPI['deleteEvent']>[0]) => ipcRenderer.invoke('calendar:deleteEvent', value),
+    savePreferences: (value: Parameters<LocalCalendarAPI['savePreferences']>[0]) => ipcRenderer.invoke('calendar:savePreferences', value),
+    availability: (value: Parameters<LocalCalendarAPI['availability']>[0]) => ipcRenderer.invoke('calendar:availability', value),
+    importIcs: (value: Parameters<LocalCalendarAPI['importIcs']>[0]) => ipcRenderer.invoke('calendar:importIcs', value),
+    importFileIcs: (value: Parameters<LocalCalendarAPI['importFileIcs']>[0]) => ipcRenderer.invoke('calendar:importFileIcs', value),
+    exportIcs: (value: Parameters<LocalCalendarAPI['exportIcs']>[0]) => ipcRenderer.invoke('calendar:exportIcs', value),
+    onChanged: (listener: () => void) => {
+      const handler = () => listener();
+      ipcRenderer.on('calendar:changed', handler);
+      return () => ipcRenderer.removeListener('calendar:changed', handler);
+    },
+    onOpenEvent: (listener: (event: LocalCalendarOpenEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, event: LocalCalendarOpenEvent) => listener(event);
+      ipcRenderer.on('calendar:openEvent', handler);
+      return () => ipcRenderer.removeListener('calendar:openEvent', handler);
+    },
+  },
   inboxAssistant: {
     accounts: () => ipcRenderer.invoke('inboxAssistant:accounts'),
     chats: () => ipcRenderer.invoke('inboxAssistant:chats'),
@@ -979,8 +1019,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Draft operations (auto-save to IMAP Drafts)
   drafts: {
-    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[]; pgp?: { encrypt?: boolean } }) =>
+    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[]; pgp?: { encrypt?: boolean }; calendarAvailability?: LocalCalendarAvailability }) =>
       ipcRenderer.invoke('drafts:save', draft),
+    getCalendarAvailability: (messageId: string, accountId?: string) => ipcRenderer.invoke('drafts:get-calendar-availability', messageId, accountId),
     delete: (options: { messageId?: string; subject?: string; to?: string; threadId?: string; accountId?: string; savedAt?: number }) =>
       ipcRenderer.invoke('drafts:delete', options),
     getFolder: (accountId?: string) => ipcRenderer.invoke('drafts:get-folder', accountId),
@@ -1293,6 +1334,8 @@ export interface BodyDownloadState {
 }
 
 export interface ElectronAPI {
+  defaultApps: DefaultAppsAPI;
+  calendar: LocalCalendarAPI;
   inboxAssistant: InboxAssistantAPI;
   app: {
     getVersion: () => Promise<{ success: boolean; data?: string; error?: string }>;
@@ -1865,8 +1908,9 @@ export interface ElectronAPI {
     removeListeners: () => void;
   };
   drafts: {
-    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[]; pgp?: { encrypt?: boolean } }) =>
+    save: (draft: { to?: string; cc?: string; bcc?: string; subject?: string; body?: string; htmlBody?: string; inReplyTo?: string; threadId?: string; accountEmail?: string; accountId?: string; attachments?: { filename: string; content: string; contentType?: string }[]; pgp?: { encrypt?: boolean }; calendarAvailability?: LocalCalendarAvailability }) =>
       Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }>;
+    getCalendarAvailability: (messageId: string, accountId?: string) => Promise<{ success: true; data?: LocalCalendarAvailability } | { success: false; error: string }>;
     delete: (options: { messageId?: string; subject?: string; to?: string; threadId?: string; accountId?: string; savedAt?: number }) =>
       Promise<{ success: boolean; error?: string }>;
     getFolder: (accountId?: string) => Promise<{ success: boolean; data?: string | null; error?: string }>;

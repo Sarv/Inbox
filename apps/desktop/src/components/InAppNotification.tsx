@@ -1,6 +1,7 @@
-import { Mail, X } from 'lucide-react';
+import { CalendarDays, Mail, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
+import type { LocalCalendarOpenEvent } from '../types/local-calendar';
 import { openEmailFromNotification } from '../utils/open-email-from-notification';
 
 /**
@@ -21,6 +22,7 @@ interface Toast {
   emailId?: string;
   /** Set for a follow-up reminder: open this thread rather than select the email. */
   threadId?: string;
+  calendarEvent?: LocalCalendarOpenEvent;
 }
 
 const AUTO_DISMISS_MS = 6000;
@@ -44,6 +46,10 @@ export function InAppNotification() {
   // Same open path as a native notification click (useNotificationBridge).
   const open = (t: Toast) => {
     remove(t.id);
+    if (t.calendarEvent) {
+      window.dispatchEvent(new CustomEvent('sarvinbox:calendar-open', { detail: t.calendarEvent }));
+      return;
+    }
     if (!t.emailId) return;
     openEmailFromNotification(t.emailId, t.accountId, t.threadId);
   };
@@ -55,11 +61,11 @@ export function InAppNotification() {
       {toasts.map((t) => (
         <div key={t.id} className="group bg-card border border-border rounded-lg shadow-2xl overflow-hidden animate-in slide-in-from-right-4 fade-in duration-200">
           <div className="flex items-start gap-3 p-3">
-            <div className="p-1.5 bg-primary/10 rounded-md shrink-0"><Mail className="h-4 w-4 text-primary" /></div>
+            <div className="p-1.5 bg-primary/10 rounded-md shrink-0">{t.calendarEvent ? <CalendarDays className="h-4 w-4 text-primary" /> : <Mail className="h-4 w-4 text-primary" />}</div>
             <button
               onClick={() => open(t)}
-              className={`flex-1 min-w-0 text-left ${t.emailId ? 'cursor-pointer' : 'cursor-default'}`}
-              title={t.emailId ? 'Open this email' : undefined}
+              className={`flex-1 min-w-0 text-left ${t.emailId || t.calendarEvent ? 'cursor-pointer' : 'cursor-default'}`}
+              title={t.calendarEvent ? 'Open this calendar event' : t.emailId ? 'Open this email' : undefined}
             >
               <div className="text-sm font-medium truncate">{t.title}</div>
               {t.subtitle && <div className="text-xs text-muted-foreground truncate">{t.subtitle}</div>}

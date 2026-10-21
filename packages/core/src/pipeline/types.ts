@@ -149,6 +149,7 @@ export type PipelineEvent =
   | EmailReceivedEvent
   | EmailSyncedEvent
   | EmailBodyReadyEvent
+  | EmailCalendarCandidateEvent
   | EmailProcessedEvent
   | EmailLabeledEvent
   | EmailFlaggedEvent
@@ -180,6 +181,13 @@ export interface EmailSyncedEvent {
 
 export interface EmailBodyReadyEvent {
   type: 'email:body-ready';
+  emailId: string;
+  timestamp: number;
+}
+
+/** Calendar processing is independent of AI and also runs during backfill. */
+export interface EmailCalendarCandidateEvent {
+  type: 'email:calendar-candidate';
   emailId: string;
   timestamp: number;
 }

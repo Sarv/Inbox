@@ -3,6 +3,7 @@ import type { StateCreator } from 'zustand';
 
 import type { InboxType, InboxSection } from '../config/inbox-types';
 import type { SearchQuery } from '../services/ai-service';
+import type { LocalCalendarAvailability } from '../types/local-calendar';
 import type { EmailThread } from '../utils/thread-utils';
 
 // Compose email types
@@ -35,6 +36,7 @@ export interface ComposeState {
     draftMessageId?: string; threadId?: string; accountId?: string;
     /** Saved encrypted — reopens with encryption on. */
     pgpEncrypted?: boolean;
+    calendarAvailability?: LocalCalendarAvailability;
   };
 }
 
@@ -555,6 +557,7 @@ export interface RestoreDraft {
   /** Content is newer than that saved draft (autosave trails typing by up to
    *  10s), so closing the reopened composer unedited must still save it. */
   unsaved?: boolean;
+  calendarAvailability?: LocalCalendarAvailability;
 }
 
 export interface ComposeSlice {

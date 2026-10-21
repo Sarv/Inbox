@@ -543,6 +543,10 @@ export interface AntivirusSetupStatus {
   endpoint: string;
   configured: boolean;
   enabled: boolean;
+  /** Session credentials remain only in main-process memory and disappear on quit. */
+  credentialStorage?: 'os-keychain' | 'session';
+  /** Saved credentials exist but cannot be opened; fresh session sign-in is available. */
+  savedCredentialsLocked?: boolean;
   operator?: string;
   region?: string;
   privacyPolicyUrl?: string;

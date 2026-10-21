@@ -11,6 +11,7 @@ import { fetchAssistantMessageBody } from '../services/assistant-mailbox-downloa
 import { inboxAssistantHistory } from '../services/inbox-assistant-history';
 import { InboxAssistantService } from '../services/inbox-assistant-service';
 import { callInboxAssistantAI } from '../services/inbox-assistant-usage';
+import { getLocalCalendarService } from '../services/local-calendar-service';
 import { getPipelineAIConfig } from '../services/unified-pipeline-service';
 import { getMainWindow } from '../shared';
 
@@ -19,6 +20,10 @@ import { logUserAction } from './agent-handlers';
 const service = new InboxAssistantService({
   accounts: () => readRegistryAccounts().map(({ id, email, name }) => ({ id, email, name })),
   history: inboxAssistantHistory,
+  calendar: {
+    preferences: () => getLocalCalendarService().getPreferences(),
+    availability: request => getLocalCalendarService().availability(request),
+  },
   callAI: async (prompt, signal, onUsage?: (usage: InboxAssistantAIUsage) => void) => {
     const config = getPipelineAIConfig();
     if (!config) throw new Error('Choose an AI provider in AI → Providers before asking the Inbox Agent.');

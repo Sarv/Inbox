@@ -30,7 +30,10 @@ export interface ScannerConfiguration {
 
 export interface AntivirusDependencies {
   readConfiguration(extensionId: string): Promise<ScannerConfiguration | undefined>;
-  writeConfiguration(extensionId: string, config: ScannerConfiguration | undefined): Promise<void>;
+  writeConfiguration(extensionId: string, config: ScannerConfiguration | undefined, storage?: AntivirusSetupStatus['credentialStorage']): Promise<void>;
+  credentialStorage?(extensionId: string): AntivirusSetupStatus['credentialStorage'];
+  newConfigurationStorage?(): AntivirusSetupStatus['credentialStorage'];
+  savedCredentialsLocked?(extensionId: string): boolean;
   accounts(): Array<{ id: string; name: string; email: string }>;
   sources(messageId: string, accountId: string): Promise<ScanSource[]>;
   read(source: ScanSource, maxBytes: number, signal?: AbortSignal): Promise<Buffer>;
@@ -72,7 +75,7 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
   private generations = new Map<string, number>();
   private accountGenerations = new Map<string, number>();
   private jobs = new Map<string, Work>();
-  private probes = new Map<string, { extensionId: string; config: ScannerConfiguration; expires: number }>();
+  private probes = new Map<string, { extensionId: string; config: ScannerConfiguration; expires: number; credentialStorage?: AntivirusSetupStatus['credentialStorage'] }>();
   private sweep: ReturnType<typeof setInterval>;
   private disposed = false;
   constructor(private deps: AntivirusDependencies) {
@@ -85,9 +88,10 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
   private transport(config: Pick<ScannerConfiguration, 'endpoint' | 'credential'>): ScannerTransport {
     return new ScannerTransport(config.endpoint, config.credential, this.deps.requestFetch);
   }
-  private publicSetup(config?: ScannerConfiguration): AntivirusSetupStatus {
+  private publicSetup(config?: ScannerConfiguration, extensionId?: string): AntivirusSetupStatus {
     const accounts = this.deps.accounts();
     return { endpoint: config?.endpoint ?? '', configured: !!config, enabled: !!config,
+      ...(extensionId && this.deps.credentialStorage ? { credentialStorage: this.deps.credentialStorage(extensionId) } : {}),
       allowedAccountIds: config?.allowedAccountIds.filter(id => accounts.some(a => a.id === id)) ?? [],
       allowBody: config?.allowBody ?? false, accounts,
       operator: config?.capabilities.operator.name, region: config?.capabilities.operator.region,
@@ -104,7 +108,16 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
     return setup;
   }
   async getTrustedSetup(extensionId: string): Promise<AntivirusSetupStatus> {
-    return this.publicSetup(await this.deps.readConfiguration(extensionId));
+    try { return this.publicSetup(await this.deps.readConfiguration(extensionId), extensionId); }
+    catch (error) {
+      // This is a UI disclosure only, never proof of missing scanner setup.
+      // Download/setup guards continue to call readConfiguration directly and
+      // fail closed until an intentional new sign-in replaces it in memory.
+      if (!this.deps.savedCredentialsLocked?.(extensionId)) throw error;
+      return { ...this.publicSetup(undefined, extensionId), configured: true, enabled: false,
+        savedCredentialsLocked: true,
+        error: 'Saved scanner sign-in is locked. Sign in again for this session, or unlock the system keychain.' };
+    }
   }
   async getAttachmentSetupRequirement(extensionId: string, accountId: string): Promise<AttachmentSetupRequirement | undefined> {
     const assertAvailable = () => {
@@ -152,7 +165,13 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
 
   async probe(extensionId: string, endpoint: string, credential?: string): Promise<{ challenge: string; setup: AntivirusSetupStatus }> {
     const origin = scannerOrigin(endpoint, this.deps.allowDevelopmentLoopback);
-    const previous = await this.deps.readConfiguration(extensionId);
+    let previous: ScannerConfiguration | undefined;
+    try { previous = await this.deps.readConfiguration(extensionId); }
+    catch (error) {
+      // Only an explicitly supplied NEW credential may probe while an old
+      // encrypted sign-in is locked. A blank "keep existing" must still fail.
+      if (!credential?.trim() || !this.deps.savedCredentialsLocked?.(extensionId)) throw error;
+    }
     const secret = credential?.trim() || (previous?.endpoint === origin ? previous.credential : '');
     const capabilities = await this.transport({ endpoint: origin, credential: secret }).capabilities();
     const config: ScannerConfiguration = { endpoint: origin, credential: secret, capabilities,
@@ -160,8 +179,9 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
     for (const [id, p] of this.probes) if (p.expires <= this.now() || p.extensionId === extensionId) this.probes.delete(id);
     if (this.probes.size >= 20) throw new Error('Too many pending scanner setups. Try again later.');
     const challenge = randomUUID();
-    this.probes.set(challenge, { extensionId, config, expires: this.now() + 300_000 });
-    return { challenge, setup: { ...this.publicSetup(config), configured: false, enabled: false } };
+    const credentialStorage = this.deps.newConfigurationStorage?.() ?? this.deps.credentialStorage?.(extensionId);
+    this.probes.set(challenge, { extensionId, config, expires: this.now() + 300_000, credentialStorage });
+    return { challenge, setup: { ...this.publicSetup(config, extensionId), ...(credentialStorage ? { credentialStorage } : {}), configured: false, enabled: false } };
   }
 
   async configure(extensionId: string, input: { challenge: string; allowedAccountIds: string[]; allowBody: boolean;
@@ -182,9 +202,12 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
     this.generations.set(extensionId, this.generation(extensionId) + 1);
     this.contexts.delete(extensionId);
     const config = { ...probe.config, capabilities: fresh, allowedAccountIds: [...input.allowedAccountIds], allowBody: input.allowBody === true };
-    await this.deps.writeConfiguration(extensionId, config);
+    // The displayed lifetime belongs to this host-owned challenge. Keychain
+    // recovery while consent is open must not turn "memory only" into a disk
+    // write; verifying again can explicitly select OS-backed persistence.
+    await this.deps.writeConfiguration(extensionId, config, probe.credentialStorage);
     this.probes.delete(input.challenge);
-    return this.publicSetup(config);
+    return this.publicSetup(config, extensionId);
   }
 
   setMessageContext(extensionId: string, messageId?: string, accountId?: string): void {

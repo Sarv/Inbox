@@ -4,7 +4,9 @@ import { waitForAbortableOperation } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReview, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
+import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, LocalCalendarPreferences } from '../../src/types/local-calendar';
 
+import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
 import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
 import { answerInboxAssistant, planInboxAssistantSearch } from './inbox-assistant-answer';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
@@ -19,6 +21,10 @@ export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   history: InboxAssistantHistoryStore;
   setRead?: InboxAssistantActionDeps['setRead'];
   moveMail?: InboxAssistantActionDeps['moveMail'];
+  calendar?: {
+    preferences(): LocalCalendarPreferences;
+    availability(request: LocalCalendarAvailabilityRequest): LocalCalendarAvailability | Promise<LocalCalendarAvailability>;
+  };
 }
 
 interface ActiveRun {
@@ -86,14 +92,16 @@ function reviewText(review: InboxAssistantReview): string {
 function validateDraftRequest(value: unknown): InboxAssistantDraftRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid email draft request.');
   const request = value as InboxAssistantDraftRequest;
-  if (!Object.keys(request).every(key => ['requestId', 'chatId', 'accountId', 'instructions'].includes(key))
+  if (!Object.keys(request).every(key => ['requestId', 'chatId', 'accountId', 'instructions', 'meeting'].includes(key))
     || typeof request.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(request.requestId)
     || typeof request.chatId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(request.chatId)
     || typeof request.accountId !== 'string' || !request.accountId || request.accountId.length > 500
-    || (request.instructions !== undefined && (typeof request.instructions !== 'string' || request.instructions.length > 4_000))) {
+    || (request.instructions !== undefined && (typeof request.instructions !== 'string' || request.instructions.length > 4_000))
+    || (request.meeting !== undefined && (!request.meeting || typeof request.meeting !== 'object' || Array.isArray(request.meeting)))) {
     throw new Error('Choose a conversation and sending account. Draft instructions can contain up to 4,000 characters.');
   }
   return { requestId: request.requestId, chatId: request.chatId, accountId: request.accountId,
+    ...(request.meeting ? { meeting: request.meeting } : {}),
     ...(request.instructions?.trim() ? { instructions: request.instructions.trim() } : {}) };
 }
 
@@ -458,15 +466,38 @@ export class InboxAssistantService {
     const report = (progress: InboxAssistantProgress) => this.reportRun(run, progress, onActivity);
     try {
       report({ stage: 'context', status: 'done', message: 'Loaded this conversation for drafting', detail: `${chat.exchanges.length} conversation ${chat.exchanges.length === 1 ? 'message' : 'messages'} included.` });
+      let availability: LocalCalendarAvailability | undefined;
+      if (request.meeting && !this.deps.calendar) throw new Error('The local calendar is unavailable. Open Calendar and try again.');
+      if (this.deps.calendar && (request.meeting || isMeetingDraft(chat, request.instructions ?? ''))) {
+        const windows = meetingAvailabilityRequests(chat, request.instructions ?? '', this.deps.calendar.preferences(), request.meeting);
+        if (windows?.length) {
+          report({ stage: 'context', status: 'running', message: 'Checking your local calendar', detail: 'Checking busy events, working hours, buffers and timezone. Other calendar services and recipient availability are not connected yet.' });
+          for (const window of windows) {
+            const result = await waitForAbortableOperation(Promise.resolve(this.deps.calendar.availability(window)), controller.signal);
+            if (result.status !== 'ready') throw new Error('Choose at least one calendar that blocks availability in Calendar before preparing meeting times.');
+            if (availability && [...availability.calendarIds].sort().join('\n') !== [...result.calendarIds].sort().join('\n')) throw new Error('Your calendar selection changed. Please prepare the meeting draft again.');
+            availability = availability ? { ...availability, slots: [...availability.slots, ...result.slots] } : result;
+            if (availability.slots.length >= 3) break;
+          }
+          availability = { ...availability!, startMs: Math.min(...windows.map(window => window.startMs)), endMs: Math.max(...windows.map(window => window.endMs)),
+            slots: [...new Map(availability!.slots.map(slot => [slot.startMs, slot])).values()].sort((a, b) => a.startMs - b.startMs).slice(0, 3) };
+          report({ stage: 'context', status: 'done', message: `${availability.slots.length} verified meeting ${availability.slots.length === 1 ? 'option' : 'options'}`, detail: `${availability.timeZone} · Local calendars only` });
+        }
+      }
       report({ stage: 'answer', status: 'running', message: 'Preparing email draft', detail: account.email });
       const callAI = (prompt: string) => {
         assertCurrent();
         return this.callRunAI(run, prompt, controller.signal);
       };
       const draft = await waitForAbortableOperation(
-        generateInboxAssistantDraft(chat, account, request.instructions ?? '', callAI, controller.signal), controller.signal,
+        generateInboxAssistantDraft(chat, account, request.instructions ?? '', callAI, controller.signal, availability), controller.signal,
       );
       assertCurrent();
+      if (availability && this.deps.calendar) {
+        report({ stage: 'context', status: 'running', message: 'Rechecking the proposed meeting times' });
+        await waitForAbortableOperation(recheckMeetingAvailability(availability, value => this.deps.calendar!.availability(value)), controller.signal);
+        assertCurrent();
+      }
       const current = this.deps.history.load(request.chatId, { select: false });
       if (current.exchanges.length !== exchangeIds.length || current.exchanges.some((exchange, index) => exchange.id !== exchangeIds[index])) {
         throw new Error('This conversation changed while preparing the draft. Prepare a new draft from the updated conversation.');

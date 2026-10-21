@@ -79,6 +79,56 @@ async function completed(service: AntivirusScanService, id: string) {
 async function flush() { await new Promise(resolve => setTimeout(resolve, 5)); }
 
 describe('antivirus host consent and mailbox boundaries', () => {
+  it('reports session credential lifetime throughout setup without exposing the credential', async () => {
+    const f = fixture({ configured: false });
+    f.deps.credentialStorage = () => 'session';
+    expect(await f.service.getTrustedSetup('clamav-scan')).toMatchObject({ configured: false, credentialStorage: 'session' });
+    const probe = await f.service.probe('clamav-scan', 'https://scanner.test', 'synthetic-test-key');
+    expect(probe.setup.credentialStorage).toBe('session');
+    const setup = await f.service.configure('clamav-scan', { challenge: probe.challenge, allowedAccountIds: ['account-b'], allowBody: false, attachmentConsent: true, bodyConsent: false });
+    expect(setup).toMatchObject({ configured: true, credentialStorage: 'session', allowedAccountIds: ['account-b'] });
+    const publicSetup = await f.service.getSetup('clamav-scan');
+    expect(publicSetup.credentialStorage).toBe('session');
+    expect(publicSetup).not.toHaveProperty('accounts'); expect(publicSetup).not.toHaveProperty('credential');
+    expect(JSON.stringify(publicSetup)).not.toContain('synthetic-test-key');
+  });
+
+  it('discloses a locked saved sign-in while failing attachment guards until fresh credentials are explicitly approved', async () => {
+    const f = fixture(); let locked = true;
+    const read = f.deps.readConfiguration;
+    const write = f.writeConfiguration.getMockImplementation()!;
+    f.deps.readConfiguration = async id => { if (locked) throw new Error('Saved scanner keychain is locked'); return read(id); };
+    f.deps.savedCredentialsLocked = () => locked;
+    f.deps.credentialStorage = () => 'session';
+    f.writeConfiguration.mockImplementation(async (id, config) => { await write(id, config); locked = false; });
+    expect(await f.service.getTrustedSetup('clamav-scan')).toMatchObject({ configured: true, enabled: false,
+      credentialStorage: 'session', savedCredentialsLocked: true, error: expect.stringContaining('locked') });
+    await expect(f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).rejects.toThrow('keychain is locked');
+    await expect(f.service.probe('clamav-scan', 'https://scanner.test')).rejects.toThrow('keychain is locked');
+    expect(f.request).not.toHaveBeenCalled();
+    const probe = await f.service.probe('clamav-scan', 'https://scanner.test', 'synthetic-fresh-credential');
+    await expect(f.service.configure('clamav-scan', { challenge: probe.challenge, allowedAccountIds: ['account-b'], allowBody: false, attachmentConsent: false, bodyConsent: false })).rejects.toThrow('Explicit consent');
+    expect(locked).toBe(true);
+    await f.service.configure('clamav-scan', { challenge: probe.challenge, allowedAccountIds: ['account-b'], allowBody: false, attachmentConsent: true, bodyConsent: false });
+    expect(await f.service.getTrustedSetup('clamav-scan')).toMatchObject({ enabled: true, credentialStorage: 'session' });
+    expect(await f.service.getAttachmentSetupRequirement('clamav-scan', 'account-b')).toBeUndefined();
+  });
+
+  it('pins the displayed storage lifetime to the probe and requires verifying again to persist after recovery', async () => {
+    const f = fixture({ configured: false });
+    let available: 'session' | 'os-keychain' = 'session';
+    f.deps.credentialStorage = () => 'session';
+    f.deps.newConfigurationStorage = () => available;
+    const probe = await f.service.probe('clamav-scan', 'https://scanner.test', 'synthetic-test-key');
+    expect(probe.setup.credentialStorage).toBe('session'); available = 'os-keychain';
+    await f.service.configure('clamav-scan', { challenge: probe.challenge, allowedAccountIds: ['account-b'], allowBody: false, attachmentConsent: true, bodyConsent: false });
+    expect(f.writeConfiguration).toHaveBeenLastCalledWith('clamav-scan', expect.any(Object), 'session');
+    const verified = await f.service.probe('clamav-scan', 'https://scanner.test');
+    expect(verified.setup.credentialStorage).toBe('os-keychain');
+    await f.service.configure('clamav-scan', { challenge: verified.challenge, allowedAccountIds: ['account-b'], allowBody: false, attachmentConsent: true, bodyConsent: false });
+    expect(f.writeConfiguration).toHaveBeenLastCalledWith('clamav-scan', expect.any(Object), 'os-keychain');
+  });
+
   it('does not discover or read any mailbox content before setup consent', async () => {
     const f = fixture({ configured: false });
     expect(await f.service.getTargets('clamav-scan')).toEqual([]);

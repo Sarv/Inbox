@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CalendarInviteBanner } from '../../../../../src/components/email-detail/CalendarInviteBanner';
+import type { LocalCalendarInvitation } from '../../../../../src/types/calendar-invitations';
 import { act, cleanup, fire, render, settle, type Mounted } from '../../../../helpers/render';
 
 const invite = [
@@ -35,6 +36,55 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+describe('Inbox calendar invitation actions', () => {
+  const meeting: LocalCalendarInvitation = {
+    id: 'i1', accountId: 'account-1', accountEmail: 'first@example.invalid', uid: 'synthetic-event', organizer: 'organizer@example.invalid',
+    eventId: 'event-local', calendarId: 'local', title: 'Synthetic review', startMs: Date.parse('2026-10-06T10:00Z'), endMs: Date.parse('2026-10-06T11:00Z'),
+    timeZone: 'UTC', allDay: false, recurrence: false, response: 'needs-action', cancelled: false, sequence: 0, dtstampMs: 0, versionToken: 'v1',
+  };
+  const invitation = vi.fn(); const respondToInvitation = vi.fn(); const changed = new Set<() => void>();
+  beforeEach(() => {
+    changed.clear(); invitation.mockReset().mockResolvedValue({ success: true, data: meeting });
+    respondToInvitation.mockReset().mockResolvedValue({ success: true, data: { invitation: { ...meeting, response: 'accepted' }, delivery: 'sent' } });
+    (window as unknown as { electronAPI: unknown }).electronAPI = { emails: api, calendar: { invitation, respondToInvitation, onChanged: (listener: () => void) => { changed.add(listener); return () => changed.delete(listener); } } };
+  });
+  const clickResponse = async (label: string) => { fire(mounted.all('button').find(button => button.textContent === label)!, 'click'); await settle(); };
+
+  it('shows a tentative hold without sending until the user responds', async () => {
+    mount(); await settle();
+    expect(mounted.container.textContent).toContain('Awaiting your response');
+    expect(invitation).toHaveBeenCalledWith({ emailId: 'email-1', accountId: 'account-1' });
+    expect(respondToInvitation).not.toHaveBeenCalled(); expect(api.openCalendarInvite).not.toHaveBeenCalled();
+    await clickResponse('Accept');
+    expect(respondToInvitation).toHaveBeenCalledExactlyOnceWith({ accountId: 'account-1', emailId: 'email-1', response: 'accepted' });
+    expect(mounted.container.textContent).toContain('Response sent to the organizer.');
+  });
+  it('explains queued responses and frees availability after declining', async () => {
+    respondToInvitation.mockResolvedValueOnce({ success: true, data: { invitation: { ...meeting, response: 'declined' }, delivery: 'queued' } });
+    mount(); await settle(); await clickResponse('Decline');
+    expect(mounted.container.textContent).toContain('Declined · Availability is free');
+    expect(mounted.container.textContent).toContain('Response saved in Outbox.');
+  });
+  it('opens the existing local event and preserves the main calendar view', async () => {
+    const listener = vi.fn(); window.addEventListener('sarvinbox:calendar-open', listener);
+    mount(); await settle(); await clickResponse('View in calendar');
+    expect(listener).toHaveBeenCalledOnce(); expect((listener.mock.calls[0]![0] as CustomEvent).detail).toEqual({ eventId: meeting.eventId, startMs: meeting.startMs });
+    window.removeEventListener('sarvinbox:calendar-open', listener);
+  });
+  it('renders a cancellation without DTSTART from its linked event metadata', async () => {
+    invitation.mockResolvedValue({ success: true, data: { ...meeting, cancelled: true } });
+    mount({ calendarIcs: 'BEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:synthetic-event\r\nEND:VEVENT\r\nEND:VCALENDAR' }); await settle();
+    expect(mounted.container.textContent).toContain('Meeting cancelled · Inbox calendar updated');
+    expect(mounted.find('[aria-label="Respond to invitation"]')).toBeNull();
+  });
+  it('shows delivery errors without changing participation', async () => {
+    respondToInvitation.mockResolvedValueOnce({ success: false, error: 'Account is unavailable' });
+    mount(); await settle(); await clickResponse('Accept');
+    expect(mounted.find('[role="alert"]')?.textContent).toContain('Account is unavailable');
+    expect(mounted.container.textContent).toContain('Awaiting your response');
+  });
+});
 
 describe('optional antivirus calendar opening', () => {
   // Breaks: accepting a missing-setup warning hands an unchecked generated ICS

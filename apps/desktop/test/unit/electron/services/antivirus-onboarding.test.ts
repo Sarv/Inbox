@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({
   readFile: vi.fn(), installed: null as null | { grantedPermissions: string[] }, active: false, managerAvailable: true,
   install: vi.fn(), grant: vi.fn(), enable: vi.fn(), disable: vi.fn(), getSetup: vi.fn(), isPackaged: false,
   prepare: vi.fn(), secure: vi.fn(), resourcesPath: '/synthetic/resources',
-  dependencies: null as null | { scanService(): unknown; prepareExtension(): Promise<void>; assertAuthorized(accountId: string): void; assertSecureStorage(): void; openExternal(url: string): Promise<unknown> },
+  dependencies: null as null | { scanService(): unknown; prepareExtension(): Promise<void>; assertAuthorized(accountId: string): void; assertCredentialStorage(): void; openExternal(url: string): Promise<unknown> },
   oauth: { connect: vi.fn(), complete: vi.fn(), cancel: vi.fn() }, openExternal: vi.fn(),
 }));
 vi.mock('node:fs/promises', () => ({ readFile: h.readFile }));
@@ -16,7 +16,7 @@ vi.mock('../../../../electron/shared', () => ({ getExtensionManager: () => h.man
   getHost: () => ({ isActive: () => h.active }), enableExtension: h.enable,
 } : null }));
 vi.mock('../../../../electron/services/accounts-registry', () => ({ readRegistryAccounts: () => [{ id: 'account-a' }] }));
-vi.mock('../../../../electron/services/antivirus-desktop-backend', () => ({ requireScannerSecureStorage: h.secure }));
+vi.mock('../../../../electron/services/antivirus-desktop-backend', () => ({ prepareScannerCredentialStorage: h.secure }));
 vi.mock('../../../../electron/services/antivirus-scan-service', () => ({ getAntivirusScanService: () => ({ getTrustedSetup: h.getSetup }) }));
 vi.mock('../../../../electron/services/antivirus-oauth-service', () => ({ SARV_SCANNER_EXTENSION_ID: 'clamav-scan', AntivirusOAuthService: class {
   constructor(dependencies: NonNullable<typeof h.dependencies>) { h.dependencies = dependencies; }
@@ -94,7 +94,7 @@ describe('optional trusted bundled scanner installation', () => {
     expect(() => deps.assertAuthorized('removed-account')).toThrow(/mailbox.*unavailable/);
     expect(() => deps.assertAuthorized('account-a')).not.toThrow();
     expect(deps.scanService()).toHaveProperty('getTrustedSetup', h.getSetup);
-    deps.assertSecureStorage(); expect(h.secure).toHaveBeenCalledOnce();
+    deps.assertCredentialStorage(); expect(h.secure).toHaveBeenCalledOnce();
     h.openExternal.mockResolvedValue(undefined); await deps.openExternal('https://oauth.sarv.com/authorize');
     expect(h.openExternal).toHaveBeenCalledWith('https://oauth.sarv.com/authorize');
     h.installed = { grantedPermissions: ['ui:panel', 'security:scan-attachments'] };

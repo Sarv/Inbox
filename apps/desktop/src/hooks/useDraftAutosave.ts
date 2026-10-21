@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 
 import type { AttachmentFile } from '../components/useCompose';
 import { useEmailStore } from '../store/email-store';
+import type { LocalCalendarAvailability } from '../types/local-calendar';
 import { attachmentsKey, toDraftAttachments } from '../utils/compose-attachments';
 
 interface DraftAutosaveOptions {
@@ -48,6 +49,8 @@ interface DraftAutosaveOptions {
   encrypt?: boolean;
   /** The draft opened into this editor was saved encrypted. */
   initialDraftEncrypted?: boolean;
+  /** App-local scheduling evidence, persisted beside the draft rather than in MIME. */
+  calendarAvailability?: LocalCalendarAvailability;
 }
 
 const DEBOUNCE_MS = 10_000; // 10 seconds
@@ -205,6 +208,7 @@ export function useDraftAutosave(opts: DraftAutosaveOptions) {
         threadId,
         accountEmail,
         pgp: encrypt ? { encrypt: true } : undefined,
+        ...(latestRef.current.calendarAvailability ? { calendarAvailability: latestRef.current.calendarAvailability } : {}),
       });
 
       // If the user discarded WHILE this save was in flight, undo it — otherwise

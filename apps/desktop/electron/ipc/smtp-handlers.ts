@@ -12,8 +12,10 @@ import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
 
+import { registryAccountEmail } from '../services/accounts-registry';
 import { ensureAccountRuntime } from '../services/accounts-runtime';
 import { seedAttachmentCache } from '../services/attachment-cache';
+import { CalendarInvitationValidationError, getLocalCalendarInvitationService } from '../services/local-calendar-invitations';
 import { getAccessTokenForMailHost } from '../services/oauth-service';
 import { getOutboxQueue, drainOutbox, getOutboxQueueForAccount, drainOutboxForAccount, notifyOutboxChanged } from '../services/outbox-service';
 import { sendTransformFor } from '../services/pgp-service';
@@ -433,6 +435,15 @@ export async function sendEmailFromMain(
   // mailbox) uses that account's SMTP client + DB + sync engine; otherwise the
   // active account (unchanged behavior).
   const acctId = options.accountId;
+  if (options.calendarInvitationResponse) {
+    try {
+      if (!acctId || options.to.length !== 1 || options.cc?.length || options.bcc?.length) throw new CalendarInvitationValidationError('Meeting responses require the original receiving account and organizer.');
+      getLocalCalendarInvitationService().assertResponseDelivery({ ...options.calendarInvitationResponse, accountId: acctId,
+        organizer: options.to[0]!, accountEmail: registryAccountEmail(acctId) });
+    } catch (error) {
+      return { success: false, transient: !(error instanceof CalendarInvitationValidationError), error: error instanceof Error ? error.message : 'The meeting invitation could not be checked before sending.' };
+    }
+  }
   const scoped = !!acctId && acctId !== getCurrentAccountId();
   const smtpClient = scoped ? getSmtpClientFor(acctId!) : getSmtpClient();
   const scopedStorage = scoped ? getStorageFor(acctId!) : getStorage();
@@ -463,8 +474,12 @@ export async function sendEmailFromMain(
     try {
       const accessToken = await getAccessTokenForMailHost(cfg.oauthProvider, cfg.username, 'smtp', cfg.host, true /* forceRefresh */);
       await smtpClient.connect({ ...cfg, accessToken });
+      if (options.calendarInvitationResponse) {
+        getLocalCalendarInvitationService().assertResponseDelivery({ ...options.calendarInvitationResponse, accountId: acctId!, organizer: options.to[0]!, accountEmail: registryAccountEmail(acctId) });
+      }
       result = await smtpClient.sendEmail(options, transformMime);
     } catch (refreshErr) {
+      if (refreshErr instanceof CalendarInvitationValidationError) return { success: false, transient: false, error: refreshErr.message };
       logger.error(`[SMTP] Token refresh/reconnect failed for ${cfg.username}:`, refreshErr);
     }
     // If it STILL failed after a refresh attempt, keep it TRANSIENT so the outbox

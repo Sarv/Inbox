@@ -49,6 +49,24 @@ afterEach(() => {
 });
 
 describe('optimistic Sent attachments during the undo-send window', () => {
+  it('restores local calendar evidence on Undo without adding it to the outgoing SMTP request', async () => {
+    const store = makeStore();
+    const startMs = Date.parse('2026-10-22T09:00:00Z');
+    const calendarAvailability = { startMs, endMs: startMs + 3_600_000, checkedAt: startMs - 86_400_000, timeZone: 'UTC', durationMinutes: 30,
+      calendarIds: ['local'], calendarNames: ['Private calendar'], scope: 'local-only', status: 'ready',
+      slots: [{ startMs, endMs: startMs + 1_800_000, label: 'Thu 09:00–09:30 UTC' }] };
+    const draft = { to: 'recipient@example.test', cc: '', subject: 'Meeting', htmlContent: '<p>Thu 09:00–09:30 UTC</p>', attachments: [],
+      replyToEmail: null, mode: 'new', isInline: false, accountId: 'account-a', calendarAvailability };
+    await store.getState().sendEmail({ ...options(), draft });
+    expect(store.getState().pendingSend.draft.calendarAvailability).toEqual(calendarAvailability);
+    expect(smtp.sendWithUndo.mock.calls[0][0]).not.toHaveProperty('calendarAvailability');
+    expect(smtp.sendWithUndo.mock.calls[0][0]).not.toHaveProperty('draft');
+    await store.getState().undoSend();
+    expect(store.getState().restoreDraft.calendarAvailability).toEqual(calendarAvailability);
+    expect(store.getState().compose.isOpen).toBe(true);
+    expect(smtp.commitSend).not.toHaveBeenCalled();
+  });
+
   it('gives both readers filenames and decoded sizes immediately while retaining the held send', async () => {
     const store = makeStore();
     const files: SendAttachment[] = [

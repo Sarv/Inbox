@@ -92,8 +92,15 @@ locally tested platform is Linux arm64 in Docker; native amd64 was not executed.
   in the SDK, worker bridge, panel bridge and desktop host.
 - Untrusted panels receive opaque target handles and sanitized verdicts. They
   receive neither file bytes nor credentials nor a list of other mailboxes.
-- Trusted setup uses OS secure storage inside the encrypted core profile.
-  Linux `basic_text` and missing secure storage refuse scanner credential setup.
+- Trusted setup persists scanner credentials only through OS secure storage
+  inside the encrypted core profile. Linux `basic_text` never qualifies.
+  If secure storage is unavailable, setup explicitly offers credentials held
+  only in main-process memory for this app session. They are never written to
+  disk, and quitting requires another scanner sign-in. An existing locked
+  credential remains preserved; fresh verified session setup can temporarily
+  replace it without overwriting it. The verification challenge fixes the
+  chosen storage lifetime, so a mid-login Keychain change cannot silently
+  turn a session-only login into persisted credentials.
 - Strict named account resolution works from All Inboxes. Exact MIME part IDs
   distinguish attachments with the same filename. Retrieval rechecks the part,
   folder/UID and size. Ambiguous filenames refuse a protected download rather

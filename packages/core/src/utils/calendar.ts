@@ -49,3 +49,23 @@ export function sanitizeIcsText(text: string | null | undefined): string | null 
   if (!/BEGIN:VCALENDAR/i.test(trimmed)) return null;
   return trimmed;
 }
+
+/** Inspect MIME metadata only; unnamed text/calendar parts are invitations too. */
+export function hasCalendarMimePart(structure: unknown): boolean {
+  const pending: unknown[] = [structure];
+  const seen = new Set<object>();
+  for (let visited = 0; pending.length && visited < 1000; visited++) {
+    const value = pending.pop();
+    if (!value || typeof value !== 'object' || seen.has(value)) continue;
+    seen.add(value);
+    const part = value as Record<string, any>;
+    const type = String(part.type ?? '').toLowerCase();
+    const subtype = String(part.subtype ?? '').toLowerCase();
+    const mime = type.includes('/') ? type : `${type}/${subtype}`;
+    const filename = part.disposition?.params?.filename ?? part.params?.name ?? part.params?.filename;
+    if (mime === 'text/calendar' || mime === 'application/ics' || mime === 'application/icalendar'
+      || (typeof filename === 'string' && /\.ics$/i.test(filename))) return true;
+    if (Array.isArray(part.parts)) pending.push(...part.parts.slice(0, 1000 - visited));
+  }
+  return false;
+}

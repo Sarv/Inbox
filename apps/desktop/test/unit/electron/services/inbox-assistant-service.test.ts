@@ -296,7 +296,7 @@ describe('Inbox Agent email draft orchestration', () => {
     const other = service.createChat();
     const activities: unknown[] = [];
     const result = await service.draftEmail(draftRequest({ accountId: 'secondary', instructions: '  Send a concise follow-up.  ' }), activity => activities.push(activity));
-    expect(draftGenerator).toHaveBeenCalledExactlyOnceWith(before, ACCOUNTS[1], 'Send a concise follow-up.', expect.any(Function), expect.any(AbortSignal));
+    expect(draftGenerator).toHaveBeenCalledExactlyOnceWith(before, ACCOUNTS[1], 'Send a concise follow-up.', expect.any(Function), expect.any(AbortSignal), undefined);
     expect(result).toEqual(preparedDraft({ accountId: 'secondary' }));
     expect(activeChatId).toBe(other.id);
     expect(chats.get('chat-main')?.exchanges).toEqual(before.exchanges);

@@ -26,6 +26,85 @@ beforeEach(() => {
 afterEach(() => { cleanup(); document.body.innerHTML = ''; });
 
 describe('optional antivirus onboarding', () => {
+  // Regression: a locked saved sign-in must offer intentional recovery without disabling or replacing it first.
+  it('explains locked saved credentials and starts a fresh account-bound sign-in only on request', async () => {
+    api.getOnboardingSetup.mockResolvedValueOnce({ success: true, data: { ...ENABLED, enabled: false, savedCredentialsLocked: true, credentialStorage: 'session' } });
+    api.connectSarvOAuth.mockResolvedValueOnce({ success: true, data: { challenge: 'recovery-challenge', setup: { ...VERIFIED, credentialStorage: 'session' } } });
+    const p = props(); const view = render(<AntivirusSetupStep {...p} />); await settle();
+    expect(view.byLabel('Saved scanner sign-in')?.textContent).toContain('Saved scanner sign-in is locked');
+    expect(view.byLabel('Saved scanner sign-in')?.textContent).toContain('Your saved scanner settings will be kept');
+    expect(button(view, 'Connect with Sarv')).not.toBeNull();
+    expect(api.connectSarvOAuth).not.toHaveBeenCalled(); expect(api.disable).not.toHaveBeenCalled();
+    fire(button(view, 'Connect with Sarv'), 'click'); await settle();
+    expect(api.connectSarvOAuth).toHaveBeenCalledWith('account-a');
+    expect(button(view, 'Enable antivirus')?.hasAttribute('disabled')).toBe(true);
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled();
+    toggle(view.find('input[type="checkbox"]')); fire(button(view, 'Enable antivirus'), 'click'); await settle();
+    expect(api.completeSarvOAuth).toHaveBeenCalledWith({ challenge: 'recovery-challenge', accountId: 'account-a', attachmentConsent: true });
+    expect(api.disable).not.toHaveBeenCalled();
+    expect(p.onComplete).toHaveBeenCalledWith({ enabled: true, providerName: 'Sarv Antivirus' });
+  });
+
+  // Regression: skipping a locked scanner must keep its saved settings and never imply active protection.
+  it('allows skipping locked saved sign-in without changing scanner settings', async () => {
+    api.getOnboardingSetup.mockResolvedValueOnce({ success: true, data: { ...ENABLED, enabled: false, savedCredentialsLocked: true } });
+    const p = props(); const view = render(<AntivirusSetupStep {...p} />); await settle();
+    fire(button(view, 'Skip for now'), 'click'); await settle();
+    expect(p.onComplete).toHaveBeenCalledWith({ enabled: false });
+    expect(api.disable).not.toHaveBeenCalled(); expect(api.connectSarvOAuth).not.toHaveBeenCalled(); expect(api.completeSarvOAuth).not.toHaveBeenCalled();
+  });
+
+  // Regression: a session-only credential must not look like sign-in that survives quitting Inbox.
+  it.each(['provider', 'connection'] as const)('discloses session-only sign-in on the %s stage before connecting', async stage => {
+    api.getOnboardingSetup.mockResolvedValueOnce({ success: true, data: { ...EMPTY, credentialStorage: 'session' } });
+    const view = render(<AntivirusSetupStep {...props({ stage })} />); await settle();
+    const warning = view.byLabel('Scanner credential storage');
+    expect(warning?.textContent).toContain('Scanner sign-in lasts for this session');
+    expect(warning?.textContent).toContain('Without system-keychain storage');
+    expect(warning?.textContent).toContain('only in app memory and is never saved to disk');
+    expect(warning?.textContent).toContain('Sign in again after quitting Inbox');
+    expect(warning?.textContent).toContain('verify the scanner and enable scanning again in scanner settings');
+    expect(view.container.textContent).not.toContain('Inbox saves it securely on this device');
+    expect(api.connectSarvOAuth).not.toHaveBeenCalled();
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled();
+  });
+
+  // Regression: losing keychain availability during sign-in must still show storage limitations before consent.
+  it('shows the host-reported session mode on verification and still requires attachment consent', async () => {
+    api.connectSarvOAuth.mockResolvedValueOnce({ success: true, data: { challenge: 'session-challenge', setup: { ...VERIFIED, credentialStorage: 'session' } } });
+    api.completeSarvOAuth.mockResolvedValueOnce({ success: true, data: { ...ENABLED, credentialStorage: 'session' } });
+    const p = props(); const view = render(<AntivirusSetupStep {...p} />); await settle();
+    fire(button(view, 'Connect with Sarv'), 'click'); await settle();
+    expect(view.byLabel('Scanner credential storage')).not.toBeNull();
+    expect(button(view, 'Enable antivirus')?.hasAttribute('disabled')).toBe(true);
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled();
+    toggle(view.find('input[type="checkbox"]')); fire(button(view, 'Enable antivirus'), 'click'); await settle();
+    expect(api.completeSarvOAuth).toHaveBeenCalledWith({ challenge: 'session-challenge', accountId: 'account-a', attachmentConsent: true });
+    expect(p.onComplete).toHaveBeenCalledWith({ enabled: true, providerName: 'Sarv Antivirus' });
+    expect(localStorage.length).toBe(0);
+  });
+
+  // Regression: ordinary keychain-backed setup should retain secure on-device storage and consent flow.
+  it('keeps keychain-backed sign-in copy without a session warning', async () => {
+    api.getOnboardingSetup.mockResolvedValueOnce({ success: true, data: { ...EMPTY, credentialStorage: 'os-keychain' } });
+    const view = render(<AntivirusSetupStep {...props()} />); await settle();
+    expect(view.byLabel('Scanner credential storage')).toBeNull();
+    expect(view.container.textContent).toContain('When the system keychain is available, Inbox saves it securely on this device');
+    expect(view.container.textContent).toContain('Reconnect when it expires');
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled();
+  });
+
+  // Regression: existing session protection is active now but must not imply it survives an app restart.
+  it('keeps the session warning visible for an already protected mailbox', async () => {
+    api.getOnboardingSetup.mockResolvedValueOnce({ success: true, data: { ...ENABLED, credentialStorage: 'session' } });
+    const p = props(); const view = render(<AntivirusSetupStep {...p} />); await settle();
+    expect(view.byLabel('Scanner credential storage')).not.toBeNull();
+    expect(view.container.textContent).toContain('already protecting');
+    fire(button(view, 'Continue'), 'click'); await settle();
+    expect(p.onComplete).toHaveBeenCalledWith({ enabled: true, providerName: 'Sarv Antivirus' });
+    expect(api.completeSarvOAuth).not.toHaveBeenCalled();
+  });
+
   // Regression: a provider picker required an unnecessary Continue click and could start OAuth before selection.
   it('opens connection immediately when Sarv is selected and never connects automatically', async () => {
     const p = props({ stage: 'provider' }); const view = render(<AntivirusSetupStep {...p} />); await settle();

@@ -85,7 +85,8 @@ interface ScannerOAuthDependencies {
   scanService(): Pick<AntivirusScanService, 'getTrustedSetup' | 'probe' | 'configure'>;
   prepareExtension(): Promise<void>;
   assertAuthorized(accountId: string): void;
-  assertSecureStorage(): void;
+  /** The host can hold credentials safely (OS-backed persistence or memory only). */
+  assertCredentialStorage(): void;
   openExternal(url: string): Promise<unknown>;
   requestFetch?: typeof fetch;
   loopback?: typeof runScannerLoopbackFlow;
@@ -104,9 +105,10 @@ interface Pending {
 const disclosure = (setup: AntivirusSetupStatus): string => JSON.stringify([
   setup.endpoint, setup.operator, setup.region, setup.privacyPolicyUrl, setup.privacyTermsVersion,
   setup.scanPolicyVersion, setup.metadataRetentionSeconds, setup.contentLifetimeSeconds, setup.resultLifetimeSeconds,
+  setup.credentialStorage,
 ]);
 
-/** Scanner-only PKCE credentials remain in main; durable API credentials use the existing encrypted scanner vault. */
+/** Scanner-only PKCE credentials remain in main; API credentials use the encrypted vault or main-process session memory. */
 export class AntivirusOAuthService {
   private active: AbortController | null = null;
   private pending: Pending | null = null;
@@ -164,7 +166,7 @@ export class AntivirusOAuthService {
   async connect(accountId: string): Promise<Probe> {
     if (this.completing) throw new Error('Wait for scanner setup to finish.');
     this.cancel();
-    this.dependencies.assertSecureStorage();
+    this.dependencies.assertCredentialStorage();
     const controller = new AbortController();
     this.active = controller;
     const timeout = setTimeout(() => controller.abort(), TRANSACTION_MS);
@@ -173,7 +175,7 @@ export class AntivirusOAuthService {
       await this.dependencies.prepareExtension();
       this.assertLive(controller, accountId);
       const previous = await this.dependencies.scanService().getTrustedSetup(SARV_SCANNER_EXTENSION_ID);
-      if (previous.configured) throw new Error('A scanner is already configured. Keep its connection, or update its approved accounts in Extensions settings.');
+      if (previous.configured && !previous.savedCredentialsLocked) throw new Error('A scanner is already configured. Keep its connection, or update its approved accounts in Extensions settings.');
       const config = await this.request('/ui/config', {}, undefined, controller.signal);
       if (config.authProvider !== 'sarv' || config.serviceMode !== 'scanner' || config.issuerUrl !== ISSUER ||
         config.clientId !== CLIENT_ID || config.tokenAudience !== AUDIENCE || config.discoveryUrl !== '/ui/oauth/discovery' ||
@@ -225,12 +227,13 @@ export class AntivirusOAuthService {
       throw new Error('Check scanner access again before enabling antivirus.');
     }
     if (input.attachmentConsent !== true) throw new Error('Review the scanner privacy terms and approve sharing attachments first.');
-    this.dependencies.assertSecureStorage();
+    this.dependencies.assertCredentialStorage();
     this.dependencies.assertAuthorized(input.accountId);
     this.completing = true;
     let issuedId: string | undefined;
     try {
-      if ((await this.dependencies.scanService().getTrustedSetup(SARV_SCANNER_EXTENSION_ID)).configured) {
+      const existing = await this.dependencies.scanService().getTrustedSetup(SARV_SCANNER_EXTENSION_ID);
+      if (existing.configured && !existing.savedCredentialsLocked) {
         throw new Error('Scanner setup changed. Keep the existing connection or review it in Extensions settings.');
       }
       const issued = await this.request('/api/v1/tokens', { method: 'POST', body: JSON.stringify({ name: 'Sarv Inbox attachment scanning', expiresInDays: 90 }) }, pending.accessToken);
@@ -240,14 +243,15 @@ export class AntivirusOAuthService {
         throw new Error('The scanner did not issue a valid scanning credential. Please retry sign-in.');
       }
       const fresh = await this.dependencies.scanService().probe(SARV_SCANNER_EXTENSION_ID, SARV_SCANNER_ORIGIN, issued.token);
-      if (disclosure(fresh.setup) !== disclosure(pending.setup)) throw new Error('The scanner privacy or scan policy changed. Sign in and review its terms again.');
+      if (disclosure(fresh.setup) !== disclosure(pending.setup)) throw new Error('The scanner privacy, credential storage or scan policy changed. Sign in and review its terms again.');
       this.dependencies.assertAuthorized(input.accountId);
-      if ((await this.dependencies.scanService().getTrustedSetup(SARV_SCANNER_EXTENSION_ID)).configured) {
+      const beforeSave = await this.dependencies.scanService().getTrustedSetup(SARV_SCANNER_EXTENSION_ID);
+      if (beforeSave.configured && !beforeSave.savedCredentialsLocked) {
         throw new Error('Scanner setup changed. Keep the existing connection or review it in Extensions settings.');
       }
       const setup = await this.dependencies.scanService().configure(SARV_SCANNER_EXTENSION_ID, { challenge: fresh.challenge,
         allowedAccountIds: [input.accountId], allowBody: false, attachmentConsent: true, bodyConsent: false });
-      issuedId = undefined; // The durable token is now owned by the encrypted scanner configuration.
+      issuedId = undefined; // The token is now owned by the OS-encrypted or session-only scanner configuration.
       return setup;
     } catch (error) {
       if (issuedId) {

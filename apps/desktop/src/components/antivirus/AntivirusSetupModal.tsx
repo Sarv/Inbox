@@ -15,18 +15,24 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
   const [endpoint, setEndpoint] = useState('');
   const [credential, setCredential] = useState('');
   const [challenge, setChallenge] = useState<string | null>(null);
+  const [oauthAccountId, setOAuthAccountId] = useState<string | null>(null);
+  const [savedCredentialsLocked, setSavedCredentialsLocked] = useState(false);
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [allowBody, setAllowBody] = useState(false);
   const [attachmentConsent, setAttachmentConsent] = useState(false);
   const [bodyConsent, setBodyConsent] = useState(false);
-  const [busy, setBusy] = useState<'loading' | 'probing' | 'saving' | 'disabling' | null>('loading');
+  const [busy, setBusy] = useState<'loading' | 'probing' | 'connecting' | 'saving' | 'disabling' | null>('loading');
   const [error, setError] = useState('');
   const [suppressedWarningAccounts, setSuppressedWarningAccounts] = useState<string[]>([]);
   const [resettingWarningAccount, setResettingWarningAccount] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const activeRef = useRef(true);
+  const oauthTransaction = useRef(false);
+  const oauthGeneration = useRef(0);
   const api = window.electronAPI?.antivirus;
+  const sessionOnly = setup?.credentialStorage === 'session';
+  const canRecoverWithSarv = savedCredentialsLocked && extensionId === 'clamav-scan' && (!endpoint.trim() || endpoint.trim() === 'https://av.sarv.com');
 
   useEffect(() => {
     activeRef.current = true;
@@ -34,6 +40,12 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
     cancelRef.current?.focus();
     return () => { activeRef.current = false; previous?.focus(); };
   }, []);
+
+  useEffect(() => () => {
+    oauthGeneration.current += 1;
+    if (oauthTransaction.current) void api?.cancelSarvOAuth?.().catch(() => {});
+    oauthTransaction.current = false;
+  }, [api]);
 
   useEffect(() => {
     let current = true;
@@ -47,7 +59,8 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
         if (!current) return;
         if (!response.success || !response.data) throw new Error(response.error || 'Could not load scanner setup');
         setSetup(response.data);
-        setEndpoint(response.data.endpoint);
+        setSavedCredentialsLocked(Boolean(response.data.savedCredentialsLocked));
+        setEndpoint(response.data.endpoint || (response.data.savedCredentialsLocked && extensionId === 'clamav-scan' ? 'https://av.sarv.com' : ''));
         setSelectedAccounts(response.data.allowedAccountIds);
         setAllowBody(response.data.allowBody);
         if (warningPreferences?.success && warningPreferences.data) {
@@ -85,9 +98,41 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
   }, [busy, onClose]);
 
   const invalidate = () => {
+    oauthGeneration.current += 1;
+    if (oauthTransaction.current) void api?.cancelSarvOAuth?.().catch(() => {});
+    oauthTransaction.current = false;
     setChallenge(null);
+    setOAuthAccountId(null);
     setAttachmentConsent(false);
     setBodyConsent(false);
+  };
+
+  const recoverWithSarv = async () => {
+    if (!api?.connectSarvOAuth || busy || !canRecoverWithSarv || selectedAccounts.length !== 1) return;
+    const accountId = selectedAccounts[0]!;
+    invalidate(); setCredential(''); setError(''); setBusy('connecting');
+    const generation = oauthGeneration.current;
+    oauthTransaction.current = true;
+    try {
+      const response = await api.connectSarvOAuth(accountId);
+      if (!activeRef.current || generation !== oauthGeneration.current) return;
+      if (!response.success || !response.data) throw new Error(response.error || 'Scanner sign-in failed. Try again.');
+      if (!response.data.challenge || response.data.setup.endpoint !== 'https://av.sarv.com' ||
+        !response.data.setup.accounts?.some(account => account.id === accountId)) {
+        throw new Error('Scanner access does not match this mailbox. Sign in again.');
+      }
+      setSetup(response.data.setup); setEndpoint(response.data.setup.endpoint);
+      setSelectedAccounts([accountId]); setOAuthAccountId(accountId); setAllowBody(false);
+      setChallenge(response.data.challenge);
+    } catch (failure) {
+      if (activeRef.current && generation === oauthGeneration.current) {
+        oauthTransaction.current = false;
+        void api.cancelSarvOAuth?.().catch(() => {});
+        setError(failure instanceof Error ? failure.message : 'Scanner sign-in failed. Try again.');
+      }
+    } finally {
+      if (activeRef.current && generation === oauthGeneration.current) setBusy(null);
+    }
   };
 
   const probe = async () => {
@@ -109,19 +154,27 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
     }
   };
 
-  const canSave = Boolean(challenge && selectedAccounts.length > 0 && attachmentConsent && (!allowBody || bodyConsent) && !busy);
+  const canSave = Boolean(challenge && selectedAccounts.length > 0 && attachmentConsent && (!allowBody || bodyConsent) && !busy &&
+    (!oauthAccountId || (selectedAccounts.length === 1 && selectedAccounts[0] === oauthAccountId && !allowBody)));
   const save = async () => {
     if (!api || !canSave || !challenge) return;
     setBusy('saving'); setError('');
     try {
-      const response = await api.configure(extensionId, {
+      const response = oauthAccountId ? await api.completeSarvOAuth({ challenge, accountId: oauthAccountId, attachmentConsent }) : await api.configure(extensionId, {
         challenge, allowedAccountIds: selectedAccounts, allowBody, attachmentConsent, bodyConsent,
       });
       if (!activeRef.current) return;
       if (!response.success) throw new Error(response.error || 'Could not enable scanning');
+      if (oauthAccountId && (!response.data?.configured || !response.data.enabled || response.data.allowedAccountIds.length !== 1 || response.data.allowedAccountIds[0] !== oauthAccountId)) {
+        throw new Error('Antivirus was not enabled for the selected mailbox. Sign in again.');
+      }
+      oauthTransaction.current = false;
       onClose();
     } catch (failure) {
-      if (activeRef.current) setError(failure instanceof Error ? failure.message : String(failure));
+      if (activeRef.current) {
+        if (oauthAccountId) invalidate();
+        setError(failure instanceof Error ? failure.message : String(failure));
+      }
     } finally {
       if (activeRef.current) setBusy(null);
     }
@@ -169,6 +222,12 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
           <button ref={cancelRef} type="button" disabled={busy === 'saving' || busy === 'disabling'} onClick={onClose} className="rounded px-2 py-1 text-sm hover:bg-muted" aria-label="Close scanner setup">Close</button>
         </header>
         <div className="space-y-4 overflow-y-auto p-4 text-sm">
+          {savedCredentialsLocked && <p role="status" aria-label="Saved scanner sign-in" className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 leading-relaxed text-amber-900 dark:text-amber-100">Saved scanner sign-in is locked. Sign in again for this session, or unlock the system keychain. Your saved scanner settings will be kept.</p>}
+          {sessionOnly && <section role="status" aria-label="Scanner credential storage" className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-amber-900 dark:text-amber-100">
+            <h3 className="font-semibold">Scanner sign-in lasts for this session</h3>
+            <p className="leading-relaxed">Without system-keychain storage, your scanner credential stays only in app memory and is never saved to disk. Sign in again after quitting Inbox.</p>
+            <p className="leading-relaxed">Once the keychain is available, verify the scanner and enable scanning again to save it securely.</p>
+          </section>}
           <p className="text-muted-foreground">When you view, open or download an attachment from an approved account, the app fetches it in the background and sends it to this scanner. You can view, open or save it only after a complete scan reports no threat. Manual scans remain available. Review the operator and privacy terms before enabling sharing.</p>
           <p className="text-muted-foreground">If scanning has not been set up for an account, you can choose to continue without scanning after a warning. The attachment will be marked as not scanned.</p>
           <p className="text-xs text-muted-foreground">This applies to every mail provider in the accounts you approve below. Attachment viewing, opening and downloads do not send the email body.</p>
@@ -192,9 +251,15 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
           </label>
           <label className="block">Authentication credential (optional)
             <input aria-label="Authentication credential" type="password" autoComplete="off" value={credential} disabled={Boolean(busy)} onChange={(event) => { setCredential(event.target.value); invalidate(); }} className="mt-1 w-full rounded border border-border bg-background px-3 py-2" />
-            <span className="mt-1 block text-xs text-muted-foreground">Stored by the app in its credential store and never returned to the extension. Leave blank to retain an existing credential for this endpoint.</span>
+            <span className="mt-1 block text-xs text-muted-foreground">{sessionOnly ? 'Kept only in app memory for this session and never returned to the extension.' : 'Stored by the app in its credential store and never returned to the extension.'} Leave blank to retain an existing credential for this endpoint.</span>
           </label>
           <button type="button" disabled={Boolean(busy) || !endpoint.trim()} onClick={() => { void probe(); }} className="rounded border border-border px-3 py-2 hover:bg-muted disabled:opacity-50">{busy === 'probing' ? 'Verifying…' : 'Verify scanner'}</button>
+          {canRecoverWithSarv && <section aria-label="Recover scanner sign-in" className="space-y-2 rounded border border-border p-3">
+            <p className="text-muted-foreground">Choose exactly one mailbox below, then sign in again and review scanner sharing. Your locked saved sign-in will be kept.</p>
+            <button type="button" disabled={Boolean(busy) || Boolean(oauthAccountId) || selectedAccounts.length !== 1 || !api?.connectSarvOAuth} onClick={() => { void recoverWithSarv(); }} className="rounded border border-border px-3 py-2 hover:bg-muted disabled:opacity-50">{busy === 'connecting' ? 'Waiting for browser sign-in…' : 'Sign in with Sarv for this session'}</button>
+            {busy === 'connecting' && <button type="button" onClick={() => { invalidate(); setBusy(null); }} className="ml-2 text-primary underline underline-offset-2">Cancel sign-in</button>}
+            {oauthAccountId && <><p className="text-muted-foreground">This sign-in is limited to {setup?.accounts?.find(account => account.id === oauthAccountId)?.email || 'the selected mailbox'}. Email body scanning stays off.</p><button type="button" disabled={Boolean(busy)} onClick={() => { invalidate(); }} className="text-primary underline underline-offset-2">Change mailbox</button></>}
+          </section>}
           {setup && (challenge || setup.configured) && (
             <section aria-label="Scanner privacy details" className="space-y-2 rounded border border-border bg-muted/30 p-3">
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
@@ -210,7 +275,7 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
               {setup.developmentOnly && <p className="text-amber-600">This localhost service uses an unencrypted development connection.</p>}
             </section>
           )}
-          <fieldset disabled={Boolean(busy)} className="space-y-2">
+          <fieldset disabled={Boolean(busy) || Boolean(oauthAccountId)} className="space-y-2">
             <legend className="mb-2 font-medium">Accounts allowed to share selected attachments</legend>
             {(setup?.accounts ?? []).map((account) => <label key={account.id} className="flex items-start gap-2">
               <input type="checkbox" checked={selectedAccounts.includes(account.id)} onChange={(event) => {
@@ -222,7 +287,7 @@ export function AntivirusSetupDialog({ extensionId, onClose }: { extensionId: st
             {!setup?.accounts?.length && <p className="text-muted-foreground">Add a mail account before enabling scanner sharing.</p>}
           </fieldset>
           <label className="flex items-start gap-2"><input type="checkbox" checked={attachmentConsent} disabled={!challenge || Boolean(busy)} onChange={(event) => setAttachmentConsent(event.target.checked)} /><span>I agree to send selected attachments, including each attachment I view, open or download from these accounts, to {setup?.operator || 'this scanner'} under the privacy terms shown above.</span></label>
-          <label className="flex items-start gap-2"><input type="checkbox" checked={allowBody} disabled={Boolean(busy)} onChange={(event) => { setAllowBody(event.target.checked); setBodyConsent(false); }} /><span>Allow email body scanning when I choose it for a message</span></label>
+          <label className="flex items-start gap-2"><input type="checkbox" checked={allowBody} disabled={Boolean(busy) || Boolean(oauthAccountId)} onChange={(event) => { setAllowBody(event.target.checked); setBodyConsent(false); }} /><span>Allow email body scanning when I choose it for a message</span></label>
           {allowBody && <label className="flex items-start gap-2"><input type="checkbox" checked={bodyConsent} disabled={!challenge || Boolean(busy)} onChange={(event) => setBodyConsent(event.target.checked)} /><span>I separately agree to share email body text with this scanner. Each body scan still requires my explicit choice.</span></label>}
           {error && <p role="alert" className="rounded border border-destructive/40 bg-destructive/10 p-3 text-destructive">{error}</p>}
         </div>

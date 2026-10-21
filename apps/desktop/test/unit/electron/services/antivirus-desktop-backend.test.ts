@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createAntivirusDesktopBackend } from '../../../../electron/services/antivirus-desktop-backend';
+import { createAntivirusDesktopBackend, requireScannerSecureStorage } from '../../../../electron/services/antivirus-desktop-backend';
 import type { AntivirusDependencies, ScanSource, ScannerConfiguration } from '../../../../electron/services/antivirus-scan-service';
 import { consentFingerprint, scannerOrigin, type ScannerCapabilities } from '../../../../electron/services/antivirus-transport';
 
@@ -86,12 +86,98 @@ describe('scanner credential storage', () => {
     expect(h.resetWarnings).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects insecure Linux basic_text and missing OS encryption', async () => {
-    h.available = false; await expect(deps().writeConfiguration('clamav-scan', configuration())).rejects.toThrow(/secure key store/);
+  it('keeps credentials in memory when OS encryption is unavailable or Linux uses basic_text', async () => {
+    const config = configuration(); h.available = false;
+    expect(() => requireScannerSecureStorage()).toThrow(/secure key store/);
+    await deps().writeConfiguration('clamav-scan', config);
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(config);
+    expect(deps().credentialStorage?.('clamav-scan')).toBe('session');
     h.available = true; Object.defineProperty(process, 'platform', { value: 'linux', configurable: true }); h.storageBackend = 'basic_text';
-    await expect(deps().writeConfiguration('clamav-scan', configuration())).rejects.toThrow(/secure key store/);
+    expect(() => requireScannerSecureStorage()).toThrow(/secure key store/);
+    await deps().writeConfiguration('clamav-scan', config);
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(config);
     expect(h.encrypt).not.toHaveBeenCalled(); expect(h.blobs.size).toBe(0);
-    expect(h.resetWarnings).not.toHaveBeenCalled();
+    expect(h.resetWarnings).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets session credentials on explicit disable and on a new app backend instance', async () => {
+    h.available = false; await deps().writeConfiguration('clamav-scan', configuration());
+    await deps().writeConfiguration('clamav-scan', undefined);
+    expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+    await deps().writeConfiguration('clamav-scan', configuration());
+    createAntivirusDesktopBackend();
+    expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+    expect(h.blobs.size).toBe(0); expect(h.encrypt).not.toHaveBeenCalled();
+  });
+
+  it('can reconnect in memory and explicitly save anew after the OS keychain recovers', async () => {
+    const config = configuration(); h.available = false;
+    await deps().writeConfiguration('clamav-scan', config);
+    const updated = { ...config, credential: 'synthetic-reconnected-key' };
+    await deps().writeConfiguration('clamav-scan', updated);
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(updated);
+    expect(h.blobs.size).toBe(0);
+    h.available = true;
+    // Availability alone does not silently persist a session credential.
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(updated);
+    expect(deps().credentialStorage?.('clamav-scan')).toBe('session'); expect(h.encrypt).not.toHaveBeenCalled();
+    await deps().writeConfiguration('clamav-scan', updated);
+    expect(deps().credentialStorage?.('clamav-scan')).toBe('os-keychain');
+    expect(h.blobs.get('antivirus-config:clamav-scan')?.subarray(0, 5).toString()).toBe('ENC1:');
+    createAntivirusDesktopBackend(); expect(await deps().readConfiguration('clamav-scan')).toEqual(updated);
+    await deps().writeConfiguration('clamav-scan', undefined);
+    expect(h.blobs.size).toBe(0); expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+  });
+
+  it('preserves an existing encrypted configuration throughout a transient unavailable keychain', async () => {
+    const config = configuration(); await deps().writeConfiguration('clamav-scan', config);
+    const saved = Buffer.from(h.blobs.get('antivirus-config:clamav-scan')!);
+    h.available = false;
+    await expect(deps().readConfiguration('clamav-scan')).rejects.toThrow(/secure key store/);
+    expect(deps().savedCredentialsLocked?.('clamav-scan')).toBe(true);
+    const temporary = { ...config, credential: 'synthetic-replacement' };
+    await deps().writeConfiguration('clamav-scan', temporary);
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(temporary);
+    expect(deps().savedCredentialsLocked?.('clamav-scan')).toBe(false);
+    expect(h.blobs.get('antivirus-config:clamav-scan')).toEqual(saved);
+    h.available = true;
+    // Recovering the keychain does not silently replace either credential.
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(temporary);
+    createAntivirusDesktopBackend();
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(config);
+    expect(h.encrypt).toHaveBeenCalledOnce();
+  });
+
+  it('explicitly forgetting a locked sign-in removes both its encrypted copy and session shadow', async () => {
+    await deps().writeConfiguration('clamav-scan', configuration());
+    h.available = false;
+    await deps().writeConfiguration('clamav-scan', { ...configuration(), credential: 'synthetic-session-key' });
+    await deps().writeConfiguration('clamav-scan', undefined);
+    expect(h.blobs.size).toBe(0); expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+    h.available = true; createAntivirusDesktopBackend();
+    expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+  });
+
+  it('does not replace a failed OS-encrypted save with an unprotected persistent or session secret', async () => {
+    h.encrypt.mockImplementation(() => { throw new Error('Keychain is locked'); });
+    await expect(deps().writeConfiguration('clamav-scan', configuration())).rejects.toThrow('Keychain is locked');
+    expect(h.blobs.size).toBe(0); expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+  });
+
+  it('keeps a consented memory-only choice in memory even if the keychain recovers before saving', async () => {
+    const config = configuration();
+    await deps().writeConfiguration('clamav-scan', config, 'session');
+    expect(await deps().readConfiguration('clamav-scan')).toEqual(config);
+    expect(deps().credentialStorage?.('clamav-scan')).toBe('session');
+    expect(deps().newConfigurationStorage?.()).toBe('os-keychain');
+    expect(h.encrypt).not.toHaveBeenCalled(); expect(h.blobs.size).toBe(0);
+  });
+
+  it('requires re-verification when an OS-persistent choice loses its keychain before saving', async () => {
+    h.available = false;
+    await expect(deps().writeConfiguration('clamav-scan', configuration(), 'os-keychain')).rejects.toThrow(/secure key store/);
+    expect(await deps().readConfiguration('clamav-scan')).toBeUndefined();
+    expect(h.blobs.size).toBe(0); expect(h.encrypt).not.toHaveBeenCalled();
   });
 
   it('fails closed for an unreadable envelope or unsuccessful database write', async () => {

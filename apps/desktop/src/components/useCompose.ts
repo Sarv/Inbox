@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, type MouseEvent as ReactMouseEvent } fro
 
 import { useClickAway } from '../hooks/useClickAway';
 import { useEmailStore } from '../store/email-store';
+import type { LocalCalendarAvailability } from '../types/local-calendar';
 import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { editorHtmlToText } from '../utils/editor-text';
 import { currentViewport, placeMenu, type MenuPlacement } from '../utils/menu-placement';
@@ -38,6 +39,7 @@ export interface ComposeDraft {
     agentDecisionId?: string;
     /** The draft was saved encrypted, so it reopens with encryption on. */
     pgpEncrypted?: boolean;
+    calendarAvailability?: LocalCalendarAvailability;
 }
 
 export interface UseComposeProps {

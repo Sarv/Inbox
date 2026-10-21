@@ -7,19 +7,31 @@
 import { emailContentHash, resolveStandardFolder, createLogger, messageIdKey, withFolderSelected } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, accountDraftRowSql, bodyLengthFromParam, cleanBodyExpression, rawBodyExpression, rawBodyForStorage, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
-import { ipcMain } from 'electron';
+import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import pLimit from 'p-limit';
 
-import { resolveAccountTarget } from '../services/account-target';
+import type { LocalCalendarAvailability } from '../../src/types/local-calendar';
+import { requireAccountStorage, requireTargetAccountId, resolveAccountTarget, resolveNamedOrActiveAccountTarget } from '../services/account-target';
 import { seedAttachmentCache } from '../services/attachment-cache';
+import { deleteDraftCalendarAvailability, readDraftCalendarAvailability, saveDraftCalendarAvailability, validateDraftCalendarAvailability } from '../services/draft-calendar-metadata';
 import { encryptDraftMime } from '../services/pgp-outgoing';
 import { getPgpKeyring } from '../services/pgp-service';
 import { pokeReadModel } from '../services/read-model-poke';
-import { requireStorage, getCurrentAccountId, getAllAccountIds, sendToWindow } from '../shared';
+import { requireStorage, getCurrentAccountId, getAllAccountIds, getMainWindow, sendToWindow } from '../shared';
 
 import { decodeDraftAttachments, draftAttachmentColumns, draftMimeAttachments, type DecodedDraftAttachment, type DraftAttachment } from './draft-attachments';
 const logger = createLogger('draft-handlers');
+
+function authorizeCalendarMetadata(event: IpcMainInvokeEvent): void {
+  const window = getMainWindow();
+  if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('Meeting draft data is available only to the main Sarv Inbox window.');
+}
+
+function removeCalendarMetadata(db: any, owner: string | null, messageIds: string[]): void {
+  try { deleteDraftCalendarAvailability(db, owner, messageIds); }
+  catch (error) { logger.warn('[Drafts] Could not remove local meeting draft metadata:', error instanceof Error ? error.message : 'Local metadata unavailable'); }
+}
 
 // Draft diagnostic log (from the "immortal draft" investigation). Kept as a
 // plain console log — the previous version did a SYNCHRONOUS fs.appendFileSync
@@ -199,10 +211,16 @@ export async function saveDraftToIMAP(draft: {
    * before it reaches the local DB or the server's Drafts folder.
    */
   pgp?: { encrypt?: boolean };
+  /** Local-only scheduling evidence; never included in the IMAP MIME. */
+  calendarAvailability?: LocalCalendarAvailability;
 }, options: { messageId?: string } = {}): Promise<{ success: boolean; folderPath?: string; messageId?: string; error?: string }> {
   // Resolve the TARGET account's storage + sync engine (falls back to the active
   // account when no accountId is given).
-  const { storage, syncEngine, accountId: owner } = await resolveAccountTarget(draft.accountId);
+  const proposal = draft.calendarAvailability === undefined ? undefined : validateDraftCalendarAvailability(draft.calendarAvailability);
+  const strictOwner = proposal ? requireTargetAccountId(draft.accountId) : undefined;
+  const { storage, syncEngine, accountId: owner } = strictOwner
+    ? { ...await resolveNamedOrActiveAccountTarget(strictOwner), accountId: strictOwner }
+    : await resolveAccountTarget(draft.accountId);
   if (!syncEngine) {
     return { success: false, error: 'No sync engine for account' };
   }
@@ -276,6 +294,11 @@ export async function saveDraftToIMAP(draft: {
       return { success: false, error: `The draft could not be encrypted, so it was not saved: ${(err as Error)?.message ?? String(err)}` };
     }
   }
+
+  // Persist evidence before publishing the local row or appending remotely. A
+  // failure must leave the old draft intact, rather than save meeting claims
+  // that would reopen without their mandatory availability check.
+  if (proposal) saveDraftCalendarAvailability((storage as any).db, owner!, messageId, proposal);
 
   // 1. Write to local DB first — instant visibility in the Drafts folder.
   try {
@@ -592,7 +615,7 @@ export async function writeLocalDraftRow(storage: ReturnType<typeof requireStora
  */
 export async function deleteDraftsForThread(accountId: string | undefined, threadId: string): Promise<void> {
   if (!threadId) return;
-  const { storage, syncEngine } = await resolveAccountTarget(accountId);
+  const { storage, syncEngine, accountId: owner } = await resolveAccountTarget(accountId);
   const db = (storage as any).db;
   if (!db?.prepare) return;
 
@@ -615,6 +638,7 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
   try {
     const ph = messageIds.map(() => '?').join(',');
     db.prepare(`DELETE FROM emails WHERE message_id IN (${ph})`).run(...messageIds);
+    removeCalendarMetadata(db, owner, messageIds);
   } catch (err) {
     logger.error('[Drafts] send-cleanup local delete failed:', err);
   }
@@ -648,6 +672,16 @@ export async function deleteDraftsForThread(accountId: string | undefined, threa
 }
 
 export function registerDraftHandlers(): void {
+  ipcMain.handle('drafts:get-calendar-availability', async (event, messageId: string, accountId?: string) => {
+    try {
+      authorizeCalendarMetadata(event);
+      const owner = requireTargetAccountId(accountId);
+      const storage = await requireAccountStorage(owner);
+      return { success: true, data: readDraftCalendarAvailability((storage as any).db, owner, messageId) };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'The saved meeting draft could not be read.' };
+    }
+  });
   // Get the drafts folder name
   ipcMain.handle('drafts:get-folder', async (_event, accountId?: string) => {
     try {
@@ -673,8 +707,10 @@ export function registerDraftHandlers(): void {
     accountId?: string;
     attachments?: DraftAttachment[];
     pgp?: { encrypt?: boolean };
+    calendarAvailability?: LocalCalendarAvailability;
   }) => {
     try {
+      if (draft.calendarAvailability !== undefined) authorizeCalendarMetadata(_event);
       return await saveDraftToIMAP(draft);
     } catch (error: any) {
       logger.error('[Drafts] Failed to save draft:', error);
@@ -739,7 +775,7 @@ export function registerDraftHandlers(): void {
     // delete ran against the active account's DB/engine — the wrong ones when the
     // draft belongs to another account (e.g. opened from All Inboxes) — so it
     // removed 0 rows and the draft was undeletable ("immortal draft").
-    const { storage, syncEngine } = await resolveAccountTarget(options.accountId);
+    const { storage, syncEngine, accountId: owner } = await resolveAccountTarget(options.accountId);
     draftLog('delete:resolved', {
       requestedAccountId: options.accountId,
       dbFile: dbFileOf(storage),
@@ -784,13 +820,20 @@ export function registerDraftHandlers(): void {
         if (messageIds.length > 0) {
           const ph = messageIds.map(() => '?').join(',');
           const result = db.prepare(`DELETE FROM emails WHERE message_id IN (${ph})`).run(...messageIds);
+          removeCalendarMetadata(db, owner, messageIds);
           draftLog('delete:local', { count: messageIds.length, changes: result.changes });
         } else if (options.subject && options.to) {
+          let removedMessageIds: string[] = [];
+          try {
+            removedMessageIds = db.prepare(`SELECT message_id FROM emails WHERE subject = ? AND to_address = ? AND instr(tags, '|draft|') > 0 AND ${accountDraftRowSql(db, 'emails')}`)
+              .all(options.subject, options.to).map((row: { message_id: string }) => row.message_id);
+          } catch { /* The existing ordinary draft cleanup remains available. */ }
           const result = db
             // A Sent copy of the same subject and recipient can keep a stale
             // |draft| tag; the ONE draft predicate keeps the sent reply.
             .prepare(`DELETE FROM emails WHERE subject = ? AND to_address = ? AND instr(tags, '|draft|') > 0 AND ${accountDraftRowSql(db, 'emails')}`)
             .run(options.subject, options.to);
+          removeCalendarMetadata(db, owner, removedMessageIds);
           draftLog('delete:local', { by: 'subject', changes: result.changes });
         }
       }
@@ -926,7 +969,7 @@ export function registerDraftHandlers(): void {
     const targets = accountIds.length ? accountIds : [undefined as any];
     for (const accountId of targets) {
       try {
-        const { storage, syncEngine } = await resolveAccountTarget(accountId);
+        const { storage, syncEngine, accountId: owner } = await resolveAccountTarget(accountId);
         const db = (storage as any).db;
         if (!db?.prepare) continue;
 
@@ -950,6 +993,7 @@ export function registerDraftHandlers(): void {
         if (rows.length > 0) {
           const ph = rows.map(() => '?').join(',');
           db.prepare(`DELETE FROM emails WHERE message_id IN (${ph})`).run(...rows.map((r) => r.message_id));
+          removeCalendarMetadata(db, owner, rows.map(row => row.message_id));
           pokeReadModel(storage);
         }
 

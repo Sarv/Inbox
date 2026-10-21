@@ -24,7 +24,7 @@ function fixture() {
     configure: vi.fn(async () => ({ ...VERIFIED, configured: true, enabled: true, allowedAccountIds: ['account-a'] })) };
   const prepareExtension = vi.fn(async () => {});
   const assertAuthorized = vi.fn((id: string) => { if (!['account-a', 'account-b'].includes(id)) throw new Error('Mailbox unavailable'); });
-  const assertSecureStorage = vi.fn();
+  const assertCredentialStorage = vi.fn();
   const openExternal = vi.fn(async () => {});
   const now = vi.fn(() => NOW);
   const urls: string[] = [];
@@ -41,14 +41,36 @@ function fixture() {
     if (path === '/api/v1/tokens/' + ISSUED_ID) return response({}, 204);
     throw new Error('Unexpected request');
   });
-  const service = new AntivirusOAuthService({ scanService: () => scan, prepareExtension, assertAuthorized, assertSecureStorage,
+  const service = new AntivirusOAuthService({ scanService: () => scan, prepareExtension, assertAuthorized, assertCredentialStorage,
     openExternal, loopback, requestFetch: requestFetch as typeof fetch, now });
-  return { service, scan, prepareExtension, assertAuthorized, assertSecureStorage, openExternal, loopback, requestFetch, urls, now };
+  return { service, scan, prepareExtension, assertAuthorized, assertCredentialStorage, openExternal, loopback, requestFetch, urls, now };
 }
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('native scanner OAuth and private credential activation', () => {
+  it('allows a deliberately fresh session-only sign-in for locked saved credentials without relaxing consent', async () => {
+    const h = fixture();
+    h.scan.getTrustedSetup.mockResolvedValue({ ...EMPTY, configured: true, savedCredentialsLocked: true, credentialStorage: 'session' });
+    h.scan.configure.mockResolvedValue({ ...VERIFIED, configured: true, enabled: true, allowedAccountIds: ['account-a'], credentialStorage: 'session' });
+    await h.service.connect('account-a');
+    await expect(h.service.complete({ challenge: 'synthetic-challenge', accountId: 'account-a', attachmentConsent: false })).rejects.toThrow('approve sharing');
+    expect(h.scan.configure).not.toHaveBeenCalled();
+    expect(await h.service.complete({ challenge: 'synthetic-challenge', accountId: 'account-a', attachmentConsent: true })).toMatchObject({ enabled: true, credentialStorage: 'session' });
+    expect(h.scan.configure).toHaveBeenCalledExactlyOnceWith(SARV_SCANNER_EXTENSION_ID, expect.objectContaining({ allowedAccountIds: ['account-a'], attachmentConsent: true }));
+  });
+
+  it('requires reviewing again and revokes the issued token if credential lifetime changes during OAuth consent', async () => {
+    const h = fixture();
+    h.scan.probe.mockResolvedValueOnce({ challenge: 'synthetic-challenge', setup: { ...VERIFIED, credentialStorage: 'session' } })
+      .mockResolvedValueOnce({ challenge: 'synthetic-fresh-challenge', setup: { ...VERIFIED, credentialStorage: 'os-keychain' } });
+    await h.service.connect('account-a');
+    await expect(h.service.complete({ challenge: 'synthetic-challenge', accountId: 'account-a', attachmentConsent: true })).rejects.toThrow('credential storage');
+    expect(h.scan.configure).not.toHaveBeenCalled();
+    expect(h.requestFetch).toHaveBeenCalledWith(SARV_SCANNER_ORIGIN + '/api/v1/tokens/' + ISSUED_ID,
+      expect.objectContaining({ method: 'DELETE' }));
+  });
+
   // Regression: email/AI OAuth tokens were reused for a separate scanner client or leaked through IPC.
   it('uses the dedicated scanner PKCE client, then creates and saves a credential only after actual privacy consent', async () => {
     const h = fixture();
@@ -156,10 +178,10 @@ describe('native scanner OAuth and private credential activation', () => {
 
   // Regression: starting over must replace the pending transaction and securely refuse a removed mailbox/keychain.
   it('checks mailbox, extension authorization and secure storage before any durable secret is issued', async () => {
-    const h = fixture(); h.assertSecureStorage.mockImplementation(() => { throw new Error('Secure key store unavailable'); });
-    await expect(h.service.connect('account-a')).rejects.toThrow(/Secure key store/);
+    const h = fixture(); h.assertCredentialStorage.mockImplementation(() => { throw new Error('Secure profile unavailable'); });
+    await expect(h.service.connect('account-a')).rejects.toThrow(/Secure profile/);
     expect(h.prepareExtension).not.toHaveBeenCalled(); expect(h.requestFetch).not.toHaveBeenCalled();
-    h.assertSecureStorage.mockReset(); await h.service.connect('account-a');
+    h.assertCredentialStorage.mockReset(); await h.service.connect('account-a');
     h.assertAuthorized.mockImplementation(() => { throw new Error('Mailbox removed'); });
     await expect(h.service.complete({ challenge: 'synthetic-challenge', accountId: 'account-a', attachmentConsent: true })).rejects.toThrow(/Mailbox removed/);
     expect(h.scan.configure).not.toHaveBeenCalled();

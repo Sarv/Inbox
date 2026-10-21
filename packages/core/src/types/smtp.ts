@@ -60,6 +60,9 @@ export interface SendEmailOptions {
   requestReadReceipt?: boolean;
   /** Remind the sender if nobody replies. Recorded only once the send succeeds. */
   followUp?: SendFollowUpRequest;
+  /** Main-owned outbox guard for an explicit RSVP. Local metadata only; never
+   *  serialized into MIME headers or message content. */
+  calendarInvitationResponse?: { invitationId: string; sequence: number; dtstampMs: number; deliveryToken: string };
   /** OpenPGP choice made in compose. Applied by the main process's outgoing
    *  MIME transform; undefined = the account's defaults. */
   pgp?: SendPgpRequest;

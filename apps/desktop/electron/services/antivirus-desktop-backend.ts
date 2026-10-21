@@ -22,29 +22,64 @@ export function requireScannerSecureStorage(): void {
   }
 }
 
-async function readConfiguration(id: string): Promise<ScannerConfiguration | undefined> {
-  getCoreDb(); // An unavailable encrypted profile must not look like a new empty profile.
-  const blob = getBlob(key(id));
-  if (!blob) return undefined;
-  requireScannerSecureStorage();
-  if (blob.subarray(0, 5).toString() !== 'ENC1:') throw new Error('Scanner configuration cannot be securely read.');
-  try { return JSON.parse(safeStorage.decryptString(blob.subarray(5))) as ScannerConfiguration; }
-  catch { throw new Error('Scanner configuration cannot be securely read.'); }
+/** A usable profile can hold a scanner credential in memory without writing it. */
+export function prepareScannerCredentialStorage(): void {
+  getCoreDb(); // A locked profile must not look like a new empty profile.
 }
 
-async function writeConfiguration(id: string, config: ScannerConfiguration | undefined): Promise<void> {
-  getCoreDb();
-  if (!config) {
-    deleteBlob(key(id));
-    if (getBlob(key(id))) throw new Error('Scanner configuration could not be removed.');
+function scannerConfigurationStore() {
+  // Owned by this backend instance. Never serialized, logged or returned to a
+  // renderer/extension; a new app process starts with no session credentials.
+  const session = new Map<string, ScannerConfiguration>();
+  const copy = (config: ScannerConfiguration): ScannerConfiguration => JSON.parse(JSON.stringify(config));
+  const readConfiguration = async (id: string): Promise<ScannerConfiguration | undefined> => {
+    prepareScannerCredentialStorage();
+    const storageKey = key(id);
+    const transient = session.get(id);
+    if (transient) return copy(transient);
+    const blob = getBlob(storageKey);
+    if (!blob) return undefined;
+    // Never turn an existing encrypted configuration that cannot be opened
+    // into "setup missing", or silently replace/downgrade its saved secret.
+    requireScannerSecureStorage();
+    if (blob.subarray(0, 5).toString() !== 'ENC1:') throw new Error('Scanner configuration cannot be securely read.');
+    try { return JSON.parse(safeStorage.decryptString(blob.subarray(5))) as ScannerConfiguration; }
+    catch { throw new Error('Scanner configuration cannot be securely read.'); }
+  };
+  const writeConfiguration = async (id: string, config: ScannerConfiguration | undefined, storage?: 'session' | 'os-keychain'): Promise<void> => {
+    prepareScannerCredentialStorage();
+    const storageKey = key(id);
+    if (!config) {
+      deleteBlob(storageKey);
+      if (getBlob(storageKey)) throw new Error('Scanner configuration could not be removed.');
+      session.delete(id);
+      unscannedWarningPreferences.resetAll();
+      return;
+    }
+    if (storage === 'os-keychain') requireScannerSecureStorage();
+    if (storage === 'session' || !isOsBackedEncryption()) {
+      // A consented fresh credential may shadow a locked saved one for this
+      // session. Leave the encrypted blob untouched so it returns after quit
+      // or keychain recovery; it is never downgraded or treated as absent.
+      session.set(id, copy(config));
+      unscannedWarningPreferences.resetAll();
+      return;
+    }
+    const encoded = Buffer.concat([Buffer.from('ENC1:'), safeStorage.encryptString(JSON.stringify(config))]);
+    setBlob(storageKey, encoded);
+    if (!getBlob(storageKey)?.equals(encoded)) throw new Error('Scanner configuration could not be securely saved.');
+    session.delete(id);
     unscannedWarningPreferences.resetAll();
-    return;
-  }
-  requireScannerSecureStorage();
-  const encoded = Buffer.concat([Buffer.from('ENC1:'), safeStorage.encryptString(JSON.stringify(config))]);
-  setBlob(key(id), encoded);
-  if (!getBlob(key(id))?.equals(encoded)) throw new Error('Scanner configuration could not be securely saved.');
-  unscannedWarningPreferences.resetAll();
+  };
+  return {
+    readConfiguration, writeConfiguration,
+    credentialStorage: (id: string): 'os-keychain' | 'session' => session.has(id) || !isOsBackedEncryption() ? 'session' : 'os-keychain',
+    newConfigurationStorage: (): 'os-keychain' | 'session' => isOsBackedEncryption() ? 'os-keychain' : 'session',
+    savedCredentialsLocked: (id: string): boolean => {
+      prepareScannerCredentialStorage();
+      return !session.has(id) && !isOsBackedEncryption() && !!getBlob(key(id));
+    },
+  };
 }
 
 function names(value: string | null): string[] {
@@ -103,7 +138,7 @@ async function read(source: ScanSource, maxBytes: number, signal?: AbortSignal):
 }
 
 export function createAntivirusDesktopBackend(): ExtensionSecurityBackend {
-  return initializeAntivirusScanService({ readConfiguration, writeConfiguration,
+  return initializeAntivirusScanService({ ...scannerConfigurationStore(),
     accounts: () => readRegistryAccounts().map(a => ({ id: a.id, name: a.name || a.email, email: a.email })), sources, read,
     allowDevelopmentLoopback: isDevBuild(),
     openSetup: extensionId => getMainWindow()?.webContents.send('antivirus:openSetup', { extensionId }),

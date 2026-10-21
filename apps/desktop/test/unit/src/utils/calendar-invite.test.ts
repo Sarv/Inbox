@@ -223,6 +223,12 @@ describe('isInviteCancelled', () => {
 });
 
 describe('formatEventRange', () => {
+  it('keeps all-day dates in the calendar timezone when the viewer timezone differs', () => {
+    const start = Date.parse('2026-10-20T18:30:00Z');
+    const end = Date.parse('2026-10-21T18:30:00Z');
+    const formatted = formatEventRange(start, end, true, new Date(), 'Asia/Kolkata');
+    expect(formatted).toContain('Oct 21'); expect(formatted).not.toContain('Oct 20'); expect(formatted).toContain('All day');
+  });
   // Wednesday 19 Aug 2026, 10:00 local. Frozen because dayLabel's Today/Tomorrow
   // come from date-fns isToday/isTomorrow, which read the SYSTEM clock (the `now`
   // argument only drives the weekday/dated branches) — so the clock must be

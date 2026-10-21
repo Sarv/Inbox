@@ -68,8 +68,8 @@ describe('electron-builder configuration', () => {
   it('keeps the Linux desktop entry under the v26 `entry` key', () => {
     const linux = buildConfig['linux'] as { desktop?: { entry?: Record<string, string> } };
     expect(linux.desktop?.entry).toMatchObject({
-      StartupWMClass: 'Sarv Inbox',
-      MimeType: 'x-scheme-handler/mailto;',
+      StartupWMClass: 'com.sarv.sarvinbox',
+      MimeType: 'x-scheme-handler/mailto;x-scheme-handler/webcal;x-scheme-handler/webcals;text/calendar;',
     });
   });
 

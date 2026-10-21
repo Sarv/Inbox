@@ -17,11 +17,13 @@ import type {
   InboxAssistantSource,
 } from '../../types/inbox-assistant';
 import type { InboxAssistantReviewAction, InboxAssistantReviewKind } from '../../types/inbox-assistant-actions';
+import type { LocalCalendarAvailabilityRequest } from '../../types/local-calendar';
 import { AccountSelectorTrigger } from '../AccountSelectorTrigger';
 
 import { AssistantReviewCard } from './AssistantReviewCard';
 import { AssistantUsage } from './AssistantUsage';
 import { ChatSidebar } from './ChatSidebar';
+import { MeetingDraftFields } from './MeetingDraftFields';
 
 export interface InboxAssistantViewState {
   chatId: string | null;
@@ -331,6 +333,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const [draftFormOpen, setDraftFormOpen] = useState(false);
   const [draftAccountId, setDraftAccountId] = useState('');
   const [draftInstructions, setDraftInstructions] = useState('');
+  const [draftMeeting, setDraftMeeting] = useState<LocalCalendarAvailabilityRequest>();
   const [draftCreating, setDraftCreating] = useState(false);
   const [actionCreating, setActionCreating] = useState(false);
   const [stoppingRequestId, setStoppingRequestId] = useState<string | null>(null);
@@ -579,6 +582,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     setRenameSaving(false);
     setDraftFormOpen(false);
     setDraftInstructions('');
+    setDraftMeeting(undefined);
     setEditingExchangeId(null);
     setEditQuestion('');
     setRewinding(false);
@@ -883,7 +887,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     setError(null);
     try {
       const instructions = draftInstructions.trim();
-      const result = await window.electronAPI.inboxAssistant.draftEmail({ requestId, chatId, accountId: draftAccountId, ...(instructions ? { instructions } : {}) });
+      const result = await window.electronAPI.inboxAssistant.draftEmail({ requestId, chatId, accountId: draftAccountId, ...(instructions ? { instructions } : {}), ...(draftMeeting ? { meeting: draftMeeting } : {}) });
       if (!result.success) throw new Error(result.error);
       if (result.data.chatId !== chatId || result.data.accountId !== draftAccountId) throw new Error('The draft belongs to a different conversation or sending account.');
       if (!isVisibleRequest(chatId, requestId) || cancelledRequests.current.has(requestId)) return;
@@ -1090,7 +1094,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
           {!compact && modeControl}
           <button type="button" disabled={busy || !!pendingQuestion || !exchanges.length || !accounts.length || !onOpenDraft} onClick={() => { const from = accounts.find(account => account.id === defaultDraftAccountId) ?? singleAccount ?? accounts[0]; setDraftAccountId(from?.id ?? ''); setDraftFormOpen(open => !open); }} aria-label="Draft email" title="Draft email from this conversation" aria-expanded={draftFormOpen} aria-controls="assistant-draft-form" className={compact ? compactButton : 'flex shrink-0 items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-40'}><MailPlus className="h-4 w-4" />{!compact && <span>Draft email</span>}</button>
           {compact && <button type="button" onClick={() => void newChat()} disabled={loading || creating || deletePending} aria-label="New conversation" title="New conversation" className={compactButton}>{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button>}
-          {draftFormOpen && <form id="assistant-draft-form" aria-label="Draft from conversation" onSubmit={event => void createEmailDraft(event)} onKeyDown={event => { if (event.key === 'Escape') setDraftFormOpen(false); }} className={`assistant-raised absolute z-20 mt-2 space-y-4 overflow-y-auto rounded-xl border border-border bg-background p-4 shadow-xl ${compact ? 'left-3 right-3 top-12 max-h-[calc(100%-5rem)]' : 'right-4 top-full max-h-[calc(100vh-12rem)] w-96 max-w-[calc(100vw-3rem)]'}`}><h2 className="text-sm font-semibold">Draft from conversation</h2><label className="block space-y-1 text-xs font-medium"><span>From</span><select autoFocus={visible} aria-label="Draft sending account" value={draftAccountId} onChange={event => setDraftAccountId(event.target.value)} className="block w-full rounded-md border border-border bg-background px-2 py-2 text-sm">{accounts.map(account => <option key={account.id} value={account.id}>{account.email}</option>)}</select></label><label className="block space-y-1 text-xs font-medium"><span>Instructions (optional)</span><textarea aria-label="Draft instructions" value={draftInstructions} onChange={event => setDraftInstructions(event.target.value)} maxLength={4000} rows={3} placeholder="For example, summarize the quotation and ask for feedback." className="max-h-40 w-full resize-none rounded-md border border-border bg-background px-2 py-2 text-sm font-normal" /></label><div className="flex justify-end gap-2"><button type="button" onClick={() => setDraftFormOpen(false)} className="rounded-md px-3 py-2 text-xs hover:bg-accent">Cancel</button><button type="submit" className="assistant-primary-action rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90">Create draft</button></div></form>}
+          {draftFormOpen && <form id="assistant-draft-form" aria-label="Draft from conversation" onSubmit={event => void createEmailDraft(event)} onKeyDown={event => { if (event.key === 'Escape') setDraftFormOpen(false); }} className={`assistant-raised absolute z-20 mt-2 space-y-4 overflow-y-auto rounded-xl border border-border bg-background p-4 shadow-xl ${compact ? 'left-3 right-3 top-12 max-h-[calc(100%-5rem)]' : 'right-4 top-full max-h-[calc(100vh-12rem)] w-96 max-w-[calc(100vw-3rem)]'}`}><h2 className="text-sm font-semibold">Draft from conversation</h2><label className="block space-y-1 text-xs font-medium"><span>From</span><select autoFocus={visible} aria-label="Draft sending account" value={draftAccountId} onChange={event => setDraftAccountId(event.target.value)} className="block w-full rounded-md border border-border bg-background px-2 py-2 text-sm">{accounts.map(account => <option key={account.id} value={account.id}>{account.email}</option>)}</select></label><label className="block space-y-1 text-xs font-medium"><span>Instructions (optional)</span><textarea aria-label="Draft instructions" value={draftInstructions} onChange={event => setDraftInstructions(event.target.value)} maxLength={4000} rows={3} placeholder="For example, summarize the quotation and ask for feedback." className="max-h-40 w-full resize-none rounded-md border border-border bg-background px-2 py-2 text-sm font-normal" /></label><MeetingDraftFields value={draftMeeting} onChange={setDraftMeeting} /><div className="flex justify-end gap-2"><button type="button" onClick={() => setDraftFormOpen(false)} className="rounded-md px-3 py-2 text-xs hover:bg-accent">Cancel</button><button type="submit" disabled={!!draftMeeting && (!Number.isFinite(draftMeeting.startMs) || !Number.isFinite(draftMeeting.endMs))} className="assistant-primary-action rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">Create draft</button></div></form>}
         </header>
 
         {workActive && renderWorkBar()}

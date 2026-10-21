@@ -1,4 +1,5 @@
 import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewKind } from './inbox-assistant-actions';
+import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
 
 export type InboxAssistantActionMode = 'review' | 'approve_for_me';
 
@@ -205,6 +206,7 @@ export interface InboxAssistantDraftRequest {
   chatId: string;
   accountId: string;
   instructions?: string;
+  meeting?: LocalCalendarAvailabilityRequest;
 }
 
 /** A reviewable plain-text draft; opening it never sends email. */
@@ -215,6 +217,7 @@ export interface InboxAssistantDraft {
   cc: string[];
   subject: string;
   body: string;
+  calendarAvailability?: LocalCalendarAvailability;
 }
 
 export type InboxAssistantResult<T> =

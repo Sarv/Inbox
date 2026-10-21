@@ -1,3 +1,4 @@
+import { escapeHtml } from '@sarvinbox/core/html-escape';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -9,16 +10,19 @@ import { AssistantSourcePane } from './components/assistant/AssistantSourcePane'
 import { AssistantWorkspace } from './components/assistant/AssistantWorkspace';
 import { InboxAssistant } from './components/assistant/InboxAssistant';
 import { AttachmentViewer } from './components/attachment-viewer/AttachmentViewer';
+import { Calendar } from './components/calendar/Calendar';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { ConnectionSecurityBanner } from './components/ConnectionSecurityBanner';
 import { Contacts } from './components/Contacts';
 import { CrashReportConsentDialog } from './components/CrashReportConsentDialog';
+import { DefaultAppsStartupPrompt } from './components/DefaultAppsStartupPrompt';
 import { EmailList } from './components/email-list';
 import { ExtensionManager } from './components/ExtensionManager';
 import { ExtensionNotification } from './components/ExtensionNotification';
 import { MailDetailWithPanels } from './components/extensions/MailDetailWithPanels';
 import { useExtensionOpenMessage } from './components/extensions/useExtensionOpenMessage';
+import { ExternalOpenIntents, type ExternalComposeSeed } from './components/ExternalOpenIntents';
 import { FollowUpsList } from './components/FollowUpsList';
 import { GlobalConfirmDialog } from './components/GlobalConfirmDialog';
 import { InAppNotification } from './components/InAppNotification';
@@ -54,6 +58,7 @@ import { useEmailStore } from './store/email-store';
 import { migrateCredentialsToVault, canonicalizeAccountIds } from './store/helpers';
 import { refreshVisibleViewForFolder } from './store/slices/sync-slice';
 import type { InboxAssistantSource } from './types/inbox-assistant';
+import type { LocalCalendarOpenEvent } from './types/local-calendar';
 import { shouldShowOnboarding, shouldShowNoAccountEmptyState } from './utils/app-gates';
 import { openInboxAssistantDraft } from './utils/inbox-assistant-draft';
 import { setImageTrustAccount } from './utils/remote-images';
@@ -97,6 +102,18 @@ function App() {
   // Survives a reload (Cmd+R, the dev server, the error boundary's retry) so the
   // screen you were on comes back instead of the inbox. See useActiveSection.
   const [activeSection, setActiveSection] = useActiveSection();
+  const [calendarEvent, setCalendarEvent] = useState<LocalCalendarOpenEvent | null>(null);
+  const [defaultAppsPromptOpen, setDefaultAppsPromptOpen] = useState(false);
+  const [externalOpen, setExternalOpen] = useState(false);
+  const openExternalCompose = useCallback((seed: ExternalComposeSeed) => {
+    const store = useEmailStore.getState();
+    if (store.compose.isOpen) return false;
+    if (!store.accounts.length) throw new Error('Add an email account in Settings to open this email link.');
+    const accountId = store.accounts.some(account => account.id === store.activeAccountId) ? store.activeAccountId! : store.accounts[0]!.id;
+    store.editDraftInComposer({ accountId, to: seed.to.join(', '), cc: seed.cc.join(', '), bcc: seed.bcc.join(', '), subject: seed.subject,
+      htmlContent: escapeHtml(seed.body).split('\n').map(line => `<p>${line || '&nbsp;'}</p>`).join(''), attachments: [] });
+    return true;
+  }, []);
   // When set, the Settings screen opens directly on this tab (e.g. the
   // no-account empty state deep-links to "accounts"). Cleared on any manual
   // section switch so the gear normally opens General.
@@ -203,6 +220,19 @@ function App() {
     }
     navigate();
   }, [activeSection, doNavigate]);
+
+  useEffect(() => {
+    const openCalendarEvent = (event: LocalCalendarOpenEvent) => requestSection('calendar', () => setCalendarEvent(event));
+    const unsubscribe = window.electronAPI?.calendar?.onOpenEvent(openCalendarEvent);
+    const onCalendarToast = (event: Event) => {
+      if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== 'object') return;
+      const { eventId, startMs, occurrenceId } = event.detail;
+      if (typeof eventId === 'string' && eventId.length > 0 && eventId.length <= 300 && typeof startMs === 'number' && Number.isFinite(startMs)
+        && (occurrenceId === undefined || (typeof occurrenceId === 'string' && occurrenceId.length <= 500))) openCalendarEvent({ eventId, startMs, ...(occurrenceId ? { occurrenceId } : {}) });
+    };
+    window.addEventListener('sarvinbox:calendar-open', onCalendarToast);
+    return () => { unsubscribe?.(); window.removeEventListener('sarvinbox:calendar-open', onCalendarToast); };
+  }, [requestSection]);
 
   // Single entry to the add-account flow: go to Settings → Accounts and open the
   // wizard there, so every "Add account" affordance behaves identically.
@@ -889,12 +919,13 @@ function App() {
         return null; // The persistent workspace owns the sole assistant instance.
       case 'extensions':
         return <ExtensionManager />;
+      case 'calendar':
+        return <Calendar initialEvent={calendarEvent} onEventOpened={event => setCalendarEvent(current => current === event ? null : current)} />;
       case 'teams':
       case 'chat':
       case 'meet':
       case 'webinar':
       case 'drive':
-      case 'calendar':
         return (
           <div className="flex-1 min-w-0 h-full overflow-y-auto p-6 text-muted-foreground">
             <div>
@@ -1041,7 +1072,9 @@ function App() {
       <UpdateDialog />
       {/* One-time crash-report consent (CASA L-8). Self-hiding: only while main
           reports the question unanswered, and never on top of onboarding. */}
-      <CrashReportConsentDialog suppressed={showOnboarding} />
+      <CrashReportConsentDialog suppressed={showOnboarding || defaultAppsPromptOpen || externalOpen} />
+      <DefaultAppsStartupPrompt suppressed={showOnboarding || checkingConnection || showReauth || compose.isOpen || externalOpen} onOpenChange={setDefaultAppsPromptOpen} />
+      <ExternalOpenIntents suppressed={showOnboarding || checkingConnection || showReauth} onCompose={openExternalCompose} onOpenChange={setExternalOpen} />
 
       {/* Set-up-sending (SMTP) modal — dismissible, opened on demand via the
           'sarvinbox:open-smtp-setup' event from the compose/reply banner. */}

@@ -15,5 +15,6 @@ export function openInboxAssistantDraft(
     to: draft.to.join(', '), cc: draft.cc.join(', '), subject: draft.subject,
     htmlContent: escaped.split(/\r?\n/).map(line => `<p>${line || '&nbsp;'}</p>`).join(''),
     attachments: [],
+    ...(draft.calendarAvailability ? { calendarAvailability: draft.calendarAvailability } : {}),
   });
 }

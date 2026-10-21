@@ -58,6 +58,7 @@ import { startAvatarDiscoveryScheduler, stopAvatarDiscoveryScheduler } from './s
 import { startBackfillScheduler, stopBackfillScheduler } from './services/backfill-scheduler';
 import { startBodyPrefetchScheduler, stopBodyPrefetchScheduler } from './services/body-prefetch-scheduler';
 import { startBodyRehealScheduler, stopBodyRehealScheduler } from './services/body-reheal-scheduler';
+import { startCalendarMailSync, stopCalendarMailSync } from './services/calendar-mail-sync';
 import { startContactEnrichmentScheduler, stopContactEnrichmentScheduler } from './services/contact-enrichment-scheduler';
 import { startConversationScheduler, stopConversationScheduler } from './services/conversation-extraction-scheduler';
 import { backupCoreDb } from './services/core-db';
@@ -75,9 +76,11 @@ import {
 import { createSandboxChannel } from './services/extension-runtime';
 import { createExtensionUIBackend } from './services/extension-ui-backend';
 import { startExtensionWorkflowRunner, stopExtensionWorkflowRunner } from './services/extension-workflow-runner';
+import { getExternalOpenService } from './services/external-open-service';
 import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
 import { startFollowUpChecker, stopFollowUpChecker } from './services/follow-up-checker';
 import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
+import { startLocalCalendarReminders, stopLocalCalendarReminders } from './services/local-calendar-reminders';
 import { offerMoveToApplications } from './services/mac-install-location';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 import { installNativeAttachmentDownloadGuard } from './services/native-attachment-download-guard';
@@ -302,6 +305,8 @@ function stopBackgroundTimers(): void {
   try { pendingPersisterFlush = stopPipelineEventPersister(); } catch {}
   try { stopUnifiedPipeline(); } catch {}
   try { stopNotificationService(); } catch {}
+  try { stopLocalCalendarReminders(); } catch {}
+  try { stopCalendarMailSync(); } catch {}
   try { stopUpdateService(); } catch {}
   try { stopOAuthRefreshScheduler(); } catch {}
   try { getAICategorizationService()?.stopAutoProcess(); } catch {}
@@ -909,7 +914,8 @@ const singleInstanceReady: Promise<void> = (async () => {
 // Surface the existing window instead of spinning up a second process; recreate it
 // if it was closed (macOS keep-alive) OR if it exists but its renderer CRASHED /
 // was destroyed — focusing a dead frame would leave the user staring at a corpse.
-app.on('second-instance', () => {
+app.on('second-instance', (_event, commandLine) => {
+  void getExternalOpenService().enqueueArgv(commandLine).catch(() => logger.warn('[Main] An application open request could not be read.'));
   const existing = getMainWindow();
   const windowUsable = !!existing
     && !existing.isDestroyed()
@@ -921,6 +927,28 @@ app.on('second-instance', () => {
   } else if (action === 'create') {
     createWindow();
   }
+});
+
+// macOS delivers these before ready on a cold launch. Retain them until the
+// authenticated main renderer has opened the composer or import dialog.
+let externalOpenReady = false;
+function showExternalOpenWindow(): void {
+  if (!externalOpenReady) return;
+  const window = getMainWindow();
+  if (!window || window.isDestroyed() || window.webContents.isCrashed()) createWindow();
+  else restoreAndFocusWindow(window);
+}
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  try { getExternalOpenService().enqueueUrl(url); showExternalOpenWindow(); }
+  catch { logger.warn('[Main] An unsupported application link was ignored.'); }
+});
+app.on('open-file', (event, path) => {
+  event.preventDefault();
+  void getExternalOpenService().enqueueFile(path).then(showExternalOpenWindow).catch(error => {
+    logger.warn('[Main] A calendar file could not be read.');
+    if (externalOpenReady) dialog.showErrorBox('Calendar file could not be opened', error instanceof Error ? error.message : 'Choose a valid local .ics calendar file.');
+  });
 });
 
 // ========== App Lifecycle ==========
@@ -1080,6 +1108,7 @@ app.whenReady().then(async () => {
     // auto-categorizing across restarts without having to re-open the settings
     // tab. DB-derived userEmail wins over any stale persisted copy.
     initializeUnifiedPipeline(bootPipelineConfig(loadAgentConfig(), userEmail));
+    startCalendarMailSync();
 
     // Load OAuth client IDs from env (see OAUTH_SETUP.md).
     initializeOAuth();
@@ -1090,6 +1119,10 @@ app.whenReady().then(async () => {
 
     // Register all IPC handlers
     registerAllHandlers();
+    getExternalOpenService().setNotifier(() => {
+      try { getMainWindow()?.webContents.send('defaultApps:pendingOpen'); } catch { /* Retained until acknowledged. */ }
+    });
+    void getExternalOpenService().enqueueArgv(process.argv);
 
     // Start the SMTP outbox (persist-first send retry queue). sendEmailFromMain
     // and appendSentCopy are injected so the service never imports the SMTP
@@ -1099,6 +1132,8 @@ app.whenReady().then(async () => {
 
     // Create main window
     createWindow();
+    externalOpenReady = true;
+    startLocalCalendarReminders();
 
     // Power monitor: handle laptop sleep/wake transitions. When the OS
     // resumes from sleep, the network stack (Wi-Fi reattach + DHCP +

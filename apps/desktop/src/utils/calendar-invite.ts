@@ -135,11 +135,18 @@ export function formatEventRange(
   endMs: number | null,
   isAllDay: boolean,
   now: Date = new Date(),
+  allDayTimeZone?: string,
 ): string {
   const start = new Date(startMs);
   const end = endMs != null ? new Date(endMs) : null;
 
   if (isAllDay) {
+    if (allDayTimeZone) {
+      const formatter = new Intl.DateTimeFormat(undefined, { timeZone: allDayTimeZone, weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+      const first = formatter.format(start);
+      const last = formatter.format(new Date(end && end.getTime() > startMs ? end.getTime() - 1 : startMs));
+      return first === last ? `${first} · All day` : `${first} – ${last} · All day`;
+    }
     if (!end || differenceInCalendarDays(end, start) <= 1) return dayLabel(start, now);
     const lastDay = new Date(end.getTime() - MS_PER_DAY); // DTEND is exclusive
     return `${dayLabel(start, now)} – ${dayLabel(lastDay, now)}`;

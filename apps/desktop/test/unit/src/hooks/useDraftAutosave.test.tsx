@@ -43,6 +43,22 @@ afterEach(() => {
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 
 describe('useDraftAutosave — closing the compose box', () => {
+  it('keeps local meeting evidence on close and when replacing the reopened draft', async () => {
+    const startMs = Date.parse('2026-10-22T09:00:00Z');
+    const calendarAvailability = { startMs, endMs: startMs + 3_600_000, checkedAt: startMs - 86_400_000, timeZone: 'UTC', durationMinutes: 30,
+      calendarIds: ['local'], calendarNames: ['My calendar'], scope: 'local-only' as const, status: 'ready' as const,
+      slots: [{ startMs, endMs: startMs + 1_800_000, label: 'Thu, 22 Oct, 09:00 UTC – 09:30' }] };
+    const view = render(<Probe opts={{ ...base, body: calendarAvailability.slots[0].label, htmlBody: '<p>Meeting times</p>', accountId: 'work', calendarAvailability }} />);
+    view.unmount(); await flush();
+    expect(save.mock.calls[0][0]).toMatchObject({ accountId: 'work', calendarAvailability });
+
+    const reopened = render(<Probe opts={{ ...base, body: 'Updated meeting', htmlBody: '<p>Updated meeting</p>', accountId: 'work', calendarAvailability,
+      initialDraftMessageId: '<m1@x>', initialDraftUnsaved: true }} />);
+    reopened.unmount(); await flush();
+    expect(save.mock.calls[1][0]).toMatchObject({ accountId: 'work', calendarAvailability });
+    expect(del).toHaveBeenCalledWith({ accountId: 'work', messageId: '<m1@x>' });
+  });
+
   // Breaks: the core promise — close with content and a draft exists.
   it('saves on close', async () => {
     const view = render(<Probe opts={{ ...base, body: 'hello', htmlBody: '<p>hello</p>' }} />);

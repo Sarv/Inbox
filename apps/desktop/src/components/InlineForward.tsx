@@ -17,11 +17,13 @@ import { usePgpCompose } from '../hooks/usePgpCompose';
 import { getDefaultProvider, PolishContext } from '../services/ai-service';
 import { useEmailStore } from '../store/email-store';
 import { checkAttachmentBeforeSend } from '../utils/attachment-reminder';
+import { recheckDraftCalendarAvailability } from '../utils/calendar-draft';
 import { mergeRecipientEmails } from '../utils/compose-recipients';
 import { assembleOutgoingHtml, convertToEmailHtml } from '../utils/email-html';
 import { buildForwardQuoteHtml, composeForwardDraft, forwardSubject, type ForwardSource } from '../utils/forward-quote';
 import { reportSendFailure } from '../utils/send-failure';
 
+import { CalendarDraftBanner } from './assistant/CalendarDraftBanner';
 import { ComposeToolbar } from './ComposeToolbar';
 import { EmailInput } from './EmailInput';
 import { ForwardAttachmentStatus } from './ForwardAttachmentStatus';
@@ -98,6 +100,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
     subjectPrefilled: true,
     body: plainBody,
     htmlBody,
+    calendarAvailability: draft?.calendarAvailability,
     composeForSave: (note) => composeForwardDraft(forwardEmail, note),
     attachments,
     // A fresh forward's files are the original's, loaded for the user; a
@@ -157,6 +160,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
 
     setSending(true);
     try {
+      await recheckDraftCalendarAvailability(draft?.calendarAvailability, plainBody);
       const quotedHtml = buildForwardQuoteHtml(forwardEmail);
       const emailFriendlyBody = convertToEmailHtml(htmlBody);
       const fullHtml = assembleOutgoingHtml(emailFriendlyBody, signatureHtml, quotedHtml);
@@ -187,6 +191,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
           attachments,
           replyToEmail: forwardEmail,
           mode: 'forward',
+          calendarAvailability: draft?.calendarAvailability,
           isInline: true,
           draftMessageId: ownedDraftId,
           accountId: forwardAccountId,
@@ -324,6 +329,7 @@ export function InlineForward({ forwardEmail, draft, onClose, embedded = false }
         />
       </div>
 
+      <CalendarDraftBanner proposal={draft?.calendarAvailability} body={plainBody} />
       {/* Editor Area */}
       <div className="min-h-[150px]" onContextMenu={(e) => handleSelectionContextMenu(e, hasAIProvider)}>
         <RichTextEditor

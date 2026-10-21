@@ -93,6 +93,11 @@ function withinWorkingHours(): boolean {
   return start <= end ? cur >= start && cur < end : cur >= start || cur < end;
 }
 
+/** Shared sound policy for explicit reminders as well as new-mail notices. */
+export function notificationShouldBeSilent(): boolean {
+  return !(config.sound && withinWorkingHours());
+}
+
 export interface NewMailNotice {
   emailId: string;
   accountId: string;
@@ -269,7 +274,7 @@ export function notifyFollowUpDue(notice: FollowUpDueNotice): void {
   const multiAccount = Object.keys(config.accounts).length > 1;
   const subtitle = multiAccount ? config.accounts[notice.accountId]?.label || undefined : undefined;
   const target = notice.emailId ? { accountId: notice.accountId, emailId: notice.emailId, threadId: notice.threadId ?? undefined } : null;
-  const silent = !(config.sound && withinWorkingHours());
+  const silent = notificationShouldBeSilent();
   if (Notification.isSupported()) {
     const toast = new Notification({ title, subtitle, body, silent });
     toast.on('click', () => (target ? openEmail(target.accountId, target.emailId, target.threadId) : focusWindow()));

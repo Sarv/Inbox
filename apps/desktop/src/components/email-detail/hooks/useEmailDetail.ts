@@ -22,6 +22,7 @@ import {
 } from '../../../services/ai-service';
 import { populateCacheFromHtml } from '../../../services/image-cache';
 import { useEmailStore } from '../../../store/email-store';
+import type { LocalCalendarAvailability } from '../../../types/local-calendar';
 import { needsAttachmentMetadata } from '../../../utils/attachment-metadata';
 import { collapseDuplicateMessages } from '../../../utils/duplicate-messages';
 import { toForwardSource } from '../../../utils/forward-quote';
@@ -205,12 +206,12 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   // written for. Composers get it only on that message (see inlineReplyDraft
   // below); moving the composer elsewhere does NOT drop it, so coming back to
   // that message brings the draft (and its stored Message-ID) back with it.
-  const [inlineReplySeed, setInlineReplySeed] = useState<ComposerSeed<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string; pgpEncrypted?: boolean }> | undefined>(undefined);
+  const [inlineReplySeed, setInlineReplySeed] = useState<ComposerSeed<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string; pgpEncrypted?: boolean; calendarAvailability?: LocalCalendarAvailability }> | undefined>(undefined);
   const inlineReplyHandlerRef = useRef<(mode: 'reply' | 'replyAll') => void>(() => { });
   const [showInlineForward, setShowInlineForward] = useState(false);
   const [forwardingEmail, setForwardingEmail] = useState<any | null>(null);
   // The forward's seed (what Undo send restored), on the same terms as the reply's.
-  const [inlineForwardSeed, setInlineForwardSeed] = useState<ComposerSeed<{ to: string; cc: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean }> | undefined>(undefined);
+  const [inlineForwardSeed, setInlineForwardSeed] = useState<ComposerSeed<{ to: string; cc: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; calendarAvailability?: LocalCalendarAvailability }> | undefined>(undefined);
   const inlineForwardHandlerRef = useRef<() => void>(() => { });
   // What each open composer is handed: its seed, only when the seed was written
   // for the message that composer is open on — never another message's.
@@ -701,7 +702,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         // them — decrypted by main when the draft was saved encrypted.
         const content = await savedDraftContent({ ...d, accountId: draftAccountId });
         if (!content) return false;
-        const { htmlContent: draftHtml, attachments: draftAttachments, pgpEncrypted } = content;
+        const { htmlContent: draftHtml, attachments: draftAttachments, pgpEncrypted, calendarAvailability } = content;
         draftOpenedForRef.current = latestThreadEmail.id;
 
         // Standalone draft (no surrounding conversation) → open the FULL compose
@@ -718,6 +719,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
             threadId: d.threadId,
             accountId: draftAccountId,
             pgpEncrypted,
+            ...(calendarAvailability ? { calendarAvailability } : {}),
           });
           // The draft now lives in the full composer, not the reading pane —
           // drop the selection so closing the composer lands back on the list.
@@ -739,6 +741,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
           attachments: draftAttachments,
           draftMessageId: d.messageId,
           pgpEncrypted,
+          ...(calendarAvailability ? { calendarAvailability } : {}),
         });
         setShowInlineReply(true);
         log.info(`draft: opened the thread's draft inline (${d.messageId})`);
@@ -797,6 +800,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         attachments: content.attachments,
         draftMessageId: draft.messageId,
         pgpEncrypted: content.pgpEncrypted,
+        ...(content.calendarAvailability ? { calendarAvailability: content.calendarAvailability } : {}),
         isAIDraft,
         aiReasoning,
         agentDecisionId,
@@ -1081,6 +1085,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         attachments: restoreDraft.attachments,
         draftMessageId: restoreDraft.draftMessageId,
         unsaved: restoreDraft.unsaved,
+        ...(restoreDraft.calendarAvailability ? { calendarAvailability: restoreDraft.calendarAvailability } : {}),
       });
       setShowInlineReply(true);
       setShowInlineForward(false);
@@ -1095,6 +1100,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         attachments: restoreDraft.attachments,
         draftMessageId: restoreDraft.draftMessageId,
         unsaved: restoreDraft.unsaved,
+        ...(restoreDraft.calendarAvailability ? { calendarAvailability: restoreDraft.calendarAvailability } : {}),
       });
       setShowInlineForward(true);
       setShowInlineReply(false);
