@@ -65,7 +65,7 @@
     "libphonenumber-js": "^1.13.14",
     "lucide-react": "^0.577.0",
     "mailparser": "^3.9.33",
-    "markdown-it": "^15.0.2",
+    "markdown-it": "^15.0.3",
     "nodemailer": "^10.0.14",
     "p-limit": "^7.3.3",
     "p-map": "^7.0.8",

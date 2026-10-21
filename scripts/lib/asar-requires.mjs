@@ -22,8 +22,12 @@
 
 import { builtinModules } from 'node:module';
 
-/** require("x") / require('x') / require(`x`) and import("x") with a literal, non-relative x. */
-const REQUIRE_PATTERN = /\b(?:require|import)\(\s*["'`](@?[a-z0-9][\w.-]*(?:\/[\w.@-]+)*)["'`]\s*\)/gi;
+/** require("x") / require('x') / require(`x`) and bare import("x") with a literal, non-relative x.
+ * A property call such as ObjC.import('CoreServices') is not JavaScript's
+ * dynamic import. JXA scripts passed to macOS can contain these in strings.
+ * Keep member require calls (module.require) covered: those do load packages.
+ */
+const REQUIRE_PATTERN = /\b(?:require|(?<!\.)import)\(\s*["'`](@?[a-z0-9][\w.-]*(?:\/[\w.@-]+)*)["'`]\s*\)/gi;
 
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 

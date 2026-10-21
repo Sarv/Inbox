@@ -39,6 +39,12 @@ describe('requiredPackagesOf', () => {
     expect(requiredPackagesOf('await import("imapflow")')).toEqual(['imapflow']);
   });
 
+  it('does not confuse a macOS JXA framework import with a JavaScript package import', () => {
+    const source = `const script="ObjC.import('CoreServices'); ObjC.unwrap(ObjC.castRefToObject(value))";await import("imapflow");module.require("bindings");`;
+    expect(requiredPackagesOf(source)).toEqual(['bindings', 'imapflow']);
+    expect(requiredPackagesOf('bridge.import("not-a-node-package");bridge?.import("also-not-a-package")')).toEqual([]);
+  });
+
   // A deep import still needs the whole package packed; reporting the subpath
   // would never match a packed package name and fail every build.
   it('reduces subpaths to their package, scoped or not', () => {
@@ -116,6 +122,20 @@ describe('analyseRequires', () => {
     });
 
     expect(analyseRequires(files, read).missing).toEqual([{ name: 'imapflow', requiredBy: 'dist-electron' }]);
+  });
+
+  it('passes embedded JXA scripts while still rejecting a genuine missing lazy import beside them', () => {
+    const { files, read } = archive({
+      'dist-electron/main.js': `const query="ObjC.import('CoreServices'); ObjC.unwrap(value)";require("better-sqlite3");`,
+      'node_modules/better-sqlite3/lib/database.js': '',
+    });
+    expect(analyseRequires(files, read)).toMatchObject({ missing: [], reached: ['better-sqlite3'] });
+    const withMissing = archive({
+      'dist-electron/main.js': read('dist-electron/main.js'),
+      'dist-electron/lazy.js': 'await import("missing-calendar-provider")',
+      'node_modules/better-sqlite3/lib/database.js': '',
+    });
+    expect(analyseRequires(withMissing.files, withMissing.read).missing).toEqual([{ name: 'missing-calendar-provider', requiredBy: 'dist-electron' }]);
   });
 
   // A kept package whose own dependency was cut by the allowlist throws on

@@ -463,6 +463,8 @@ describe('reviewed Inbox Agent mark-read actions', () => {
     expect(f.setRead).not.toHaveBeenCalled();
   });
 
+  // These exercise hundreds of complete body reviews. Coverage instrumentation
+  // and other parallel CI suites need more than the default single-test budget.
   it('continues past200 unchanged protected threads without revisiting or counting them in the next batch', async () => {
     const f = fixture(Array.from({ length: 400 }, (_, index) => email(`m${index}`, { tags: '|INBOX|important|' })));
     const first = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
@@ -473,7 +475,7 @@ describe('reviewed Inbox Agent mark-read actions', () => {
     expect(second.coverage[0]).toMatchObject({ hasMore: false, truncated: false, reviewedThreads: 200, scannedThreads: 400 });
     expect(second.items.every(item => item.recommendation === 'keep_unread')).toBe(true);
     expect(f.setRead).not.toHaveBeenCalled();
-  });
+  }, 20_000);
 
   it('rescans current headers after prior read actions remove rows instead of resuming a stale offset', async () => {
     const f = fixture(Array.from({ length: 400 }, (_, index) => email(`m${index}`)));
@@ -485,7 +487,7 @@ describe('reviewed Inbox Agent mark-read actions', () => {
     expect(second.items.map(item => item.emailId)).toEqual(Array.from({ length: 200 }, (_, index) => `m${index + 200}`));
     expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenNthCalledWith(1, expect.objectContaining({ offset: 0 }));
     expect(second.coverage[0]).toMatchObject({ hasMore: false, truncated: false, scannedThreads: 200 });
-  });
+  }, 20_000);
 
   it('scopes continuation exclusions by account even when thread IDs collide', async () => {
     const f = fixture([email('same')], [email('same')]);
@@ -511,7 +513,7 @@ describe('reviewed Inbox Agent mark-read actions', () => {
     expect(found).toEqual(Array.from({ length: 500 }, (_, index) => `m${index + 2_000}`));
     expect(f.callAI).not.toHaveBeenCalled();
     expect(f.setRead).not.toHaveBeenCalled();
-  });
+  }, 20_000);
 
   it('bounds NEW uncategorized candidates independently of exclusions and reports incomplete coverage', async () => {
     const f = fixture(Array.from({ length: 2_001 }, (_, index) => email(`m${index}`, { tags: '|INBOX|promotions|' })));
