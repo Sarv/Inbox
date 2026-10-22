@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-10-22
+
 ### Added
 - **Erase a selected local profile from Settings.** Settings → Advanced offers
   separate production and development choices, typed confirmation and a native
@@ -1121,7 +1123,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.3...HEAD
+[1.4.3]: https://github.com/Sarv/Inbox/releases/tag/v1.4.3
 [1.4.2]: https://github.com/Sarv/Inbox/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sarv/Inbox/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sarv/Inbox/releases/tag/v1.4.0
