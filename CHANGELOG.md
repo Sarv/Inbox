@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Erase a selected local profile from Settings.** Settings → Advanced offers
+  separate production and development choices, typed confirmation and a native
+  confirmation dialog. A current production reset restarts into onboarding;
+  development resets explain how to restart the development server.
+
+### Fixed
+- Complete resets remove the whole selected profile, including current
+  attachment storage, legacy files, database backups, credentials and local-only
+  data. Running-app checks and operation locks prevent erasing an open profile.
+- The cleanup CLI defaults to development cache/log cleanup and preserves
+  mail databases, drafts, Outbox and sign-ins. Explicit profile selection,
+  `--full` and `--dry-run` make complete resets reviewable. Reinstalling normally
+  continues to preserve data and login.
+
 ## [1.4.2] - 2026-10-22
 
 ### Fixed

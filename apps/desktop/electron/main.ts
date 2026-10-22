@@ -81,6 +81,7 @@ import { wireFolderCountBroadcast } from './services/folder-count-broadcast';
 import { startFollowUpChecker, stopFollowUpChecker } from './services/follow-up-checker';
 import { startHeaderBackfill, stopHeaderBackfill } from './services/header-backfill';
 import { startLocalCalendarReminders, stopLocalCalendarReminders } from './services/local-calendar-reminders';
+import { initializeLocalDataReset, isLocalDataResetRestarting } from './services/local-data-reset';
 import { offerMoveToApplications } from './services/mac-install-location';
 import { ensureNativeSqliteLoadable } from './services/native-abi-guard';
 import { installNativeAttachmentDownloadGuard } from './services/native-attachment-download-guard';
@@ -194,6 +195,18 @@ const DEV_LAUNCHER_PID = process.ppid;
 const APP_NAME = isDev ? 'Sarv Inbox Dev' : 'Sarv Inbox';
 app.name = APP_NAME;
 
+// A confirmed reset runs only in a fresh process, before a logger, crash queue,
+// encrypted database or browser session can retain/recreate the old profile.
+// Every ordinary launch also checks the external reset lock before touching it.
+const localDataStartup = (() => {
+  try { return { ...initializeLocalDataReset(), error: null }; }
+  catch (error) { return { erased: false, error: error instanceof Error ? error.message : 'Local data reset could not be completed.' }; }
+})();
+// Vite exits when its old Electron child quits. A development reset therefore
+// finishes in a native reset-only process; it never starts a doomed renderer or
+// the orphan watchdog. The user restarts the development server afterward.
+const localDataBootstrapOnly = !!localDataStartup.error || (isDev && localDataStartup.erased);
+
 // Windows requires an explicit AppUserModelID for toast notifications to show
 // (and to group under the right taskbar identity). Harmless no-op on macOS/Linux.
 app.setAppUserModelId(isDev ? 'com.sarv.sarvinbox.dev' : 'com.sarv.sarvinbox');
@@ -226,7 +239,7 @@ installIpcSenderGuard(ipcMain, {
 });
 
 // Initialize crash/error reporting as early as possible, before any app work.
-initSentryMain();
+if (!localDataBootstrapOnly) initSentryMain();
 
 // The in-app attachment viewer's scheme. MUST be declared at module scope:
 // Electron only accepts privileged-scheme registration before `app.whenReady()`,
@@ -431,7 +444,7 @@ ipcAppUrl = APP_URL;
 // Tee the main-process console to a rolling app.log (dev AND release). A
 // release's log redacts email addresses (CASA L-7); dev keeps them for
 // debugging. `isDev`, never `app.isPackaged` — see isDevBuild.
-initFileLogger({ redactAddresses: !isDev });
+if (!localDataBootstrapOnly) initFileLogger({ redactAddresses: !isDev });
 // Renderer logs → the SAME app.log (redacted in appendExternalLog), so a bug
 // report's log file carries the renderer's trail too — not just DevTools. The
 // renderer forwards fire-and-forget (ipcRenderer.send), and its own level gate
@@ -879,7 +892,7 @@ function resolvePanelExtensionDir(extensionId: string): string | undefined {
 // to ~3s while it drains. The new process would lose the race for the lock and
 // exit, killing the dev app until the next edit. So the lock is enforced for
 // packaged/shipped builds only — where the duplicate-connection risk is real.
-let gotSingleInstanceLock = isDev ? true : app.requestSingleInstanceLock();
+let gotSingleInstanceLock = !localDataBootstrapOnly && (isDev ? true : app.requestSingleInstanceLock());
 
 // PROD wedged-primary recovery. Failing to get the lock means a LIVE holder exists
 // right now. The lock alone can't tell a HEALTHY holder (which will surface its
@@ -891,6 +904,7 @@ let gotSingleInstanceLock = isDev ? true : app.requestSingleInstanceLock();
 // behavior — this path can only ever be safer, never worse. Async, so whenReady
 // awaits `singleInstanceReady` before trusting `gotSingleInstanceLock`.
 const singleInstanceReady: Promise<void> = (async () => {
+  if (localDataBootstrapOnly) return;
   if (isDev || gotSingleInstanceLock) return;
   try {
     const { action, holderPid } = evaluateLockContention(
@@ -954,7 +968,7 @@ app.on('open-file', (event, path) => {
     if (externalOpenReady) dialog.showErrorBox('Calendar file could not be opened', error instanceof Error ? error.message : 'Choose a valid local .ics calendar file.');
   });
 });
-restoreSecureStorageLaunchInputs();
+if (!localDataBootstrapOnly) restoreSecureStorageLaunchInputs();
 
 // ========== App Lifecycle ==========
 
@@ -964,6 +978,16 @@ restoreSecureStorageLaunchInputs();
 let stopEventLoopMonitor: (() => void) | null = null;
 
 app.whenReady().then(async () => {
+  if (localDataBootstrapOnly) {
+    if (localDataStartup.error) {
+      dialog.showErrorBox('Local data reset could not be completed', `${localDataStartup.error}\n\nInbox has stopped before opening your data. Close other Inbox instances and retry the reset. A failed deletion may be incomplete; do not assume the profile has been erased.`);
+      app.exit(1);
+    } else {
+      await dialog.showMessageBox({ type: 'info', title: 'Development data erased', message: 'Sarv Inbox development data has been erased.', detail: 'Restart your development server to open a fresh profile. Production data has not been changed.', buttons: ['Done'], noLink: true });
+      app.exit(0);
+    }
+    return;
+  }
   // Wait for the (async) single-instance decision to settle — a prod duplicate may
   // still be evaluating whether the current holder is wedged and reclaimable.
   await singleInstanceReady;
@@ -1298,7 +1322,7 @@ app.on('before-quit', (event) => {
   // Skipped on a signal-driven quit (vite hot-restart) so an edit doesn't kill the
   // dev server. Best-effort: SIGTERM the launcher we recorded at module load; if
   // it's already gone (we were orphaned) the throw is harmless.
-  if (shouldKillLauncherOnQuit({ isDev, quitBySignal: quitInitiatedBySignal })) {
+  if (shouldKillLauncherOnQuit({ isDev, quitBySignal: quitInitiatedBySignal || isLocalDataResetRestarting() })) {
     try {
       process.kill(DEV_LAUNCHER_PID, 'SIGTERM');
       logger.info(`[Shutdown] in-app quit — signalled dev launcher pid=${DEV_LAUNCHER_PID} to close the terminal session.`);

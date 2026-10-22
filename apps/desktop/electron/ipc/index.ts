@@ -26,6 +26,7 @@ import { registerIdentityHandlers } from './identity-handlers';
 import { registerImageTrustHandlers } from './image-trust-handlers';
 import { registerInboxAssistantHandlers } from './inbox-assistant-handlers';
 import { registerLabelHandlers } from './label-handlers';
+import { registerLocalDataHandlers } from './local-data-handlers';
 import { registerMiscHandlers } from './misc-handlers';
 import { registerNotificationHandlers } from './notification-handlers';
 import { registerOAuthHandlers } from './oauth-handlers';
@@ -45,6 +46,7 @@ import { registerUpdateHandlers } from './update-handlers';
  */
 export function registerAllHandlers(): void {
   registerAppHandlers();
+  registerLocalDataHandlers();
   registerDefaultAppHandlers();
   registerUpdateHandlers();
   // Give the shared enrichment code the better (Node-only) signature parser.

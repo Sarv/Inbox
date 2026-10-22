@@ -5,6 +5,7 @@ import { useConfirm } from '../ConfirmDialog';
 import { formatBytes } from '../quota-format';
 
 import { summariseCompaction } from './compaction-summary';
+import { EraseLocalDataSection } from './EraseLocalDataSection';
 import { UpdatesSection } from './UpdatesSection';
 
 interface AccountStorageUsage {
@@ -266,6 +267,7 @@ export function AdvancedTab() {
           Re-thread existing emails
         </button>
       </div>
+      <EraseLocalDataSection />
     </div>
   );
 }

@@ -12,6 +12,7 @@ import { contextBridge, ipcRenderer, webFrame } from 'electron';
 import type { DefaultAppsAPI } from '../src/types/default-apps';
 import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
 import type { LocalCalendarAPI, LocalCalendarAvailability, LocalCalendarOpenEvent } from '../src/types/local-calendar';
+import type { LocalDataAPI } from '../src/types/local-data';
 import type { SecureStorageAccessResult, SecureStorageStatus } from '../src/types/secure-storage';
 
 
@@ -125,6 +126,10 @@ interface RegistryAccountDTO {
 
 // Expose protected methods that allow the renderer process to use ipcRenderer
 contextBridge.exposeInMainWorld('electronAPI', {
+  localData: {
+    getProfiles: () => ipcRenderer.invoke('localData:getProfiles'),
+    erase: (request: Parameters<LocalDataAPI['erase']>[0]) => ipcRenderer.invoke('localData:erase', request),
+  },
   defaultApps: {
     getStatus: () => ipcRenderer.invoke('defaultApps:getStatus'),
     requestDefault: (target: Parameters<DefaultAppsAPI['requestDefault']>[0]) => ipcRenderer.invoke('defaultApps:requestDefault', target),
@@ -1337,6 +1342,7 @@ export interface BodyDownloadState {
 }
 
 export interface ElectronAPI {
+  localData: LocalDataAPI;
   defaultApps: DefaultAppsAPI;
   calendar: LocalCalendarAPI;
   inboxAssistant: InboxAssistantAPI;
