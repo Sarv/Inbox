@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -142,18 +143,18 @@ describe('ConversationTab — the conversation-mode cascade', () => {
     localStorage.setItem(AI_FEATURES_KEY, JSON.stringify([{ id: 'conversation-mode', enabled: true }]));
     const view = render(<ConversationTab aiProviders={[PROVIDER]} />);
     await settle();
-    expect(switches(view).map((input) => input.checked)).toEqual([true, false, true]);
+    expect(switches(view).map((input) => input.checked)).toEqual([true, true, true]);
 
     toggle(switches(view)[1]!);
     await settle();
-    expect(storedEnabled('auto-chat-view')).toBe(true);
+    expect(storedEnabled('auto-chat-view')).toBe(false);
 
     // Extract already off: turning the mode off saves only what is still on.
     toggle(switches(view)[2]!);
     await settle();
     toggle(switches(view)[0]!);
     await settle();
-    expect(stored().map((feature) => [feature.id, feature.enabled])).toEqual([
+    expect(stored().filter(feature => ['conversation-mode', 'auto-chat-view', 'auto-chat-extract'].includes(feature.id)).map((feature) => [feature.id, feature.enabled])).toEqual([
       ['conversation-mode', false],
       ['auto-chat-view', false],
       ['auto-chat-extract', false],
@@ -168,7 +169,7 @@ describe('ConversationTab — the conversation-mode cascade', () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const view = render(<ConversationTab aiProviders={[PROVIDER]} />);
     await settle();
-    expect(switches(view).map((input) => input.checked)).toEqual([true, false, true]);
+    expect(switches(view).map((input) => input.checked)).toEqual([true, true, true]);
     expect(consoleError.mock.calls.some((call) => String(call[0]).startsWith('Failed to parse AI features'))).toBe(false);
     consoleError.mockRestore();
     view.unmount();
@@ -180,6 +181,41 @@ describe('ConversationTab — the conversation-mode cascade', () => {
     await settle();
     expect(switches(view).every((input) => input.disabled)).toBe(true);
     expect(view.container.textContent).toContain('No AI Provider Configured');
+    view.unmount();
+  });
+});
+
+describe('ConversationTab initial display and tab remount', () => {
+  it('renders saved Off choices before effects can run, with matching non-animated switches', () => {
+    localStorage.setItem(AI_FEATURES_KEY, JSON.stringify([
+      { id: 'conversation-mode', enabled: true },
+      { id: 'auto-chat-view', enabled: false },
+      { id: 'auto-chat-extract', enabled: false },
+    ]));
+    const initial = document.createElement('div');
+    initial.innerHTML = renderToStaticMarkup(<ConversationTab aiProviders={[PROVIDER]} />);
+    const inputs = Array.from(initial.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    expect(inputs.map(input => input.checked)).toEqual([true, false, false]);
+    expect(inputs.map(input => input.getAttribute('aria-label'))).toEqual(['AI Conversation Mode', 'Auto Chat View', 'Auto Chat Extract']);
+    const tracks = inputs.map(input => input.nextElementSibling!);
+    expect(new Set(tracks.map(track => track.className)).size).toBe(1);
+    expect(tracks.every(track => !/transition|animate/.test(track.className))).toBe(true);
+  });
+
+  it('keeps explicit Off after leaving and reopening the tab', async () => {
+    localStorage.setItem(AI_FEATURES_KEY, JSON.stringify([
+      { id: 'conversation-mode', enabled: true },
+      { id: 'auto-chat-view', enabled: false },
+      { id: 'auto-chat-extract', enabled: false },
+    ]));
+    let view = render(<ConversationTab aiProviders={[PROVIDER]} />);
+    await settle();
+    expect(switches(view).map(input => input.checked)).toEqual([true, false, false]);
+    view.unmount();
+    view = render(<ConversationTab aiProviders={[PROVIDER]} />);
+    await settle();
+    expect(switches(view).map(input => input.checked)).toEqual([true, false, false]);
+    expect(storedEnabled('auto-chat-view')).toBe(false);
     view.unmount();
   });
 });

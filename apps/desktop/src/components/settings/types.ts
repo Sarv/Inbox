@@ -235,12 +235,11 @@ CRITICAL: The "htmlSelector" field must be a CSS selector string (like "div.gmai
   },
   {
     id: 'auto-chat-view',
-    // Opt-in: threads open in the normal reading view by default; the user
-    // switches to Chat View with the List/Chat toggle. Enable this to have
-    // threads auto-open in Chat View instead.
+    // Open eligible conversations in Chat View unless the user switches this
+    // off. Existing explicit choices remain authoritative.
     name: 'Auto Chat View',
-    description: 'Open conversations in Chat View by themselves, including a single looped-in email that quotes two or more earlier messages. Off by default: threads open in the normal reading view, and the List/Chat toggle switches them.',
-    enabled: false,
+    description: 'Open conversations in Chat View by default, including a single looped-in email that quotes two or more earlier messages. Turn this off to open in the normal reading view. The List/Chat toggle switches views at any time.',
+    enabled: true,
     systemPrompt: '',
     userPrompt: '',
   },

@@ -1,4 +1,5 @@
 import { hasGlobalDomParser } from '@sarv-in/email-chat-view/transform';
+import type { EmailRecord } from '@sarvinbox/core';
 import {
   compareConversationOrder,
   conversationFoldersOf,
@@ -148,6 +149,8 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     clearRestoreDraft,
     threadAccountId,
     accounts,
+    activeAccountId,
+    viewAccountId,
   } = useEmailStore();
 
   // Where this account's drafts and sent copies live (provider paths such as
@@ -247,11 +250,30 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   const [signatureDetectionResult, setSignatureDetectionResult] = useState<SignatureDetectionResult | null>(null);
   const [signatureDetecting, setSignatureDetecting] = useState(false);
 
-  // Check emails, searchResults, and threadEmails for the selected email
-  // (Falling back to threadEmails prevents the UI from unmounting if a background sync replaces the active `emails` array)
-  const selectedEmail = options.threadOnly ? threadEmails.find((e) => e.id === selectedEmailId) : emails.find((e) => e.id === selectedEmailId)
+  // Resolve the selection BEFORE filtering drafts out of conversation members.
+  // A Drafts-list refresh can omit the selected row while its raw thread still
+  // holds it; drafts belong in the editor, but remain a valid selection anchor.
+  const selectedRow = options.threadOnly ? rawThreadEmails.find((e) => e.id === selectedEmailId) : emails.find((e) => e.id === selectedEmailId)
     || (searchQuery ? searchResults.find((e) => e.id === selectedEmailId) : undefined)
-    || threadEmails.find((e) => e.id === selectedEmailId);
+    || rawThreadEmails.find((e) => e.id === selectedEmailId);
+
+  // Autosave durably writes a replacement draft, then removes the old row.
+  // Keep the open editor's selection anchor for its lifetime: changing the
+  // selection to the new row would run the navigation reset below, unmounting
+  // the editor and dropping edits typed while that save was in flight. This
+  // snapshot never goes back into a list or DB; autosave owns the new Message-ID.
+  const editorOpen = (showInlineReply && !!replyingToEmail) || (showInlineForward && !!forwardingEmail);
+  const selectionAccountId = viewAccountId ?? activeAccountId ?? null;
+  const editingDraftRef = useRef<{ email: EmailRecord; accountId: string | null } | null>(null);
+  const retainedDraft = editingDraftRef.current;
+  const selectedEmail = selectedRow || (editorOpen
+    && retainedDraft?.email.id === selectedEmailId
+    && retainedDraft.accountId === selectionAccountId ? retainedDraft.email : undefined);
+  useLayoutEffect(() => {
+    editingDraftRef.current = editorOpen && selectedEmail && isDraftEmail(selectedEmail, conversationFolders)
+      ? { email: selectedEmail, accountId: selectionAccountId }
+      : null;
+  }, [editorOpen, selectedEmail, selectionAccountId, conversationFolders]);
 
   // When the selected email is itself a draft (opened from the Drafts folder or
   // the All view), it must NOT be rendered as a message — it becomes the compose

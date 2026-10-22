@@ -3,7 +3,7 @@ import type { EmailRecord } from '@sarvinbox/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { chatMountsComposer } from '../../../../../src/components/email-detail/chat-view-rules';
-import { render, toggle, type Mounted } from '../../../../helpers/render';
+import { render, toggle, fire, type Mounted } from '../../../../helpers/render';
 
 import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
 
@@ -56,6 +56,8 @@ const storeState = {
   selectedVirtualFolder: null,
   viewAccountId: null,
   accounts: [],
+  selectedEmailId: null as string | null,
+  clearSelectedEmail: vi.fn(),
   pendingThreadEmailIds: [] as string[],
   showPendingThreadMessages: vi.fn(),
   dismissPendingThreadMessages: vi.fn(),
@@ -64,9 +66,10 @@ vi.mock('../../../../../src/store/email-store', () => ({
   useEmailStore: (select: (state: typeof storeState) => unknown) => select(storeState),
 }));
 let ctx: Record<string, unknown> = {};
+let unresolvedContext = false;
 vi.mock('../../../../../src/components/email-detail/hooks/useEmailDetail', () => ({
   useEmailDetail: () =>
-    new Proxy(ctx, { get: (target, key) => (key in target ? target[key as string] : vi.fn()) }),
+    unresolvedContext ? null : new Proxy(ctx, { get: (target, key) => (key in target ? target[key as string] : vi.fn()) }),
 }));
 
 const { EmailDetail } = await import('../../../../../src/components/email-detail/EmailDetail');
@@ -108,6 +111,9 @@ afterEach(() => {
   mounted = undefined;
   mountedComposers.length = 0;
   replyContexts.length = 0;
+  unresolvedContext = false;
+  storeState.selectedEmailId = null;
+  storeState.clearSelectedEmail.mockClear();
 });
 
 const mountWith = (overrides: Record<string, unknown>) => {
@@ -115,6 +121,39 @@ const mountWith = (overrides: Record<string, unknown>) => {
   mounted = render(<EmailDetail />);
   return mounted;
 };
+
+describe('EmailDetail — recovery from an unresolved selected message', () => {
+  it('leaves the normal empty selection placeholder unchanged', () => {
+    unresolvedContext = true;
+    mounted = render(<EmailDetail />);
+    expect(mounted.container.textContent).toContain('Select an email to read');
+    expect(mounted.container.textContent).toContain('Choose a message from the list to view its contents');
+    expect(mounted.all('button')).toHaveLength(0);
+    expect(storeState.clearSelectedEmail).not.toHaveBeenCalled();
+  });
+
+  it('lets the user return to the list when a selected row disappears, without clearing selection automatically', () => {
+    unresolvedContext = true;
+    storeState.selectedEmailId = 'superseded-draft';
+    mounted = render(<EmailDetail />);
+    const back = mounted.all('button').find(button => button.textContent === 'Return to message list');
+    expect(back).toBeDefined(); expect(storeState.clearSelectedEmail).not.toHaveBeenCalled();
+    fire(back!, 'click');
+    expect(storeState.clearSelectedEmail).toHaveBeenCalledExactlyOnceWith();
+    // Model the store update from clearSelectedEmail: no-split can show the list again.
+    storeState.selectedEmailId = null;
+    mounted.rerender(<EmailDetail />);
+    expect(mounted.all('button')).toHaveLength(0);
+    expect(mounted.container.textContent).toContain('Select an email to read');
+  });
+
+  it('does not show the recovery control while a valid message context is visible', () => {
+    storeState.selectedEmailId = ANCHOR.id;
+    const view = mountWith({});
+    expect(view.all('button').some(button => button.textContent === 'Return to message list')).toBe(false);
+    expect(storeState.clearSelectedEmail).not.toHaveBeenCalled();
+  });
+});
 
 describe('EmailDetail — the List/Chat switch', () => {
   // Regression guard for the wiring: the switch shows the view that is on,

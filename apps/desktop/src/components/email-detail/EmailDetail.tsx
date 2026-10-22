@@ -36,6 +36,8 @@ export function EmailDetail(options: EmailReaderOptions = {}) {
   const isUnifiedView = useEmailStore((s) => s.selectedVirtualFolder === 'virtual-unified');
   const viewAccountId = useEmailStore((s) => s.viewAccountId);
   const accounts = useEmailStore((s) => s.accounts);
+  const selectedEmailId = useEmailStore((s) => s.selectedEmailId);
+  const clearSelectedEmail = useEmailStore((s) => s.clearSelectedEmail);
   // "New message" banner: messages that landed in this thread (via IMAP IDLE)
   // after it was opened. The reading pane is snapshotted at open time and does
   // not live-append, so we surface them here instead of silently going stale.
@@ -63,6 +65,15 @@ export function EmailDetail(options: EmailReaderOptions = {}) {
           <p className="text-sm mt-2 opacity-70">
             Choose a message from the list to view its contents
           </p>
+          {selectedEmailId && (
+            <button
+              type="button"
+              onClick={() => clearSelectedEmail()}
+              className="mt-4 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground enabled:hover:bg-muted enabled:hover:text-foreground"
+            >
+              Return to message list
+            </button>
+          )}
         </div>
       </div>
     );

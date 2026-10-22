@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Chat View opens by default for eligible AI conversations, while preserving
+  saved choices to keep it off. The three Conversation settings switches share
+  one design and show saved values immediately, without animating on tab changes.
+
+### Fixed
+- Editing an open reply draft keeps the editor and its current text visible
+  when autosave replaces the saved draft. An unresolved message selection also
+  offers a way back to the message list.
+
 ## [1.4.3] - 2026-10-22
 
 ### Added

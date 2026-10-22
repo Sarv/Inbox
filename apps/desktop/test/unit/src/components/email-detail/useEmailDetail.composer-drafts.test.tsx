@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 import type { EmailRecord } from '@sarvinbox/core';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EmailDetailContext } from '../../../../../src/components/email-detail/types';
-import { act, render, settle, type Mounted } from '../../../../helpers/render';
+import { act, render, settle, typeInto, type Mounted } from '../../../../helpers/render';
 
 import { ELEVEN_AM, email, TEN_AM } from './email-fixture';
 
@@ -62,7 +63,8 @@ vi.mock('../../../../../src/services/image-cache', () => ({
   resolveRefsInHtml: (html: string) => html,
   registerImage: vi.fn(),
 }));
-vi.mock('../../../../../src/utils/compose-attachments', () => ({
+vi.mock('../../../../../src/utils/compose-attachments', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../../../src/utils/compose-attachments')>(),
   loadEmailAttachments: async () => [],
 }));
 
@@ -92,6 +94,7 @@ type Restore = {
 };
 
 const baseState = () => ({
+  activeAccountId: 'work',
   emails: [A, B, OTHER],
   folders: [],
   selectedFolderId: 'INBOX',
@@ -124,7 +127,7 @@ const baseState = () => ({
   restoreDraft: null as Restore | null,
   clearRestoreDraft: vi.fn(),
   pendingSend: [],
-  viewAccountId: null,
+  viewAccountId: null as string | null,
   getNavigationThreads: () => [],
   getNavigationTotalCount: () => 0,
   _accountIdFor: () => undefined,
@@ -149,9 +152,21 @@ const { useEmailDetail } = await import(
 
 /** The hook, mounted: `ctx()` is the context from the latest render. */
 let latest: EmailDetailContext | null = null;
+let mountEditor = false;
+// Exercise the real autosave hook under the reader's conditional composer.
+// Losing the reader context unmounts this editor and loses its live state.
+const { useDraftAutosave } = await import('../../../../../src/hooks/useDraftAutosave');
+function EditorProbe() {
+  const [body, setBody] = useState('Opened draft');
+  useDraftAutosave({
+    to: 'bob@acme.example', subject: 'Re: Q3', body, htmlBody: `<p>${body}</p>`,
+    initialDraftMessageId: '<editing@acme.example>', threadId: 't1', accountId: 'work',
+  });
+  return <textarea aria-label="Draft editor" value={body} onChange={event => setBody(event.target.value)} />;
+}
 function Harness() {
   latest = useEmailDetail();
-  return null;
+  return mountEditor && latest?.showInlineReply ? <EditorProbe key={latest.replyingToEmail?.id} /> : null;
 }
 const ctx = () => latest!;
 
@@ -184,6 +199,7 @@ beforeEach(() => {
   vi.useFakeTimers(); // the composers' scroll-and-focus retries
   state = baseState();
   latest = null;
+  mountEditor = false;
 });
 afterEach(() => {
   mounted?.unmount();
@@ -432,6 +448,105 @@ describe('useEmailDetail — the auto-opened draft', () => {
     run(() => ctx().handleInlineForward());
     run(() => ctx().handleReply());
     expect(ctx().inlineReplyDraft).toBe(opened);
+  });
+});
+
+describe('useEmailDetail — editing a selected draft during autosave', () => {
+  const draft = email({
+    id: 'editing', messageId: '<editing@acme.example>', tags: '|Drafts|draft|',
+    date: ELEVEN_AM + 60, cleanBody: 'Opened draft', rawBody: '<p>Opened draft</p>',
+  });
+  const openSelectedDraft = async () => {
+    state = { ...state, selectedEmailId: draft.id, emails: [draft], threadEmails: [A, B, draft] };
+    await mount();
+    expect(ctx()?.showInlineReply).toBe(true);
+    expect(ctx()?.replyingToEmail?.id).toBe(B.id);
+  };
+
+  it('resolves the selected draft from raw thread rows when a list refresh omits it', async () => {
+    state = { ...state, selectedEmailId: draft.id, emails: [], threadEmails: [A, B, draft] };
+    await mount();
+    expect(ctx()).not.toBeNull();
+    expect(ctx()?.showInlineReply).toBe(true);
+    expect(ctx()?.threadEmails.map(e => e.id)).toEqual([A.id, B.id]);
+  });
+
+  it('keeps the same live editor through repeated save-then-delete replacements', async () => {
+    mountEditor = true;
+    let sequence = 0;
+    const save = vi.fn(async (_draft: unknown) => ({ success: true, messageId: `<saved-${++sequence}@acme.example>` }));
+    let finishUpload!: () => void;
+    save.mockImplementationOnce(() => new Promise(resolve => {
+      finishUpload = () => resolve({ success: true, messageId: `<saved-${++sequence}@acme.example>` });
+    }));
+    const remove = vi.fn(async () => {
+      // The main-process drafts:removed event drops the superseded row from
+      // every store view. The selected id deliberately does not change.
+      state = { ...state, emails: [], threadEmails: [A, B] };
+      mounted!.rerender(<Harness />);
+      return { success: true };
+    });
+    Object.assign(window.electronAPI.drafts, { save, delete: remove });
+    await openSelectedDraft();
+    const seed = ctx().inlineReplyDraft;
+    const editor = mounted!.byLabel('Draft editor') as HTMLTextAreaElement;
+    typeInto(editor, 'Edited with AI polish');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(save).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+    // Further edits during the upload belong to the live editor, not the
+    // snapshot that was just sent to drafts.save.
+    typeInto(editor, 'Kept typing during upload');
+    await act(async () => { finishUpload(); });
+    expect(remove).toHaveBeenCalledWith({ messageId: draft.messageId, accountId: 'work' });
+    expect(ctx()).not.toBeNull();
+    expect(ctx()?.showInlineReply).toBe(true);
+    expect(ctx()?.inlineReplyDraft).toBe(seed);
+    expect(ctx()?.replyingToEmail?.id).toBe(B.id);
+    expect(ctx()?.threadMessageTotal).toBe(2);
+    expect(mounted!.byLabel('Draft editor')).toBe(editor);
+    expect(editor.value).toBe('Kept typing during upload');
+
+    typeInto(editor, 'Kept typing after autosave');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1][0]).toMatchObject({ body: 'Kept typing after autosave' });
+    expect(remove).toHaveBeenLastCalledWith({ messageId: '<saved-1@acme.example>', accountId: 'work' });
+    expect(mounted!.byLabel('Draft editor')).toBe(editor);
+  });
+
+  it('reanchors to the real conversation when the editor closes after replacement', async () => {
+    await openSelectedDraft();
+    state = { ...state, emails: [], threadEmails: [A, B] };
+    await rerender();
+    expect(ctx()).not.toBeNull();
+    run(() => ctx().handleCloseInlineReply());
+    expect(state.selectEmail).toHaveBeenCalledWith(B.id);
+    // A real selection change ends the retained draft and its composer.
+    state = { ...state, selectedEmailId: B.id, emails: [A, B] };
+    await rerender();
+    expect(ctx()?.showInlineReply).toBe(false);
+  });
+
+  it.each(['selection', 'clear', 'account', 'unified-account'] as const)('drops the retained anchor on %s changes', async change => {
+    await openSelectedDraft();
+    state = { ...state, emails: [], threadEmails: [A, B] };
+    await rerender();
+    expect(ctx()).not.toBeNull();
+    state = {
+      ...state,
+      ...(change === 'selection' ? { selectedEmailId: OTHER.id, threadEmails: [OTHER], loadingThread: true }
+        : change === 'clear' ? { selectedEmailId: null }
+          : change === 'unified-account' ? { viewAccountId: 'another-account', threadEmails: [] }
+          : { activeAccountId: 'personal', threadEmails: [] }),
+    };
+    await rerender();
+    if (change === 'selection') {
+      expect(ctx()?.showInlineReply).toBe(false);
+      expect(ctx()?.selectedEmailId).toBe(OTHER.id);
+    } else {
+      expect(ctx()).toBeNull();
+    }
   });
 });
 

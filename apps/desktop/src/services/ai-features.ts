@@ -21,7 +21,7 @@ export function isConversationModeEnabled(): boolean {
 }
 
 export function isAutoChatViewEnabled(): boolean {
-  return featureEnabled('auto-chat-view') === true;
+  return featureEnabled('auto-chat-view') !== false;
 }
 
 export function isAutoChatExtractEnabled(): boolean {

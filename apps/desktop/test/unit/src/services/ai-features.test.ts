@@ -16,7 +16,7 @@ import {
  * What breaks if this file goes red: the chat view or the background split
  * reads a switch the user turned off as on (AI spent against their choice),
  * or a user who never touched the settings gets the wrong defaults —
- * conversation mode and background extraction ON, auto chat view OFF.
+ * conversation mode, auto chat view and background extraction ON.
  */
 
 const store = (features: Array<{ id: string; enabled: boolean }>) =>
@@ -27,7 +27,7 @@ beforeEach(() => localStorage.clear());
 describe('AI feature toggles', () => {
   it('uses the defaults when the user never saved a choice', () => {
     expect(isConversationModeEnabled()).toBe(true);
-    expect(isAutoChatViewEnabled()).toBe(false);
+    expect(isAutoChatViewEnabled()).toBe(true);
     expect(isAutoChatExtractEnabled()).toBe(true);
   });
 
@@ -40,6 +40,8 @@ describe('AI feature toggles', () => {
     expect(isConversationModeEnabled()).toBe(false);
     expect(isAutoChatViewEnabled()).toBe(true);
     expect(isAutoChatExtractEnabled()).toBe(false);
+    store([{ id: 'auto-chat-view', enabled: false }]);
+    expect(isAutoChatViewEnabled()).toBe(false);
   });
 });
 

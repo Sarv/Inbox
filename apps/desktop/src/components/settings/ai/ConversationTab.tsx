@@ -4,10 +4,10 @@ import { Loader2, Trash2, MessageSquare } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 
 import { syncBackgroundSplitToMain } from '../../../services/ai-features';
-import type { AIProvider } from '../../../services/ai-service';
+import { loadAIFeatures, type AIProvider } from '../../../services/ai-service';
 import { useEmailStore } from '../../../store/email-store';
 import type { AIFeatureConfig } from '../types';
-import { DEFAULT_AI_FEATURES, AI_FEATURES_KEY } from '../types';
+import { AI_FEATURES_KEY } from '../types';
 
 const log = createLogger('ConversationTab');
 
@@ -22,6 +22,16 @@ interface ConversationTabProps {
 interface ClearOutcome {
   text: string;
   failed: boolean;
+}
+
+/** One stationary switch design; mounting a tab never animates a saved choice. */
+function FeatureSwitch({ feature, onToggle, disabled }: { feature: AIFeatureConfig; onToggle: () => void; disabled: boolean }) {
+  return (
+    <label className={`relative inline-flex shrink-0 items-center ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+      <input type="checkbox" aria-label={feature.name} checked={feature.enabled} onChange={onToggle} disabled={disabled} className="sr-only peer" />
+      <span aria-hidden="true" className="relative block h-6 w-11 rounded-full bg-muted peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-disabled:opacity-50 peer-checked:bg-primary after:absolute after:start-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:content-[''] peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white" />
+    </label>
+  );
 }
 
 /**
@@ -49,15 +59,12 @@ export function clearCacheOutcome(
 
 export function ConversationTab({ aiProviders }: ConversationTabProps) {
   const accounts = useEmailStore((s) => s.accounts);
-  const [feature, setFeature] = useState<AIFeatureConfig>(
-    DEFAULT_AI_FEATURES.find(f => f.id === 'conversation-mode')!
-  );
-  const [autoFeature, setAutoFeature] = useState<AIFeatureConfig>(
-    DEFAULT_AI_FEATURES.find(f => f.id === 'auto-chat-view')!
-  );
-  const [extractFeature, setExtractFeature] = useState<AIFeatureConfig>(
-    DEFAULT_AI_FEATURES.find(f => f.id === 'auto-chat-extract')!
-  );
+  // Use the same saved/default merge as the reader, before the first paint.
+  // Applying saved values in an effect made switches flash the wrong state.
+  const [features, setFeatures] = useState(loadAIFeatures);
+  const feature = features.find(f => f.id === 'conversation-mode')!;
+  const autoFeature = features.find(f => f.id === 'auto-chat-view')!;
+  const extractFeature = features.find(f => f.id === 'auto-chat-extract')!;
   const [clearing, setClearing] = useState(false);
   const [clearResult, setClearResult] = useState<ClearOutcome | null>(null);
   const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -67,60 +74,10 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
     if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
   }, []);
 
-  // Load feature state on mount
-  useEffect(() => {
-    const stored = localStorage.getItem(AI_FEATURES_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        const saved = parsed.find((f: AIFeatureConfig) => f.id === 'conversation-mode');
-        if (saved) {
-          const defaultFeature = DEFAULT_AI_FEATURES.find(f => f.id === 'conversation-mode')!;
-          setFeature({
-            ...defaultFeature,
-            enabled: saved.enabled,
-          });
-        }
-        const savedAuto = parsed.find((f: AIFeatureConfig) => f.id === 'auto-chat-view');
-        if (savedAuto) {
-          const defaultAuto = DEFAULT_AI_FEATURES.find(f => f.id === 'auto-chat-view')!;
-          setAutoFeature({
-            ...defaultAuto,
-            enabled: savedAuto.enabled,
-          });
-        }
-        const savedExtract = parsed.find((f: AIFeatureConfig) => f.id === 'auto-chat-extract');
-        if (savedExtract) {
-          const defaultExtract = DEFAULT_AI_FEATURES.find(f => f.id === 'auto-chat-extract')!;
-          setExtractFeature({
-            ...defaultExtract,
-            enabled: savedExtract.enabled,
-          });
-        }
-      } catch (e) {
-        // The toggles fall back to their defaults; say why, once.
-        log.warn(`Could not read the stored AI features: ${String(e)}`);
-      }
-    }
-  }, []);
-
   const saveFeatureById = (id: string, updated: AIFeatureConfig) => {
-    if (id === 'conversation-mode') setFeature(updated);
-    else if (id === 'auto-chat-view') setAutoFeature(updated);
-    else if (id === 'auto-chat-extract') setExtractFeature(updated);
-
-    const stored = localStorage.getItem(AI_FEATURES_KEY);
-    let features: AIFeatureConfig[] = DEFAULT_AI_FEATURES;
-    if (stored) {
-      try {
-        features = JSON.parse(stored);
-      } catch {}
-    }
-    const hasFeature = features.some(f => f.id === id);
-    const merged = hasFeature
-      ? features.map(f => f.id === id ? updated : f)
-      : [...features, updated];
+    const merged = loadAIFeatures().map(f => f.id === id ? updated : f);
     localStorage.setItem(AI_FEATURES_KEY, JSON.stringify(merged));
+    setFeatures(merged);
     // Main's first-split scheduler scans and nominates only while the
     // background split is on (conversation mode AND 'Auto Chat Extract').
     void syncBackgroundSplitToMain();
@@ -191,16 +148,7 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
               <div className="text-sm text-muted-foreground">{feature.description}</div>
             </div>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
-            <input
-              type="checkbox"
-              checked={feature.enabled}
-              onChange={toggleFeature}
-              className="sr-only peer"
-              disabled={aiProviders.length === 0}
-            />
-            <div className="w-11 h-6 bg-muted peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
+          <FeatureSwitch feature={feature} onToggle={toggleFeature} disabled={aiProviders.length === 0} />
         </div>
       </div>
 
@@ -220,16 +168,7 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
                 <div className="text-sm text-muted-foreground">{autoFeature.description}</div>
               </div>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
-              <input
-                type="checkbox"
-                checked={autoFeature.enabled}
-                onChange={toggleAutoFeature}
-                className="sr-only peer"
-                disabled={aiProviders.length === 0}
-              />
-              <div className="w-11 h-6 bg-muted peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-            </label>
+            <FeatureSwitch feature={autoFeature} onToggle={toggleAutoFeature} disabled={aiProviders.length === 0} />
           </div>
         </div>
       )}
@@ -250,16 +189,7 @@ export function ConversationTab({ aiProviders }: ConversationTabProps) {
                 <div className="text-sm text-muted-foreground">{extractFeature.description}</div>
               </div>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
-              <input
-                type="checkbox"
-                checked={extractFeature.enabled}
-                onChange={toggleExtractFeature}
-                className="sr-only peer"
-                disabled={aiProviders.length === 0}
-              />
-              <div className="w-11 h-6 bg-muted peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-            </label>
+            <FeatureSwitch feature={extractFeature} onToggle={toggleExtractFeature} disabled={aiProviders.length === 0} />
           </div>
         </div>
       )}
