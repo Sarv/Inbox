@@ -30,6 +30,8 @@ export interface AIProviderConfig {
    * other providers: the provider's own API key. */
   apiKey: string;
   model: string;
+  /** Optional per-call response budget. Shared callers retain the 16,000-token default. */
+  maxOutputTokens?: number;
   /** For ``sarv`` this MUST be the oauth-provisioned edge LLM URL
    * (e.g. ``http://localhost:<port>/edge/v1/llm`` in dev; swap host for
    * prod). The code appends ``/chat/completions``. Callers should read
@@ -1021,12 +1023,19 @@ export function validateCategorizationResponse(raw: string, knownSlugs: Set<stri
 
 // ========== AI API Client ==========
 
+function outputTokenLimit(config: AIProviderConfig): number {
+  const value = config.maxOutputTokens;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(16_000, Math.floor(value))) : 16_000;
+}
+
 export async function callAIProvider(
   config: AIProviderConfig,
   systemPrompt: string,
   userMessage: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   if (config.type === 'gemini') {
     return callGeminiAPI(config, systemPrompt, userMessage, signal);
   }
@@ -1075,7 +1084,9 @@ async function callOpenAICompatibleAPI(
     // One HTTP attempt with a resolved bearer. `forceRefresh` forces a fresh
     // OAuth token (used on the 401 retry below).
     const attempt = async (forceRefresh: boolean): Promise<Response> => {
+      timeoutCtl.signal.throwIfAborted();
       const bearer = config.resolveBearer ? await config.resolveBearer(forceRefresh) : config.apiKey;
+      timeoutCtl.signal.throwIfAborted();
       // Guard against empty bearer — `Authorization: Bearer ` is an illegal
       // header value and triggers a generic 502 at the gateway that would
       // otherwise look like an upstream outage.
@@ -1092,7 +1103,7 @@ async function callOpenAICompatibleAPI(
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userMessage },
           ],
-          max_completion_tokens: 16000,
+          max_completion_tokens: outputTokenLimit(config),
           ...buildAIChatRequestOptions(config),
         }),
         signal: timeoutCtl.signal,
@@ -1132,6 +1143,7 @@ async function callGeminiAPI(
   const baseUrl = effectiveAIBaseUrl(config);
 
   const doFetch = config.fetchImpl || fetch;
+  signal?.throwIfAborted();
   const response = await doFetch(`${baseUrl}/models/${config.model}:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...aiApiKeyHeaders('gemini', config.apiKey) },
@@ -1141,7 +1153,7 @@ async function callGeminiAPI(
       ],
       generationConfig: {
         temperature: 0.3,
-        maxOutputTokens: 16000,
+        maxOutputTokens: outputTokenLimit(config),
         // Disable Gemini 2.5 Flash thinking — same rationale as the
         // OpenAI-compat chat_template_kwargs flag above. Ignored by
         // non-thinking Gemini variants which don't recognise the field.
@@ -1169,8 +1181,10 @@ export async function callAIWithRetry(
   return pRetry(
     async () => {
       try {
+        signal?.throwIfAborted();
         return await callAIProvider(config, systemPrompt, userMessage, signal);
       } catch (error: any) {
+        signal?.throwIfAborted();
         const status: number = error?.status ?? error?.statusCode ?? 0;
         const code: SarvErrorCode | undefined = error instanceof SarvApiError ? error.code : undefined;
 
@@ -1191,6 +1205,7 @@ export async function callAIWithRetry(
       }
     },
     {
+      signal,
       // Exponential back-off: 2s, 4s, 8s … capped at 30s, up to
       // MAX_API_RETRIES retries.
       retries: MAX_API_RETRIES,

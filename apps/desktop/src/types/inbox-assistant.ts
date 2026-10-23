@@ -1,4 +1,4 @@
-import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewKind } from './inbox-assistant-actions';
+import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from './inbox-assistant-actions';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
 
 export type InboxAssistantActionMode = 'review' | 'approve_for_me';
@@ -63,6 +63,7 @@ export interface InboxAssistantProgress {
   accountId?: string;
   emailId?: string;
   filename?: string;
+  reviewAutomation?: InboxAssistantReviewAutomation;
 }
 
 export interface InboxAssistantActivity extends InboxAssistantProgress {
@@ -133,6 +134,8 @@ export interface InboxAssistantExchange {
   activities?: InboxAssistantActivity[];
   review?: InboxAssistantReview;
   reviewResult?: InboxAssistantReviewApplyResult;
+  /** Compact receipt presentation for batches produced by one automatic run. */
+  reviewBatch?: { runId: string; number: number };
   requestId?: string;
   status?: InboxAssistantRunStatus;
   updatedAt?: number;
@@ -163,6 +166,8 @@ export interface InboxAssistantReviewActionRequest {
   manualSelection?: boolean;
   /** Manual mail actions never alter the review's automatic recommendation. */
   action?: InboxAssistantReviewAction;
+  /** Explicit one-run consent: mark verified recommendations read, then continue. */
+  autoContinue?: boolean;
 }
 
 export interface InboxAssistantChatSummary {

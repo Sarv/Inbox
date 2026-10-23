@@ -57,9 +57,26 @@ export interface InboxAssistantReviewCoverage {
   hasMore: boolean;
   /** Uncached originals skipped because no indexed evidence made them candidates. */
   skippedUncachedBodies?: number;
+  /** Verified recommendations reused after fresh source and safety checks. */
+  cachedRecommendations?: number;
+  aiReviewedThreads?: number;
   /** Diagnostic scan position only. Continuation rescans with account-scoped exclusions. */
   nextOffset?: number;
   warnings: string[];
+}
+
+/** Explicit, bounded automatic review; never enables background mail rules. */
+export interface InboxAssistantReviewAutomation {
+  reviewId: string;
+  status: 'running' | 'completed' | 'stopped' | 'failed';
+  batchesReviewed: number;
+  reviewedConversations: number;
+  markedConversations: number;
+  markedEmails: number;
+  queuedEmails: number;
+  maxBatches: number;
+  maxAICalls: number;
+  reason?: string;
 }
 
 export interface InboxAssistantReview {
@@ -73,6 +90,7 @@ export interface InboxAssistantReview {
   items: InboxAssistantReviewItem[];
   coverage: InboxAssistantReviewCoverage[];
   truncated: boolean;
+  automation?: InboxAssistantReviewAutomation;
 }
 
 export interface InboxAssistantReviewItemResult {

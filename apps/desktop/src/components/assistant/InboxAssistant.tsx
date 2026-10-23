@@ -16,7 +16,7 @@ import type {
   InboxAssistantRunRecord,
   InboxAssistantSource,
 } from '../../types/inbox-assistant';
-import type { InboxAssistantReviewAction, InboxAssistantReviewKind } from '../../types/inbox-assistant-actions';
+import type { InboxAssistantReviewAction, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from '../../types/inbox-assistant-actions';
 import type { LocalCalendarAvailabilityRequest } from '../../types/local-calendar';
 import { AccountSelectorTrigger } from '../AccountSelectorTrigger';
 
@@ -248,7 +248,7 @@ function UserMessage({ question, date, onEdit, editValue, onEditChange, onCancel
   </div>{onEdit && <button type="button" onClick={onEdit} disabled={disabled} aria-label={`Edit question: ${question}`} title="Edit question" className="shrink-0 rounded-lg p-2 text-muted-foreground opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:opacity-30 md:opacity-0 md:group-hover:opacity-100"><Pencil className="h-3.5 w-3.5" /></button>}</div>;
 }
 
-function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded, actionBusy, onApply, onUndo, onRefresh, onContinue, userMessage, compact }: {
+function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded, actionBusy, onApply, onUndo, onRefresh, onContinue, onStartAutoReview, onStop, automation, userMessage, compact }: {
   exchange: InboxAssistantExchange;
   onNavigateToSource?: InboxAssistantProps['onNavigateToSource'];
   onViewActivity: (exchangeId: string, trigger: HTMLButtonElement) => void;
@@ -258,9 +258,21 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
   onUndo: (ids: string[]) => void;
   onRefresh: () => void;
   onContinue: () => void;
+  onStartAutoReview: () => void;
+  onStop?: () => void;
+  automation?: InboxAssistantReviewAutomation;
   userMessage: Omit<UserMessageProps, 'question' | 'date'>;
   compact: boolean;
 }) {
+  const [batchExpanded, setBatchExpanded] = useState(false);
+  const reviewCard = exchange.review && <AssistantReviewCard review={exchange.review} busy={actionBusy} onApply={onApply} onUndo={onUndo} onRefresh={onRefresh} onContinue={onContinue} onStartAutoReview={onStartAutoReview} onStop={onStop} automation={automation} onOpen={source => onNavigateToSource?.(source)} />;
+  if (exchange.reviewBatch && exchange.review) return <article aria-label={`Automatic review batch ${exchange.reviewBatch.number}`} className="assistant-surface rounded-xl border border-border">
+    <button type="button" aria-expanded={batchExpanded} onClick={() => setBatchExpanded(value => !value)} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl p-3 text-left text-xs hover:bg-accent">
+      <span className="flex items-center gap-2 font-medium"><Check className="h-3.5 w-3.5 text-muted-foreground" />Batch {exchange.reviewBatch.number} · {exchange.review.items.length} conversations reviewed</span>
+      <span className="flex items-center gap-2 text-muted-foreground">{exchange.reviewResult ? `${exchange.reviewResult.appliedCount} updated${exchange.reviewResult.queuedCount ? ` · ${exchange.reviewResult.queuedCount} queued` : ''}${exchange.reviewResult.failedCount || exchange.reviewResult.skippedCount ? ' · Check receipts' : ''}` : 'Kept unread'}<ChevronDown aria-hidden="true" className={`h-3.5 w-3.5 ${batchExpanded ? 'rotate-180' : ''}`} /></span>
+    </button>
+    {batchExpanded && <div className="p-2 pt-0">{reviewCard}</div>}
+  </article>;
   return (
     <article className="space-y-5" aria-label={`Answer to ${exchange.question}`}>
       <UserMessage question={exchange.question} date={exchange.createdAt} {...userMessage} />
@@ -273,7 +285,7 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
       <div className={`whitespace-pre-wrap break-words text-sm ${compact ? 'leading-6' : 'leading-7'}`}><AnswerText text={exchange.answer.text} sources={exchange.answer.sources} onNavigate={onNavigateToSource} /></div>
       {exchange.status && exchange.status !== 'completed' && <p className="text-xs text-muted-foreground">{exchange.status === 'failed' ? exchange.error || 'Request failed. Your question and activity have been saved.' : exchange.status === 'stopped' ? 'Stopped. Your question and activity have been saved.' : 'In progress…'}</p>}
       <AssistantUsage usage={exchange.usage} compact={compact} />
-      {exchange.review && <AssistantReviewCard review={exchange.review} busy={actionBusy} onApply={onApply} onUndo={onUndo} onRefresh={onRefresh} onContinue={onContinue} onOpen={source => onNavigateToSource?.(source)} />}
+      {reviewCard}
       {exchange.answer.sources.length > 0 && (
         <details aria-label="Answer sources" className="assistant-surface rounded-lg border border-border p-3">
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Sources · {exchange.answer.sources.length}</summary>
@@ -369,9 +381,12 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const pendingChatMutations = useRef(new Set<string>());
   const pendingDeletion = useRef(false);
   const chatWork = useRef(new Map<string, ChatWork>());
+  const mailReceiptProgress = useRef(new Map<string, { marked: number; queued: number }>());
+  const mailChangeListener = useRef(onMailChanged);
   const completedExchanges = useRef(new Map<string, Map<string, InboxAssistantExchange>>());
   const [workRevision, setWorkRevision] = useState(0);
   useEffect(() => { visibleRef.current = visible; stateListener.current = onStateChange; }, [visible, onStateChange]);
+  useEffect(() => { mailChangeListener.current = onMailChanged; }, [onMailChanged]);
   useEffect(() => {
     if (!accountPickerOpen) return;
     const dismiss = (event: PointerEvent) => {
@@ -467,6 +482,15 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
         || !Number.isInteger(activity.sequence) || activity.sequence <= run.sequence) return;
       run.sequence = activity.sequence;
       run.work = { ...run.work, activities: [...run.work.activities, activity].slice(-400) };
+      if (activity.reviewAutomation) {
+        const previous = mailReceiptProgress.current.get(run.requestId) ?? { marked: 0, queued: 0 };
+        const marked = activity.reviewAutomation.markedEmails;
+        const queued = activity.reviewAutomation.queuedEmails;
+        if (marked > previous.marked || queued > previous.queued) {
+          mailReceiptProgress.current.set(run.requestId, { marked: Math.max(marked, previous.marked), queued: Math.max(queued, previous.queued) });
+          mailChangeListener.current?.();
+        }
+      }
       if (activeChatRef.current === run.chatId) showWork(run);
     });
     return () => {
@@ -519,6 +543,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   };
   const isVisibleRequest = (chatId: string, requestId: string) => mounted.current && activeChatRef.current === chatId && request.current === requestId;
   const releaseRequest = (requestId: string) => {
+    mailReceiptProgress.current.delete(requestId);
     const run = [...chatWork.current.values()].find(value => value.requestId === requestId);
     if (run) chatWork.current.delete(run.chatId);
     if (mounted.current) setWorkRevision(value => value + 1);
@@ -794,9 +819,9 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     finally { if (mounted.current && version === modeGeneration.current) setModeSaving(false); }
   };
 
-  const applyReview = async (exchange: InboxAssistantExchange, itemIds: string[], undo = false, manualSelection = false, action?: InboxAssistantReviewAction) => {
+  const applyReview = async (exchange: InboxAssistantExchange, itemIds: string[], undo = false, manualSelection = false, action?: InboxAssistantReviewAction, autoContinue = false) => {
     const chatId = activeChatRef.current;
-    if (!chatId || !exchange.review || request.current || !itemIds.length) return;
+    if (!chatId || !exchange.review || request.current || (!itemIds.length && !autoContinue)) return;
     const moveAction = action === 'archive' || action === 'trash';
     const confirmationKey = `review-confirmation:${exchange.review.id}`;
     if (pendingChatMutations.current.has(confirmationKey)) return;
@@ -819,13 +844,13 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     if (exchange.review.status === 'expired' || !Number.isFinite(exchange.review.expiresAt) || exchange.review.expiresAt <= Date.now()) { setError('This review has expired. Refresh it before changing mail.'); return; }
     const requestId = globalThis.crypto.randomUUID();
     const chatRevision = chatRevisions.current.get(chatId) ?? 0;
-    const message = undo ? 'Restoring the previous read status of changed emails' : action === 'archive' ? 'Archiving selected conversations' : action === 'trash' ? 'Moving selected conversations to Trash' : exchange.review.kind === 'mark_unread' ? 'Marking selected emails as unread' : 'Marking selected conversations as read';
+    const message = autoContinue ? 'Automatically marking recommended mail as read and reviewing the next batches' : undo ? 'Restoring the previous read status of changed emails' : action === 'archive' ? 'Archiving selected conversations' : action === 'trash' ? 'Moving selected conversations to Trash' : exchange.review.kind === 'mark_unread' ? 'Marking selected emails as unread' : 'Marking selected conversations as read';
     setError(null);
     const run = startWork(chatId, requestId, { kind: 'action', question: message, activities: [], status: 'running', coverage: [], warnings: [] });
     setActivitySelection('live');
     onCloseSourcePane?.();
     try {
-      const result = await window.electronAPI.inboxAssistant.applyReview({ requestId, chatId, exchangeId: exchange.id, reviewId: exchange.review.id, itemIds, ...(undo ? { undo: true } : { ...(manualSelection || moveAction ? { manualSelection: true } : {}), ...(action ? { action } : {}) }) });
+      const result = await window.electronAPI.inboxAssistant.applyReview({ requestId, chatId, exchangeId: exchange.id, reviewId: exchange.review.id, itemIds, ...(autoContinue ? { autoContinue: true } : undo ? { undo: true } : { ...(manualSelection || moveAction ? { manualSelection: true } : {}), ...(action ? { action } : {}) }) });
       if (result.success && result.data.chatId && result.data.chatId !== chatId) throw new Error('The receipt belongs to a different conversation.');
       if (result.success) onMailChanged?.();
       if (!result.success) throw new Error(result.error);
@@ -988,6 +1013,8 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const backgroundRequestId = backgroundRuns[0]?.requestId ?? null;
   const runningChatIds = new Set(chatWork.current.keys());
   const displayedExchanges = exchanges.filter(exchange => !runningRequest || exchange.requestId !== runningRequest || (exchange.status !== 'pending' && exchange.status !== 'running'));
+  const liveReviewAutomation = liveWork?.status === 'running' || liveWork?.status === 'stopping'
+    ? [...liveWork.activities].reverse().find(activity => activity.reviewAutomation)?.reviewAutomation : undefined;
   const workStatus = stoppingRequestId ? 'Stopping…' : workRunning ? liveWork?.activities.at(-1)?.message || (liveWork?.kind === 'draft' ? 'Preparing draft from conversation' : liveWork?.kind === 'action' ? liveWork.question : 'Preparing email search')
     : liveWork?.status === 'error' ? 'Request failed' : liveWork?.status === 'cancelled' ? 'Stopped' : 'Ready';
   useEffect(() => {
@@ -1105,7 +1132,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
           {loading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading conversations…</p> : loadError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{loadError}</p><button onClick={() => void load()} className="mt-3 font-medium underline">Try again</button></div> : chatLoading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{creating ? 'Creating conversation…' : 'Loading conversation…'}</p> : chatError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{chatError}</p><button type="button" onClick={() => activeChatId ? void selectChat(activeChatId, true) : void newChat()} className="mt-3 font-medium underline">Try again</button></div> : <>
             {accounts.length === 0 && <p role="status" className="text-sm text-muted-foreground">Connect an email account to ask Inbox Agent about your mail.</p>}
             {exchanges.length === 0 && !liveWork && <div className={`mx-auto flex w-full max-w-3xl flex-col justify-center ${compact ? 'space-y-5 py-3' : 'space-y-6 py-10'}`}><div className="space-y-3"><span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Bot className="h-6 w-6" /></span><h2 className={`${compact ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight`}>What can I help you with?</h2><p className="text-sm text-muted-foreground">Search your mail, review unread conversations, and catch messages that missed categorization.</p></div><div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'sm:grid-cols-2'}`}>{starterActions.map(({ title, description, question: text, Icon }) => <button key={title} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className={`assistant-surface flex items-start gap-3 rounded-xl border border-border text-left transition-colors hover:bg-accent hover:border-primary/20 disabled:opacity-50 ${compact ? 'p-3' : 'p-4'}`}><Icon className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><span className="space-y-1"><span className="block text-sm font-medium">{title}</span><span className="block text-xs leading-5 text-muted-foreground">{description}</span></span></button>)}</div><div className="flex flex-wrap gap-2">{starterQuestions.map(text => <button key={text} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className="rounded-full border border-border px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">{text}</button>)}</div></div>}
-            {displayedExchanges.map(exchange => <Answer key={exchange.id} compact={compact} exchange={exchange} onNavigateToSource={onNavigateToSource} onViewActivity={viewActivity} activityExpanded={activityOpen && activitySelection === exchange.id} userMessage={{ visible, onEdit: () => { setEditingExchangeId(exchange.id); setEditQuestion(exchange.question); }, disabled: busy || !!pendingQuestion, ...(editingExchangeId === exchange.id ? { editValue: editQuestion, onEditChange: setEditQuestion, onCancelEdit: () => setEditingExchangeId(null), onSaveEdit: () => void rewindChat(exchange) } : {}) }} actionBusy={busy || !!pendingQuestion || !!editingExchangeId} onApply={(ids, manualSelection, action) => void applyReview(exchange, ids, false, manualSelection, action)} onUndo={ids => void applyReview(exchange, ids, true)} onRefresh={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} onContinue={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, continueReviewId: exchange.review?.id, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} />)}
+            {displayedExchanges.map(exchange => <Answer key={exchange.id} compact={compact} exchange={exchange} onNavigateToSource={onNavigateToSource} onViewActivity={viewActivity} activityExpanded={activityOpen && activitySelection === exchange.id} userMessage={{ visible, onEdit: () => { setEditingExchangeId(exchange.id); setEditQuestion(exchange.question); }, disabled: busy || !!pendingQuestion, ...(editingExchangeId === exchange.id ? { editValue: editQuestion, onEditChange: setEditQuestion, onCancelEdit: () => setEditingExchangeId(null), onSaveEdit: () => void rewindChat(exchange) } : {}) }} actionBusy={busy || !!pendingQuestion || !!editingExchangeId} automation={liveReviewAutomation?.reviewId === exchange.review?.id ? liveReviewAutomation : undefined} onStartAutoReview={() => void applyReview(exchange, [], false, false, undefined, true)} onStop={runningRequest && !stoppingRequestId ? stop : undefined} onApply={(ids, manualSelection, action) => void applyReview(exchange, ids, false, manualSelection, action)} onUndo={ids => void applyReview(exchange, ids, true)} onRefresh={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} onContinue={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, continueReviewId: exchange.review?.id, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} />)}
             {!!activeChat?.runs?.some(run => run.kind !== 'question' && run.requestId !== runningRequest) && <details aria-label="Drafts and mail actions" className="assistant-surface rounded-xl border border-border p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">Drafts and mail actions</summary><div className="mt-3 space-y-4">{activeChat.runs.filter(run => run.kind !== 'question' && run.requestId !== runningRequest).map(run => <article key={run.requestId} aria-label={`Work record: ${run.question}`} className="space-y-2 border-t border-border pt-3"><p className="text-sm font-medium">{run.question}</p><p className="text-xs text-muted-foreground">{run.status === 'completed' ? 'Completed' : run.status === 'stopped' ? 'Stopped' : run.status === 'failed' ? 'Failed' : 'In progress'}</p>{run.error && <p className="text-xs text-destructive">{run.error}</p>}<div className="flex flex-wrap gap-3"><button type="button" onClick={event => viewActivity(`run:${run.requestId}`, event.currentTarget)} className="text-xs text-primary hover:underline">View activity</button>{run.draft && onOpenDraft && <button type="button" onClick={() => onOpenDraft(run.draft!)} className="text-xs text-primary hover:underline">Open draft</button>}</div><AssistantUsage usage={run.usage} compact={compact} /></article>)}</div></details>}
             {liveWork && <div className="space-y-5" role={workRunning ? 'status' : undefined}>{liveWork.kind !== 'draft' && liveWork.kind !== 'action' && <UserMessage question={liveWork.question} visible={visible} onEdit={!workRunning && !stoppingRequestId ? () => { setQuestion(liveWork.question); if (visibleRef.current) questionInput.current?.focus(); } : undefined} />}{!workActive && <button type="button" onClick={event => viewActivity('live', event.currentTarget)} aria-label={workRunning ? 'View current activity' : liveWork.status === 'stopping' ? 'View stopping activity' : liveWork.status === 'done' ? 'View draft activity' : liveWork.status === 'error' ? 'View failed activity' : 'View stopped activity'} aria-expanded={activityOpen && activitySelection === 'live'} aria-controls="assistant-activity-panel" className="flex max-w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground">{workRunning ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Activity className="h-3.5 w-3.5 shrink-0" />}<span className="truncate">{liveWork.status === 'running' ? liveWork.activities[liveWork.activities.length - 1]?.message || (liveWork.kind === 'draft' ? 'Preparing draft from conversation' : 'Preparing email search') : liveWork.status === 'done' ? 'Draft ready · View activity' : liveWork.status === 'stopping' ? 'Stopping… · View activity' : liveWork.status === 'cancelled' ? 'Stopped · View activity' : 'Failed · View activity'}</span><ChevronDown className="h-3.5 w-3.5 shrink-0 -rotate-90" /></button>}</div>}
           </>}

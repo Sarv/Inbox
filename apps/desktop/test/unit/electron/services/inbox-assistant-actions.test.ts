@@ -2,6 +2,7 @@ import type { EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
+import { InboxAssistantRecommendationCache } from '../../../../electron/services/inbox-assistant-recommendation-cache';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
 const accounts = [{ id: 'a', email: 'owner@company.example' }, { id: 'b', email: 'second@other.example' }];
@@ -52,6 +53,134 @@ function fixture(records: EmailRecord[] = [email('one')], second: EmailRecord[] 
   const deps: InboxAssistantActionDeps = { openMailbox: vi.fn(async id => { const mailbox = mailboxes.get(id); if (!mailbox) throw new Error('Account removed'); return mailbox; }), callAI, setRead, moveMail };
   return { deps, mailboxes, data, callAI, setRead, moveMail };
 }
+
+describe('reusing exact verified unread recommendations safely', () => {
+  const options = () => ({ recommendationCache: new InboxAssistantRecommendationCache(), reviewCacheIdentity: 'provider:model:request-policy-v1' });
+
+  it('refreshes unchanged complete mail without another AI call and creates fresh action snapshots', async () => {
+    const f = fixture(); const cacheOptions = options();
+    const first = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    const second = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(f.callAI).toHaveBeenCalledTimes(1);
+    expect(first.coverage[0]).toMatchObject({ cachedRecommendations: 0, aiReviewedThreads: 1 });
+    expect(second.coverage[0]).toMatchObject({ cachedRecommendations: 1, aiReviewedThreads: 0 });
+    expect(second.id).not.toBe(first.id); expect(second.items[0]!.id).not.toBe(first.items[0]!.id);
+    expect(second.items[0]).toMatchObject({ recommendation: 'mark_read', confidence: 0.98 });
+    expect(f.setRead).not.toHaveBeenCalled();
+    f.data.get('a')!.get('one')!.subject = 'Changed after the cached review';
+    expect((await applyInboxAssistantReview(second, [second.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { rawBody: '<p>A different complete discount announcement.</p>' }, { subject: 'A different sale' },
+    { fromAddress: 'different@newsletter.example' }, { toAddress: 'a-new-recipient@example.test' },
+    { uid: 11 }, { tags: '|INBOX|custom|' }, { updatedAt: 11 },
+  ])('invalidates cached recommendations after exact source state changes: %j', async change => {
+    const f = fixture(); const cacheOptions = options();
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    Object.assign(f.data.get('a')!.get('one')!, change);
+    const refreshed = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    expect(refreshed.coverage[0]).toMatchObject({ cachedRecommendations: 0, aiReviewedThreads: 1 });
+  });
+
+  it('keeps identical IDs/content isolated by account and provider/request policy', async () => {
+    const f = fixture([email('one')], [email('one')]); const cacheOptions = options();
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    const otherAccount = await prepareInboxAssistantReview([accounts[1]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(otherAccount.coverage[0]!.cachedRecommendations).toBe(0);
+    for (const reviewCacheIdentity of ['provider:new-model:request-policy-v1', 'provider:model:request-policy-v2']) {
+      const refreshed = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { ...cacheOptions, reviewCacheIdentity });
+      expect(refreshed.coverage[0]!.cachedRecommendations).toBe(0);
+    }
+    expect(f.callAI).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not reuse decisions without an explicit provider identity or after cache TTL', async () => {
+    let now = 0; const f = fixture();
+    const cacheOptions = { recommendationCache: new InboxAssistantRecommendationCache({ ttlMs: 100, now: () => now }), reviewCacheIdentity: 'provider:model' };
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    now = 100;
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { recommendationCache: cacheOptions.recommendationCache });
+    expect(f.callAI).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['changed', 'unavailable'] as const)('does not read cached decisions when the live provider policy is %s', async state => {
+    const f = fixture(); const cacheOptions = options();
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    const refreshed = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { ...cacheOptions,
+      isCacheCurrent: () => { if (state === 'unavailable') throw new Error('Provider unavailable'); return false; },
+    });
+    expect(f.callAI).toHaveBeenCalledTimes(2); expect(refreshed.coverage[0]!.cachedRecommendations).toBe(0);
+  });
+
+  it('does not cache a response under the old provider identity after a live policy change during the call', async () => {
+    const f = fixture(); let current = true; const cacheOptions = { ...options(), isCacheCurrent: () => current };
+    const call = f.callAI.getMockImplementation()!;
+    f.callAI.mockImplementation(async prompt => { current = false; return call(prompt); });
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    current = true; f.callAI.mockImplementation(call);
+    const refreshed = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(f.callAI).toHaveBeenCalledTimes(2); expect(refreshed.coverage[0]!.cachedRecommendations).toBe(0);
+    const next = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(f.callAI).toHaveBeenCalledTimes(2); expect(next.coverage[0]!.cachedRecommendations).toBe(1);
+  });
+
+  it('rechecks business contacts even when the email state and classifier input did not change', async () => {
+    const f = fixture(); const cacheOptions = options();
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    f.mailboxes.get('a')!.storage.getContacts.mockResolvedValue([{ email: 'offers@newsletter.example', sentCount: 1 }] as never);
+    const protectedReview = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(protectedReview.items[0]).toMatchObject({ recommendation: 'keep_unread', confidence: 0 });
+    expect(protectedReview.items[0]!.protectedReasons.join(' ')).toContain('known business contact');
+    expect(protectedReview.coverage[0]!.cachedRecommendations).toBe(0);
+    expect((await applyInboxAssistantReview(protectedReview, [protectedReview.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled(); expect(f.callAI).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['attachment', 'body', 'star', 'manual-category'] as const)('keeps newly protected %s mail out of cached automatic actions', async protection => {
+    const f = fixture(); const cacheOptions = options();
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    const row = f.data.get('a')!.get('one')!;
+    if (protection === 'attachment') f.mailboxes.get('a')!.storage.getAttachments.mockResolvedValue([{ filename: 'one.pdf' }] as never);
+    if (protection === 'body') { row.rawBody = ''; row.cleanBody = ''; row.hasBody = false; }
+    if (protection === 'star') row.tags += 'starred|';
+    if (protection === 'manual-category') row.manualCategories = [];
+    const protectedReview = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(protectedReview.items[0]!.recommendation).toBe('keep_unread');
+    expect(protectedReview.coverage[0]!.cachedRecommendations).toBe(0);
+    expect((await applyInboxAssistantReview(protectedReview, [protectedReview.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled(); expect(f.callAI).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['needs_review', 'low-confidence', 'missing', 'invalid', 'error'] as const)('does not cache %s provider results', async response => {
+    const f = fixture(); const cacheOptions = options();
+    f.callAI.mockImplementation(async prompt => {
+      if (response === 'error') throw new Error('Synthetic provider failure');
+      const item = JSON.parse(prompt.split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!)[0];
+      if (response === 'invalid') return '{"recommendations":[{"id":"invented"}]}';
+      return JSON.stringify({ recommendations: response === 'missing' ? [] : [{ id: item.id,
+        recommendation: response === 'needs_review' ? 'needs_review' : 'mark_read', confidence: response === 'low-confidence' ? 0.89 : 0.99, reason: 'Not a verified high-confidence decision.' }] });
+    });
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    const refreshed = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(f.callAI).toHaveBeenCalledTimes(2); expect(refreshed.coverage[0]!.cachedRecommendations).toBe(0);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('reuses high-confidence keep-unread decisions without authorizing a read action', async () => {
+    const f = fixture(); const cacheOptions = options();
+    const call = f.callAI.getMockImplementation()!;
+    f.callAI.mockImplementation(async prompt => (await call(prompt)).replace(/mark_read/g, 'keep_unread'));
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    const refreshed = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, cacheOptions);
+    expect(f.callAI).toHaveBeenCalledTimes(1); expect(refreshed.coverage[0]!.cachedRecommendations).toBe(1);
+    expect((await applyInboxAssistantReview(refreshed, [refreshed.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+});
 
 describe('explicit reviewed archive and Trash actions', () => {
   it.each(['archive', 'trash'] as const)('moves all trusted members of a manually chosen protected conversation to %s', async action => {

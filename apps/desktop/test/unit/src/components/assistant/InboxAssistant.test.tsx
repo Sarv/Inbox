@@ -191,6 +191,99 @@ function emit(event: InboxAssistantActivity) {
 }
 
 describe('Inbox Agent', () => {
+  it('starts automatic review explicitly without forwarding manual selections, shows live progress and stops the exact run', async () => {
+    const onMailChanged = vi.fn();
+    const reviewed = reviewExchange();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [reviewed] : [])));
+    let finish!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.applyReview.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const view = await mount({ onMailChanged });
+    expect(api.applyReview).not.toHaveBeenCalled();
+    fire(button(view, 'Clear selection'), 'click');
+    fire(button(view, 'Mark recommended & continue'), 'click'); await settle();
+    const request = api.applyReview.mock.calls[0]![0];
+    expect(request).toMatchObject({ chatId: 'chat-1', exchangeId: reviewed.id, reviewId: reviewed.review!.id, itemIds: [], autoContinue: true });
+    expect(request.manualSelection).toBeUndefined();
+    expect(confirm).not.toHaveBeenCalled();
+    const automation = { reviewId: reviewed.review!.id, status: 'running' as const, batchesReviewed: 2,
+      reviewedConversations: 400, markedConversations: 32, markedEmails: 35, queuedEmails: 2, maxBatches: 10, maxAICalls: 20 };
+    emit({ requestId: request.requestId, chatId: 'chat-1', sequence: 1, at: Date.now(), stage: 'action', status: 'running',
+      message: 'Automatic unread review · Batch 2', reviewAutomation: automation }); await settle();
+    expect(view.byLabel('Automatic unread review')?.textContent).toContain('400 conversations reviewed');
+    expect(view.byLabel('Automatic unread review')?.textContent).toContain('35 emails marked as read');
+    expect(view.byLabel('Automatic unread review')?.textContent).toContain('2 emails queued for sync');
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    emit({ requestId: request.requestId, chatId: 'chat-1', sequence: 2, at: Date.now(), stage: 'action', status: 'running',
+      message: 'Preparing another batch', reviewAutomation: automation }); await settle();
+    expect(onMailChanged).toHaveBeenCalledOnce();
+    emit({ requestId: request.requestId, chatId: 'chat-1', sequence: 3, at: Date.now(), stage: 'action', status: 'running',
+      message: 'Another receipt saved', reviewAutomation: { ...automation, markedEmails: 36 } }); await settle();
+    expect(onMailChanged).toHaveBeenCalledTimes(2);
+    fire(view.byLabel('Stop automatic review'), 'click'); await settle();
+    expect(api.cancel).toHaveBeenCalledExactlyOnceWith(request.requestId);
+    await act(async () => finish(ok({ ...reviewReceipt(reviewed), updatedAt: Date.now(), review: { ...reviewed.review!, automation: { ...automation, status: 'stopped' } } })));
+    await settle();
+    expect(api.applyReview).toHaveBeenCalledOnce();
+  });
+
+  it('keeps automatic batches in their original chat when a new conversation is opened', async () => {
+    const reviewed = reviewExchange();
+    api.chat.mockImplementation(async id => ok(chat(id, id === 'chat-1' ? [reviewed] : [])));
+    let finish!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
+    api.applyReview.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const view = await mount();
+    fire(button(view, 'Mark recommended & continue'), 'click'); await settle();
+    const request = api.applyReview.mock.calls[0]![0];
+    fire(button(view, 'New conversation'), 'click'); await settle();
+    expect(view.container.textContent).not.toContain('Unread mail review');
+    expect(api.cancel).not.toHaveBeenCalled();
+    const automation = { reviewId: reviewed.review!.id, status: 'completed' as const, batchesReviewed: 3,
+      reviewedConversations: 450, markedConversations: 42, markedEmails: 48, queuedEmails: 0, maxBatches: 10, maxAICalls: 20 };
+    emit({ requestId: request.requestId, chatId: 'chat-1', sequence: 1, at: Date.now(), stage: 'action', status: 'done',
+      message: 'Automatic unread review finished', reviewAutomation: automation });
+    await act(async () => finish(ok({ ...reviewReceipt(reviewed), updatedAt: Date.now(), review: { ...reviewed.review!, automation } })));
+    await settle();
+    expect(view.container.textContent).not.toContain('450 conversations reviewed');
+    fire(view.byLabel('Open conversation: TCS quotations'), 'click'); await settle();
+    expect(view.byLabel('Automatic unread review')?.textContent).toContain('450 conversations reviewed');
+    expect(api.applyReview).toHaveBeenCalledOnce();
+    expect(api.cancel).not.toHaveBeenCalled();
+  });
+
+  it('restores automatic progress and Stop without submitting another mail action', async () => {
+    const reviewed = reviewExchange();
+    const automation = { reviewId: reviewed.review!.id, status: 'running' as const, batchesReviewed: 2,
+      reviewedConversations: 250, markedConversations: 21, markedEmails: 24, queuedEmails: 1, maxBatches: 10, maxAICalls: 20 };
+    const run = { requestId: 'restored-automatic', chatId: 'chat-1', kind: 'action' as const, question: 'Automatic unread review',
+      accountIds: ['work', 'other'], exchangeId: reviewed.id, status: 'running' as const, startedAt: Date.now(), updatedAt: Date.now(),
+      activities: [{ requestId: 'restored-automatic', chatId: 'chat-1', sequence: 1, at: Date.now(), stage: 'action' as const,
+        status: 'running' as const, message: 'Automatic unread review · Batch 2', reviewAutomation: automation }] };
+    api.chats.mockResolvedValue(ok({ activeChatId: 'chat-1', chats: [{ ...summary(), activeRun: run }] }));
+    api.chat.mockResolvedValue(ok({ ...chat('chat-1', [reviewed]), activeRun: run }));
+    const view = await mount();
+    expect(view.byLabel('Automatic unread review')?.textContent).toContain('250 conversations reviewed');
+    expect(api.applyReview).not.toHaveBeenCalled();
+    fire(view.byLabel('Stop automatic review'), 'click'); await settle();
+    expect(api.cancel).toHaveBeenCalledExactlyOnceWith('restored-automatic');
+  });
+
+  it('loads automatic batch rows only when expanded and refreshes using the original review request', async () => {
+    const original = reviewExchange();
+    const batch = reviewExchange({ id: 'automatic-batch-two', reviewBatch: { runId: 'automatic-request', number: 2 },
+      createdAt: original.createdAt + 1, review: { ...original.review!, id: 'batch-two-review',
+        items: Array.from({ length: 200 }, (_, index) => reviewItem(`batch-${index}`)) } });
+    api.chat.mockImplementation(async id => ok(chat(id, [original, batch])));
+    const view = await mount();
+    const receipt = view.byLabel('Automatic review batch 2')!;
+    expect(receipt.textContent).toContain('200 conversations reviewed');
+    expect(receipt.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+    fire(receipt.querySelector('button'), 'click'); await settle();
+    expect(receipt.querySelectorAll('input[type="checkbox"]')).toHaveLength(200);
+    fire([...receipt.querySelectorAll('button')].find(value => value.textContent === 'Refresh review')!, 'click'); await settle();
+    expect(api.ask.mock.calls[0]![0]).toMatchObject({ question: original.question, reviewKind: 'unread', reviewOnly: true });
+    expect(api.applyReview).not.toHaveBeenCalled();
+  });
+
   it('keeps Stop locked until acknowledgement, suppresses stale progress and then permits editing the stopped question', async () => {
     let resolveCancel!: (value: InboxAssistantResult<InboxAssistantCancellation>) => void;
     let resolveAsk!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;

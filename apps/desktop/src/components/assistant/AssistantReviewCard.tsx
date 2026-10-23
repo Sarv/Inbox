@@ -1,8 +1,8 @@
-import { Archive, CheckCircle2, Clock3, Mail, RefreshCw, Trash2, Undo2 } from 'lucide-react';
+import { Archive, CheckCircle2, Clock3, Mail, Play, RefreshCw, Square, Trash2, Undo2 } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 
 import type { InboxAssistantSource } from '../../types/inbox-assistant';
-import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewItem, InboxAssistantReviewRecommendation } from '../../types/inbox-assistant-actions';
+import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewAutomation, InboxAssistantReviewItem, InboxAssistantReviewRecommendation } from '../../types/inbox-assistant-actions';
 
 export interface AssistantReviewCardProps {
   review: InboxAssistantReview;
@@ -12,6 +12,9 @@ export interface AssistantReviewCardProps {
   onOpen: (source: InboxAssistantSource) => void;
   onRefresh: () => void;
   onContinue?: () => void;
+  automation?: InboxAssistantReviewAutomation;
+  onStartAutoReview?: () => void;
+  onStop?: () => void;
 }
 
 const filters: Array<{ value: InboxAssistantReviewRecommendation; label: string }> = [
@@ -20,6 +23,7 @@ const filters: Array<{ value: InboxAssistantReviewRecommendation; label: string 
   { value: 'needs_review', label: 'Needs review' },
 ];
 const statusLabels = { applied: 'Applied', queued: 'Queued for sync', failed: 'Failed', skipped: 'Skipped', undone: 'Undone' };
+const automationLabels = { running: 'Automatic review running', completed: 'Automatic review complete', stopped: 'Automatic review stopped', failed: 'Automatic review failed' };
 
 function exactFlagTargets(item: InboxAssistantReviewItem, review: InboxAssistantReview): boolean {
   return (review.kind === 'mark_read' || review.kind === 'mark_unread')
@@ -69,8 +73,8 @@ function sourceFor(item: InboxAssistantReviewItem): InboxAssistantSource {
   };
 }
 
-function count(value: number, noun: string): string {
-  return `${value} ${noun}${value === 1 ? '' : 's'}`;
+function count(value: number, noun: string, plural = `${noun}s`): string {
+  return `${value} ${value === 1 ? noun : plural}`;
 }
 
 function sourceDate(value: number): string {
@@ -78,7 +82,7 @@ function sourceDate(value: number): string {
   return Number.isFinite(date.getTime()) ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Date unavailable';
 }
 
-export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onRefresh, onContinue }: AssistantReviewCardProps) {
+export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onRefresh, onContinue, automation, onStartAutoReview, onStop }: AssistantReviewCardProps) {
   const headingId = useId();
   const markUnread = review.kind === 'mark_unread';
   const scoped = review.kind === 'mark_read' || markUnread;
@@ -100,12 +104,18 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
   const canMarkRead = selected.length > 0 && selected.every(item => selectable(item, review) || manuallySelectable(item, review));
   const canMove = selected.length > 0 && selected.every(movable);
   const expired = review.status === 'expired' || !Number.isFinite(review.expiresAt) || review.expiresAt <= now;
-  const locked = busy || expired;
+  const currentAutomation = automation ?? review.automation;
+  const automationRunning = currentAutomation?.status === 'running';
+  const automationCompleted = currentAutomation?.status === 'completed';
+  const automationStartLabel = currentAutomation?.status === 'stopped' || currentAutomation?.status === 'failed' ? 'Resume automatic review' : 'Mark recommended & continue';
+  const automaticReviewSupported = review.kind === 'unread' || review.kind === 'uncategorized';
+  const canStartAutoReview = automaticReviewSupported && !automationCompleted && (eligible.length > 0 || review.coverage.some(account => account.hasMore));
+  const locked = busy || expired || automationRunning;
   const undoable = review.items.filter(item => item.undoAvailable === true
     && item.appliedAction !== 'archive' && item.appliedAction !== 'trash'
     && (item.status === 'applied' || item.status === 'queued' || item.status === 'failed') && (recommended(item, review) || item.manualSelectionAllowed === true));
   const shown = review.items.filter(item => item.recommendation === filter);
-  const hasCoverageNotes = review.truncated || review.coverage.some(account => account.status === 'unavailable' || account.hasMore || account.warnings.length > 0);
+  const hasCoverageNotes = review.truncated || review.coverage.some(account => account.status === 'unavailable' || account.hasMore || account.warnings.length > 0 || account.cachedRecommendations !== undefined || account.aiReviewedThreads !== undefined);
 
   useEffect(() => {
     setNow(Date.now());
@@ -117,7 +127,7 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
   useEffect(() => { setFilter(primaryFilter); }, [review.id, primaryFilter]);
 
   function canAct(): boolean {
-    return !busy && review.status !== 'expired' && Number.isFinite(review.expiresAt) && review.expiresAt > Date.now();
+    return !busy && !automationRunning && review.status !== 'expired' && Number.isFinite(review.expiresAt) && review.expiresAt > Date.now();
   }
 
   function setSelected(ids: string[]) {
@@ -156,11 +166,29 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
             <p className="mt-1 text-xs text-muted-foreground">{count(review.items.length, 'conversation')} · {count(review.items.reduce((sum, item) => sum + (scoped ? item.targetEmailIds?.length ?? 0 : item.unreadCount), 0), scoped ? 'matching email' : 'unread email')}</p>
             {review.scope && <p className="mt-1 break-words text-xs text-muted-foreground">{review.scope.field === 'any' ? 'Matching' : `${review.scope.field.charAt(0).toUpperCase()}${review.scope.field.slice(1)} matches`}: {review.scope.query}</p>}
           </div>
-          <button type="button" onClick={() => { if (!busy) onRefresh(); }} disabled={busy} className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">
+          <button type="button" onClick={() => { if (!busy && !automationRunning) onRefresh(); }} disabled={busy || automationRunning} className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">
             <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh review
           </button>
         </div>
-        {expired && <div role="status" className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-foreground"><p>This review has expired. Refresh it before changing mail.</p><button type="button" onClick={() => { if (!busy) onRefresh(); }} disabled={busy} className="flex min-h-8 items-center gap-1.5 font-medium underline underline-offset-2"><RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh now</button></div>}
+        {expired && <div role="status" className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-foreground"><p>This review has expired. Refresh it before changing mail.</p><button type="button" onClick={() => { if (!busy && !automationRunning) onRefresh(); }} disabled={busy || automationRunning} className="flex min-h-8 items-center gap-1.5 font-medium underline underline-offset-2"><RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh now</button></div>}
+        {automaticReviewSupported && (onStartAutoReview || currentAutomation) && <div aria-label="Automatic unread review" className="space-y-3 rounded-xl border border-border bg-muted/30 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-[min(100%,14rem)] flex-1 space-y-1">
+              <p className="text-xs font-medium">{currentAutomation ? automationLabels[currentAutomation.status] : 'Work through remaining mail'}</p>
+              <p className="text-xs leading-5 text-muted-foreground">Only recommended mail is marked as read. Important and uncertain mail stays unread. Nothing is archived or deleted.</p>
+              <p className="text-xs text-muted-foreground">Up to {currentAutomation?.maxBatches ?? 10} batches and {currentAutomation?.maxAICalls ?? 20} AI classification calls per run.</p>
+            </div>
+            {automationRunning ? <button type="button" onClick={() => onStop?.()} disabled={!onStop} aria-label="Stop automatic review" className="flex min-h-9 max-w-full shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2 text-xs font-medium hover:bg-accent hover:text-foreground disabled:opacity-50"><Square aria-hidden="true" className="h-3 w-3" />Stop</button>
+              : onStartAutoReview && !automationCompleted && <button type="button" disabled={locked || !canStartAutoReview} onClick={() => { if (canAct() && canStartAutoReview) onStartAutoReview(); }} className="assistant-primary-action flex min-h-9 max-w-full shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"><Play aria-hidden="true" className="h-3.5 w-3.5" />{automationStartLabel}</button>}
+          </div>
+          {currentAutomation && <div role="status" aria-live="polite" className="space-y-1 text-xs [overflow-wrap:anywhere]">
+            <p>{count(currentAutomation.batchesReviewed, 'batch', 'batches')} reviewed · {count(currentAutomation.reviewedConversations, 'conversation')} reviewed</p>
+            <p>{count(currentAutomation.markedConversations, 'conversation')} marked as read · {count(currentAutomation.markedEmails, 'email')} marked as read</p>
+            {currentAutomation.queuedEmails > 0 && <p className="text-muted-foreground">{count(currentAutomation.queuedEmails, 'email')} queued for sync; server changes are not confirmed yet.</p>}
+            {currentAutomation.reason && <p className={currentAutomation.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}>{currentAutomation.reason}</p>}
+            {automationCompleted && <p className="text-muted-foreground">Refresh review to check for newly arrived mail.</p>}
+          </div>}
+        </div>}
         {hasCoverageNotes && (
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">Review coverage and limits</summary>
@@ -168,6 +196,7 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
               {review.coverage.map(account => <li key={account.accountId}>
                 <span className="font-medium text-foreground">{account.email}</span>
                 <p>{account.status === 'unavailable' ? 'Account unavailable; its mail was not reviewed.' : `${count(account.reviewedThreads, 'conversation')} reviewed`}{account.hasMore ? ' · More conversations remain.' : ''}</p>
+                {(account.cachedRecommendations !== undefined || account.aiReviewedThreads !== undefined) && <p>{[account.cachedRecommendations !== undefined ? count(account.cachedRecommendations, 'cached recommendation') : undefined, account.aiReviewedThreads !== undefined ? `${count(account.aiReviewedThreads, 'conversation')} newly reviewed by AI` : undefined].filter(Boolean).join(' · ')}</p>}
                 {account.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
               </li>)}
               {review.truncated && <li>This review covers a limited batch of conversations.</li>}
@@ -232,11 +261,11 @@ export function AssistantReviewCard({ review, busy, onApply, onUndo, onOpen, onR
       <div role="group" aria-label="Review actions" className="assistant-raised sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card p-4">
         <div className="space-y-1"><p aria-live="polite" className="text-xs text-muted-foreground">{count(selected.length, 'conversation')} selected · {count(selectedTargetCount, selectedTargetLabel)}{scoped ? ` to mark ${actionLabel}` : ''}{selectedElsewhere > 0 && <span> · {selectedElsewhere} in other groups</span>}</p>{canMove && <p className="text-xs text-muted-foreground">Archive and Delete apply to all {count(selectedMessageCount, 'email')} in these conversations. Delete moves them to Trash.</p>}{canMarkRead && overrides.length > 0 && <p className="text-xs text-muted-foreground">{count(overrides.length, 'selection')} {overrides.length === 1 ? 'overrides' : 'override'} the agent’s recommendation. Confirmation required to mark as {actionLabel}.</p>}</div>
         <div className="flex flex-wrap items-center gap-3">
-          {expired && <button type="button" disabled={busy} onClick={() => { if (!busy) onRefresh(); }} className="flex min-h-9 items-center gap-1.5 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"><RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh review</button>}
+          {expired && <button type="button" disabled={busy || automationRunning} onClick={() => { if (!busy && !automationRunning) onRefresh(); }} className="flex min-h-9 items-center gap-1.5 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"><RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />Refresh review</button>}
           {review.coverage.some(account => account.hasMore) && <button type="button" disabled={locked || !onContinue} onClick={() => { if (canAct()) onContinue?.(); }} className="rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50">Review next batch</button>}
           {undoable.length > 1 && <button type="button" disabled={locked} onClick={() => { if (canAct()) onUndo(undoable.map(item => item.id)); }} className="text-xs text-primary hover:underline disabled:text-muted-foreground disabled:no-underline">Undo {count(undoable.length, 'conversation')}</button>}
           <button type="button" aria-label="Archive selected conversations" disabled={locked || !canMove} onClick={() => { if (canAct() && canMove) onApply(selected.map(item => item.id), true, 'archive'); }} className="flex min-h-9 items-center gap-1.5 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"><Archive aria-hidden="true" className="h-3.5 w-3.5" />Archive</button>
-          <button type="button" aria-label="Move selected conversations to Trash" disabled={locked || !canMove} onClick={() => { if (canAct() && canMove) onApply(selected.map(item => item.id), true, 'trash'); }} className="flex min-h-9 items-center gap-1.5 rounded-xl border border-destructive/40 px-3 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"><Trash2 aria-hidden="true" className="h-3.5 w-3.5" />Delete</button>
+          <button type="button" aria-label="Move selected conversations to Trash" disabled={locked || !canMove} onClick={() => { if (canAct() && canMove) onApply(selected.map(item => item.id), true, 'trash'); }} className="flex min-h-9 items-center gap-1.5 rounded-xl border border-destructive/40 px-3 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-400/10"><Trash2 aria-hidden="true" className="h-3.5 w-3.5" />Delete</button>
           <button type="button" disabled={locked || !canMarkRead} onClick={() => { if (canAct() && canMarkRead) { const ids = selected.map(item => item.id); if (overrides.length) onApply(ids, true); else onApply(ids); } }} className="assistant-primary-action min-h-9 rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">Mark selected as {actionLabel}</button>
         </div>
       </div>

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { waitForAbortableOperation } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
-import type { InboxAssistantReview, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
+import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, LocalCalendarPreferences } from '../../src/types/local-calendar';
 
 import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
@@ -12,12 +12,14 @@ import { answerInboxAssistant, planInboxAssistantSearch } from './inbox-assistan
 import { buildInboxAssistantContext } from './inbox-assistant-context';
 import { generateInboxAssistantDraft } from './inbox-assistant-draft';
 import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
+import { InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import { researchInboxAssistant, type AssistantResearchDeps } from './inbox-assistant-retrieval';
 import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
 
 export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   accounts(): InboxAssistantAccount[];
-  callAI(prompt: string, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void): Promise<string>;
+  callAI(prompt: string, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void, options?: { maxOutputTokens?: number }): Promise<string>;
+  reviewCacheIdentity?(): string;
   history: InboxAssistantHistoryStore;
   setRead?: InboxAssistantActionDeps['setRead'];
   moveMail?: InboxAssistantActionDeps['moveMail'];
@@ -37,6 +39,18 @@ interface ActiveRun {
   cancelled: boolean;
   settled: Promise<void>;
   finish(): void;
+  reviewBudget?: { calls: number; inputChars: number; reason?: string };
+}
+
+const AUTOMATIC_REVIEW_LIMITS = { batches: 10, aiCalls: 20, inputChars: 500_000, durationMs: 10 * 60_000 };
+interface HeldReview {
+  chatId: string;
+  exchangeId: string;
+  review: InboxAssistantReview;
+  excludedThreads: Record<string, string[]>;
+  /** Host-only continuation, updated only after safely settled batches. */
+  automaticCheckpoint?: Record<string, string[]>;
+  automaticExhausted?: boolean;
 }
 
 function validateRequest(value: unknown): InboxAssistantRequest {
@@ -109,7 +123,8 @@ export class InboxAssistantService {
   private running = new Map<string, ActiveRun>();
   private mailActionTail: Promise<void> = Promise.resolve();
   private generations = new Map<string, number>();
-  private actionReviews = new Map<string, { chatId: string; exchangeId: string; review: InboxAssistantReview; excludedThreads: Record<string, string[]> }>();
+  private actionReviews = new Map<string, HeldReview>();
+  private recommendationCache = new InboxAssistantRecommendationCache();
 
   constructor(private deps: InboxAssistantServiceDeps) {}
 
@@ -201,15 +216,26 @@ export class InboxAssistantService {
     } finally { release(); }
   }
 
-  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal): Promise<string> {
+  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal, maxOutputTokens?: number): Promise<string> {
     signal.throwIfAborted();
-    return waitForAbortableOperation(this.deps.callAI(prompt, signal, usage => {
+    if (run.reviewBudget) {
+      const budget = run.reviewBudget;
+      if (budget.calls >= AUTOMATIC_REVIEW_LIMITS.aiCalls || budget.inputChars + prompt.length > AUTOMATIC_REVIEW_LIMITS.inputChars) {
+        budget.reason = 'The automatic review reached its AI budget. Start another run to continue.';
+        throw new Error(budget.reason);
+      }
+      budget.calls++;
+      budget.inputChars += prompt.length;
+    }
+    const onUsage = (usage: InboxAssistantAIUsage) => {
       run.record.usage = aggregateInboxAssistantUsage([...(run.record.usage?.calls ?? []), usage]);
       // Reported accounting can arrive during cancellation. Keep the saved
       // receipt on its originating run without waking or selecting that chat.
       if (run.generation === (this.generations.get(run.chatId) ?? 0)) this.persistRun(run);
       else this.persistStaleUsage(run);
-    }), signal);
+    };
+    return waitForAbortableOperation(maxOutputTokens === undefined ? this.deps.callAI(prompt, signal, onUsage)
+      : this.deps.callAI(prompt, signal, onUsage, { maxOutputTokens }), signal);
   }
 
   private persistStaleUsage(run: ActiveRun): void {
@@ -248,7 +274,13 @@ export class InboxAssistantService {
       changed = true;
       return { ...value, status: 'stopped', updatedAt: Date.now(), error: 'Interrupted when the app restarted. The saved conversation is available; start a new request to continue.' };
     };
-    const recovered: InboxAssistantChat = { ...chat, exchanges: chat.exchanges.map(stopOrphan),
+    const recovered: InboxAssistantChat = { ...chat, exchanges: chat.exchanges.map(value => {
+      const exchange = stopOrphan(value);
+      if (exchange.review?.automation?.status !== 'running' || (live && live.record.exchangeId === exchange.id)) return exchange;
+      changed = true;
+      return { ...exchange, review: { ...exchange.review, automation: { ...exchange.review.automation, status: 'stopped' as const,
+        reason: 'Interrupted when the app restarted. Saved receipts remain available; start a new review to continue.' } } };
+    }),
       ...(chat.runs ? { runs: chat.runs.map(stopOrphan) } : {}) };
     if (changed) this.deps.history.writeChat(recovered);
     return recovered;
@@ -362,11 +394,17 @@ export class InboxAssistantService {
     for (const [id, entry] of this.actionReviews) if (entry.chatId === active) this.actionReviews.delete(id);
   }
 
-  private reviewDeps(signal: AbortSignal): InboxAssistantActionDeps {
+  private reviewDeps(signal: AbortSignal, expectedAccounts?: InboxAssistantAccount[]): InboxAssistantActionDeps {
+    const assertAccount = (accountId: string) => {
+      signal.throwIfAborted();
+      const account = this.accounts().find(item => item.id === accountId);
+      if (!account || (expectedAccounts && !expectedAccounts.some(item => item.id === account.id && item.email === account.email))) {
+        throw new Error('The review account changed or is no longer connected.');
+      }
+    };
     return {
       openMailbox: accountId => {
-        if (signal.aborted) throw new Error('Request stopped.');
-        if (!this.accounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
+        assertAccount(accountId);
         return this.deps.openMailbox(accountId);
       },
       callAI: (prompt, stepSignal) => {
@@ -374,31 +412,143 @@ export class InboxAssistantService {
         if (effective.aborted) throw new Error('Request stopped.');
         const run = [...this.running.values()].find(value => value.controller.signal === signal);
         if (!run) throw new Error('This Inbox Agent request is no longer running.');
-        return this.callRunAI(run, prompt, effective);
+        expectedAccounts?.forEach(account => assertAccount(account.id));
+        return this.callRunAI(run, prompt, effective, 4_000);
       },
       setRead: async (accountId, ids, read) => {
-        if (signal.aborted) throw new Error('Request stopped.');
-        if (!this.accounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
+        assertAccount(accountId);
         if (!this.deps.setRead) throw new Error('Mail actions are unavailable. Restart the app after updating.');
         return this.deps.setRead(accountId, ids, read);
       },
       moveMail: async (accountId, ids, action) => {
-        if (signal.aborted) throw new Error('Request stopped.');
-        if (!this.accounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
+        assertAccount(accountId);
         if (!this.deps.moveMail) throw new Error('Folder actions are unavailable. Restart the app after updating.');
         return this.deps.moveMail(accountId, ids, action);
       },
     };
   }
 
-  async applyReview(value: unknown): Promise<InboxAssistantExchange> {
+  private rememberReview(chatId: string, exchangeId: string, review: InboxAssistantReview, excludedThreads: Record<string, string[]>): void {
+    for (const [id, held] of this.actionReviews) if (held.review.expiresAt <= Date.now()) this.actionReviews.delete(id);
+    while (this.actionReviews.size >= 20) this.actionReviews.delete(this.actionReviews.keys().next().value!);
+    this.actionReviews.set(review.id, { chatId, exchangeId, review, excludedThreads });
+  }
+
+  /** Each batch keeps its own trusted snapshot and durable, independently undoable receipt. */
+  private async automaticallyReview(run: ActiveRun, initial: InboxAssistantExchange, held: HeldReview, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
+    const selected = held.review.accounts.map(account => ({ ...account }));
+    const identity = this.deps.reviewCacheIdentity?.();
+    const signal = run.controller.signal;
+    const deps = this.reviewDeps(signal, selected);
+    const resuming = !!held.review.automation && held.review.automation.status !== 'running';
+    const progress: InboxAssistantReviewAutomation = { reviewId: held.review.id, status: 'running', batchesReviewed: 0,
+      reviewedConversations: 0, markedConversations: 0, markedEmails: 0, queuedEmails: 0,
+      maxBatches: AUTOMATIC_REVIEW_LIMITS.batches, maxAICalls: AUTOMATIC_REVIEW_LIMITS.aiCalls };
+    run.reviewBudget = { calls: 0, inputChars: 0 };
+    let anchor = initial;
+    let batch = initial;
+    let current = held;
+    let failure: unknown;
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      if (run.generation !== (this.generations.get(run.chatId) ?? 0)) throw new Error('The conversation changed. Automatic review stopped.');
+      if (selected.some(account => !this.accounts().some(value => value.id === account.id && value.email === account.email))) throw new Error('A selected account changed. Automatic review stopped.');
+      if (this.deps.reviewCacheIdentity?.() !== identity) throw new Error('Your AI provider changed. Start another review with the new settings.');
+    };
+    const saveProgress = () => {
+      held.review.automation = { ...progress };
+      anchor = { ...anchor, review: held.review, updatedAt: Date.now() };
+      this.persistRun(run, anchor);
+      this.reportRun(run, { stage: 'action', status: progress.status === 'running' ? 'running' : progress.status === 'completed' ? 'done' : 'warning',
+        message: progress.status === 'running' ? `Automatic unread review · Batch ${Math.max(1, progress.batchesReviewed)}` : progress.status === 'completed' ? 'Automatic unread review finished' : 'Automatic unread review stopped',
+        detail: progress.reason ?? `${progress.reviewedConversations} conversations reviewed · ${progress.markedEmails} emails marked as read${progress.queuedEmails ? ` · ${progress.queuedEmails} queued for sync` : ''}`,
+        reviewAutomation: { ...progress } }, onActivity);
+    };
+    const prepareNext = async (excludedThreads: Record<string, string[]>) => {
+      const next = await waitForAbortableOperation(prepareInboxAssistantReview(selected, held.review.kind, deps, signal,
+        activity => this.reportRun(run, activity, onActivity), { excludeThreadIds: excludedThreads, recommendationCache: this.recommendationCache, reviewCacheIdentity: identity,
+          isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === identity }), signal);
+      assertCurrent();
+      batch = { id: randomUUID(), chatId: run.chatId, question: initial.question, reviewBatch: { runId: run.id, number: progress.batchesReviewed + 1 },
+        accountIds: selected.map(account => account.id), createdAt: Date.now(), status: 'completed', review: next,
+        answer: { text: reviewText(next), sources: [], coverage: [], warnings: next.coverage.flatMap(account => account.warnings) } };
+      this.rememberReview(run.chatId, batch.id, next, excludedThreads);
+      current = this.actionReviews.get(next.id)!;
+      this.persistRun(run, batch);
+    };
+    try {
+      saveProgress();
+      if (held.automaticCheckpoint || resuming) await prepareNext(held.automaticCheckpoint ?? held.excludedThreads);
+      while (progress.batchesReviewed < AUTOMATIC_REVIEW_LIMITS.batches) {
+        assertCurrent();
+        const review = current.review;
+        progress.batchesReviewed++;
+        progress.reviewedConversations += review.items.length;
+        saveProgress();
+        // A renderer selection, cached authority or an LLM can never widen this
+        // action. The mutation helper rechecks full source snapshots as well.
+        const ids = review.items.filter(item => item.status === 'pending' && item.recommendation === 'mark_read' && item.confidence >= 0.9
+          && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown).map(item => item.id);
+        if (ids.length) {
+          const result = await this.withMailActions(run, () => {
+            assertCurrent();
+            return applyInboxAssistantReview(review, ids, deps, signal);
+          });
+          batch = { ...batch, review, reviewResult: result, answer: { ...batch.answer, text: reviewText(review) }, updatedAt: Date.now() };
+          if (batch.id === anchor.id) anchor = batch;
+          // Even Stop during a write must save acknowledged changes before
+          // observing cancellation or attempting another batch.
+          this.persistRun(run, batch);
+          progress.markedConversations += result.items.filter(item => item.appliedIds.length > 0).length;
+          progress.markedEmails += result.items.reduce((sum, item) => sum + item.appliedIds.length, 0);
+          progress.queuedEmails += result.items.reduce((sum, item) => sum + item.queuedIds.length, 0);
+          saveProgress();
+          assertCurrent();
+          if (result.failedCount || result.skippedCount) {
+            progress.status = 'stopped'; progress.reason = 'Some conversations changed or could not be updated. Check the saved receipts before continuing.'; break;
+          }
+        }
+        assertCurrent();
+        if (review.coverage.some(account => account.status === 'unavailable')) {
+          progress.status = 'stopped'; progress.reason = 'A selected account could not be reviewed. Reconnect it before continuing.'; break;
+        }
+        if (run.reviewBudget.reason) { progress.status = 'stopped'; progress.reason = run.reviewBudget.reason; break; }
+        const excludedThreads: Record<string, string[]> = {};
+        for (const account of selected) excludedThreads[account.id] = [...new Set([
+          ...(current.excludedThreads[account.id] ?? []), ...review.items.filter(item => item.accountId === account.id).map(item => item.threadId),
+        ])];
+        held.automaticCheckpoint = excludedThreads;
+        held.excludedThreads = excludedThreads;
+        if (!review.coverage.some(account => account.hasMore)) { held.automaticExhausted = true; progress.status = 'completed'; progress.reason = 'All available unread conversations in the selected accounts were reviewed. Important and uncertain mail stayed unread.'; break; }
+        if (!review.items.length) { progress.status = 'stopped'; progress.reason = 'No new conversations were found within the scan limit. More mail may remain; narrow the account scope or refresh later.'; break; }
+        if (progress.batchesReviewed >= AUTOMATIC_REVIEW_LIMITS.batches) {
+          progress.status = 'stopped'; progress.reason = 'Reached the 10-batch limit. Start another automatic run to continue.'; break;
+        }
+        if (run.reviewBudget.calls >= AUTOMATIC_REVIEW_LIMITS.aiCalls) {
+          progress.status = 'stopped'; progress.reason = 'Reached the AI budget for this run. Start another automatic run to continue.'; break;
+        }
+        await prepareNext(excludedThreads);
+      }
+    } catch (error) {
+      failure = error;
+      progress.status = run.cancelled ? 'stopped' : 'failed';
+      progress.reason = run.cancelled ? 'Stopped. Changes already acknowledged are saved below; no further batches were started.'
+        : error instanceof Error ? error.message : 'Automatic review could not finish. Check the saved receipts.';
+    }
+    saveProgress();
+    return this.settleRun(run, failure, anchor)!;
+  }
+
+  async applyReview(value: unknown, onActivity?: (activity: InboxAssistantActivity) => void): Promise<InboxAssistantExchange> {
     const request = value as InboxAssistantReviewActionRequest;
-    if (!request || !Object.keys(request).every(key => ['requestId', 'chatId', 'exchangeId', 'reviewId', 'itemIds', 'undo', 'manualSelection', 'action'].includes(key))
+    if (!request || !Object.keys(request).every(key => ['requestId', 'chatId', 'exchangeId', 'reviewId', 'itemIds', 'undo', 'manualSelection', 'action', 'autoContinue'].includes(key))
       || ![request.requestId, request.chatId, request.exchangeId, request.reviewId].every(id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(id))
-      || !Array.isArray(request.itemIds) || !request.itemIds.length || request.itemIds.length > 600
+      || !Array.isArray(request.itemIds) || (!request.itemIds.length && !request.autoContinue) || request.itemIds.length > 600
       || request.itemIds.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id))
       || (request.undo !== undefined && typeof request.undo !== 'boolean')
       || (request.manualSelection !== undefined && typeof request.manualSelection !== 'boolean')
+      || (request.autoContinue !== undefined && typeof request.autoContinue !== 'boolean')
+      || (request.autoContinue && (request.itemIds.length > 0 || request.undo || request.manualSelection || request.action !== undefined))
       || (request.action !== undefined && !['mark_read', 'mark_unread', 'archive', 'trash'].includes(request.action))
       || ((request.action === 'archive' || request.action === 'trash') && request.manualSelection !== true)
       || (request.undo && (request.manualSelection || request.action !== undefined))) throw new Error('Choose valid reviewed conversations.');
@@ -409,14 +559,17 @@ export class InboxAssistantService {
     if (!held || held.chatId !== request.chatId || held.exchangeId !== request.exchangeId || !exchange
       || held.review.expiresAt <= Date.now()) throw new Error('This review has expired. Prepare a fresh review before changing mail.');
     if (exchange.accountIds.some(id => !this.accounts().some(account => account.id === id))) throw new Error('A review account is no longer connected.');
+    if (request.autoContinue && !['unread', 'uncategorized'].includes(held.review.kind)) throw new Error('Automatic review is available for unread and uncategorized mail only.');
+    if (request.autoContinue && held.automaticExhausted) throw new Error('This automatic review is complete. Refresh the review to check newly arrived mail.');
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), 300_000);
+    const timeout = setTimeout(() => controller.abort(new Error('Mail action took too long.')), request.autoContinue ? AUTOMATIC_REVIEW_LIMITS.durationMs : 300_000);
     timeout.unref?.();
-    const actionText = request.undo ? 'Undo the previous read action' : request.action === 'trash' ? 'Move selected conversations to Trash'
+    const actionText = request.autoContinue ? 'Automatically mark recommended mail read and review the next batches' : request.undo ? 'Undo the previous read action' : request.action === 'trash' ? 'Move selected conversations to Trash'
       : request.action === 'archive' ? 'Archive selected conversations' : held.review.kind === 'mark_unread' ? 'Mark selected emails unread' : 'Mark selected conversations read';
     const run = this.beginRequest(request.requestId, request.chatId, controller, 'action', actionText, [...exchange.accountIds], exchange.id);
     try {
-      this.reportRun(run, { stage: 'action', status: 'running', message: actionText });
+      if (request.autoContinue) return await this.automaticallyReview(run, exchange, held, onActivity);
+      this.reportRun(run, { stage: 'action', status: 'running', message: actionText }, onActivity);
       const ids = [...new Set(request.itemIds)];
       const result = await this.withMailActions(run, async () => request.undo
         ? await undoInboxAssistantReview(held.review, ids, this.reviewDeps(controller.signal), controller.signal)
@@ -580,15 +733,16 @@ export class InboxAssistantService {
           ])];
         }
         report({ stage: 'search', status: 'running', message: command ? 'Finding matching emails' : 'Reviewing unread conversations', detail: command ? `Matching “${command.scope.query}” in ${command.scope.field === 'any' ? 'sender, subject and original body' : command.scope.field}. Preparing mark as ${command.kind === 'mark_unread' ? 'unread' : 'read'}.` : 'Including uncategorized mail and checking every unread member of each conversation.' });
-        const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads, ...(command ? { scope: command.scope } : {}) }), controller.signal);
+        const reviewCacheIdentity = this.deps.reviewCacheIdentity?.();
+        const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads,
+          recommendationCache: this.recommendationCache, reviewCacheIdentity, isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === reviewCacheIdentity,
+          ...(command ? { scope: command.scope } : {}) }), controller.signal);
         assertCurrent();
         const exchange: InboxAssistantExchange = {
           id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt, review,
           answer: { text: reviewText(review), sources: [], coverage: [], warnings: review.coverage.flatMap(account => account.warnings) },
         };
-        for (const [id, held] of this.actionReviews) if (held.review.expiresAt <= Date.now()) this.actionReviews.delete(id);
-        while (this.actionReviews.size >= 20) this.actionReviews.delete(this.actionReviews.keys().next().value!);
-        this.actionReviews.set(review.id, { chatId: request.chatId, exchangeId: exchange.id, review, excludedThreads });
+        this.rememberReview(request.chatId, exchange.id, review, excludedThreads);
         // Approval is a saved choice for user requests in this conversation.
         // Changing it never starts work by itself or enables a mail daemon.
         const mode = this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review';

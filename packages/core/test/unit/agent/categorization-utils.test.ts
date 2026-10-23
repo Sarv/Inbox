@@ -518,6 +518,16 @@ const config = (over: Partial<AIProviderConfig> = {}): AIProviderConfig => ({
 });
 
 describe('callAIProvider — OpenAI-compatible transport', () => {
+  it.each([
+    [4_000, 4_000], [1, 1], [0.5, 1], [4000.9, 4_000], [100_000, 16_000],
+    [undefined, 16_000], [0, 16_000], [-1, 16_000], [NaN, 16_000], [Infinity, 16_000],
+  ])('bounds a per-call output allowance %s to %s', async (maxOutputTokens, expected) => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => chatCompletion('ok'));
+    await callAIProvider(config({ fetchImpl, maxOutputTokens }), 's', 'u');
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string);
+    expect(body.max_completion_tokens).toBe(expected);
+  });
+
   it('posts the chat completion with the bearer, model and thinking disabled', async () => {
     const fetchImpl = vi.fn(async () => chatCompletion('  hello from the model  '));
     const out = await callAIProvider(config({ fetchImpl }), 'SYSTEM', 'USER');
@@ -732,17 +742,60 @@ describe('callAIProvider — request timeout', () => {
   it('aborts immediately when the caller signal is already aborted', async () => {
     const controller = new AbortController();
     controller.abort(new Error('already gone'));
-    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      if (init?.signal?.aborted) reject(new Error('aborted before send'));
-      init?.signal?.addEventListener('abort', () => reject(new Error('aborted before send')));
-    }));
+    const fetchImpl = vi.fn();
+    const resolveBearer = vi.fn(async () => 'unused');
 
-    await expect(callAIProvider(config({ fetchImpl }), 's', 'u', controller.signal))
-      .rejects.toThrow(/aborted before send/);
+    await expect(callAIProvider(config({ fetchImpl, resolveBearer }), 's', 'u', controller.signal))
+      .rejects.toThrow(/already gone/);
+    expect(resolveBearer).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not send after cancellation while resolving a bearer', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn();
+    let release!: (value: string) => void;
+    const resolveBearer = vi.fn(() => new Promise<string>(resolve => { release = resolve; }));
+    const pending = callAIProvider(config({ fetchImpl, resolveBearer }), 's', 'u', controller.signal);
+    const assertion = expect(pending).rejects.toThrow('Stopped while authorizing');
+    controller.abort(new Error('Stopped while authorizing'));
+    release('unused');
+    await assertion;
+    expect(resolveBearer).toHaveBeenCalledExactlyOnceWith(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh credentials or resend a rejected bearer after cancellation', async () => {
+    const controller = new AbortController();
+    const resolveBearer = vi.fn(async () => 'first-bearer');
+    const fetchImpl = vi.fn(async () => {
+      controller.abort(new Error('Stopped before auth retry'));
+      return jsonResponse({ error: 'invalid_token' }, { status: 401 });
+    });
+    await expect(callAIProvider(config({ fetchImpl, resolveBearer }), 's', 'u', controller.signal))
+      .rejects.toThrow('Stopped before auth retry');
+    expect(resolveBearer).toHaveBeenCalledExactlyOnceWith(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('callAIProvider — Gemini transport', () => {
+  it('honors a bounded per-call output allowance', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({}));
+    await callAIProvider(config({ type: 'gemini', fetchImpl, maxOutputTokens: 4_000 }), 's', 'u');
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string);
+    expect(body.generationConfig.maxOutputTokens).toBe(4_000);
+  });
+
+  it('does not send a Gemini request after cancellation', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('Already stopped'));
+    const fetchImpl = vi.fn();
+    await expect(callAIProvider(config({ type: 'gemini', fetchImpl }), 's', 'u', controller.signal))
+      .rejects.toThrow('Already stopped');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('calls generateContent with the key, merged prompt and thinking disabled', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ candidates: [{ content: { parts: [{ text: ' gemini says hi ' }] } }] }));
     const out = await callAIProvider(config({ type: 'gemini', apiKey: 'gkey', model: 'gemini-2.5-flash', baseUrl: undefined, fetchImpl }), 'SYS', 'USR');
@@ -781,6 +834,21 @@ describe('callAIWithRetry — only transient failures are retried', () => {
   const drainBackoff = async () => {
     for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(10_000);
   };
+
+  it('immediately cancels retry backoff without resolving credentials or sending another request', async () => {
+    const controller = new AbortController();
+    const resolveBearer = vi.fn(async () => 'first-bearer');
+    const fetchImpl = vi.fn(async () => jsonResponse({}, { status: 503 }));
+    const pending = callAIWithRetry(config({ fetchImpl, resolveBearer }), 's', 'u', controller.signal);
+    const assertion = expect(pending).rejects.toThrow('Stopped during retry delay');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    controller.abort(new Error('Stopped during retry delay'));
+    await assertion;
+    await drainBackoff();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(resolveBearer).toHaveBeenCalledExactlyOnceWith(false);
+  });
 
   it('retries a 500 and returns the eventual success', async () => {
     const fetchImpl = vi.fn()

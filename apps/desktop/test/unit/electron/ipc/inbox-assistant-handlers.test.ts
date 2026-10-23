@@ -43,6 +43,7 @@ vi.mock('../../../../electron/services/accounts-registry', () => ({
 vi.mock('../../../../electron/services/assistant-attachment-reader', () => ({ readAssistantAttachment: vi.fn() }));
 vi.mock('../../../../electron/services/assistant-mailbox-download', () => ({ fetchAssistantMessageBody: vi.fn() }));
 vi.mock('../../../../electron/services/inbox-assistant-history', () => ({ inboxAssistantHistory: { read: vi.fn(), write: vi.fn() } }));
+vi.mock('../../../../electron/services/inbox-assistant-usage', () => ({ callInboxAssistantAI: vi.fn() }));
 vi.mock('../../../../electron/services/unified-pipeline-service', () => ({ getPipelineAIConfig: vi.fn() }));
 vi.mock('../../../../electron/services/inbox-assistant-service', () => ({
   InboxAssistantService: class {
@@ -59,7 +60,7 @@ vi.mock('../../../../electron/services/inbox-assistant-service', () => ({
     draftEmail(value: unknown, progress: (activity: InboxAssistantActivity) => void) { return h.service.draftEmail(value, progress); }
     history() { return h.service.history(); }
     ask(value: unknown, progress: (activity: InboxAssistantActivity) => void) { return h.service.ask(value, progress); }
-    applyReview(value: unknown) { return h.service.applyReview(value); }
+    applyReview(value: unknown, progress?: (activity: InboxAssistantActivity) => void) { return h.service.applyReview(value, progress); }
     cancel(value: string) { return h.service.cancel(value); }
     clearHistory() { return h.service.clearHistory(); }
   },
@@ -68,6 +69,8 @@ vi.mock('../../../../electron/services/inbox-assistant-service', () => ({
 import { registerInboxAssistantHandlers } from '../../../../electron/ipc/inbox-assistant-handlers';
 import { fetchAssistantMessageBody } from '../../../../electron/services/assistant-mailbox-download';
 import type { InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
+import { callInboxAssistantAI } from '../../../../electron/services/inbox-assistant-usage';
+import { getPipelineAIConfig } from '../../../../electron/services/unified-pipeline-service';
 import type { InboxAssistantActivity } from '../../../../src/types/inbox-assistant';
 
 const trusted = () => ({ sender: h.sender, senderFrame: h.frame });
@@ -101,6 +104,51 @@ beforeEach(() => {
 });
 
 describe('Inbox Agent trusted IPC and source ownership', () => {
+  it('uses a per-call output allowance without changing the shared provider configuration', async () => {
+    const provider = Object.freeze({ type: 'sarv' as const, model: 'review-model', apiKey: 'synthetic-key', baseUrl: 'https://ai.example/v1' });
+    vi.mocked(getPipelineAIConfig).mockReturnValue(provider);
+    vi.mocked(callInboxAssistantAI).mockResolvedValue('review');
+    const signal = new AbortController().signal;
+    const onUsage = vi.fn();
+    expect(await h.serviceDeps.callAI('Review', signal, onUsage, { maxOutputTokens: 4_000 })).toBe('review');
+    const limited = vi.mocked(callInboxAssistantAI).mock.calls[0]![0];
+    expect(limited).toEqual({ ...provider, maxOutputTokens: 4_000 });
+    expect(limited).not.toBe(provider);
+    expect(provider).not.toHaveProperty('maxOutputTokens');
+    await h.serviceDeps.callAI('Answer', signal, onUsage);
+    expect(vi.mocked(callInboxAssistantAI).mock.calls[1]![0]).toBe(provider);
+    expect(vi.mocked(callInboxAssistantAI).mock.calls[0]!.slice(2)).toEqual(['Review', signal, onUsage]);
+  });
+
+  it('does not resolve AI configuration or invoke a provider after cancellation', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('Already stopped'));
+    await expect(h.serviceDeps.callAI('Review', controller.signal)).rejects.toThrow('Already stopped');
+    expect(getPipelineAIConfig).not.toHaveBeenCalled();
+    expect(callInboxAssistantAI).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the opaque review identity for provider, model, endpoint and credential changes', () => {
+    const provider = { type: 'sarv' as const, model: 'review-model', apiKey: 'synthetic-key', baseUrl: 'https://ai.example/v1',
+      providerId: 'provider-a', authMethod: 'oauth', oauthProvider: 'sarv', oauthEmail: 'owner@example.test' };
+    vi.mocked(getPipelineAIConfig).mockReturnValue(provider);
+    const identity = h.serviceDeps.reviewCacheIdentity!();
+    expect(identity).toMatch(/^[a-f0-9]{64}$/);
+    expect(h.serviceDeps.reviewCacheIdentity!()).toBe(identity);
+    expect(identity).not.toContain(provider.apiKey);
+    for (const changes of [
+      { type: 'custom' as const }, { model: 'other-model' }, { baseUrl: 'https://other.example/v1' },
+      { apiKey: 'rotated-synthetic-key' }, { providerId: 'provider-b' }, { authMethod: 'apiKey' },
+      { oauthProvider: 'other' }, { oauthEmail: 'other@example.test' },
+    ]) {
+      vi.mocked(getPipelineAIConfig).mockReturnValue({ ...provider, ...changes });
+      expect(h.serviceDeps.reviewCacheIdentity!()).not.toBe(identity);
+    }
+    vi.mocked(getPipelineAIConfig).mockReturnValue(null);
+    expect(h.serviceDeps.reviewCacheIdentity!()).not.toBe(identity);
+    expect(callInboxAssistantAI).not.toHaveBeenCalled();
+  });
+
   it('downloads the original when research identifies an incomplete nonempty preview', async () => {
     const mailbox = await h.serviceDeps.openMailbox('sales-account');
     const signal = new AbortController().signal;
@@ -143,7 +191,7 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     const request = { requestId: 'apply-1', chatId: 'chat-1', exchangeId: 'exchange-1', reviewId: 'review-1', itemIds: ['item-1'] };
     h.service.applyReview.mockResolvedValue({ id: 'exchange-1', reviewResult: { appliedCount: 1 } });
     expect(await call('applyReview', request)).toMatchObject({ success: true, data: { reviewResult: { appliedCount: 1 } } });
-    expect(h.service.applyReview).toHaveBeenCalledExactlyOnceWith(request);
+    expect(h.service.applyReview).toHaveBeenCalledExactlyOnceWith(request, expect.any(Function));
     h.service.applyReview.mockRejectedValueOnce(new Error('This review has expired.'));
     expect(await call('applyReview', request)).toEqual({ success: false, error: 'This review has expired.' });
   });
@@ -249,6 +297,25 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     h.sender.send.mockClear();
     h.service.draftEmail.mockImplementation(async (_request, report) => { h.sender.mainFrame = {}; report(activity); return {}; });
     await call('draftEmail', {});
+    expect(h.sender.send).not.toHaveBeenCalled();
+  });
+
+  it('streams automatic review progress only to the original trusted frame', async () => {
+    const activity: InboxAssistantActivity = { requestId: 'apply-1', chatId: 'chat-1', sequence: 1, at: 1, stage: 'action', status: 'running', message: 'Reviewing next batch' };
+    h.service.applyReview.mockImplementation(async (_request, report) => { report(activity); return {}; });
+    await call('applyReview', {});
+    expect(h.sender.send).toHaveBeenCalledExactlyOnceWith('inboxAssistant:activity', activity);
+    h.sender.send.mockClear();
+    h.sender.isDestroyed.mockReturnValue(true);
+    await call('applyReview', {});
+    expect(h.sender.send).not.toHaveBeenCalled();
+    h.sender.isDestroyed.mockReturnValue(false);
+    h.service.applyReview.mockImplementation(async (_request, report) => { h.sender.mainFrame = {}; report(activity); return {}; });
+    await call('applyReview', {});
+    expect(h.sender.send).not.toHaveBeenCalled();
+    h.sender.mainFrame = h.frame;
+    h.service.applyReview.mockImplementation(async (_request, report) => { h.windowAvailable = false; report(activity); return {}; });
+    await call('applyReview', {});
     expect(h.sender.send).not.toHaveBeenCalled();
   });
 

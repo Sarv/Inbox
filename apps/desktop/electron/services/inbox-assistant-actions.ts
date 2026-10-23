@@ -5,6 +5,7 @@ import { automaticCategorizationDeferred, conversationFoldersOf, conversationMem
 import type { InboxAssistantAccount, InboxAssistantProgress } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReadCommand, InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewCoverage, InboxAssistantReviewItem, InboxAssistantReviewItemResult, InboxAssistantReviewKind, InboxAssistantReviewScope } from '../../src/types/inbox-assistant-actions';
 
+import { inboxAssistantRecommendationFingerprint, type InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import type { AssistantResearchMailbox } from './inbox-assistant-retrieval';
 
 export interface InboxAssistantReadReceipt {
@@ -24,6 +25,11 @@ export interface InboxAssistantReviewOptions {
   /** Host-held continuation history, scoped by registered account ID. */
   excludeThreadIds?: Record<string, string[]>;
   scope?: InboxAssistantReviewScope;
+  recommendationCache?: InboxAssistantRecommendationCache;
+  /** Provider/model/request identity; absent identity disables cached decisions. */
+  reviewCacheIdentity?: string;
+  /** Reject reuse/storage if the live provider policy changed during this review. */
+  isCacheCurrent?: () => boolean;
 }
 export interface InboxAssistantReviewApplyOptions {
   /** Explicit user approval of non-recommended unread conversations. */
@@ -32,6 +38,8 @@ export interface InboxAssistantReviewApplyOptions {
 }
 
 const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
+// Bump when the classifier contract or recommendation policy changes.
+const REVIEW_POLICY_VERSION = 'unread-triage-v1';
 const PROTECTED = new Set(['important', 'starred', 'flagged', 'needs_response', 'needsresponse', 'invoice', 'invoices', 'finance', 'meeting', 'meetings', 'reminders']);
 const DEFAULT_CATEGORIES = ['important', 'needs_response', 'reminders', 'meeting', 'meetings', 'invoice', 'invoices', 'finance', 'promotions', 'social', 'updates', 'forums', 'personal'];
 const PUBLIC_DOMAINS = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'yahoo.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com', 'aol.com']);
@@ -200,12 +208,20 @@ export async function prepareInboxAssistantReview(
   const review: InboxAssistantReview = { id: randomUUID(), kind, createdAt: Date.now(), expiresAt: Date.now() + LIMIT.expiry, status: 'ready', accounts: accounts.map(account => ({ ...account })), items: [], coverage: [], truncated: false };
   const trusted: TrustedReview = { id: review.id, expiresAt: review.expiresAt, items: new Map(), busy: false };
   const contexts = new Map<string, string>();
+  const cacheKeys = new Map<string, string>();
+  const cache = typeof options.reviewCacheIdentity === 'string' && options.reviewCacheIdentity.trim()
+    ? options.recommendationCache : undefined;
+  const isCacheCurrent = () => {
+    try { return options.isCacheCurrent?.() !== false; }
+    catch { return false; }
+  };
   let calls = 0;
   const progress = (value: InboxAssistantProgress) => { if (!effective.aborted) { try { onProgress?.(value); } catch {} } };
   try {
     for (const account of accounts) {
       check(effective);
-      const coverage: InboxAssistantReviewCoverage = { accountId: account.id, email: account.email, status: 'reviewed', reviewedThreads: 0, scannedThreads: 0, truncated: false, hasMore: false, warnings: [] };
+      const coverage: InboxAssistantReviewCoverage = { accountId: account.id, email: account.email, status: 'reviewed', reviewedThreads: 0, scannedThreads: 0,
+        cachedRecommendations: 0, aiReviewedThreads: 0, truncated: false, hasMore: false, warnings: [] };
       review.coverage.push(coverage);
       try {
         progress({ stage: 'search', status: 'running', accountId: account.id, message: `Reviewing unread conversations in ${account.email}` });
@@ -306,8 +322,24 @@ export async function prepareInboxAssistantReview(
               reason: protection.length ? unique(protection).join(' ') : 'Waiting for a verified recommendation.', confidence: 0,
               protectedReasons: unique(protection), bodyUnavailable, attachmentsUnknown, manualSelectionAllowed: manualEligible, mailActionsAllowed: manualEligible, status: 'pending' };
             review.items.push(item);
-            trusted.items.set(item.id, { ...target, accountId: account.id, storage, members: snapshot(thread), targetIds: [...item.unreadEmailIds], targetRead: true, eligible: false, manualEligible });
-            if (!protection.length) contexts.set(item.id, content.join('\n\n'));
+            const state = snapshot(thread);
+            const trustedItem: Snapshot = { ...target, accountId: account.id, storage, members: state, targetIds: [...item.unreadEmailIds], targetRead: true, eligible: false, manualEligible };
+            trusted.items.set(item.id, trustedItem);
+            if (!protection.length) {
+              const completeContent = content.join('\n\n');
+              const key = cache && isCacheCurrent() ? inboxAssistantRecommendationFingerprint({ accountId: account.id, accountEmail: account.email,
+                providerIdentity: options.reviewCacheIdentity!, policyVersion: REVIEW_POLICY_VERSION,
+                members: [...state].sort(([left], [right]) => left.localeCompare(right)), content: completeContent }) : undefined;
+              const cached = key ? cache?.get(key) : undefined;
+              if (cached) {
+                item.recommendation = cached.recommendation; item.reason = cached.reason; item.confidence = cached.confidence;
+                trustedItem.eligible = cached.recommendation === 'mark_read';
+                coverage.cachedRecommendations = (coverage.cachedRecommendations ?? 0) + 1;
+              } else {
+                contexts.set(item.id, completeContent);
+                if (key) cacheKeys.set(item.id, key);
+              }
+            }
             coverage.reviewedThreads++;
           }
           coverage.nextOffset = (page + 1) * LIMIT.page;
@@ -366,6 +398,10 @@ export async function prepareInboxAssistantReview(
           item.reason = result.reason; item.confidence = result.confidence;
           item.recommendation = result.recommendation === 'mark_read' && result.confidence < 0.9 ? 'needs_review' : result.recommendation;
           trusted.items.get(item.id)!.eligible = item.recommendation === 'mark_read' && item.confidence >= 0.9 && item.protectedReasons.length === 0;
+          const coverage = review.coverage.find(value => value.accountId === item.accountId)!;
+          coverage.aiReviewedThreads = (coverage.aiReviewedThreads ?? 0) + 1;
+          const key = cacheKeys.get(item.id);
+          if (key && isCacheCurrent()) cache?.set(key, result);
         }
       } catch { check(effective); for (const item of batch) item.reason = 'A safe recommendation was unavailable. Keep unread for review.'; }
     }
@@ -374,7 +410,7 @@ export async function prepareInboxAssistantReview(
     reviews.set(review, trusted);
     progress({ stage: 'complete', status: 'done', message: `Reviewed ${review.items.length} conversations`, detail: 'Choose any suggested conversations before applying mark as read.' });
     return review;
-  } finally { clearTimeout(timer); contexts.clear(); }
+  } finally { clearTimeout(timer); contexts.clear(); cacheKeys.clear(); }
 }
 
 /** Explicit user read-flag command: local matching supplies all IDs, never AI. */
