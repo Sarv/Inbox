@@ -210,7 +210,7 @@ describe('scanner exact mailbox source adapter', () => {
     const { storage, engine } = mailbox();
     const [attachment] = await deps().sources('message-b', 'account-b');
     expect(h.requireStorage).toHaveBeenCalledWith('account-b'); expect(storage.getEmail).toHaveBeenCalledWith('message-b');
-    expect(engine.listAttachmentScanParts).toHaveBeenCalledWith('INBOX', 42);
+    expect(engine.listAttachmentScanParts).toHaveBeenCalledWith('INBOX', 42, undefined);
     expect((await deps().read(attachment!, 128)).toString()).toBe('Synthetic attachment');
     expect(engine.fetchAttachmentScanPart).toHaveBeenCalledWith('INBOX', 42, '3', 'sample.txt', 128, undefined);
   });
@@ -248,5 +248,22 @@ describe('scanner exact mailbox source adapter', () => {
   it('does not expose underlying IMAP errors, subjects, or secrets to the extension', async () => {
     const { engine } = mailbox(); engine.listAttachmentScanParts.mockRejectedValue(new Error('private mail subject or token'));
     await expect(deps().sources('message-b', 'account-b')).rejects.toThrow('Attachment metadata could not be retrieved. Reconnect this account and try again.');
+  });
+
+  it('passes cancellation into MIME discovery and refuses a pre-cancelled lookup', async () => {
+    const { engine } = mailbox(); const abort = new AbortController();
+    await deps().sources('message-b', 'account-b', abort.signal);
+    expect(engine.listAttachmentScanParts).toHaveBeenCalledWith('INBOX', 42, abort.signal);
+    engine.listAttachmentScanParts.mockClear(); abort.abort();
+    await expect(deps().sources('message-b', 'account-b', abort.signal)).rejects.toThrow(/cancelled/);
+    expect(engine.listAttachmentScanParts).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes an offline account from a missing IMAP location', async () => {
+    const { engine, email } = mailbox(); engine.isConnected.mockReturnValue(false);
+    expect((await deps().sources('message-b', 'account-b'))[0]).toMatchObject({ unavailableCode: 'account-offline' });
+    engine.isConnected.mockReturnValue(true); email.uid = 0;
+    expect((await deps().sources('message-b', 'account-b'))[0]).toMatchObject({ unavailableCode: 'attachment-location' });
+    expect(engine.listAttachmentScanParts).not.toHaveBeenCalled();
   });
 });

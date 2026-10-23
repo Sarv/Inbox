@@ -1323,7 +1323,14 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       Math.max(1, Math.min(options?.timeoutMs ?? 90_000, 90_000))) : undefined;
     timer?.unref();
     try {
-      const dl: any = await this.op('DOWNLOAD', this.client!.download(String(uid), part, { uid: true }));
+      // ImapFlow's limiter truncates at maxBytes. Request one sentinel byte so
+      // our actual-byte check can distinguish a complete part from truncation,
+      // while bounding the upstream decoding pipeline as well as this collector.
+      const downloadOptions = options?.maxBytes !== undefined
+        ? { uid: true, maxBytes: options.maxBytes + 1 }
+        : { uid: true };
+      const dl: any = await this.op('DOWNLOAD', this.client!.download(String(uid), part, downloadOptions),
+        bounded ? Math.max(1, Math.min(options?.timeoutMs ?? 90_000, ImapFlowClient.OP_TIMEOUT_MS)) : ImapFlowClient.OP_TIMEOUT_MS);
       content = dl && dl.content;
       if (stopReason) { content?.destroy?.(); throw stopReason; }
       if (!content) return null;

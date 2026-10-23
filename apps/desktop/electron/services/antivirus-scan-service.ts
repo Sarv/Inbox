@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import type { AntivirusScanJob, AntivirusScanTarget, AntivirusSetupStatus, ExtensionSecurityBackend } from '@sarvinbox/core';
-import { waitForAbortableOperation, withTimeout } from '@sarvinbox/core';
+import { waitForAbortableOperation } from '@sarvinbox/core';
 
 import { consentFingerprint, hasControlCharacters, object, opaqueId, ScannerTransport, scannerOrigin, timestamp, validateCapabilities, validateEngine,
   type ScannerCapabilities } from './antivirus-transport';
@@ -17,6 +17,7 @@ export interface ScanSource {
   folderPath?: string;
   uid?: number;
   unavailableReason?: string;
+  unavailableCode?: 'account-offline' | 'encrypted-content' | 'attachment-location';
 }
 
 export interface ScannerConfiguration {
@@ -35,7 +36,7 @@ export interface AntivirusDependencies {
   newConfigurationStorage?(): AntivirusSetupStatus['credentialStorage'];
   savedCredentialsLocked?(extensionId: string): boolean;
   accounts(): Array<{ id: string; name: string; email: string }>;
-  sources(messageId: string, accountId: string): Promise<ScanSource[]>;
+  sources(messageId: string, accountId: string, signal?: AbortSignal): Promise<ScanSource[]>;
   read(source: ScanSource, maxBytes: number, signal?: AbortSignal): Promise<Buffer>;
   openSetup(extensionId: string): void;
   allowDevelopmentLoopback: boolean;
@@ -242,8 +243,9 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
     }
   }
   private async assertCurrent(work: Work, ignoreAbort = false): Promise<void> {
+    if (this.disposed) throw new Error('The antivirus service is unavailable.');
     const current = await this.deps.readConfiguration(work.extensionId);
-    if ((!ignoreAbort && work.abort.signal.aborted) || !current || work.generation !== this.generation(work.extensionId) ||
+    if (this.disposed || (!ignoreAbort && work.abort.signal.aborted) || !current || work.generation !== this.generation(work.extensionId) ||
       current.endpoint !== work.config.endpoint || current.fingerprint !== work.config.fingerprint ||
       current.credential !== work.config.credential) throw new Error('Scanner consent was revoked or changed.');
     this.checkAccounts(current, work.targets.map(t => t.accountId));
@@ -285,7 +287,15 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
   async scanAttachmentForDownload(extensionId: string, messageId: string, accountId: string, filename: string,
     options: { signal?: AbortSignal; onProgress?: (phase: 'downloading' | 'scanning') => void } = {}): Promise<VerifiedAttachmentDownload> {
     const generation = this.generation(extensionId);
+    const accountGeneration = this.accountGenerations.get(accountId) ?? 0;
+    const assertLookupCurrent = () => {
+      if (this.disposed || generation !== this.generation(extensionId) || accountGeneration !== (this.accountGenerations.get(accountId) ?? 0)) {
+        throw new Error('Download blocked: scanner settings changed. Review scanner setup and try again.');
+      }
+    };
+    assertLookupCurrent();
     const config = await this.deps.readConfiguration(extensionId);
+    assertLookupCurrent();
     if (!config) {
       this.deps.openSetup(extensionId);
       throw new Error('Configure ClamAV Scan before downloading attachments.');
@@ -297,12 +307,31 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
     }
     if (options.signal?.aborted) throw new Error('Download cancelled.');
     options.onProgress?.('downloading');
-    const sources = await withTimeout(waitForAbortableOperation(this.deps.sources(messageId, accountId), options.signal),
-      30_000, 'Download blocked: this attachment is unavailable or exceeds the scanner limits.');
+    const metadataAbort = new AbortController();
+    const metadataSignal = options.signal ? AbortSignal.any([options.signal, metadataAbort.signal]) : metadataAbort.signal;
+    const metadataTimeout = setTimeout(() => metadataAbort.abort(), 30_000);
+    let sources: ScanSource[];
+    try {
+      sources = await waitForAbortableOperation(this.deps.sources(messageId, accountId, metadataSignal), metadataSignal);
+    } catch {
+      if (options.signal?.aborted) throw new Error('Download cancelled.');
+      throw new Error(metadataAbort.signal.aborted
+        ? 'Download blocked: attachment details timed out. Reconnect this account and try again.'
+        : 'Download blocked: attachment details are unavailable. Reopen this email and try again.');
+    } finally { clearTimeout(metadataTimeout); }
+    assertLookupCurrent();
     const matches = sources.filter(source => source.kind === 'attachment' && (source.partFilename ?? source.displayName) === filename);
     const source = matches[0];
-    if (matches.length !== 1 || !source || source.unavailableReason || source.accountId !== accountId || source.messageId !== messageId) {
-      throw new Error('Download blocked: this attachment is unavailable or exceeds the scanner limits.');
+    if (matches.length > 1) {
+      throw new Error('Download blocked: multiple attachments have this name and cannot be safely distinguished.');
+    }
+    if (!source || source.accountId !== accountId || source.messageId !== messageId) {
+      throw new Error('Download blocked: this attachment is unavailable. Reopen this email and try again.');
+    }
+    if (source.unavailableReason) {
+      if (source.unavailableCode === 'account-offline') throw new Error('Download blocked: this account is offline. Reconnect it and try again.');
+      if (source.unavailableCode === 'encrypted-content') throw new Error('Download blocked: encrypted OpenPGP attachments cannot be scanned.');
+      throw new Error('Download blocked: this attachment is unavailable. Reopen this email and try again.');
     }
     this.prune();
     const running = [...this.jobs.values()].filter(work => !terminal.has(work.job.state));
@@ -492,14 +521,18 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
     }
   }
   async onExtensionDisabled(extensionId: string): Promise<void> {
-    await this.cancelExtensionWork(extensionId);
     this.generations.set(extensionId, this.generation(extensionId) + 1);
+    await this.cancelExtensionWork(extensionId);
     this.contexts.delete(extensionId);
     for (const [id, p] of this.probes) if (p.extensionId === extensionId) this.probes.delete(id);
     for (const [id, work] of this.jobs) if (work.extensionId === extensionId) this.jobs.delete(id);
     await this.deps.writeConfiguration(extensionId, undefined);
   }
-  async onExtensionDeactivated(extensionId: string): Promise<void> { await this.cancelExtensionWork(extensionId); this.contexts.delete(extensionId); }
+  async onExtensionDeactivated(extensionId: string): Promise<void> {
+    this.generations.set(extensionId, this.generation(extensionId) + 1);
+    await this.cancelExtensionWork(extensionId);
+    this.contexts.delete(extensionId);
+  }
   async dispose(): Promise<void> {
     this.disposed = true;
     clearInterval(this.sweep);

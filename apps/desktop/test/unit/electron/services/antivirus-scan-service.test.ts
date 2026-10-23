@@ -29,7 +29,7 @@ function fixture(options: { allowBody?: boolean; configured?: boolean; changeTic
   ];
   const readBuffers: Buffer[] = [];
   const read = vi.fn(async (_source: ScanSource, _limit: number) => { const buffer = Buffer.from('synthetic scan fixture'); readBuffers.push(buffer); return buffer; });
-  const sourceRead = vi.fn(async (_message: string, _account: string) => structuredClone(sources));
+  const sourceRead = vi.fn(async (_message: string, _account: string, _signal?: AbortSignal) => structuredClone(sources));
   const uploaded = new Map<string, Buffer>();
   const ticketId = 'T'.repeat(43);
   let created: any;
@@ -379,7 +379,7 @@ describe('trusted scan before attachment download', () => {
     const f = fixture(); const onProgress = vi.fn();
     f.service.setMessageContext('clamav-scan', 'another-message', 'account-a');
     const receipt = await f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { onProgress });
-    expect(f.sourceRead).toHaveBeenCalledWith('message-b', 'account-b');
+    expect(f.sourceRead).toHaveBeenCalledWith('message-b', 'account-b', expect.any(AbortSignal));
     expect(f.read).toHaveBeenCalledTimes(1);
     expect(receipt.content.toString()).toBe('synthetic scan fixture');
     expect(receipt.content).not.toBe(f.readBuffers[0]);
@@ -410,8 +410,34 @@ describe('trusted scan before attachment download', () => {
       displayName: 'sample.txt', partFilename: 'sample.txt', partId: '2', byteLength: null,
       ...(kind === 'unavailable' ? { unavailableReason: 'Encrypted message' } : {}) };
     f.sources(kind === 'missing' ? [] : kind === 'duplicate' ? [source, { ...source, partId: '3' }] : [source]);
-    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(/unavailable/);
-    expect(f.read).not.toHaveBeenCalled(); expect(f.uploaded.size).toBe(0);
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow(kind === 'duplicate' ? /cannot be safely distinguished/ : /unavailable/);
+    expect(f.read).not.toHaveBeenCalled(); expect(f.uploaded.size).toBe(0); expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it('reports an offline mailbox without claiming a scanner size limit or sending a scan', async () => {
+    const f = fixture();
+    f.sources([{ accountId: 'account-b', messageId: 'message-b', kind: 'attachment', displayName: 'sample.txt', byteLength: null,
+      unavailableCode: 'account-offline', unavailableReason: 'Connect this account to select exact attachment parts.' }]);
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow('Download blocked: this account is offline. Reconnect it and try again.');
+    expect(f.read).not.toHaveBeenCalled(); expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it('keeps private metadata failures out of the error shown to the user', async () => {
+    const f = fixture(); f.sourceRead.mockRejectedValue(new Error('private IMAP response and secret'));
+    await expect(f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt')).rejects.toThrow('Download blocked: attachment details are unavailable. Reopen this email and try again.');
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it('aborts stalled MIME discovery at its deadline without submitting a scan', async () => {
+    vi.useFakeTimers();
+    const f = fixture(); let signal: AbortSignal | undefined;
+    f.sourceRead.mockImplementation((_message, _account, pendingSignal) => { signal = pendingSignal; return new Promise(() => {}); });
+    try {
+      const pending = f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt');
+      const rejected = expect(pending).rejects.toThrow('Download blocked: attachment details timed out. Reconnect this account and try again.');
+      await vi.advanceTimersByTimeAsync(30_000); await rejected;
+      expect(signal?.aborted).toBe(true); expect(f.read).not.toHaveBeenCalled(); expect(f.request).not.toHaveBeenCalled();
+    } finally { await f.service.dispose(); vi.useRealTimers(); }
   });
 
   // Breaks: a threat, incomplete scan or malformed verdict is mistaken for permission to save.
@@ -473,6 +499,23 @@ describe('trusted scan before attachment download', () => {
     abort.abort(new Error('Download cancelled.')); await rejected;
     release([{ accountId: 'account-b', messageId: 'message-b', kind: 'attachment', displayName: 'sample.txt', byteLength: 1 }]);
     await flush(); expect(f.read).not.toHaveBeenCalled(); expect(f.request).not.toHaveBeenCalled();
+  });
+
+  it.each(['disable', 'deactivate', 'remove-account', 'dispose'] as const)('does not upload late metadata after %s', async action => {
+    const f = fixture(); const readSources = f.sourceRead.getMockImplementation()!;
+    let release!: (value: ScanSource[]) => void;
+    f.sourceRead.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const pending = f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt');
+    const rejected = expect(pending).rejects.toThrow('Download blocked: scanner settings changed. Review scanner setup and try again.');
+    await vi.waitFor(() => expect(f.sourceRead).toHaveBeenCalled());
+    if (action === 'disable') await f.service.onExtensionDisabled('clamav-scan');
+    if (action === 'deactivate') await f.service.onExtensionDeactivated('clamav-scan');
+    // Deliberately leave the registry unchanged: removal can notify the host
+    // before the account row is removed from persistent storage.
+    if (action === 'remove-account') await f.service.onAccountRemoved('account-b');
+    if (action === 'dispose') await f.service.dispose();
+    release(await readSources('message-b', 'account-b')); await rejected;
+    expect(f.read).not.toHaveBeenCalled(); expect(f.request).not.toHaveBeenCalled();
   });
 
   // Breaks: Download bypasses the queue limit shared with manual scans and starts unbounded mail reads.

@@ -20,8 +20,8 @@ import { SIMPLE_PARSER_OPTIONS } from '../utils/mail-parse';
 import { detectProvider, type EmailProvider } from '../utils/provider';
 import { withStallTimeout, isTimeoutError } from '../utils/timeout';
 
+import { attachmentScanNodes } from './attachment-scan-metadata';
 import {
-  attachmentNodes,
   base64DecodeShort,
   countNonBase64Bytes,
   findAttachmentNodeByName,
@@ -2461,11 +2461,13 @@ export class SyncEngine {
    * doesn't support per-part download, so the caller falls back to the full
    * fetchAttachment path — never a silent failure.
    */
-  async listAttachmentScanParts(folderPath: string, uid: number): Promise<Array<{ partId: string; filename: string; byteLength: number | null }>> {
+  async listAttachmentScanParts(folderPath: string, uid: number, signal?: AbortSignal): Promise<Array<{ partId: string; filename: string; byteLength: number | null }>> {
     if (!this.isConnected() || !uid) throw new Error('Connect this mailbox before scanning attachments');
     const run = async (client: IIMAPClient) => withFolderSelected(client, folderPath, async () => {
+      if (signal?.aborted) throw new Error('Attachment scan cancelled');
       const rows = await client.fetchMessagesByUID([uid], { discoverCategories: false, fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
-      const nodes = attachmentNodes(rows[0]?.bodyStructure);
+      if (signal?.aborted) throw new Error('Attachment scan cancelled');
+      const nodes = await attachmentScanNodes(client, uid, rows[0]?.bodyStructure, signal);
       return nodes.map((node) => ({ partId: node.part!, filename: node.disposition?.params?.filename || node.params?.name || `Attachment ${node.part}`,
         byteLength: null })); // BODYSTRUCTURE sizes describe encoded bytes, not the bytes submitted.
     });
@@ -2483,7 +2485,7 @@ export class SyncEngine {
       if (signal?.aborted) throw new Error('Attachment scan cancelled');
       const rows = await client.fetchMessagesByUID([uid], { discoverCategories: false, fetchHeaders: false, fetchBody: false, fetchBodyStructure: true });
       if (signal?.aborted) throw new Error('Attachment scan cancelled');
-      const node = attachmentNodes(rows[0]?.bodyStructure).find(n => n.part === partId);
+      const node = (await attachmentScanNodes(client, uid, rows[0]?.bodyStructure, signal)).find(n => n.part === partId);
       const name = node?.disposition?.params?.filename || node?.params?.name || `Attachment ${partId}`;
       if (!node || name !== expectedName || !client.downloadPart) throw new Error('The selected MIME attachment changed or is unavailable');
       const content = await client.downloadPart(uid, partId, { maxBytes, signal, timeoutMs: 90_000 });

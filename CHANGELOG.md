@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Attachment scanning recovers exact filenames from bounded MIME headers when
+  a mail server omits them from its attachment metadata, so valid small files
+  can reach the scanner. Unavailable, ambiguous, offline and timed-out lookups
+  show specific errors instead of incorrectly suggesting a scanner size limit.
+
 ## [1.4.4] - 2026-10-22
 
 ### Changed

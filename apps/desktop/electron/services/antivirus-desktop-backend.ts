@@ -88,7 +88,8 @@ function names(value: string | null): string[] {
   catch { return []; }
 }
 
-async function sources(messageId: string, accountId: string): Promise<ScanSource[]> {
+async function sources(messageId: string, accountId: string, signal?: AbortSignal): Promise<ScanSource[]> {
+  if (signal?.aborted) throw new Error('Attachment scan cancelled.');
   if (!readRegistryAccounts().some(a => a.id === accountId)) throw new Error('This mailbox is no longer available.');
   const storage = await requireAccountStorage(accountId);
   const email = await storage.getEmail(messageId);
@@ -96,9 +97,9 @@ async function sources(messageId: string, accountId: string): Promise<ScanSource
   const base = { accountId, messageId };
   if (email.pgpStatus === 'encrypted') {
     return [...names(email.attachmentNames).map(displayName => ({ ...base, kind: 'attachment' as const, displayName: displayName.slice(0, 512),
-      byteLength: null, unavailableReason: 'Encrypted OpenPGP content is not supported for remote scanning.' })),
+      byteLength: null, unavailableCode: 'encrypted-content' as const, unavailableReason: 'Encrypted OpenPGP content is not supported for remote scanning.' })),
     { ...base, kind: 'email-body', displayName: 'Message text', byteLength: null,
-      unavailableReason: 'Encrypted OpenPGP content is not supported for remote scanning.' }];
+      unavailableCode: 'encrypted-content' as const, unavailableReason: 'Encrypted OpenPGP content is not supported for remote scanning.' }];
   }
   const folder = await storage.getFolder(email.folderId);
   const sync = getSyncEngineFor(accountId);
@@ -106,9 +107,10 @@ async function sources(messageId: string, accountId: string): Promise<ScanSource
   if (email.hasAttachments) {
     if (!folder || !email.uid || !sync?.isConnected()) {
       attachments = names(email.attachmentNames).map(displayName => ({ ...base, kind: 'attachment', displayName: displayName.slice(0, 512),
-        byteLength: null, unavailableReason: 'Connect this account to select exact attachment parts.' }));
+        byteLength: null, unavailableCode: !sync?.isConnected() ? 'account-offline' : 'attachment-location',
+        unavailableReason: 'Connect this account to select exact attachment parts.' }));
     } else {
-      const parts = await sync.listAttachmentScanParts(folder.path, email.uid).catch(() => { throw new Error('Attachment metadata could not be retrieved. Reconnect this account and try again.'); });
+      const parts = await sync.listAttachmentScanParts(folder.path, email.uid, signal).catch(() => { throw new Error('Attachment metadata could not be retrieved. Reconnect this account and try again.'); });
       if (parts.length > 200) throw new Error('This message has too many attachment parts to scan.');
       attachments = parts.map(part => ({ ...base, kind: 'attachment', displayName: part.filename.slice(0, 512), partFilename: part.filename, partId: part.partId,
         byteLength: part.byteLength, folderPath: folder.path, uid: email.uid }));

@@ -15,7 +15,7 @@ describe('bounded antivirus MIME download', () => {
   it('returns decoded bytes within the cap', async () => {
     const { client, download } = connected(Readable.from([Buffer.from('syn'), Buffer.from('thetic')]));
     expect((await client.downloadPart(42, '3', { maxBytes: 9 }))?.toString()).toBe('synthetic');
-    expect(download).toHaveBeenCalledWith('42', '3', { uid: true });
+    expect(download).toHaveBeenCalledWith('42', '3', { uid: true, maxBytes: 10 });
   });
 
   it('destroys the MIME stream when actual decoded bytes exceed the cap', async () => {
@@ -45,5 +45,19 @@ describe('bounded antivirus MIME download', () => {
     const { client, download } = connected(new Readable({ read() {} })); const controller = new AbortController(); controller.abort();
     await expect(client.downloadPart(42, '3', { maxBytes: 128, signal: controller.signal })).rejects.toThrow(/cancelled/);
     expect(download).not.toHaveBeenCalled();
+  });
+
+  it('bounds the initial MIME header FETCH and recycles its socket before returning a timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, download } = connected(new Readable({ read() {} }));
+      const close = vi.fn(); (client as any).client.close = close;
+      download.mockImplementation(() => new Promise(() => {}));
+      const result = client.downloadPart(42, '2.MIME', { maxBytes: 65536, timeoutMs: 20_000 });
+      const check = expect(result).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(20_000); await check;
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(download).toHaveBeenCalledWith('42', '2.MIME', { uid: true, maxBytes: 65537 });
+    } finally { vi.useRealTimers(); }
   });
 });

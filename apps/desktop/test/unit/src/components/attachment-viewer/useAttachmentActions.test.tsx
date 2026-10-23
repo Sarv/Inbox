@@ -129,6 +129,11 @@ describe('error reporting', () => {
   it.each([
     'Antivirus setup changed. Try again.',
     'Attachment is too large to open or save without scanning.',
+    'Download blocked: attachment details timed out. Reconnect this account and try again.',
+    'Download blocked: attachment details are unavailable. Reopen this email and try again.',
+    'Download blocked: this attachment is unavailable. Reopen this email and try again.',
+    'Download blocked: multiple attachments have this name and cannot be safely distinguished.',
+    'Download blocked: this account is offline. Reconnect it and try again.',
   ])('preserves the host optional-scanning failure (%s)', async (error) => {
     downloadAttachment.mockResolvedValueOnce({ success: false, error });
     await run(() => actions.saveCopy({ emailId: 'email-1', filename: 'report.pdf' }));
