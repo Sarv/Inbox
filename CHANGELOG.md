@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now", or a reminder in an hour, tonight, tomorrow morning or at a time you
   pick. Before, the only notice was one system notification, and the update
   waited until the app was next quit, which could be weeks.
+- The Inbox Agent can work through your unread mail on its own: "Mark
+  recommended & continue" marks the mail it recommends as read and moves on to
+  the next batch, up to ten batches per run, which you can stop or resume.
+  Important and uncertain mail stays unread, and nothing is archived or deleted.
+  Recommendations it has already made are reused instead of asking the AI
+  again.
+
+### Changed
+- Mail that arrives as HTML only is converted to text much faster, which
+  speeds up syncing newsletters and other HTML-heavy mail.
 
 ### Fixed
 - Attachment scanning recovers exact filenames from bounded MIME headers when
