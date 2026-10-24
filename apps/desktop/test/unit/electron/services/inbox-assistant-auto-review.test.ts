@@ -212,7 +212,13 @@ describe('bounded automatic unread review', () => {
     expect(f.history.load(f.chatId).exchanges).toHaveLength(1);
   });
 
-  it('stops at ten batches with protected mail still remaining and no AI calls', async () => {
+  // Regression: the 10-batch cap is what keeps an automatic review from walking
+  // an entire mailbox unattended; without it this run would mark or bill all
+  // 2,001 conversations in one go. It needs 2,001 real rows to reach the cap,
+  // and runs three automatic reviews over them, so it gets its own timeout: about
+  // 4s under coverage locally, close to the 5s default on a slower CI runner.
+  // (Profiled; the real hot spot, html-to-text recompiling per body, is fixed.)
+  it('stops at ten batches with protected mail still remaining and no AI calls', { timeout: 20_000 }, async () => {
     const f = fixture(Array.from({ length: 2_001 }, (_, index) => newsletter(`kept-${index}`, true)));
     const initial = await f.prepare();
     const result = await f.auto(initial);
