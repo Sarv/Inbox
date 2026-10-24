@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can reach the scanner. Unavailable, ambiguous, offline and timed-out lookups
   show specific errors instead of incorrectly suggesting a scanner size limit.
 
+### Security
+- Updated Electron, the HTML sanitiser that cleans mail before display, and the
+  mail parser to versions that fix published vulnerabilities, including a way
+  for crafted HTML to get past sanitising and a header that could make parsing
+  a message take very long.
+
 ## [1.4.4] - 2026-10-22
 
 ### Changed
