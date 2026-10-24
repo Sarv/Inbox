@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-10-24
+
 ### Added
 - A downloaded update now says so inside the app: a banner offers "Restart
   now", or a reminder in an hour, tonight, tomorrow morning or at a time you
@@ -1163,7 +1165,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.4...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.5...HEAD
+[1.4.5]: https://github.com/Sarv/Inbox/releases/tag/v1.4.5
 [1.4.4]: https://github.com/Sarv/Inbox/releases/tag/v1.4.4
 [1.4.3]: https://github.com/Sarv/Inbox/releases/tag/v1.4.3
 [1.4.2]: https://github.com/Sarv/Inbox/releases/tag/v1.4.2
