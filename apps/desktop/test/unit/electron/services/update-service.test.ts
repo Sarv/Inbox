@@ -997,6 +997,121 @@ describe('remindAboutUpdateLater', () => {
   });
 });
 
+describe('update-ready banner', () => {
+  const HOUR = 60 * 60 * 1000;
+
+  // THE regression: with automatic updates on, a staged update was announced
+  // by one silent notification and nothing in the app, and sat unapplied for
+  // as long as the app went without a quit.
+  it('shows once an update is staged in the background', async () => {
+    const service = await load();
+    service.startUpdateService();
+    expect(service.getUpdateState().banner).toBe(false);
+
+    await stage(service);
+
+    expect(service.getUpdateState()).toMatchObject({ phase: 'downloaded', prompt: false, banner: true });
+    expect(h.sent.at(-1)).toMatchObject({ channel: 'updater:state', payload: { banner: true } });
+    service.stopUpdateService();
+  });
+
+  // Regression: the dialog and the banner asking the same question at once.
+  it('stays hidden while the dialog is prompting for the same update', async () => {
+    manualMode();
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    expect(service.getUpdateState()).toMatchObject({ prompt: true, banner: false });
+    service.stopUpdateService();
+  });
+
+  // Regression: "Remind me tonight" written as the default 6h, or ignored,
+  // and the banner coming straight back on the next state push.
+  it('hides until the chosen reminder time, then comes back on its own', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    const until = Date.now() + 3 * HOUR;
+    service.remindAboutUpdateLater(until);
+
+    expect(readPrefs().remindAfter).toBe(until);
+    expect(service.getUpdateState().banner).toBe(false);
+    // Still installs on quit — a reminder only quiets the banner.
+    expect(h.updater.autoInstallOnAppQuit).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(3 * HOUR - 1000);
+    expect(service.getUpdateState().banner).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(service.getUpdateState().banner).toBe(true);
+    service.stopUpdateService();
+  });
+
+  // Regression: a past or garbage time from the renderer would mean "no
+  // reminder" (the banner never hides) or "never" — both wrong; it is the default.
+  it('falls back to the default snooze for a time that is not in the future', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    service.remindAboutUpdateLater(Date.now() - HOUR);
+
+    expect(readPrefs().remindAfter).toBe(Date.now() + 6 * HOUR);
+    expect(service.getUpdateState().banner).toBe(false);
+    service.stopUpdateService();
+  });
+
+  // Regression: a custom date months out would bury the update for months.
+  it('caps a reminder at a week', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+
+    service.remindAboutUpdateLater(Date.now() + 90 * 24 * HOUR);
+
+    expect(readPrefs().remindAfter).toBe(Date.now() + 7 * 24 * HOUR);
+    service.stopUpdateService();
+  });
+
+  // Regression: a reminder chosen before a restart lost its wake-up, so the
+  // banner stayed hidden past the time it promised until some unrelated check.
+  it('re-arms a saved reminder on start', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    writePrefs({ skippedVersion: null, remindAfter: Date.now() + 2 * HOUR, autoUpdate: true });
+    const service = await load();
+    service.startUpdateService();
+    // Stage without going through the timers the start-up check uses.
+    await offer('1.3.0');
+    h.updater.emit('update-downloaded', { version: '1.3.0', files: [] });
+    expect(service.getUpdateState().banner).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2 * HOUR);
+
+    expect(service.getUpdateState().banner).toBe(true);
+    service.stopUpdateService();
+  });
+
+  // Regression: a reminder timer outliving the service would push state into
+  // a torn-down window after quit started.
+  it('cancels the reminder wake-up when the service stops', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const service = await load();
+    service.startUpdateService();
+    await stage(service);
+    service.remindAboutUpdateLater(Date.now() + HOUR);
+    service.stopUpdateService();
+    const pushes = h.sent.length;
+
+    await vi.advanceTimersByTimeAsync(2 * HOUR);
+
+    expect(h.sent.length).toBe(pushes);
+  });
+});
+
 describe('dismissUpdateDialog', () => {
   // THE regression: `prompt` is recomputed on every state change, so a dialog
   // closed during a MANUAL check ("you're up to date" — always promptable)

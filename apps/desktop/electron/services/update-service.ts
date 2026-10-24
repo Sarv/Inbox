@@ -38,13 +38,16 @@ import {
   UPDATE_CHECK_TIMEOUT_MS,
   getUpdateSupport,
   parseUpdatePrefs,
+  reminderWakeDelay,
   remindLater,
+  resolveRemindAfter,
   sameUpdate,
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
   shouldNotifyUpdateReady,
   shouldShowDialog,
+  shouldShowReadyBanner,
   skipVersion,
   type UpdateIdentity,
   type UpdatePrefs,
@@ -87,6 +90,8 @@ let state: UpdateState = { ...INITIAL_UPDATE_STATE };
 let currentTrigger: UpdateTrigger = 'scheduled';
 let checkTimer: NodeJS.Timeout | null = null;
 let firstCheckTimer: NodeJS.Timeout | null = null;
+/** Wakes the service when a "Remind me" snooze ends, so the banner comes back on time. */
+let reminderTimer: NodeJS.Timeout | null = null;
 let wired = false;
 /** Guards against overlapping checks (a manual press during an hourly check). */
 let checkInFlight = false;
@@ -203,6 +208,13 @@ const setState = (patch: Partial<UpdateState>): void => {
     now: Date.now(),
     dismissed: dialogDismissed,
     downloadRequested,
+  });
+  merged.banner = shouldShowReadyBanner({
+    phase: merged.phase,
+    version: merged.version,
+    prefs,
+    now: Date.now(),
+    prompted: merged.prompt,
   });
   merged.trigger = currentTrigger;
   merged.autoUpdate = prefs.autoUpdate;
@@ -610,13 +622,34 @@ export const skipCurrentVersion = (): UpdateState => {
   return state;
 };
 
-/** Record "Remind me later" — no prompts of any kind for six hours. */
-export const remindAboutUpdateLater = (): UpdateState => {
+/**
+ * Re-arm the wake-up for the current snooze: when it ends, recompute the state
+ * so the banner reappears at the moment the user picked — not up to an hour
+ * later at the next scheduled check. A no-op when nothing is snoozed.
+ */
+const scheduleReminderWake = (): void => {
+  if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+  const delay = reminderWakeDelay(prefs, Date.now());
+  if (delay === null) return;
+  reminderTimer = setTimeout(() => {
+    reminderTimer = null;
+    setState({});
+  }, delay);
+  reminderTimer.unref?.();
+};
+
+/**
+ * Record "Remind me later" — no prompts of any kind until `untilMs` (epoch
+ * ms, the moment the user picked), or for six hours when none was given.
+ */
+export const remindAboutUpdateLater = (untilMs?: number): UpdateState => {
   // Note this does NOT disarm the silent install: "later" is about the prompt,
-  // not the update. If the user quits before the six hours are up they still
-  // get the new version, which is the whole point of automatic updates.
-  savePrefs(remindLater(prefs, Date.now()));
+  // not the update. If the user quits before then they still get the new
+  // version, which is the whole point of automatic updates.
+  const now = Date.now();
+  savePrefs(remindLater(prefs, now, resolveRemindAfter(now, untilMs) - now));
   logger.info('[Update] Reminder snoozed until', new Date(prefs.remindAfter ?? 0).toISOString());
+  scheduleReminderWake();
   dialogDismissed = true;
   setState({});
   return state;
@@ -669,6 +702,8 @@ export const startUpdateService = (): void => {
   state = { ...state, currentVersion: runningVersion(), autoUpdate: prefs.autoUpdate };
 
   wireEvents();
+  // A snooze chosen before the last quit still ends when it said it would.
+  scheduleReminderWake();
 
   if (firstCheckTimer) clearTimeout(firstCheckTimer);
   firstCheckTimer = setTimeout(() => {
@@ -693,6 +728,7 @@ export const startUpdateService = (): void => {
 export const stopUpdateService = (): void => {
   if (firstCheckTimer) { clearTimeout(firstCheckTimer); firstCheckTimer = null; }
   if (checkTimer) { clearInterval(checkTimer); checkTimer = null; }
+  if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
 };
 
 /** Test seam: reset module state between cases. */

@@ -227,7 +227,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setAutoUpdate: (enabled: boolean) => ipcRenderer.invoke('updater:setAutoUpdate', enabled),
     install: () => ipcRenderer.invoke('updater:install'),
     skip: () => ipcRenderer.invoke('updater:skip'),
-    remindLater: () => ipcRenderer.invoke('updater:remindLater'),
+    remindLater: (untilEpochSeconds?: number) => ipcRenderer.invoke('updater:remindLater', untilEpochSeconds),
     dismiss: () => ipcRenderer.invoke('updater:dismiss'),
     // Returns its own disposer: React effects must be able to detach this
     // listener on unmount, or a remount stacks a second one and every state
@@ -1369,7 +1369,10 @@ export interface ElectronAPI {
     /** Quit, install the staged update and relaunch. Fails if none is staged. */
     install: () => Promise<{ success: boolean; error?: string }>;
     skip: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
-    remindLater: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
+    /** Snooze prompts until a UTC epoch-SECONDS moment, or for six hours when omitted. */
+    remindLater: (
+      untilEpochSeconds?: number,
+    ) => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
     dismiss: () => Promise<{ success: boolean; data?: UpdateState; error?: string }>;
     /** Subscribe to pushed state. Call the returned disposer to unsubscribe. */
     onState: (callback: (state: UpdateState) => void) => () => void;

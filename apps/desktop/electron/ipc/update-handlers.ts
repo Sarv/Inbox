@@ -64,9 +64,16 @@ export function registerUpdateHandlers(): void {
 
   ipcMain.handle('updater:skip', () => ({ success: true, data: skipCurrentVersion() }));
 
-  ipcMain.handle('updater:remindLater', () => ({
+  /**
+   * "Remind me later", optionally at a moment the user picked — UTC epoch
+   * SECONDS, like every time-pick IPC here. The policy treats it as untrusted
+   * (past, NaN or absurd values fall back or clamp), so it is only converted.
+   */
+  ipcMain.handle('updater:remindLater', (_event, untilEpochSeconds?: unknown) => ({
     success: true,
-    data: remindAboutUpdateLater(),
+    data: remindAboutUpdateLater(
+      typeof untilEpochSeconds === 'number' ? untilEpochSeconds * 1000 : undefined,
+    ),
   }));
 
   ipcMain.handle('updater:dismiss', () => ({ success: true, data: dismissUpdateDialog() }));

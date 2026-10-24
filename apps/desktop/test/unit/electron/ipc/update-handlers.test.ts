@@ -151,4 +151,21 @@ describe('registerUpdateHandlers', () => {
     expect(service.remindAboutUpdateLater).toHaveBeenCalledTimes(1);
     expect(service.dismissUpdateDialog).toHaveBeenCalledTimes(1);
   });
+
+  // Regression: the renderer speaks UTC epoch SECONDS (like every other
+  // scheduled-time IPC here); passing them through as ms would set the
+  // reminder for January 1970 — i.e. "already due", banner never hides.
+  it('converts a reminder time from epoch seconds to milliseconds', async () => {
+    await invoke('updater:remindLater', 1_800_000_000);
+    expect(service.remindAboutUpdateLater).toHaveBeenLastCalledWith(1_800_000_000_000);
+  });
+
+  // Regression: a non-number from a compromised or older renderer must reach
+  // the service as "no time chosen" (the default snooze), not as NaN or a string.
+  it('passes no time for a missing or non-numeric reminder', async () => {
+    await invoke('updater:remindLater');
+    expect(service.remindAboutUpdateLater).toHaveBeenLastCalledWith(undefined);
+    await invoke('updater:remindLater', 'tonight');
+    expect(service.remindAboutUpdateLater).toHaveBeenLastCalledWith(undefined);
+  });
 });

@@ -31,6 +31,13 @@
 /** How long "Remind me later" silences the prompt. */
 export const REMIND_LATER_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * The furthest a chosen reminder may reach. The renderer offers "tonight" and
+ * "tomorrow" and a custom date; anything past a week is a value nobody picked
+ * on purpose, and a snooze that long would hide the NEXT release too.
+ */
+export const MAX_REMIND_LATER_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** How often the background scheduler asks GitHub whether a release exists. */
 export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -106,6 +113,12 @@ export interface UpdateState {
    * surface an update the user already skipped.
    */
   prompt: boolean;
+  /**
+   * Whether the in-app "ready — restart to install" banner should show. Like
+   * `prompt`, decided here: it is the quiet announcement of a staged update
+   * that the dialog is not already making, and it honours "skip" and "later".
+   */
+  banner: boolean;
   /** What started the current cycle, so the UI can stay quiet for a scheduled one. */
   trigger: UpdateTrigger | null;
   /**
@@ -123,6 +136,7 @@ export const INITIAL_UPDATE_STATE: UpdateState = {
   error: null,
   checkedAt: null,
   prompt: false,
+  banner: false,
   trigger: null,
   autoUpdate: true,
 };
@@ -202,6 +216,27 @@ export const remindLater = (
   now: number,
   delayMs: number = REMIND_LATER_MS,
 ): UpdatePrefs => ({ ...prefs, remindAfter: now + delayMs });
+
+/**
+ * When a "Remind me" press with a chosen moment should end.
+ *
+ * The moment arrives over IPC from the renderer, so it is untrusted: anything
+ * that is not a future epoch (missing, NaN, in the past) falls back to the
+ * plain "later" delay rather than silencing nothing or forever, and a moment
+ * past {@link MAX_REMIND_LATER_MS} is pulled back to it.
+ */
+export const resolveRemindAfter = (now: number, until: unknown): number => {
+  if (typeof until !== 'number' || !Number.isFinite(until) || until <= now) return now + REMIND_LATER_MS;
+  return Math.min(until, now + MAX_REMIND_LATER_MS);
+};
+
+/**
+ * How long until an active snooze ends, so the service can wake and bring the
+ * banner back at the time the user chose rather than at the next hourly check.
+ * Null when there is no snooze still running.
+ */
+export const reminderWakeDelay = (prefs: UpdatePrefs, now: number): number | null =>
+  prefs.remindAfter !== null && prefs.remindAfter > now ? prefs.remindAfter - now : null;
 
 /** Record the automatic-updates toggle. */
 export const setAutoUpdate = (prefs: UpdatePrefs, enabled: boolean): UpdatePrefs => ({
@@ -411,6 +446,35 @@ export const shouldNotifyUpdateReady = ({
 }): boolean =>
   !prompted
   && notifiedVersion !== version
+  && shouldPromptForUpdate({ version, prefs, now, trigger: 'scheduled' });
+
+/**
+ * Should the in-app "ready to install" banner show?
+ *
+ * The notification above is shown once and is gone the moment it slides off
+ * the screen, so on its own a staged update could still sit unnoticed for
+ * weeks. The banner stays until it is answered: "Restart now", or a reminder
+ * for later. Only a STAGED update earns it (there is nothing to restart into
+ * before that), never while the dialog is already asking, and never against
+ * the user's "skip" or an unexpired "later".
+ */
+export const shouldShowReadyBanner = ({
+  phase,
+  version,
+  prefs,
+  now,
+  prompted,
+}: {
+  phase: UpdatePhase;
+  version: string | null;
+  prefs: UpdatePrefs;
+  now: number;
+  /** The dialog is showing right now. */
+  prompted: boolean;
+}): boolean =>
+  phase === 'downloaded'
+  && version !== null
+  && !prompted
   && shouldPromptForUpdate({ version, prefs, now, trigger: 'scheduled' });
 
 /**

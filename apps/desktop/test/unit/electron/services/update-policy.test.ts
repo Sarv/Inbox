@@ -2,16 +2,20 @@ import { describe, it, expect } from 'vitest';
 
 import {
   DEFAULT_UPDATE_PREFS,
+  MAX_REMIND_LATER_MS,
   REMIND_LATER_MS,
   getUpdateSupport,
   parseUpdatePrefs,
   remindLater,
+  reminderWakeDelay,
+  resolveRemindAfter,
   sameUpdate,
   setAutoUpdate,
   shouldAutoDownload,
   shouldAutoInstallOnQuit,
   shouldPromptForUpdate,
   shouldNotifyUpdateReady,
+  shouldShowReadyBanner,
   shouldShowDialog,
   skipVersion,
   type UpdatePhase,
@@ -424,5 +428,77 @@ describe('sameUpdate', () => {
       { version: '1.3.0', files: [{ url: 'Sarv-Inbox-Setup-1.3.0.exe', sha512: 'a' }] },
     )).toBe(true);
     expect(sameUpdate({ version: '1.3.0' }, { version: '1.3.0', files: [] })).toBe(true);
+  });
+});
+
+describe('resolveRemindAfter', () => {
+  // Regression: "Tonight" / "Tomorrow morning" from the banner would be
+  // ignored and every reminder would come back in the default 6 hours.
+  it('keeps a chosen time in the future', () => {
+    const tonight = NOW + 8 * 60 * 60 * 1000;
+    expect(resolveRemindAfter(NOW, tonight)).toBe(tonight);
+  });
+
+  // Regression: a garbled or stale IPC value (a past time, NaN, a string)
+  // must not snooze to "already due" or to never — it falls back to the default.
+  it('falls back to the default snooze for a missing, past or non-numeric time', () => {
+    for (const bad of [undefined, null, 'tonight', Number.NaN, Number.POSITIVE_INFINITY, NOW, NOW - 1]) {
+      expect(resolveRemindAfter(NOW, bad)).toBe(NOW + REMIND_LATER_MS);
+    }
+  });
+
+  // Regression: a custom date a year out would hide a staged security fix
+  // for a year. The reminder is capped at a week.
+  it('caps a reminder at a week out', () => {
+    expect(resolveRemindAfter(NOW, NOW + 365 * 24 * 60 * 60 * 1000)).toBe(NOW + MAX_REMIND_LATER_MS);
+    expect(resolveRemindAfter(NOW, NOW + MAX_REMIND_LATER_MS)).toBe(NOW + MAX_REMIND_LATER_MS);
+  });
+});
+
+describe('reminderWakeDelay', () => {
+  // Regression: without a wake-up the banner would only come back on the next
+  // unrelated state change (the hourly check), not when the reminder was due.
+  it('is the time left until a pending reminder', () => {
+    expect(reminderWakeDelay(prefs({ remindAfter: NOW + 5000 }), NOW)).toBe(5000);
+  });
+
+  // Regression: arming a timer for a reminder already due (or none) would
+  // schedule a zero/negative timeout loop for nothing.
+  it('is null when there is no reminder or it is already due', () => {
+    expect(reminderWakeDelay(prefs({ remindAfter: null }), NOW)).toBeNull();
+    expect(reminderWakeDelay(prefs({ remindAfter: NOW }), NOW)).toBeNull();
+    expect(reminderWakeDelay(prefs({ remindAfter: NOW - 1 }), NOW)).toBeNull();
+  });
+});
+
+describe('shouldShowReadyBanner', () => {
+  const ready = { phase: 'downloaded' as UpdatePhase, version: '1.3.0', prefs: prefs(), now: NOW, prompted: false };
+
+  // THE regression this banner exists for: a staged update announced only by
+  // one silent notification, waiting weeks for a quit that never came.
+  it('shows for a downloaded update nobody has answered', () => {
+    expect(shouldShowReadyBanner(ready)).toBe(true);
+  });
+
+  // Regression: the banner must only ever offer "Restart now" for something
+  // actually on disk — never while checking, downloading or after an error.
+  it('stays hidden until the update is downloaded', () => {
+    for (const phase of ['idle', 'checking', 'available', 'downloading', 'up-to-date', 'unsupported', 'error'] as UpdatePhase[]) {
+      expect(shouldShowReadyBanner({ ...ready, phase })).toBe(false);
+    }
+    expect(shouldShowReadyBanner({ ...ready, version: null })).toBe(false);
+  });
+
+  // Regression: the dialog and the banner saying the same thing at once.
+  it('gives way to the dialog while it is asking', () => {
+    expect(shouldShowReadyBanner({ ...ready, prompted: true })).toBe(false);
+  });
+
+  // Regression: "Remind me tonight" that the banner ignored, and "Skip" that
+  // kept nagging about the skipped version.
+  it('honours a pending reminder and a skipped version', () => {
+    expect(shouldShowReadyBanner({ ...ready, prefs: prefs({ remindAfter: NOW + 1 }) })).toBe(false);
+    expect(shouldShowReadyBanner({ ...ready, prefs: prefs({ remindAfter: NOW - 1 }) })).toBe(true);
+    expect(shouldShowReadyBanner({ ...ready, prefs: prefs({ skippedVersion: '1.3.0' }) })).toBe(false);
   });
 });
