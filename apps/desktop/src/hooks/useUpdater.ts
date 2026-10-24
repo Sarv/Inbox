@@ -69,8 +69,9 @@ export const useUpdater = () => {
     await window.electronAPI?.updater?.skip();
   }, []);
 
-  const remindLater = useCallback(async () => {
-    await window.electronAPI?.updater?.remindLater();
+  /** `untilEpochSeconds` is the moment the user picked; omitted, six hours. */
+  const remindLater = useCallback(async (untilEpochSeconds?: number) => {
+    await window.electronAPI?.updater?.remindLater(untilEpochSeconds);
   }, []);
 
   const dismiss = useCallback(async () => {

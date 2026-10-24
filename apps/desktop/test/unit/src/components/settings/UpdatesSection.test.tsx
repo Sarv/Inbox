@@ -35,6 +35,7 @@ const state = (over: Partial<UpdateState> = {}): UpdateState => ({
   checkedAt: null,
   trigger: null,
   prompt: false,
+  banner: false,
   autoUpdate: true,
   ...over,
 });

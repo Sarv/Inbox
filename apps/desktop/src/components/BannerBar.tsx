@@ -11,9 +11,12 @@ import type { ReactNode } from 'react';
  * after an unrelated edit. Purely presentational — every banner keeps its own
  * visibility rules; this only draws them.
  */
-export type BannerTone = 'warning' | 'danger';
+export type BannerTone = 'info' | 'warning' | 'danger';
 
 const TONE_CLASSES: Record<BannerTone, string> = {
+  // Good news with an action attached (an update ready to install) — the brand
+  // colour, not the amber that says something is wrong.
+  info: 'bg-primary/10 border-primary/30 text-primary',
   warning:
     'bg-amber-500/10 border-amber-500/30 text-amber-800 dark:text-amber-300',
   danger: 'bg-destructive/10 border-destructive/30 text-destructive',
@@ -21,6 +24,7 @@ const TONE_CLASSES: Record<BannerTone, string> = {
 
 /** Hover fill for a control sitting ON the strip, matched to its tone. */
 const TONE_HOVER: Record<BannerTone, string> = {
+  info: 'hover:bg-primary/15',
   warning: 'hover:bg-amber-500/20',
   danger: 'hover:bg-destructive/15',
 };

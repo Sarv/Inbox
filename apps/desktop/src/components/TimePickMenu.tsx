@@ -103,7 +103,7 @@ export function TimePickMenu<T>({
   const alignClass = align === 'left' ? 'left-0' : 'right-0';
 
   return (
-    <div className={`absolute ${alignClass} ${positionClass} z-[100] bg-popover border border-border rounded-lg shadow-lg py-1 w-72`}>
+    <div className={`absolute ${alignClass} ${positionClass} z-[100] bg-popover text-popover-foreground border border-border rounded-lg shadow-lg py-1 w-72`}>
       <div className="px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase">{heading}</div>
       {options.map((option) => (
         <button

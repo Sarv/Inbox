@@ -25,6 +25,7 @@ const state = (over: Partial<UpdateState> = {}): UpdateState => ({
   checkedAt: null,
   trigger: null,
   prompt: false,
+  banner: false,
   autoUpdate: true,
   ...over,
 });
@@ -121,6 +122,26 @@ describe('useUpdater', () => {
     await expect(latest.skip()).resolves.toBeUndefined();
     await expect(latest.remindLater()).resolves.toBeUndefined();
     await expect(latest.dismiss()).resolves.toBeUndefined();
+    view.unmount();
+  });
+
+  // Regression: the banner's "Tonight" / "Tomorrow morning" dropped on the
+  // way to the bridge, so every reminder silently became the 6h default.
+  it('passes a chosen reminder time through to the main process', async () => {
+    const remindLater = vi.fn(async () => ({ success: true }));
+    bridge({
+      getState: vi.fn(async () => ({ success: true, data: state() })),
+      onState: vi.fn(() => () => {}),
+      remindLater,
+    });
+    const view = render(<Probe />);
+    await settle();
+
+    await latest.remindLater(1_800_000_000);
+    await latest.remindLater();
+
+    expect(remindLater).toHaveBeenNthCalledWith(1, 1_800_000_000);
+    expect(remindLater).toHaveBeenNthCalledWith(2, undefined);
     view.unmount();
   });
 

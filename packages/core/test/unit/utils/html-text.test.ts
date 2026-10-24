@@ -48,6 +48,18 @@ describe('htmlToPlainText', () => {
     expect(text).toContain('advik.d@sarv.com');
   });
 
+  // Regression: the converters are compiled once and cached per option set. A
+  // cache keyed wrongly would hand the snippet path the href-keeping converter
+  // (URL walls in the list) or the mining path the href-dropping one.
+  it('keeps the two option sets apart when calls interleave', () => {
+    const link = '<a href="mailto:advik.d@sarv.com">write to me</a>';
+
+    expect(htmlToPlainText(link, { keepLinkHrefs: true })).toContain('advik.d@sarv.com');
+    expect(htmlToPlainText(link)).not.toContain('advik.d@sarv.com');
+    expect(htmlToPlainText(link, { keepLinkHrefs: true })).toContain('advik.d@sarv.com');
+    expect(htmlToPlainText(link, { keepLinkHrefs: false })).not.toContain('advik.d@sarv.com');
+  });
+
   // Regression: every caller is mid-message-ingest. A malformed or absurd body
   // must degrade to an empty snippet, never throw and abort the whole mail.
   it('returns empty for nothing to convert instead of throwing', () => {

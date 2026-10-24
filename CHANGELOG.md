@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A downloaded update now says so inside the app: a banner offers "Restart
+  now", or a reminder in an hour, tonight, tomorrow morning or at a time you
+  pick. Before, the only notice was one system notification, and the update
+  waited until the app was next quit, which could be weeks.
+
 ### Fixed
 - Attachment scanning recovers exact filenames from bounded MIME headers when
   a mail server omits them from its attachment metadata, so valid small files
   can reach the scanner. Unavailable, ambiguous, offline and timed-out lookups
   show specific errors instead of incorrectly suggesting a scanner size limit.
+
+### Security
+- Updated Electron, the HTML sanitiser that cleans mail before display, and the
+  mail parser to versions that fix published vulnerabilities, including a way
+  for crafted HTML to get past sanitising and a header that could make parsing
+  a message take very long.
 
 ## [1.4.4] - 2026-10-22
 

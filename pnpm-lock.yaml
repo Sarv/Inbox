@@ -17,11 +17,13 @@ overrides:
   brace-expansion@5: ^5.0.9
   browserslist: ^4.29.0
   deepmerge-ts: ^8.0.1
+  dompurify: ^3.4.17
+  fast-uri@3: ^3.1.9
   fast-xml-parser: ^5.5.6
   flatted: ^3.4.4
   follow-redirects@1: ^1.16.1
   form-data: ^4.0.6
-  ip-address: ^10.3.1
+  ip-address: ^10.7.4
   joi: ^17.13.7
   js-yaml@3: ^3.15.2
   js-yaml@4: ^4.3.2
@@ -35,16 +37,20 @@ overrides:
   minimatch@9: ^9.0.7
   nanoid@3: ^3.3.18
   node-abi: ^4.33.0
-  nodemailer: ^10.0.10
+  nodemailer: ^10.1.4
   picomatch@2: ^2.3.2
+  postal-mime@3: ^4.0.8
   postcss: ^8.5.18
   postcss-selector-parser@6: ^6.1.3
   rollup: ^4.59.0
   shell-quote: ^1.11.0
   source-map-js: ^1.2.2
   tmp: ^0.2.7
+  undici@6: ^6.29.1
+  undici@7: ^7.30.1
   ws@7: ^7.5.11
   yaml@2: ^2.8.3
+  zod@4: ^4.6.6
 
 importers:
 
@@ -97,7 +103,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.2
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
       yaml:
         specifier: ^2.8.3
         version: 2.9.1
@@ -165,8 +171,8 @@ importers:
         specifier: ^4.4.0
         version: 4.4.0
       dompurify:
-        specifier: ^3.4.16
-        version: 3.4.16
+        specifier: ^3.4.17
+        version: 3.4.17
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
@@ -210,8 +216,8 @@ importers:
         specifier: ^15.0.3
         version: 15.0.3
       nodemailer:
-        specifier: ^10.0.10
-        version: 10.0.14
+        specifier: ^10.1.4
+        version: 10.2.1
       p-limit:
         specifier: ^7.3.3
         version: 7.3.3
@@ -255,8 +261,8 @@ importers:
         specifier: ^1.1.1
         version: 1.1.1
       zod:
-        specifier: ^4.6.5
-        version: 4.6.5
+        specifier: ^4.6.6
+        version: 4.6.7
       zustand:
         specifier: ^5.0.15
         version: 5.0.15(@types/react@19.3.0)(react@19.3.0)
@@ -295,14 +301,14 @@ importers:
         specifier: ^10.6.1
         version: 10.6.1(postcss@8.5.28)
       electron:
-        specifier: ^44.5.1
-        version: 44.5.1
+        specifier: ^44.9.1
+        version: 44.9.3
       electron-builder:
         specifier: ^26.17.0
         version: 26.17.0(electron-builder-squirrel-windows@26.17.0)
       happy-dom:
-        specifier: ^20.14.5
-        version: 20.14.5
+        specifier: ^21.0.4
+        version: 21.0.4
       parse5:
         specifier: ^8.0.1
         version: 8.0.1
@@ -332,8 +338,8 @@ importers:
         version: 2.14.1
     devDependencies:
       happy-dom:
-        specifier: ^20.14.5
-        version: 20.14.5
+        specifier: ^21.0.4
+        version: 21.0.4
       marked:
         specifier: ^18.0.14
         version: 18.0.14
@@ -351,7 +357,7 @@ importers:
         version: 8.3.3(@types/node@22.20.5)(esbuild@0.27.2)(yaml@2.9.1)
       vitest:
         specifier: ^5.0.2
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
 
   packages/core:
     dependencies:
@@ -404,8 +410,8 @@ importers:
         specifier: ^3.9.33
         version: 3.9.36
       nodemailer:
-        specifier: ^10.0.10
-        version: 10.0.14
+        specifier: ^10.1.4
+        version: 10.2.1
       openpgp:
         specifier: ^6.3.2
         version: 6.3.2
@@ -416,8 +422,8 @@ importers:
         specifier: ^1.6.4
         version: 1.6.4
       sanitize-html:
-        specifier: ^2.18.0
-        version: 2.18.0
+        specifier: ^2.18.1
+        version: 2.18.1
       tldts:
         specifier: ^7.4.15
         version: 7.4.16
@@ -425,8 +431,8 @@ importers:
         specifier: ^7.2.4
         version: 7.2.4
       zod:
-        specifier: ^4.6.5
-        version: 4.6.5
+        specifier: ^4.6.6
+        version: 4.6.7
     devDependencies:
       '@types/html-to-text':
         specifier: ^9.0.4
@@ -457,7 +463,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.2
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
 
   packages/extension-sdk:
     dependencies:
@@ -498,7 +504,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.2
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
 
   packages/storage-node:
     dependencies:
@@ -523,7 +529,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.2
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
 
   packages/ui-primitives:
     dependencies:
@@ -573,7 +579,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: ^5.0.2
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
 
 packages:
 
@@ -1012,7 +1018,7 @@ packages:
       semver: 7.8.5
       sumchecker: 3.0.1
     optionalDependencies:
-      undici: 7.30.0
+      undici: 7.30.1
     transitivePeerDependencies:
       - supports-color
     dev: true
@@ -2485,7 +2491,7 @@ packages:
         optional: true
     dependencies:
       chrono-node: 2.10.2
-      dompurify: 3.4.16
+      dompurify: 3.4.17
       email-addresses: 5.0.0
       react: 19.3.0
       react-dom: 19.3.0(react@19.3.0)
@@ -2512,7 +2518,7 @@ packages:
       email-addresses: 5.0.0
       htmlparser2: 10.1.0
       ipaddr.js: 2.5.0
-      postal-mime: 3.0.0
+      postal-mime: 4.1.4
       tldts: 7.4.16
     dev: false
 
@@ -3836,7 +3842,7 @@ packages:
       obug: 2.2.1
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3)
+      vitest: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3)
     dev: true
 
   /@vitest/istanbul-lib-coverage@1.0.2:
@@ -3960,7 +3966,7 @@ packages:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
     dependencies:
       fast-deep-equal: 3.1.3
-      fast-uri: 3.1.8
+      fast-uri: 3.1.9
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
     dev: true
@@ -4892,11 +4898,6 @@ packages:
     engines: {node: '>=16.9.0'}
     dev: false
 
-  /deepmerge@4.3.1:
-    resolution: {integrity: sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A==}
-    engines: {node: '>=0.10.0'}
-    dev: false
-
   /defer-to-connect@2.0.1:
     resolution: {integrity: sha512-4tvttepXG1VaYGrRibk5EwJd1t4udunSOVMdLSAL6mId1ix438oPwPZMALY41FCijukO1L0twNcGsdzS7dHgDg==}
     engines: {node: '>=10'}
@@ -5030,8 +5031,8 @@ packages:
     dependencies:
       domelementtype: 3.0.0
 
-  /dompurify@3.4.16:
-    resolution: {integrity: sha512-sqo+pNp3qRhCIpbgRi1y8Tgk27Bo2Ry7w0dC1NBeNTdZChWjz9Xb/KOoZbRP/R6pQZ80Qw8YhXw13hWWBbMRnQ==}
+  /dompurify@3.4.17:
+    resolution: {integrity: sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==}
     optionalDependencies:
       '@types/trusted-types': 2.0.7
     dev: false
@@ -5177,8 +5178,8 @@ packages:
       - supports-color
     dev: true
 
-  /electron@44.5.1:
-    resolution: {integrity: sha512-lx7AYoFIiyvEvgvpyWO9kOC60xtNPpiPZAth6Fmg9NutzpCAMLwpUlaBY2EXfZyIgUdzEmLMj9KvK0Vrokl1yQ==}
+  /electron@44.9.3:
+    resolution: {integrity: sha512-Cv9/yMnZxNWsMlIe8T4v//NKHdUvbeyoTJoXE3BIcRxus2meeFaO9h/P3zB5d4cBXum51IgAYrT2QjpIDWKpJA==}
     engines: {node: '>= 22.12.0'}
     hasBin: true
     dependencies:
@@ -5568,8 +5569,8 @@ packages:
       '@babel/parser': 7.29.9
       eslint: 8.57.1
       hermes-parser: 0.25.1
-      zod: 4.6.5
-      zod-validation-error: 4.0.2(zod@4.6.5)
+      zod: 4.6.7
+      zod-validation-error: 4.0.2(zod@4.6.7)
     transitivePeerDependencies:
       - supports-color
     dev: true
@@ -5734,8 +5735,8 @@ packages:
     resolution: {integrity: sha512-DCXu6Ifhqcks7TZKY3Hxp3y6qphY5SJZmrWMDrKcERSOXWQdMhU9Ig/PYrzyw/ul9jOIyh0N4M0tbC5hodg8dw==}
     dev: true
 
-  /fast-uri@3.1.8:
-    resolution: {integrity: sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==}
+  /fast-uri@3.1.9:
+    resolution: {integrity: sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==}
     dev: true
 
   /fast-xml-builder@1.3.1:
@@ -6184,8 +6185,8 @@ packages:
     resolution: {integrity: sha512-EtKwoO6kxCL9WO5xipiHTZlSzBm7WLT627TqC/uVRd0HKmq8NXyebnNYxDoBi7wt8eTWrUrKXCOVaFq9x1kgag==}
     dev: true
 
-  /happy-dom@20.14.5:
-    resolution: {integrity: sha512-x/RzkpWO40bTjIoT30iQtt64FLLmH/iRcUCN2X//bLx7H3ifkdfPXyqsro/OYtqzIAhiLMMA7mmiOR9C3NOKjQ==}
+  /happy-dom@21.0.4:
+    resolution: {integrity: sha512-tFm+GaLBgo6o0awHnvHaNoraVo27qJ+2tZEtZ+cIa08hXbeitrxAJajLI05hsUy/2/YTKcUjQYzHe5mCcraLBw==}
     engines: {node: '>=20.0.0'}
     dependencies:
       '@types/node': 22.20.5
@@ -6486,8 +6487,8 @@ packages:
       loose-envify: 1.4.0
     dev: false
 
-  /ip-address@10.7.2:
-    resolution: {integrity: sha512-7H/2gFSIitxc0hG3nOI1glS8QLo/EHBFFLk8vEUjXY/xu0AdL8jZ9U1IzO2PUm0d2D/ofQcAifb0g6OBkt8U7w==}
+  /ip-address@10.7.4:
+    resolution: {integrity: sha512-DWBMKyeM25D70nrIiTkgQth59/G+naKOTep6huF9j+GmeK3DMD60Zvxg5d5qQnz+38AHgou6ean2LECX+lrKDg==}
     engines: {node: '>= 12'}
     dev: false
 
@@ -7347,7 +7348,7 @@ packages:
       iconv-lite: 0.7.3
       libmime: 5.4.7
       linkify-it: 5.0.2
-      nodemailer: 10.0.14
+      nodemailer: 10.2.1
       punycode.js: 2.3.1
       tlds: 1.261.0
     dev: false
@@ -8128,7 +8129,7 @@ packages:
       semver: 7.7.3
       tar: 7.5.22
       tinyglobby: 0.2.15
-      undici: 6.28.1
+      undici: 6.29.1
       which: 6.0.1
     dev: true
 
@@ -8139,8 +8140,8 @@ packages:
     resolution: {integrity: sha512-kQK9LGGFiHtrWiNhZtA7Qbw17AQz+dmsEKODRIVTXA9+e5MS/2gZEBhYJt13GrAz5/IOZKddH/0Z3TP/Zgo+yw==}
     engines: {node: '>=18'}
 
-  /nodemailer@10.0.14:
-    resolution: {integrity: sha512-eJoLFKg55fesSlzUekmfOv/SBXh4KUYT8oiQc2RLP0tfG0rbNMJBK7wgHJwXTJwqyKlSJMz9UzDZ4v+aHEvo8g==}
+  /nodemailer@10.2.1:
+    resolution: {integrity: sha512-ZrDNsPFoDMwefNs7sJwrYiEJ/CG4ClJWDZv05iNJsEBWa8GRDry1QJHTJxsuTAY9eDDKjX4k+q3SxslXJOao7w==}
     engines: {node: '>=20.0.0'}
     dev: false
 
@@ -8565,8 +8566,9 @@ packages:
     engines: {node: '>= 0.4'}
     dev: true
 
-  /postal-mime@3.0.0:
-    resolution: {integrity: sha512-Z4a9ar2Bv3YpK3IXag+Yda30k7bMZfpRuUGyqtHnZ2pjHG8Bl62EhZIk4n1dzv00gfzP9g+94e9kd8+XmjVWLA==}
+  /postal-mime@4.1.4:
+    resolution: {integrity: sha512-+6Qsn7Q2TSLMScfN4X2VQIclPRKgDAtKhytQex3fVSV/+HgVaawtsQGzKYDQLQIBR7b4Vfg+88WRGvuF/kwLSw==}
+    engines: {node: '>=20'}
     dev: false
 
   /postcss-import@15.1.0(postcss@8.5.28):
@@ -9366,11 +9368,10 @@ packages:
     dependencies:
       truncate-utf8-bytes: 1.0.2
 
-  /sanitize-html@2.18.0:
-    resolution: {integrity: sha512-CvY+PV+NBhxe3BnjFI5f//vEDKLULm9OlZArso7gdgVsWvanBuq9PNDx+/2llfL+8XFYa/UNBxvqRBg3TWU2Ug==}
+  /sanitize-html@2.18.1:
+    resolution: {integrity: sha512-2X5lC8fYla8YaT8g73Nj+HcLWXan5dLyCWLgVvaOmfw7JI78IRsyNtIDytTHdn7hBQbIkCah7Zbmd5jabzeDig==}
     engines: {node: '>=22.12.0'}
     dependencies:
-      deepmerge: 4.3.1
       escape-string-regexp: 4.0.0
       htmlparser2: 12.0.0
       is-plain-object: 5.1.0
@@ -9594,7 +9595,7 @@ packages:
     resolution: {integrity: sha512-e0VyvkVTwVYViNovRkZ9aodhxVlyoMn7eJhVUPxZ+eK9P/7CBkxvvsBOHqFPEH416726W8tLXXXjKwqgTErrCQ==}
     engines: {node: '>= 10.0.0', npm: '>= 3.0.0'}
     dependencies:
-      ip-address: 10.7.2
+      ip-address: 10.7.4
       smart-buffer: 4.2.0
     dev: false
 
@@ -10247,13 +10248,13 @@ packages:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
     dev: true
 
-  /undici@6.28.1:
-    resolution: {integrity: sha512-zWpdTVD54H48CIybL0rWQ3ukpb9d23wM7eH5RtfdmeP70cWHNjtfo7P4vZX+5CoDcO53J4Pu5uXp7lNfjc6DRA==}
+  /undici@6.29.1:
+    resolution: {integrity: sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA==}
     engines: {node: '>=18.17'}
     dev: true
 
-  /undici@7.30.0:
-    resolution: {integrity: sha512-dkrQXeHSaoamnItlYbmzG0wFYrM0ZwDxCIg0A7aKjTyyhh9svRzCNFEzV+Vm05/yehjCzjDZ31KXfGEjYSztDQ==}
+  /undici@7.30.1:
+    resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
     engines: {node: '>=20.18.1'}
     requiresBuild: true
     dev: true
@@ -10425,7 +10426,7 @@ packages:
       fsevents: 2.3.3
     dev: true
 
-  /vitest@5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@20.14.5)(vite@8.3.3):
+  /vitest@5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(happy-dom@21.0.4)(vite@8.3.3):
     resolution: {integrity: sha512-xMw97S3rjdtj5dkVat7jCsqWBpvchs3RlpQctUqwJD0KkERk40vz2fJ77lDwW/Vzh/pk18eItYAzkodhSes3jQ==}
     engines: {node: ^22.12.0 || ^24.0.0 || >=26.0.0}
     hasBin: true
@@ -10473,7 +10474,7 @@ packages:
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
-      happy-dom: 20.14.5
+      happy-dom: 21.0.4
       magic-string: 1.4.2
       obug: 2.2.1
       picomatch: 4.0.7
@@ -10748,17 +10749,17 @@ packages:
     engines: {node: '>=12.20'}
     dev: false
 
-  /zod-validation-error@4.0.2(zod@4.6.5):
+  /zod-validation-error@4.0.2(zod@4.6.7):
     resolution: {integrity: sha512-Q6/nZLe6jxuU80qb/4uJ4t5v2VEZ44lzQjPDhYJNztRQ4wyWc6VF3D3Kb/fAuPetZQnhS3hnajCf9CsWesghLQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      zod: ^3.25.0 || ^4.0.0
+      zod: ^4.6.6
     dependencies:
-      zod: 4.6.5
+      zod: 4.6.7
     dev: true
 
-  /zod@4.6.5:
-    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
+  /zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   /zustand@5.0.15(@types/react@19.3.0)(react@19.3.0):
     resolution: {integrity: sha512-MpSEjRiBkA9crSYeOUH32rJC7SVqAbm0Fqcqge/bUi2PPoLcBWKOsG+C8mevmpr8TwXHBVkChbbJiyvkE+i/3A==}

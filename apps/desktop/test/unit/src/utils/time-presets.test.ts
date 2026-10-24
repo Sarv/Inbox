@@ -10,6 +10,7 @@ import {
   snoozePresets,
   timeInputValue,
   toEpochSeconds,
+  updateReminderPresets,
 } from '../../../../src/utils/time-presets';
 
 // What breaks if this suite goes red: a message comes back — or goes out — at
@@ -75,6 +76,38 @@ describe('sendLaterPresets', () => {
   it('never returns a time in the past', () => {
     for (const option of sendLaterPresets(WEDNESDAY_AFTERNOON)) {
       expect(option.time.getTime()).toBeGreaterThan(WEDNESDAY_AFTERNOON.getTime());
+    }
+  });
+});
+
+describe('updateReminderPresets', () => {
+  // Regression: "Remind me tonight" for a staged update resolving to the wrong
+  // evening (or the wrong hour), so the banner comes back while the reader is
+  // mid-meeting instead of after work.
+  it('offers in an hour, tonight at 8 PM and tomorrow morning', () => {
+    const [inAnHour, tonight, tomorrow] = updateReminderPresets(WEDNESDAY_AFTERNOON);
+
+    expect(inAnHour).toMatchObject({ label: 'In 1 hour', time: new Date(2026, 8, 23, 15, 20, 37, 500) });
+    expect(tonight).toMatchObject({ label: 'Tonight', sublabel: '8:00 PM', time: new Date(2026, 8, 23, 20, 0, 0, 0) });
+    expect(tomorrow).toMatchObject({ label: 'Tomorrow morning', sublabel: 'Thu, 8:00 AM', time: new Date(2026, 8, 24, 8, 0, 0, 0) });
+  });
+
+  // Regression: "Tonight" at 19:30 meaning 20:00 — barely a reminder — or at
+  // 22:00 meaning 20:00 TOMORROW. Within an hour of 8 PM it is dropped.
+  it('drops tonight once it is less than an hour away or has passed', () => {
+    for (const late of [new Date(2026, 8, 23, 19, 30), new Date(2026, 8, 23, 22, 0)]) {
+      expect(updateReminderPresets(late).map((option) => option.label)).toEqual(['In 1 hour', 'Tomorrow morning']);
+    }
+    expect(updateReminderPresets(new Date(2026, 8, 23, 18, 59)).map((option) => option.label)).toContain('Tonight');
+  });
+
+  // Regression: a preset in the past is "already due" — the banner would
+  // reappear the instant it was dismissed.
+  it('never returns a time in the past', () => {
+    for (const now of [WEDNESDAY_AFTERNOON, new Date(2026, 8, 23, 23, 59), new Date(2026, 8, 24, 0, 5)]) {
+      for (const option of updateReminderPresets(now)) {
+        expect(option.time.getTime()).toBeGreaterThan(now.getTime());
+      }
     }
   });
 });
