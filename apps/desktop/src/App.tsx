@@ -42,6 +42,7 @@ import { SyncTroubleBanner } from './components/SyncTroubleBanner';
 import { UndoDeleteToast } from './components/UndoDeleteToast';
 import { UndoSendToast } from './components/UndoSendToast';
 import { UpdateDialog } from './components/UpdateDialog';
+import { UpdateReadyBanner } from './components/UpdateReadyBanner';
 import { useActiveSection } from './hooks/useActiveSection';
 import { useAppVersion } from './hooks/useAppVersion';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -1005,6 +1006,9 @@ function App() {
             reassuring green "Live" while nothing arrives. Hidden when re-auth is
             needed (that banner takes over). */}
         <SyncTroubleBanner />
+        {/* A downloaded update waiting for the next quit — restart now or be
+            reminded later. Hidden while the update dialog is asking the same. */}
+        <UpdateReadyBanner />
         <AssistantWorkspace
           section={activeSection}
           onOpenInbox={() => requestSection('mail')}

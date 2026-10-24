@@ -87,6 +87,26 @@ export function sendLaterPresets(now: Date = new Date()): TimePreset[] {
   return presets;
 }
 
+/** "Tonight" for a reminder: the evening, when a restart costs nobody anything. */
+const TONIGHT_HOUR = 20;
+/** Within this long of "tonight" the preset says nothing "In 1 hour" doesn't. */
+const TONIGHT_MIN_LEAD_HOURS = 1;
+
+/**
+ * When a staged app update should ask again. "Tonight" disappears once the
+ * evening is under an hour away (or past), where it would mean the same as
+ * "In 1 hour" — or, after 20:00, a time that has already gone.
+ */
+export function updateReminderPresets(now: Date = new Date()): TimePreset[] {
+  const tonight = atHour(now, TONIGHT_HOUR);
+  const presets: TimePreset[] = [preset('In 1 hour', addHours(now, 1), 'h:mm a')];
+  if (isBefore(addHours(now, TONIGHT_MIN_LEAD_HOURS), tonight)) {
+    presets.push(preset('Tonight', tonight, 'h:mm a'));
+  }
+  presets.push(preset('Tomorrow morning', atHour(addDays(now, 1), MORNING_HOUR), 'EEE, h:mm a'));
+  return presets;
+}
+
 /** UTC epoch SECONDS — what every storage and IPC boundary here takes. */
 export const toEpochSeconds = (date: Date): number => Math.floor(date.getTime() / 1000);
 

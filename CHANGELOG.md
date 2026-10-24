@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A downloaded update now says so inside the app: a banner offers "Restart
+  now", or a reminder in an hour, tonight, tomorrow morning or at a time you
+  pick. Before, the only notice was one system notification, and the update
+  waited until the app was next quit, which could be weeks.
+
 ### Fixed
 - Attachment scanning recovers exact filenames from bounded MIME headers when
   a mail server omits them from its attachment metadata, so valid small files
