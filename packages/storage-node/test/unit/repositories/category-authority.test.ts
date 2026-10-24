@@ -63,7 +63,11 @@ describe('persisted classification authority', () => {
     emails.setServerCategories('ordinary', []);
     const after = row('ordinary');
     expect(after.server_categories).toBe('[]');
-    expect({ ...after, server_categories: before.server_categories }).toEqual(before);
+    // Recording the metadata is a real write, so updated_at is stamped with the
+    // wall clock; comparing it made the test fail whenever the two reads fell
+    // either side of a second boundary. Everything else must be untouched.
+    expect(after.updated_at).toBeGreaterThanOrEqual(before.updated_at);
+    expect({ ...after, server_categories: before.server_categories, updated_at: before.updated_at }).toEqual(before);
   });
 
   // Regression: offline manual selections and intentional remove-all must survive retries/restart and in-flight AI.
