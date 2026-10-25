@@ -56,6 +56,7 @@ import { getStorage, getAllAccountRuntimes, getAccountRuntime, getSyncEngine, ge
 
 import { registryAccountEmail, resolveAccountEmail, resolveAccountIdentity } from './accounts-registry';
 import { loadAgentConfig } from './agent-config-store';
+import { ensureBundledAgentPrompts, readBundledAgentPrompt } from './agent-prompt-defaults';
 import { getAutoBacklogCap } from './ai-backlog-cap';
 import { decideAIErrorPolicy } from './ai-error-policy';
 import { prepareAIProviderConfig } from './ai-provider-config';
@@ -672,37 +673,10 @@ export function initializeUnifiedPipeline(
   const userEmail = serviceConfig.userEmail || '';
   const userName = userEmail.split('@')[0] || '';
 
-  // Seed the user-editable prompt templates (idempotent — preserves any
-  // content the user has already customized; refreshes label/description
-  // and default_content so the Reset button reflects upstream prompt
-  // changes).
+  // Seed this account now; background accounts are seeded on their first read.
+  // The shared helper preserves edits and avoids per-email seed writes.
   try {
-    const { DEFAULT_CATEGORIZATION_TEMPLATE, DEFAULT_PLAN_TEMPLATE, DEFAULT_DRAFT_TEMPLATE } =
-      require('@sarvinbox/core');
-    const promptRepo = (repos as any).prompts;
-    if (promptRepo?.seedDefault) {
-      promptRepo.seedDefault({
-        id: 'categorization_system',
-        label: 'Categorization (System Prompt)',
-        description:
-          'How the AI classifies emails, picks categories, and decides if a reply should be drafted. Variables: {{userEmail}}, {{userName}}, {{userDomain}}, {{categorySection}}, {{spamPrompt}}.',
-        content: DEFAULT_CATEGORIZATION_TEMPLATE,
-      });
-      promptRepo.seedDefault({
-        id: 'agent_plan',
-        label: 'Reply Drafter — Plan',
-        description:
-          'Step 1 of reply drafting: decides whether to search old emails or the web before writing. Variables: {{identity}}, {{webOption}}, {{webSearchesField}}, {{webWhenSection}}.',
-        content: DEFAULT_PLAN_TEMPLATE,
-      });
-      promptRepo.seedDefault({
-        id: 'agent_draft',
-        label: 'Reply Drafter — Draft',
-        description:
-          'Step 2 of reply drafting: writes the actual reply body. Variables: {{identity}}, {{userName}}, {{greeting}}, {{tone}}, {{closing}}.',
-        content: DEFAULT_DRAFT_TEMPLATE,
-      });
-    }
+    ensureBundledAgentPrompts((repos as any).prompts);
   } catch (err) {
     logger.warn('[Pipeline] Failed to seed prompt templates:', err);
   }
@@ -745,7 +719,10 @@ export function initializeUnifiedPipeline(
       saveNotes: (notes) => { try { return pRepos().agent.addNotesBatch(notes); } catch { return 0; } },
       getNotesForPrompt: (email) => { try { return pRepos().agent.getNotesForPrompt(email); } catch { return ''; } },
       getPromptTemplate: (id: string) => {
-        try { return (pRepos() as any).prompts?.getContent?.(id) || null; }
+        try {
+          const promptRepo = (pRepos() as any)?.prompts;
+          return readBundledAgentPrompt(promptRepo, id, error => logger.warn('[Pipeline] Failed to upgrade this account\'s prompt defaults:', error));
+        }
         catch { return null; }
       },
       // Addressing gate — core uses this to strip needs_response (and
@@ -1653,7 +1630,7 @@ export async function autoDraftReply(emailId: string, storage: any = getStorage(
       getPromptTemplate: (id: 'agent_plan' | 'agent_draft') => {
         try {
           const r = (storage as any).getRepositories?.()?.prompts;
-          return r?.getContent?.(id) || null;
+          return readBundledAgentPrompt(r, id, error => logger.warn('[Pipeline] Failed to upgrade this account\'s prompt defaults:', error));
         } catch { return null; }
       },
       getNotes: (e: string) => agentRepo.getNotesForPrompt(e),

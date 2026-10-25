@@ -5,7 +5,7 @@ vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { thr
 
 import { createInboxAssistantHistoryStore, type InboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
 import { aggregateInboxAssistantUsage } from '../../../../electron/services/inbox-assistant-usage';
-import type { InboxAssistantExchange, InboxAssistantRunRecord } from '../../../../src/types/inbox-assistant';
+import type { InboxAssistantAIWorkload, InboxAssistantExchange, InboxAssistantRunRecord } from '../../../../src/types/inbox-assistant';
 
 let db: Database.Database;
 let store: InboxAssistantHistoryStore;
@@ -92,6 +92,49 @@ describe('separate encrypted-store Inbox Agent chats', () => {
     expect(restored.usage?.calls.map(call => call.id)).toEqual(['call-first', 'call-second', 'call-third']);
     expect(store.restoreRewind(origin.id).usage?.inputTokens).toBe(225);
     expect(blob(INDEX)).not.toContain('call-first');
+  });
+
+  it('persists host workload alongside real provider accounting across restart and rewind without leaking it to the chat index', () => {
+    const origin = store.create();
+    const workload: InboxAssistantAIWorkload = { operation: 'unread_review', conversationCount: 16, messageCount: 25,
+      originalContentChars: 20_000, submittedContentChars: 12_000, reusedQuotedTurns: 4 };
+    const usage = aggregateInboxAssistantUsage([{ id: 'workload-call', provider: 'fixture', model: 'fixture', status: 'completed', startedAt: 1, completedAt: 2,
+      attempts: 1, inputTokens: 1_234, outputTokens: 56, tokenSource: 'provider', usageComplete: true, estimatedCostUsd: 0.001, costComplete: true, workload }]);
+    const run: InboxAssistantRunRecord = { requestId: 'workload-run', chatId: origin.id, kind: 'question', exchangeId: 'exchange-0', question: 'Review unread mail',
+      accountIds: ['work'], status: 'completed', startedAt: 1, updatedAt: 2, activities: [], usage };
+    store.writeChat({ ...origin, exchanges: [{ ...exchange(), usage }, exchange(1)], runs: [run], usage });
+    const restarted = createInboxAssistantHistoryStore(() => db);
+    const saved = restarted.load(origin.id);
+    expect(saved.usage).toMatchObject({ inputTokens: 1_234, outputTokens: 56, calls: [{ workload }] });
+    expect(saved.runs![0]!.usage!.calls[0]!.workload).toEqual(workload);
+    expect(saved.exchanges[0]!.usage!.calls[0]!.workload).toEqual(workload);
+    restarted.rewind(origin.id, 'exchange-1');
+    expect(restarted.restoreRewind(origin.id).usage!.calls[0]!.workload).toEqual(workload);
+    expect(blob(INDEX)).not.toContain('workload-call');
+    expect(blob(INDEX)).not.toContain('conversationCount');
+  });
+
+  it('omits malformed saved workload without losing legacy questions, provider counts or costs', () => {
+    const origin = store.create();
+    const usage = aggregateInboxAssistantUsage([{ id: 'legacy-call', provider: 'fixture', model: 'fixture', status: 'completed', startedAt: 1, completedAt: 2,
+      attempts: 1, inputTokens: 300, outputTokens: 20, tokenSource: 'provider', usageComplete: true, estimatedCostUsd: 0.004, costComplete: true }]);
+    const run: InboxAssistantRunRecord = { requestId: 'legacy-run', chatId: origin.id, kind: 'question', question: 'Review unread mail', accountIds: ['work'],
+      status: 'completed', startedAt: 1, updatedAt: 2, activities: [], usage };
+    store.writeChat({ ...origin, exchanges: [{ ...exchange(), usage }], runs: [run], usage });
+    const stored = JSON.parse(blob(`${CHAT}${origin.id}`)!);
+    const invalid = { operation: 'unread_review', conversationCount: 16, messageCount: 1, originalContentChars: 100, submittedContentChars: 200, reusedQuotedTurns: 0 };
+    stored.usage.calls[0].workload = invalid;
+    stored.runs[0].usage.calls[0].workload = invalid;
+    stored.exchanges[0].usage.calls[0].workload = invalid;
+    seed(`${CHAT}${origin.id}`, stored);
+    const saved = createInboxAssistantHistoryStore(() => db).load(origin.id);
+    expect(saved.exchanges[0]!.question).toBe(exchange().question);
+    expect(saved.usage).toMatchObject({ inputTokens: 300, outputTokens: 20, estimatedCostUsd: 0.004 });
+    expect(saved.usage!.calls[0]).not.toHaveProperty('workload');
+    expect(saved.runs![0]!.usage!.calls[0]).not.toHaveProperty('workload');
+    expect(saved.exchanges[0]!.usage!.calls[0]).not.toHaveProperty('workload');
+    store.writeChat(saved);
+    expect(blob(`${CHAT}${origin.id}`)).not.toContain('conversationCount');
   });
 
   it('rejects malformed or foreign run records without replacing prior stored data', () => {

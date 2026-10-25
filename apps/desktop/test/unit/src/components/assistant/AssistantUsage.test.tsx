@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { AssistantUsage } from '../../../../../src/components/assistant/AssistantUsage';
-import type { InboxAssistantAIUsage, InboxAssistantUsage } from '../../../../../src/types/inbox-assistant';
+import type { InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantUsage } from '../../../../../src/types/inbox-assistant';
 import { cleanup, render } from '../../../../helpers/render';
 
 function call(id = 'call-one', changes: Partial<InboxAssistantAIUsage> = {}): InboxAssistantAIUsage {
@@ -20,6 +20,43 @@ function usage(changes: Partial<InboxAssistantUsage> = {}): InboxAssistantUsage 
 afterEach(cleanup);
 
 describe('Assistant usage accounting', () => {
+  it('shows how many conversations and emails one unread-review call covered without treating characters as tokens', () => {
+    const workload: InboxAssistantAIWorkload = { operation: 'unread_review', conversationCount: 16, messageCount: 23,
+      originalContentChars: 40_000, submittedContentChars: 25_000, reusedQuotedTurns: 7 };
+    const view = render(<AssistantUsage usage={usage({ calls: [call('review', { workload })] })} />);
+    expect(view.byLabel('Unread review workload')?.textContent).toContain('Unread review · 16 conversations · 23 emails');
+    expect(view.container.textContent).toContain('Content: 40,000 → 25,000 characters · 15,000 fewer');
+    expect(view.container.textContent).toContain('7 quoted passages shared');
+    expect(view.container.textContent).toContain('Content characters describe the email text, not token estimates.');
+    expect(view.byLabel('Input tokens: 1,000')).not.toBeNull();
+    expect(view.byLabel('Output tokens: 250')).not.toBeNull();
+    expect(view.byLabel('Input tokens: 25,000')).toBeNull();
+  });
+
+  it('uses singular counts and does not claim savings when the complete content was submitted', () => {
+    const workload: InboxAssistantAIWorkload = { operation: 'unread_review', conversationCount: 1, messageCount: 1,
+      originalContentChars: 1_234, submittedContentChars: 1_234, reusedQuotedTurns: 0 };
+    const view = render(<AssistantUsage compact usage={usage({ calls: [call('review', { workload })] })} />);
+    expect(view.container.textContent).toContain('Unread review · 1 conversation · 1 email');
+    expect(view.container.textContent).toContain('Content: 1,234 characters');
+    expect(view.container.textContent).not.toContain('fewer');
+    expect(view.container.textContent).not.toContain('quoted passage');
+  });
+
+  it.each([
+    undefined, { operation: 'other' }, { operation: 'unread_review', conversationCount: -1, messageCount: 1 },
+    { operation: 'unread_review', conversationCount: 17, messageCount: 17, originalContentChars: 100, submittedContentChars: 100, reusedQuotedTurns: 0 },
+    { operation: 'unread_review', conversationCount: 2, messageCount: 1, originalContentChars: 100, submittedContentChars: 100, reusedQuotedTurns: 0 },
+    { operation: 'unread_review', conversationCount: 1, messageCount: 1, originalContentChars: 100, submittedContentChars: 101, reusedQuotedTurns: 0 },
+    { operation: 'unread_review', conversationCount: 1, messageCount: 1, originalContentChars: 100, submittedContentChars: 50, reusedQuotedTurns: NaN },
+  ])('does not fabricate workload for old or malformed records: %j', workload => {
+    const view = render(<AssistantUsage usage={usage({ calls: [call('legacy', { workload: workload as InboxAssistantAIWorkload })] })} />);
+    expect(view.byLabel('Unread review workload')).toBeNull();
+    expect(view.container.textContent).not.toContain('Content characters');
+    expect(view.byLabel('Input tokens: 1,000')).not.toBeNull();
+    expect(view.byLabel('Output tokens: 250')).not.toBeNull();
+  });
+
   it('shows answer input and output tokens with estimated USD cost and provider/model details', () => {
     const view = render(<AssistantUsage usage={usage()} />);
     expect(view.byLabel('Answer usage')).not.toBeNull();

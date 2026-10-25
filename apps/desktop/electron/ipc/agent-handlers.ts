@@ -9,7 +9,7 @@ import type { UserActionType, ActionSource } from '@sarvinbox/core';
 import { createLogger, setEmailReadFlag } from '@sarvinbox/core';
 import { ipcMain } from 'electron';
 
-import { openAccountStorages, requireNamedOrActiveStorage } from '../services/account-target';
+import { openAccountStorages, requireNamedOrActiveStorage, requireTargetAccountId } from '../services/account-target';
 import { resolveAccountIdentity } from '../services/accounts-registry';
 import { saveAgentConfig, loadAgentConfig } from '../services/agent-config-store';
 import { refreshContactClassifications } from '../services/contact-classification-service';
@@ -453,17 +453,31 @@ export function registerAgentHandlers(): void {
     } catch { return { success: true, data: false }; }
   });
 
-  ipcMain.handle('agent:getProposals', async () => {
+  ipcMain.handle('agent:getProposals', async (_event, accountId?: string) => {
     try {
-      const agentRepo = getAgentRepo();
-      const storage = requireStorage();
+      if (accountId !== undefined && (typeof accountId !== 'string' || !accountId || accountId.length > 500)) {
+        throw new Error('Invalid proposal account.');
+      }
+      if (accountId !== undefined) requireTargetAccountId(accountId);
+      const storage = await requireNamedOrActiveStorage(accountId);
+      const assertCurrent = async () => {
+        if (accountId === undefined) return;
+        requireTargetAccountId(accountId);
+        if (await requireNamedOrActiveStorage(accountId) !== storage) {
+          throw new Error('The proposal account changed while loading.');
+        }
+      };
+      await assertCurrent();
+      const agentRepo = getAgentRepo(storage);
       const decisions = await agentRepo.getPendingDecisions();
+      await assertCurrent();
 
       // Enrich with email subject + sender info. Fetch every referenced email
       // in ONE batched query and index by id — avoids an N+1 sequential
       // getEmail per pending decision.
       const emailIds = [...new Set(decisions.map((d: any) => d.emailId).filter(Boolean))];
       const emails = await storage.getEmailsByIds(emailIds as string[]);
+      await assertCurrent();
       const emailById = new Map(emails.map((e) => [e.id, e]));
 
       const enriched = decisions.map((d: any) => {

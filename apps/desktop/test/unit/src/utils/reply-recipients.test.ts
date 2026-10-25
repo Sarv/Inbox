@@ -31,4 +31,35 @@ describe('replyRecipients', () => {
   it('answers the sender when our address is unknown', () => {
     expect(replyRecipients({ fromAddress: 'alice@example.com' }, 'replyAll', '')).toEqual({ to: 'alice@example.com', cc: '' });
   });
+
+  it('excludes the owning account and its aliases, retaining an unrelated account as an intentional recipient', () => {
+    const source = { fromAddress: 'client@example.com', toAddress: 'owner@work.test, alias@work.test, active@home.test', ccAddress: 'ALIAS@work.test, teammate@work.test' };
+    expect(replyRecipients(source, 'replyAll', 'owner@work.test', ['owner@work.test', 'alias@work.test'])).toEqual({
+      to: 'client@example.com', cc: 'active@home.test, teammate@work.test',
+    });
+  });
+
+  it('deduplicates the sender and To/Cc case-insensitively without losing the first recipient spelling', () => {
+    expect(replyRecipients({ fromAddress: 'Alice <ALICE@example.com>',
+      toAddress: 'alice@example.com, Bob <bob@example.com>, BOB@example.com, me@example.com',
+      ccAddress: 'BOB@example.com, Carol <carol@example.com>, CAROL@example.com, ALICE@example.com',
+    }, 'replyAll', ME)).toEqual({ to: 'ALICE@example.com', cc: 'bob@example.com, carol@example.com' });
+  });
+
+  it.each(['reply', 'replyAll'] as const)('follows up an own send-as alias in %s mode', mode => {
+    const source = { fromAddress: 'Sales <SALES@work.test>', toAddress: 'client@example.com, owner@work.test, sales@work.test, CLIENT@example.com',
+      ccAddress: 'client@example.com, other@example.com, SALES@work.test' };
+    expect(replyRecipients(source, mode, 'owner@work.test', ['sales@work.test'])).toEqual({
+      to: 'client@example.com', cc: mode === 'replyAll' ? 'other@example.com' : '',
+    });
+  });
+
+  it.each(['reply', 'replyAll'] as const)('answers external Cc when a self-sent alias message has no external To (%s)', mode => {
+    expect(replyRecipients({ fromAddress: 'sales@work.test', toAddress: 'owner@work.test, sales@work.test', ccAddress: 'client@example.com, CLIENT@example.com' },
+      mode, 'owner@work.test', ['sales@work.test'])).toEqual({ to: 'client@example.com', cc: '' });
+  });
+
+  it('plain reply to an incoming message does not add other recipients', () => {
+    expect(replyRecipients(incoming, 'reply', ME, ['alias@example.com'])).toEqual({ to: 'alice@example.com', cc: '' });
+  });
 });

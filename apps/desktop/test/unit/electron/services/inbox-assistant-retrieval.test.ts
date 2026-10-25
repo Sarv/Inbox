@@ -2,8 +2,9 @@ import type { EmailRecord, FolderRecord, SearchQuery } from '@sarvinbox/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AssistantAttachmentRef, AssistantAttachmentResult } from '../../../../electron/services/assistant-attachment-types';
-import type { InboxAssistantSearchPlan } from '../../../../electron/services/inbox-assistant-answer';
+import { buildInboxAssistantAnswerPrompt, planInboxAssistantSearch, type InboxAssistantSearchPlan } from '../../../../electron/services/inbox-assistant-answer';
 import { researchInboxAssistant, type AssistantResearchMailbox, type AssistantResearchStorage } from '../../../../electron/services/inbox-assistant-retrieval';
+import { resolveInboxAssistantSearchScope } from '../../../../electron/services/inbox-assistant-search-scope';
 import type { InboxAssistantAccount, InboxAssistantProgress } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
@@ -52,6 +53,152 @@ function ready(ref: AssistantAttachmentRef, text = 'TCS quotation total INR 90,0
 }
 
 describe('Inbox Agent bounded retrieval priorities', () => {
+  it('packs repeated raw HTML thread quotes after shared HTML-to-text conversion without altering stored evidence', async () => {
+    const original = '<p>TCS directory quotation Q-204: INR 270,000 excluding GST.</p>'
+      + `<p>${'Deployment includes migration and support. '.repeat(25)}</p>`
+      + '<p>Regards, Alice<br>Solutions Director<br>Phone +91 90000 00123</p>';
+    const quote = '<blockquote><p>On Thu, 1 Oct 2026 at 10:00, Alice &lt;alice@example.test&gt; wrote:</p>' + original + '</blockquote>';
+    const rows = [sentEmail('original', { threadId: 'html-thread', rawBody: original }),
+      sentEmail('reply-one', { threadId: 'html-thread', rawBody: `<p>First authored reply.</p>${quote}`, date: 1_791_600_001 }),
+      sentEmail('reply-two', { threadId: 'html-thread', rawBody: `<p>Second authored reply.</p>${quote}`, date: 1_791_600_002 })];
+    const primary = mailbox(rows);
+    const research = await researchInboxAssistant([ACCOUNTS[0]!], PLAN, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    const snapshot = structuredClone(research.evidence);
+    const prompt = buildInboxAssistantAnswerPrompt('What TCS quotation did I send?', research.evidence, research.coverage);
+    expect(prompt).toContain('shared with');
+    expect(prompt).toContain('First authored reply.');
+    expect(prompt).toContain('Second authored reply.');
+    expect(prompt).toContain('Solutions Director');
+    expect(prompt).toContain('90000 00123');
+    expect(prompt).toContain('270,000 excluding GST');
+    expect(research.evidence).toEqual(snapshot);
+    expect(rows[1]!.rawBody).toContain('<blockquote>');
+  });
+
+  it('requires an explicitly requested company and product before expanding its conversation', async () => {
+    const target = sentEmail('directory-offer', { subject: 'Proposal for Sarv User Directory (UD) Licensing',
+      threadId: 'directory-thread', cleanBody: 'User Directory licences: INR 270,000.', rawBody: '<p>User Directory licences: INR 270,000.</p>' });
+    const genuineReply = sentEmail('directory-reply', { subject: 'Re: deployment clarification', threadId: target.threadId,
+      cleanBody: 'Support is included with staged migration.', rawBody: '<p>Support is included with staged migration.</p>', date: target.date + 1 });
+    const sip = Array.from({ length: 30 }, (_, index) => sentEmail(`sip-${index}`, { subject: 'TCS SIP trunk proposal',
+      cleanBody: 'SIP trunk commercial proposal.', rawBody: '<p>SIP trunk commercial proposal.</p>', date: target.date + 20 + index }));
+    const otherCustomer = sentEmail('other-directory', { subject: 'User Directory proposal', toAddress: 'buyer@other.example',
+      cleanBody: 'User Directory licences for another customer.', rawBody: '<p>User Directory licences for another customer.</p>' });
+    const primary = mailbox([target, genuineReply, otherCustomer, ...sip]);
+    const plan = await planInboxAssistantSearch('What quote did I send to TCS for Sarv User Directory (UD) licensing?', vi.fn().mockResolvedValue(JSON.stringify({
+      queries: ['TCS', 'Sarv', 'User Directory', 'UD'], entityTerms: ['TCS', 'Sarv', 'User Directory', 'UD'],
+      topicTerms: ['TCS', 'Sarv User Directory', 'UD'], intent: 'sent', quoteIntent: true, filters: {},
+    })));
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], plan, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence.map(source => source.emailId).sort()).toEqual(['directory-offer', 'directory-reply']);
+    expect(result.coverage[0]).toMatchObject({ matchedMessages: 2, reviewedMessages: 2, truncated: false });
+    expect(primary.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ query: 'TCS User Directory' }));
+  });
+
+  it('requires customer/product evidence instead of the account brand in headers or quoted signatures, then keeps genuine team replies', async () => {
+    const account = { id: 'brand-account', email: 'owner@sarv.example' };
+    const target = sentEmail('target-quote', { subject: 'Proposal for Sarv User Directory (UD) Licensing', threadId: 'target-thread', fromAddress: account.email, cleanBody: 'Commercial value: INR 95000000.', rawBody: '<p>Commercial value: INR 95000000.</p>' });
+    const team = sentEmail('team-followup', { subject: 'Re: Commercial clarification', threadId: 'target-thread', fromAddress: 'colleague@sarv.example', toAddress: 'buyer@customer.example', cleanBody: 'The agreed deployment includes technical support.', rawBody: '<p>The agreed deployment includes technical support.</p>', date: target.date + 1 });
+    const unrelated = sentEmail('unrelated-header', { subject: 'Other API escalation', toAddress: 'buyer@other.example', cleanBody: 'Please check this separate issue.', rawBody: '<p>Please check this separate issue.</p>' });
+    const signature = { ...unrelated, id: 'unrelated-signature', threadId: 'signature-thread', rawBody: '<p>Separate issue.</p><p>Contact owner@sarv.example or colleague@sarv.example</p>' };
+    const brandOnly = { ...unrelated, id: 'unrelated-brand-prose', threadId: 'brand-thread', subject: 'Sarv weekly operations', rawBody: '<p>Sarv operational update.</p>' };
+    const primary = mailbox([target, team, unrelated, signature, brandOnly]);
+    const plan: InboxAssistantSearchPlan = { queries: ['Sarv', 'TCS', 'User Directory'], entityTerms: ['Sarv', 'TCS', 'User Directory'], topicTerms: ['Sarv', 'TCS', 'User Directory'], intent: 'all', quoteIntent: true, filters: {} };
+    const result = await researchInboxAssistant([account], plan, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence.map(source => source.emailId).sort()).toEqual(['target-quote', 'team-followup']);
+    expect(result.evidence.find(source => source.emailId === target.id)?.text).toContain('INR 95000000');
+  });
+
+  it('keeps real brand content and explicit self-address filters without treating own email addresses as brand prose', async () => {
+    const selfAddress = ACCOUNTS[0]!.email;
+    const genuine = sentEmail('brand-content', { subject: 'Sarv service update', toAddress: 'other@vendor.example', cleanBody: 'Sarv has updated its service.', rawBody: '<p>Sarv has updated its service.</p>' });
+    const signature = sentEmail('signature-only', { subject: 'Unrelated update', toAddress: 'other@vendor.example', cleanBody: `Contact ${selfAddress}`, rawBody: `<p>Contact ${selfAddress}</p>` });
+    const primary = mailbox([genuine, signature]);
+    const brandPlan: InboxAssistantSearchPlan = { queries: ['Sarv'], entityTerms: ['Sarv'], intent: 'all', quoteIntent: false, filters: {} };
+    const brand = await researchInboxAssistant([ACCOUNTS[0]!], brandPlan, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(brand.evidence.map(source => source.emailId)).toEqual(['brand-content']);
+    const address = await researchInboxAssistant([ACCOUNTS[0]!], { ...brandPlan, queries: [selfAddress], entityTerms: [selfAddress], filters: { from: selfAddress } }, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(address.evidence.map(source => source.emailId).sort()).toEqual(['brand-content', 'signature-only']);
+  });
+
+  it('finds actual meeting confirmations today across accounts and excludes generic or out-of-day matches', async () => {
+    const scope = resolveInboxAssistantSearchScope('is any meetings invite today', { nowMs: Date.parse('2026-10-22T19:00:00Z'), timeZone: 'Asia/Kolkata' });
+    const plan: InboxAssistantSearchPlan = { queries: ['any', 'meetings', 'invite', 'today'], entityTerms: [], intent: 'all', quoteIntent: false, filters: scope.filters, scope };
+    const today = sentEmail('today-invite', { subject: 'Meeting Confirmation | Sarv <> Vembu Technologies', cleanBody: 'Please join us at 2 PM.', rawBody: '<p>Please join us at 2 PM.</p>', date: Date.parse('2026-10-22T18:45:00Z') / 1000 });
+    const unrelated = sentEmail('pricing', { subject: 'Infosys API pricing escalation', cleanBody: 'Following up after our meeting. Please advise if there are any further questions today.', rawBody: '<p>Following up after our meeting. Please advise if there are any further questions today.</p>', date: today.date + 10 });
+    const old = { ...today, id: 'yesterday-invite', threadId: 'yesterday-thread', date: scope.timeWindow!.dateFrom - 1 };
+    const next = { ...today, id: 'tomorrow-invite', threadId: 'tomorrow-thread', date: scope.timeWindow!.dateTo + 1 };
+    const secondary = { ...today, id: 'secondary-invite', threadId: 'secondary-thread', subject: 'Invitation: Project review', fromAddress: ACCOUNTS[1]!.email };
+    const primary = mailbox([today, unrelated, old, next]);
+    const second = mailbox([secondary]);
+    const fetchBody = vi.fn(); primary.fetchBody = fetchBody;
+    const result = await researchInboxAssistant(ACCOUNTS, plan, { openMailbox: vi.fn(async id => id === 'primary' ? primary : second), readAttachment: vi.fn() });
+    expect(result.evidence.map(source => source.emailId)).toEqual(['today-invite', 'secondary-invite']);
+    expect(result.evidence[0]).toMatchObject({ accountId: 'primary', subject: today.subject });
+    expect(result.evidence[1]).toMatchObject({ accountId: 'secondary' });
+    expect(primary.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ dateFrom: scope.timeWindow!.dateFrom, dateTo: scope.timeWindow!.dateTo, scope: 'mailbox' }));
+    expect(fetchBody).not.toHaveBeenCalled();
+  });
+
+  it('discovers a generic-subject calendar invite within the local day without promoting old quoted invites or downloading unrelated mail', async () => {
+    const scope = resolveInboxAssistantSearchScope('is any meetings invite today', { today: '2026-10-23', timeZone: 'Asia/Kolkata' });
+    const date = scope.timeWindow!.dateFrom + 25 * 60;
+    const calendarIcs = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting-test\r\nDTSTART:20261023T090000Z\r\nSUMMARY:Quarterly discussion\r\nEND:VEVENT\r\nEND:VCALENDAR';
+    const invite = sentEmail('calendar-only', { subject: 'Quarterly discussion', cleanBody: 'Please see the details.', rawBody: '<p>Please see the details.</p>', calendarIcs, date, hasAttachments: true, attachmentNames: '["event.ics"]' });
+    const pricing = sentEmail('pricing-after-meeting', { subject: 'Pricing discussion', cleanBody: 'Following up after our meeting.\nOn Thursday, Buyer wrote:\nYou are invited to join our meeting.', rawBody: '', date: date + 1 });
+    const procurement = sentEmail('procurement', { subject: 'Invitation: Tender bid submission', cleanBody: 'You are invited to submit a commercial proposal.', rawBody: '<p>You are invited to submit a commercial proposal.</p>', date: date + 1 });
+    const unrelatedForward = { ...pricing, id: 'pricing-forward', threadId: 'pricing-forward', subject: 'Fwd: Pricing discussion' };
+    const forwardedInvite = sentEmail('forwarded-invite', { subject: 'Fwd: Meeting details', cleanBody: 'Forwarding the meeting invitation.', rawBody: 'Forwarding the meeting invitation.\n---------- Forwarded Message ----------\nYou are invited to join our meeting.', contentType: 'text', date: date + 1 });
+    const missing = sentEmail('unrelated-missing-body', { subject: 'API update', cleanBody: '', rawBody: '', hasBody: false, date: date + 2 });
+    const primary = mailbox([invite, pricing, procurement, unrelatedForward, forwardedInvite, missing]);
+    primary.fetchBody = vi.fn();
+    const readAttachment = vi.fn();
+    const plan: InboxAssistantSearchPlan = { queries: ['meeting'], entityTerms: [], intent: 'all', quoteIntent: false, filters: scope.filters, scope };
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], plan, { openMailbox: vi.fn(async () => primary), readAttachment });
+    expect(result.evidence.map(source => source.emailId).sort()).toEqual(['calendar-only', 'forwarded-invite']);
+    expect(result.evidence.find(source => source.emailId === 'calendar-only')?.text).toContain('SUMMARY:Quarterly discussion');
+    expect(result.coverage[0]).toMatchObject({ attachmentsSkipped: 0 });
+    expect(primary.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ query: '', dateFrom: scope.timeWindow!.dateFrom, dateTo: scope.timeWindow!.dateTo }));
+    expect(primary.fetchBody).not.toHaveBeenCalled();
+    expect(readAttachment).not.toHaveBeenCalled();
+  });
+
+  it('requires both the explicit company and meeting subject rather than accepting either topic alone', async () => {
+    const scope = resolveInboxAssistantSearchScope('TCS meeting invites today', { today: '2026-10-23', timeZone: 'UTC' });
+    const date = scope.timeWindow!.dateFrom + 3600;
+    const rows = [
+      sentEmail('correct', { subject: 'TCS Meeting Confirmation', date }),
+      sentEmail('wrong-topic', { subject: 'TCS pricing', cleanBody: 'Commercial escalation', rawBody: '<p>Commercial escalation</p>', date }),
+      sentEmail('wrong-company', { subject: 'Other company Meeting Confirmation', toAddress: 'other@vendor.example', cleanBody: 'Invitation', rawBody: '<p>Invitation</p>', date }),
+    ];
+    const plan: InboxAssistantSearchPlan = { queries: ['TCS', 'meeting'], entityTerms: ['TCS'], intent: 'all', quoteIntent: false, filters: scope.filters, scope };
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], plan, { openMailbox: vi.fn(async () => mailbox(rows)), readAttachment: vi.fn() });
+    expect(result.evidence.map(source => source.emailId)).toEqual(['correct']);
+  });
+
+  it('does not turn an empty-topic generic query into unrelated sources or body downloads', async () => {
+    const primary = mailbox([sentEmail('unrelated', { subject: 'API escalation', cleanBody: 'Any updates?', rawBody: '' })]);
+    primary.fetchBody = vi.fn();
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], { queries: ['any', 'today'], entityTerms: [], intent: 'all', quoteIntent: false, filters: {} }, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence).toEqual([]);
+    expect(primary.storage.searchEmails).not.toHaveBeenCalled();
+    expect(primary.fetchBody).not.toHaveBeenCalled();
+  });
+
+  it('reserves sources for distinct conversations when one meeting thread has many updates', async () => {
+    const scope = resolveInboxAssistantSearchScope('meeting invites today', { today: '2026-10-23', timeZone: 'UTC' });
+    const busy = Array.from({ length: 30 }, (_, index) => sentEmail(`busy-${index}`, { subject: 'Meeting invitation update', threadId: 'busy-thread', date: scope.timeWindow!.dateFrom + 10_000 - index }));
+    const separate = sentEmail('separate-invite', { subject: 'Meeting Confirmation | Vembu', threadId: 'separate-thread', date: scope.timeWindow!.dateFrom + 1 });
+    const primary = mailbox([...busy, separate]);
+    const plan: InboxAssistantSearchPlan = { queries: ['meeting'], entityTerms: [], intent: 'all', quoteIntent: false, filters: scope.filters, scope };
+    const result = await researchInboxAssistant([ACCOUNTS[0]!], plan, { openMailbox: vi.fn(async () => primary), readAttachment: vi.fn() });
+    expect(result.evidence.some(source => source.emailId === 'separate-invite')).toBe(true);
+    expect(result.coverage[0]).toMatchObject({ reviewedMessages: 24, truncated: true });
+    const requests = vi.mocked(primary.storage.searchEmails).mock.calls.map(([request]) => JSON.stringify(request));
+    expect(new Set(requests).size).toBe(requests.length);
+    expect(requests).toHaveLength(5);
+  });
+
   it('reads a complete HTML quotation when the persisted clean body is a legacy preview', async () => {
     const preview = 'Dear customer, please find our User Directory licensing proposal for your existing deployment. '.repeat(2).slice(0, 181);
     const primary = mailbox([sentEmail('full-html', {

@@ -104,6 +104,21 @@ describe('SearchRepository', () => {
   let db: Database.Database;
   let repo: SearchRepository;
 
+  it.each([false, true])('can return headers without hydrating bodies while preserving search matches (collapsed=%s)', collapseThreads => {
+    const headers = new SearchRepository(() => db, row => row as unknown as EmailRecord);
+    for (const query of ['', 'invoice']) {
+      const options: SearchQuery = { query, scope: 'mailbox', headersOnly: true, collapseThreads, limit: 10 };
+      const rows = headers.search(options) as unknown as Array<{ id: string; raw_body: string; clean_body: string; has_body: number }>;
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every(row => row.raw_body === '' && row.clean_body === '' && row.has_body === 1)).toBe(true);
+      expect(rows.map(row => row.id).sort()).toEqual(repo.search({ ...options, headersOnly: false }).map(row => row.id).sort());
+    }
+    breakFtsIndex(db);
+    const fallback = headers.search({ query: 'invoice', scope: 'mailbox', headersOnly: true, collapseThreads }) as unknown as Array<{ raw_body: string; clean_body: string }>;
+    expect(fallback.length).toBeGreaterThan(0);
+    expect(fallback.every(row => row.raw_body === '' && row.clean_body === '')).toBe(true);
+  });
+
   beforeEach(() => {
     db = newMigratedDb();
     repo = new SearchRepository(() => db, rowToRecord);

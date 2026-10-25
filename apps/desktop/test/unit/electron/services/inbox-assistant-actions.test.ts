@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps, type InboxAssistantReadReceipt } from '../../../../electron/services/inbox-assistant-actions';
 import { InboxAssistantRecommendationCache } from '../../../../electron/services/inbox-assistant-recommendation-cache';
+import type { InboxAssistantAIWorkload } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
 const accounts = [{ id: 'a', email: 'owner@company.example' }, { id: 'b', email: 'second@other.example' }];
@@ -27,7 +28,7 @@ function fixture(records: EmailRecord[] = [email('one')], second: EmailRecord[] 
       }),
     },
   }]));
-  const callAI = vi.fn(async (prompt: string) => {
+  const callAI = vi.fn(async (prompt: string, _signal?: AbortSignal, _workload?: InboxAssistantAIWorkload) => {
     const line = prompt.split('\n').find(value => value.startsWith('UNTRUSTED_CONVERSATIONS_JSON: '))!;
     const items = JSON.parse(line.slice('UNTRUSTED_CONVERSATIONS_JSON: '.length)) as Array<{ id: string }>;
     return JSON.stringify({ recommendations: items.map(item => ({ id: item.id, recommendation: 'mark_read', reason: 'Low-value unsolicited promotion with no requested response.', confidence: 0.98 })) });
@@ -53,6 +54,127 @@ function fixture(records: EmailRecord[] = [email('one')], second: EmailRecord[] 
   const deps: InboxAssistantActionDeps = { openMailbox: vi.fn(async id => { const mailbox = mailboxes.get(id); if (!mailbox) throw new Error('Account removed'); return mailbox; }), callAI, setRead, moveMail };
   return { deps, mailboxes, data, callAI, setRead, moveMail };
 }
+
+describe('financial and business-report action protection', () => {
+  it.each([
+    ['Screener.in - Watchlist updates', 'Latest rating and company updates for your watchlist.'],
+    ['Zoho SalesIQ: Daily report for Oct 16', 'Daily Summary Report of HelpDesk. Visitor On Site: 4.'],
+    ['Weekly sales summary', 'New leads: 12\nClosed sales: 3'],
+    ['Your bank statement is ready', 'Your monthly statement is available.'],
+  ])('keeps %s unread without sending it to AI or using cached actions', async (subject, rawBody) => {
+    const f = fixture([email('protected', { subject, rawBody, contentType: 'text' })]);
+    const cache = new InboxAssistantRecommendationCache();
+    const lookup = vi.spyOn(cache, 'get');
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+      { recommendationCache: cache, reviewCacheIdentity: 'provider-model' });
+    expect(review.items[0]).toMatchObject({ recommendation: 'keep_unread', confidence: 0 });
+    expect(review.items[0]!.protectedReasons.length).toBeGreaterThan(0);
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('protects the whole conversation when the financial report is in a read sibling', async () => {
+    const f = fixture([email('unread'), email('read-sibling', { threadId: 'thread-unread', tags: '|INBOX|read|',
+      subject: 'Portfolio holdings update', rawBody: 'Your investment holdings have changed.', contentType: 'text' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]).toMatchObject({ recommendation: 'keep_unread', messageCount: 2 });
+    expect(f.callAI).not.toHaveBeenCalled();
+  });
+
+  it('vetoes and never caches a contradictory AI recommendation', async () => {
+    const f = fixture();
+    f.callAI.mockImplementation(async prompt => {
+      const rows = JSON.parse(prompt.split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!) as Array<{ id: string }>;
+      return JSON.stringify({ recommendations: rows.map(row => ({ id: row.id, recommendation: 'mark_read',
+        reason: 'Automated daily summary report.', confidence: 0.99 })) });
+    });
+    const cache = new InboxAssistantRecommendationCache();
+    const store = vi.spyOn(cache, 'set');
+    const options = { recommendationCache: cache, reviewCacheIdentity: 'provider-model' };
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(review.items[0]).toMatchObject({ recommendation: 'keep_unread', confidence: 0 });
+    expect(review.items[0]!.protectedReasons).toContain('Business reports or operational notifications require your review.');
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+    expect(store).not.toHaveBeenCalled();
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('compact complete unread-review input', () => {
+  const original = ['A seasonal newsletter with subscriber discounts and product news.',
+    'Subscribers receive monthly news, release notes and seasonal offers. '.repeat(15),
+    'Regards, Alice\nDesignation: Editor\nPhone: +91 90000 00123'].join('\n');
+  const quoted = 'On Thu, 1 Oct 2026 at 10:00, Alice <alice@newsletter.example> wrote:\n';
+  const inputRows = (prompt: string) => JSON.parse(prompt.split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!) as Array<{ id: string; accountEmail: string; content: string }>;
+
+  it('sends exact quoted copies once while preserving unique replies, signatures and outer message headers', async () => {
+    const rows = [email('original', { threadId: 'shared', tags: '|INBOX|read|', rawBody: original, contentType: 'text', date: 1_791_590_000 }),
+      email('later', { threadId: 'shared', rawBody: `The October subscriber news.\n\n${quoted}${original}`, contentType: 'text', ccAddress: 'editor@example.test' }),
+      email('latest', { threadId: 'shared', rawBody: `The November subscriber news.\n\n${quoted}${original}`, contentType: 'text' })];
+    const f = fixture(rows);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(f.callAI).toHaveBeenCalledTimes(1);
+    const [prompt, , workload] = f.callAI.mock.calls[0]!;
+    const content = inputRows(prompt)[0]!.content;
+    expect(content.split(original)).toHaveLength(2);
+    expect(content).toContain('shared with M1, turn 1');
+    expect(content).toContain('Message: M1');
+    expect(content).toContain('Message: M2');
+    expect(content).toContain('Cc: editor@example.test');
+    expect(content).toContain('The October subscriber news.');
+    expect(content).toContain('The November subscriber news.');
+    expect(content).toContain('Designation: Editor\nPhone: +91 90000 00123');
+    expect(workload).toMatchObject({ operation: 'unread_review', conversationCount: 1, messageCount: 3, reusedQuotedTurns: 2 });
+    expect(workload!.submittedContentChars).toBeLessThan(workload!.originalContentChars * 0.6);
+    expect(review.items[0]!.id).not.toBe('C1');
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps references local to their conversation instead of pointing into another batch or account', async () => {
+    const f = fixture([email('one', { rawBody: `October subscriber news.\n${quoted}${original}`, contentType: 'text' }),
+      email('two', { rawBody: `November subscriber news.\n${quoted}${original}`, contentType: 'text' })],
+    [email('one', { rawBody: `December subscriber news.\n${quoted}${original}`, contentType: 'text' })]);
+    await prepareInboxAssistantReview(accounts, 'unread', f.deps);
+    const records = inputRows(f.callAI.mock.calls[0]![0]);
+    expect(records).toHaveLength(3);
+    for (const record of records) {
+      expect(record.content).toContain(original);
+      expect(record.content).not.toContain('shared with');
+    }
+    expect(f.callAI.mock.calls[0]![2]).toMatchObject({ reusedQuotedTurns: 0, conversationCount: 3, messageCount: 3 });
+  });
+
+  it('maps compact IDs back to exact host targets when aliases restart in the next call', async () => {
+    const f = fixture(Array.from({ length: 17 }, (_, index) => email(`mail-${index}`)));
+    f.callAI.mockImplementation(async prompt => JSON.stringify({ recommendations: inputRows(prompt).map(item => ({ id: item.id,
+      recommendation: item.id === 'C1' ? 'mark_read' : 'keep_unread', confidence: 0.99, reason: 'Unsolicited subscriber news.' })) }));
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    expect(inputRows(f.callAI.mock.calls[0]![0]).map(item => item.id)).toEqual(Array.from({ length: 16 }, (_, index) => `C${index + 1}`));
+    expect(inputRows(f.callAI.mock.calls[1]![0]).map(item => item.id)).toEqual(['C1']);
+    expect(review.items.filter(item => item.recommendation === 'mark_read').map(item => item.emailId)).toEqual(['mail-0', 'mail-16']);
+    expect(new Set(review.items.map(item => item.id)).size).toBe(17);
+    await applyInboxAssistantReview(review, [review.items[16]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['mail-16'], true);
+  });
+
+  it('still protects complete originals above the reading limit even when repeated quotes could pack much smaller', async () => {
+    const large = original.repeat(4);
+    const f = fixture([email('original', { threadId: 'shared', tags: '|INBOX|read|', rawBody: large, contentType: 'text' }),
+      email('later', { threadId: 'shared', rawBody: `October news.\n${quoted}${large}`, contentType: 'text' }),
+      email('latest', { threadId: 'shared', rawBody: `November news.\n${quoted}${large}`, contentType: 'text' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]!.recommendation).toBe('keep_unread');
+    expect(review.items[0]!.protectedReasons).toContain('The complete conversation exceeds the reading limit.');
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+});
 
 describe('reusing exact verified unread recommendations safely', () => {
   const options = () => ({ recommendationCache: new InboxAssistantRecommendationCache(), reviewCacheIdentity: 'provider:model:request-policy-v1' });

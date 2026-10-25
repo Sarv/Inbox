@@ -159,7 +159,7 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     expect(fetchAssistantMessageBody).toHaveBeenCalledExactlyOnceWith('sales-account', ref.emailId, signal, { force: true });
   });
 
-  it.each(['accounts', 'chats', 'chat', 'createChat', 'renameChat', 'updateChat', 'deleteChat', 'rewindChat', 'restoreRewindChat', 'draftEmail', 'history', 'ask', 'applyReview', 'cancel', 'clearHistory', 'source'])('accepts %s only from the app main frame', async channel => {
+  it.each(['accounts', 'dashboard', 'chats', 'chat', 'createChat', 'renameChat', 'updateChat', 'deleteChat', 'rewindChat', 'restoreRewindChat', 'draftEmail', 'history', 'ask', 'applyReview', 'cancel', 'clearHistory', 'source'])('accepts %s only from the app main frame', async channel => {
     for (const event of [{ sender: h.sender, senderFrame: {} }, { sender: { mainFrame: h.frame }, senderFrame: h.frame }, {}]) {
       expect(await call(channel, ref, event)).toEqual({ success: false, error: 'Inbox Agent requests must come from the main app window.' });
     }

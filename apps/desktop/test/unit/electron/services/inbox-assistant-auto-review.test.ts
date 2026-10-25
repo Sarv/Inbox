@@ -283,7 +283,9 @@ describe('bounded automatic unread review', () => {
     f.deps.callAI = vi.fn(async (prompt, _signal, onUsage) => {
       const usage: InboxAssistantAIUsage = { id: `synthetic-call-${++sequence}`, provider: 'fixture', model: 'fixture', status: 'completed',
         startedAt: 1, completedAt: 2, attempts: 1, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0,
-        tokenSource: 'provider', usageComplete: true, estimatedCostUsd: 0.001, costComplete: true };
+        tokenSource: 'provider', usageComplete: true, estimatedCostUsd: 0.001, costComplete: true,
+        workload: { operation: 'unread_review', conversationCount: 16, messageCount: 1_600,
+          originalContentChars: 192_000, submittedContentChars: 192_000, reusedQuotedTurns: 0 } };
       onUsage?.(usage);
       return recommendations(prompt);
     });
@@ -293,6 +295,13 @@ describe('bounded automatic unread review', () => {
     const saved = f.history.load(f.chatId);
     expect(saved.usage).toMatchObject({ inputTokens: 200, outputTokens: 20, estimatedCostUsd: 0.002, tokenCountsComplete: true, costComplete: true });
     expect(saved.usage!.calls.map(call => call.id)).toEqual(['synthetic-call-1', 'synthetic-call-2']);
+    for (const call of saved.usage!.calls) {
+      expect(call.workload).toMatchObject({ operation: 'unread_review', conversationCount: 1, messageCount: 1, reusedQuotedTurns: 0 });
+      expect(call.workload!.originalContentChars).toBeGreaterThan(0);
+      expect(call.workload!.submittedContentChars).toBe(call.workload!.originalContentChars);
+      expect(call).toMatchObject({ inputTokens: 100, outputTokens: 10, estimatedCostUsd: 0.001 });
+    }
+    expect(saved.exchanges[0]!.usage!.calls[0]!.workload).toEqual(saved.usage!.calls[0]!.workload);
     expect(saved.runs!.at(-1)!.usage).toMatchObject({ inputTokens: 100, outputTokens: 10 });
     expect(vi.mocked(f.deps.callAI).mock.calls.every(([, , , options]) => options?.maxOutputTokens === 4_000)).toBe(true);
   });

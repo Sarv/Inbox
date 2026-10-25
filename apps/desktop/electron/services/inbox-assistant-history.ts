@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import type Database from 'better-sqlite3';
 
-import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
+import type { InboxAssistantActionMode, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantExchange, InboxAssistantRunRecord, InboxAssistantUsage } from '../../src/types/inbox-assistant';
+import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
 import { getCoreDb } from './core-db';
 import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
@@ -77,6 +78,24 @@ function publicSummary({ customTitle: _customTitle, ...summary }: StoredSummary)
   return { ...summary, pinned: summary.pinned ?? false };
 }
 
+function withSafeWorkloads(usage: InboxAssistantUsage | undefined): InboxAssistantUsage | undefined {
+  if (!usage || !Array.isArray(usage.calls)) return usage;
+  return { ...usage, calls: usage.calls.map(call => {
+    if (!call || typeof call !== 'object') return call;
+    const { workload, ...reported } = call;
+    const valid = readInboxAssistantAIWorkload(workload);
+    return { ...reported, ...(valid ? { workload: valid } : {}) };
+  }) };
+}
+
+function withSafeChatUsage(chat: InboxAssistantChat): InboxAssistantChat {
+  return { ...chat,
+    exchanges: chat.exchanges.map(exchange => exchange.usage ? { ...exchange, usage: withSafeWorkloads(exchange.usage) } : exchange),
+    ...(chat.runs ? { runs: chat.runs.map(run => run.usage ? { ...run, usage: withSafeWorkloads(run.usage) } : run) } : {}),
+    ...(chat.usage ? { usage: withSafeWorkloads(chat.usage) } : {}),
+  };
+}
+
 /** One encrypted blob per chat; the lightweight index never contains questions, answers or source excerpts. */
 export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxAssistantHistoryStore {
   const readBlob = (key: string): unknown => {
@@ -96,7 +115,7 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
     if (!snapshot || snapshot.version !== 1 || !snapshot.chat || snapshot.chat.id !== chatId || !validExchanges(snapshot.chat.exchanges) || !validRuns(snapshot.chat.runs)) {
       throw new Error('This saved conversation recovery could not be read. Its stored data has been preserved.');
     }
-    return snapshot;
+    return { ...snapshot, chat: withSafeChatUsage(snapshot.chat) };
   };
   const saveRewind = (chat: InboxAssistantChat): void => {
     const previous = readRewind(chat.id);
@@ -160,7 +179,7 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
     if (!summary) throw new Error('This Inbox Agent chat is no longer available.');
     const chat = readBlob(`${CHAT_PREFIX}${chatId}`) as InboxAssistantChat | undefined;
     if (!chat || chat.id !== chatId || !validExchanges(chat.exchanges) || !validRuns(chat.runs)) throw new Error('This saved Inbox Agent chat could not be read. Its stored data has been preserved.');
-    return { ...publicSummary(summary), exchanges: chat.exchanges, ...(chat.runs ? { runs: chat.runs } : {}), ...(chat.usage ? { usage: chat.usage } : {}) };
+    return withSafeChatUsage({ ...publicSummary(summary), exchanges: chat.exchanges, ...(chat.runs ? { runs: chat.runs } : {}), ...(chat.usage ? { usage: chat.usage } : {}) });
   };
   const mutate = <T>(run: (current: ChatIndex) => T): T => getDb().transaction(() => run(index()))();
   const store: InboxAssistantHistoryStore = {
@@ -236,6 +255,7 @@ export function createInboxAssistantHistoryStore(getDb: () => HistoryDb): InboxA
     writeChat(chat) {
       validateInboxAssistantChatId(chat.id);
       if (!validExchanges(chat.exchanges) || !validRuns(chat.runs)) throw new Error('Invalid Inbox Agent conversation.');
+      chat = withSafeChatUsage(chat);
       mutate(current => {
         const summary = current.chats.find(item => item.id === chat.id);
         if (!summary) throw new Error('This Inbox Agent chat is no longer available.');

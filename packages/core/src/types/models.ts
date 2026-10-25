@@ -336,6 +336,8 @@ export interface SearchQuery {
   /** Page matching conversations, returning all matched members of each page.
    * Omitted keeps message-based search for background and programmatic callers. */
   collapseThreads?: boolean;
+  /** Local overview rows need headers only; do not hydrate stored bodies or calendar payloads. */
+  headersOnly?: boolean;
   doesntHave?: string;    // NOT text match (exclude emails containing these words)
   sizeMin?: number;       // Minimum size in bytes (uses length of raw_body as proxy)
   sizeMax?: number;       // Maximum size in bytes

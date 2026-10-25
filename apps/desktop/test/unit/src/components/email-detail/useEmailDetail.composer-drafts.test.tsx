@@ -3,6 +3,7 @@ import type { EmailRecord } from '@sarvinbox/core';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { EmailReaderOptions } from '../../../../../src/components/email-detail/reader-options';
 import type { EmailDetailContext } from '../../../../../src/components/email-detail/types';
 import { act, render, settle, typeInto, type Mounted } from '../../../../helpers/render';
 
@@ -95,6 +96,8 @@ type Restore = {
 
 const baseState = () => ({
   activeAccountId: 'work',
+  threadAccountId: 'work' as string | null,
+  accounts: [{ id: 'work', email: 'me@example.test' }],
   emails: [A, B, OTHER],
   folders: [],
   selectedFolderId: 'INBOX',
@@ -153,9 +156,18 @@ const { useEmailDetail } = await import(
 /** The hook, mounted: `ctx()` is the context from the latest render. */
 let latest: EmailDetailContext | null = null;
 let mountEditor = false;
+let mountSavedEditor = false;
 // Exercise the real autosave hook under the reader's conditional composer.
 // Losing the reader context unmounts this editor and loses its live state.
 const { useDraftAutosave } = await import('../../../../../src/hooks/useDraftAutosave');
+const { useCompose } = await import('../../../../../src/components/useCompose');
+function SavedEditorProbe() {
+  const draft = latest?.inlineReplyDraft;
+  const editor = useCompose({ initialDraft: draft });
+  useDraftAutosave({ to: editor.to, cc: editor.cc, subject: editor.subject, body: editor.plainBody, htmlBody: editor.htmlBody,
+    attachments: editor.attachments, initialDraftMessageId: draft?.draftMessageId, threadId: 't1', accountId: 'work' });
+  return <textarea aria-label="Restored reply editor" value={editor.htmlBody} readOnly />;
+}
 function EditorProbe() {
   const [body, setBody] = useState('Opened draft');
   useDraftAutosave({
@@ -164,8 +176,9 @@ function EditorProbe() {
   });
   return <textarea aria-label="Draft editor" value={body} onChange={event => setBody(event.target.value)} />;
 }
-function Harness() {
-  latest = useEmailDetail();
+function Harness({ options }: { options?: EmailReaderOptions } = {}) {
+  latest = useEmailDetail(options);
+  if (mountSavedEditor && latest?.showInlineReply) return <SavedEditorProbe key={latest.replyingToEmail?.id} />;
   return mountEditor && latest?.showInlineReply ? <EditorProbe key={latest.replyingToEmail?.id} /> : null;
 }
 const ctx = () => latest!;
@@ -200,12 +213,134 @@ beforeEach(() => {
   state = baseState();
   latest = null;
   mountEditor = false;
+  mountSavedEditor = false;
 });
 afterEach(() => {
   mounted?.unmount();
   mounted = undefined;
   vi.clearAllTimers();
   vi.useRealTimers();
+});
+
+describe('useEmailDetail — dashboard Reply all intent', () => {
+  const options = (id = 1): EmailReaderOptions => ({ threadOnly: true, autoMarkRead: false,
+    replyAllRequest: { id, accountId: 'work', emailId: 'b' } });
+  const open = async (value = options()) => {
+    state.viewAccountId = 'work';
+    mounted = render(<Harness options={value} />);
+    for (let i = 0; i < 5; i++) await settle();
+  };
+
+  it('opens the existing inline Reply all composer once without marking mail read or opening a second composer', async () => {
+    await open();
+    expect(ctx().showInlineReply).toBe(true);
+    expect(ctx().inlineReplyMode).toBe('replyAll');
+    expect(ctx().replyingToEmail?.id).toBe('b');
+    expect(state.markAsRead).not.toHaveBeenCalled();
+    expect(state.openCompose).not.toHaveBeenCalled();
+    await run(() => ctx().handleCloseInlineReply());
+    expect(ctx().showInlineReply).toBe(false);
+    mounted!.rerender(<Harness options={options()} />); await settle();
+    expect(ctx().showInlineReply).toBe(false);
+    mounted!.rerender(<Harness options={options(2)} />); await settle();
+    expect(ctx().showInlineReply).toBe(true);
+    expect(ctx().inlineReplyMode).toBe('replyAll');
+  });
+
+  it('waits for the owning account and original body before seeding the quoted reply', async () => {
+    state.threadAccountId = 'other';
+    const middle = email({ ...A, id: 'unread-middle', messageId: '<unread-middle@example.test>', date: TEN_AM + 1800, tags: '|INBOX|' });
+    state.threadEmails = [A, middle, { ...B, rawBody: '', cleanBody: '', hasBody: false }];
+    state.emails = state.threadEmails;
+    await open();
+    expect(ctx().showInlineReply).toBe(false);
+    state.threadAccountId = 'work';
+    mounted!.rerender(<Harness options={options()} />); await settle();
+    expect(ctx().showInlineReply).toBe(false);
+    expect(ctx().expandedThreads.has(middle.id)).toBe(true);
+    expect(ctx().expandedThreads.has('b')).toBe(false);
+    expect(state.fetchEmailBody).toHaveBeenCalledWith('b');
+    state.threadEmails = [A, { ...B, rawBody: '<p>Original full reply body</p>', cleanBody: 'Original full reply body', hasBody: true }];
+    state.emails = state.threadEmails;
+    mounted!.rerender(<Harness options={options()} />); await settle();
+    expect(ctx().showInlineReply).toBe(true);
+    expect(ctx().replyingToEmail?.rawBody).toBe('<p>Original full reply body</p>');
+  });
+
+  it('ignores an intent for another email selection even when its account matches', async () => {
+    await open({ ...options(), replyAllRequest: { id: 1, accountId: 'work', emailId: 'other' } });
+    expect(ctx().showInlineReply).toBe(false);
+  });
+
+  it('retains an existing saved draft while defaulting to Reply all', async () => {
+    bridge.storedDraft = { messageId: '<saved@example.test>', toAddress: 'bob@acme.example', ccAddress: 'team@acme.example',
+      subject: 'Re: Q3', rawBody: '<p>Previously written reply</p>', cleanBody: 'Previously written reply' };
+    await open();
+    expect(ctx().showInlineReply).toBe(true);
+    expect(ctx().inlineReplyMode).toBe('replyAll');
+    expect(ctx().inlineReplyDraft?.htmlContent).toContain('Previously written reply');
+    expect(ctx().inlineReplyDraft?.draftMessageId).toBe('<saved@example.test>');
+  });
+
+  it('waits for a delayed saved draft lookup rather than showing an empty composer that is later replaced', async () => {
+    let finish!: (value: unknown) => void;
+    mountSavedEditor = true;
+    window.electronAPI.drafts.save = vi.fn(async () => ({ success: true, messageId: '<unexpected-save@example.test>' }));
+    window.electronAPI.drafts.findForThread = vi.fn(() => new Promise(resolve => { finish = resolve; })) as typeof window.electronAPI.drafts.findForThread;
+    await open();
+    expect(ctx().showInlineReply).toBe(false);
+    expect(mounted!.byLabel('Restored reply editor')).toBeNull();
+    await act(async () => finish({ success: true, data: { messageId: '<delayed@example.test>', toAddress: 'bob@acme.example',
+      subject: 'Re: Q3', rawBody: '<p>Keep this saved reply</p>' } }));
+    for (let i = 0; i < 5; i++) await settle();
+    expect(ctx().showInlineReply).toBe(true);
+    expect(ctx().inlineReplyMode).toBe('replyAll');
+    expect(ctx().inlineReplyDraft?.htmlContent).toContain('Keep this saved reply');
+    expect(ctx().inlineReplyDraft?.draftMessageId).toBe('<delayed@example.test>');
+    expect((mounted!.byLabel('Restored reply editor') as HTMLTextAreaElement).value).toContain('Keep this saved reply');
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(window.electronAPI.drafts.save).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late draft from another account even when the email IDs are identical', async () => {
+    let finish!: (value: unknown) => void;
+    window.electronAPI.drafts.findForThread = vi.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValue({ success: false }) as typeof window.electronAPI.drafts.findForThread;
+    await open();
+    state.viewAccountId = 'other';
+    state.threadAccountId = 'other';
+    state.threadEmails = [{ ...B, accountId: 'other', rawBody: '<p>Other account original</p>' }];
+    state.emails = state.threadEmails;
+    mounted!.rerender(<Harness options={{ ...options(), replyAllRequest: { id: 2, accountId: 'other', emailId: 'b' } }} />);
+    for (let i = 0; i < 5; i++) await settle();
+    expect(ctx().showInlineReply).toBe(true);
+    expect(ctx().replyingToEmail?.accountId).toBe('other');
+    await act(async () => finish({ success: true, data: { messageId: '<wrong-account@example.test>', toAddress: 'old@example.test',
+      subject: 'Old account draft', rawBody: '<p>Wrong account saved reply</p>' } }));
+    for (let i = 0; i < 5; i++) await settle();
+    expect(ctx().replyingToEmail?.accountId).toBe('other');
+    expect(ctx().inlineReplyDraft).toBeUndefined();
+  });
+
+  it('ignores an old lookup after the same conversation loads a newer reply target', async () => {
+    let finish!: (value: unknown) => void;
+    window.electronAPI.drafts.findForThread = vi.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValue({ success: false }) as typeof window.electronAPI.drafts.findForThread;
+    await open();
+    const newest = email({ ...B, id: 'newest', messageId: '<newest@example.test>', date: ELEVEN_AM + 3600 });
+    state.threadEmails = [A, B, newest];
+    state.emails = state.threadEmails;
+    mounted!.rerender(<Harness options={options()} />);
+    for (let i = 0; i < 5; i++) await settle();
+    expect(ctx().replyingToEmail?.id).toBe('newest');
+    await act(async () => finish({ success: true, data: { messageId: '<old-draft@example.test>', toAddress: 'old@example.test',
+      rawBody: '<p>Outdated lookup</p>' } }));
+    for (let i = 0; i < 5; i++) await settle();
+    expect(ctx().replyingToEmail?.id).toBe('newest');
+    expect(ctx().inlineReplyDraft).toBeUndefined();
+  });
 });
 
 describe('useEmailDetail — the forward composer\'s seed', () => {

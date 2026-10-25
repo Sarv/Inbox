@@ -25,6 +25,10 @@ import '../../../../electron/preload';
 beforeEach(() => { h.listeners.clear(); h.remove.mockReset(); h.invoke.mockReset().mockResolvedValue({ success: true }); });
 
 describe('Inbox Agent activity bridge', () => {
+  it('keeps the read-only overview on its own explicit account-scoped channel', async () => {
+    await h.api!.inboxAssistant.dashboard({ accountIds: ['sales'] });
+    expect(h.invoke).toHaveBeenCalledExactlyOnceWith('inboxAssistant:dashboard', { accountIds: ['sales'] });
+  });
   it('keeps chat listing, individual loading, creation and renaming on their explicit channels', async () => {
     await h.api!.inboxAssistant.chats();
     await h.api!.inboxAssistant.chat('chat-2');

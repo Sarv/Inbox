@@ -16,20 +16,32 @@ export function replyRecipients(
   source: ReplySource,
   mode: 'reply' | 'replyAll',
   myEmail: string,
+  identities: readonly string[] = [],
 ): { to: string; cc: string } {
-  const me = myEmail.toLowerCase();
-  const from = source.fromAddress.toLowerCase();
-  const notMe = (address: string) => address.toLowerCase() !== me;
-  const toList = parseAddresses(source.toAddress);
-  const ccList = parseAddresses(source.ccAddress);
+  // Only this sending account's identities are self. Another configured
+  // account can be an intentional recipient and must not disappear here.
+  const own = new Set([myEmail, ...identities].flatMap(parseAddresses).map(address => address.toLowerCase()));
+  const from = parseAddresses(source.fromAddress)[0] || source.fromAddress.trim();
+  const seen = new Set<string>();
+  const external = (addresses: string[]) => addresses.filter(address => {
+    const key = address.toLowerCase();
+    if (own.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
-  if (me && from === me) {
+  if (own.has(from.toLowerCase())) {
+    const to = external(parseAddresses(source.toAddress));
+    const cc = external(parseAddresses(source.ccAddress));
+    // A sent message can have only self in To and an external Cc. Promote
+    // those recipients when needed so the reply never addresses ourselves.
     return {
-      to: toList.filter(notMe).join(', '),
-      cc: mode === 'replyAll' ? ccList.filter(notMe).join(', ') : '',
+      to: (to.length ? to : cc).join(', '),
+      cc: mode === 'replyAll' && to.length ? cc.join(', ') : '',
     };
   }
-  if (mode === 'reply') return { to: source.fromAddress, cc: '' };
-  const others = [...toList, ...ccList].filter((address) => notMe(address) && address.toLowerCase() !== from);
-  return { to: source.fromAddress, cc: others.join(', ') };
+  if (mode === 'reply') return { to: from, cc: '' };
+  seen.add(from.toLowerCase());
+  const others = external([...parseAddresses(source.toAddress), ...parseAddresses(source.ccAddress)]);
+  return { to: from, cc: others.join(', ') };
 }

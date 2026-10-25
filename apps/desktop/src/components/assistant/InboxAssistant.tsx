@@ -1,4 +1,4 @@
-import { Activity, AlertCircle, ArrowUp, Bot, Check, ChevronDown, Circle, FileText, Inbox, ListFilter, Loader2, Mail, MailCheck, MailPlus, Menu, Pencil, Plus, RotateCcw, Search, Square, X } from 'lucide-react';
+import { Activity, AlertCircle, ArrowUp, Bot, Check, ChevronDown, Circle, FileText, Inbox, LayoutDashboard, ListFilter, Loader2, Mail, MailCheck, MailPlus, Menu, Pencil, Plus, RotateCcw, Search, Square, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import '../../styles/assistant-theme.css';
@@ -17,9 +17,10 @@ import type {
   InboxAssistantSource,
 } from '../../types/inbox-assistant';
 import type { InboxAssistantReviewAction, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from '../../types/inbox-assistant-actions';
-import type { LocalCalendarAvailabilityRequest } from '../../types/local-calendar';
+import type { LocalCalendarAvailabilityRequest, LocalCalendarOpenEvent } from '../../types/local-calendar';
 import { AccountSelectorTrigger } from '../AccountSelectorTrigger';
 
+import { AssistantDashboard } from './AssistantDashboard';
 import { AssistantReviewCard } from './AssistantReviewCard';
 import { AssistantUsage } from './AssistantUsage';
 import { ChatSidebar } from './ChatSidebar';
@@ -35,11 +36,14 @@ export interface InboxAssistantViewState {
 
 export interface InboxAssistantProps {
   onNavigateToSource?: (source: InboxAssistantSource) => void;
+  onReplyToSource?: (source: InboxAssistantSource) => void;
   sourcePane?: ReactNode;
   onCloseSourcePane?: () => void;
   onOpenDraft?: (draft: InboxAssistantDraft) => void;
   defaultDraftAccountId?: string;
   onMailChanged?: () => void;
+  onOpenCalendarEvent?: (event: LocalCalendarOpenEvent) => void;
+  initialView?: 'overview' | 'conversation';
   compact?: boolean;
   visible?: boolean;
   onStateChange?: (state: InboxAssistantViewState) => void;
@@ -265,6 +269,13 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
   compact: boolean;
 }) {
   const [batchExpanded, setBatchExpanded] = useState(false);
+  const relatedSources = exchange.answer.sourceStatus === 'related' || (!exchange.answer.sourceStatus
+    && exchange.answer.text.startsWith('I found related mail, but could not verify an answer'));
+  const missingBodies = exchange.answer.coverage.reduce((sum, account) => sum + account.missingBodies, 0);
+  const skippedAttachments = exchange.answer.coverage.reduce((sum, account) => sum + account.attachmentsSkipped, 0);
+  const unavailableAccounts = exchange.answer.coverage.filter(account => account.status === 'unavailable').length;
+  const searchLimited = exchange.answer.coverage.some(account => account.truncated);
+  const omittedStatements = exchange.answer.warnings.some(warning => warning.includes('AI statements were omitted'));
   const reviewCard = exchange.review && <AssistantReviewCard review={exchange.review} busy={actionBusy} onApply={onApply} onUndo={onUndo} onRefresh={onRefresh} onContinue={onContinue} onStartAutoReview={onStartAutoReview} onStop={onStop} automation={automation} onOpen={source => onNavigateToSource?.(source)} />;
   if (exchange.reviewBatch && exchange.review) return <article aria-label={`Automatic review batch ${exchange.reviewBatch.number}`} className="assistant-surface rounded-xl border border-border">
     <button type="button" aria-expanded={batchExpanded} onClick={() => setBatchExpanded(value => !value)} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl p-3 text-left text-xs hover:bg-accent">
@@ -283,12 +294,21 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
           </div>
       {/* Mail and model output are untrusted text. Never interpret HTML here. */}
       <div className={`whitespace-pre-wrap break-words text-sm ${compact ? 'leading-6' : 'leading-7'}`}><AnswerText text={exchange.answer.text} sources={exchange.answer.sources} onNavigate={onNavigateToSource} /></div>
+      {(relatedSources || missingBodies > 0 || skippedAttachments > 0 || unavailableAccounts > 0 || searchLimited || omittedStatements) && <div role="status" aria-label="Answer reading status" className="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+        {relatedSources && <p className="font-medium text-foreground">Needs verification</p>}
+        {unavailableAccounts > 0 && <p>{unavailableAccounts} selected {unavailableAccounts === 1 ? 'account could' : 'accounts could'} not be searched.</p>}
+        {searchLimited && <p>More matching emails may remain beyond the search limit.</p>}
+        {missingBodies > 0 && <p>{missingBodies} {missingBodies === 1 ? 'email body was' : 'email bodies were'} unavailable.</p>}
+        {skippedAttachments > 0 && <p>{skippedAttachments} {skippedAttachments === 1 ? 'attachment was' : 'attachments were'} not read.</p>}
+        {omittedStatements && <p>Statements that could not be verified were left out.</p>}
+        <button type="button" onClick={event => onViewActivity(exchange.id, event.currentTarget)} className="font-medium text-primary hover:underline">View reading details</button>
+      </div>}
       {exchange.status && exchange.status !== 'completed' && <p className="text-xs text-muted-foreground">{exchange.status === 'failed' ? exchange.error || 'Request failed. Your question and activity have been saved.' : exchange.status === 'stopped' ? 'Stopped. Your question and activity have been saved.' : 'In progress…'}</p>}
       <AssistantUsage usage={exchange.usage} compact={compact} />
       {reviewCard}
       {exchange.answer.sources.length > 0 && (
-        <details aria-label="Answer sources" className="assistant-surface rounded-lg border border-border p-3">
-          <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Sources · {exchange.answer.sources.length}</summary>
+        <details aria-label={relatedSources ? 'Related emails' : 'Answer sources'} className="assistant-surface rounded-lg border border-border p-3">
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground">{relatedSources ? 'Related emails to inspect' : 'Sources'} · {exchange.answer.sources.length}</summary>
           <div className={`mt-3 grid grid-cols-1 gap-3 ${compact ? '' : '2xl:grid-cols-2'}`}>
             {exchange.answer.sources.map(source => <SourceCard key={`${source.accountId}:${source.id}`} source={source} onNavigate={onNavigateToSource} />)}
           </div>
@@ -319,8 +339,10 @@ function mergeChatExchanges(saved: InboxAssistantExchange[], cached?: Map<string
   return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
-export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePane, onOpenDraft, defaultDraftAccountId, onMailChanged, compact = false, visible = true, onStateChange }: InboxAssistantProps) {
+export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane, onCloseSourcePane, onOpenDraft, defaultDraftAccountId, onMailChanged, onOpenCalendarEvent, initialView, compact = false, visible = true, onStateChange }: InboxAssistantProps) {
+  const [view, setView] = useState<'overview' | 'conversation'>(() => initialView ?? (compact ? 'conversation' : 'overview'));
   const [accounts, setAccounts] = useState<InboxAssistantAccount[]>([]);
+  const [overviewAccountIds, setOverviewAccountIds] = useState<string[]>([]);
   const [chats, setChats] = useState<InboxAssistantChatSummary[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [activeChat, setActiveChat] = useState<InboxAssistantChat | null>(null);
@@ -358,6 +380,8 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   const [activityOpen, setActivityOpen] = useState(false);
   const [activitySelection, setActivitySelection] = useState('live');
   const generation = useRef(0);
+  const viewRef = useRef(view);
+  const overviewScopeInitialized = useRef(false);
   const metadataGeneration = useRef(0);
   const modeGeneration = useRef(0);
   const mounted = useRef(false);
@@ -455,6 +479,13 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       if (!accountResult.success) throw new Error(accountResult.error);
       if (!listResult.success) throw new Error(listResult.error);
       setAccounts(accountResult.data);
+      if (!overviewScopeInitialized.current) {
+        overviewScopeInitialized.current = true;
+        setOverviewAccountIds(accountResult.data.map(account => account.id));
+      } else {
+        const known = new Set(accountResult.data.map(account => account.id));
+        setOverviewAccountIds(current => current.filter(id => known.has(id)));
+      }
       setChats(listResult.data.chats);
       restoreExternalRuns(listResult.data.chats);
       const targetId = listResult.data.chats.some(chat => chat.id === listResult.data.activeChatId)
@@ -618,6 +649,8 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
   };
 
   const selectChat = async (chatId: string, retry = false) => {
+    viewRef.current = 'conversation';
+    setView('conversation');
     if (!retry && activeChatRef.current === chatId) { setChatListOpen(false); return; }
     saveDraft();
     const version = ++generation.current;
@@ -640,8 +673,11 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     }
   };
 
-  const newChat = async () => {
+  const newChat = async (seed?: { question: string; accountIds: string[] }) => {
     if (loading || creating) return;
+    const selectedScope = seed?.accountIds ?? (viewRef.current === 'overview' ? overviewAccountIds : undefined);
+    viewRef.current = 'conversation';
+    setView('conversation');
     saveDraft();
     const version = ++generation.current;
     metadataGeneration.current++;
@@ -655,6 +691,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
       const result = await window.electronAPI.inboxAssistant.createChat();
       if (version !== generation.current) return;
       if (!result.success) throw new Error(result.error);
+      if (selectedScope) drafts.current.set(result.data.id, { question: seed?.question ?? '', accountIds: [...selectedScope] });
       applyChat(result.data, accounts);
       if (visibleRef.current) questionInput.current?.focus();
     } catch (cause) {
@@ -662,6 +699,16 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     } finally {
       if (version === generation.current) { setCreating(false); setChatLoading(false); }
     }
+  };
+
+  const showOverview = () => {
+    saveDraft();
+    viewRef.current = 'overview';
+    setView('overview');
+    setChatListOpen(false);
+    setActivityOpen(false);
+    setDraftFormOpen(false);
+    onCloseSourcePane?.();
   };
 
   const refreshSummaries = async () => {
@@ -981,9 +1028,12 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     }
   };
 
-  const allAccountsSelected = accounts.length > 0 && selectedAccountIds.length === accounts.length;
-  const scopeLabel = allAccountsSelected ? `All accounts (${accounts.length})` : `${selectedAccountIds.length} of ${accounts.length} accounts`;
-  const singleAccount = selectedAccountIds.length === 1 ? accounts.find(account => account.id === selectedAccountIds[0]) : undefined;
+  const overview = view === 'overview';
+  const scopeAccountIds = overview ? overviewAccountIds : selectedAccountIds;
+  const setScopeAccountIds = overview ? setOverviewAccountIds : setSelectedAccountIds;
+  const allAccountsSelected = accounts.length > 0 && scopeAccountIds.length === accounts.length;
+  const scopeLabel = allAccountsSelected ? `All accounts (${accounts.length})` : `${scopeAccountIds.length} of ${accounts.length} accounts`;
+  const singleAccount = scopeAccountIds.length === 1 ? accounts.find(account => account.id === scopeAccountIds[0]) : undefined;
   const selectedExchange = exchanges.find(exchange => exchange.id === activitySelection);
   const selectedRun = activeChat?.runs?.find(run => `run:${run.requestId}` === activitySelection);
   const inspection: WorkInspection | null = activitySelection === 'live' ? liveWork : selectedExchange ? {
@@ -1076,16 +1126,17 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
     return () => { disposed = true; clearInterval(timer); };
   }, [workRevision, restoreExternalRuns]);
 
-  const renderAccountPicker = () => <div ref={accountPicker} className={compact ? 'min-w-0 flex-1' : 'relative'} onKeyDown={event => {
+  const scopePickerLocked = loading || (!overview && (!!pendingQuestion || busy));
+  const renderAccountPicker = (inHeader = false) => <div ref={accountPicker} className={compact ? 'min-w-0 flex-1' : 'relative'} onKeyDown={event => {
     if (event.key === 'Escape' && accountPickerOpen) { event.stopPropagation(); setAccountPickerOpen(false); accountPicker.current?.querySelector('button')?.focus(); }
   }}>
-    {compact ? <button type="button" aria-label="Accounts to search" aria-expanded={accountPickerOpen} aria-controls="assistant-account-picker" onClick={() => setAccountPickerOpen(open => !open)} disabled={!!pendingQuestion || busy} title={singleAccount?.email ?? scopeLabel} className="flex h-8 max-w-full items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"><Mail aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{singleAccount?.email ?? scopeLabel}</span><ChevronDown aria-hidden="true" className="h-3 w-3 shrink-0" /></button>
-      : <AccountSelectorTrigger label={singleAccount?.email ?? scopeLabel} secondaryLabel={singleAccount ? scopeLabel : undefined} expanded={accountPickerOpen} controls="assistant-account-picker" onClick={() => setAccountPickerOpen(open => !open)} disabled={!!pendingQuestion || busy} avatar={<span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-medium text-primary-foreground">{singleAccount ? (singleAccount.name || singleAccount.email).charAt(0).toUpperCase() : <Mail className="h-4 w-4" />}</span>} />}
-    {accountPickerOpen && <fieldset id="assistant-account-picker" disabled={!!pendingQuestion || busy} className={`assistant-raised absolute z-30 overflow-y-auto rounded-xl border border-border bg-background p-2 shadow-xl ${compact ? 'bottom-full left-3 right-3 mb-2 max-h-[min(50vh,calc(100cqh-10rem))]' : 'left-0 top-full mt-2 max-h-[50vh] w-full'}`}>
+    {compact ? <button type="button" aria-label="Accounts to search" aria-expanded={accountPickerOpen} aria-controls="assistant-account-picker" onClick={() => setAccountPickerOpen(open => !open)} disabled={scopePickerLocked} title={singleAccount?.email ?? scopeLabel} className="flex h-8 max-w-full items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"><Mail aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{singleAccount?.email ?? scopeLabel}</span><ChevronDown aria-hidden="true" className="h-3 w-3 shrink-0" /></button>
+      : <AccountSelectorTrigger label={singleAccount?.email ?? scopeLabel} secondaryLabel={singleAccount ? scopeLabel : undefined} expanded={accountPickerOpen} controls="assistant-account-picker" onClick={() => setAccountPickerOpen(open => !open)} disabled={scopePickerLocked} avatar={<span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-medium text-primary-foreground">{singleAccount ? (singleAccount.name || singleAccount.email).charAt(0).toUpperCase() : <Mail className="h-4 w-4" />}</span>} />}
+    {accountPickerOpen && <fieldset id="assistant-account-picker" disabled={scopePickerLocked} className={`assistant-raised absolute z-30 overflow-y-auto rounded-xl border border-border bg-background p-2 shadow-xl ${compact ? `${inHeader ? 'top-full mt-2' : 'bottom-full mb-2'} left-3 right-3 max-h-[min(50vh,calc(100cqh-10rem))]` : 'left-0 top-full mt-2 max-h-[50vh] w-full'}`}>
       <legend className="sr-only">Accounts to search</legend>
       <div className="mb-1 flex items-center justify-between gap-2 px-2 py-1"><span className="text-xs font-medium">Search accounts</span><button type="button" onClick={() => setAccountPickerOpen(false)} aria-label="Close account picker" className="rounded-md p-1 text-muted-foreground hover:bg-accent"><X className="h-3.5 w-3.5" /></button></div>
-      <button type="button" onClick={() => setSelectedAccountIds(accounts.map(account => account.id))} className="mb-1 flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-primary hover:bg-accent"><Check className="h-3.5 w-3.5" />Select all accounts</button>
-      {accounts.map(account => <label key={account.id} className="flex cursor-pointer items-center gap-3 rounded-lg p-2 hover:bg-accent"><input type="checkbox" checked={selectedAccountIds.includes(account.id)} onChange={event => setSelectedAccountIds(current => event.target.checked ? [...current, account.id] : current.filter(id => id !== account.id))} className="h-4 w-4 shrink-0 accent-primary" /><span className="min-w-0 text-sm"><span className="block truncate">{account.email}</span>{account.name && <span className="block truncate text-xs text-muted-foreground">{account.name}</span>}</span></label>)}
+      <button type="button" onClick={() => setScopeAccountIds(accounts.map(account => account.id))} className="mb-1 flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-primary hover:bg-accent"><Check className="h-3.5 w-3.5" />Select all accounts</button>
+      {accounts.map(account => <label key={account.id} className="flex cursor-pointer items-center gap-3 rounded-lg p-2 hover:bg-accent"><input type="checkbox" checked={scopeAccountIds.includes(account.id)} onChange={event => setScopeAccountIds(current => event.target.checked ? [...current, account.id] : current.filter(id => id !== account.id))} className="h-4 w-4 shrink-0 accent-primary" /><span className="min-w-0 text-sm"><span className="block truncate">{account.email}</span>{account.name && <span className="block truncate text-xs text-muted-foreground">{account.name}</span>}</span></label>)}
     </fieldset>}
   </div>;
   const modeControl = <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground"><span className="sr-only">Action mode</span><select aria-label="Action mode" value={actionMode} disabled={busy || !!pendingQuestion || !activeChatId} onChange={event => void setActionMode(event.target.value as InboxAssistantActionMode)} title={actionMode === 'review' ? 'Review and approve recommendations before mail changes are made.' : 'Apply eligible actions you request in this conversation without asking, until changed.'} className={`assistant-raised max-w-40 rounded-lg bg-background text-xs ${compact ? 'h-8 border border-border/70 px-2' : 'border border-border px-2 py-2'}`}><option value="review">Ask for approval</option><option value="approve_for_me">Approve for me</option></select></label>;
@@ -1105,14 +1156,21 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
         <div className="shrink-0 space-y-3 p-3">
           <div className={`flex items-center justify-between ${compact ? '' : 'md:hidden'}`}><span className="text-sm font-semibold">{compact ? 'Conversations' : 'Inbox Agent'}</span><button type="button" onClick={() => setChatListOpen(false)} aria-label="Close conversations" className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent"><X className="h-4 w-4" /></button></div>
           {!compact && renderAccountPicker()}
+          <button type="button" onClick={showOverview} aria-current={overview ? 'page' : undefined} className={`flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium ${overview ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}><LayoutDashboard aria-hidden="true" className="h-4 w-4" />Overview</button>
           <button type="button" onClick={() => void newChat()} disabled={loading || creating || deletePending} className="assistant-primary-action brand-fill flex w-full items-center justify-center gap-2 rounded-full px-4 py-2.5 font-medium text-primary-foreground shadow-md transition-all hover:shadow-lg disabled:opacity-50">{creating ? <Loader2 className="h-5 w-5 animate-spin" /> : <Plus className="h-5 w-5" />}New conversation</button>
         </div>
-        <ChatSidebar chats={chats} activeChatId={activeChatId} pendingChatIds={pendingChatIds} runningChatIds={runningChatIds} deletePending={deletePending} error={chatListError} onSelect={chatId => void selectChat(chatId)} onTogglePinned={chat => void togglePinned(chat)} onDelete={chat => void deleteChat(chat)} />
+        <ChatSidebar chats={chats} activeChatId={overview ? null : activeChatId} pendingChatIds={pendingChatIds} runningChatIds={runningChatIds} deletePending={deletePending} error={chatListError} onSelect={chatId => void selectChat(chatId)} onTogglePinned={chat => void togglePinned(chat)} onDelete={chat => void deleteChat(chat)} />
       </nav>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className={`assistant-chrome flex shrink-0 items-center border-b border-border/70 ${compact ? 'gap-1 px-3 py-2' : 'relative gap-3 px-5 py-4'}`}>
+        {overview ? <header className="assistant-chrome relative flex shrink-0 flex-wrap items-center gap-3 border-b border-border/70 px-5 py-4">
+          <button type="button" onClick={() => setChatListOpen(open => !open)} aria-label="Show conversations" aria-expanded={chatListOpen} className={`${compactButton} ${compact ? '' : 'md:hidden'}`}><Menu className="h-4 w-4" /></button>
+          <h1 className="min-w-0 flex-1 text-base font-semibold">Inbox overview</h1>
+          {compact && renderAccountPicker(true)}
+          <button type="button" disabled={loading || creating} onClick={() => activeChatId ? void selectChat(activeChatId) : void newChat()} aria-label="Open conversations" className="rounded-lg border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50">Conversations</button>
+        </header> : <header className={`assistant-chrome flex shrink-0 items-center border-b border-border/70 ${compact ? 'gap-1 px-3 py-2' : 'relative gap-3 px-5 py-4'}`}>
           <button type="button" onClick={() => setChatListOpen(open => !open)} aria-label="Show conversations" title="Conversations" aria-expanded={chatListOpen} className={`${compactButton} ${compact ? '' : 'md:hidden'}`}><Menu className="h-4 w-4" /></button>
+          <button type="button" onClick={showOverview} aria-label="Open Inbox overview" title="Overview" className={compactButton}><LayoutDashboard className="h-4 w-4" /></button>
           <div className="min-w-0 flex-1">
             {!compact && <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Inbox Agent</p>}
             {renaming ? <form onSubmit={event => void renameChat(event)} className="flex flex-wrap items-center gap-2"><input autoFocus={visible} aria-label="Conversation name" value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenaming(false); }} maxLength={120} disabled={renameSaving} className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-sm" /><button type="submit" disabled={!renameDraft.trim() || renameSaving} className="rounded px-2 py-1 text-xs font-medium text-primary hover:bg-accent disabled:opacity-50">{renameSaving ? 'Saving…' : 'Save name'}</button><button type="button" onClick={() => setRenaming(false)} className="rounded px-2 py-1 text-xs hover:bg-accent">Cancel</button></form> : <div className="flex min-w-0 items-center gap-1"><h1 title={activeTitle} className={`truncate font-semibold ${compact ? 'text-sm' : 'text-base'}`}>{activeTitle}</h1><button type="button" onClick={() => { setRenameDraft(activeTitle); setRenaming(true); }} disabled={busy || !activeChatId} aria-label="Rename conversation" title="Rename conversation" className="shrink-0 rounded-lg p-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground disabled:opacity-40"><Pencil className="h-3 w-3" /></button></div>}
@@ -1122,13 +1180,15 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
           <button type="button" disabled={busy || !!pendingQuestion || !exchanges.length || !accounts.length || !onOpenDraft} onClick={() => { const from = accounts.find(account => account.id === defaultDraftAccountId) ?? singleAccount ?? accounts[0]; setDraftAccountId(from?.id ?? ''); setDraftFormOpen(open => !open); }} aria-label="Draft email" title="Draft email from this conversation" aria-expanded={draftFormOpen} aria-controls="assistant-draft-form" className={compact ? compactButton : 'flex shrink-0 items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-40'}><MailPlus className="h-4 w-4" />{!compact && <span>Draft email</span>}</button>
           {compact && <button type="button" onClick={() => void newChat()} disabled={loading || creating || deletePending} aria-label="New conversation" title="New conversation" className={compactButton}>{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button>}
           {draftFormOpen && <form id="assistant-draft-form" aria-label="Draft from conversation" onSubmit={event => void createEmailDraft(event)} onKeyDown={event => { if (event.key === 'Escape') setDraftFormOpen(false); }} className={`assistant-raised absolute z-20 mt-2 space-y-4 overflow-y-auto rounded-xl border border-border bg-background p-4 shadow-xl ${compact ? 'left-3 right-3 top-12 max-h-[calc(100%-5rem)]' : 'right-4 top-full max-h-[calc(100vh-12rem)] w-96 max-w-[calc(100vw-3rem)]'}`}><h2 className="text-sm font-semibold">Draft from conversation</h2><label className="block space-y-1 text-xs font-medium"><span>From</span><select autoFocus={visible} aria-label="Draft sending account" value={draftAccountId} onChange={event => setDraftAccountId(event.target.value)} className="block w-full rounded-md border border-border bg-background px-2 py-2 text-sm">{accounts.map(account => <option key={account.id} value={account.id}>{account.email}</option>)}</select></label><label className="block space-y-1 text-xs font-medium"><span>Instructions (optional)</span><textarea aria-label="Draft instructions" value={draftInstructions} onChange={event => setDraftInstructions(event.target.value)} maxLength={4000} rows={3} placeholder="For example, summarize the quotation and ask for feedback." className="max-h-40 w-full resize-none rounded-md border border-border bg-background px-2 py-2 text-sm font-normal" /></label><MeetingDraftFields value={draftMeeting} onChange={setDraftMeeting} /><div className="flex justify-end gap-2"><button type="button" onClick={() => setDraftFormOpen(false)} className="rounded-md px-3 py-2 text-xs hover:bg-accent">Cancel</button><button type="submit" disabled={!!draftMeeting && (!Number.isFinite(draftMeeting.startMs) || !Number.isFinite(draftMeeting.endMs))} className="assistant-primary-action rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">Create draft</button></div></form>}
-        </header>
+        </header>}
 
         {workActive && renderWorkBar()}
         {backgroundRuns.length > 0 && <div aria-label="Background agent work" className="flex shrink-0 flex-wrap gap-2 border-b border-border px-4 py-2">{backgroundRuns.map(run => <button key={run.requestId} type="button" onClick={() => void selectChat(run.chatId)} className="flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"><Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin text-primary" /><span className="truncate">{chats.find(chat => chat.id === run.chatId)?.title ?? 'Another conversation'} · Working in background</span></button>)}</div>}
-        {(exchanges.length > 0 || !!activeChat?.runs?.length || workActive) && <div className="shrink-0 border-b border-border px-4 py-2"><AssistantUsage usage={activeChat?.usage} variant="conversation" compact={compact} /></div>}
+        {!overview && (exchanges.length > 0 || !!activeChat?.runs?.length || workActive) && <div className="shrink-0 border-b border-border px-4 py-2"><AssistantUsage usage={activeChat?.usage} variant="conversation" compact={compact} /></div>}
 
-        <div ref={messages} aria-label="Conversation messages" className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${compact ? 'space-y-6 px-4 py-5' : 'space-y-8 px-5 py-6'}`} aria-live="polite" aria-busy={busy || !!pendingQuestion}>
+        {overview ? <div aria-label="Overview content" className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
+          {loading ? <p role="status" className="flex items-center gap-2 p-5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading overview…</p> : loadError ? <div role="alert" className="m-5 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{loadError}</p><button type="button" onClick={() => void load()} className="mt-3 font-medium underline">Try again</button></div> : <AssistantDashboard accountIds={overviewAccountIds} chats={chats} visible={visible} compact={compact} currentConversationUsage={activeChat?.usage} currentConversationTitle={activeTitle} onChoosePrompt={text => void newChat({ question: text, accountIds: [...overviewAccountIds] })} onOpenConversation={chatId => void selectChat(chatId)} onNewConversation={() => void newChat()} onNavigateToSource={onNavigateToSource} onReplyToSource={onReplyToSource} onOpenCalendarEvent={onOpenCalendarEvent} />}
+        </div> : <div ref={messages} aria-label="Conversation messages" className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${compact ? 'space-y-6 px-4 py-5' : 'space-y-8 px-5 py-6'}`} aria-live="polite" aria-busy={busy || !!pendingQuestion}>
           {loading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading conversations…</p> : loadError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{loadError}</p><button onClick={() => void load()} className="mt-3 font-medium underline">Try again</button></div> : chatLoading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{creating ? 'Creating conversation…' : 'Loading conversation…'}</p> : chatError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{chatError}</p><button type="button" onClick={() => activeChatId ? void selectChat(activeChatId, true) : void newChat()} className="mt-3 font-medium underline">Try again</button></div> : <>
             {accounts.length === 0 && <p role="status" className="text-sm text-muted-foreground">Connect an email account to ask Inbox Agent about your mail.</p>}
             {exchanges.length === 0 && !liveWork && <div className={`mx-auto flex w-full max-w-3xl flex-col justify-center ${compact ? 'space-y-5 py-3' : 'space-y-6 py-10'}`}><div className="space-y-3"><span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Bot className="h-6 w-6" /></span><h2 className={`${compact ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight`}>What can I help you with?</h2><p className="text-sm text-muted-foreground">Search your mail, review unread conversations, and catch messages that missed categorization.</p></div><div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'sm:grid-cols-2'}`}>{starterActions.map(({ title, description, question: text, Icon }) => <button key={title} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className={`assistant-surface flex items-start gap-3 rounded-xl border border-border text-left transition-colors hover:bg-accent hover:border-primary/20 disabled:opacity-50 ${compact ? 'p-3' : 'p-4'}`}><Icon className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><span className="space-y-1"><span className="block text-sm font-medium">{title}</span><span className="block text-xs leading-5 text-muted-foreground">{description}</span></span></button>)}</div><div className="flex flex-wrap gap-2">{starterQuestions.map(text => <button key={text} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className="rounded-full border border-border px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">{text}</button>)}</div></div>}
@@ -1136,9 +1196,9 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
             {!!activeChat?.runs?.some(run => run.kind !== 'question' && run.requestId !== runningRequest) && <details aria-label="Drafts and mail actions" className="assistant-surface rounded-xl border border-border p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">Drafts and mail actions</summary><div className="mt-3 space-y-4">{activeChat.runs.filter(run => run.kind !== 'question' && run.requestId !== runningRequest).map(run => <article key={run.requestId} aria-label={`Work record: ${run.question}`} className="space-y-2 border-t border-border pt-3"><p className="text-sm font-medium">{run.question}</p><p className="text-xs text-muted-foreground">{run.status === 'completed' ? 'Completed' : run.status === 'stopped' ? 'Stopped' : run.status === 'failed' ? 'Failed' : 'In progress'}</p>{run.error && <p className="text-xs text-destructive">{run.error}</p>}<div className="flex flex-wrap gap-3"><button type="button" onClick={event => viewActivity(`run:${run.requestId}`, event.currentTarget)} className="text-xs text-primary hover:underline">View activity</button>{run.draft && onOpenDraft && <button type="button" onClick={() => onOpenDraft(run.draft!)} className="text-xs text-primary hover:underline">Open draft</button>}</div><AssistantUsage usage={run.usage} compact={compact} /></article>)}</div></details>}
             {liveWork && <div className="space-y-5" role={workRunning ? 'status' : undefined}>{liveWork.kind !== 'draft' && liveWork.kind !== 'action' && <UserMessage question={liveWork.question} visible={visible} onEdit={!workRunning && !stoppingRequestId ? () => { setQuestion(liveWork.question); if (visibleRef.current) questionInput.current?.focus(); } : undefined} />}{!workActive && <button type="button" onClick={event => viewActivity('live', event.currentTarget)} aria-label={workRunning ? 'View current activity' : liveWork.status === 'stopping' ? 'View stopping activity' : liveWork.status === 'done' ? 'View draft activity' : liveWork.status === 'error' ? 'View failed activity' : 'View stopped activity'} aria-expanded={activityOpen && activitySelection === 'live'} aria-controls="assistant-activity-panel" className="flex max-w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground">{workRunning ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Activity className="h-3.5 w-3.5 shrink-0" />}<span className="truncate">{liveWork.status === 'running' ? liveWork.activities[liveWork.activities.length - 1]?.message || (liveWork.kind === 'draft' ? 'Preparing draft from conversation' : 'Preparing email search') : liveWork.status === 'done' ? 'Draft ready · View activity' : liveWork.status === 'stopping' ? 'Stopping… · View activity' : liveWork.status === 'cancelled' ? 'Stopped · View activity' : 'Failed · View activity'}</span><ChevronDown className="h-3.5 w-3.5 shrink-0 -rotate-90" /></button>}</div>}
           </>}
-        </div>
-        {error && <p role="alert" className="mx-5 mb-3 shrink-0 rounded-lg bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
-        <form onSubmit={event => void ask(event)} className={`relative shrink-0 space-y-2 bg-background ${compact ? 'border-t border-border/60 px-3 pb-3 pt-2.5' : 'border-t border-border px-5 py-4'}`}>
+        </div>}
+        {!overview && error && <p role="alert" className="mx-5 mb-3 shrink-0 rounded-lg bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
+        {!overview && <form onSubmit={event => void ask(event)} className={`relative shrink-0 space-y-2 bg-background ${compact ? 'border-t border-border/60 px-3 pb-3 pt-2.5' : 'border-t border-border px-5 py-4'}`}>
           <label htmlFor="inbox-assistant-question" className="sr-only">Message Inbox Agent</label>
           <div className={`assistant-raised flex items-end rounded-2xl border border-border bg-muted/10 transition-shadow focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-primary/10 ${compact ? 'gap-2 p-2.5' : 'gap-3 p-3'}`}>
             <textarea ref={questionInput} id="inbox-assistant-question" value={question} maxLength={4000} disabled={!!pendingQuestion || busy || !!editingExchangeId || !!loadError || !!chatError || !accounts.length || !activeChatId} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={compact ? 1 : 2} placeholder="Message Inbox Agent…" className={`max-h-36 min-w-0 flex-1 resize-none bg-transparent py-1 text-sm leading-6 outline-none disabled:opacity-50 ${compact ? 'min-h-9 [field-sizing:content]' : 'min-h-12'}`} />
@@ -1146,7 +1206,7 @@ export function InboxAssistant({ onNavigateToSource, sourcePane, onCloseSourcePa
           </div>
           {compact && <div className="flex min-w-0 items-center gap-2">{renderAccountPicker()}{modeControl}</div>}
           {selectedAccountIds.length === 0 && !loading && <p className="text-xs text-muted-foreground">Choose at least one account.</p>}
-        </form>
+        </form>}
       </div>
       {sourcePane ? <div aria-label="Assistant email source" className={`inset-y-0 right-0 z-40 flex min-h-0 flex-col border-l border-border bg-background shadow-xl ${compact ? 'absolute w-full' : 'fixed w-[min(56rem,100vw)] lg:static lg:z-auto lg:h-full lg:w-1/2 lg:shrink-0 lg:shadow-none'}`}>{workActive && renderWorkBar(true)}<div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">{sourcePane}</div></div> : activityOpen && inspection && <ActivitySidebar inspection={inspection} accounts={accounts} onClose={closeActivity} compact={compact} visible={visible} stopButton={workActive ? renderStopButton('Stop work from activity') : undefined} />}
     </section>

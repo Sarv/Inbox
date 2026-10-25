@@ -1,11 +1,22 @@
 import type { InboxAssistantExchange, InboxAssistantRequest, InboxAssistantSource } from '../../src/types/inbox-assistant';
 
+import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
+
 export const INBOX_ASSISTANT_FOLLOWUP_SEPARATOR = '\nEarlier user question for this follow-up: ';
 const MAX_CONTEXT = 6_000;
 const MAX_SOURCE_REFS = 12;
 const TOPIC_WORDS = new Set('a aabout about all an and are as at be by can check could did do does email emails final find for from have how i in is it last latest me my of on one our please previous proposal proposals propsal quote quotes quotation quotations reference regarding revision revisions send sent show submit submitted submission tell that the their them these they this those to us validity was we were what when where which who with would you your'.split(' '));
 const FOLLOW_UP = /\b(?:it|its|that|this|these|those|them|their|same|again|earlier|previous|latest|last|revised|revision|revisions|validity|valid|expiry|expires|expired|changed|difference|differences|compared|compare)\b|\b(?:which one|what about|how about|how much|tell me more|more details|break (?:it|that) down|the (?:(?:actual|full|complete|original|updated) )?(?:quote|quotation|proposal|attachment|document|email|message|amount|price|customer))\b|^(?:read|summari[sz]e|explain|extract)\s+(?:(?:the|an)\s+)?(?:(?:actual|full|complete|original)\s+)?(?:proposal|attachment|document|email|message)\b|^(?:amount|price|total|currency|tax|gst|recipient|recipients|validity|when|who|why)\??$/i;
 const EXPLICIT_OLD_SOURCE = /\b(?:back to|return to|go back to|earlier|previous|compare|compared)\b|\bsource\s+S\d+\b|\[S\d+\]/i;
+const EXPLICIT_SOURCE_RETURN = /\b(?:back to|return to|go back to)\b|\bsource\s+S\d+\b|\[S\d+\]/i;
+const ACKNOWLEDGEMENT = /^(?:(?:thanks|thank you)(?:\s+(?:very much|so much|a lot))?|ok(?:ay)?(?:,?\s+thanks)?|got it|understood)[!.?]*$/i;
+const CONTENT_SUBJECTS = [
+  /\b(?:quotes?|quotations?|proposals?|propsal|tenders?)\b/i,
+  /\b(?:meetings?|appointments?|calendar|invitations?|invites?)\b/i,
+  /\b(?:invoices?|bills?|billing|receipts?)\b/i,
+  /\b(?:login|log[ -]?in|sign[ -]?in|password|otp|verification codes?|security (?:alerts?|notifications?|warnings?))\b/i,
+  /\b(?:promotional|promotions?|newsletters?|marketing|subscriptions?)\b/i,
+];
 
 export interface InboxAssistantConversationContext {
   historyContext?: string;
@@ -86,6 +97,20 @@ function namesNewTarget(question: string, prior: string): boolean {
   return targets.some(target => !TOPIC_WORDS.has(target) && !prior.includes(target));
 }
 
+function contentSubjects(value: string): number[] {
+  return CONTENT_SUBJECTS.flatMap((pattern, index) => pattern.test(value) ? [index] : []);
+}
+
+/** "Latest" is a date preference, not a reference to the last customer. */
+function changesContentSubject(question: string, prior: string): boolean {
+  if (EXPLICIT_SOURCE_RETURN.test(question)
+    || /\b(?:it|its|these|those|them|their|same)\b/i.test(question)
+    || /\b(?:this|that)\b(?!\s+(?:morning|afternoon|evening|night|week|weekend|month|quarter|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b)/i.test(question)) return false;
+  const current = contentSubjects(question);
+  const previous = contentSubjects(prior);
+  return current.length > 0 && previous.length > 0 && !current.some(subject => previous.includes(subject));
+}
+
 /** Rebuild context from persisted turns; prior answers are never treated as fresh mail evidence. */
 export function buildInboxAssistantContext(
   history: InboxAssistantExchange[], request: InboxAssistantRequest,
@@ -97,9 +122,15 @@ export function buildInboxAssistantContext(
   const chatHistory = history.filter(exchange => !exchange.chatId || exchange.chatId === request.chatId);
   const cut = chatHistory.findIndex(exchange => exchange.id === request.previousExchangeId);
   if (cut < 0) return empty;
+  // App guidance and acknowledgements do not establish mailbox topics. Skip
+  // them before rebuilding the chain, including histories saved before this
+  // distinction existed, while preserving the preceding research question.
+  const researchHistory = chatHistory.slice(0, cut + 1).filter(exchange => !inboxAssistantCapabilityReply(exchange.question)
+    && !ACKNOWLEDGEMENT.test(exchange.question.trim()));
+  if (!researchHistory.length) return empty;
   const selected = new Set(request.accountIds);
-  const previousScope = chatHistory[cut]!.accountIds;
-  const scoped = chatHistory.slice(0, cut + 1).filter(exchange => sameScope(exchange.accountIds, request.accountIds)
+  const previousScope = researchHistory.at(-1)!.accountIds;
+  const scoped = researchHistory.filter(exchange => sameScope(exchange.accountIds, request.accountIds)
     || sameScope(exchange.accountIds, previousScope));
   if (!scoped.length) return empty;
 
@@ -120,8 +151,16 @@ export function buildInboxAssistantContext(
   }
   let start = end;
   while (start > 0 && (FOLLOW_UP.test(scoped[start]!.question) || inboxAssistantParticipantTerms(scoped[start]!.question).length > 0)
-    && !namesNewTarget(scoped[start]!.question, topicText(scoped[start - 1]!, selected))) start--;
+    && !namesNewTarget(scoped[start]!.question, topicText(scoped[start - 1]!, selected))) {
+    // Recover the user's subject even when an intervening turn only says
+    // "How much?". Model answers and retrieved candidate subjects cannot turn
+    // an unrelated new request into a continuation after history is restored.
+    const priorSubject = scoped.slice(0, start).reverse().find(exchange => contentSubjects(exchange.question).length)?.question ?? '';
+    if (changesContentSubject(scoped[start]!.question, priorSubject)) break;
+    start--;
+  }
   const chain = scoped.slice(start, end + 1);
+  if (changesContentSubject(question, chain.map(exchange => exchange.question).join(' '))) return empty;
   // Persistence keeps every message. Only the provider context has a window:
   // retain the original topic plus the most recent follow-ups.
   const relevant = chain.length > 20 ? [chain[0]!, ...chain.slice(-19)] : chain;

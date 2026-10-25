@@ -18,8 +18,49 @@ const exchange = (overrides: Partial<InboxAssistantExchange> = {}): InboxAssista
 });
 const history = () => [exchange(), exchange({ id: 'second', question: 'Which was the latest revision?', createdAt: 2_000,
   answer: { text: 'Revision 2 was the latest observed sent revision.', sources: [source({ accountId: 'secondary', accountEmail: 'rc@sarv.example', emailId: 'revision-2' })], coverage: [], warnings: [] } })];
+const guidance = (id: string, question: string) => exchange({ id, question,
+  answer: { text: 'App-owned guidance without email research.', sources: [], coverage: [], warnings: [] } });
 
 describe('Inbox Agent persisted conversation context', () => {
+  it.each([
+    ['Hello', 'Find the latest quotation I sent'],
+    ['Help', 'Find the latest invoice'],
+    ['What can you do?', 'Show my latest meetings today'],
+    ['Delete all promotional emails', 'Find the latest quotation I sent'],
+    ['Send this email', 'Find the latest invoice'],
+  ])('does not use %s as the research topic for %s', (priorQuestion, question) => {
+    const saved = [guidance('guidance', priorQuestion)];
+    expect(buildInboxAssistantContext(saved, request({ previousExchangeId: 'guidance', question })))
+      .toEqual({ sourceRefs: [], contextualizedQuestion: question, isFollowUp: false });
+  });
+
+  it.each(['Help', 'Thanks!', 'Okay, thanks', 'Hello', 'Delete all promotional emails'])('resumes the preceding valid topic through %s', question => {
+    const saved = [exchange({ id: 'quote' }), guidance('guidance', question)];
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'guidance', question: 'How much?' }));
+    expect(context.topicTerms).toEqual(['TCS']);
+    expect(context.intent).toBe('sent');
+    expect(context.sourceRefs).toEqual([{ accountId: 'primary', emailId: 'tcs-quote' }]);
+    expect(JSON.parse(context.historyContext!).turns).toEqual([expect.objectContaining({ question: 'What quote did I send to TCS?' })]);
+  });
+
+  it('rebuilds a clean research anchor from restored greeting and guidance turns', () => {
+    const saved = [guidance('hello', 'Hello'), exchange({ id: 'quote', question: 'Find the latest quotation I sent to TCS' }),
+      guidance('help', 'What can you do?'), guidance('thanks', 'Thank you very much!')];
+    const context = buildInboxAssistantContext(JSON.parse(JSON.stringify(saved)), request({ previousExchangeId: 'thanks', question: 'How much?' }));
+    expect(context.topicTerms).toEqual(['TCS']);
+    expect(context.historyContext).not.toContain('Hello');
+    expect(context.historyContext).not.toContain('App-owned');
+    expect(context.historyContext).not.toContain('What can you do?');
+  });
+
+  it('preserves research scope across guidance without exposing excluded-account answers', () => {
+    const saved = [exchange({ id: 'quote' }), { ...guidance('help', 'Help'), accountIds: ['third'] }];
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'help', accountIds: ['primary'], question: 'How much?' }));
+    expect(context.topicTerms).toEqual(['TCS']);
+    expect(context.historyContext).not.toContain('answerContextOnly');
+    expect(context.sourceRefs).toEqual([{ accountId: 'primary', emailId: 'tcs-quote' }]);
+  });
+
   it('keeps the customer context when a follow-up switches from my sent quote to a team member submission', () => {
     const context = buildInboxAssistantContext(history(), request({ question: 'This was sent by my team members, what did Prakash submit last?' }));
     expect(context.historyContext).toContain('TCS');
@@ -151,6 +192,45 @@ describe('Inbox Agent persisted conversation context', () => {
     for (const question of ['What quote did I send to Acme?', 'And what about the latest quote I sent to Acme?', 'What about the quote to IBM?', 'How much was the IBM quotation?', 'How much was the Acme quotation?', 'Show all unread mail']) {
       expect(buildInboxAssistantContext(history(), request({ question }))).toEqual({ sourceRefs: [], contextualizedQuestion: question, isFollowUp: false });
     }
+  });
+
+  it.each([
+    'is any meetings invite today',
+    'Show my latest meetings today',
+    'What was my last login alert?',
+    'Find the latest invoice',
+    'Show me previous security alerts',
+    'Show the latest invoices this week',
+    'Show the latest invoices this  week',
+    'Find the latest meeting invitations this morning',
+    'Show me the latest newsletter',
+  ])('does not inherit quotation scope for an independent content request: %s', question => {
+    expect(buildInboxAssistantContext(history(), request({ question })))
+      .toEqual({ sourceRefs: [], contextualizedQuestion: question, isFollowUp: false });
+  });
+
+  it.each(['Which was the latest revision?', 'What was the last one?', 'What about the same proposal?',
+    'Find the latest quotation', 'What are their latest meeting invitations?', 'Find the invoice for this customer',
+    'Read source S1 and find its invoice', 'Back to the TCS quote, find the invoice'])('preserves actual topic references for %s', question => {
+    expect(buildInboxAssistantContext(history(), request({ question })).isFollowUp).toBe(true);
+  });
+
+  it('uses prior user subjects rather than irrelevant retrieved candidates to detect a new request', () => {
+    const saved = [exchange({ id: 'quote', answer: { text: 'No verified details found.', sources: [source({ subject: 'Latest meeting invitation and invoice' })], coverage: [], warnings: [] } })];
+    const question = 'Find the latest invoice';
+    expect(buildInboxAssistantContext(saved, request({ previousExchangeId: 'quote', question })))
+      .toEqual({ sourceRefs: [], contextualizedQuestion: question, isFollowUp: false });
+  });
+
+  it('recovers an independent subject boundary from restored history after a vague follow-up', () => {
+    const saved = [exchange({ id: 'quote' }), exchange({ id: 'amount', question: 'How much?' }),
+      exchange({ id: 'invoice', question: 'Find the latest invoice', answer: { text: 'Invoice found.',
+        sources: [source({ emailId: 'invoice', subject: 'Invoice 42', sent: false })], coverage: [], warnings: [] } })];
+    const context = buildInboxAssistantContext(saved, request({ previousExchangeId: 'invoice', question: 'How much?' }));
+    expect(context.historyContext).toContain('Find the latest invoice');
+    expect(context.historyContext).not.toContain('TCS');
+    expect(context.intent).toBeUndefined();
+    expect(context.sourceRefs).toEqual([{ accountId: 'primary', emailId: 'invoice' }]);
   });
 
   it.each(['How much?', 'Amount?', 'Tell me more', 'Who received it?'])('retains genuine short follow-up context for %s', question => {

@@ -56,7 +56,7 @@ beforeEach(() => {
   Object.assign(window, { electronAPI: { inboxAssistant: api } });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
-async function mount(props: InboxAssistantProps = {}) { const view = render(<InboxAssistant {...props} />); await settle(); return view; }
+async function mount(props: InboxAssistantProps = {}) { const view = render(<InboxAssistant initialView="conversation" {...props} />); await settle(); return view; }
 function button(view: ReturnType<typeof render>, text: string) { return view.all('button').find(value => value.textContent?.trim() === text) ?? null; }
 function ask(view: ReturnType<typeof render>, question: string) { typeInto(view.find('#inbox-assistant-question'), question); fire(view.byLabel('Ask Inbox Agent'), 'click'); }
 function progress(requestId: string, chatId: string, message: string, sequence = 1) {

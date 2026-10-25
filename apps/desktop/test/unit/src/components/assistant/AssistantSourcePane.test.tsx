@@ -67,6 +67,20 @@ describe('embedded assistant source mail', () => {
     expect(view.container.textContent).toContain('sales@example.test');
   });
 
+  it('passes a targeted Reply all intent only to the loaded source reader', async () => {
+    const view = render(<AssistantSourcePane source={source} replyAllRequestId={4} autoMarkRead={false} onClose={vi.fn()} />);
+    await settle();
+    expect(reader.render).not.toHaveBeenCalled();
+    await finishLoad('primary');
+    expect(reader.render).not.toHaveBeenCalled();
+    await finishLoad();
+    expect(reader.render).toHaveBeenLastCalledWith(expect.objectContaining({ autoMarkRead: false,
+      replyAllRequest: { id: 4, accountId: source.accountId, emailId: source.emailId } }));
+    view.rerender(<AssistantSourcePane source={source} replyAllRequestId={5} autoMarkRead={false} onClose={vi.fn()} />);
+    expect(reader.render).toHaveBeenLastCalledWith(expect.objectContaining({ replyAllRequest: { id: 5, accountId: source.accountId, emailId: source.emailId } }));
+    expect(useEmailStore.getState().openThread).toHaveBeenCalledTimes(1);
+  });
+
   it('passes unread-preserving review mode to the shared full reader', async () => {
     const view = render(<AssistantSourcePane source={source} onClose={vi.fn()} autoMarkRead={false} />);
     await settle(); await finishLoad();

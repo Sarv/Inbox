@@ -6,6 +6,7 @@ import type { InboxAssistantAccount, InboxAssistantAccountCoverage, InboxAssista
 
 import type { AssistantAttachmentResult } from './assistant-attachment-types';
 import type { InboxAssistantSearchPlan } from './inbox-assistant-answer';
+import { matchesInboxAssistantTerm, meaningfulInboxAssistantTerms } from './inbox-assistant-search-scope';
 
 export type AssistantResearchStorage = Pick<SQLiteStorage,
   'getFolders' | 'searchEmails' | 'getEmail' | 'getContacts' | 'getAttachments'>
@@ -61,15 +62,35 @@ function fullBody(email: EmailRecord): string {
   return plain.length > clean.length ? plain : clean;
 }
 
-function matchesTerm(value: string, term: string): boolean {
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Company acronyms can precede a version (EPFO3.0), but must not match
-  // unrelated words such as postcss. Names and domains remain literal.
-  return new RegExp(`(^|[^\\p{L}])${escaped}(?=$|[^\\p{L}])`, 'iu').test(value);
-}
+const matchesTerm = matchesInboxAssistantTerm;
 
 function participantText(email: EmailRecord): string {
   return `${email.fromAddress} ${email.fromName ?? ''} ${email.toAddress ?? ''} ${email.toNames ?? ''} ${email.ccAddress ?? ''} ${email.ccNames ?? ''}`;
+}
+
+function calendarInvitation(email: EmailRecord): string {
+  const ics = email.calendarIcs?.slice(0, 24_000).trim() ?? '';
+  return /(?:^|\r?\n)BEGIN:VCALENDAR\b/i.test(ics) && /(?:^|\r?\n)BEGIN:VEVENT\b/i.test(ics) ? ics : '';
+}
+
+/** An incidental mention of a past meeting is not an invitation. */
+function invitationEvidence(email: EmailRecord, body = fullBody(email)): boolean {
+  if (calendarInvitation(email)) return true;
+  const subject = email.subject ?? '';
+  const commercialInvitation = /\b(?:tender|rfp|rfq|bid|quotation|proposal|procurement)\b/i.test(subject);
+  if (/\bmeeting\s+(?:confirmation|invitation|invite)\b/i.test(subject)
+    || !commercialInvitation && /^(?:(?:re|fw|fwd):\s*)*(?:invitation|invite)\s*[:|–-]/i.test(subject)
+    || /\b(?:invitation|invite)\s+(?:to|for)\s+(?:(?:a|the|our|your)\s+)?(?:meeting|call|demo|discussion|review|webinar)\b/i.test(subject)) return true;
+  const bounded = body.slice(0, 12_000);
+  const quoted = bounded.search(/\n\s*(?:On [^\n]{1,250}wrote:|[- ]{2,}(?:Original Message|Forwarded Message)[- ]*|From:\s*\S)/i);
+  const authored = quoted >= 0 ? bounded.slice(0, quoted) : bounded;
+  const invitationWording = (value: string) => /\byou(?:\s+are|['’]re|\s+have been)\s+invited\s+to\s+[^\n.!?]{0,80}\b(?:meeting|call|demo|webinar|review|discussion|session|conference|appointment|sync)\b|\b(?:please\s+)?join\s+(?:us\s+for|the|this|our)\s+(?:(?:scheduled|upcoming)\s+)?(?:meeting|call|demo|webinar|review)\b|\bmeeting\s+(?:invitation|confirmation)\b/i.test(value);
+  if (invitationWording(authored)) return true;
+  // An intentional forward retains its outer source/date provenance. An old
+  // quoted invite below an unrelated pricing follow-up does not qualify.
+  const deliberateForward = /^(?:fw|fwd):/i.test(subject) && /\b(?:meetings?|invites?|invitations?|appointments?)\b/i.test(subject)
+    || /\bforward(?:ing|ed)?\b[^\n.!?]{0,50}\b(?:meetings?|invites?|invitations?)\b/i.test(authored);
+  return deliberateForward && invitationWording(bounded);
 }
 
 /** Read the complete body, then retain bounded, explicitly separated excerpts. */
@@ -130,8 +151,9 @@ function isSent(email: EmailRecord, folders: FolderRecord[], aliases: string[]):
 
 function matchesFilters(email: EmailRecord, plan: InboxAssistantSearchPlan): boolean {
   const { filters } = plan;
-  if (filters.after && email.date < Date.parse(`${filters.after}T00:00:00Z`) / 1000) return false;
-  if (filters.before && email.date >= Date.parse(`${filters.before}T00:00:00Z`) / 1000) return false;
+  const dates = dateFilters(plan);
+  if (dates.dateFrom !== undefined && email.date < dates.dateFrom) return false;
+  if (dates.dateTo !== undefined && email.date > dates.dateTo) return false;
   if (filters.from && !`${email.fromAddress} ${email.fromName ?? ''}`.toLowerCase().includes(filters.from.toLowerCase())) return false;
   if (filters.to && !(email.toAddress ?? '').toLowerCase().includes(filters.to.toLowerCase())) return false;
   if (typeof filters.hasAttachment === 'boolean' && (email.hasAttachments || parseAttachmentNames(email.attachmentNames).length > 0) !== filters.hasAttachment) return false;
@@ -143,10 +165,18 @@ function contactTerms(contacts: ContactRecord[]): string[] {
     .filter(value => value.includes('@') || /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(value));
 }
 
-function planFilters(plan: InboxAssistantSearchPlan): Pick<SearchQuery, 'dateFrom' | 'dateTo' | 'from' | 'to' | 'hasAttachments'> {
+function dateFilters(plan: InboxAssistantSearchPlan): Pick<SearchQuery, 'dateFrom' | 'dateTo'> {
+  const window = plan.scope?.timeWindow;
+  if (window) return { dateFrom: window.dateFrom, dateTo: window.dateTo };
   return {
     ...(plan.filters.after ? { dateFrom: Date.parse(`${plan.filters.after}T00:00:00Z`) / 1000 } : {}),
     ...(plan.filters.before ? { dateTo: Date.parse(`${plan.filters.before}T00:00:00Z`) / 1000 - 1 } : {}),
+  };
+}
+
+function planFilters(plan: InboxAssistantSearchPlan): Pick<SearchQuery, 'dateFrom' | 'dateTo' | 'from' | 'to' | 'hasAttachments'> {
+  return {
+    ...dateFilters(plan),
     ...(plan.filters.from ? { from: plan.filters.from } : {}),
     ...(plan.filters.to ? { to: plan.filters.to } : {}),
     ...(typeof plan.filters.hasAttachment === 'boolean' ? { hasAttachments: plan.filters.hasAttachment } : {}),
@@ -228,42 +258,72 @@ export async function researchInboxAssistant(
       }
     };
     try {
-      progress({ stage: 'search', status: 'running', accountId: account.id, message: `Searching ${account.email}`, detail: 'Checking Inbox, Sent and archived mail.' });
+      progress({ stage: 'search', status: 'running', accountId: account.id, message: `Searching ${account.email}`, detail: `Checking Inbox, Sent and archived mail.${plan.scope?.timeWindow ? ` Message date range: ${plan.scope.timeWindow.label}.` : ''}` });
       const mailbox = await deps.openMailbox(account.id);
       checkAbort(signal);
       const folders = await mailbox.storage.getFolders();
       const aliases = unique([account.email, ...mailbox.aliases].map(value => value.toLowerCase()), 12);
+      const ownDomains = new Set(aliases.map(value => value.slice(value.lastIndexOf('@') + 1)).filter(Boolean));
+      const ownIdentityTerms = new Set([...ownDomains].flatMap(domain => [domain, ...domain.split('.').slice(0, -1).filter(label => label.length > 2)]));
+      const ownIdentityTopic = (term: string) => ownIdentityTerms.has(term.toLowerCase().replace(/^@/, ''));
+      const withoutOwnAddresses = (value: string) => {
+        const parts: string[] = [];
+        let cursor = 0;
+        // Start at literal @ characters rather than repeatedly scanning long
+        // attacker-controlled words for a possible mailbox suffix.
+        for (const match of value.matchAll(/@([\p{L}\p{N}.-]{1,253})/gu)) {
+          const domain = match[1]!.replace(/\.+$/, '');
+          if (!ownDomains.has(domain.toLowerCase())) continue;
+          let start = match.index!;
+          while (start > cursor && /[\p{L}\p{N}._%+-]/u.test(value[start - 1]!)) start--;
+          parts.push(value.slice(cursor, start));
+          cursor = match.index! + 1 + domain.length;
+        }
+        return parts.length ? parts.join('') + value.slice(cursor) : value;
+      };
       if (folders.some(folder => folder.syncEnabled !== false && folder.backfillComplete === false)) {
         covered.warnings.push('Older mail is still synchronizing. This answer covers locally searchable mail.');
       }
-      const entities = unique(plan.entityTerms, 6);
-      const topics = unique(plan.topicTerms?.length ? plan.topicTerms : entities.filter(term => !plan.participantTerms?.some(person => person.toLowerCase() === term.toLowerCase())), 6);
+      const entities = meaningfulInboxAssistantTerms(plan.scope?.meetingIntent
+        ? plan.scope.topicTerms.filter(term => term !== 'meeting') : plan.entityTerms).slice(0, 6);
+      const plannedTopics = plan.scope?.meetingIntent ? plan.scope.topicTerms : plan.topicTerms?.length
+        ? plan.topicTerms : entities.filter(term => !plan.participantTerms?.some(person => person.toLowerCase() === term.toLowerCase()));
+      const topics = meaningfulInboxAssistantTerms(plannedTopics.length ? plannedTopics : plan.queries).slice(0, 6);
       const people = unique(plan.participantTerms ?? [], 6);
+      const customerProductAnchors = unique(meaningfulInboxAssistantTerms([...topics, ...entities, ...plan.queries])
+        .filter(term => !ownIdentityTopic(term)), 12);
+      const requireCustomerProduct = !plan.scope?.meetingIntent && topics.some(ownIdentityTopic) && customerProductAnchors.length > 0;
+      const requiredTopicGroups = (plan.requiredTopicGroups ?? []).map(group => unique(group.map(term =>
+        term.split(/\s+/).filter(word => !ownIdentityTopic(word)).join(' ')), 6)).filter(group => group.length);
       const contacts: ContactRecord[] = [];
       for (const term of entities.slice(0, 3)) {
         try { contacts.push(...await mailbox.storage.getContacts({ search: term, limit: 12, offset: 0 })); }
         catch { /* Contact expansion is optional; original search terms remain. */ }
       }
-      const queries = unique(topics.length
-        ? [...topics, ...plan.queries.filter(query => topics.some(topic => matchesTerm(query, topic)))]
-        : [...entities, ...plan.queries], 8);
+      const queries = plan.scope?.meetingIntent ? unique(plan.scope.queryTerms, 8)
+        : unique(topics.length
+          ? [...topics, ...meaningfulInboxAssistantTerms(plan.queries).filter(query => topics.some(topic => matchesTerm(query, topic)))]
+          : [...entities, ...meaningfulInboxAssistantTerms(plan.queries)], 8);
       const participants = unique([...people, ...entities.filter(value => value.includes('@') || value.includes('.')), ...contactTerms(contacts)], 12);
       const requests: SearchQuery[] = [];
-      const sentFolders = folders.filter(folder => (folder.specialUse ?? '').toLowerCase() === '\\sent' || SENT_NAMES.has(folder.path.toLowerCase()));
-      const addRequest = (query: string, extra: Partial<SearchQuery> = {}) => requests.push({
-        query, scope: 'mailbox', collapseThreads: false, sortBy: 'date', sortOrder: 'desc',
-        limit: QUERY_LIMIT, ...planFilters(plan), ...extra,
-      });
+      const requestKeys = new Set<string>();
+      const addRequest = (query: string, extra: Partial<SearchQuery> = {}) => {
+        const request: SearchQuery = { query, scope: 'mailbox', collapseThreads: false, sortBy: 'date', sortOrder: 'desc',
+          limit: QUERY_LIMIT, ...planFilters(plan), ...extra };
+        const key = JSON.stringify(request);
+        if (!requestKeys.has(key)) { requestKeys.add(key); requests.push(request); }
+      };
+      if (requiredTopicGroups.length > 1) addRequest(requiredTopicGroups.map(group => group[0]).join(' ').slice(0, 160));
       for (const query of queries) {
-        if (plan.intent === 'all') addRequest(query);
-        // Legacy mailbox search excludes Sent unless it is requested
-        // explicitly. Discover it for both intents; only the strict intent
-        // filters received messages out of the resulting conversations.
-        for (const folder of sentFolders.slice(0, 3)) addRequest(query, { folderPath: folder.path });
-        for (const alias of aliases.slice(0, 3)) {
-          if (!plan.filters.from || plan.filters.from.toLowerCase() === alias) addRequest(query, { from: alias });
-        }
+        // Mailbox scope already searches Inbox, Sent and Archive. Repeating
+        // every query per alias/folder starved later participant searches.
+        addRequest(query);
       }
+      if (!queries.length && plan.scope?.timeWindow) addRequest('');
+      // Calendar MIME data is not indexed as body text. Inspect one bounded
+      // local-date page to discover generic-subject invites without fetching
+      // unrelated missing bodies or searching all time.
+      if (plan.scope?.invitationIntent && plan.scope.timeWindow) addRequest('');
       for (const participant of participants) {
         // Keep participant discovery inside the project. A generic sender or
         // company match must not consume the result window with other work.
@@ -280,11 +340,29 @@ export async function researchInboxAssistant(
         && (plan.intent !== 'sent' || isSent(email, folders, aliases));
       const score = (email: EmailRecord, body = fullBody(email), threadMatch = false): number => {
         const header = `${email.subject ?? ''} ${email.attachmentNames ?? ''} ${participantText(email)}`;
-        const inHeader = topics.filter(topic => matchesTerm(header, topic)).length;
-        const inBody = topics.filter(topic => matchesTerm(body, topic)).length;
-        if (topics.length && !inHeader && !inBody && !threadMatch) return -1;
+        const subject = `${email.subject ?? ''} ${email.attachmentNames ?? ''}`;
+        const content = `${body}\n${plan.scope?.invitationIntent ? calendarInvitation(email) : ''}`;
+        // The user's own company/domain occurs on nearly every mail header and
+        // in quoted signatures. It is identity metadata, not proof that an
+        // otherwise unrelated message concerns the requested customer/product.
+        // Keep actual brand prose and explicit full-address searches intact.
+        const identityNeutralContent = withoutOwnAddresses(content);
+        const topicInHeader = (term: string) => matchesTerm(ownIdentityTopic(term) ? subject : header, term);
+        const topicInBody = (term: string) => matchesTerm(ownIdentityTopic(term) ? identityNeutralContent : content, term);
+        const searchable = `${header}\n${content}`;
+        const invited = plan.scope?.invitationIntent === true && invitationEvidence(email, body);
+        if (plan.scope?.invitationIntent && !invited) return -1;
+        const meetingTerm = (term: string) => /^(?:meetings?|invites?|invitations?|appointments?)$/i.test(term);
+        if (!threadMatch && plan.scope?.topicGroups.some(group => !group.some(term => matchesTerm(searchable, term) || invited && meetingTerm(term)))) return -1;
+        if (!threadMatch && requiredTopicGroups.some(group => !group.some(term => topicInHeader(term) || topicInBody(term)))) return -1;
+        if (!threadMatch && requireCustomerProduct && !customerProductAnchors.some(term => topicInHeader(term) || topicInBody(term))) return -1;
+        const inHeader = topics.filter(topicInHeader).length;
+        const inBody = topics.filter(topic => topicInBody(topic) || invited && meetingTerm(topic)).length;
+        const reopenedWithoutNewTopic = pinnedIds.has(email.id) && !plannedTopics.length && !plan.scope?.meetingIntent;
+        if (topics.length && !inHeader && !inBody && !threadMatch && !reopenedWithoutNewTopic) return -1;
         const person = people.some(term => matchesTerm(participantText(email), term));
         const authoredByPerson = people.some(term => matchesTerm(`${email.fromAddress} ${email.fromName ?? ''}`, term));
+        if (!topics.length && !person && !threadMatch && !pinnedIds.has(email.id) && !plan.scope?.timeWindow) return -1;
         return inHeader * 80 + inBody * 25 + Number(person) * 40 + Number(authoredByPerson) * 160
           + Number(plan.quoteIntent && /quot|proposal|pricing|price.?bid|commercial/i.test(`${email.subject ?? ''} ${email.attachmentNames ?? ''}`)) * 30
           + Number(pinnedIds.has(email.id)) * 10 + Number(threadMatch) * 5;
@@ -306,16 +384,14 @@ export async function researchInboxAssistant(
         }
         progress({ stage: 'context', status: reopened ? 'done' : 'warning', accountId: account.id, message: `Reopened ${reopened} previously cited ${reopened === 1 ? 'message' : 'messages'}`, detail: account.email });
       }
-      const requestKeys = new Set<string>();
+      if (requests.length > 48) covered.truncated = true;
       for (const request of requests.slice(0, 48)) {
         checkAbort(signal);
-        const key = JSON.stringify(request);
-        if (requestKeys.has(key)) continue;
-        requestKeys.add(key);
         const rows = await mailbox.storage.searchEmails(request);
         if (rows.length >= QUERY_LIMIT) covered.truncated = true;
         for (const email of rows) {
           if (!eligible(email)) continue;
+          if (plan.scope?.invitationIntent && !invitationEvidence(email)) continue;
           found.set(email.id, email);
           relevance.set(email.id, Math.max(relevance.get(email.id) ?? -1, score(email)));
         }
@@ -345,6 +421,7 @@ export async function researchInboxAssistant(
           let added = 0;
           for (const email of members.sort((a, b) => b.date - a.date).slice(0, MAX_THREAD_MEMBERS)) {
             if (!eligible(email)) continue;
+            if (plan.scope?.invitationIntent && !invitationEvidence(email)) continue;
             if (!found.has(email.id)) added++;
             found.set(email.id, email);
             relevance.set(email.id, score(email, fullBody(email), true));
@@ -355,7 +432,17 @@ export async function researchInboxAssistant(
       }
       covered.matchedMessages = found.size;
       progress({ stage: 'search', status: 'done', accountId: account.id, message: `Found ${found.size} matching ${found.size === 1 ? 'message' : 'messages'}`, detail: account.email });
-      const candidates = [...found.values()].sort((a, b) => (relevance.get(b.id) ?? 0) - (relevance.get(a.id) ?? 0) || b.date - a.date);
+      const ranked = [...found.values()].sort((a, b) => (relevance.get(b.id) ?? 0) - (relevance.get(a.id) ?? 0) || b.date - a.date);
+      // Reserve a first message for each discovered conversation before one
+      // busy conversation consumes every source slot.
+      const seenThreads = new Set<string>();
+      const first: EmailRecord[] = []; const additional: EmailRecord[] = [];
+      for (const email of ranked) {
+        const key = email.threadId || email.id;
+        if (seenThreads.has(key)) additional.push(email);
+        else { seenThreads.add(key); first.push(email); }
+      }
+      const candidates = [...first, ...additional];
       if (candidates.length > MAX_MESSAGES_PER_ACCOUNT) covered.truncated = true;
       const selected = candidates.slice(0, MAX_MESSAGES_PER_ACCOUNT);
       const documentCount = selected.filter(email => email.hasAttachments || parseAttachmentNames(email.attachmentNames).length).length;
@@ -398,6 +485,8 @@ export async function researchInboxAssistant(
         }
         if (!eligible(email)) continue;
         if (score(email, body, expandedThreads.has(email.threadId)) < 0) continue;
+        const ics = plan.scope?.invitationIntent ? calendarInvitation(email) : '';
+        if (ics) body += `\n\nCalendar invitation captured from this message (untrusted original calendar text):\n${ics}`;
         if (!body || unavailableOriginal) {
           covered.missingBodies++;
           progress({ stage: 'body', status: 'warning', accountId: account.id, emailId: email.id, message: 'Email content could not be downloaded', detail: email.subject || '(No subject)' });
@@ -435,6 +524,7 @@ export async function researchInboxAssistant(
         let supportedFiles = 0;
         for (const filename of names.slice(0, 30)) {
           checkAbort(signal);
+          if (ics && /\.ics$/i.test(filename)) continue;
           // Inline logos and unsupported files do not consume document slots.
           if (!supported(filename)) { covered.attachmentsSkipped++; continue; }
           if (plan.quoteIntent && /tender|\brfp\b|declaration|invoice|cibil/i.test(filename)

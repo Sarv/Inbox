@@ -118,7 +118,7 @@ function WorkspaceHarness() {
   const [section, setSection] = useState('assistant');
   return <><button onClick={() => setSection('mail')}>Open Inbox test</button><button onClick={() => setSection('settings')}>Open Settings test</button>
     <AssistantWorkspace section={section} onOpenInbox={() => setSection('mail')} onOpenAssistant={() => setSection('assistant')}
-      renderAssistant={props => <InboxAssistant {...props} />}><div>Mail and settings workspace</div></AssistantWorkspace></>;
+      renderAssistant={props => <InboxAssistant initialView="conversation" {...props} />}><div>Mail and settings workspace</div></AssistantWorkspace></>;
 }
 
 describe('Inbox Agent background workspace', () => {
@@ -172,7 +172,7 @@ describe('Inbox Agent background workspace', () => {
 });
 
 async function mount(props = {}) {
-  const view = render(<InboxAssistant {...props} />);
+  const view = render(<InboxAssistant initialView="conversation" {...props} />);
   await settle();
   return view;
 }
@@ -191,6 +191,49 @@ function emit(event: InboxAssistantActivity) {
 }
 
 describe('Inbox Agent', () => {
+  it.each(['current', 'legacy'] as const)('distinguishes %s unverified related mail and exposes missing reads without opening Activity first', async version => {
+    const incomplete = exchange();
+    incomplete.answer = { ...incomplete.answer,
+      text: 'I found related mail, but could not verify an answer from the available content. Open the sources to review them.',
+      ...(version === 'current' ? { sourceStatus: 'related' as const } : {}),
+      coverage: [{ ...incomplete.answer.coverage[0]!, missingBodies: 1, attachmentsSkipped: 2 }],
+      warnings: ['Some AI statements were omitted because their source references or excerpts could not be verified.'] };
+    api.chat.mockImplementation(async id => ok(chat(id, [incomplete])));
+    const view = await mount();
+    expect(view.byLabel('Related emails')?.textContent).toContain('Related emails to inspect');
+    expect(view.byLabel('Answer sources')).toBeNull();
+    const status = view.byLabel('Answer reading status')!;
+    expect(status.textContent).toContain('Needs verification');
+    expect(status.textContent).toContain('1 email body was unavailable');
+    expect(status.textContent).toContain('2 attachments were not read');
+    expect(status.textContent).toContain('Statements that could not be verified were left out');
+    fire(button(view, 'View reading details'), 'click'); await settle();
+    expect(view.find('aside')?.textContent).toContain('Notes and limitations');
+  });
+
+  it('keeps verified citations distinct from related emails without adding routine warnings', async () => {
+    const verified = exchange();
+    verified.answer.sourceStatus = 'verified';
+    api.chat.mockImplementation(async id => ok(chat(id, [verified])));
+    const view = await mount();
+    expect(view.byLabel('Answer sources')).not.toBeNull();
+    expect(view.byLabel('Related emails')).toBeNull();
+    expect(view.byLabel('Answer reading status')).toBeNull();
+  });
+
+  it('shows actual account and search-limit gaps even when the cited facts are verified', async () => {
+    const partial = exchange();
+    partial.answer.sourceStatus = 'verified';
+    partial.answer.coverage = [{ ...partial.answer.coverage[0]!, truncated: true },
+      { ...partial.answer.coverage[0]!, accountId: 'offline', status: 'unavailable' }];
+    api.chat.mockImplementation(async id => ok(chat(id, [partial])));
+    const view = await mount();
+    expect(view.byLabel('Answer sources')).not.toBeNull();
+    expect(view.byLabel('Answer reading status')?.textContent).toContain('1 selected account could not be searched');
+    expect(view.byLabel('Answer reading status')?.textContent).toContain('More matching emails may remain beyond the search limit');
+    expect(view.byLabel('Answer reading status')?.textContent).not.toContain('Needs verification');
+  });
+
   it('starts automatic review explicitly without forwarding manual selections, shows live progress and stops the exact run', async () => {
     const onMailChanged = vi.fn();
     const reviewed = reviewExchange();

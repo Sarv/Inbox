@@ -10,6 +10,7 @@ import { readAssistantAttachment } from '../services/assistant-attachment-reader
 import { changeAssistantReadFlags } from '../services/assistant-mail-actions';
 import { changeAssistantMailLocation } from '../services/assistant-mail-moves';
 import { fetchAssistantMessageBody } from '../services/assistant-mailbox-download';
+import { buildInboxAssistantDashboard } from '../services/inbox-assistant-dashboard';
 import { inboxAssistantHistory } from '../services/inbox-assistant-history';
 import { InboxAssistantService } from '../services/inbox-assistant-service';
 import { callInboxAssistantAI } from '../services/inbox-assistant-usage';
@@ -120,6 +121,10 @@ export function registerInboxAssistantHandlers(): void {
     });
   };
   register('inboxAssistant:accounts', () => service.accounts());
+  register('inboxAssistant:dashboard', value => buildInboxAssistantDashboard(value, {
+    accounts: () => service.accounts(), storage: requireAccountStorage,
+    calendar: { preferences: () => getLocalCalendarService().getPreferences(), snapshot: range => getLocalCalendarService().snapshot(range) },
+  }));
   register('inboxAssistant:chats', () => service.chats());
   register('inboxAssistant:chat', value => service.chat(value));
   register('inboxAssistant:createChat', () => service.createChat());

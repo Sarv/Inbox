@@ -2,13 +2,15 @@ import { randomUUID } from 'node:crypto';
 
 import { waitForAbortableOperation } from '@sarvinbox/core';
 
-import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
+import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
 import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, LocalCalendarPreferences } from '../../src/types/local-calendar';
+import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
 import { isMeetingDraft, meetingAvailabilityRequests, recheckMeetingAvailability } from './assistant-calendar';
 import { applyInboxAssistantReview, parseInboxAssistantReadCommand, prepareInboxAssistantReview, undoInboxAssistantReview, type InboxAssistantActionDeps } from './inbox-assistant-actions';
 import { answerInboxAssistant, planInboxAssistantSearch } from './inbox-assistant-answer';
+import { inboxAssistantCapabilityReply } from './inbox-assistant-capabilities';
 import { buildInboxAssistantContext } from './inbox-assistant-context';
 import { generateInboxAssistantDraft } from './inbox-assistant-draft';
 import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
@@ -20,6 +22,8 @@ export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
   accounts(): InboxAssistantAccount[];
   callAI(prompt: string, signal: AbortSignal, onUsage?: (usage: InboxAssistantAIUsage) => void, options?: { maxOutputTokens?: number }): Promise<string>;
   reviewCacheIdentity?(): string;
+  now?(): number;
+  timeZone?(): string;
   history: InboxAssistantHistoryStore;
   setRead?: InboxAssistantActionDeps['setRead'];
   moveMail?: InboxAssistantActionDeps['moveMail'];
@@ -43,6 +47,21 @@ interface ActiveRun {
 }
 
 const AUTOMATIC_REVIEW_LIMITS = { batches: 10, aiCalls: 20, inputChars: 500_000, durationMs: 10 * 60_000 };
+
+/** A calendar preference failure must not prevent unrelated email research. */
+function researchTimeZone(deps: InboxAssistantServiceDeps): string {
+  for (const resolve of [() => deps.timeZone?.(), () => deps.calendar?.preferences().timeZone,
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone]) {
+    try {
+      const zone = resolve();
+      if (typeof zone !== 'string' || !zone.trim()) continue;
+      new Intl.DateTimeFormat('en', { timeZone: zone }).format(0);
+      return zone;
+    } catch { /* Try the next host-owned timezone source. */ }
+  }
+  return 'UTC';
+}
+
 interface HeldReview {
   chatId: string;
   exchangeId: string;
@@ -216,7 +235,7 @@ export class InboxAssistantService {
     } finally { release(); }
   }
 
-  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal, maxOutputTokens?: number): Promise<string> {
+  private callRunAI(run: ActiveRun, prompt: string, signal: AbortSignal, maxOutputTokens?: number, workload?: InboxAssistantAIWorkload): Promise<string> {
     signal.throwIfAborted();
     if (run.reviewBudget) {
       const budget = run.reviewBudget;
@@ -227,8 +246,12 @@ export class InboxAssistantService {
       budget.calls++;
       budget.inputChars += prompt.length;
     }
+    const trustedWorkload = readInboxAssistantAIWorkload(workload);
     const onUsage = (usage: InboxAssistantAIUsage) => {
-      run.record.usage = aggregateInboxAssistantUsage([...(run.record.usage?.calls ?? []), usage]);
+      // Only the host's actual prepared batch describes workload. Provider
+      // accounting remains unchanged and cannot supply these diagnostic counts.
+      const { workload: _providerWorkload, ...reported } = usage;
+      run.record.usage = aggregateInboxAssistantUsage([...(run.record.usage?.calls ?? []), { ...reported, ...(trustedWorkload ? { workload: trustedWorkload } : {}) }]);
       // Reported accounting can arrive during cancellation. Keep the saved
       // receipt on its originating run without waking or selecting that chat.
       if (run.generation === (this.generations.get(run.chatId) ?? 0)) this.persistRun(run);
@@ -407,13 +430,13 @@ export class InboxAssistantService {
         assertAccount(accountId);
         return this.deps.openMailbox(accountId);
       },
-      callAI: (prompt, stepSignal) => {
+      callAI: (prompt, stepSignal, workload) => {
         const effective = stepSignal ? AbortSignal.any([signal, stepSignal]) : signal;
         if (effective.aborted) throw new Error('Request stopped.');
         const run = [...this.running.values()].find(value => value.controller.signal === signal);
         if (!run) throw new Error('This Inbox Agent request is no longer running.');
         expectedAccounts?.forEach(account => assertAccount(account.id));
-        return this.callRunAI(run, prompt, effective, 4_000);
+        return this.callRunAI(run, prompt, effective, 4_000, workload);
       },
       setRead: async (accountId, ids, read) => {
         assertAccount(accountId);
@@ -701,9 +724,17 @@ export class InboxAssistantService {
     const run = this.beginRequest(request.requestId, request.chatId, controller, 'question', request.question, request.accountIds, randomUUID());
     const report = (progress: InboxAssistantProgress) => this.reportRun(run, progress, onActivity);
     try {
+      const capabilityReply = !request.reviewKind && !request.continueReviewId ? inboxAssistantCapabilityReply(request.question) : undefined;
+      if (capabilityReply) {
+        const exchange: InboxAssistantExchange = { id: run.record.exchangeId!, chatId: request.chatId, question: request.question,
+          accountIds: request.accountIds, createdAt: run.record.startedAt,
+          answer: { text: capabilityReply, sources: [], coverage: [], warnings: [] } };
+        report({ stage: 'complete', status: 'done', message: 'Inbox Agent capabilities', detail: 'No email search or AI request was needed.' });
+        return this.settleRun(run, undefined, exchange)!;
+      }
       if (historyContext) report({ stage: 'context', status: 'done', message: 'Loaded conversation context', detail: 'Earlier questions supply context; original emails and attachments are checked again for facts.' });
       report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
-      const callAI = (prompt: string) => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal); };
+      const callAI = (prompt: string) => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal, 8_000); };
       const command = parseInboxAssistantReadCommand(request.question);
       // Never reinterpret a rejected mark-unread command as low-value triage
       // (which has the opposite flag direction). Only parsed literal scopes can
@@ -760,8 +791,14 @@ export class InboxAssistantService {
         report({ stage: 'complete', status: 'done', message: command ? 'Matching email review ready' : 'Unread review ready', detail: `${review.items.length} conversations reviewed.` });
         return this.settleRun(run, undefined, exchange)!;
       }
-      const plan = await planInboxAssistantSearch(context.contextualizedQuestion, callAI, {
+      const timeZone = researchTimeZone(this.deps);
+      const plan = await planInboxAssistantSearch(context.contextualizedQuestion, prompt => {
+        assertCurrent();
+        return this.callRunAI(run, prompt, controller.signal, 1_600);
+      }, {
         historyContext, topicTerms: context.topicTerms, participantTerms: context.participantTerms, intent: context.intent,
+        nowMs: this.deps.now?.() ?? Date.now(),
+        timeZone,
       });
       assertCurrent();
       const research = await waitForAbortableOperation(researchInboxAssistant(selected, plan, this.deps, controller.signal, {
@@ -769,22 +806,25 @@ export class InboxAssistantService {
       }), controller.signal);
       assertCurrent();
       report({ stage: 'answer', status: 'running', message: 'Preparing answer from sources', detail: `${research.evidence.length} source excerpts collected.` });
-      const grounded = await answerInboxAssistant(request.question, research.evidence, research.coverage, callAI, historyContext);
+      const answerEvidence = research.evidence.map(source => ({ ...source, dateTimeZone: timeZone }));
+      const grounded = await answerInboxAssistant(request.question, answerEvidence, research.coverage, callAI, historyContext, plan.scope);
       assertCurrent();
       const used = new Set(grounded.sourceIds);
-      // When a model cannot verify a fact, offer the retrieved originals rather
-      // than inventing an answer or hiding useful source links.
-      const sources = (used.size ? research.evidence.filter(source => used.has(source.id)) : research.evidence.slice(0, 12))
+      // Unverified originals remain inspectable as explicitly related mail.
+      // They are never presented as sources supporting a successful answer.
+      const sources = (used.size ? research.evidence.filter(source => used.has(source.id)) : research.evidence.slice(0, 6))
         .map(({ text: _text, ...source }) => ({ ...source,
           excerpt: grounded.facts.flatMap(fact => fact.quotes).find(quote => quote.sourceId === source.id)?.text.slice(0, 1000) || source.excerpt,
         }));
       const exchange: InboxAssistantExchange = {
         id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt,
-        answer: { text: grounded.answer, sources, coverage: research.coverage,
+        answer: { text: grounded.answer, sources, sourceStatus: used.size ? 'verified' : 'related', coverage: research.coverage,
           warnings: grounded.warnings },
       };
       assertCurrent();
-      report({ stage: 'complete', status: 'done', message: 'Answer ready', detail: `${sources.length} linked ${sources.length === 1 ? 'source' : 'sources'}.` });
+      report({ stage: 'complete', status: used.size ? 'done' : 'warning', message: used.size ? 'Answer verified against sources' : sources.length ? 'Related emails found; answer not verified' : 'No supporting email found',
+        detail: used.size ? `${sources.length} cited ${sources.length === 1 ? 'source' : 'sources'}.`
+          : sources.length ? 'Related originals are available to inspect. They do not support a verified answer.' : 'Check the search coverage and account scope before concluding that no email exists.' });
       return this.settleRun(run, undefined, exchange)!;
     } catch (error) {
       if (!controller.signal.aborted && generation === (this.generations.get(request.chatId) ?? 0)) {

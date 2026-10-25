@@ -11,10 +11,12 @@ interface AssistantSourcePaneProps {
   onClose: () => void;
   onOpenAttachment?: (target: InboxAssistantSourceTarget & { filename: string }) => void;
   autoMarkRead?: boolean;
+  /** A new request opens the shared Reply all composer after this source loads. */
+  replyAllRequestId?: number;
 }
 
 /** The normal mail reader, embedded beside the conversation rather than copied. */
-export function AssistantSourcePane({ source, onClose, onOpenAttachment, autoMarkRead = true }: AssistantSourcePaneProps) {
+export function AssistantSourcePane({ source, onClose, onOpenAttachment, autoMarkRead = true, replyAllRequestId }: AssistantSourcePaneProps) {
   const sourceKey = JSON.stringify([source.accountId, source.emailId, source.filename ?? '']);
   const [resolved, setResolved] = useState<{ key: string; target: InboxAssistantSourceTarget } | null>(null);
   const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
@@ -94,7 +96,7 @@ export function AssistantSourcePane({ source, onClose, onOpenAttachment, autoMar
       {error ? (
         <div role="alert" className="m-4 space-y-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{error}</p><button type="button" onClick={() => setRetry(value => value + 1)} className="font-medium underline">Try again</button></div>
       ) : target && ownedThread ? (
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><MailDetailWithPanels key={`${target.accountId}:${target.threadId}`} onBack={close} threadOnly autoMarkRead={autoMarkRead} /></div>
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><MailDetailWithPanels key={`${target.accountId}:${target.threadId}`} onBack={close} threadOnly autoMarkRead={autoMarkRead} replyAllRequest={replyAllRequestId === undefined ? undefined : { id: replyAllRequestId, accountId: target.accountId, emailId: target.emailId }} /></div>
       ) : !target || loadingThread ? (
         <p role="status" className="flex items-center justify-center gap-2 p-8 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Opening the original email…</p>
       ) : (

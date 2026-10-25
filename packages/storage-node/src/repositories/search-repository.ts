@@ -164,7 +164,7 @@ export class SearchRepository extends BaseRepository {
 
       // bm25 weights: email_id(0) > subject(10) > from_address(5) > from_name(3) > to(3) > cc(2) > attachments(2) > body(1)
       sql = `
-        SELECT ${this.emailSelect()}, ${this.threadMeta()},
+        SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()},
                bm25(emails_fts, 0, 10, 5, 3, 3, 2, 2, 1) as relevance_score
         FROM emails_fts
         JOIN emails ON emails.id = emails_fts.email_id
@@ -172,7 +172,7 @@ export class SearchRepository extends BaseRepository {
       `;
       params.push(ftsQuery);
     } else {
-      sql = `SELECT ${this.emailSelect()}, ${this.threadMeta()} FROM emails WHERE 1=1`;
+      sql = `SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()} FROM emails WHERE 1=1`;
     }
 
     // All folder/category/field/date/size filters (shared with count()).
@@ -277,7 +277,7 @@ export class SearchRepository extends BaseRepository {
         PARTITION BY search_thread ORDER BY ${order('search_matches')}
       ) AS search_position FROM search_matches
     ), search_page AS (${page})
-    SELECT ${this.emailSelect()}, ${this.threadMeta()}, search_matches.relevance_score
+    SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()}, search_matches.relevance_score
     FROM search_page JOIN search_matches ON search_matches.search_thread = search_page.search_thread
     JOIN emails ON emails.id = search_matches.search_id
     ORDER BY ${order('search_page', true)}, ${order('search_matches')}`;
@@ -544,7 +544,7 @@ export class SearchRepository extends BaseRepository {
    */
   private searchWithLike(query: SearchQuery): EmailRecord[] {
     if (query.collapseThreads) return this.searchThreads(query, true);
-    let sql = `SELECT ${this.emailSelect()}, ${this.threadMeta()} FROM emails WHERE 1=1`;
+    let sql = `SELECT ${this.emailSelect('emails', query.headersOnly)}, ${this.threadMeta()} FROM emails WHERE 1=1`;
     const params: any[] = [];
 
     sql += this.appendFilters(query, params, { likeOnly: true });

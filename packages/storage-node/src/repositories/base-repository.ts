@@ -5,7 +5,7 @@ import type Database from 'better-sqlite3';
 
 import { reportSlowQuery } from '../slow-query-reporter';
 
-import { areBodyLengthsReady } from './body-metrics';
+import { areBodyLengthsReady, rawBodyLengthExpression } from './body-metrics';
 import { bodySelectColumns } from './body-storage';
 
 const logger = createLogger('base-repository');
@@ -72,13 +72,15 @@ export abstract class BaseRepository {
    * qualified names keep the correlated body lookup from resolving `id` against a
    * joined table, which would return another row's body.
    */
-  protected emailSelect(alias = 'emails'): string {
+  protected emailSelect(alias = 'emails', headersOnly = false): string {
     const db = this.db;
     if (this._emailSelectDb !== db) {
       this._emailSelectDb = db;
       this._emailSelectCache.clear();
     }
-    const cached = this._emailSelectCache.get(alias);
+    const lengthsReady = headersOnly && this.bodyLengthsReady();
+    const cacheKey = headersOnly ? `${alias}:headers:${lengthsReady}` : alias;
+    const cached = this._emailSelectCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
     // Double-quote every column: some (e.g. `references`) are SQLite reserved
@@ -86,10 +88,13 @@ export abstract class BaseRepository {
     // still resolves in the row mappers.
     const cols = (db.prepare('PRAGMA table_info(emails)').all() as Array<{ name: string }>)
       .map((c) => c.name)
-      .filter((n) => n !== 'clean_body' && n !== 'raw_body')
+      .filter((n) => n !== 'clean_body' && n !== 'raw_body' && (!headersOnly || n !== 'calendar_ics'))
       .map((n) => (alias ? `${alias}."${n}"` : `"${n}"`));
-    const sql = `${cols.join(', ')}, ${bodySelectColumns(alias)}`;
-    this._emailSelectCache.set(alias, sql);
+    const bodyColumns = headersOnly
+      ? `'' AS clean_body, '' AS raw_body, (${rawBodyLengthExpression(alias, lengthsReady)} > 0) AS has_body`
+      : bodySelectColumns(alias);
+    const sql = `${cols.join(', ')}, ${bodyColumns}`;
+    this._emailSelectCache.set(cacheKey, sql);
     return sql;
   }
 

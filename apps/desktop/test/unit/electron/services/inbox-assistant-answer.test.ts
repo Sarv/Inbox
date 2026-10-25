@@ -6,6 +6,7 @@ import {
   buildInboxAssistantSearchPlanPrompt,
   fallbackInboxAssistantSearchPlan,
   inboxAssistantCoverageWarnings,
+  inboxAssistantEvidenceText,
   parseInboxAssistantAnswer,
   parseInboxAssistantSearchPlan,
   planInboxAssistantSearch,
@@ -66,6 +67,39 @@ describe('Inbox Agent read-only search planning', () => {
     } }), question).filters).toEqual({ after: '2026-09-01', before: '2026-10-01', to: 'procurement@tcs.example', hasAttachment: true });
   });
 
+  it('keeps separately requested company and product anchors while grouping an explicit acronym alias', async () => {
+    const question = 'What quote did I send to TCS for Sarv User Directory (UD) licensing?';
+    const result = await planInboxAssistantSearch(question, vi.fn().mockResolvedValue(plan({
+      entityTerms: ['TCS', 'Tata Consultancy Services', 'Sarv', 'User Directory', 'UD'],
+      topicTerms: ['TCS', 'Sarv User Directory', 'UD'],
+    })));
+    expect(result.requiredTopicGroups).toEqual([['TCS'], ['Sarv User Directory', 'UD']]);
+    const fallback = await planInboxAssistantSearch(question, vi.fn().mockRejectedValue(new Error('unavailable')));
+    expect(fallback.requiredTopicGroups).toEqual([['TCS'], ['Sarv User Directory', 'UD']]);
+    const generic = await planInboxAssistantSearch('What quote did I send to TCS?', vi.fn().mockResolvedValue(plan()));
+    expect(generic.requiredTopicGroups).toBeUndefined();
+  });
+
+  it('does not turn model-invented products or a requested team member into required literal topics', async () => {
+    const result = await planInboxAssistantSearch('What did Prakash submit for EPFO?', vi.fn().mockResolvedValue(plan({
+      topicTerms: ['EPFO', 'Server licensing'], entityTerms: ['EPFO', 'Prakash'], participantTerms: ['Prakash'],
+    })));
+    expect(result.requiredTopicGroups).toBeUndefined();
+  });
+
+  it.each(['Compare TCS User Directory and SIP proposals', 'TCS quotes for User Directory or SIP', 'TCS quotes except User Directory'])('does not invent an AND constraint for alternatives, comparisons or exclusions: %s', async question => {
+    const result = await planInboxAssistantSearch(question, vi.fn().mockResolvedValue(plan({
+      entityTerms: ['TCS', 'User Directory', 'SIP'], topicTerms: ['TCS', 'User Directory', 'SIP'],
+    })));
+    expect(result.requiredTopicGroups).toBeUndefined();
+  });
+
+  it('does not treat a search year as a product anchor', async () => {
+    const result = await planInboxAssistantSearch('What quote did I send to TCS in 2026?', vi.fn().mockResolvedValue(plan({ entityTerms: ['TCS', '2026'] })));
+    expect(result.requiredTopicGroups).toBeUndefined();
+    expect(() => parseInboxAssistantSearchPlan(plan({ requiredTopicGroups: [['TCS'], ['invented product']] }), question)).toThrow();
+  });
+
   it('validates separate literal topic and participant hints without treating a person as the project', () => {
     const parsed = parseInboxAssistantSearchPlan(plan({ topicTerms: ['EPFO'], participantTerms: ['Prakash'] }), 'What did Prakash submit for EPFO?');
     expect(parsed.topicTerms).toEqual(['EPFO']);
@@ -87,6 +121,62 @@ describe('Inbox Agent read-only search planning', () => {
     const result = parseInboxAssistantSearchPlan(`<think>PRIVATE SEARCH REASONING</think>\n<analysis>MORE PRIVATE REASONING</analysis>\n${plan()}`, question);
     expect(result.queries).toContain('TCS');
     expect(JSON.stringify(result)).not.toContain('PRIVATE');
+  });
+
+  it('accepts a complete leading Gemma thought channel while rejecting unfinished or tool-control output', () => {
+    const raw = `<|channel>thought\nPRIVATE REASONING {not a plan}\n<channel|>\n\`\`\`json\n${plan()}\n\`\`\``;
+    expect(parseInboxAssistantSearchPlan(raw, question).queries).toContain('TCS');
+    for (const invalid of [`<|channel>thought PRIVATE ${plan()}`, `<|tool_call>${plan()}<tool_call|>`, `<|channel>analysis ${plan()}`]) {
+      expect(() => parseInboxAssistantSearchPlan(invalid, question)).toThrow();
+    }
+  });
+
+  it('retains host-local today and meeting terms when model planning fails or guesses another date', async () => {
+    const options = { nowMs: Date.UTC(2026, 9, 22, 22), timeZone: 'Asia/Kolkata' };
+    const query = 'is any meetings invite today';
+    const failed = await planInboxAssistantSearch(query, vi.fn().mockResolvedValue('not JSON'), options);
+    expect(failed.filters).toEqual({ after: '2026-10-23', before: '2026-10-24' });
+    expect(failed.scope).toMatchObject({ meetingIntent: true, timeWindow: { timeZone: 'Asia/Kolkata' } });
+    expect(failed.queries).not.toContain('any');
+    expect(failed.queries).not.toContain('today');
+    expect(failed.queries).toContain('meeting');
+    const guessed = await planInboxAssistantSearch(query, vi.fn().mockResolvedValue(plan({
+      queries: ['meeting'], entityTerms: [], filters: { after: '2020-01-01', before: '2020-01-02' },
+    })), options);
+    expect(guessed.filters).toEqual(failed.filters);
+    expect(guessed.scope).toEqual(failed.scope);
+  });
+
+  it('drops model-invented date, participant-address and attachment restrictions from a company quote search', async () => {
+    const callAI = vi.fn().mockResolvedValue(plan({ filters: {
+      after: '2026-10-01', before: '2026-10-02', from: 'invented@tcs.example', to: 'invented-buyer@tcs.example', hasAttachment: true,
+    } }));
+    const result = await planInboxAssistantSearch('What quote did I send to TCS? Read the attachment too.', callAI);
+    expect(result.filters).toEqual({});
+    expect(result.intent).toBe('sent');
+    expect(result.entityTerms).toContain('TCS');
+    const wording = await planInboxAssistantSearch('May I see the TCS quote with validity of 30 days?', callAI);
+    expect(wording.filters).toEqual({});
+  });
+
+  it('retains user-requested calendar dates and literal from/to addresses but not guessed addresses', async () => {
+    const filters = { after: '2025-01-01', before: '2026-01-01', from: 'alice@example.test', to: 'bob@example.test' };
+    const question = 'Find emails from alice@example.test to bob@example.test in 2025';
+    expect((await planInboxAssistantSearch(question, vi.fn().mockResolvedValue(plan({ filters })))).filters).toEqual(filters);
+    const guessed = await planInboxAssistantSearch(question, vi.fn().mockResolvedValue(plan({ filters: { ...filters, from: 'carol@example.test' } })));
+    expect(guessed.filters.from).toBe('alice@example.test');
+    expect(guessed.filters.to).toBe('bob@example.test');
+    const failed = await planInboxAssistantSearch('Find emails from alice@example.test to bob@example.test', vi.fn().mockResolvedValue('not JSON'));
+    expect(failed.filters).toEqual({ from: 'alice@example.test', to: 'bob@example.test' });
+  });
+
+  it.each([
+    ['Find emails with attachments', true],
+    ['Find emails without attachments', false],
+    ['Find emails with no attachments', false],
+  ])('uses only an explicit attachment restriction and keeps its requested direction: %s', async (question, expected) => {
+    const result = await planInboxAssistantSearch(question, vi.fn().mockResolvedValue(plan({ filters: { hasAttachment: !expected } })));
+    expect(result.filters.hasAttachment).toBe(expected);
   });
 
   it.each([
@@ -123,10 +213,55 @@ describe('Inbox Agent read-only search planning', () => {
     expect(callAI.mock.calls[0][0]).toContain('2026-10-15');
     expect(callAI.mock.calls[0][0]).toContain('PREVIOUS_CONVERSATION_UNTRUSTED_JSON');
     expect(buildInboxAssistantSearchPlanPrompt(question)).toContain('READ-ONLY');
+    expect(buildInboxAssistantSearchPlanPrompt(question, '2026-10-23', 'Asia/Kolkata')).toContain('Today (Asia/Kolkata calendar date');
+    expect(buildInboxAssistantSearchPlanPrompt(question, '2026-10-23', 'Asia/Kolkata')).not.toContain('Today (UTC date');
   });
 });
 
 describe('Inbox Agent grounded answers', () => {
+  it('validates a host-local date and time across the previous UTC day using the exact trusted header', () => {
+    const source = makeSource({ date: Date.UTC(2026, 9, 22, 18, 45) / 1000, dateTimeZone: 'Asia/Kolkata',
+      text: 'Planning review invitation. Fee INR 12,000. GST 18%.' });
+    const local = 'Local date/time (Asia/Kolkata): 2026-10-23T00:15:00+05:30';
+    expect(inboxAssistantEvidenceText(source)).toContain('Date: 2026-10-22T18:45:00.000Z');
+    expect(inboxAssistantEvidenceText(source)).toContain(local);
+    const result = parseInboxAssistantAnswer(answer([
+      { text: 'The invitation was received on 2026-10-23 at 00:15; the fee is INR 12,000 with GST 18%.', sourceIds: ['S1'], quotes: [
+        { sourceId: 'S1', text: local }, { sourceId: 'S1', text: source.text },
+      ] },
+      fact('The invitation was received on 2026-10-24 at 00:15.', 'S1', local),
+      fact('The invitation was received on 2026-10-23 at 00:00.', 'S1', local),
+      fact('The invitation was received on 2026-10-23 at 00:16.', 'S1', local),
+      fact('The invitation was received at 2026-10-23T00:15:00+04:30.', 'S1', local),
+      { text: 'The invitation was received on 2026-10-23 at 00:15; the fee is INR 12,001.', sourceIds: ['S1'], quotes: [
+        { sourceId: 'S1', text: local }, { sourceId: 'S1', text: source.text },
+      ] },
+    ]), [source], [makeCoverage()]);
+    expect(result.facts).toHaveLength(1);
+    expect(result.answer).toContain('2026-10-23 at 00:15');
+    expect(result.facts[0]!.quotes[0]!.text).toBe(local);
+    expect(result.answer).not.toContain('12,001');
+  });
+
+  it.each([undefined, '', 'Invalid/Timezone', 'UTC\nInjected: header'])('omits an invalid or absent host timezone without changing the UTC header: %s', dateTimeZone => {
+    const source = makeSource({ dateTimeZone });
+    const represented = inboxAssistantEvidenceText(source);
+    expect(represented).toContain('Date: 2026-10-01T00:00:00.000Z');
+    expect(represented).not.toContain('Local date/time');
+    expect(parseInboxAssistantAnswer(answer([fact('The date is 2026-10-02.', 'S1', 'Local date/time (Invalid/Timezone): 2026-10-02T00:00:00Z')]), [source], [makeCoverage()]).facts).toEqual([]);
+  });
+
+  it('retains the trusted local header in the bounded repair context and quote validator', async () => {
+    const source = makeSource({ date: Date.UTC(2026, 9, 22, 18, 45) / 1000, dateTimeZone: 'Asia/Kolkata' });
+    const local = 'Local date/time (Asia/Kolkata): 2026-10-23T00:15:00+05:30';
+    const callAI = vi.fn().mockResolvedValueOnce(answer([]))
+      .mockResolvedValueOnce(answer([fact('The quotation was sent on 2026-10-23 at 00:15.', 'S1', local)]));
+    const result = await answerInboxAssistant(question, [source], [makeCoverage()], callAI);
+    expect(result.facts).toHaveLength(1);
+    expect(callAI.mock.calls[0][0]).toContain(local);
+    expect(callAI.mock.calls[1][0]).toContain(local);
+  });
+
   it('formats Unix-second email timestamps as their actual send date', () => {
     const prompt = buildInboxAssistantAnswerPrompt(question, [latestQuote], [makeCoverage()]);
     expect(prompt).toContain('2026-10-08T00:00:00.000Z');
@@ -198,6 +333,51 @@ describe('Inbox Agent grounded answers', () => {
     const result = parseInboxAssistantAnswer(answer([fact(claim, 'S1', quote)]), [source], [makeCoverage()]);
     expect(result.facts).toHaveLength(1);
     expect(result.answer).toContain(claim);
+  });
+
+  it.each([
+    ['Total ₹8.2 lakh crore.', 'The quotation is ₹8.2 lakh crore.'],
+    ['Total ₹8.2 lakh crore.', 'The quotation is INR 8,200,000,000,000.'],
+    ['Total Rs. 8.2 lacs Cr.', 'The quotation is ₹82,00,00,00,00,000.'],
+    ['Total 8.2 lakh-crore rupees.', 'The quotation is INR 8,200,000,000,000.'],
+    ['Total INR 8,200,000,000,000.', 'The quotation is ₹8.2 lakh crore.'],
+  ])('verifies the complete lakh-crore monetary scale: %s', (quote, claim) => {
+    const source = makeSource({ text: quote });
+    const result = parseInboxAssistantAnswer(answer([fact(claim, 'S1', quote)]), [source], [makeCoverage()]);
+    expect(result.facts).toHaveLength(1);
+    expect(result.answer).toContain(claim);
+    expect(result.facts[0]!.quotes[0]!.text).toBe(quote);
+  });
+
+  it('rejects truncated compound scales, changed magnitudes and changed currency', () => {
+    const quote = 'Total ₹8.2 lakh crore.';
+    const source = makeSource({ text: quote });
+    const result = parseInboxAssistantAnswer(answer([
+      fact('The quotation is INR 820,000.', 'S1', quote),
+      fact('The quotation is INR 82,000,000.', 'S1', quote),
+      fact('The quotation is INR 820,000,000,000.', 'S1', quote),
+      fact('The quotation is INR 8,200,000,000,001.', 'S1', quote),
+      fact('The quotation is ₹8.2 lakh.', 'S1', quote),
+      fact('The quotation is ₹8.2 crore.', 'S1', quote),
+      fact('The quotation is USD 8,200,000,000,000.', 'S1', quote),
+      fact('The quotation is INR 8,200,000,000,000.', 'S1', quote),
+    ]), [source], [makeCoverage()]);
+    expect(result.facts).toHaveLength(1);
+    expect(result.facts[0]!.text).toBe('The quotation is INR 8,200,000,000,000.');
+    expect(result.warnings.join(' ')).toContain('omitted');
+  });
+
+  it.each([
+    ['Total ₹8.2 crore lakh.', 'The quotation is INR 82,000,000.'],
+    ['Total ₹8.2 lakh lakh.', 'The quotation is INR 820,000.'],
+    ['Total ₹8.2 lakh crore million.', 'The quotation is INR 8,200,000,000,000.'],
+    ['Total ₹8.2 crore lakh.', 'The quotation is ₹8.2 crore lakh.'],
+    ['Total INR 82,000,000.', 'The quotation is ₹8.2 crore lakh.'],
+  ])('fails closed instead of validating only the first unsupported monetary unit: %s', (quote, claim) => {
+    const source = makeSource({ text: quote });
+    const result = parseInboxAssistantAnswer(answer([fact(claim, 'S1', quote)]), [source], [makeCoverage()]);
+    expect(result.facts).toEqual([]);
+    expect(result.sourceIds).toEqual([]);
   });
 
   it('rejects changed monetary magnitude and keeps unrelated references and tax figures strict', () => {
@@ -346,15 +526,113 @@ describe('Inbox Agent grounded answers', () => {
     expect(callAI).toHaveBeenCalledTimes(2);
   });
 
-  it('does not repair a legitimate empty answer or a fully verified answer', async () => {
+  it('does not repair an empty answer with unrelated evidence or a fully verified answer', async () => {
     const noAnswer = vi.fn().mockResolvedValue(answer([]));
-    expect((await answerInboxAssistant(question, [firstQuote], [makeCoverage()], noAnswer)).facts).toEqual([]);
+    expect((await answerInboxAssistant('What quote did I send to Globex?', [firstQuote], [makeCoverage()], noAnswer)).facts).toEqual([]);
     expect(noAnswer).toHaveBeenCalledOnce();
     const verified = vi.fn().mockResolvedValue(answer([
       fact('The quotation is INR 100,000.', 'S1', firstQuote.text),
     ]));
     expect((await answerInboxAssistant(question, [firstQuote], [makeCoverage()], verified)).facts).toHaveLength(1);
     expect(verified).toHaveBeenCalledOnce();
+  });
+
+  it.each(['Here is the answer: {"facts":[]}', '{"answer":"not the required schema"}', '<|channel>thought PRIVATE UNFINISHED'])('repairs a malformed response once without replaying raw reasoning: %s', async invalid => {
+    const callAI = vi.fn().mockResolvedValueOnce(invalid)
+      .mockResolvedValueOnce(answer([fact('The quotation is INR 100,000.', 'S1', firstQuote.text)]));
+    const result = await answerInboxAssistant(question, [firstQuote], [makeCoverage()], callAI);
+    expect(result.answer).toBe('The quotation is INR 100,000. [S1]');
+    expect(callAI).toHaveBeenCalledTimes(2);
+    expect(callAI.mock.calls[1][0]).toContain('did not satisfy the JSON contract');
+    expect(callAI.mock.calls[1][0]).not.toContain(invalid);
+    expect(result.answer).not.toContain('PRIVATE');
+  });
+
+  it('repairs an empty draft when relevant quotation evidence exists', async () => {
+    const callAI = vi.fn().mockResolvedValueOnce(answer([]))
+      .mockResolvedValueOnce(answer([fact('The quotation is INR 100,000 excluding GST.', 'S1', firstQuote.text)]));
+    const result = await answerInboxAssistant(question, [firstQuote], [makeCoverage()], callAI);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    expect(result.answer).toContain('INR 100,000 excluding GST');
+  });
+
+  it('uses an existing conversation topic for a terse follow-up repair without treating a prior answer as evidence', async () => {
+    const callAI = vi.fn().mockResolvedValueOnce(answer([]))
+      .mockResolvedValueOnce(answer([fact('The quotation is INR 100,000.', 'S1', firstQuote.text)]));
+    const history = JSON.stringify({ turns: [{ question: 'What quote did I send to TCS?', answerContextOnly: 'A fabricated earlier price INR 999999.' }] });
+    const result = await answerInboxAssistant('How much?', [firstQuote], [makeCoverage()], callAI, history);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    expect(result.answer).toBe('The quotation is INR 100,000. [S1]');
+    expect(result.answer).not.toContain('999999');
+  });
+
+  it('supplies trusted local-day scope without rewriting the UTC source timestamp', () => {
+    const scope = fallbackInboxAssistantSearchPlan('meeting invites today', { nowMs: Date.UTC(2026, 9, 22, 22), timeZone: 'Asia/Kolkata' }).scope;
+    const source = makeSource({ date: Date.UTC(2026, 9, 22, 18, 45) / 1000, subject: 'Meeting invitation', text: 'Planning review invitation.' });
+    const prompt = buildInboxAssistantAnswerPrompt('meeting invites today', [source], [makeCoverage()], undefined, scope);
+    expect(prompt).toContain('HOST_SEARCH_SCOPE_JSON');
+    expect(prompt).toContain('Asia/Kolkata');
+    expect(prompt).toContain('2026-10-23');
+    expect(prompt).toContain('2026-10-22T18:45:00.000Z');
+    expect(prompt).toContain('A locally-today message can have the previous UTC date');
+  });
+
+  it('repairs an empty meeting answer only from relevant meeting evidence', async () => {
+    const meeting = makeSource({ subject: 'Meeting invitation', text: 'Meeting invitation: planning review. Join the planning review call.' });
+    const callAI = vi.fn().mockResolvedValueOnce(answer([]))
+      .mockResolvedValueOnce(answer([fact('There is an invitation for a planning review call.', 'S1', meeting.text)]));
+    expect((await answerInboxAssistant('is any meetings invite today', [meeting], [makeCoverage()], callAI)).facts).toHaveLength(1);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    const unrelated = vi.fn().mockResolvedValue(answer([]));
+    expect((await answerInboxAssistant('is any meetings invite today', [firstQuote], [makeCoverage()], unrelated)).facts).toEqual([]);
+    expect(unrelated).toHaveBeenCalledOnce();
+  });
+
+  it('retains verified initial facts if the bounded repair is malformed', async () => {
+    const callAI = vi.fn().mockResolvedValueOnce(answer([
+      fact('The quotation is INR 100,000.', 'S1', firstQuote.text),
+      fact('The quotation is INR 999,999.', 'S1', firstQuote.text),
+    ])).mockResolvedValueOnce('<|channel>thought PRIVATE UNFINISHED');
+    const result = await answerInboxAssistant(question, [firstQuote], [makeCoverage()], callAI);
+    expect(result.answer).toBe('The quotation is INR 100,000. [S1]');
+    expect(result.warnings.join(' ')).toContain('omitted');
+    expect(callAI).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an honest fallback after malformed or empty repair responses and does not retry again', async () => {
+    for (const repaired of ['invalid JSON', answer([])]) {
+      const callAI = vi.fn().mockResolvedValueOnce('invalid JSON').mockResolvedValueOnce(repaired);
+      const result = await answerInboxAssistant(question, [firstQuote], [makeCoverage()], callAI);
+      expect(result.facts).toEqual([]);
+      expect(result.answer).toContain('could not verify an answer');
+      expect(callAI).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it('bounds repair evidence and excludes sources outside the original submitted context', async () => {
+    const sources = Array.from({ length: 6 }, (_, index) => makeSource({ id: `S${index + 1}`, text: `${firstQuote.text}\n${'x'.repeat(24_100)}` }));
+    sources.push(makeSource({ id: 'S99', text: 'NEVER SUBMITTED TO MODEL. TCS quotation INR 999999.' }));
+    const callAI = vi.fn().mockResolvedValueOnce(answer([])).mockResolvedValueOnce(answer([]));
+    await answerInboxAssistant(question, sources, [makeCoverage()], callAI);
+    expect(callAI).toHaveBeenCalledTimes(2);
+    expect(callAI.mock.calls[0][0].length).toBeGreaterThan(100_000);
+    expect(callAI.mock.calls[1][0].length).toBeLessThan(40_000);
+    expect(callAI.mock.calls[1][0]).not.toContain('NEVER SUBMITTED TO MODEL');
+  });
+
+  it('accepts a provably equivalent offset timestamp without relaxing amounts, tax or changed times', () => {
+    const quote = 'Meeting time: 2026-10-23T09:30:00.000Z. Fee INR 12,000. GST 18%. Reference MT-15.';
+    const source = makeSource({ text: quote });
+    const result = parseInboxAssistantAnswer(answer([
+      fact('The meeting time is 2026-10-23T15:00:00+05:30; the fee is INR 12,000 with GST 18%.', 'S1', quote),
+      fact('The meeting time is 2026-10-23T09:00:00Z.', 'S1', quote),
+      fact('The meeting time is 2026-10-23T15:00:00+05:30; the fee is INR 12,001.', 'S1', quote),
+      fact('The meeting time is 2026-10-23T15:00:00+05:30 with GST 28%.', 'S1', quote),
+      fact('The meeting date is 2026-23-10.', 'S1', quote),
+    ]), [source], [makeCoverage()]);
+    expect(result.facts).toHaveLength(1);
+    expect(result.answer).toContain('2026-10-23T15:00:00+05:30');
+    expect(result.answer).not.toContain('12,001');
   });
 
   it('repairs rejected chronology and payment terms while retaining and formatting a verified workbook amount', async () => {
@@ -453,6 +731,18 @@ describe('Inbox Agent grounded answers', () => {
     expect(result.warnings.join(' ')).toContain('no locally available body');
   });
 
+  it('strips a complete Gemma thought channel while preserving literal control strings in source excerpts', () => {
+    const source = makeSource({ text: 'The literal marker <|channel>thought SOURCE TEXT <channel|> appears in this message.' });
+    const raw = `<|channel>thought\nPRIVATE PROVIDER REASONING\n<channel|>${answer([fact('The message contains a literal marker.', 'S1', source.text)])}`;
+    const result = parseInboxAssistantAnswer(raw, [source], [makeCoverage()]);
+    expect(result.facts).toHaveLength(1);
+    expect(result.facts[0]!.quotes[0]!.text).toBe(source.text);
+    expect(result.answer).not.toContain('PRIVATE');
+    const invalid = parseInboxAssistantAnswer(answer([fact('<|channel>thought PRIVATE <channel|> The quotation is INR 100,000.', 'S1', firstQuote.text)]), [firstQuote], [makeCoverage()]);
+    expect(invalid.facts).toEqual([]);
+    expect(() => parseInboxAssistantAnswer(`<|tool_call>${answer([])}<tool_call|>`, [source], [makeCoverage()])).toThrow();
+  });
+
   it('never renders reasoning markup embedded in a model fact or an incomplete reasoning-only response', () => {
     const result = parseInboxAssistantAnswer(answer([
       fact('<think>Private reasoning</think> The quotation is INR 100,000.', 'S1', firstQuote.text),
@@ -472,6 +762,62 @@ describe('Inbox Agent grounded answers', () => {
     expect(prompt).toContain('No external browsing, tool calls, deletion, sending');
     expect(prompt).toContain('PREVIOUS_CONVERSATION_UNTRUSTED_JSON');
     expect(prompt).toContain(JSON.stringify(source.text).slice(1, -1));
+  });
+
+  it('substantially reduces repeated thread payload while retaining unique turns and valid canonical/carrier citations', () => {
+    const original = 'Quotation Q-204. Total INR 270,000 excluding GST. Valid for 21 days.\n'
+      + 'The directory deployment includes migration, support and phased onboarding. '.repeat(40)
+      + '\nRegards, Alice\nSolutions Director\nPhone: +91 90000 00123';
+    const quoteHeader = 'On Thu, 1 Oct 2026 at 10:00, Alice <alice@example.test> wrote:\n';
+    const sources = Array.from({ length: 10 }, (_, index) => makeSource({ id: `S${index + 1}`,
+      emailId: `message-${index}`, threadId: 'directory-thread',
+      text: index === 9 ? original : `Unique authored reply ${index}: rollout stage ${index}.\n\n${quoteHeader}${original}` }));
+    const before = buildInboxAssistantAnswerPrompt(question, sources.map(source => ({ ...source, threadId: undefined })), [makeCoverage()]);
+    const after = buildInboxAssistantAnswerPrompt(question, sources, [makeCoverage()]);
+    expect(after.length).toBeLessThan(before.length * 0.5);
+    expect(after).toContain('EVIDENCE_PACKING_JSON');
+    const packedLine = after.split('\n').find(line => line.startsWith('UNTRUSTED_EVIDENCE_JSON: '))!;
+    const packed = JSON.parse(packedLine.slice('UNTRUSTED_EVIDENCE_JSON: '.length)) as Array<{ id: string; evidence: string }>;
+    expect(packed[0]!.evidence).toContain('shared with S10, turn 1');
+    expect(packed[0]!.evidence).not.toContain('Total INR 270,000');
+    expect(packed[9]!.evidence).toContain(original);
+    for (let index = 0; index < 9; index++) expect(packed[index]!.evidence).toContain(`Unique authored reply ${index}`);
+    expect(after).toContain('Solutions Director');
+    expect(after).toContain('+91 90000 00123');
+    const result = parseInboxAssistantAnswer(answer([
+      fact('The quotation is INR 270,000 excluding GST.', 'S10', 'Total INR 270,000 excluding GST.'),
+      fact('The forwarded history contains an offer of INR 270,000.', 'S1', 'Total INR 270,000 excluding GST.'),
+      fact('The quotation is INR 275,000.', 'S1', 'Total INR 270,000 excluding GST.'),
+    ]), sources, [makeCoverage()]);
+    expect(result.facts).toHaveLength(2);
+    expect(result.sourceIds).toEqual(['S10', 'S1']);
+    expect(sources[0]!.text).toContain(original);
+  });
+
+  it('keeps a unique changed commercial revision instead of treating punctuation or numbers as duplicates', () => {
+    const original = 'Quotation Q-204 revision 1. Total INR 270,000 excluding GST.\n' + 'Migration conditions remain explicit. '.repeat(20);
+    const revision = original.replace('revision 1', 'revision 2').replace('270,000', '275,000').replace('excluding GST', 'including GST');
+    const quoteHeader = 'On Thu, 1 Oct 2026 at 10:00, Alice <alice@example.test> wrote:\n';
+    const sources = [makeSource({ id: 'S1', threadId: 'same-thread', text: `Forwarded.\n${quoteHeader}${original}` }),
+      makeSource({ id: 'S2', threadId: 'same-thread', text: `Updated offer.\n${quoteHeader}${revision}` })];
+    const prompt = buildInboxAssistantAnswerPrompt(question, sources, [makeCoverage()]);
+    expect(prompt).toContain('270,000 excluding GST');
+    expect(prompt).toContain('275,000 including GST');
+    const result = parseInboxAssistantAnswer(answer([fact('Revision 2 is INR 275,000 including GST.', 'S2', revision)]), sources, [makeCoverage()]);
+    expect(result.facts).toHaveLength(1);
+  });
+
+  it('does not share quoted text with an original outside the actual submitted context budget', () => {
+    const original = 'Unique historical offer INR 270,000. ' + 'The contractual deployment conditions are explicit. '.repeat(12);
+    const quote = `Forwarded.\nOn Thu, 1 Oct 2026 at 10:00, Alice <alice@example.test> wrote:\n${original}`;
+    const sources = [makeSource({ id: 'S1', threadId: 'same-thread', text: quote }),
+      ...Array.from({ length: 5 }, (_, index) => makeSource({ id: `S${index + 2}`, threadId: `other-${index}`, text: 'A'.repeat(24_000) })),
+      makeSource({ id: 'S99', threadId: 'same-thread', text: original })];
+    const prompt = buildInboxAssistantAnswerPrompt(question, sources, [makeCoverage()]);
+    expect(prompt).not.toContain('shared with S99');
+    expect(prompt).toContain('Unique historical offer INR 270,000.');
+    const result = parseInboxAssistantAnswer(answer([fact('The offer is INR 270,000.', 'S99', original)]), sources, [makeCoverage()]);
+    expect(result.facts).toEqual([]);
   });
 
   it('does not validate excerpts outside the actual bounded context sent to the provider', () => {

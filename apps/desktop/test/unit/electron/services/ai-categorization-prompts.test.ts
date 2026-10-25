@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   save: vi.fn((batch: unknown[]) => batch.length),
   send: vi.fn(),
   getTemplate: vi.fn<() => string | null>(() => null),
+  seedTemplate: undefined as undefined | ((row: { id: string; content: string }) => void),
   repositories: 'present' as 'present' | 'missing-api' | 'missing-repository' | 'missing-prompts',
 }));
 const categories = [
@@ -39,7 +40,7 @@ vi.mock('../../../../electron/shared', () => ({
     saveEmailCategoriesBatch: h.save,
     getRepositories: h.repositories === 'missing-api' ? undefined : () =>
       h.repositories === 'missing-repository' ? undefined : {
-        prompts: h.repositories === 'missing-prompts' ? undefined : { getContent: h.getTemplate },
+        prompts: h.repositories === 'missing-prompts' ? undefined : { getContent: h.getTemplate, seedDefault: h.seedTemplate },
       },
   }),
 }));
@@ -58,6 +59,7 @@ const run = (mode: 'bulk' | 'realtime' = 'realtime', userEmail = 'buyer@sarv.com
 beforeEach(() => {
   h.repositories = 'present';
   h.getTemplate.mockReset().mockReturnValue(null);
+  h.seedTemplate = undefined;
   h.save.mockClear();
   h.send.mockClear();
   h.fetch.mockReset().mockImplementation(async () => reply());
@@ -73,7 +75,7 @@ describe('standalone categorizer shares classification guidance', () => {
     const messages = requestMessages();
     expect(messages[0].content).toBe(buildCategorizationPrompt(categories, 'buyer@sarv.com'));
     expect(messages[0].content).toContain("CLASSIFY THE CURRENT MESSAGE'S PRIMARY PURPOSE");
-    expect(messages[0].content).toContain('No recorded replies is only a supporting signal');
+    expect(messages[0].content).toContain("No recorded reply does not negate a requested quote or new customer's request");
     expect(messages[0].content).not.toContain('NEVER replying to a sender');
     // Keep the existing transport facts/recipient role and cleaned message body.
     expect(messages[1].content).toContain('Sent-to: 2');
@@ -93,6 +95,31 @@ describe('standalone categorizer shares classification guidance', () => {
     expect(h.getTemplate).toHaveBeenCalledWith('categorization_system');
     expect(requestMessages()[0].content).toBe(buildCategorizationPrompt(categories, userEmail, custom));
     expect(requestMessages()[0].content).not.toContain('CLASSIFY THE CURRENT MESSAGE');
+  });
+
+  it.each([false, true])('seeds the selected account before reading its categorization policy (custom=%s)', async customized => {
+    let content = customized ? 'MY OWN POLICY for {{userEmail}}' : 'An older bundled policy';
+    const previousDefault = 'An older bundled policy';
+    const seed = vi.fn((row: { id: string; content: string }) => {
+      if (row.id === 'categorization_system' && content === previousDefault) content = row.content;
+    });
+    h.seedTemplate = seed;
+    h.getTemplate.mockImplementation(() => content);
+
+    await run();
+
+    expect(seed).toHaveBeenCalledTimes(3);
+    expect(seed.mock.invocationCallOrder[0]).toBeLessThan(h.getTemplate.mock.invocationCallOrder[0]);
+    expect(requestMessages()[0].content).toBe(customized ? 'MY OWN POLICY for buyer@sarv.com' : buildCategorizationPrompt(categories, 'buyer@sarv.com'));
+  });
+
+  it('sends no mail to a provider when upgrading the selected account\'s prompt fails', async () => {
+    h.seedTemplate = () => { throw new Error('Prompt seed unavailable'); };
+    h.getTemplate.mockReturnValue('Custom policy');
+    await run();
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.getTemplate).not.toHaveBeenCalled();
+    expect(h.save).not.toHaveBeenCalled();
   });
 
   // Regression: older or minimal storage bridges have no editable templates;

@@ -10,7 +10,7 @@ import type { AntivirusSetupStatus, IMAPConfig, SyncEngineOptions, SyncStatus, R
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
 import type { DefaultAppsAPI } from '../src/types/default-apps';
-import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
+import type { InboxAssistantAPI, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantDashboardRequest, InboxAssistantDraftRequest, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantSource } from '../src/types/inbox-assistant';
 import type { LocalCalendarAPI, LocalCalendarAvailability, LocalCalendarOpenEvent } from '../src/types/local-calendar';
 import type { LocalDataAPI } from '../src/types/local-data';
 import type { SecureStorageAccessResult, SecureStorageStatus } from '../src/types/secure-storage';
@@ -169,6 +169,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   inboxAssistant: {
     accounts: () => ipcRenderer.invoke('inboxAssistant:accounts'),
+    dashboard: (request: InboxAssistantDashboardRequest) => ipcRenderer.invoke('inboxAssistant:dashboard', request),
     chats: () => ipcRenderer.invoke('inboxAssistant:chats'),
     chat: (chatId: string) => ipcRenderer.invoke('inboxAssistant:chat', chatId),
     createChat: () => ipcRenderer.invoke('inboxAssistant:createChat'),
@@ -1163,7 +1164,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getBehaviorProfile: () => ipcRenderer.invoke('agent:getBehaviorProfile'),
     getReplyStyleProfile: () => ipcRenderer.invoke('agent:getReplyStyleProfile'),
     generateReply: (emailId: string) => ipcRenderer.invoke('agent:generateReply', emailId),
-    getProposals: () => ipcRenderer.invoke('agent:getProposals'),
+    getProposals: (accountId?: string) => accountId === undefined
+      ? ipcRenderer.invoke('agent:getProposals') : ipcRenderer.invoke('agent:getProposals', accountId),
     resolveProposal: (proposalId: string, approved: boolean, actualAction?: string, feedback?: string) =>
       ipcRenderer.invoke('agent:resolveProposal', proposalId, approved, actualAction, feedback),
     getAccuracyMetrics: (days?: number) => ipcRenderer.invoke('agent:getAccuracyMetrics', days),
@@ -2009,7 +2011,8 @@ export interface ElectronAPI {
      * active account.
      */
     draftReply: (emailId: string, accountId?: string) => Promise<{ success: boolean; data?: DraftResult; error?: string }>;
-    getProposals: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    /** Pending drafts from the named owning account; omitted keeps the active-account dashboard. */
+    getProposals: (accountId?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>;
     resolveProposal: (proposalId: string, approved: boolean, actualAction?: string, feedback?: string) =>
       Promise<{ success: boolean; error?: string }>;
     getAccuracyMetrics: (days?: number) =>

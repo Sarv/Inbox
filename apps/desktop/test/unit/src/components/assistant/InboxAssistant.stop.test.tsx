@@ -45,7 +45,7 @@ function completedReview(): InboxAssistantExchange {
 }
 
 async function mount(compact = false) {
-  const view = render(<InboxAssistant compact={compact} />);
+  const view = render(<InboxAssistant initialView="conversation" compact={compact} />);
   await settle();
   return view;
 }
@@ -148,7 +148,7 @@ describe('Inbox Agent visible review Stop', () => {
   });
 
   it('can stop while a compact email source covers the chat without closing the email', async () => {
-    const view = render(<InboxAssistant compact sourcePane={<div>Thread email preview</div>} />);
+    const view = render(<InboxAssistant initialView="conversation" compact sourcePane={<div>Thread email preview</div>} />);
     await settle();
     const requestId = await startReview(view);
     const preview = view.byLabel('Assistant email source')!;

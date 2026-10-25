@@ -156,25 +156,33 @@ export function InlineReply({ replyToEmail, mode, onClose, onModeChange, embedde
 
   const hasAIProvider = !!getDefaultProvider();
 
-  // Calculate initial recipients based on mode
-  const getInitialRecipients = () =>
-    replyRecipients(replyToEmail, mode, imapConfig?.username || '');
+  const sendingAccount = accounts.find(account => account.id === (replyAccountId ?? activeAccountId));
+  // A named secondary owner must never borrow the active mailbox's identity.
+  // Keep the username fallback for legacy single-account state without an
+  // explicit mail owner; modern accounts use their primary address + aliases.
+  const ownEmail = sendingAccount?.email || sendingEmail || (!replyAccountId ? imapConfig?.username || '' : '');
+  const ownIdentities = sendingAccount?.identities;
+  const recipientTargetKey = JSON.stringify([replyAccountId ?? activeAccountId, replyToEmail.id, mode]);
 
-  // Initialize recipients when mode changes (skip if restoring from draft)
+  // A target/mode change initializes recipients once. Account or connection
+  // refreshes must not overwrite manually edited/restored To/Cc/subject fields.
+  const initializedRecipients = useRef<string | null>(null);
   const draftUsedRef = useRef(!!draft);
   useEffect(() => {
+    if (initializedRecipients.current === recipientTargetKey) return;
+    initializedRecipients.current = recipientTargetKey;
     if (draftUsedRef.current) {
       draftUsedRef.current = false;
       return;
     }
-    const initial = getInitialRecipients();
+    const initial = replyRecipients(replyToEmail, mode, ownEmail, ownIdentities);
     setTo(initial.to);
     setCc(initial.cc);
 
     // Set subject
     const newSubject = replyToEmail.subject.startsWith('Re:') ? replyToEmail.subject : `Re: ${replyToEmail.subject}`;
     setSubject(newSubject);
-  }, [mode, replyToEmail.fromAddress]);
+  }, [recipientTargetKey, replyToEmail, mode, ownEmail, ownIdentities, setTo, setCc, setSubject]);
 
   // Parse recipients for display
   const toEmails = to ? to.split(',').map(e => e.trim()).filter(Boolean) : [];

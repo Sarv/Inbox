@@ -43,13 +43,13 @@ describe('DEFAULT_CATEGORIZATION_TEMPLATE', () => {
   // specific claim that nothing matched.
   it('does not present an empty array as the safe answer', () => {
     expect(DEFAULT_CATEGORIZATION_TEMPLATE).not.toMatch(/Empty \[\] is perfectly valid/);
-    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/should be the exception/);
+    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/Return \[\] only when no definition fits, not as a default for uncertainty or low relevance/);
   });
 
   // The 66 archive-or-spam-with-no-category cases: the model contradicted its
   // own recommendation, and nothing in the prompt told it that was wrong.
   it('forbids recommending archive or spam while assigning no category', () => {
-    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/ACTION\/CATEGORY CONSISTENCY/);
+    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/If suggesting archive\/delete\/spam, identify the descriptive category that actually fits/);
   });
 
   // The judgement rules are NOT the bug and must survive. Their reasoning in
@@ -57,9 +57,9 @@ describe('DEFAULT_CATEGORIZATION_TEMPLATE', () => {
   // addressed to Devendra", confidence 0.95) and relaxing them would trade one
   // failure for a worse one.
   it('keeps the strict rules that make "important" rare', () => {
-    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/"important" is RARE/);
-    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/CC emails: DEFAULT is NOT important/);
-    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/a HUMAN must be waiting for a HUMAN reply/);
+    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/Important is rare: urgent action TODAY for this user/);
+    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/CC means FYI by default: no important or needs_response unless the user is explicitly named with a direct request/);
+    expect(DEFAULT_CATEGORIZATION_TEMPLATE).toMatch(/needs_response requires a human genuinely awaiting this user's reply/);
   });
 
   // The single worked example was `"categories": []`. It was the only sample of
@@ -69,10 +69,10 @@ describe('DEFAULT_CATEGORIZATION_TEMPLATE', () => {
     const examples = DEFAULT_CATEGORIZATION_TEMPLATE.slice(
       DEFAULT_CATEGORIZATION_TEMPLATE.indexOf('RETURN FORMAT:'),
     );
-    expect(examples).toMatch(/"categories": \["promotions"\]/);
+    expect(examples).toMatch(/"categories":\s*\["promotions"\]/);
     // …and still shows a legitimate empty one, so [] is not eliminated either.
-    expect(examples).toMatch(/"categories": \[\]/);
-    expect(examples.indexOf('["promotions"]')).toBeLessThan(examples.indexOf('"categories": []'));
+    expect(examples).toMatch(/"categories":\s*\[\]/);
+    expect(examples.indexOf('["promotions"]')).toBeLessThan(examples.indexOf('"categories":[]'));
   });
 
   // A stray duplicate heading sat hundreds of lines above the real one, so the

@@ -7,6 +7,8 @@ export interface EmailReaderOptions {
   threadOnly?: boolean;
   /** Review previews can preserve unread state; normal readers mark opened mail read. */
   autoMarkRead?: boolean;
+  /** One-shot, account-bound navigation intent; uses the normal inline composer. */
+  replyAllRequest?: { id: number; accountId: string; emailId: string };
 }
 export function readerCurrentUserEmail(input: {
   threadOnly?: boolean;

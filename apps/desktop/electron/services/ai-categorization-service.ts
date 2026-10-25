@@ -12,6 +12,7 @@ import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox
 
 import { getMainWindow, requireStorage } from '../shared';
 
+import { ensureBundledAgentPrompts } from './agent-prompt-defaults';
 import { chromiumFetch } from './net-fetch';
 const logger = createLogger('ai-categorization-service');
 
@@ -204,6 +205,7 @@ export class AICategorizationService {
     // An absent template uses the default; a failed read must stop the request
     // rather than silently disregard the user's customized instructions.
     const promptRepo = requireStorage().getRepositories?.()?.prompts;
+    ensureBundledAgentPrompts(promptRepo);
     const override = promptRepo?.getContent('categorization_system') || undefined;
     return buildCategorizationPrompt(categories, userEmail, override);
   }

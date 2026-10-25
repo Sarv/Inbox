@@ -1,5 +1,8 @@
 import type { InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from './inbox-assistant-actions';
+import type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest } from './local-calendar';
+
+export type { InboxAssistantDashboard, InboxAssistantDashboardRequest } from './inbox-assistant-dashboard';
 
 export type InboxAssistantActionMode = 'review' | 'approve_for_me';
 
@@ -32,6 +35,8 @@ export interface InboxAssistantSource {
 /** Full bounded evidence stays in the main process, not conversation storage. */
 export interface InboxAssistantEvidence extends InboxAssistantSource {
   text: string;
+  /** Host-selected display timezone; never supplied by the model or persisted as mail content. */
+  dateTimeZone?: string;
 }
 
 export interface InboxAssistantAccountCoverage {
@@ -50,6 +55,8 @@ export interface InboxAssistantAccountCoverage {
 export interface InboxAssistantAnswer {
   text: string;
   sources: InboxAssistantSource[];
+  /** Related originals can be offered without implying a verified AI answer. */
+  sourceStatus?: 'verified' | 'related';
   coverage: InboxAssistantAccountCoverage[];
   warnings: string[];
 }
@@ -73,7 +80,17 @@ export interface InboxAssistantActivity extends InboxAssistantProgress {
   at: number;
 }
 
-/** Provider-reported accounting only. Prompts and API credentials are excluded. */
+/** Host-recorded work represented by one unread-review classifier call. Character counts are not token estimates. */
+export interface InboxAssistantAIWorkload {
+  operation: 'unread_review';
+  conversationCount: number;
+  messageCount: number;
+  originalContentChars: number;
+  submittedContentChars: number;
+  reusedQuotedTurns: number;
+}
+
+/** Provider-reported accounting, with optional host-recorded workload. Prompts and API credentials are excluded. */
 export interface InboxAssistantAIUsage {
   id: string;
   provider: string;
@@ -93,6 +110,7 @@ export interface InboxAssistantAIUsage {
   costComplete: boolean;
   pricingSource?: string;
   pricingAsOf?: string;
+  workload?: InboxAssistantAIWorkload;
 }
 
 export interface InboxAssistantUsage {
@@ -231,6 +249,7 @@ export type InboxAssistantResult<T> =
 
 export interface InboxAssistantAPI {
   accounts(): Promise<InboxAssistantResult<InboxAssistantAccount[]>>;
+  dashboard(request: InboxAssistantDashboardRequest): Promise<InboxAssistantResult<InboxAssistantDashboard>>;
   chats(): Promise<InboxAssistantResult<InboxAssistantChatList>>;
   chat(chatId: string): Promise<InboxAssistantResult<InboxAssistantChat>>;
   createChat(): Promise<InboxAssistantResult<InboxAssistantChat>>;

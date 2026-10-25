@@ -129,8 +129,18 @@ function App() {
   const [aiSettingsNavigationId, setAiSettingsNavigationId] = useState(0);
   const [assistantAttachment, setAssistantAttachment] = useState<{ accountId: string; emailId: string; filename: string } | null>(null);
   const [assistantSource, setAssistantSource] = useState<InboxAssistantSource | null>(null);
+  const [assistantReplyRequestId, setAssistantReplyRequestId] = useState<number | undefined>();
+  const assistantReplySequence = useRef(0);
   const [assistantFocused, setAssistantFocused] = useState(false);
-  const closeAssistantSource = useCallback(() => { setAssistantSource(null); setAssistantAttachment(null); }, []);
+  const openAssistantSource = useCallback((source: InboxAssistantSource) => {
+    setAssistantReplyRequestId(undefined);
+    setAssistantSource(source);
+  }, []);
+  const replyToAssistantSource = useCallback((source: InboxAssistantSource) => {
+    setAssistantReplyRequestId(++assistantReplySequence.current);
+    setAssistantSource(source);
+  }, []);
+  const closeAssistantSource = useCallback(() => { setAssistantSource(null); setAssistantReplyRequestId(undefined); setAssistantAttachment(null); }, []);
   // One-shot: open the add-account wizard once AccountsTab mounts. Set by the
   // shared add-account flow so every entry point (sidebar switcher, mailbox
   // empty state, in-tab button) lands on Settings → Accounts with the wizard open.
@@ -1028,9 +1038,11 @@ function App() {
               });
             }}
             onOpenDraft={draft => openInboxAssistantDraft(draft, useEmailStore.getState())}
-            onNavigateToSource={setAssistantSource}
+            onOpenCalendarEvent={event => requestSection('calendar', () => setCalendarEvent(event))}
+            onNavigateToSource={openAssistantSource}
+            onReplyToSource={replyToAssistantSource}
             onCloseSourcePane={closeAssistantSource}
-            sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} autoMarkRead={false} onClose={closeAssistantSource} onOpenAttachment={target => setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename })} /> : undefined}
+            sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} replyAllRequestId={assistantReplyRequestId} autoMarkRead={false} onClose={closeAssistantSource} onOpenAttachment={target => setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename })} /> : undefined}
           />}
         >
           {/* No account + on the mail view → show the empty state. Only overrides

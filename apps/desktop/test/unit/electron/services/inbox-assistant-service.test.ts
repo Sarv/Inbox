@@ -427,6 +427,88 @@ afterEach(async () => {
 });
 
 describe('Inbox Agent with real account databases', () => {
+  it.each(['hello', 'What can you do?', 'Delete all promotional email'])('answers app-owned guidance for %s without searching or paying for AI', async question => {
+    const result = await service.ask(request({ question }));
+    expect(result.answer.text.length).toBeGreaterThan(40);
+    expect(result.answer.sources).toEqual([]);
+    expect(deps.callAI).not.toHaveBeenCalled();
+    expect(deps.openMailbox).not.toHaveBeenCalled();
+    expect(deps.readAttachment).not.toHaveBeenCalled();
+    expect(result.activities?.at(-1)).toMatchObject({ stage: 'complete', status: 'done', message: 'Inbox Agent capabilities' });
+    expect(saved.at(-1)?.id).toBe(result.id);
+  });
+
+  it.each(['Hello', 'Help'])('keeps %s out of the next quotation research scope', async question => {
+    const guidance = await service.ask(request({ question }));
+    await seedQuotes();
+    const result = await service.ask(request({ requestId: 'after-guidance', question: 'Find the latest quotation I sent', previousExchangeId: guidance.id }));
+    expect(result.answer.sourceStatus).toBe('verified');
+    expect(result.answer.text).toContain(NEW_QUOTE);
+    expect(result.activities?.some(item => item.stage === 'context')).toBe(false);
+  });
+
+  it('labels relevant originals as unverified when no grounded facts survive, rather than reporting Answer ready', async () => {
+    await seedQuotes();
+    deps.callAI = vi.fn(async prompt => prompt.startsWith('You plan') ? PLAN : '{"facts":[]}');
+    const result = await service.ask(request());
+    expect(result.answer.sourceStatus).toBe('related');
+    expect(result.answer.sources.length).toBeGreaterThan(0);
+    expect(result.answer.sources.length).toBeLessThanOrEqual(6);
+    expect(result.activities?.at(-1)).toMatchObject({ stage: 'complete', status: 'warning', message: 'Related emails found; answer not verified' });
+    expect(result.activities?.at(-1)?.detail).not.toContain('cited');
+  });
+
+  it('continues email research when calendar preferences cannot be read and an optional timezone is invalid', async () => {
+    await seedQuotes();
+    deps.timeZone = () => 'invalid/timezone';
+    deps.calendar = { preferences: vi.fn(() => { throw new Error('Calendar preferences unavailable'); }), availability: vi.fn() };
+    const result = await service.ask(request());
+    expect(result.answer.sourceStatus).toBe('verified');
+    expect(result.answer.text).toContain(NEW_QUOTE);
+    expect(deps.calendar.preferences).toHaveBeenCalledOnce();
+    expect(deps.calendar.availability).not.toHaveBeenCalled();
+  });
+
+  it('preserves local today and a new meeting topic after a quotation, even when Gemma planning fails', async () => {
+    await seedQuotes();
+    const first = await service.ask(request());
+    const invitationBody = 'You are invited to our project review. Please join the meeting using the link below.';
+    await primary.add('local-day-invite', { id: 'local-day-invite', subject: 'Invitation: Project review meeting',
+      fromAddress: 'organizer@partner.example', date: Date.parse('2026-10-22T18:45:00Z') / 1000,
+      cleanBody: invitationBody, rawBody: `<p>${invitationBody}</p>` });
+    await primary.add('yesterday-invite', { id: 'yesterday-invite', subject: 'Invitation: Earlier project review meeting',
+      fromAddress: 'organizer@partner.example', date: Date.parse('2026-10-22T18:00:00Z') / 1000,
+      cleanBody: invitationBody, rawBody: `<p>${invitationBody}</p>` });
+    await primary.add('pricing-after-meeting', { id: 'pricing-after-meeting', subject: 'Re: Commercial pricing escalation',
+      fromAddress: 'customer@partner.example', date: Date.parse('2026-10-23T04:00:00Z') / 1000,
+      cleanBody: 'Following up after our meeting. Please send written pricing for the channels.',
+      rawBody: '<p>Following up after our meeting. Please send written pricing for the channels.</p>' });
+    deps.now = () => Date.parse('2026-10-23T10:00:00Z');
+    deps.timeZone = () => 'Asia/Kolkata';
+    deps.callAI = vi.fn(async prompt => {
+      if (prompt.startsWith('You plan')) throw new Error('Synthetic malformed Gemma planning response');
+      const sources = evidence(prompt);
+      const source = sources.find(item => item.evidence.includes(invitationBody));
+      return JSON.stringify({ facts: source ? [{ text: 'A project review invitation was received on 2026-10-23 at 00:15.', sourceIds: [source.id],
+        quotes: [{ sourceId: source.id, text: 'Local date/time (Asia/Kolkata): 2026-10-23T00:15:00+05:30' },
+          { sourceId: source.id, text: invitationBody }] }] : [] });
+    });
+    const result = await service.ask(request({ requestId: 'meeting-followup', question: 'is any meetings invite today', previousExchangeId: first.id }));
+    expect(result.answer.sourceStatus).toBe('verified');
+    expect(result.answer.sources.map(source => source.emailId)).toEqual(['local-day-invite']);
+    expect(result.answer.text).toContain('2026-10-23 at 00:15');
+    expect(result.answer.sources[0]).not.toHaveProperty('dateTimeZone');
+    const answerPrompt = vi.mocked(deps.callAI).mock.calls.find(([prompt]) => !prompt.startsWith('You plan'))![0];
+    expect(answerPrompt).toContain('Asia/Kolkata');
+    expect(answerPrompt).toContain('Local date/time (Asia/Kolkata): 2026-10-23T00:15:00+05:30');
+    expect(answerPrompt).toContain('HOST_SEARCH_SCOPE_JSON');
+    expect(answerPrompt).not.toContain('TCS quotation');
+    expect(answerPrompt).not.toContain('Commercial pricing escalation');
+    expect(result.activities?.at(-1)).toMatchObject({ status: 'done', message: 'Answer verified against sources' });
+    expect(vi.mocked(deps.callAI).mock.calls[0]![3]).toEqual({ maxOutputTokens: 1_600 });
+    expect(vi.mocked(deps.callAI).mock.calls.at(-1)![3]).toEqual({ maxOutputTokens: 8_000 });
+  });
+
   it('matches BigBlueButton across real account databases and raw bodies, including Sent, without changing other members', async () => {
     const readTags = '|INBOX|read|';
     await primary.add('mixed-bbb', { id: 'shared-bbb', tags: readTags, fromAddress: 'updates@bigbluebutton.example', subject: 'BigBlueButton release' });
@@ -617,7 +699,7 @@ describe('Inbox Agent with real account databases', () => {
     expect(activities.map(activity => activity.sequence)).toEqual(activities.map((_activity, index) => index + 1));
     expect(activities.every(activity => activity.requestId === 'request-1' && Number.isFinite(activity.at))).toBe(true);
     expect(activities[0]).toMatchObject({ stage: 'search', status: 'running' });
-    expect(activities.at(-1)).toMatchObject({ stage: 'complete', status: 'done', message: 'Answer ready' });
+    expect(activities.at(-1)).toMatchObject({ stage: 'complete', status: 'done', message: 'Answer verified against sources' });
     expect(result.activities).toEqual(activities);
     expect(saved[0]?.activities).toEqual(activities);
     expect(result.answer.warnings.join(' ')).not.toContain('Trash, Spam and unsent drafts are excluded');

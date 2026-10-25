@@ -1,0 +1,29 @@
+.assistant-dashboard {
+  container: assistant-dashboard / inline-size;
+}
+
+.assistant-dashboard-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+  padding-top: 0.5rem;
+}
+
+.assistant-dashboard-agenda {
+  border-top: 1px solid hsl(var(--border));
+  padding-top: 1rem;
+}
+
+@container assistant-dashboard (min-width: 760px) {
+  .assistant-dashboard-layout:not(.assistant-dashboard-layout-compact) {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 30%);
+    gap: 1.75rem;
+  }
+
+  .assistant-dashboard-layout:not(.assistant-dashboard-layout-compact) > .assistant-dashboard-agenda {
+    border-top: 0;
+    border-left: 1px solid hsl(var(--border));
+    padding-top: 0.75rem;
+    padding-left: 1.5rem;
+  }
+}

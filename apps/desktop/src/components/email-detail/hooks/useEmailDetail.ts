@@ -211,6 +211,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   // that message brings the draft (and its stored Message-ID) back with it.
   const [inlineReplySeed, setInlineReplySeed] = useState<ComposerSeed<{ to: string; cc: string; subject?: string; htmlContent: string; attachments: any[]; draftMessageId?: string; unsaved?: boolean; isAIDraft?: boolean; aiReasoning?: string; agentDecisionId?: string; pgpEncrypted?: boolean; calendarAvailability?: LocalCalendarAvailability }> | undefined>(undefined);
   const inlineReplyHandlerRef = useRef<(mode: 'reply' | 'replyAll') => void>(() => { });
+  const consumedReplyRequestRef = useRef<number | null>(null);
   const [showInlineForward, setShowInlineForward] = useState(false);
   const [forwardingEmail, setForwardingEmail] = useState<any | null>(null);
   // The forward's seed (what Undo send restored), on the same terms as the reply's.
@@ -681,12 +682,22 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   // for any email in the currently-viewed thread. Gmail-style: open thread →
   // see saved draft inline → edit & send, or dismiss.
   const draftOpenedForRef = useRef<string | null>(null);
+  const draftLookupKey = JSON.stringify([selectionAccountId, selectedEmailId, latestThreadEmail?.id]);
+  const currentDraftLookupKey = useRef(draftLookupKey);
+  currentDraftLookupKey.current = draftLookupKey;
+  const [finishedDraftLookupKey, setFinishedDraftLookupKey] = useState<string | null>(null);
 
   // Session-level dismissal set: once the user discards a draft for a thread,
   // don't auto-open any draft for that thread again during this app session —
   // even if the DB still has one (pipeline re-creation, IMAP re-sync lag,
   // stale agent proposal, etc.). Cleared on process restart.
   const dismissedThreadsRef = useRef<Set<string>>(new Set());
+
+  const draftSelectionIsCurrent = () => {
+    const current = useEmailStore.getState();
+    return currentDraftLookupKey.current === draftLookupKey && current.selectedEmailId === selectedEmailId
+      && (current.viewAccountId ?? current.activeAccountId ?? null) === selectionAccountId;
+  };
 
   const openSavedDraftForThread = async () => {
     if (!latestThreadEmail) return false;
@@ -723,7 +734,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         // The draft's body and own files, so the mail sent from it still carries
         // them — decrypted by main when the draft was saved encrypted.
         const content = await savedDraftContent({ ...d, accountId: draftAccountId });
-        if (!content) return false;
+        if (!content || !draftSelectionIsCurrent()) return false;
         const { htmlContent: draftHtml, attachments: draftAttachments, pgpEncrypted, calendarAvailability } = content;
         draftOpenedForRef.current = latestThreadEmail.id;
 
@@ -782,6 +793,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
 
       const threadAccountId = (latestThreadEmail as any).accountId ?? useEmailStore.getState().viewAccountId ?? undefined;
       const res = await (window.electronAPI as any).drafts?.findForThread(messageIds, threadAccountId);
+      if (!draftSelectionIsCurrent()) return false;
       if (!res?.success || !res.data) {
         // No manual draft yet — fall back to an AI proposal's draftBody that
         // hasn't been written to IMAP yet (pipeline still processing).
@@ -790,14 +802,14 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
 
       const draft = res.data;
       const content = await savedDraftContent({ ...draft, accountId: threadAccountId });
-      if (!content) return false;
+      if (!content || !draftSelectionIsCurrent()) return false;
 
       // Detect AI origin by checking agent_decisions (best-effort)
       let isAIDraft = false;
       let aiReasoning = '';
       let agentDecisionId: string | undefined;
       try {
-        const proposals = await (window.electronAPI.agent as any).getProposals();
+        const proposals = await (window.electronAPI.agent as any).getProposals(threadAccountId);
         if (proposals?.success && Array.isArray(proposals.data)) {
           const match = proposals.data.find((d: any) =>
             (d.proposedAction === 'reply' || d.proposedAction === 'reply_all') &&
@@ -811,6 +823,7 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
         }
       } catch {}
 
+      if (!draftSelectionIsCurrent()) return false;
       draftOpenedForRef.current = latestThreadEmail.id;
       setReplyingToEmail(latestThreadEmail);
       setInlineReplyMode('replyAll');
@@ -847,8 +860,8 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     const sendingKeys = pendingSendThreadKeys(useEmailStore.getState().pendingSend);
     if (shouldSuppressDraftAutoOpen(threadKeys, dismissedThreadsRef.current, sendingKeys)) return false;
     try {
-      const res = await (window.electronAPI.agent as any).getProposals();
-      if (!res?.success || !Array.isArray(res.data)) return false;
+      const res = await (window.electronAPI.agent as any).getProposals((latestThreadEmail as EmailRecord).accountId ?? selectionAccountId ?? undefined);
+      if (!res?.success || !Array.isArray(res.data) || !draftSelectionIsCurrent()) return false;
       const match = res.data.find((d: any) =>
         d.emailId === latestThreadEmail.id &&
         (d.proposedAction === 'reply' || d.proposedAction === 'reply_all') &&
@@ -891,9 +904,13 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
   useEffect(() => {
     if (loadingThread) return;
     if (!latestThreadEmail) return;
-    if (showInlineReply) return; // user or another flow already opened one
-    openDraftRef.current();
-  }, [loadingThread, latestThreadEmail?.id, threadEmails.length, showInlineReply]);
+    if (showInlineReply) { setFinishedDraftLookupKey(draftLookupKey); return; }
+    let current = true;
+    void openDraftRef.current().finally(() => {
+      if (current) setFinishedDraftLookupKey(draftLookupKey);
+    });
+    return () => { current = false; };
+  }, [loadingThread, latestThreadEmail?.id, threadEmails.length, showInlineReply, draftLookupKey]);
 
   // Listen for drafts that land AFTER the user has already opened the email.
   useEffect(() => {
@@ -1135,6 +1152,28 @@ export function useEmailDetail(options: EmailReaderOptions = {}): EmailDetailCon
     // reply composer, which is not on screen, and was never focused.
     focusComposerWhenMounted(later, restoreDraft.mode === 'forward' ? INLINE_FORWARD : INLINE_REPLY);
   }, [restoreDraft, later]);
+
+  const replyAllRequest = options.replyAllRequest;
+  useEffect(() => {
+    if (!replyAllRequest || consumedReplyRequestRef.current === replyAllRequest.id || loadingThread || isRestoring) return;
+    // An assistant source can have the same message ID in two mailboxes. The
+    // intent belongs only to the resolved source's currently loaded thread.
+    if (selectedEmailId !== replyAllRequest.emailId || threadAccountId !== replyAllRequest.accountId
+      || selectionAccountId !== replyAllRequest.accountId || !latestThreadEmail) return;
+    // Standard view may keep the latest read message collapsed while an older
+    // unread message is expanded. Request the reply target explicitly rather
+    // than waiting forever for the reader's expanded-message downloads.
+    if (loadingBodies.has(latestThreadEmail.id)) return;
+    if (!latestThreadEmail.rawBody && !latestThreadEmail.hasBody && !failedBodies.has(latestThreadEmail.id)) {
+      void fetchEmailBody(latestThreadEmail.id);
+      return;
+    }
+    // A late saved draft must arrive before the editor first mounts; otherwise
+    // its one-time initial state could overwrite that draft with an empty body.
+    if (finishedDraftLookupKey !== draftLookupKey) return;
+    consumedReplyRequestRef.current = replyAllRequest.id;
+    inlineReplyHandlerRef.current('replyAll');
+  }, [replyAllRequest, loadingThread, isRestoring, finishedDraftLookupKey, draftLookupKey, selectedEmailId, threadAccountId, selectionAccountId, latestThreadEmail, loadingBodies, failedBodies, fetchEmailBody]);
 
   // Return null if nothing selected
   if (!selectedEmailId || !selectedEmail || !displayEmail) {
