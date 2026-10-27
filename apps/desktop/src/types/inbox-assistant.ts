@@ -88,6 +88,8 @@ export interface InboxAssistantAIWorkload {
   originalContentChars: number;
   submittedContentChars: number;
   reusedQuotedTurns: number;
+  /** Bounded account-local behavior evidence, separate from email content. */
+  behaviorContextChars?: number;
 }
 
 /** Provider-reported accounting, with optional host-recorded workload. Prompts and API credentials are excluded. */

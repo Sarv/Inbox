@@ -37,6 +37,8 @@ export interface InboxAssistantReviewItem {
   protectedReasons: string[];
   bodyUnavailable: boolean;
   attachmentsUnknown: boolean;
+  /** The provider did not return a verified decision; continuation must retry it. */
+  needsRetry?: boolean;
   /** A user may explicitly override the recommendation for this stable snapshot. */
   manualSelectionAllowed?: boolean;
   /** Explicit archive/Trash actions are available for this host-held snapshot. */
@@ -60,6 +62,8 @@ export interface InboxAssistantReviewCoverage {
   /** Verified recommendations reused after fresh source and safety checks. */
   cachedRecommendations?: number;
   aiReviewedThreads?: number;
+  /** Technical failures or incomplete AI output, distinct from an uncertain decision. */
+  unverifiedRecommendations?: number;
   /** Diagnostic scan position only. Continuation rescans with account-scoped exclusions. */
   nextOffset?: number;
   warnings: string[];

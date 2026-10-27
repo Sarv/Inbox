@@ -80,6 +80,18 @@ function fixture(records: EmailRecord[]) {
 afterEach(() => { vi.restoreAllMocks(); for (const db of databases.splice(0)) db.close(); });
 
 describe('bounded automatic unread review', () => {
+  it('retains the original keep-only preferences in automatic child classification', async () => {
+    const f = fixture([newsletter('first'), ...Array.from({ length: 199 }, (_, index) => newsletter(`kept-${index}`, true)), newsletter('last')]);
+    const question = 'Review my unread emails and mark low-value conversations as read. Keep personal emails sent directly to me and ongoing conversations unread.';
+    const initial = await f.prepare(question);
+    vi.mocked(f.deps.callAI).mockClear();
+    const result = await f.auto(initial);
+    expect(result.review!.automation).toMatchObject({ status: 'completed', batchesReviewed: 2 });
+    const prompt = vi.mocked(f.deps.callAI).mock.calls[0]![0];
+    expect(prompt).toContain('USER_RETENTION_PREFERENCES_JSON: "Keep personal emails sent directly to me and ongoing conversations unread."');
+    expect(prompt).toContain('Newsletter last');
+  });
+
   it.each(['Review unread mail', 'Review uncategorized unread mail'])('advances through more than 400 protected conversations without AI or mail writes: %s', async question => {
     const f = fixture(Array.from({ length: 405 }, (_, index) => question.includes('uncategorized')
       ? { ...newsletter(`protected-${index}`), fromAddress: 'colleague@company.example' } : newsletter(`protected-${index}`, true)));
@@ -386,5 +398,131 @@ describe('bounded automatic unread review', () => {
     expect(saved.exchanges[0]!.reviewResult).toEqual(stopped.reviewResult);
     expect(saved.exchanges[1]!.reviewResult).toMatchObject({ appliedCount: 1 });
     expect(saved.exchanges[1]!.review!.id).not.toBe(initial.review!.id);
+  });
+
+  it('pauses on incomplete AI output and resumes only unverified conversations without losing completed receipts', async () => {
+    const f = fixture([newsletter('verified'), newsletter('retry'), newsletter('protected', true)]);
+    f.deps.callAI = vi.fn(async prompt => {
+      const response = JSON.parse(recommendations(prompt)) as { recommendations: Array<{ id: string }> };
+      return JSON.stringify({ recommendations: response.recommendations.slice(0, 1) });
+    });
+    const initial = await f.prepare();
+    expect(initial.review!.items.find(item => item.emailId === 'retry')).toMatchObject({ needsRetry: true });
+    const stopped = await f.auto(initial);
+    expect(stopped.review!.automation).toMatchObject({ status: 'stopped', reviewedConversations: 2, markedEmails: 1,
+      reason: expect.stringMatching(/did not finish for 1 conversation/) });
+    expect(f.rows.get('retry')!.tags).not.toContain('|read|');
+    f.deps.callAI = vi.fn(async prompt => recommendations(prompt));
+    const resumed = await f.auto(initial, { requestId: 'auto-retry' });
+    expect(resumed.review!.automation).toMatchObject({ status: 'completed', reviewedConversations: 1, markedEmails: 1 });
+    const saved = f.history.load(f.chatId);
+    expect(saved.exchanges).toHaveLength(2);
+    expect(saved.exchanges[0]!.reviewResult).toEqual(stopped.reviewResult);
+    expect(saved.exchanges[1]!.review!.items.map(item => item.emailId)).toEqual(['retry']);
+    expect(vi.mocked(f.deps.callAI).mock.calls[0]![0]).toContain('Newsletter retry');
+    expect(vi.mocked(f.deps.callAI).mock.calls[0]![0]).not.toContain('Newsletter verified');
+    expect(f.deps.setRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries an initial retry-only review on the first explicit automatic start', async () => {
+    const f = fixture([newsletter('retry-first'), newsletter('retry-second'), newsletter('protected', true)]);
+    f.deps.callAI = vi.fn(async () => '{"recommendations":[]}');
+    const initial = await f.prepare();
+    expect(initial.review!.items.filter(item => item.needsRetry)).toHaveLength(2);
+    expect(initial.review!.items.some(item => item.recommendation === 'mark_read')).toBe(false);
+    expect(initial.review!.coverage.some(account => account.hasMore)).toBe(false);
+    f.deps.callAI = vi.fn(async prompt => recommendations(prompt));
+    const result = await f.auto(initial);
+    expect(result.review!.automation).toMatchObject({ status: 'completed', batchesReviewed: 1,
+      reviewedConversations: 2, markedConversations: 2, markedEmails: 2 });
+    expect(f.deps.callAI).toHaveBeenCalledTimes(1);
+    const saved = f.history.load(f.chatId);
+    expect(saved.exchanges).toHaveLength(2);
+    expect(saved.exchanges[1]!.review!.items.map(item => item.emailId)).toEqual(['retry-first', 'retry-second']);
+    expect(saved.exchanges[1]!.reviewResult).toMatchObject({ appliedCount: 2, failedCount: 0, skippedCount: 0 });
+    expect(f.rows.get('protected')!.tags).not.toContain('|read|');
+    expect(f.rows.get('retry-first')!.tags).toContain('|read|');
+    expect(f.rows.get('retry-second')!.tags).toContain('|read|');
+  });
+
+  it('manual continuation after a failed later automatic batch honors the last safe checkpoint', async () => {
+    const f = fixture([newsletter('first'), ...Array.from({ length: 399 }, (_, index) => newsletter(`kept-${index}`, true)), newsletter('last')]);
+    const initial = await f.prepare();
+    f.deps.callAI = vi.fn(async () => { throw new Error('Synthetic provider outage'); });
+    const stopped = await f.auto(initial);
+    expect(stopped.review!.automation).toMatchObject({ status: 'stopped', batchesReviewed: 3, reviewedConversations: 400, markedEmails: 1 });
+    expect(f.deps.callAI).toHaveBeenCalledTimes(1);
+    expect(f.rows.get('last')!.tags).not.toContain('|read|');
+    f.deps.callAI = vi.fn(async prompt => recommendations(prompt));
+    const next = await f.service.ask({ requestId: 'manual-next', chatId: f.chatId, question: 'Review unread mail',
+      accountIds: [ACCOUNT.id], continueReviewId: initial.review!.id, reviewOnly: true });
+    expect(next.review!.items.map(item => item.emailId)).toEqual(['last']);
+    expect(next.review!.items[0]!.needsRetry).toBeUndefined();
+    expect(f.deps.callAI).toHaveBeenCalledTimes(1);
+    expect(f.deps.setRead).toHaveBeenCalledTimes(1);
+    expect(f.history.load(f.chatId).exchanges[0]!.reviewResult).toEqual(stopped.reviewResult);
+  });
+
+  it('manual continuation retries a changed first batch instead of excluding its failed snapshot', async () => {
+    const f = fixture([newsletter('changed')]);
+    const initial = await f.prepare();
+    const changed = f.rows.get('changed')!;
+    f.rows.set(changed.id, { ...changed, rawBody: '<p>A refreshed public sale newsletter with no response requested.</p>' });
+    const stopped = await f.auto(initial);
+    expect(stopped.review!.automation).toMatchObject({ status: 'stopped', markedEmails: 0 });
+    const next = await f.service.ask({ requestId: 'manual-retry', chatId: f.chatId, question: 'Review unread mail',
+      accountIds: [ACCOUNT.id], continueReviewId: initial.review!.id, reviewOnly: true });
+    expect(next.review!.items.map(item => item.emailId)).toEqual(['changed']);
+    expect(next.review!.id).not.toBe(initial.review!.id);
+    expect(f.deps.setRead).not.toHaveBeenCalled();
+    expect(f.deps.callAI).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['changed snapshot', 'manual'], ['changed snapshot', 'automatic'],
+    ['failed write', 'manual'], ['failed write', 'automatic'],
+  ] as const)('retries a child batch after %s through its own %s continuation without skipping mail', async (failure, continuation) => {
+    const f = fixture([newsletter('first'), ...Array.from({ length: 199 }, (_, index) => newsletter(`kept-${index}`, true)), newsletter('last')]);
+    const initial = await f.prepare();
+    const write = f.deps.setRead!;
+    if (failure === 'changed snapshot') {
+      f.deps.callAI = vi.fn(async prompt => {
+        const row = f.rows.get('last')!;
+        f.rows.set(row.id, { ...row, rawBody: '<p>A refreshed public newsletter with seasonal sale offers and no requested response.</p>' });
+        return recommendations(prompt);
+      });
+    } else {
+      f.deps.setRead = vi.fn(async (accountId, ids, read) => {
+        if (ids.includes('last')) throw new Error('Synthetic mail connection failure');
+        return write(accountId, ids, read);
+      });
+    }
+    const stopped = await f.auto(initial);
+    expect(stopped.review!.automation).toMatchObject({ status: 'stopped', batchesReviewed: 2, markedEmails: 1 });
+    const saved = f.history.load(f.chatId);
+    const child = saved.exchanges[1]!;
+    expect(child.review!.items.map(item => item.emailId)).toEqual(['last']);
+    expect(child.reviewResult).toMatchObject(failure === 'changed snapshot' ? { skippedCount: 1 } : { failedCount: 1 });
+    expect(f.rows.get('last')!.tags).not.toContain('|read|');
+    f.deps.callAI = vi.fn(async prompt => recommendations(prompt));
+    f.deps.setRead = vi.fn(write);
+    vi.mocked(f.deps.setRead).mockClear();
+    const next = continuation === 'automatic'
+      ? await f.auto(child, { requestId: 'child-auto-retry' })
+      : await f.service.ask({ requestId: 'child-manual-retry', chatId: f.chatId, question: 'Review unread mail',
+        accountIds: [ACCOUNT.id], continueReviewId: child.review!.id, reviewOnly: true });
+    const resumed = f.history.load(f.chatId);
+    expect(resumed.exchanges.at(-1)!.review!.items.map(item => item.emailId)).toEqual(['last']);
+    expect(resumed.exchanges.at(-1)!.review!.id).not.toBe(child.review!.id);
+    expect(resumed.exchanges[0]!.reviewResult).toEqual(saved.exchanges[0]!.reviewResult);
+    expect(resumed.exchanges[1]!.reviewResult).toEqual(child.reviewResult);
+    if (continuation === 'automatic') {
+      expect(next.review!.automation).toMatchObject({ status: 'completed', batchesReviewed: 1, markedEmails: 1 });
+      expect(f.deps.setRead).toHaveBeenCalledExactlyOnceWith(ACCOUNT.id, ['last'], true);
+      expect(f.rows.get('last')!.tags).toContain('|read|');
+    } else {
+      expect(f.deps.setRead).not.toHaveBeenCalled();
+      expect(f.rows.get('last')!.tags).not.toContain('|read|');
+    }
   });
 });

@@ -108,8 +108,13 @@ function hiddenName(kind: 'email' | 'file', value: string): string {
 /** The pre-account default slot has no id yet; its files are swept as orphans. */
 const NO_ACCOUNT = '__default__';
 
-function cacheEntryPath(accountId: string | null, emailId: string, filename: string): string {
-  return path.join(accountAttachmentDir(accountId ?? NO_ACCOUNT), hiddenName('email', emailId), hiddenName('file', filename));
+function cacheEntryPath(accountId: string | null, emailId: string, filename: string, remote = false): string {
+  // Old per-part downloads could repeat a 64 KiB MIME window while retaining
+  // a plausible total size. Re-fetch server-backed entries once through the
+  // corrected downloader. A separate keyed slot leaves local/unsynced drafts
+  // and their only attachment copy intact; never clear the whole store for this.
+  const fileKey = remote ? `complete-part-v2\0${filename}` : filename;
+  return path.join(accountAttachmentDir(accountId ?? NO_ACCOUNT), hiddenName('email', emailId), hiddenName('file', fileKey));
 }
 
 /** Binds sealed bytes to their email and file slot within the account. */
@@ -311,7 +316,7 @@ export async function getOrCacheAttachment(
   await ensureCacheGeneration(attachmentCacheRoot());
 
   const safeName = safeFilename(filename);
-  const cachedPath = cacheEntryPath(accountId, emailId, filename);
+  const cachedPath = cacheEntryPath(accountId, emailId, filename, !!uid);
 
   // Return cached file if it exists
   try {

@@ -105,6 +105,153 @@ describe('financial and business-report action protection', () => {
   });
 });
 
+describe('incomplete unread review recovery', () => {
+  it('stops repeated calls to an unavailable provider and keeps every unverified conversation for retry', async () => {
+    const f = fixture(Array.from({ length: 40 }, (_, index) => email(`offer-${index}`)));
+    f.callAI.mockRejectedValue(new Error('Synthetic provider is temporarily unavailable'));
+    const progress = vi.fn();
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, progress);
+    expect(f.callAI).toHaveBeenCalledTimes(1);
+    expect(review.items).toHaveLength(40);
+    expect(review.items.every(item => item.needsRetry && item.recommendation === 'needs_review')).toBe(true);
+    expect(review.coverage[0]).toMatchObject({ unverifiedRecommendations: 40, aiReviewedThreads: 0 });
+    expect(review.coverage[0]!.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/40 conversations did not receive a verified AI recommendation/)]));
+    expect(review.status).toBe('partial');
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ stage: 'complete', status: 'warning' }));
+    expect((await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps)).skippedCount).toBe(40);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes missing provider output from a completed uncertain recommendation', async () => {
+    const f = fixture([email('omitted'), email('uncertain')]);
+    f.callAI.mockImplementation(async prompt => {
+      const items = JSON.parse(prompt.split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!) as Array<{ id: string }>;
+      return JSON.stringify({ recommendations: [{ id: items[1]!.id, recommendation: 'needs_review', confidence: 0.4,
+        reason: 'The relevance of this newsletter is uncertain.' }] });
+    });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]).toMatchObject({ emailId: 'omitted', needsRetry: true, recommendation: 'needs_review' });
+    expect(review.items[1]).toMatchObject({ emailId: 'uncertain', recommendation: 'needs_review' });
+    expect(review.items[1]!.needsRetry).toBeUndefined();
+    expect(review.coverage[0]).toMatchObject({ unverifiedRecommendations: 1, aiReviewedThreads: 1 });
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+});
+
+describe('account-local behavior in unread recommendations', () => {
+  it('supplies bounded validated account aliases for recipient interpretation without expanding mailbox queries', async () => {
+    const f = fixture([email('alias-mail', { toAddress: 'alias@company.example' })]);
+    const mailbox = f.mailboxes.get('a')!;
+    mailbox.aliases = ['ALIAS@company.example', 'alias@company.example', 'invalid\naddress@example.com', `${'x'.repeat(260)}@example.com`,
+      ...Array.from({ length: 10 }, (_, index) => `other-alias-${index}@company.example`)];
+    const options = { recommendationCache: new InboxAssistantRecommendationCache(), reviewCacheIdentity: 'recipient-context-provider',
+      reviewPreferences: 'Keep personal emails addressed directly to me unread.' };
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    const prompt = f.callAI.mock.calls[0]![0];
+    const input = JSON.parse(prompt.split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!) as Array<{ recipientContext: { addresses: string[]; complete: boolean }; content: string }>;
+    expect(input[0]!.recipientContext).toMatchObject({ addresses: expect.arrayContaining([accounts[0]!.email, 'alias@company.example']), complete: false });
+    expect(input[0]!.recipientContext.addresses.length).toBeLessThanOrEqual(8);
+    expect(input[0]!.recipientContext.addresses.reduce((sum, address) => sum + address.length, 0)).toBeLessThanOrEqual(1_024);
+    expect(input[0]!.recipientContext.addresses.every(address => address.length <= 254 && !/[\r\n]/u.test(address))).toBe(true);
+    expect(input[0]!.content).toContain('To: alias@company.example');
+    expect(f.mailboxes.get('b')!.storage.searchEmails).not.toHaveBeenCalled();
+    expect(vi.mocked(f.deps.openMailbox).mock.calls.every(([id]) => id === 'a')).toBe(true);
+    expect(mailbox.storage.searchEmails.mock.calls.every(([query]) => query.query === '' && query.scope === 'mailbox' && query.isUnread === true)).toBe(true);
+    expect(prompt.length).toBeLessThanOrEqual(64_000);
+    mailbox.aliases = ['new-alias@company.example'];
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('retains original personal criteria in the prompt and invalidates a recommendation cached under other criteria', async () => {
+    const f = fixture();
+    const options = { recommendationCache: new InboxAssistantRecommendationCache(), reviewCacheIdentity: 'personal-review-provider',
+      reviewPreferences: 'Keep personal emails sent directly to me unread.' };
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    const first = f.callAI.mock.calls[0]![0];
+    expect(first).toContain(`USER_RETENTION_PREFERENCES_JSON: ${JSON.stringify(options.reviewPreferences)}`);
+    expect(first).toContain('Enjoy our summer discount. No response needed.');
+    expect(first).toContain('They can only retain more mail');
+    const updated = { ...options, reviewPreferences: 'Keep personal emails and ongoing relationships unread.' };
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, updated);
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    const cached = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, updated);
+    expect(cached.coverage[0]).toMatchObject({ cachedRecommendations: 1 });
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('includes bounded sender history without replacing body content and invalidates cached decisions when behavior changes', async () => {
+    const f = fixture();
+    let behavior = 'Account-local user actions: opened=2,replied=1; automatic/system actions excluded.';
+    const history = vi.fn(async () => ({ text: behavior, available: true, senderCount: 1, omittedSenderCount: 0 }));
+    Object.assign(f.mailboxes.get('a')!, { getUnreadReviewBehaviorContext: history });
+    const workload = vi.fn();
+    const call = f.callAI.getMockImplementation()!;
+    f.callAI.mockImplementation(async (prompt, signal, detail) => { workload(detail); return call(prompt, signal, detail); });
+    const options = { recommendationCache: new InboxAssistantRecommendationCache(), reviewCacheIdentity: 'provider-with-behavior' };
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(history).toHaveBeenCalledExactlyOnceWith(['offers@newsletter.example']);
+    let prompt = f.callAI.mock.calls[0]![0];
+    expect(prompt).toContain('Enjoy our summer discount. No response needed.');
+    expect(prompt).toContain(behavior);
+    expect(prompt).toContain('Missing history or no replies is not evidence of low value');
+    expect(workload).toHaveBeenLastCalledWith(expect.objectContaining({ behaviorContextChars: behavior.length }));
+    behavior = 'Account-local user actions: opened=3,replied=1,keptUnread=1; automatic/system actions excluded.';
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    prompt = f.callAI.mock.calls[1]![0];
+    expect(prompt).toContain(behavior);
+    const cached = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(cached.coverage[0]).toMatchObject({ cachedRecommendations: 1 });
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('binds each supplied history to its own account and keeps all content under the prompt limit', async () => {
+    const f = fixture([email('primary')], [email('secondary', { toAddress: accounts[1]!.email })]);
+    for (const [id, mailbox] of f.mailboxes) Object.assign(mailbox, {
+      getUnreadReviewBehaviorContext: async () => ({ text: `Recorded user behavior for ${id} only.`, available: true, senderCount: 1, omittedSenderCount: 0 }),
+    });
+    await prepareInboxAssistantReview(accounts, 'unread', f.deps);
+    const prompt = f.callAI.mock.calls[0]![0];
+    const input = JSON.parse(prompt.split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!) as Array<{ accountEmail: string; behaviorContext: string }>;
+    expect(input).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accountEmail: accounts[0]!.email, behaviorContext: 'Recorded user behavior for a only.' }),
+      expect.objectContaining({ accountEmail: accounts[1]!.email, behaviorContext: 'Recorded user behavior for b only.' }),
+    ]));
+    expect(prompt.length).toBeLessThanOrEqual(64_000);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each(['unavailable', 'oversized'] as const)('describes %s history as unavailable rather than inventing lack of engagement', async failure => {
+    const f = fixture();
+    Object.assign(f.mailboxes.get('a')!, { getUnreadReviewBehaviorContext: async () => {
+      if (failure === 'unavailable') throw new Error('Synthetic history read failed');
+      return { text: 'private history '.repeat(200), available: true, senderCount: 1, omittedSenderCount: 0 };
+    } });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    const input = JSON.parse(f.callAI.mock.calls[0]![0].split('UNTRUSTED_CONVERSATIONS_JSON: ')[1]!) as Array<{ content: string; behaviorContext: string }>;
+    expect(input[0]!.behaviorContext).toBe('Sender behavior unavailable; missing history is not evidence of low value.');
+    expect(input[0]!.content).toContain('Enjoy our summer discount. No response needed.');
+    expect(review.items[0]).toMatchObject({ recommendation: 'mark_read', protectedReasons: [] });
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('preserves financial protections even when user behavior often deletes the sender', async () => {
+    const f = fixture([email('statement', { subject: 'Your bank statement is ready', rawBody: 'Your monthly statement is available.', contentType: 'text' })]);
+    const history = vi.fn(async () => ({ text: 'User deleted90d=99.', available: true, senderCount: 1, omittedSenderCount: 0 }));
+    Object.assign(f.mailboxes.get('a')!, { getUnreadReviewBehaviorContext: history });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps);
+    expect(review.items[0]).toMatchObject({ recommendation: 'keep_unread' });
+    expect(history).not.toHaveBeenCalled();
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+});
+
 describe('compact complete unread-review input', () => {
   const original = ['A seasonal newsletter with subscriber discounts and product news.',
     'Subscribers receive monthly news, release notes and seasonal offers. '.repeat(15),

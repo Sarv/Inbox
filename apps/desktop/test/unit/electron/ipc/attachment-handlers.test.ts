@@ -1220,7 +1220,11 @@ describe('the cache generation', () => {
 
     const filePath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 42, FILENAME, engine());
 
-    expect(await readCachedAttachment(filePath)).toEqual(STALE);
+    // Local migration/seeding writes a separate slot; it must neither evict
+    // nor replace a complete server-backed entry in the current generation.
+    expect(await readCachedAttachment(filePath)).toEqual(BYTES);
+    const localPath = await getOrCacheAttachment(ACTIVE, EMAIL_ID, 'INBOX', 0, FILENAME, null);
+    expect(await readCachedAttachment(localPath)).toEqual(STALE);
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled();
   });
 

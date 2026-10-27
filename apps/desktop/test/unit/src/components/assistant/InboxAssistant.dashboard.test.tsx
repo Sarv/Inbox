@@ -133,7 +133,7 @@ describe('Inbox Agent overview integration', () => {
     expect(api.applyReview).not.toHaveBeenCalled();
   });
 
-  it('keeps a request running when switching to Overview and offers Stop for the same request', async () => {
+  it('keeps a request running in Overview and offers cancellation through activity when the composer is hidden', async () => {
     let finish!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
     api.ask.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const view = render(<InboxAssistant initialView="conversation" />); await settle();
@@ -144,7 +144,15 @@ describe('Inbox Agent overview integration', () => {
     expect(api.cancel).not.toHaveBeenCalled();
     expect(view.byLabel('Inbox overview')).not.toBeNull();
     expect(view.find('#inbox-assistant-question')).toBeNull();
-    fire(view.byLabel('Stop current work'), 'click'); await settle();
+    expect(view.byLabel('Stop answering')).toBeNull();
+    expect(view.byLabel('Stop current work')).toBeNull();
+    const workBar = view.byLabel('Current agent work')!;
+    expect(workBar.querySelectorAll('button')).toHaveLength(1);
+    fire(view.byLabel('View current activity'), 'click');
+    const activity = view.find('#assistant-activity-panel')!;
+    const stop = view.byLabel('Stop work from activity')!;
+    expect(activity.contains(stop)).toBe(true);
+    fire(stop, 'click'); await settle();
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith(requestId);
     await act(async () => finish(ok(exchange()))); await settle();
     expect(view.find('h1')?.textContent).toBe('Inbox overview');

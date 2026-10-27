@@ -116,7 +116,7 @@ afterEach(cleanup);
 
 function WorkspaceHarness() {
   const [section, setSection] = useState('assistant');
-  return <><button onClick={() => setSection('mail')}>Open Inbox test</button><button onClick={() => setSection('settings')}>Open Settings test</button>
+  return <><button onClick={() => setSection('mail')}>Open Inbox test</button><button onClick={() => setSection('settings')}>Open Settings test</button><button onClick={() => setSection('assistant')}>Open AI test</button>
     <AssistantWorkspace section={section} onOpenInbox={() => setSection('mail')} onOpenAssistant={() => setSection('assistant')}
       renderAssistant={props => <InboxAssistant initialView="conversation" {...props} />}><div>Mail and settings workspace</div></AssistantWorkspace></>;
 }
@@ -142,12 +142,12 @@ describe('Inbox Agent background workspace', () => {
     expect(view.byLabel('Show running AI chat')?.textContent).toContain('Downloading original email');
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
     await act(async () => { complete(ok(exchange())); }); await settle();
-    expect(view.byLabel('Show AI chat')).not.toBeNull();
+    expect(view.find('.assistant-launcher')).toBeNull();
     // Startup and completion both fetch the active chat, including its durable run accounting.
     expect(api.chat.mock.calls.map(([id]) => id)).toEqual(['chat-1', 'chat-1']);
     expect(api.ask).toHaveBeenCalledTimes(1);
     expect(api.cancel).not.toHaveBeenCalled();
-    fire(view.byLabel('Show AI chat'), 'click'); await settle();
+    fire(view.all('button').find(button => button.textContent === 'Open AI test')!, 'click'); await settle();
     expect(view.find('#inbox-assistant-question')).toBe(input);
     expect(view.container.textContent).toContain('You sent a revised quote');
     fire(view.byLabel('Inbox + AI split view'), 'click'); await settle();
@@ -243,6 +243,7 @@ describe('Inbox Agent', () => {
     const view = await mount({ onMailChanged });
     expect(api.applyReview).not.toHaveBeenCalled();
     fire(button(view, 'Clear selection'), 'click');
+    toggle(view.byLabel('Continue automatically') as HTMLInputElement);
     fire(button(view, 'Mark recommended & continue'), 'click'); await settle();
     const request = api.applyReview.mock.calls[0]![0];
     expect(request).toMatchObject({ chatId: 'chat-1', exchangeId: reviewed.id, reviewId: reviewed.review!.id, itemIds: [], autoContinue: true });
@@ -262,7 +263,11 @@ describe('Inbox Agent', () => {
     emit({ requestId: request.requestId, chatId: 'chat-1', sequence: 3, at: Date.now(), stage: 'action', status: 'running',
       message: 'Another receipt saved', reviewAutomation: { ...automation, markedEmails: 36 } }); await settle();
     expect(onMailChanged).toHaveBeenCalledTimes(2);
-    fire(view.byLabel('Stop automatic review'), 'click'); await settle();
+    expect(view.byLabel('Stop automatic review')).toBeNull();
+    const stop = view.byLabel('Stop answering')!;
+    expect(stop.closest('form')?.contains(view.find('#inbox-assistant-question'))).toBe(true);
+    expect(view.all('button[aria-label="Stop answering"]')).toHaveLength(1);
+    fire(stop, 'click'); await settle();
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith(request.requestId);
     await act(async () => finish(ok({ ...reviewReceipt(reviewed), updatedAt: Date.now(), review: { ...reviewed.review!, automation: { ...automation, status: 'stopped' } } })));
     await settle();
@@ -275,6 +280,7 @@ describe('Inbox Agent', () => {
     let finish!: (value: InboxAssistantResult<InboxAssistantExchange>) => void;
     api.applyReview.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const view = await mount();
+    toggle(view.byLabel('Continue automatically') as HTMLInputElement);
     fire(button(view, 'Mark recommended & continue'), 'click'); await settle();
     const request = api.applyReview.mock.calls[0]![0];
     fire(button(view, 'New conversation'), 'click'); await settle();
@@ -306,7 +312,11 @@ describe('Inbox Agent', () => {
     const view = await mount();
     expect(view.byLabel('Automatic unread review')?.textContent).toContain('250 conversations reviewed');
     expect(api.applyReview).not.toHaveBeenCalled();
-    fire(view.byLabel('Stop automatic review'), 'click'); await settle();
+    expect(view.byLabel('Stop automatic review')).toBeNull();
+    const stop = view.byLabel('Stop answering')!;
+    expect(stop.closest('form')?.contains(view.find('#inbox-assistant-question'))).toBe(true);
+    expect(view.all('button[aria-label="Stop answering"]')).toHaveLength(1);
+    fire(stop, 'click'); await settle();
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith('restored-automatic');
   });
 
@@ -321,7 +331,8 @@ describe('Inbox Agent', () => {
     expect(receipt.textContent).toContain('200 conversations reviewed');
     expect(receipt.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
     fire(receipt.querySelector('button'), 'click'); await settle();
-    expect(receipt.querySelectorAll('input[type="checkbox"]')).toHaveLength(200);
+    expect(receipt.querySelectorAll('input[aria-label^="Select conversation:"]')).toHaveLength(20);
+    expect(receipt.querySelector('[aria-label="Reviewed conversation pages"]')).not.toBeNull();
     fire([...receipt.querySelectorAll('button')].find(value => value.textContent === 'Refresh review')!, 'click'); await settle();
     expect(api.ask.mock.calls[0]![0]).toMatchObject({ question: original.question, reviewKind: 'unread', reviewOnly: true });
     expect(api.applyReview).not.toHaveBeenCalled();
@@ -998,7 +1009,11 @@ describe('Inbox Agent', () => {
     fire(button(view, 'Draft email'), 'click');
     fire(view.byLabel('Draft from conversation'), 'submit');
     expect(view.container.textContent).toContain('Preparing draft from conversation');
-    expect(view.byLabel('Stop drafting')).not.toBeNull();
+    const stop = view.byLabel('Stop drafting') as HTMLButtonElement;
+    expect(stop).not.toBeNull();
+    expect(stop.closest('form')?.contains(view.find('#inbox-assistant-question'))).toBe(true);
+    expect(view.byLabel('Stop current work')).toBeNull();
+    expect(view.byLabel('Current agent work')?.querySelectorAll('button')).toHaveLength(1);
     fire(view.byLabel('Open conversation: Meeting follow-ups'), 'click');
     await settle();
     expect(api.cancel).not.toHaveBeenCalled();
@@ -1032,9 +1047,7 @@ describe('Inbox Agent', () => {
     expect(api.chats).toHaveBeenCalledOnce();
     expect(api.chat).toHaveBeenCalledExactlyOnceWith('chat-1');
     expect(api.history).not.toHaveBeenCalled();
-    expect(button(view, 'New conversation')?.className).toContain('rounded-full');
     expect(view.byLabel('Conversation messages')?.className).toContain('overflow-y-auto');
-    expect(view.find('textarea')?.className).toContain('resize-none');
     expect(view.find('form')?.className).not.toContain('sticky');
   });
 
@@ -1368,6 +1381,24 @@ describe('Inbox Agent', () => {
     submit(view, 'Find my latest invoice.');
     await settle();
     expect(api.ask).toHaveBeenCalledWith({ requestId: expect.any(String), chatId: 'chat-new', question: 'Find my latest invoice.', accountIds: ['work', 'other'] });
+  });
+
+  it('shows a saved preflight failure once without empty token panels', async () => {
+    const message = 'This request needs a supported review scope. No mail was changed.';
+    let failed: InboxAssistantExchange | undefined;
+    api.chat.mockImplementation(async id => ok(chat(id, failed ? [failed] : [])));
+    api.ask.mockImplementationOnce(async request => {
+      failed = { ...exchange(), id: 'failed-review', requestId: request.requestId, question: request.question,
+        status: 'failed', error: message, answer: { ...exchange().answer, text: message, sources: [] }, usage: undefined };
+      return { success: false, error: message };
+    });
+    const view = await mount();
+    submit(view, 'Review my unread emails.'); await settle();
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    expect(view.find('[role="alert"]')?.textContent).toContain(message);
+    expect(view.byLabel('Answer usage')).toBeNull();
+    expect(view.byLabel('Conversation usage')).toBeNull();
+    expect(api.applyReview).not.toHaveBeenCalled();
   });
 
   it('preserves older chats when creating fails and displays ask errors without losing the question', async () => {

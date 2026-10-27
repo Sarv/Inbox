@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An Inbox Agent dashboard brings together replies, follow-ups, upcoming
+  meetings and unread mail. Reply actions include all conversation recipients
+  by default.
+
+### Changed
+- The assistant sends compact, deduplicated email context to the AI and uses
+  relevant sender history when reviewing unread mail. Financial reports,
+  business conversations and uncertain messages receive stronger protection.
+- Unread review uses a compact conversation list, clearer recommendations and
+  a single action to mark recommended mail as read and continue through batches.
+  The message composer keeps one accessible Stop control while work is running.
+
+### Fixed
+- Natural-language unread-review requests retain your preferences across
+  batches, and incomplete reviews can retry without silently skipping mail.
+- Assistant answers make better use of conversation history, team emails,
+  full message bodies and supported attachments across connected accounts.
+- The floating assistant appears for active work or a pending approval, and
+  stays closed when an old conversation is idle.
+- Attachments download correctly from mail servers that repeat partial file
+  data. Previously cached remote downloads are refreshed, fixing PDFs that
+  appeared damaged in both the preview and saved file.
+
 ## [1.4.5] - 2026-10-24
 
 ### Added

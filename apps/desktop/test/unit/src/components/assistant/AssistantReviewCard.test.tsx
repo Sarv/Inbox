@@ -59,6 +59,21 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('Assistant unread review card', () => {
+  it('shows a nonempty retained or uncertain group when no mark-read recommendations exist without selecting its mail', () => {
+    const value = review({ items: [item('financial', { recommendation: 'keep_unread', protectedReasons: ['Financial report'], manualSelectionAllowed: true })] });
+    const { view, props } = mount(value);
+    expect(button(view, 'Keep unread 1')?.getAttribute('aria-pressed')).toBe('true');
+    expect(view.byLabel('Reviewed conversations')?.textContent).toContain('Subject financial');
+    expect(view.container.textContent).toContain('These conversations stay unread.');
+    expect(checkbox(view, 'financial').checked).toBe(false);
+    expect(view.container.textContent).toContain('0 conversations selected');
+    view.rerender(<AssistantReviewCard {...props} review={review({ id: 'only-uncertain', items: [item('uncertain', { recommendation: 'needs_review', manualSelectionAllowed: true })] })} />);
+    expect(button(view, 'Needs review 1')?.getAttribute('aria-pressed')).toBe('true');
+    expect(checkbox(view, 'uncertain').checked).toBe(false);
+    expect(props.onApply).not.toHaveBeenCalled();
+    expect(props.onOpen).not.toHaveBeenCalled();
+  });
+
   it('selects a recommendation group without changing mail and preserves selections when inspecting another group', () => {
     const { view, props } = mount(review({ items: [
       item('recommended', { mailActionsAllowed: true }),
@@ -387,6 +402,54 @@ describe('Assistant unread review card', () => {
     expect(view.container.textContent).not.toContain('1970');
   });
 
+  it('lets users inspect a protected conversation’s details without selecting it or changing mail', () => {
+    const { view, props } = mount(review({ items: [
+      item('safe'),
+      item('financial', { protectedReasons: ['Financial reports require your review.'], categories: ['finance'], uncategorized: false }),
+    ] }));
+    const summary = view.byLabel('Review details: Subject financial (owner@example.test)');
+    const details = summary?.closest('details') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    act(() => summary?.focus());
+    fire(summary, 'click');
+    expect(details.open).toBe(true);
+    expect(details.textContent).toContain('Financial reports require your review.');
+    expect(details.textContent).toContain('96% confidence');
+    expect(checkbox(view, 'financial').checked).toBe(false);
+    expect(checkbox(view, 'financial').disabled).toBe(true);
+    expect(checkbox(view, 'safe').checked).toBe(true);
+    expect(props.onApply).not.toHaveBeenCalled();
+    expect(props.onOpen).not.toHaveBeenCalled();
+  });
+
+  it.each([2, 3])('summarizes %s duplicated protection reasons while keeping every reason in Details and distinct recommendations intact', total => {
+    const reasons = ['Financial report requires your review.', 'Your team is part of this conversation.', 'Attachments need review.'].slice(0, total);
+    const distinctReason = 'The latest message asks you to approve a revised business report.';
+    const { view, props } = mount(review({ items: [
+      item('duplicated', { protectedReasons: reasons, reason: reasons.join(' ') }),
+      item('distinct', { protectedReasons: reasons, reason: distinctReason }),
+    ] }));
+    const row = view.byLabel('Open conversation: Subject duplicated (owner@example.test)')?.closest('li');
+    const visibleReason = [...row!.querySelectorAll('p')].find(paragraph => !paragraph.closest('details') && paragraph.textContent.includes(reasons[0]!));
+    expect(visibleReason?.textContent).toBe(`${reasons[0]} ${total - 1} more ${total === 2 ? 'reason' : 'reasons'} in Details`);
+    const details = view.byLabel('Review details: Subject duplicated (owner@example.test)')?.closest('details');
+    for (const reason of reasons) expect(details?.textContent).toContain(reason);
+    const distinctRow = view.byLabel('Open conversation: Subject distinct (owner@example.test)')?.closest('li');
+    expect([...distinctRow!.querySelectorAll('p')].some(paragraph => !paragraph.closest('details') && paragraph.textContent === distinctReason)).toBe(true);
+    expect(props.onApply).not.toHaveBeenCalled();
+  });
+
+  it('labels a rule-protected decision separately from actual model confidence', () => {
+    const { view } = mount(review({ items: [
+      item('rules', { recommendation: 'keep_unread', protectedReasons: ['Financial report'], confidence: 0 }),
+      item('model', { recommendation: 'keep_unread', confidence: 0.94 }),
+    ] }));
+    const protectedDetails = view.byLabel('Review details: Subject rules (owner@example.test)')?.closest('details');
+    expect(protectedDetails?.textContent).toContain('Protected by review rules');
+    expect(protectedDetails?.textContent).not.toContain('0% confidence');
+    expect(view.byLabel('Review details: Subject model (owner@example.test)')?.closest('details')?.textContent).toContain('94% confidence');
+  });
+
   it('shows receipts and offers undo only when the backend retained an undo snapshot, including partial failures', () => {
     const value = review({ items: [
       item('applied', { status: 'applied', undoAvailable: true }), item('queued', { status: 'queued', undoAvailable: true }),
@@ -427,6 +490,28 @@ describe('Assistant unread review card', () => {
     expect(props.onRefresh).toHaveBeenCalledExactlyOnceWith();
     fire(view.byLabel('Open conversation: Subject safe-a (owner@example.test)'), 'click');
     expect(props.onOpen).toHaveBeenCalledOnce();
+  });
+
+  it('reschedules an expiry timer that fires just before the trusted deadline', () => {
+    const { view } = mount(review({ expiresAt: NOW + 500 }));
+    vi.setSystemTime(NOW - 1);
+    act(() => { vi.advanceTimersByTime(500); });
+    expect(view.container.textContent).not.toContain('This review has expired.');
+    expect((button(view, 'Mark selected as read') as HTMLButtonElement).disabled).toBe(false);
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(view.container.textContent).toContain('This review has expired.');
+    expect((button(view, 'Mark selected as read') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it.each(['focus', 'visibilitychange'] as const)('refreshes expired action state after a clock jump on %s', event => {
+    const { view, props } = mount(review({ expiresAt: NOW + 500 }));
+    vi.setSystemTime(NOW + 501);
+    act(() => { (event === 'focus' ? window : document).dispatchEvent(new Event(event)); });
+    const actions = view.byLabel('Review actions')!;
+    expect(actions.textContent).toContain('This review has expired.');
+    expect((button(view, 'Mark selected as read') as HTMLButtonElement).disabled).toBe(true);
+    expect([...actions.querySelectorAll('button')].some(value => value.textContent === 'Refresh review' && !value.disabled)).toBe(true);
+    expect(props.onApply).not.toHaveBeenCalled();
   });
 
   it('locks mutations while busy and uses fresh default tokens when a new review replaces it', () => {
@@ -493,6 +578,132 @@ describe('Assistant unread review card', () => {
 });
 
 describe('Explicit automatic review', () => {
+  it.each(['ready', 'expired', 'nothing-left'] as const)('puts %s continuation guidance in a hover tooltip and accessible description without expanding the label', state => {
+    const onStartAutoReview = vi.fn();
+    const value = review({
+      ...(state === 'expired' ? { expiresAt: NOW - 1 } : {}),
+      ...(state === 'nothing-left' ? { items: [item('keep', { recommendation: 'keep_unread' })] } : {}),
+    });
+    const { view, props } = mount(value, { onStartAutoReview });
+    const preference = view.byLabel('Continue automatically') as HTMLInputElement;
+    const label = preference.closest('label')!;
+    const description = document.getElementById(preference.getAttribute('aria-describedby')!);
+    const help = state === 'expired' ? 'Refresh this expired review before starting.'
+      : state === 'nothing-left' ? 'No recommendations or remaining batches. Refresh to check for new mail.'
+        : 'Mark all recommended mail as read, then review the next batches. Important and uncertain mail stays unread.';
+    expect(label.title).toBe(help);
+    expect(description?.textContent).toBe(help);
+    expect(description?.classList.contains('sr-only')).toBe(true);
+    expect(label.querySelector('p')).toBeNull();
+    toggle(preference);
+    expect(preference.checked).toBe(true);
+    expect(label.title).toBe(help);
+    expect(label.querySelector('p')).toBeNull();
+    expect([...label.querySelectorAll('span')].filter(span => !span.classList.contains('sr-only')).map(span => span.textContent)).toEqual(['Continue automatically']);
+    expect(onStartAutoReview).not.toHaveBeenCalled();
+    expect(props.onApply).not.toHaveBeenCalled();
+  });
+
+  it.each(['already-expired', 'clock-jumped'] as const)('allows an idle continuation preference when %s while keeping expired mail changes locked', condition => {
+    const onStartAutoReview = vi.fn();
+    const value = review({ expiresAt: condition === 'already-expired' ? NOW - 1 : NOW + 500 });
+    const { view, props } = mount(value, { onStartAutoReview });
+    if (condition === 'clock-jumped') vi.setSystemTime(NOW + 501);
+    const preference = view.byLabel('Continue automatically') as HTMLInputElement;
+    expect(preference.disabled).toBe(false);
+    toggle(preference);
+    expect(preference.checked).toBe(true);
+    expect(view.byLabel('Review actions')?.textContent).toContain('This review has expired.');
+    expect((button(view, 'Mark recommended & continue') as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<AssistantReviewCard {...props} review={{ ...value }} />);
+    expect(preference.checked).toBe(true);
+    fire(button(view, 'Mark recommended & continue'), 'click');
+    expect(onStartAutoReview).not.toHaveBeenCalled();
+    expect(props.onApply).not.toHaveBeenCalled();
+    toggle(preference);
+    expect(preference.checked).toBe(false);
+  });
+
+  it('can explicitly start continuous review for incomplete classifications without eligible mail or another page', () => {
+    const onStartAutoReview = vi.fn();
+    const { view, props } = mount(review({ items: [item('retry', { recommendation: 'needs_review', needsRetry: true })] }), { onStartAutoReview });
+    expect(view.container.textContent).toContain('0 conversations selected');
+    toggle(view.byLabel('Continue automatically'));
+    expect((button(view, 'Mark recommended & continue') as HTMLButtonElement).disabled).toBe(false);
+    expect(onStartAutoReview).not.toHaveBeenCalled();
+    fire(button(view, 'Mark recommended & continue'), 'click');
+    expect(onStartAutoReview).toHaveBeenCalledExactlyOnceWith();
+    expect(props.onApply).not.toHaveBeenCalled();
+  });
+
+  it('keeps a custom manual selection separate from continuous recommended-only processing', () => {
+    const onStartAutoReview = vi.fn();
+    const { view, props } = mount(review({ items: [item('safe'), item('keep', { recommendation: 'keep_unread', manualSelectionAllowed: true })] }), { onStartAutoReview });
+    const continuous = view.byLabel('Continue automatically') as HTMLInputElement;
+    expect(continuous.checked).toBe(false);
+    toggle(continuous);
+    expect(button(view, 'Review next batch')).toBeNull();
+    expect(button(view, 'Mark selected as read')).toBeNull();
+    fire(button(view, 'Keep unread 1'), 'click');
+    toggle(checkbox(view, 'keep'));
+    expect(continuous.checked).toBe(false);
+    expect(button(view, 'Mark recommended & continue')).toBeNull();
+    fire(button(view, 'Mark selected as read'), 'click');
+    expect(props.onApply).toHaveBeenCalledExactlyOnceWith(['safe', 'keep'], true);
+    expect(onStartAutoReview).not.toHaveBeenCalled();
+  });
+
+  it('paginates long reviews without discarding selections or mixing page changes with AI requests', () => {
+    const { view, props } = mount(review({ items: Array.from({ length: 45 }, (_, index) => item(`row-${index}`)) }));
+    expect(view.all('input[aria-label^="Select conversation:"]')).toHaveLength(20);
+    toggle(checkbox(view, 'row-0'));
+    fire(view.byLabel('Next reviewed conversations'), 'click');
+    expect(checkbox(view, 'row-20').checked).toBe(true);
+    toggle(checkbox(view, 'row-20'));
+    fire(view.byLabel('Previous reviewed conversations'), 'click');
+    expect(checkbox(view, 'row-0').checked).toBe(false);
+    fire(button(view, 'Mark selected as read'), 'click');
+    const ids = (props.onApply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string[];
+    expect(ids).toHaveLength(43);
+    expect(ids).not.toContain('row-0');
+    expect(ids).not.toContain('row-20');
+    expect(props.onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('provides keyboard access to the reviewed list and starts each page or group at the top without clearing selection', () => {
+    const { view, props } = mount(review({ items: [
+      ...Array.from({ length: 25 }, (_, index) => item(`row-${index}`)),
+      item('keep', { recommendation: 'keep_unread' }),
+    ] }));
+    const list = view.byLabel('Reviewed conversations')!;
+    expect(list.getAttribute('role')).toBe('region');
+    act(() => list.focus());
+    expect(document.activeElement).toBe(list);
+    toggle(checkbox(view, 'row-0'));
+    list.scrollTop = 250;
+    fire(view.byLabel('Next reviewed conversations'), 'click');
+    expect(list.scrollTop).toBe(0);
+    expect(checkbox(view, 'row-20').checked).toBe(true);
+    list.scrollTop = 150;
+    fire(button(view, 'Keep unread 1'), 'click');
+    expect(list.scrollTop).toBe(0);
+    fire(button(view, 'Mark read 25'), 'click');
+    expect(checkbox(view, 'row-0').checked).toBe(false);
+    expect(view.container.textContent).toContain('24 conversations selected');
+    expect(props.onApply).not.toHaveBeenCalled();
+    expect(props.onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('retries incomplete AI classifications with the continuation checkpoint and leaves mail unchanged', () => {
+    const onContinue = vi.fn();
+    const { view, props } = mount(review({ items: [item('retry', { recommendation: 'needs_review', needsRetry: true })] }), { onContinue });
+    expect(view.container.textContent).toContain('1 conversation still needs classification');
+    fire(button(view, 'Retry incomplete review'), 'click');
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith();
+    expect(props.onApply).not.toHaveBeenCalled();
+    expect(props.onRefresh).not.toHaveBeenCalled();
+  });
+
   it('keeps the optional control absent for existing callers', () => {
     const { view } = mount();
     expect(view.byLabel('Automatic unread review')).toBeNull();
@@ -510,6 +721,9 @@ describe('Explicit automatic review', () => {
     fire(button(view, 'Keep unread 1'), 'click');
     toggle(checkbox(view, 'manual'));
     expect(view.container.textContent).toContain('2 conversations selected');
+    expect(button(view, 'Mark recommended & continue')).toBeNull();
+    toggle(view.byLabel('Continue automatically') as HTMLInputElement);
+    expect(view.container.textContent).toContain('1 conversation selected');
     fire(button(view, 'Mark recommended & continue'), 'click');
     expect(onStartAutoReview).toHaveBeenCalledExactlyOnceWith();
     expect(props.onApply).not.toHaveBeenCalled();
@@ -527,10 +741,15 @@ describe('Explicit automatic review', () => {
     const onStartAutoReview = vi.fn();
     const value = review({ items: [item('keep', { recommendation: 'keep_unread' }), item('uncertain', { recommendation: 'needs_review' })] });
     const { view, props } = mount(value, { onStartAutoReview });
+    const preference = view.byLabel('Continue automatically') as HTMLInputElement;
+    expect(preference.disabled).toBe(false);
+    expect(preference.checked).toBe(false);
+    toggle(preference);
     expect((button(view, 'Mark recommended & continue') as HTMLButtonElement).disabled).toBe(true);
-    fire(button(view, 'Mark recommended & continue'), 'click');
+    expect(view.container.textContent).toContain('No recommendations or remaining batches. Refresh to check for new mail.');
     expect(onStartAutoReview).not.toHaveBeenCalled();
     view.rerender(<AssistantReviewCard {...props} review={{ ...value, coverage: [{ ...value.coverage[0]!, hasMore: true }] }} />);
+    expect(preference.checked).toBe(true);
     expect((button(view, 'Mark recommended & continue') as HTMLButtonElement).disabled).toBe(false);
     fire(button(view, 'Mark recommended & continue'), 'click');
     expect(onStartAutoReview).toHaveBeenCalledExactlyOnceWith();
@@ -542,14 +761,21 @@ describe('Explicit automatic review', () => {
     const value = review({ ...(condition === 'expired' ? { expiresAt: NOW - 1 } : {}),
       ...(condition === 'protected' ? { items: [item('protected', { protectedReasons: ['Starred by you'], manualSelectionAllowed: true, mailActionsAllowed: true })] } : {}) });
     const { view } = mount(value, { onStartAutoReview, busy: condition === 'busy' });
-    expect((button(view, 'Mark recommended & continue') as HTMLButtonElement).disabled).toBe(true);
-    fire(button(view, 'Mark recommended & continue'), 'click');
+    const preference = view.byLabel('Continue automatically') as HTMLInputElement;
+    expect(preference.disabled).toBe(condition === 'busy');
+    if (condition !== 'busy') {
+      toggle(preference);
+      expect(preference.checked).toBe(true);
+      expect((button(view, 'Mark recommended & continue') as HTMLButtonElement).disabled).toBe(true);
+      fire(button(view, 'Mark recommended & continue'), 'click');
+    } else expect(button(view, 'Mark recommended & continue')).toBeNull();
     expect(onStartAutoReview).not.toHaveBeenCalled();
   });
 
   it('rechecks expiry before starting even if the expiry timer has not rendered', () => {
     const onStartAutoReview = vi.fn();
     const { view } = mount(review(), { onStartAutoReview });
+    toggle(view.byLabel('Continue automatically') as HTMLInputElement);
     vi.setSystemTime(NOW + 60_001);
     fire(button(view, 'Mark recommended & continue'), 'click');
     expect(onStartAutoReview).not.toHaveBeenCalled();
@@ -557,48 +783,47 @@ describe('Explicit automatic review', () => {
 
   it('shows live progress instead of an older saved receipt and keeps queued emails separate from confirmed changes', () => {
     const value = review({ automation: automation({ status: 'completed', batchesReviewed: 9, markedEmails: 30 }) });
-    const { view } = mount(value, { automation: automation(), onStop: vi.fn() });
+    const { view } = mount(value, { automation: automation() });
     expect(view.container.textContent).toContain('Automatic review running');
     expect(view.container.textContent).toContain('2 batches reviewed · 12 conversations reviewed');
     expect(view.container.textContent).toContain('3 conversations marked as read · 5 emails marked as read');
     expect(view.container.textContent).toContain('2 emails queued for sync; server changes are not confirmed yet.');
+    expect(view.byLabel('Automatic unread review')?.textContent).toContain('5 emails marked as read · 2 emails queued for sync');
     expect(view.container.textContent).not.toContain('30 emails marked as read');
     expect(view.container.textContent).not.toContain('9 batches reviewed');
     expect(view.container.querySelector('[role="progressbar"]')).toBeNull(); // The mailbox total is not known.
   });
 
-  it.each([false, true])('keeps Stop available and locks manual changes while running, with busy=%s', busy => {
-    const onStop = vi.fn();
-    const { view, props } = mount(review({ expiresAt: NOW - 1, automation: automation() }), { busy, onStop, onStartAutoReview: vi.fn(), onContinue: vi.fn() });
-    const stop = view.byLabel('Stop automatic review') as HTMLButtonElement;
-    expect(stop.disabled).toBe(false);
+  it.each([false, true])('avoids a duplicate Stop and locks manual changes while running, with busy=%s', busy => {
+    const { view, props } = mount(review({ expiresAt: NOW - 1, automation: automation() }), { busy, onStartAutoReview: vi.fn(), onContinue: vi.fn() });
+    expect(view.byLabel('Stop automatic review')).toBeNull();
+    expect(button(view, 'Stop')).toBeNull();
     expect(button(view, 'Mark recommended & continue')).toBeNull();
-    fire(stop, 'click');
-    expect(onStop).toHaveBeenCalledExactlyOnceWith();
-    fire(button(view, 'Mark selected as read'), 'click');
-    fire(view.byLabel('Archive selected conversations'), 'click');
-    fire(view.byLabel('Move selected conversations to Trash'), 'click');
-    fire(button(view, 'Refresh now'), 'click');
+    expect(button(view, 'Mark selected as read')).toBeNull();
+    expect(view.byLabel('Archive selected conversations')).toBeNull();
+    expect(view.byLabel('Move selected conversations to Trash')).toBeNull();
+    fire(button(view, 'Refresh review'), 'click');
     expect(props.onApply).not.toHaveBeenCalled();
     expect(props.onRefresh).not.toHaveBeenCalled();
     expect(props.onContinue).not.toHaveBeenCalled();
   });
 
   it('locks a fresh review against competing manual actions during automation even if busy was not set', () => {
-    const { view, props } = mount(review({ automation: automation(), items: [item('safe', { mailActionsAllowed: true })] }), { onStop: vi.fn(), onContinue: vi.fn() });
+    const { view, props } = mount(review({ automation: automation(), items: [item('safe', { mailActionsAllowed: true })] }), { onContinue: vi.fn() });
     expect(checkbox(view, 'safe').disabled).toBe(true);
     expect((button(view, 'Refresh review') as HTMLButtonElement).disabled).toBe(true);
-    fire(button(view, 'Mark selected as read'), 'click');
-    fire(view.byLabel('Archive selected conversations'), 'click');
-    fire(view.byLabel('Move selected conversations to Trash'), 'click');
+    expect(button(view, 'Mark selected as read')).toBeNull();
+    expect(view.byLabel('Archive selected conversations')).toBeNull();
+    expect(view.byLabel('Move selected conversations to Trash')).toBeNull();
     fire(button(view, 'Refresh review'), 'click');
     expect(props.onApply).not.toHaveBeenCalled();
     expect(props.onRefresh).not.toHaveBeenCalled();
   });
 
-  it('does not imply Stop is actionable without a handler', () => {
+  it('keeps a restored running snapshot free of a duplicate Stop', () => {
     const { view } = mount(review({ automation: automation() }));
-    expect((view.byLabel('Stop automatic review') as HTMLButtonElement).disabled).toBe(true);
+    expect(view.byLabel('Stop automatic review')).toBeNull();
+    expect(button(view, 'Stop')).toBeNull();
   });
 
   it.each(['completed', 'stopped', 'failed'] as const)('restores a %s receipt without restarting automation', status => {
@@ -625,6 +850,28 @@ describe('Explicit automatic review', () => {
     fire(resume, 'click');
     expect(onStartAutoReview).toHaveBeenCalledExactlyOnceWith();
     expect(props.onApply).not.toHaveBeenCalled();
+  });
+
+  it.each(['stopped', 'failed'] as const)('allows the host to resume a %s checkpoint with retryable mail after the anchor’s recommendations were applied', status => {
+    const onStartAutoReview = vi.fn();
+    const value = review({
+      automation: automation({ status }),
+      items: [
+        item('applied', { status: 'applied', appliedAction: 'mark_read' }),
+        item('retry', { recommendation: 'needs_review', needsRetry: true, manualSelectionAllowed: false }),
+        item('write-retry', { status: 'failed', appliedAction: 'mark_read' }),
+      ],
+    });
+    const { view, props } = mount(value, { onStartAutoReview });
+    const resume = button(view, 'Resume automatic review') as HTMLButtonElement;
+    expect(view.container.textContent).toContain('0 conversations selected');
+    expect(value.coverage.some(account => account.hasMore)).toBe(false);
+    expect(resume.disabled).toBe(false);
+    expect(onStartAutoReview).not.toHaveBeenCalled();
+    fire(resume, 'click');
+    expect(onStartAutoReview).toHaveBeenCalledExactlyOnceWith();
+    expect(props.onApply).not.toHaveBeenCalled();
+    expect(props.onUndo).not.toHaveBeenCalled();
   });
 
   it('offers a fresh review rather than restarting a completed sweep even if its old snapshot has pending items', () => {

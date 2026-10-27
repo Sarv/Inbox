@@ -55,6 +55,23 @@ import {
 const CONTACTS = SHARED('contacts');
 const CONTACT_NOTES = SHARED('contact_notes');
 
+/** Bounded, account-local evidence for an unread review; never action authority. */
+export interface UnreadReviewSenderContext {
+  received90d: number;
+  opened90d: number;
+  markedRead90d: number;
+  deleted90d: number;
+  archived90d: number;
+  replied90d: number;
+  keptUnread90d: number;
+  starred90d: number;
+  important90d: number;
+  sentLifetime: number;
+  lastSentAt: number | null;
+  isVip: boolean;
+  isBlocked: boolean;
+}
+
 /**
  * One candidate for category-label mirroring; `date` is the merge key only.
  *
@@ -1432,6 +1449,64 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
       burstCount: burst,
       lastInteractionAt: lastInteraction.ts,
     };
+  }
+
+  /**
+   * Reuses categorization's underlying behavior records without its shared
+   * directory counters or automatic actions. Otherwise an agent's previous
+   * mark-read decision would become evidence that the user values that mail
+   * less. Read/keep/reply counts describe distinct messages, not repeated clicks.
+   * This connection is the named mailbox's DB; no shared tables are consulted.
+   */
+  getUnreadReviewSenderContextBatch(senderEmails: string[], nowSec = Math.floor(Date.now() / 1000)): Record<string, UnreadReviewSenderContext> {
+    if (!Array.isArray(senderEmails) || senderEmails.length > 100 || !Number.isSafeInteger(nowSec) || nowSec <= 0
+      || senderEmails.some(email => typeof email !== 'string' || email.length > 254 || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/u.test(email.trim()))) {
+      throw new Error('Invalid unread-review sender scope.');
+    }
+    const senders = [...new Set(senderEmails.map(email => email.trim().toLowerCase()))];
+    if (!senders.length) return {};
+    const placeholders = senders.map(() => '?').join(',');
+    const since = nowSec - 90 * 86400;
+    const received = this.db.prepare(`
+      SELECT LOWER(from_address) AS sender,
+        COUNT(DISTINCT COALESCE(NULLIF(TRIM(message_id), ''), id)) AS count
+      FROM emails WHERE LOWER(from_address) IN (${placeholders}) AND date >= ? AND date <= ?
+      GROUP BY LOWER(from_address)
+    `).all(...senders, since, nowSec) as Array<{ sender: string; count: number }>;
+    const actions = this.db.prepare(`
+      SELECT LOWER(a.sender_address) AS sender, CASE WHEN a.action_type = 'reply_all' THEN 'reply' ELSE a.action_type END AS action,
+        COUNT(DISTINCT COALESCE(NULLIF(TRIM(e.message_id), ''), a.email_id)) AS count
+      FROM user_action_log a JOIN emails e ON e.id = a.email_id
+      WHERE LOWER(a.sender_address) IN (${placeholders})
+        AND a.source = 'user' AND a.timestamp >= ? AND a.timestamp <= ?
+        AND a.action_type IN ('open','read','delete','archive','reply','reply_all','unread','star','important')
+      GROUP BY LOWER(a.sender_address), CASE WHEN a.action_type = 'reply_all' THEN 'reply' ELSE a.action_type END
+    `).all(...senders, since, nowSec) as Array<{ sender: string; action: string; count: number }>;
+    const stats = this.db.prepare(`
+      SELECT LOWER(email) AS sender, sent_to_count AS sentLifetime, last_sent_to AS lastSentAt,
+        is_vip AS isVip, is_blocked AS isBlocked
+      FROM sender_stats WHERE LOWER(email) IN (${placeholders})
+    `).all(...senders) as Array<{ sender: string; sentLifetime: number; lastSentAt: number | null; isVip: number; isBlocked: number }>;
+    const result: Record<string, UnreadReviewSenderContext> = Object.fromEntries(senders.map(sender => [sender, {
+      received90d: 0, opened90d: 0, markedRead90d: 0, deleted90d: 0, archived90d: 0,
+      replied90d: 0, keptUnread90d: 0, starred90d: 0, important90d: 0,
+      sentLifetime: 0, lastSentAt: null, isVip: false, isBlocked: false,
+    }]));
+    for (const row of received) result[row.sender]!.received90d = row.count;
+    const fields: Record<string, keyof UnreadReviewSenderContext> = {
+      open: 'opened90d', read: 'markedRead90d', delete: 'deleted90d', archive: 'archived90d',
+      reply: 'replied90d', reply_all: 'replied90d', unread: 'keptUnread90d', star: 'starred90d', important: 'important90d',
+    };
+    for (const row of actions) {
+      const target = result[row.sender];
+      if (target && fields[row.action]) Object.assign(target, { [fields[row.action]!]: row.count });
+    }
+    for (const row of stats) {
+      const target = result[row.sender];
+      if (target) Object.assign(target, { sentLifetime: row.sentLifetime, lastSentAt: row.lastSentAt,
+        isVip: row.isVip === 1, isBlocked: row.isBlocked === 1 });
+    }
+    return result;
   }
 
   // ========== Contact Notes (Knowledge Base) ==========

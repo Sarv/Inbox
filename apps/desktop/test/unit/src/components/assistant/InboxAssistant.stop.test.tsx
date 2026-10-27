@@ -78,34 +78,42 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Inbox Agent visible review Stop', () => {
-  it.each([false, true])('keeps a labelled Stop outside the scrolling chat until cancellation is acknowledged (compact=%s)', async compact => {
+  it.each([false, true])('keeps the composer Stop outside the scrolling chat without a duplicate in the work bar (compact=%s)', async compact => {
     const cancellation = deferred<InboxAssistantResult<InboxAssistantCancellation>>();
     api.cancel.mockReturnValueOnce(cancellation.promise);
     const view = await mount(compact);
-    expect(view.byLabel('Stop current work')).toBeNull();
+    expect(view.byLabel('Stop answering')).toBeNull();
 
     const requestId = await startReview(view);
     reportProgress(requestId);
     const messages = view.byLabel('Conversation messages')!;
-    const stop = view.byLabel('Stop current work') as HTMLButtonElement;
+    const stop = view.byLabel('Stop answering') as HTMLButtonElement;
     expect(stop).not.toBeNull();
-    expect(stop.textContent?.trim()).toBe('Stop');
     expect(stop.disabled).toBe(false);
     expect(messages.contains(stop)).toBe(false);
+    expect(stop.closest('form')?.contains(view.find('#inbox-assistant-question'))).toBe(true);
+    const workBar = view.byLabel('Current agent work')!;
+    expect(workBar.contains(view.byLabel('View current activity'))).toBe(true);
+    expect(workBar.contains(stop)).toBe(false);
+    expect(workBar.querySelectorAll('button')).toHaveLength(1);
+    expect(view.byLabel('Stop current work')).toBeNull();
     messages.scrollTop = 0;
     fire(messages, 'scroll');
-    expect(view.byLabel('Stop current work')).toBe(stop);
+    expect(view.byLabel('Stop answering')).toBe(stop);
 
     fire(stop, 'click');
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith(requestId);
-    expect(stop.textContent).toContain('Stopping…');
-    expect(stop.disabled).toBe(true);
-    fire(stop, 'click');
+    const stopping = view.byLabel('Stopping request') as HTMLButtonElement;
+    expect(stopping).not.toBeNull();
+    expect(stopping.disabled).toBe(true);
+    expect(workBar.querySelectorAll('button')).toHaveLength(1);
+    fire(stopping, 'click');
     expect(api.cancel).toHaveBeenCalledOnce();
     expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(true);
 
     await act(async () => cancellation.resolve(ok({ requestId, cancelled: true })));
-    expect(view.byLabel('Stop current work')).toBeNull();
+    expect(view.byLabel('Stop answering')).toBeNull();
+    expect(view.byLabel('Stopping request')).toBeNull();
     expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).disabled).toBe(false);
     expect(view.container.textContent).toContain('Stopped');
   });
@@ -115,11 +123,11 @@ describe('Inbox Agent visible review Stop', () => {
     api.ask.mockReturnValueOnce(result.promise);
     const view = await mount(true);
     await startReview(view);
-    expect(view.byLabel('Stop current work')).not.toBeNull();
+    expect(view.byLabel('Stop answering')).not.toBeNull();
 
     await act(async () => result.resolve(ok(completedReview())));
     await settle();
-    expect(view.byLabel('Stop current work')).toBeNull();
+    expect(view.byLabel('Stop answering')).toBeNull();
     expect(view.container.textContent).toContain('Unread review is ready.');
     expect(api.cancel).not.toHaveBeenCalled();
   });
@@ -138,8 +146,8 @@ describe('Inbox Agent visible review Stop', () => {
     fire(stop, 'click');
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith(requestId);
     expect(stop.disabled).toBe(true);
-    expect((view.byLabel('Stop current work') as HTMLButtonElement).disabled).toBe(true);
-    fire(view.byLabel('Stop current work'), 'click');
+    expect((view.byLabel('Stopping request') as HTMLButtonElement).disabled).toBe(true);
+    fire(view.byLabel('Stopping request'), 'click');
     expect(api.cancel).toHaveBeenCalledOnce();
 
     await act(async () => cancellation.resolve(ok({ requestId, cancelled: true })));
@@ -159,7 +167,7 @@ describe('Inbox Agent visible review Stop', () => {
     await settle();
     expect(api.cancel).toHaveBeenCalledExactlyOnceWith(requestId);
     expect(view.byLabel('Stop work from email')).toBeNull();
-    expect(view.byLabel('Stop current work')).toBeNull();
+    expect(view.byLabel('Stop answering')).toBeNull();
     expect(preview.textContent).toContain('Thread email preview');
   });
 
@@ -167,16 +175,16 @@ describe('Inbox Agent visible review Stop', () => {
     api.cancel.mockResolvedValueOnce({ success: false, error: 'Stop could not be confirmed.' });
     const view = await mount(true);
     const requestId = await startReview(view);
-    fire(view.byLabel('Stop current work'), 'click');
+    fire(view.byLabel('Stop answering'), 'click');
     await settle();
-    const retry = view.byLabel('Stop current work') as HTMLButtonElement;
-    expect(retry.textContent).toContain('Retry stop');
+    const retry = view.byLabel('Retry stop') as HTMLButtonElement;
     expect(retry.disabled).toBe(false);
     expect(view.container.textContent).toContain('Stop could not be confirmed.');
     fire(retry, 'click');
     await settle();
     expect(api.cancel).toHaveBeenNthCalledWith(2, requestId);
-    expect(view.byLabel('Stop current work')).toBeNull();
+    expect(view.byLabel('Retry stop')).toBeNull();
+    expect(view.byLabel('Stopping request')).toBeNull();
     expect(api.ask).toHaveBeenCalledOnce();
   });
 });

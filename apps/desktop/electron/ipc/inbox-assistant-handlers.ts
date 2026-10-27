@@ -12,6 +12,7 @@ import { changeAssistantMailLocation } from '../services/assistant-mail-moves';
 import { fetchAssistantMessageBody } from '../services/assistant-mailbox-download';
 import { buildInboxAssistantDashboard } from '../services/inbox-assistant-dashboard';
 import { inboxAssistantHistory } from '../services/inbox-assistant-history';
+import { createUnreadReviewBehaviorContext } from '../services/inbox-assistant-review-behavior';
 import { InboxAssistantService } from '../services/inbox-assistant-service';
 import { callInboxAssistantAI } from '../services/inbox-assistant-usage';
 import { getLocalCalendarService } from '../services/local-calendar-service';
@@ -49,6 +50,11 @@ const service = new InboxAssistantService({
     const storage = await requireAccountStorage(accountId);
     return {
       storage, aliases: resolveAccountIdentity(storage).aliases,
+      getUnreadReviewBehaviorContext: createUnreadReviewBehaviorContext((senders, nowSec) => {
+        // This closure retains the named account's storage, never the active
+        // account/global contact counters used by the rest of the UI.
+        return storage.getRepositories().agent.getUnreadReviewSenderContextBatch(senders, nowSec);
+      }),
       fetchBody: async (email, _folder, options) => {
         // Retrieval has checked completeness; bypass a legacy clean preview
         // rather than letting the download helper treat it as the full body.

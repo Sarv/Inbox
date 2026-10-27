@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../../../electron/services/core-db', () => ({ getCoreDb: () => { throw new Error('Use the isolated action-service test database.'); } }));
 
 import { createInboxAssistantHistoryStore, type InboxAssistantHistoryStore } from '../../../../electron/services/inbox-assistant-history';
-import { InboxAssistantService, inboxAssistantGenericReviewRequest, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
+import { InboxAssistantService, inboxAssistantGenericReviewRequest, inboxAssistantReviewPreferences, type InboxAssistantServiceDeps } from '../../../../electron/services/inbox-assistant-service';
 import type { InboxAssistantAccount, InboxAssistantAIUsage, InboxAssistantExchange, InboxAssistantReviewActionRequest } from '../../../../src/types/inbox-assistant';
 import { emailRecord } from '../../../helpers/email-fixtures';
 
 const ACCOUNTS: InboxAssistantAccount[] = [{ id: 'primary', email: 'owner@company.example' }, { id: 'secondary', email: 'sales@company.example' }];
+const PERSONAL_REVIEW = 'Review my unread emails and mark low-value conversations as read. only keep unread email that send to me and not pormotinal and i have old histry of conversation them with';
 let db: Database.Database;
 let history: InboxAssistantHistoryStore;
 let service: InboxAssistantService;
@@ -239,8 +240,35 @@ describe('Inbox Agent conversation approval orchestration', () => {
     'Show uncategorized conversations',
     'Check all unread emails across all accounts.',
     'Look at my unread inbox conversations',
+    PERSONAL_REVIEW,
+    'Review my unread emails. Keep personal emails sent directly to me and ongoing conversations unread.',
+    "Review unread emails. Keep emails addressed directly to me and senders I've previously replied to unread; don't keep unsolicited mailing lists.",
   ])('recognizes the explicit generic review vocabulary: %s', question => {
     expect(inboxAssistantGenericReviewRequest(question)).toBe(true);
+  });
+
+  it('routes a broad unread review with personal keep criteria without treating later keep-unread text as a flag command', async () => {
+    const result = await service.ask({ ...request(), question: PERSONAL_REVIEW, reviewOnly: true });
+    expect(result.review).toMatchObject({ kind: 'unread' });
+    expect(result.question).toBe(PERSONAL_REVIEW);
+    const prompt = vi.mocked(deps.callAI).mock.calls[0]![0];
+    expect(prompt).toContain(`USER_RETENTION_PREFERENCES_JSON: ${JSON.stringify(inboxAssistantReviewPreferences(PERSONAL_REVIEW))}`);
+    expect(prompt).toContain('They can only retain more mail');
+    expect(prompt).toContain('To: owner@company.example');
+    expect(prompt).toContain('Use To/Cc and the complete original conversation plus account-local history');
+    expect(deps.setRead).not.toHaveBeenCalled();
+    expect(deps.moveMail).not.toHaveBeenCalled();
+  });
+
+  it('keeps the original personal retention preferences when the next-batch request uses a generic label', async () => {
+    rows.clear();
+    for (const row of [newsletter('first'), ...Array.from({ length: 199 }, (_, index) => newsletter(`kept-${index}`, { tags: '|INBOX|important|' })), newsletter('last')]) rows.set(row.id, row);
+    const initial = await service.ask({ ...request(), question: PERSONAL_REVIEW, reviewOnly: true });
+    vi.mocked(deps.callAI).mockClear();
+    const next = await service.ask({ ...request('next-with-preferences'), continueReviewId: initial.review!.id, reviewOnly: true });
+    expect(next.review!.items.map(item => item.emailId)).toEqual(['last']);
+    expect(vi.mocked(deps.callAI).mock.calls[0]![0]).toContain(`USER_RETENTION_PREFERENCES_JSON: ${JSON.stringify(inboxAssistantReviewPreferences(PERSONAL_REVIEW))}`);
+    expect(deps.setRead).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -256,6 +284,12 @@ describe('Inbox Agent conversation approval orchestration', () => {
     'Review unread emails résumé',
     'Review unread emails 商城',
     'Review unread emails २०२६',
+    'Review unread emails from news@offers.example. Keep personal conversations unread.',
+    'Review unread emails before October. Keep personal conversations unread.',
+    'Review only unread promotions. Keep personal conversations unread.',
+    'Review unread Acme emails. Keep personal conversations unread.',
+    'Review unread emails. Keep personal conversations unread and only review promotions.',
+    'Review unread emails. Keep messages from news@offers.example unread.',
   ])('rejects unsupported restrictions before opening mail or using delegated approval: %s', async question => {
     service.updateChat({ chatId, actionMode: 'approve_for_me' });
     expect(inboxAssistantGenericReviewRequest(question)).toBe(false);
@@ -301,7 +335,8 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(history.load(chatId).actionMode).toBe('approve_for_me');
   });
 
-  it.each(['Mark all emails unread', 'mark all unread emails read', 'mark BigBlueButton emails unread and read', 'mark emails read', 'mark all BigBlueButton emails unread before October', 'Mark these emails as unread for me', 'Please mark my emails as unread please', 'Can you please mark all my emails unread'])('never turns a rejected flag command into opposite-direction triage: %s', async question => {
+  it.each(['Mark all emails unread', 'mark all unread emails read', 'mark BigBlueButton emails unread and read', 'mark emails read', 'mark all BigBlueButton emails unread before October', 'Mark these emails as unread for me', 'Please mark my emails as unread please', 'Can you please mark all my emails unread',
+    'Review my unread emails and mark all emails unread', 'Review unread emails and mark low value emails read and mark all unread'])('never turns a rejected flag command into opposite-direction triage: %s', async question => {
     service.updateChat({ chatId, actionMode: 'approve_for_me' });
     await expect(service.ask({ ...request(), question })).rejects.toThrow();
     expect(deps.setRead).not.toHaveBeenCalled();

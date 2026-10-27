@@ -41,20 +41,29 @@ describe('confirm-service', () => {
     expect(useConfirmStore.getState().current).toBeNull();
   });
 
-  it('lets a SECOND request replace the first (documented serial behaviour)', async () => {
+  it('cancels a replaced request without granting permission to its operation', async () => {
     const first = useConfirmStore.getState().request({ title: 'First', message: 'first' });
     const second = useConfirmStore.getState().request({ title: 'Second', message: 'second' });
+    expect(useConfirmStore.getState().current?.title).toBe('Second');
+    await expect(first).resolves.toBe(false);
     expect(useConfirmStore.getState().current?.title).toBe('Second');
 
     useConfirmStore.getState().resolve(true);
     await expect(second).resolves.toBe(true);
+    expect(useConfirmStore.getState().current).toBeNull();
+    await expect(first).resolves.toBe(false);
+  });
 
-    // The prior promise deliberately never resolves — confirmations are
-    // user-driven and serial in practice, so this is documented, not a leak fix.
-    let firstSettled = false;
-    void first.then(() => { firstSettled = true; });
-    await Promise.resolve();
-    expect(firstSettled).toBe(false);
+  it('keeps only the latest prompt pending across repeated replacements', async () => {
+    const first = requestConfirm({ title: 'First', message: 'first' });
+    const second = requestConfirm({ title: 'Second', message: 'second' });
+    const third = requestConfirm({ title: 'Third', message: 'third' });
+    await expect(first).resolves.toBe(false);
+    await expect(second).resolves.toBe(false);
+    expect(useConfirmStore.getState().current?.title).toBe('Third');
+    useConfirmStore.getState().resolve(false);
+    await expect(third).resolves.toBe(false);
+    expect(useConfirmStore.getState().current).toBeNull();
   });
 
   it('requestConfirm is the imperative entry point onto the same store', async () => {

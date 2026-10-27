@@ -128,6 +128,77 @@ beforeEach(() => {
 });
 
 describe('per-account entries', () => {
+  it('re-fetches old server-backed bytes once without losing unsynced draft attachments', async () => {
+    await seed('acct-a', 'remote-1', 'report.pdf', 'old duplicated MIME chunks');
+    await seed('acct-a', 'draft-1', 'notes.txt', 'only local copy');
+    const oldPath = await entryPath('acct-a', 'remote-1', 'report.pdf');
+    const correct = Buffer.from('%PDF-1.4\ncomplete server copy\n%%EOF\n');
+    const remote = { isConnected: () => true, fetchAttachmentPart: vi.fn(async () => ({ filename: 'report.pdf', content: correct })), fetchAttachment: vi.fn() };
+
+    const refreshed = await getOrCacheAttachment('acct-a', 'remote-1', 'INBOX', 42, 'report.pdf', remote);
+    expect(refreshed).not.toBe(oldPath);
+    expect(await readCachedAttachment(refreshed)).toEqual(correct);
+    expect(await readEntry('acct-a', 'draft-1', 'notes.txt')).toBe('only local copy');
+    expect(existsSync(oldPath)).toBe(true);
+
+    const cached = await getOrCacheAttachment('acct-a', 'remote-1', 'INBOX', 42, 'report.pdf', null);
+    expect(cached).toBe(refreshed);
+    expect(remote.fetchAttachmentPart).toHaveBeenCalledTimes(1);
+    expect(remote.fetchAttachment).not.toHaveBeenCalled();
+    for (const segment of relative(storeRoot(), refreshed).split(sep)) expect(segment).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('does not serve an old corrupt server copy offline or remove local draft data', async () => {
+    await seed('acct-a', 'remote-1', 'report.pdf', 'old duplicated MIME chunks');
+    await seed('acct-a', 'draft-1', 'notes.txt', 'only local copy');
+    const oldPath = await entryPath('acct-a', 'remote-1', 'report.pdf');
+    await expect(getOrCacheAttachment('acct-a', 'remote-1', 'INBOX', 42, 'report.pdf', null))
+      .rejects.toMatchObject({ status: 503 });
+    expect(existsSync(oldPath)).toBe(true);
+    expect(await readEntry('acct-a', 'draft-1', 'notes.txt')).toBe('only local copy');
+  });
+
+  it('keeps the repaired server copy cached when a message moves to a new folder and UID', async () => {
+    const correct = Buffer.from('complete attachment bytes');
+    const remote = {
+      isConnected: () => true,
+      fetchAttachmentPart: vi.fn(async () => ({ filename: 'report.pdf', content: correct })),
+      fetchAttachment: vi.fn(),
+    };
+    const initial = await getOrCacheAttachment('acct-a', 'mail-1', 'INBOX', 42, 'report.pdf', remote);
+
+    // UIDs identify a server location, but the cached bytes belong to the
+    // stable account/email/file slot and remain available while offline.
+    const moved = await getOrCacheAttachment('acct-a', 'mail-1', 'Archive', 901, 'report.pdf', null);
+
+    expect(moved).toBe(initial);
+    expect(await readCachedAttachment(moved)).toEqual(correct);
+    expect(remote.fetchAttachmentPart).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves repaired server slots and local draft slots together when an account is rekeyed', async () => {
+    await seed('acct-old', 'draft-1', 'only-local.txt', 'draft bytes');
+    const correct = Buffer.from('complete server bytes');
+    await getOrCacheAttachment('acct-old', 'mail-1', 'INBOX', 42, 'report.pdf', {
+      isConnected: () => true,
+      fetchAttachmentPart: async () => ({ filename: 'report.pdf', content: correct }),
+      fetchAttachment: vi.fn(),
+    });
+    // Exercise the file-by-file merge, including two namespaces under one
+    // email folder, rather than only the whole-account directory rename.
+    await seed('acct-old', 'mail-1', 'report.pdf', 'old local slot');
+    await seed('acct-new', 'mail-1', 'other.txt', 'already under new account');
+
+    await rekeyAccountAttachments('acct-old', 'acct-new');
+
+    const repaired = await getOrCacheAttachment('acct-new', 'mail-1', 'INBOX', 42, 'report.pdf', null);
+    expect(await readCachedAttachment(repaired)).toEqual(correct);
+    expect(await readEntry('acct-new', 'mail-1', 'report.pdf')).toBe('old local slot');
+    expect(await readEntry('acct-new', 'draft-1', 'only-local.txt')).toBe('draft bytes');
+    expect(await readEntry('acct-new', 'mail-1', 'other.txt')).toBe('already under new account');
+    expect(existsSync(accountAttachmentDir('acct-old'))).toBe(false);
+  });
+
   // Breaks: two mailboxes holding the same message (a shared list, a Cc to both)
   // overwrite each other's cached copy — one account opens the other's bytes.
   it('keeps the same email id + filename apart per account', async () => {

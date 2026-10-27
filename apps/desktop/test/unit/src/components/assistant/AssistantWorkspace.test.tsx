@@ -35,13 +35,14 @@ describe('persistent Inbox and AI workspace', () => {
     const input = view.byLabel('Retained draft'); typeInto(input, 'Keep this draft');
     view.rerender(harness('contacts')); await settle();
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
+    expect(view.find('.assistant-launcher')).toBeNull();
     expect(view.byLabel('Retained draft')).toBe(input);
     view.rerender(harness('assistant')); await settle();
     expect((view.byLabel('Retained draft') as HTMLInputElement).value).toBe('Keep this draft');
     expect(mounted).toHaveBeenCalledTimes(1); expect(unmounted).not.toHaveBeenCalled();
   });
 
-  it('opens PiP automatically only for running work, stays hidden after dismissal, and preserves completion', async () => {
+  it('shows minimized work while running and removes it on completion without remounting the chat', async () => {
     const view = render(harness('assistant')); await settle();
     act(() => report(running)); view.rerender(harness('mail')); await settle();
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
@@ -50,7 +51,10 @@ describe('persistent Inbox and AI workspace', () => {
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
     expect(view.byLabel('Show running AI chat')?.textContent).toContain('Checking attachments');
     act(() => report({ ...running, running: false, requestId: null, status: 'Ready' })); await settle();
-    expect(view.byLabel('Show AI chat')).not.toBeNull();
+    expect(view.find('.assistant-launcher')).toBeNull();
+    view.rerender(harness('contacts')); await settle();
+    act(() => report({ ...running, running: false, requestId: null, status: 'Ready' })); await settle();
+    expect(view.find('.assistant-launcher')).toBeNull();
     act(() => report({ ...running, requestId: 'request-2' })); await settle();
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
     expect(mounted).toHaveBeenCalledTimes(1); expect(unmounted).not.toHaveBeenCalled();
@@ -68,10 +72,51 @@ describe('persistent Inbox and AI workspace', () => {
     expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
     fire(view.byLabel('Hide AI view'), 'click'); await settle();
     expect(view.find('[data-assistant-workspace]')?.getAttribute('inert')).not.toBeNull();
-    fire(view.byLabel('Show AI chat'), 'click'); await settle();
+    expect(view.find('.assistant-launcher')).toBeNull();
     view.rerender(harness('assistant')); await settle();
     expect(view.byLabel('Retained draft')).toBe(input);
     expect(mounted).toHaveBeenCalledTimes(1); expect(unmounted).not.toHaveBeenCalled();
+  });
+
+  it.each(['Ready', 'Stopped', 'Request failed'])('hides automatically opened PiP when work ends with %s', async status => {
+    const view = render(harness('assistant')); await settle();
+    act(() => report(running)); view.rerender(harness('mail')); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+    act(() => report({ ...running, running: false, requestId: null, status })); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
+    expect(view.find('.assistant-launcher')).toBeNull();
+    view.rerender(harness('calendar')); await settle();
+    expect(view.find('.assistant-launcher')).toBeNull();
+    expect(unmounted).not.toHaveBeenCalled();
+  });
+
+  it('shows a genuine pending approval, does not repeatedly reopen it, and clears it after resolution', async () => {
+    const approval: InboxAssistantViewState = { ...running, running: false, requestId: null, attentionId: 'review-approval-1', status: 'Awaiting your approval' };
+    const view = render(harness('assistant')); await settle();
+    view.rerender(harness('mail')); await settle();
+    act(() => report(approval)); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+    fire(view.byLabel('Hide AI view'), 'click'); await settle();
+    expect(view.byLabel('Show AI approval')?.textContent).toContain('Awaiting your approval');
+    view.rerender(harness('contacts')); act(() => report({ ...approval })); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
+    act(() => report({ ...approval, attentionId: null, status: 'Ready' })); await settle();
+    expect(view.find('.assistant-launcher')).toBeNull();
+    act(() => report({ ...approval, attentionId: 'review-approval-2' })); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+  });
+
+  it('keeps an explicitly opened floating view available after work finishes, then fully hides it when closed', async () => {
+    const view = render(harness('assistant')); await settle();
+    act(() => report(running));
+    fire(view.byLabel('Float AI chat'), 'click');
+    view.rerender(harness('mail')); await settle();
+    act(() => report({ ...running, running: false, requestId: null, status: 'Ready' })); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('pip');
+    fire(view.byLabel('Hide AI view'), 'click'); await settle();
+    expect(view.find('[data-assistant-layout]')?.getAttribute('data-assistant-layout')).toBe('hidden');
+    expect(view.find('.assistant-launcher')).toBeNull();
+    expect(unmounted).not.toHaveBeenCalled();
   });
 
   it('restores the saved split view and falls back to bounded PiP on narrow windows', async () => {

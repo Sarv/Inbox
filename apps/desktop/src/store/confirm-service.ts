@@ -21,14 +21,16 @@ interface ConfirmServiceState {
  * dangerous action guarded in the store chokepoint prompts no matter which
  * entry point (list, toolbar, keyboard) triggered it.
  *
- * A second request while one is pending replaces it (the prior promise never
- * resolves); confirmations are user-driven and serial in practice.
+ * A second request replaces the visible prompt and cancels the prior request.
+ * Hidden prompts must never leave an operation waiting for an unavailable choice.
  */
 export const useConfirmStore = create<ConfirmServiceState>((set, get) => ({
   current: null,
   request: (opts) =>
     new Promise<boolean>((resolve) => {
+      const previous = get().current;
       set({ current: { ...opts, resolve } });
+      previous?.resolve(false);
     }),
   resolve: (confirmed) => {
     const cur = get().current;

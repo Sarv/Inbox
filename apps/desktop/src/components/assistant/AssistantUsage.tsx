@@ -43,6 +43,7 @@ function WorkloadDetails({ value }: { value: unknown }) {
     <span className="block text-foreground">Unread review · {plural(workload.conversationCount, 'conversation')} · {plural(workload.messageCount, 'email')}</span>
     <span className="block">Content: {savedChars > 0 ? `${tokenCount(workload.originalContentChars)} → ` : ''}{tokenCount(workload.submittedContentChars)} characters{savedChars > 0 ? ` · ${tokenCount(savedChars)} fewer` : ''}</span>
     {workload.reusedQuotedTurns > 0 && <span className="block">{plural(workload.reusedQuotedTurns, 'quoted passage')} shared</span>}
+    {typeof workload.behaviorContextChars === 'number' && workload.behaviorContextChars > 0 && <span className="block">Relevant behavior context: {tokenCount(workload.behaviorContextChars)} characters</span>}
   </span>;
 }
 

@@ -244,7 +244,7 @@ describe('read-only assistant dashboard', () => {
     const view = render(<AssistantDashboard {...props({ onChoosePrompt })} />);
     await settle();
     fire(view.byLabel('Saved needs-reply conversations: 1'), 'click');
-    expect(document.activeElement?.textContent).toBe('Needs your reply');
+    expect(document.activeElement?.textContent).toMatch(/^Needs your reply/);
     expect(onChoosePrompt).not.toHaveBeenCalled();
     expect(ask).not.toHaveBeenCalled();
   });
@@ -278,20 +278,17 @@ describe('read-only assistant dashboard', () => {
     expect(createChat).not.toHaveBeenCalled();
   });
 
-  it('closes the task launcher on Escape and after preparing a request', async () => {
+  it('keeps task actions directly available without a menu and prepares only the selected request', async () => {
     const onChoosePrompt = vi.fn();
     const view = render(<AssistantDashboard {...props({ onChoosePrompt })} />);
     await settle();
-    const launcher = view.all('details').find(element => element.querySelector('summary')?.textContent?.includes('Inbox tasks')) as HTMLDetailsElement;
-    const summary = launcher.querySelector('summary');
-    launcher.open = true;
-    act(() => summary?.focus());
-    fire(button(view, 'Find quotations'), 'keydown', { key: 'Escape' });
-    expect(launcher.open).toBe(false);
-    expect(document.activeElement).toBe(summary);
-    launcher.open = true;
-    fire(button(view, 'Find quotations'), 'click');
-    expect(launcher.open).toBe(false);
+    const tasks = view.byLabel('Guided inbox tasks');
+    const quotations = button(view, 'Find quotations');
+    expect(tasks?.contains(quotations)).toBe(true);
+    expect(quotations?.closest('details')).toBeNull();
+    act(() => quotations?.focus());
+    expect(document.activeElement).toBe(quotations);
+    fire(quotations, 'click');
     expect(onChoosePrompt).toHaveBeenCalledExactlyOnceWith('Find the latest quotation I sent and any revisions.');
     expect(ask).not.toHaveBeenCalled();
   });

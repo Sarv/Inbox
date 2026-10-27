@@ -82,6 +82,13 @@ const CONNECT_TIMEOUT_CEILING_MS = 22000;
 // closes (force-closed on the connect timeout above), so a wait resolves quickly.
 const CONNECT_BUDGET_WAIT_MS = 20000;
 
+// A decoded attachment is bounded independently of its enclosing message. The
+// wire allowance covers base64/QP expansion plus the other MIME headers/parts;
+// metadata alone must never authorize an arbitrarily large download window.
+const DEFAULT_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+const ATTACHMENT_WIRE_ALLOWANCE = 1024 * 1024;
+const MAX_ATTACHMENT_WIRE_BYTES = DEFAULT_ATTACHMENT_MAX_BYTES * 4 + ATTACHMENT_WIRE_ALLOWANCE;
+
 interface IdleHandlers {
   exists: (data: ExistsEvent) => void;
   flags: (data: FlagsEvent) => void;
@@ -1299,6 +1306,8 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
   async downloadPart(uid: number, part: string, options?: { maxBytes?: number; signal?: AbortSignal; timeoutMs?: number }): Promise<Buffer | null> {
     this.ensureConnected();
     const bounded = options?.maxBytes !== undefined || options?.signal !== undefined || options?.timeoutMs !== undefined;
+    const maxBytes = options?.maxBytes ?? DEFAULT_ATTACHMENT_MAX_BYTES;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error('Invalid attachment byte limit');
     if (options?.signal?.aborted) throw new Error('Attachment scan cancelled');
     let content: any;
     const chunks: Buffer[] = [];
@@ -1319,28 +1328,51 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
     };
     const abort = () => stop(new Error('Attachment scan cancelled'));
     options?.signal?.addEventListener('abort', abort, { once: true });
-    const timer = bounded ? setTimeout(() => stop(new Error('Attachment scan download timed out')),
-      Math.max(1, Math.min(options?.timeoutMs ?? 90_000, 90_000))) : undefined;
+    const timeoutMs = Math.max(1, Math.min(options?.timeoutMs ?? 90_000, 90_000));
+    const timer = bounded ? setTimeout(() => stop(new Error('Attachment scan download timed out')), timeoutMs) : undefined;
     timer?.unref();
     try {
+      // Some servers repeat the first 64 KiB when BODY[part]<offset.length>
+      // asks for a later window. The resulting decoded file can have the right
+      // size but a repeated prefix and no tail. Keep ImapFlow's mature MIME
+      // decoder, but fit this part in ONE window: no part can exceed its
+      // immutable enclosing RFC822.SIZE. One sentinel byte makes even a part
+      // occupying the complete message terminate after the initial fetch.
+      const metadata = await this.op('ATTACHMENT_SIZE', this.client!.fetchOne(String(uid),
+        { uid: true, size: true }, { uid: true }), Math.min(timeoutMs, ImapFlowClient.META_OP_TIMEOUT_MS));
+      if (stopReason) throw stopReason;
+      const messageSize = metadata && metadata.size;
+      // MIME-header probes have a tiny decoded limit even when their enclosing
+      // message contains large files. Their header output is still capped below.
+      const headerSection = /^(?:\d+(?:\.\d+)*\.mime|header)$/i.test(part);
+      const wireLimit = headerSection ? MAX_ATTACHMENT_WIRE_BYTES
+        : Math.min(MAX_ATTACHMENT_WIRE_BYTES, maxBytes * 4 + ATTACHMENT_WIRE_ALLOWANCE);
+      if (!metadata || metadata.uid !== uid || typeof messageSize !== 'number' || !Number.isSafeInteger(messageSize) || messageSize <= 0) {
+        throw new Error('Attachment message size is unavailable');
+      }
+      if (messageSize > wireLimit) throw new Error('Attachment message exceeds the download byte limit');
       // ImapFlow's limiter truncates at maxBytes. Request one sentinel byte so
       // our actual-byte check can distinguish a complete part from truncation,
       // while bounding the upstream decoding pipeline as well as this collector.
-      const downloadOptions = options?.maxBytes !== undefined
-        ? { uid: true, maxBytes: options.maxBytes + 1 }
-        : { uid: true };
-      const dl: any = await this.op('DOWNLOAD', this.client!.download(String(uid), part, downloadOptions),
-        bounded ? Math.max(1, Math.min(options?.timeoutMs ?? 90_000, ImapFlowClient.OP_TIMEOUT_MS)) : ImapFlowClient.OP_TIMEOUT_MS);
+      const downloadOptions = { uid: true, maxBytes: maxBytes + 1, chunkSize: messageSize + 1 };
+      // The initial window now contains the complete encoded file. Ordinary
+      // user opens therefore use the same progress watchdog as full bodies:
+      // a large transfer that keeps receiving bytes may exceed sixty seconds.
+      // Scanner/explicitly bounded reads retain their short absolute deadline.
+      const download = this.client!.download(String(uid), part, downloadOptions);
+      const dl: any = await (bounded
+        ? this.op('DOWNLOAD', download, Math.min(timeoutMs, ImapFlowClient.OP_TIMEOUT_MS))
+        : this.opStreaming('DOWNLOAD', download));
       content = dl && dl.content;
       if (stopReason) { content?.destroy?.(); throw stopReason; }
       if (!content) return null;
       const iterator = (content as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
       for (;;) {
-        const next = bounded ? await Promise.race([iterator.next(), stopped]) : await iterator.next();
+        const next = await Promise.race([iterator.next(), stopped]);
         if (next.done) break;
         const buffer = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
         bytes += buffer.length;
-        if (options?.maxBytes !== undefined && bytes > options.maxBytes) {
+        if (bytes > maxBytes) {
           buffer.fill(0);
           throw new Error('Attachment exceeds the scan byte limit');
         }
@@ -1348,15 +1380,13 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
       }
       return Buffer.concat(chunks);
     } catch (error) {
-      if (bounded) {
-        content?.destroy?.();
-        for (const chunk of chunks) chunk.fill(0);
-      }
+      content?.destroy?.();
+      for (const chunk of chunks) chunk.fill(0);
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
       options?.signal?.removeEventListener('abort', abort);
-      if (bounded) for (const chunk of chunks) chunk.fill(0);
+      for (const chunk of chunks) chunk.fill(0);
     }
   }
 

@@ -70,6 +70,8 @@ interface HeldReview {
   /** Host-only continuation, updated only after safely settled batches. */
   automaticCheckpoint?: Record<string, string[]>;
   automaticExhausted?: boolean;
+  /** Validated retention preferences from the original user review request. */
+  reviewPreferences?: string;
 }
 
 function validateRequest(value: unknown): InboxAssistantRequest {
@@ -101,10 +103,30 @@ export function inboxAssistantReviewIntent(question: string): InboxAssistantRevi
 }
 
 /** This first tool has an explicit account scope and no hidden free-text filters. */
-export function inboxAssistantGenericReviewRequest(question: string): boolean {
+function genericReviewWords(question: string): boolean {
   const allowed = new Set('a about across all an and are as at available can categorize categorise categorization categorisation categories check classify clean cleanup conversation conversations could do email emails for have help i if in inbox inboxes into is it let look low mail mails mark me my no nonvaluable not of or our please process read review should show that the them these they this those triage uncategorized uncategorised unclassified unlabelled unlabeled unread unvaluable up us useful valuable value what which will with worthless worth would you your accounts account'.split(' '));
   const words = question.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
   return words.length > 0 && words.every(word => allowed.has(word));
+}
+
+/** Retention criteria can keep more mail, never silently narrow the mailbox query. */
+export function inboxAssistantReviewPreferences(question: string): string | undefined {
+  const clause = /\b(?:(?:only|please)\s+)?(?:keep|leave|retain|preserve|protect)\b/iu.exec(question);
+  if (!clause || !genericReviewWords(question.slice(0, clause.index))
+    || !/\b(?:review|triage|check|look|process)\b/iu.test(question.slice(0, clause.index))) return undefined;
+  const preferences = question.slice(clause.index).trim();
+  // Unknown names, sender addresses, dates and additional selection commands
+  // must not be dropped and replaced by an account-wide review. This bounded
+  // vocabulary covers keep-only personal/business/relationship preferences.
+  if (/@|https?:|\p{N}/iu.test(preferences)
+    || /\b(?:review|triage|check|look|find|show|process|mark|before|after|since|until|today|yesterday|tomorrow|delete|archive|move)\b/iu.test(preferences)) return undefined;
+  const allowed = new Set('a about active addressed ads advertisements all already also an and are as at automated be been bulk business by can category categories cc client clients contact contacts conversation conversations correspondence corresponded could customer customers direct directly do earlier email emails even ever financial for from genuine had has have help historical historically history histry histroy i if important in invitation invitations invite is it keep known leave legitimate list lists mail mailing mails marketing me meeting messages more my needs news newsletter newsletters no non not of old older ongoing only or other our past people person personal personally please pormotinal preserve previous previously prior promotional promotinal promotion promotions protect read recipient recipients related relationship relationships relevant replied replies reply report reports requested respond responded responding response retain routine security send sender senders sent should so spam statement statements still team that the their them these they this those to unread unsolicited updates us valuable value want wanted was we were what where which who whom will with would you your'.split(' '));
+  const words = preferences.toLowerCase().replace(/\b(i|we|they|you)['’]ve\b/gu, '$1 have').replace(/\bdon['’]t\b/gu, 'do not').match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.length > 0 && words.every(word => allowed.has(word)) ? preferences : undefined;
+}
+
+export function inboxAssistantGenericReviewRequest(question: string): boolean {
+  return genericReviewWords(question) || inboxAssistantReviewPreferences(question) !== undefined;
 }
 
 function reviewText(review: InboxAssistantReview): string {
@@ -119,7 +141,8 @@ function reviewText(review: InboxAssistantReview): string {
   const suggested = review.items.filter(item => item.recommendation === 'mark_read').length;
   const applied = review.items.filter(item => item.status === 'applied' || item.status === 'queued').length;
   const uncategorized = review.items.filter(item => item.uncategorized).length;
-  return `Reviewed ${review.items.length} unread conversations across ${accountText}. ${uncategorized} conversations include uncategorized mail.\n\n${applied ? `${applied} conversations marked as read. Review the results below or undo the changes.` : `${suggested} conversations are recommended for marking as read. Important, incomplete and uncertain conversations stay unread.`}${review.truncated ? '\n\nMore unread mail remains. Continue with another review after this batch.' : ''}`;
+  const unverified = review.items.filter(item => item.needsRetry).length;
+  return `Reviewed ${unverified ? `${review.items.length - unverified} of ` : ''}${review.items.length} unread conversations across ${accountText}. ${uncategorized} conversations include uncategorized mail.\n\n${applied ? `${applied} conversations marked as read. Review the results below or undo the changes.` : `${suggested} conversations are recommended for marking as read. Important, incomplete and uncertain conversations stay unread.`}${unverified ? `\n\nThe AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stays' : 'conversations. They stay'} unread. Continue to retry; verified recommendations are saved.` : review.truncated ? '\n\nMore unread mail remains. Continue with another review after this batch.' : ''}`;
 }
 
 function validateDraftRequest(value: unknown): InboxAssistantDraftRequest {
@@ -451,10 +474,10 @@ export class InboxAssistantService {
     };
   }
 
-  private rememberReview(chatId: string, exchangeId: string, review: InboxAssistantReview, excludedThreads: Record<string, string[]>): void {
+  private rememberReview(chatId: string, exchangeId: string, review: InboxAssistantReview, excludedThreads: Record<string, string[]>, reviewPreferences?: string): void {
     for (const [id, held] of this.actionReviews) if (held.review.expiresAt <= Date.now()) this.actionReviews.delete(id);
     while (this.actionReviews.size >= 20) this.actionReviews.delete(this.actionReviews.keys().next().value!);
-    this.actionReviews.set(review.id, { chatId, exchangeId, review, excludedThreads });
+    this.actionReviews.set(review.id, { chatId, exchangeId, review, excludedThreads, ...(reviewPreferences ? { reviewPreferences } : {}) });
   }
 
   /** Each batch keeps its own trusted snapshot and durable, independently undoable receipt. */
@@ -490,23 +513,40 @@ export class InboxAssistantService {
     const prepareNext = async (excludedThreads: Record<string, string[]>) => {
       const next = await waitForAbortableOperation(prepareInboxAssistantReview(selected, held.review.kind, deps, signal,
         activity => this.reportRun(run, activity, onActivity), { excludeThreadIds: excludedThreads, recommendationCache: this.recommendationCache, reviewCacheIdentity: identity,
-          isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === identity }), signal);
+          isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === identity, ...(held.reviewPreferences ? { reviewPreferences: held.reviewPreferences } : {}) }), signal);
       assertCurrent();
       batch = { id: randomUUID(), chatId: run.chatId, question: initial.question, reviewBatch: { runId: run.id, number: progress.batchesReviewed + 1 },
         accountIds: selected.map(account => account.id), createdAt: Date.now(), status: 'completed', review: next,
         answer: { text: reviewText(next), sources: [], coverage: [], warnings: next.coverage.flatMap(account => account.warnings) } };
-      this.rememberReview(run.chatId, batch.id, next, excludedThreads);
+      this.rememberReview(run.chatId, batch.id, next, excludedThreads, held.reviewPreferences);
       current = this.actionReviews.get(next.id)!;
+      // Every expanded batch card can continue independently. Its checkpoint
+      // starts before this batch, so a changed/skipped/failed source is freshly
+      // reviewed instead of being excluded by that card's display snapshot.
+      current.automaticCheckpoint = excludedThreads;
       this.persistRun(run, batch);
     };
     try {
       saveProgress();
       if (held.automaticCheckpoint || resuming) await prepareNext(held.automaticCheckpoint ?? held.excludedThreads);
+      else if (held.review.items.some(item => item.needsRetry) && !held.review.items.some(item => item.status === 'pending'
+        && item.recommendation === 'mark_read' && item.confidence >= 0.9 && !item.protectedReasons.length && !item.bodyUnavailable && !item.attachmentsUnknown)) {
+        // A first explicit start on a retry-only review must do the pending AI
+        // work now, not require another click to reach the normal resume path.
+        const excludedThreads: Record<string, string[]> = {};
+        for (const account of selected) excludedThreads[account.id] = [...new Set([
+          ...(held.excludedThreads[account.id] ?? []), ...held.review.items.filter(item => item.accountId === account.id
+            && !item.needsRetry && item.status !== 'failed' && item.status !== 'skipped').map(item => item.threadId),
+        ])];
+        held.automaticCheckpoint = excludedThreads;
+        held.excludedThreads = excludedThreads;
+        await prepareNext(excludedThreads);
+      }
       while (progress.batchesReviewed < AUTOMATIC_REVIEW_LIMITS.batches) {
         assertCurrent();
         const review = current.review;
         progress.batchesReviewed++;
-        progress.reviewedConversations += review.items.length;
+        progress.reviewedConversations += review.items.filter(item => !item.needsRetry).length;
         saveProgress();
         // A renderer selection, cached authority or an LLM can never widen this
         // action. The mutation helper rechecks full source snapshots as well.
@@ -535,14 +575,20 @@ export class InboxAssistantService {
         if (review.coverage.some(account => account.status === 'unavailable')) {
           progress.status = 'stopped'; progress.reason = 'A selected account could not be reviewed. Reconnect it before continuing.'; break;
         }
-        if (run.reviewBudget.reason) { progress.status = 'stopped'; progress.reason = run.reviewBudget.reason; break; }
         const excludedThreads: Record<string, string[]> = {};
         for (const account of selected) excludedThreads[account.id] = [...new Set([
-          ...(current.excludedThreads[account.id] ?? []), ...review.items.filter(item => item.accountId === account.id).map(item => item.threadId),
+          ...(current.excludedThreads[account.id] ?? []), ...review.items.filter(item => item.accountId === account.id && !item.needsRetry).map(item => item.threadId),
         ])];
         held.automaticCheckpoint = excludedThreads;
         held.excludedThreads = excludedThreads;
-        if (!review.coverage.some(account => account.hasMore)) { held.automaticExhausted = true; progress.status = 'completed'; progress.reason = 'All available unread conversations in the selected accounts were reviewed. Important and uncertain mail stayed unread.'; break; }
+        current.automaticCheckpoint = excludedThreads;
+        current.excludedThreads = excludedThreads;
+        if (run.reviewBudget.reason) { progress.status = 'stopped'; progress.reason = run.reviewBudget.reason; break; }
+        const unverified = review.items.filter(item => item.needsRetry).length;
+        if (unverified) {
+          progress.status = 'stopped'; progress.reason = `The AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stayed' : 'conversations. They stayed'} unread. Continue to retry; verified results are saved.`; break;
+        }
+        if (!review.coverage.some(account => account.hasMore)) { held.automaticExhausted = true; current.automaticExhausted = true; progress.status = 'completed'; progress.reason = 'All available unread conversations in the selected accounts were reviewed. Important and uncertain mail stayed unread.'; break; }
         if (!review.items.length) { progress.status = 'stopped'; progress.reason = 'No new conversations were found within the scan limit. More mail may remain; narrow the account scope or refresh later.'; break; }
         if (progress.batchesReviewed >= AUTOMATIC_REVIEW_LIMITS.batches) {
           progress.status = 'stopped'; progress.reason = 'Reached the 10-batch limit. Start another automatic run to continue.'; break;
@@ -736,22 +782,30 @@ export class InboxAssistantService {
       report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
       const callAI = (prompt: string) => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal, 8_000); };
       const command = parseInboxAssistantReadCommand(request.question);
+      const requestedReviewKind = request.reviewKind ?? inboxAssistantReviewIntent(request.question);
+      const broadReview = !command && (requestedReviewKind === 'unread' || requestedReviewKind === 'uncategorized')
+        && /\b(?:review|triage|check|look|process)\b/iu.test(request.question) && inboxAssistantGenericReviewRequest(request.question);
+      // Inspect the first flag word after each actual mark clause. A later
+      // "keep unread" preference is not a mark-unread command, while a genuine
+      // mark-unread or mixed-direction request must never enter read triage.
+      const requestsMarkUnread = /\bmark\b(?:(?!\b(?:mark|read|unread)\b)[\s\S])*\bunread\b/iu.test(request.question);
       // Never reinterpret a rejected mark-unread command as low-value triage
       // (which has the opposite flag direction). Only parsed literal scopes can
       // enter the explicit flag tool.
-      if ((!command && (/\bmark\b[\s\S]*\bunread\b/iu.test(request.question)
-          || /^(?:(?:please|can you|could you|would you)\s+)?mark\b[\s\S]*\bread\b/iu.test(request.question)))
+      if ((!command && (requestsMarkUnread
+          || (!broadReview && /^(?:(?:please|can you|could you|would you)\s+)?mark\b[\s\S]*\bread\b/iu.test(request.question))))
         || (request.reviewKind?.startsWith('mark_') && command?.kind !== request.reviewKind)
         || (command && request.reviewKind && command.kind !== request.reviewKind)) {
         throw new Error('Specify the matching sender, subject or phrase, for example “Mark all BigBlueButton emails unread”. Date, category and combined restrictions are not supported by this command yet. No mail was changed.');
       }
-      const reviewKind = command?.kind ?? request.reviewKind ?? inboxAssistantReviewIntent(request.question);
+      const reviewKind = command?.kind ?? requestedReviewKind;
       if (reviewKind) {
         if (!command && !inboxAssistantGenericReviewRequest(request.question)) {
           throw new Error('This unread review uses the selected accounts. Sender, date and category restrictions are not supported yet, so no mail was changed. Use “Review my unread emails” or choose fewer accounts.');
         }
         if (/\ball\s+accounts\b/i.test(request.question) && selected.length !== known.length) throw new Error('Select all accounts before reviewing mail across all accounts. No mail was changed.');
         const excludedThreads: Record<string, string[]> = {};
+        let reviewPreferences = command ? undefined : inboxAssistantReviewPreferences(request.question);
         if (request.continueReviewId) {
           const prior = this.actionReviews.get(request.continueReviewId);
           if (!prior || prior.chatId !== request.chatId || prior.review.kind !== reviewKind || prior.review.expiresAt <= Date.now()
@@ -759,21 +813,23 @@ export class InboxAssistantService {
             || prior.review.accounts.length !== selected.length || prior.review.accounts.some(account => !request.accountIds.includes(account.id))) {
             throw new Error('This review continuation expired or its account scope changed. Start a fresh review.');
           }
-          for (const account of selected) excludedThreads[account.id] = [...new Set([
-            ...(prior.excludedThreads[account.id] ?? []), ...prior.review.items.filter(item => item.accountId === account.id).map(item => item.threadId),
-          ])];
+          for (const account of selected) excludedThreads[account.id] = [...new Set(prior.automaticCheckpoint?.[account.id]
+            ?? [...(prior.excludedThreads[account.id] ?? []), ...(prior.review.automation ? []
+              : prior.review.items.filter(item => item.accountId === account.id && !item.needsRetry).map(item => item.threadId))])];
+          reviewPreferences = prior.reviewPreferences;
         }
         report({ stage: 'search', status: 'running', message: command ? 'Finding matching emails' : 'Reviewing unread conversations', detail: command ? `Matching “${command.scope.query}” in ${command.scope.field === 'any' ? 'sender, subject and original body' : command.scope.field}. Preparing mark as ${command.kind === 'mark_unread' ? 'unread' : 'read'}.` : 'Including uncategorized mail and checking every unread member of each conversation.' });
         const reviewCacheIdentity = this.deps.reviewCacheIdentity?.();
         const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads,
           recommendationCache: this.recommendationCache, reviewCacheIdentity, isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === reviewCacheIdentity,
+          ...(reviewPreferences ? { reviewPreferences } : {}),
           ...(command ? { scope: command.scope } : {}) }), controller.signal);
         assertCurrent();
         const exchange: InboxAssistantExchange = {
           id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt, review,
           answer: { text: reviewText(review), sources: [], coverage: [], warnings: review.coverage.flatMap(account => account.warnings) },
         };
-        this.rememberReview(request.chatId, exchange.id, review, excludedThreads);
+        this.rememberReview(request.chatId, exchange.id, review, excludedThreads, reviewPreferences);
         // Approval is a saved choice for user requests in this conversation.
         // Changing it never starts work by itself or enables a mail daemon.
         const mode = this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review';
@@ -788,7 +844,9 @@ export class InboxAssistantService {
             exchange.answer.text = reviewText(review);
           }
         }
-        report({ stage: 'complete', status: 'done', message: command ? 'Matching email review ready' : 'Unread review ready', detail: `${review.items.length} conversations reviewed.` });
+        const unverified = review.items.filter(item => item.needsRetry).length;
+        report({ stage: 'complete', status: unverified ? 'warning' : 'done', message: unverified ? 'Unread review needs another attempt' : command ? 'Matching email review ready' : 'Unread review ready',
+          detail: unverified ? `${review.items.length - unverified} conversations reviewed; ${unverified} stay unread until the AI review is retried.` : `${review.items.length} conversations reviewed.` });
         return this.settleRun(run, undefined, exchange)!;
       }
       const timeZone = researchTimeZone(this.deps);

@@ -239,6 +239,68 @@ function newRepo(): { db: Database.Database; repo: AgentRepository } {
   return { db, repo: new AgentRepository(() => db) };
 }
 
+describe('AgentRepository — unread-review behavior evidence', () => {
+  let db: Database.Database;
+  let repo: AgentRepository;
+  beforeEach(() => { ({ db, repo } = newRepo()); });
+  afterEach(() => { db.close(); });
+
+  it('uses unique messages for recent user-only actions and excludes automatic/system feedback', () => {
+    const sender = 'sender@example.test';
+    seedEmail(db, { id: 'first', from: sender, date: FIXED_NOW_SEC - DAY });
+    seedEmail(db, { id: 'second', from: sender, date: FIXED_NOW_SEC - 2 * DAY });
+    seedEmail(db, { id: 'old', from: sender, date: FIXED_NOW_SEC - 91 * DAY });
+    seedEmail(db, { id: 'future', from: sender, date: FIXED_NOW_SEC + DAY });
+    for (const [id, actionType, emailId] of [
+      ['read1', 'read', 'first'], ['read-again', 'read', 'first'],
+      ['reply', 'reply', 'first'], ['reply-all', 'reply_all', 'first'], ['reply-other', 'reply_all', 'second'],
+      ['open', 'open', 'first'], ['keep', 'unread', 'second'], ['star', 'star', 'second'], ['important', 'important', 'first'],
+    ] as const) seedAction(db, { id, emailId, actionType, sender: sender.toUpperCase(), timestamp: FIXED_NOW_SEC - 500 });
+    for (const source of ['agent_auto', 'agent_approved', 'agent_rejected', 'rule', 'system']) {
+      seedAction(db, { id: source, emailId: 'second', actionType: 'delete', sender, source, timestamp: FIXED_NOW_SEC - 500 });
+    }
+    seedAction(db, { id: 'too-old', emailId: 'old', actionType: 'delete', sender, timestamp: FIXED_NOW_SEC - 91 * DAY });
+    seedAction(db, { id: 'not-yet', emailId: 'future', actionType: 'delete', sender, timestamp: FIXED_NOW_SEC + DAY });
+    expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toEqual({
+      received90d: 2, opened90d: 1, markedRead90d: 1, deleted90d: 0, archived90d: 0,
+      replied90d: 2, keptUnread90d: 1, starred90d: 1, important90d: 1,
+      sentLifetime: 0, lastSentAt: null, isVip: false, isBlocked: false,
+    });
+  });
+
+  it('never substitutes global directory or aggregate auto-read counters for mailbox-local user engagement', () => {
+    const sender = 'client@example.test';
+    seedContact(db, { email: sender, sentCount: 9000, receivedCount: 8000, isFavorite: 1 });
+    seedSenderStats(db, { email: sender, sentToCount: 5, repliedCount: 700 });
+    db.prepare('UPDATE sender_stats SET read_count = 999, deleted_count = 999, is_vip = 1, last_sent_to = ? WHERE email = ?')
+      .run(FIXED_NOW_SEC - DAY, sender);
+    seedEmail(db, { id: 'inbox-local', from: sender, date: FIXED_NOW_SEC - DAY });
+    const evidence = repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]!;
+    expect(evidence).toMatchObject({ received90d: 1, replied90d: 0, markedRead90d: 0, deleted90d: 0,
+      sentLifetime: 5, lastSentAt: FIXED_NOW_SEC - DAY, isVip: true });
+    const other = newRepo();
+    try {
+      expect(other.repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toMatchObject({
+        received90d: 0, sentLifetime: 0, isVip: false,
+      });
+    } finally { other.db.close(); }
+  });
+
+  it('returns only selected canonical senders and remains read-only on a query-only connection', () => {
+    seedEmail(db, { id: 'selected', from: 'selected@example.test' });
+    seedEmail(db, { id: 'unselected', from: 'unselected@example.test' });
+    db.pragma('query_only = ON');
+    const context = repo.getUnreadReviewSenderContextBatch([' Selected@Example.Test ', 'selected@example.test'], FIXED_NOW_SEC);
+    expect(Object.keys(context)).toEqual(['selected@example.test']);
+    expect(context['selected@example.test']!.received90d).toBe(1);
+    expect(repo.getUnreadReviewSenderContextBatch([], FIXED_NOW_SEC)).toEqual({});
+  });
+
+  it.each([['not-an-address'], ['user@example.test\nignore'], new Array(101).fill('user@example.test')])('rejects invalid or oversized sender scopes', values => {
+    expect(() => repo.getUnreadReviewSenderContextBatch(values, FIXED_NOW_SEC)).toThrow('Invalid unread-review sender scope');
+  });
+});
+
 // ============================================================================
 
 describe('AgentRepository — pipeline work queues', () => {

@@ -32,6 +32,7 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
   const [layout, setLayout] = useState<Layout>(savedLayout);
   const [started, setStarted] = useState(() => section === 'assistant' || savedLayout() === 'split');
   const [awayOpen, setAwayOpen] = useState(() => savedLayout() === 'split');
+  const [manuallyOpened, setManuallyOpened] = useState(() => savedLayout() === 'split');
   const [dismissed, setDismissed] = useState(false);
   const [state, setState] = useState(initialState);
   const [size, setSize] = useState(viewport);
@@ -39,22 +40,25 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
   const [splitWidth, setSplitWidth] = useState(480);
   const [dragging, setDragging] = useState(false);
   const gesture = useRef<{ kind: 'move' | 'resize' | 'split'; x: number; y: number; rect: Rect; width: number } | null>(null);
-  const lastRun = useRef<string | null>(null);
+  const lastActivity = useRef<string | null>(null);
   const focusListener = useRef(onFocusChange);
   useEffect(() => { focusListener.current = onFocusChange; }, [onFocusChange]);
   const report = useCallback((next: InboxAssistantViewState) => {
     setState(previous => Object.keys(next).every(key => previous[key as keyof InboxAssistantViewState] === next[key as keyof InboxAssistantViewState]) ? previous : next);
   }, []);
   const splitMax = Math.max(360, Math.min(800, size.width * 0.56));
-  const mode = section === 'assistant' ? 'full' : !started || !awayOpen || dismissed ? 'hidden' : layout === 'split' && size.width >= 1000 ? 'split' : 'pip';
+  const needsAttention = !!state.attentionId;
+  const active = state.running || needsAttention;
+  const activityId = state.running ? `run:${state.requestId ?? state.chatId ?? 'active'}` : needsAttention ? `approval:${state.attentionId}` : null;
+  const mode = section === 'assistant' ? 'full' : !started || !awayOpen || dismissed || (!manuallyOpened && !active) ? 'hidden' : layout === 'split' && size.width >= 1000 ? 'split' : 'pip';
 
   useEffect(() => {
     if (section === 'assistant') { setStarted(true); setDismissed(false); }
-    else if (state.running && ((!dismissed && !awayOpen) || (state.requestId && state.requestId !== lastRun.current))) {
+    else if (active && ((!dismissed && !awayOpen) || activityId !== lastActivity.current)) {
       setStarted(true); setAwayOpen(true); setDismissed(false);
     }
-    if (state.running) lastRun.current = state.requestId;
-  }, [section, state.running, state.requestId, dismissed, awayOpen]);
+    if (active) lastActivity.current = activityId;
+  }, [section, active, activityId, dismissed, awayOpen]);
   useEffect(() => {
     if (mode === 'hidden') focusListener.current?.(false);
   }, [mode]);
@@ -86,12 +90,12 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
     setDragging(true);
   }
   function choose(next: Layout) {
-    setStarted(true); setLayout(next); setAwayOpen(true); setDismissed(false);
+    setStarted(true); setLayout(next); setAwayOpen(true); setManuallyOpened(true); setDismissed(false);
     try { localStorage.setItem(PREFERENCE, next); } catch { /* Layout remains available for this session. */ }
     if (section === 'assistant' || next === 'split') onOpenInbox();
   }
   function hide() {
-    setDismissed(true); setAwayOpen(true); focusListener.current?.(false);
+    setDismissed(true); setManuallyOpened(false); focusListener.current?.(false);
     if (section === 'assistant') onOpenInbox();
   }
   const button = 'flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary';
@@ -124,8 +128,8 @@ export function AssistantWorkspace({ section, onOpenInbox, onOpenAssistant, onFo
         event.preventDefault(); event.stopPropagation(); setRect(current => bounds({ ...current, width: current.width + (event.key === 'ArrowRight' ? 24 : event.key === 'ArrowLeft' ? -24 : 0), height: current.height + (event.key === 'ArrowDown' ? 24 : event.key === 'ArrowUp' ? -24 : 0) }));
       }} className="absolute bottom-0 right-0 h-5 w-5 cursor-nwse-resize touch-none rounded-tl-lg border-l border-t border-border bg-muted/80 text-muted-foreground focus:outline focus:outline-2 focus:outline-primary"><span aria-hidden="true">⌟</span></button>}
     </aside>
-    {mode === 'hidden' && started && (awayOpen || state.running) && <button type="button" onClick={() => { setAwayOpen(true); setDismissed(false); }} aria-label={state.running ? 'Show running AI chat' : 'Show AI chat'} className="assistant-theme assistant-launcher fixed bottom-5 right-5 z-30 flex max-w-[min(22rem,calc(100vw-2rem))] items-center gap-3 rounded-2xl border border-border bg-background px-4 py-3 text-left shadow-xl hover:bg-accent">
-      {state.running ? <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" /> : <Bot className="h-5 w-5 shrink-0 text-primary" />}<span className="min-w-0"><span className="block truncate text-sm font-medium">{state.title}</span><span className="block truncate text-xs text-muted-foreground">{state.running ? state.status : 'Open chat'}</span></span>
+    {mode === 'hidden' && started && active && <button type="button" onClick={() => { setAwayOpen(true); setManuallyOpened(true); setDismissed(false); }} aria-label={state.running ? 'Show running AI chat' : 'Show AI approval'} className="assistant-theme assistant-launcher fixed bottom-5 right-5 z-30 flex max-w-[min(22rem,calc(100vw-2rem))] items-center gap-3 rounded-2xl border border-border bg-background px-4 py-3 text-left shadow-xl hover:bg-accent">
+      {state.running ? <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" /> : <Bot className="h-5 w-5 shrink-0 text-primary" />}<span className="min-w-0"><span className="block truncate text-sm font-medium">{state.title}</span><span className="block truncate text-xs text-muted-foreground">{state.running ? state.status : 'Awaiting your approval'}</span></span>
     </button>}
   </div>;
 }

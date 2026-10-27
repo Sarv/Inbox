@@ -7,6 +7,12 @@ const workload: InboxAssistantAIWorkload = { operation: 'unread_review', convers
   originalContentChars: 40_000, submittedContentChars: 20_000, reusedQuotedTurns: 8 };
 
 describe('host unread-review workload metadata', () => {
+  it('counts bounded behavior context separately and drops invalid optional metadata', () => {
+    expect(readInboxAssistantAIWorkload({ ...workload, behaviorContextChars: 300 })).toEqual({ ...workload, behaviorContextChars: 300 });
+    expect(readInboxAssistantAIWorkload({ ...workload, behaviorContextChars: -1 })).toEqual(workload);
+    expect(readInboxAssistantAIWorkload({ ...workload, behaviorContextChars: 32_769 })).toEqual(workload);
+  });
+
   it('copies only bounded numeric diagnostics and never retains supplied content', () => {
     expect(readInboxAssistantAIWorkload({ ...workload, body: 'private email', apiKey: 'private key' })).toEqual(workload);
     expect(readInboxAssistantAIWorkload(workload)).not.toBe(workload);

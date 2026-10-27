@@ -12,5 +12,6 @@ export function readInboxAssistantAIWorkload(value: unknown): InboxAssistantAIWo
     || (row.submittedContentChars as number) > (row.originalContentChars as number)) return undefined;
   return { operation: 'unread_review', conversationCount: row.conversationCount as number, messageCount: row.messageCount as number,
     originalContentChars: row.originalContentChars as number, submittedContentChars: row.submittedContentChars as number,
-    reusedQuotedTurns: row.reusedQuotedTurns as number };
+    reusedQuotedTurns: row.reusedQuotedTurns as number,
+    ...(count('behaviorContextChars', 32_768) ? { behaviorContextChars: row.behaviorContextChars as number } : {}) };
 }
