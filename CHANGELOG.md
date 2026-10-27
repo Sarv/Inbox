@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-10-27
+
 ### Added
 - An Inbox Agent dashboard brings together replies, follow-ups, upcoming
   meetings and unread mail. Reply actions include all conversation recipients
@@ -1189,7 +1191,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.5...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.6...HEAD
+[1.4.6]: https://github.com/Sarv/Inbox/releases/tag/v1.4.6
 [1.4.5]: https://github.com/Sarv/Inbox/releases/tag/v1.4.5
 [1.4.4]: https://github.com/Sarv/Inbox/releases/tag/v1.4.4
 [1.4.3]: https://github.com/Sarv/Inbox/releases/tag/v1.4.3
