@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.8] - 2026-10-28
+## [1.4.9] - 2026-10-28
 
 ### Added
 - A compact attachment progress popup lets you keep reading mail while a file
@@ -1218,8 +1218,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.8...HEAD
-[1.4.8]: https://github.com/Sarv/Inbox/releases/tag/v1.4.8
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.9...HEAD
+[1.4.9]: https://github.com/Sarv/Inbox/releases/tag/v1.4.9
 [1.4.6]: https://github.com/Sarv/Inbox/releases/tag/v1.4.6
 [1.4.5]: https://github.com/Sarv/Inbox/releases/tag/v1.4.5
 [1.4.4]: https://github.com/Sarv/Inbox/releases/tag/v1.4.4
