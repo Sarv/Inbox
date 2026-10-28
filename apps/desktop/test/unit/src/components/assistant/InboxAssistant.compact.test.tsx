@@ -37,7 +37,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 async function mount() {
-  const view = render(<InboxAssistant compact />);
+  const view = render(<InboxAssistant compact initialView="conversation" />);
   await settle();
   return view;
 }
@@ -109,11 +109,11 @@ describe('compact Inbox Agent controls', () => {
     fire(view.byLabel('Accounts to search'), 'click');
     toggle(view.find('input[type="checkbox"]'));
     fire(view.byLabel('Close account picker'), 'click');
-    view.rerender(<InboxAssistant compact={false} />);
+    view.rerender(<InboxAssistant compact={false} initialView="conversation" />);
     await settle();
     expect(view.find('#inbox-assistant-question')).toBe(input);
     expect((input as HTMLTextAreaElement).value).toBe('Compare the supplier quotations.');
-    view.rerender(<InboxAssistant compact />);
+    view.rerender(<InboxAssistant compact initialView="conversation" />);
     await settle();
     expect(view.find('#inbox-assistant-question')).toBe(input);
     expect((input as HTMLTextAreaElement).value).toBe('Compare the supplier quotations.');

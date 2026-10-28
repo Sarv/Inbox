@@ -7,12 +7,15 @@ vi.mock('../../../../electron/shared', () => ({ getMainWindow: vi.fn(), requireS
 vi.mock('../../../../electron/services/net-fetch', () => ({ chromiumFetch: vi.fn() }));
 
 function transport(config: AIProviderConfig) {
+  const run = { storage: {}, config, controller: new AbortController(), userEmail: '', maxEmails: 100, skipRead: true };
   const service = new AICategorizationService() as unknown as {
-    config: AIProviderConfig;
-    callOpenAICompatibleAPI: (system: string, prompt: string) => Promise<string>;
+    currentRun: typeof run | null;
+    callOpenAICompatibleAPI: (system: string, prompt: string, owner: typeof run) => Promise<string>;
   };
-  service.config = config;
-  return service;
+  // Transport requests now belong to the immutable run captured at startup.
+  // Keep that owner current without starting mailbox processing in these tests.
+  service.currentRun = run;
+  return { callOpenAICompatibleAPI: (system: string, prompt: string) => service.callOpenAICompatibleAPI(system, prompt, run) };
 }
 const config = (fields: Partial<AIProviderConfig> = {}): AIProviderConfig => ({ type: 'custom', apiKey: '', model: 'local-model', baseUrl: 'http://localhost:11434/v1', ...fields });
 beforeEach(() => { vi.clearAllMocks(); });
