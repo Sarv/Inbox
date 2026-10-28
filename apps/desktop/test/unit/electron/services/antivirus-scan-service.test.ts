@@ -385,11 +385,34 @@ describe('trusted scan before attachment download', () => {
     expect(receipt.content).not.toBe(f.readBuffers[0]);
     expect(f.readBuffers[0]?.every(byte => byte === 0)).toBe(true);
     expect([...f.uploaded.values()][0]).toEqual(receipt.content);
-    expect(onProgress.mock.calls).toEqual([['downloading'], ['scanning']]);
+    expect(onProgress.mock.calls).toEqual([
+      ['downloading'],
+      ['downloading', { transferredBytes: 22, totalBytes: 22 }],
+      ['uploading', { transferredBytes: 0, totalBytes: 22 }],
+      ['uploading', { transferredBytes: 22, totalBytes: 22 }],
+      ['scanning'],
+    ]);
     await receipt.assertCurrent();
     receipt.dispose(); receipt.dispose();
     expect(receipt.content.every(byte => byte === 0)).toBe(true);
     await expect(receipt.assertCurrent()).rejects.toThrow(/could not be fully scanned/);
+  });
+
+  it('reports uploading until the server acknowledges the bytes and never invents scan percentages', async () => {
+    const f = fixture(); const onProgress = vi.fn();
+    const original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    f.request.mockImplementation(async (url, init) => {
+      if (init?.method === 'PUT') await new Promise<void>(resolve => { release = resolve; });
+      return original(url, init);
+    });
+    const pending = f.service.scanAttachmentForDownload('clamav-scan', 'message-b', 'account-b', 'sample.txt', { onProgress });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    expect(onProgress).toHaveBeenLastCalledWith('uploading', { transferredBytes: 0, totalBytes: 22 });
+    expect(onProgress.mock.calls.some(([phase]) => phase === 'scanning')).toBe(false);
+    release(); const receipt = await pending;
+    expect(onProgress).toHaveBeenLastCalledWith('scanning');
+    receipt.dispose();
   });
 
   // Breaks: installing the extension shares content before a scanner/account has been explicitly approved.

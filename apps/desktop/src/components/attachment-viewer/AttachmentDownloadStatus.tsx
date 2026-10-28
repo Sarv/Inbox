@@ -23,7 +23,8 @@ export function AttachmentDownloadStatus({
   const action = status.operation === 'preview' ? 'preview' : status.operation === 'open' ? 'open' : 'download';
   const phase = status.cancelling ? 'Cancelling…' : {
     downloading: 'Downloading…',
-    scanning: 'Scanning…',
+    uploading: 'Uploading for scan…',
+    scanning: 'Scanning on server…',
     saving: 'Saving…',
   }[status.phase ?? 'downloading'];
 

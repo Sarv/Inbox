@@ -342,7 +342,9 @@ function mergeChatExchanges(saved: InboxAssistantExchange[], cached?: Map<string
 }
 
 export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane, onCloseSourcePane, onOpenDraft, defaultDraftAccountId, onMailChanged, onOpenCalendarEvent, initialView, compact = false, visible = true, onStateChange }: InboxAssistantProps) {
-  const [view, setView] = useState<'overview' | 'conversation'>(() => initialView ?? (compact ? 'conversation' : 'overview'));
+  // A saved split layout can mount the assistant compact before its section is
+  // opened. Presentation size must not make that first visit restore a chat.
+  const [view, setView] = useState<'overview' | 'conversation'>(() => initialView ?? 'overview');
   const [accounts, setAccounts] = useState<InboxAssistantAccount[]>([]);
   const [overviewAccountIds, setOverviewAccountIds] = useState<string[]>([]);
   const [chats, setChats] = useState<InboxAssistantChatSummary[]>([]);

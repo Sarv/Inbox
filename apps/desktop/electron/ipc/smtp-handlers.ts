@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { SMTPClient, emailContentHash, resolveStandardFolder, providerAutoSavesSentCopy, isAuthTokenError, isStarttlsRefusedError, withFolderSelected, messageIdKey, STARTTLS_UNAVAILABLE, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
+import { SMTPClient, emailContentHash, resolveStandardFolder, providerAutoSavesSentCopy, isAuthTokenError, isStarttlsRefusedError, withFolderSelected, messageIdKey, parseAddresses, STARTTLS_UNAVAILABLE, type SMTPConfig, type SendEmailOptions, createLogger } from '@sarvinbox/core';
 import { PGP_ENCRYPTED_PLACEHOLDER } from '@sarvinbox/core/pgp';
 import { UPSERT_BODY_SQL, bodyLengthFromParam, relocateBodyForInsert, writeImageLinks, writeThreadKey } from '@sarvinbox/storage-node';
 import { ipcMain, dialog } from 'electron';
@@ -428,8 +428,52 @@ export function sentMirrorBody(options: Pick<SendEmailOptions, 'body' | 'htmlBod
   return { bodyText: options.body || '', bodyHtml: options.htmlBody || '' };
 }
 
+/** Main-owned provenance, never accepted from the renderer's mail payload. */
+export interface SendExecutionContext { source: 'user' | 'agent_auto' }
+
+const replyLearningTails = new WeakMap<object, Map<string, Promise<void>>>();
+
+/** A successful human reply is engagement; a draft, retry failure or auto-send is not. */
+async function recordSuccessfulUserReply(
+  storage: ReturnType<typeof getStorage>, options: SendEmailOptions, sentMessageId: string, context: SendExecutionContext,
+): Promise<void> {
+  if (context.source !== 'user' || !storage || !options.inReplyTo || options.inReplyTo.length > 998 || sentMessageId.length > 998) return;
+  const parentKey = messageIdKey(options.inReplyTo);
+  const sentKey = messageIdKey(sentMessageId);
+  if (!parentKey || !sentKey) return;
+  let tails = replyLearningTails.get(storage);
+  if (!tails) { tails = new Map(); replyLearningTails.set(storage, tails); }
+  const previous = tails.get(sentKey) ?? Promise.resolve();
+  const job = previous.catch(() => {}).then(async () => {
+    const rows = await storage.getEmailsByMessageIds([options.inReplyTo!]);
+    const original = rows.find(email => messageIdKey(email.messageId || '') === parentKey);
+    if (!original?.fromAddress) return;
+    const repo = storage.getRepositories().agent;
+    const actions = await repo.getActionsByEmail(original.id);
+    // The queue can repeat completion after a crash. Persist the SMTP result's
+    // Message-ID rather than retaining an unbounded in-memory sent-message set.
+    if (actions.some(action => {
+      if (action.source !== 'user' || !['reply', 'reply_all'].includes(action.actionType) || !action.actionValue) return false;
+      try { return JSON.parse(action.actionValue).sentMessageId === sentKey; } catch { return false; }
+    })) return;
+    const recipients = new Set([...options.to, ...(options.cc ?? [])].flatMap(address => parseAddresses(address)).map(address => address.toLowerCase()));
+    // Avoid another static dependency in SMTP -> pipeline -> agent -> SMTP.
+    // This code runs only after initialization and successful SMTP acceptance.
+    const { logUserAction } = await import('./agent-handlers');
+    await logUserAction(original.id, recipients.size > 1 ? 'reply_all' : 'reply', {
+      source: 'user', threadId: original.threadId, senderAddress: original.fromAddress,
+      actionValue: JSON.stringify({ sentMessageId: sentKey }),
+    }, storage);
+  });
+  tails.set(sentKey, job);
+  try { await job; }
+  catch (error) { logger.warn('[SMTP] Could not record successful reply engagement:', error); }
+  finally { if (tails.get(sentKey) === job) tails.delete(sentKey); }
+}
+
 export async function sendEmailFromMain(
   options: SendEmailOptions,
+  context: SendExecutionContext = { source: 'user' },
 ): Promise<{ success: boolean; messageId?: string; error?: string; transient?: boolean; rawMessage?: string; needsSentAppend?: boolean }> {
   // Resolve the sending account: a non-active accountId (reply from another
   // mailbox) uses that account's SMTP client + DB + sync engine; otherwise the
@@ -523,6 +567,8 @@ export async function sendEmailFromMain(
     } catch (err) {
       logger.error('[SMTP] Local sent mirror write failed (non-fatal):', err);
     }
+
+    await recordSuccessfulUserReply(scopedStorage, options, result.messageId, context);
 
     // "Remind me if nobody replies" — recorded only now that the send
     // succeeded, keyed by Message-ID so an outbox retry can't add a second.

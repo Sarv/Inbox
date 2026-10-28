@@ -10,7 +10,7 @@ describe('attachment download status', () => {
   // Breaks: any message surface omits the host's actual phase, leaving scanning
   // indistinguishable from downloading or displaying an unverified clean badge.
   it.each([
-    ['downloading', 'Downloading…'], ['scanning', 'Scanning…'], ['saving', 'Saving…'],
+    ['downloading', 'Downloading…'], ['scanning', 'Scanning on server…'], ['saving', 'Saving…'],
   ] as const)('names the %s phase and provides a trusted cancel control', (phase, text) => {
     const onCancel = vi.fn();
     const mounted = render(<AttachmentDownloadStatus status={{ phase, canCancel: true }} filename="report.pdf" onCancel={onCancel} />);

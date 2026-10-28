@@ -37,6 +37,7 @@ const h = vi.hoisted(() => ({
   },
   saveDialog: { canceled: false, filePath: '' },
   openPath: vi.fn(async (_filePath: string) => ''),
+  revealPath: vi.fn(),
   frame: {},
   webContents: { mainFrame: {} as object, send: vi.fn() },
   manager: null as any,
@@ -53,7 +54,7 @@ h.webContents.mainFrame = h.frame;
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, fn: (...a: any[]) => any) => h.handlers.set(name, fn) },
   dialog: { showSaveDialog: async () => h.saveDialog },
-  shell: { openPath: (p: string) => h.openPath(p) },
+  shell: { openPath: (p: string) => h.openPath(p), showItemInFolder: (p: string) => h.revealPath(p) },
   app: { getPath: () => h.userData },
 }));
 vi.mock('../../../../electron/shared', () => ({
@@ -816,7 +817,7 @@ describe('per-action missing antivirus setup warnings', () => {
     enableScanner(); h.scannerSetup.mockResolvedValue({ configured: false, allowedAccountIds: [] }); h.warning.mockResolvedValue('continue');
     const target = join(h.userData, 'unscanned.pdf'); h.saveDialog = { canceled: false, filePath: target };
     for (let attempt = 0; attempt < 2; attempt++) {
-      expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2')).toEqual({ success: true, filePath: target, notScanned: true });
+      expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2')).toMatchObject({ success: true, filePath: target, notScanned: true });
       expect(readFileSync(target)).toEqual(BYTES);
     }
     expect(h.warning).toHaveBeenCalledTimes(2); expect(h.scannerSetup).toHaveBeenCalledWith('clamav-scan', 'acct-2');
@@ -901,12 +902,12 @@ describe('emails:downloadAttachment', () => {
 
     const result = await download()(downloadEvent(), EMAIL_ID, FILENAME);
 
-    expect(result).toEqual({ success: true, filePath: target });
+    expect(result).toMatchObject({ success: true, filePath: target, savedFileId: expect.any(String), canOpenSavedFile: true });
     expect(readFileSync(target)).toEqual(BYTES);
     expect(readFileSync(cachedFiles()[0]!)).not.toEqual(BYTES); // the source was sealed
 
     rmSync(target);
-    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toEqual({ success: true, filePath: target });
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME)).toMatchObject({ success: true, filePath: target });
     expect(readFileSync(target)).toEqual(BYTES);
     expect(h.syncEngine.fetchAttachmentPart).toHaveBeenCalledOnce();
   });
@@ -956,7 +957,7 @@ describe('emails:downloadAttachment', () => {
   // Breaks: the saved attachment differs from the scanned bytes or the scan reads the wrong mailbox.
   it('uses the owning account and saves the exact protected bytes without another IMAP fetch', async () => {
     enableScanner(); const target = join(h.userData, 'scanned.txt'); h.saveDialog = { canceled: false, filePath: target };
-    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'request-scanned')).toEqual({ success: true, filePath: target });
+    expect(await download()(downloadEvent(), EMAIL_ID, FILENAME, 'acct-2', 'request-scanned')).toMatchObject({ success: true, filePath: target });
     expect(h.scanDownload).toHaveBeenCalledWith('clamav-scan', EMAIL_ID, 'acct-2', FILENAME, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(readFileSync(target, 'utf8')).toBe('scanner verified bytes');
     expect(h.syncEngine.fetchAttachmentPart).not.toHaveBeenCalled(); expect(h.otherStorage.getEmail).not.toHaveBeenCalled();
@@ -966,6 +967,20 @@ describe('emails:downloadAttachment', () => {
       ['emails:attachmentDownloadProgress', { requestId: 'request-scanned', phase: 'scanning' }],
       ['emails:attachmentDownloadProgress', { requestId: 'request-scanned', phase: 'saving' }],
     ]);
+  });
+
+  it('saves to Downloads without a dialog, returns a receipt, and authorizes only receipt-based file actions', async () => {
+    enableScanner();
+    const automatic = h.handlers.get('emails:downloadAttachmentToDownloads')!;
+    const result = await automatic(downloadEvent(), EMAIL_ID, FILENAME, 'acct-1', 'request-automatic');
+    expect(result).toMatchObject({ success: true, filePath: join(h.userData, FILENAME), savedFileId: expect.any(String), canOpenSavedFile: true });
+    expect(readFileSync(result.filePath, 'utf8')).toBe('scanner verified bytes');
+    expect(await h.handlers.get('emails:openSavedAttachment')!(downloadEvent(), result.savedFileId)).toEqual({ success: true });
+    expect(h.openPath).toHaveBeenLastCalledWith(result.filePath);
+    expect(await h.handlers.get('emails:revealSavedAttachment')!(downloadEvent(), result.savedFileId)).toEqual({ success: true });
+    expect(h.revealPath).toHaveBeenLastCalledWith(result.filePath);
+    expect((await h.handlers.get('emails:openSavedAttachment')!(downloadEvent(), '/etc/passwd')).success).toBe(false);
+    expect((await h.handlers.get('emails:revealSavedAttachment')!({ sender: h.webContents, senderFrame: {} }, result.savedFileId)).success).toBe(false);
   });
 
   // Breaks: a missing setup silently bypasses AV instead of requiring an explicit per-file warning.

@@ -96,14 +96,14 @@ describe('interaction', () => {
     act(() => { progress({ requestId, phase: 'scanning' }); });
     fire(chipFor('photo.png'), 'click');
     await settle();
-    expect(mounted.find('[role="dialog"]')?.textContent).toContain('Scanning…');
+    expect(mounted.find('[role="dialog"]')?.textContent).toContain('Scanning on server…');
     expect((mounted.byLabel('Save a copy') as HTMLButtonElement).disabled).toBe(true);
     fire(mounted.byLabel('Close attachment viewer'), 'click');
-    expect(chipFor('photo.png')?.textContent).toContain('Scanning…');
+    expect(chipFor('photo.png')?.textContent).toContain('Scanning on server…');
     expect(cancelAttachmentDownload).not.toHaveBeenCalled();
     release({ success: true });
     await settle();
-    expect(chipFor('photo.png')?.textContent).not.toContain('Scanning…');
+    expect(chipFor('photo.png')?.textContent).not.toContain('Scanning on server…');
     expect(downloadAttachment).toHaveBeenCalledOnce();
   });
 
@@ -117,7 +117,7 @@ describe('interaction', () => {
     const requestId = downloadAttachment.mock.calls[0][3];
     expect(chipFor('report.pdf')?.textContent).toContain('Downloading…');
     act(() => { progress({ requestId, phase: 'scanning' }); });
-    expect(chipFor('report.pdf')?.textContent).toContain('Scanning…');
+    expect(chipFor('report.pdf')?.textContent).toContain('Scanning on server…');
     expect((mounted.byLabel('Save all attachments') as HTMLButtonElement).disabled).toBe(true);
     fire(mounted.byLabel('Cancel download of report.pdf'), 'click');
     await settle();

@@ -7,13 +7,14 @@
  * Runs entirely in the Electron main process for reliability.
  */
 
-import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, AI_DEFAULT_BASE_URLS, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail } from '@sarvinbox/core';
-import type { EmailRecord , AIErrorInfo, EmailSecurityContext } from '@sarvinbox/core';
+import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray, cleanEmailHtmlForLLM, isConnectionError, isUpstreamError, describeNetworkError, classifyAIError, createLogger, applySecurityGate, buildSecurityContext, formatSecurityLines, buildCategorizationPrompt, buildAIAuthHeaders, buildAIChatRequestOptions, AI_DEFAULT_BASE_URLS, effectiveAIBaseUrl, aiApiKeyHeaders, existingCategoryClassification, automaticCategorizationDeferred, isSpamProtectedEmail, formatSenderBehaviorFacts, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
+import type { EmailRecord , AIErrorInfo, EmailSecurityContext, SenderSignals } from '@sarvinbox/core';
 
 import { getMainWindow, requireStorage } from '../shared';
 
 import { ensureBundledAgentPrompts } from './agent-prompt-defaults';
 import { chromiumFetch } from './net-fetch';
+import { readCategorizationSenderHistory } from './sender-history-context';
 const logger = createLogger('ai-categorization-service');
 
 // ========== Helpers ==========
@@ -69,6 +70,22 @@ export interface AIProcessingProgress {
   queueSize: number;
 }
 
+interface CategorizationStartOptions {
+  emailIds?: string[];
+  systemPrompt?: string;
+  userEmail?: string;
+  maxEmails?: number;
+  skipRead?: boolean;
+}
+interface CategorizationRun {
+  storage: ReturnType<typeof requireStorage>;
+  config: AIProviderConfig;
+  controller: AbortController;
+  userEmail: string;
+  maxEmails: number;
+  skipRead: boolean;
+}
+
 interface EmailForCategorization {
   id: string;
   subject: string;
@@ -78,23 +95,10 @@ interface EmailForCategorization {
   body: string;
   date: number;
   isRead: boolean;
-  senderContext?: {
-    tier: string;
-    receivedCount: number;
-    sentToCount: number;
-    repliedCount: number;
-    lastReplied?: number;
-    lastSentTo?: number;
-    readCount: number;
-    deletedCount: number;
-    isVip: boolean;
-    isFavorite: boolean;
-    isBlocked: boolean;
-  };
+  senderContext?: SenderSignals;
   origin?: string; // 'internal (same domain)' or 'external (domain.com)'
   userInCc?: boolean; // true if user is in CC, not TO
   sameSubjectCount?: number; // emails from this sender with identical subject
-  volumePercent?: number;    // sender's share of total inbox as percentage
   threadDepth?: number;      // total messages in this email's thread
   /** The filter's verdict and where the links go — see core's buildSecurityContext. */
   security?: EmailSecurityContext;
@@ -173,6 +177,7 @@ const BULK_RESTART_MAX_MS = 5 * 60_000;
 
 export class AICategorizationService {
   private running = false;
+  private currentRun: CategorizationRun | null = null;
   private abortController: AbortController | null = null;
   private config: AIProviderConfig | null = null;
   private progress: AIProcessingProgress | null = null;
@@ -200,11 +205,12 @@ export class AICategorizationService {
   /**
    * Build the categorization prompt dynamically from category definitions
    */
-  private buildPrompt(categories: LoadedCategoryDef[], userEmail: string): string {
+  private buildPrompt(categories: LoadedCategoryDef[], userEmail: string, run: CategorizationRun): string {
+    this.assertRun(run);
     // Read the same account's editable template as the background pipeline.
     // An absent template uses the default; a failed read must stop the request
     // rather than silently disregard the user's customized instructions.
-    const promptRepo = requireStorage().getRepositories?.()?.prompts;
+    const promptRepo = run.storage.getRepositories?.()?.prompts;
     ensureBundledAgentPrompts(promptRepo);
     const override = promptRepo?.getContent('categorization_system') || undefined;
     return buildCategorizationPrompt(categories, userEmail, override);
@@ -213,16 +219,20 @@ export class AICategorizationService {
   /**
    * Start AI categorization processing
    */
-  async start(
-    config: AIProviderConfig,
-    mode: 'bulk' | 'realtime',
-    options?: {
-      emailIds?: string[];
-      systemPrompt?: string;
-      userEmail?: string;
-      maxEmails?: number;
-      skipRead?: boolean;
+  async start(config: AIProviderConfig, mode: 'bulk' | 'realtime', options?: CategorizationStartOptions): Promise<void> {
+    if (this.running) return;
+    return this.startForStorage(requireStorage(), config, mode, options);
+  }
+
+  private assertRun(run: CategorizationRun): void {
+    if (this.currentRun !== run || run.controller.signal.aborted) {
+      const error = new Error('Categorization cancelled.'); error.name = 'AbortError'; throw error;
     }
+  }
+
+  private async startForStorage(
+    storage: ReturnType<typeof requireStorage>, config: AIProviderConfig,
+    mode: 'bulk' | 'realtime', options?: CategorizationStartOptions,
   ): Promise<void> {
     if (this.running) {
       logger.info('[AICategorizationService] Already running, ignoring start');
@@ -239,35 +249,40 @@ export class AICategorizationService {
     this.running = true;
     this.abortController = new AbortController();
 
-    if (options?.userEmail) {
-      this.userEmail = options.userEmail;
-    }
+    this.userEmail = options?.userEmail || ''; // Never carry another mailbox's identity into a fresh job.
     if (options?.maxEmails) {
       this.maxEmails = options.maxEmails;
     }
     this.skipRead = options?.skipRead !== false;
 
-    // Load category definitions from DB
-    const storage = requireStorage();
-    const defs = storage.getEnabledCategoryDefinitions();
-    this.categoryDefs = defs.map(d => ({ slug: d.slug, name: d.name, prompt: d.prompt }));
-    this.categorySlugs = new Set(defs.map(d => d.slug));
-
-    logger.info(`[AICategorizationService] Starting in ${mode} mode (skipRead=${this.skipRead}, maxEmails=${this.maxEmails}, categories=${this.categoryDefs.length})`);
+    const run: CategorizationRun = { storage, config, controller: this.abortController!, userEmail: this.userEmail,
+      maxEmails: this.maxEmails, skipRead: this.skipRead };
+    this.currentRun = run;
 
     try {
+      // Definitions, bodies, sender history and writes belong to this captured
+      // mailbox even if another account becomes active while an await is pending.
+      const defs = storage.getEnabledCategoryDefinitions();
+      this.categoryDefs = defs.map(d => ({ slug: d.slug, name: d.name, prompt: d.prompt }));
+      this.categorySlugs = new Set(defs.map(d => d.slug));
+      logger.info(`[AICategorizationService] Starting in ${mode} mode (skipRead=${this.skipRead}, maxEmails=${this.maxEmails}, categories=${this.categoryDefs.length})`);
       if (mode === 'bulk') {
-        await this.processBulk();
+        await this.processBulk(run);
       } else {
-        await this.processImmediate(options?.emailIds || []);
+        await this.processImmediate(options?.emailIds || [], run);
       }
     } catch (error) {
-      logger.error('[AICategorizationService] Processing error:', error);
-      this.emitError((error as Error).message);
+      if (this.currentRun === run && !run.controller.signal.aborted) {
+        logger.error('[AICategorizationService] Processing error:', error);
+        this.emitError((error as Error).message);
+      }
     } finally {
-      this.running = false;
-      this.abortController = null;
-      this.emitComplete();
+      if (this.currentRun === run) {
+        this.running = false;
+        this.abortController = null;
+        this.currentRun = null;
+        this.emitComplete();
+      }
     }
   }
 
@@ -354,7 +369,9 @@ export class AICategorizationService {
 
     try {
       const storage = requireStorage();
-      const skipRead = this.autoOptions.skipRead !== false;
+      const config = this.autoConfig;
+      const options = { ...this.autoOptions };
+      const skipRead = options.skipRead !== false;
       const eligible = storage.getEligibleEmailsForAI(1, skipRead);
 
       if (eligible.length === 0) return;
@@ -363,9 +380,9 @@ export class AICategorizationService {
       const count = await storage.getUnprocessedEmailCount(10000, skipRead);
       logger.info(`[AICategorizationService] Auto-tick: ${count} eligible emails`);
 
-      await this.start(this.autoConfig, 'bulk', {
-        userEmail: this.autoOptions.userEmail,
-        maxEmails: this.autoOptions.maxEmails,
+      await this.startForStorage(storage, config, 'bulk', {
+        userEmail: options.userEmail,
+        maxEmails: options.maxEmails,
         skipRead,
       });
 
@@ -401,7 +418,7 @@ export class AICategorizationService {
    * self-terminating. A terminal failure never reaches here (see the circuit
    * breaker), so this can't spin on a bad key.
    */
-  private scheduleBulkRestart(): void {
+  private scheduleBulkRestart(run: CategorizationRun): void {
     if (this.bulkRestartTimer) return; // one pending restart at a time
     if (!this.config) return;
 
@@ -417,11 +434,11 @@ export class AICategorizationService {
 
     this.bulkRestartTimer = setTimeout(() => {
       this.bulkRestartTimer = null;
-      if (this.running || !this.config) return;
-      void this.start(this.config, 'bulk', {
-        userEmail: this.userEmail,
-        maxEmails: this.maxEmails,
-        skipRead: this.skipRead,
+      if (this.running) return;
+      void this.startForStorage(run.storage, run.config, 'bulk', {
+        userEmail: run.userEmail,
+        maxEmails: run.maxEmails,
+        skipRead: run.skipRead,
       });
     }, delay);
   }
@@ -436,16 +453,17 @@ export class AICategorizationService {
 
   // ========== Bulk Processing ==========
 
-  private async processBulk(): Promise<void> {
-    const storage = requireStorage();
+  private async processBulk(run: CategorizationRun): Promise<void> {
+    this.assertRun(run);
+    const storage = run.storage;
     this.lastRunAllFailed = false;
     this.lastChunkError = null;
 
     // Get eligible emails directly — no queue needed
-    const eligible = storage.getEligibleEmailsForAI(this.maxEmails, this.skipRead);
+    const eligible = storage.getEligibleEmailsForAI(run.maxEmails, run.skipRead);
     const totalEligible = eligible.length;
 
-    this.emitLog('info', `Found ${totalEligible} eligible emails (skipRead=${this.skipRead})`);
+    this.emitLog('info', `Found ${totalEligible} eligible emails (skipRead=${run.skipRead})`);
 
     // Initialize categorized counts from loaded category defs
     const categorizedInit: Record<string, number> = { spam: 0 };
@@ -484,6 +502,7 @@ export class AICategorizationService {
     // the first 2-3 emails then truncate the rest, causing 70% of
     // each batch to need retry).
     for (let offset = 0; offset < totalEligible && this.running; offset += CONCURRENCY) {
+      this.assertRun(run);
       // Circuit breaker — the run has stalled (N chunks failed in a row).
       // WHY it stalled decides what happens next:
       //   • terminal (bad key / no credits / other 4xx) → surface a Fix banner
@@ -502,7 +521,7 @@ export class AICategorizationService {
           // Only self-restart a one-shot (manual) run. In auto mode the 30s
           // autoTick already re-drives processing (with its own fail-streak
           // backoff), so scheduling a second driver would double up.
-          this.scheduleBulkRestart();
+          this.scheduleBulkRestart(run);
         }
         break;
       }
@@ -516,7 +535,8 @@ export class AICategorizationService {
       // Fetch enriched email data (sender context, thread depth, etc.)
       // for the whole chunk in one DB pass — fetchEmails is already a
       // batch operation so this stays cheap even with N>1.
-      const emails = await this.fetchEmails(emailIds);
+      const emails = await this.fetchEmails(emailIds, run);
+      this.assertRun(run);
       if (emails.length === 0) {
         // All emails were filtered out at fetch time (e.g. became read
         // since the eligible query). Skip the chunk silently — they
@@ -527,9 +547,10 @@ export class AICategorizationService {
       // Fire N parallel single-email LLM calls. allSettled so one
       // failed call doesn't poison the rest of the chunk.
       const settled = await Promise.allSettled(
-        emails.map(email => this.callAI([email])),
+        emails.map(email => this.callAI([email], run)),
       );
 
+      this.assertRun(run);
       const toSave: CategorizationResult[] = [];
       let transientFailuresThisChunk = 0;
       let networkFailuresThisChunk = 0;
@@ -607,7 +628,8 @@ export class AICategorizationService {
       }
 
       if (toSave.length > 0) {
-        await this.saveBatch(toSave, emails);
+        await this.saveBatch(toSave, emails, run);
+        this.assertRun(run);
       }
       consecutiveFailures = transientFailuresThisChunk === emails.length ? consecutiveFailures + 1 : 0;
 
@@ -623,7 +645,7 @@ export class AICategorizationService {
       // chunks so we don't hammer the provider. Each chunk already
       // does CONCURRENCY parallel calls, so we don't need a long pause.
       if (this.running && offset + CONCURRENCY < totalEligible) {
-        await this.delay(INTER_BATCH_DELAY_MS);
+        await this.delay(INTER_BATCH_DELAY_MS, run.controller.signal);
       }
     }
 
@@ -641,7 +663,8 @@ export class AICategorizationService {
 
   // ========== Realtime Processing ==========
 
-  private async processImmediate(emailIds: string[]): Promise<void> {
+  private async processImmediate(emailIds: string[], run: CategorizationRun): Promise<void> {
+    this.assertRun(run);
     if (emailIds.length === 0) return;
 
     const categorizedInit: Record<string, number> = { spam: 0 };
@@ -666,17 +689,21 @@ export class AICategorizationService {
     this.emitProgress();
 
     try {
-      const emails = await this.fetchEmails(emailIds);
+      const emails = await this.fetchEmails(emailIds, run);
+      this.assertRun(run);
       if (emails.length === 0) return;
 
-      const results = await this.callAI(emails);
+      const results = await this.callAI(emails, run);
+      this.assertRun(run);
       if (results.length > 0) {
-        await this.saveBatch(results, emails);
+        await this.saveBatch(results, emails, run);
+        this.assertRun(run);
       }
 
       this.progress.current = emailIds.length;
       this.emitProgress();
     } catch (error) {
+      if (this.currentRun !== run || run.controller.signal.aborted) return;
       logger.error('[AICategorizationService] Realtime processing failed:', error);
       this.progress.failed += emailIds.length;
       this.progress.lastError = (error as Error).message;
@@ -686,12 +713,14 @@ export class AICategorizationService {
 
   // ========== Fetch Emails ==========
 
-  private async fetchEmails(emailIds: string[]): Promise<EmailForCategorization[]> {
-    const storage = requireStorage();
+  private async fetchEmails(emailIds: string[], run: CategorizationRun): Promise<EmailForCategorization[]> {
+    this.assertRun(run);
+    const storage = run.storage;
     const rawEmails: EmailRecord[] = [];
 
     for (const id of emailIds) {
       const email = await storage.getEmail(id) as EmailRecord | null;
+      this.assertRun(run);
       if (email) rawEmails.push(email);
     }
 
@@ -700,10 +729,15 @@ export class AICategorizationService {
       .map(e => e.fromAddress)
       .filter(Boolean) as string[];
     const senderContextMap = senderEmails.length > 0
-      ? storage.getSenderContextBatch(senderEmails)
+      ? readCategorizationSenderHistory(senderEmails, {
+        legacy: senders => storage.getSenderContextBatch(senders),
+        // Keep this captured mailbox's durable human evidence with its bodies.
+        // A missing older bridge becomes explicit unknown evidence in the helper.
+        human: senders => storage.getRepositories().agent.getUnreadReviewSenderContextBatch(senders),
+      })
       : {};
 
-    // Batch-fetch same-subject counts and total email count for volume %
+    // Batch-fetch account-local same-subject counts (not engagement rates).
     const repetitionStats = senderEmails.length > 0
       ? storage.getSenderRepetitionStats(senderEmails)
       : { sameSubject: {}, totalEmails: 0 };
@@ -714,7 +748,7 @@ export class AICategorizationService {
       ? storage.getThreadDepths(threadIds)
       : {};
 
-    const userDomain = this.userEmail ? this.userEmail.split('@')[1]?.toLowerCase() : '';
+    const userDomain = run.userEmail ? run.userEmail.split('@')[1]?.toLowerCase() : '';
 
     const emails: EmailForCategorization[] = [];
     for (const email of rawEmails) {
@@ -741,7 +775,7 @@ export class AICategorizationService {
       // Detect if user is in CC (not direct TO recipient)
       const toAddrs = (email.toAddress || '').toLowerCase();
       const ccAddrs = (email.ccAddress || '').toLowerCase();
-      const userLower = this.userEmail?.toLowerCase() || '';
+      const userLower = run.userEmail?.toLowerCase() || '';
       const userInCc = userLower
         ? (!toAddrs.includes(userLower) && ccAddrs.includes(userLower))
         : false;
@@ -756,12 +790,6 @@ export class AICategorizationService {
       const subjectMap = repetitionStats.sameSubject[fromAddr];
       const sameSubjectCount = subjectMap ? (subjectMap[email.subject || ''] || 0) : 0;
 
-      // Volume %: sender's received_count as percentage of total inbox
-      const senderReceived = ctx ? ctx.receivedCount : 0;
-      const volumePercent = repetitionStats.totalEmails > 0
-        ? Math.round((senderReceived / repetitionStats.totalEmails) * 1000) / 10
-        : 0;
-
       emails.push({
         id: email.id,
         subject: email.subject || '',
@@ -774,22 +802,9 @@ export class AICategorizationService {
         origin,
         userInCc,
         sameSubjectCount,
-        volumePercent,
         threadDepth: email.threadId ? (threadDepthMap[email.threadId] || 1) : 1,
         security: buildSecurityContext(email),
-        senderContext: ctx ? {
-          tier: ctx.tier,
-          receivedCount: ctx.receivedCount,
-          sentToCount: ctx.sentToCount,
-          repliedCount: ctx.repliedCount,
-          lastReplied: ctx.lastReplied,
-          lastSentTo: ctx.lastSentTo,
-          readCount: ctx.readCount,
-          deletedCount: ctx.deletedCount,
-          isVip: ctx.isVip,
-          isFavorite: ctx.isFavorite,
-          isBlocked: ctx.isBlocked,
-        } : undefined,
+        senderContext: ctx,
       });
     }
 
@@ -798,44 +813,25 @@ export class AICategorizationService {
 
   // ========== AI API Calls ==========
 
-  private async callAI(emails: EmailForCategorization[]): Promise<CategorizationResult[]> {
-    if (!this.config) throw new Error('No AI config');
+  private async callAI(emails: EmailForCategorization[], run: CategorizationRun): Promise<CategorizationResult[]> {
+    this.assertRun(run);
 
-    const prompt = this.buildPrompt(this.categoryDefs, this.userEmail || 'unknown');
+    const prompt = this.buildPrompt(this.categoryDefs, run.userEmail || 'unknown', run);
 
     const categorySlugs = this.categoryDefs.map(c => `"${c.slug}"`).join(', ');
 
     const nowSec = Math.floor(Date.now() / 1000);
 
     const emailsText = emails.map((email, index) => {
-      // Build sender context line
-      let senderLine = '';
-      if (email.senderContext) {
-        const ctx = email.senderContext;
-        const flags = [
-          ctx.isVip ? 'VIP' : '',
-          ctx.isFavorite ? 'Favorite' : '',
-          ctx.isBlocked ? 'BLOCKED' : '',
-        ].filter(Boolean).join(', ');
-        const readRate = ctx.receivedCount > 0
-          ? ` | Read: ${Math.round((ctx.readCount / ctx.receivedCount) * 100)}%`
-          : '';
-        const keepRate = ctx.receivedCount > 0
-          ? ` | Keep: ${Math.round(((ctx.receivedCount - ctx.deletedCount) / ctx.receivedCount) * 100)}%`
-          : '';
-        const replied = ctx.repliedCount ? ` | Replied: ${ctx.repliedCount}` : '';
-        const lastReply = ctx.lastReplied
-          ? ` | Last-Reply: ${Math.max(1, Math.round((nowSec - ctx.lastReplied) / 86400))}d ago`
-          : '';
-        const lastSent = ctx.lastSentTo
-          ? ` | Last-Sent: ${Math.max(1, Math.round((nowSec - ctx.lastSentTo) / 86400))}d ago`
-          : '';
-        const sameSubj = email.sameSubjectCount ? ` | Same-Subject: ${email.sameSubjectCount}` : '';
-        const volume = email.volumePercent ? ` | Volume: ${email.volumePercent}%` : '';
-        senderLine = `Sender: ${ctx.tier} | Received: ${ctx.receivedCount} | Sent-to: ${ctx.sentToCount}${replied}${lastReply}${lastSent}${readRate}${keepRate}${sameSubj}${volume}${flags ? ` | ${flags}` : ''}`;
-      } else {
-        senderLine = 'Sender: first-time | Received: 0 | Sent-to: 0 | No prior relationship';
-      }
+      // Both categorization paths and unread review use the same validated,
+      // account-local human facts. Never infer rates from legacy mixed counters.
+      const ctx = email.senderContext;
+      const facts = formatSenderBehaviorFacts(email.fromAddress, ctx?.humanBehavior, nowSec);
+      const flags = [ctx?.isVip ? 'VIP' : '', ctx?.isFavorite ? 'Favorite' : '', ctx?.isBlocked ? 'BLOCKED' : ''].filter(Boolean);
+      const senderLine = [facts ?? SENDER_BEHAVIOR_UNAVAILABLE,
+        flags.length ? `Contact flags: ${flags.join(', ')}` : '',
+        (email.sameSubjectCount ?? 0) > 5 ? `Same-Subject: ${email.sameSubjectCount} messages` : '',
+      ].filter(Boolean).join('\n');
 
       const recipientRole = email.userInCc ? 'CC (not direct recipient)' : 'TO (direct recipient)';
       const threadDepthLine = email.threadDepth && email.threadDepth > 1
@@ -855,7 +851,7 @@ Body:
 ${email.body}`;
     }).join('\n\n');
 
-    const userMessage = `Analyze these ${emails.length} emails FOR THE USER (${this.userEmail || 'unknown'}) and return a JSON array with classifications:
+    const userMessage = `Analyze these ${emails.length} emails FOR THE USER (${run.userEmail || 'unknown'}) and return a JSON array with classifications:
 
 ${emailsText}
 
@@ -871,15 +867,17 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
   ...
 ]`;
 
-    const responseText = await this.callAPIWithRetry(prompt, userMessage);
+    const responseText = await this.callAPIWithRetry(prompt, userMessage, run);
+    this.assertRun(run);
     // The filter's verdict outranks the model: spam stays spam, and a
     // deception never comes out important / needs_response / reminders.
     return applySecurityGate(this.validateResponse(responseText), emails);
   }
 
-  private async callAPIWithRetry(systemPrompt: string, userMessage: string, retryCount = 0): Promise<string> {
+  private async callAPIWithRetry(systemPrompt: string, userMessage: string, run: CategorizationRun, retryCount = 0): Promise<string> {
+    this.assertRun(run);
     try {
-      return await this.callAPIOnce(systemPrompt, userMessage);
+      return await this.callAPIOnce(systemPrompt, userMessage, run);
     } catch (error: any) {
       // User cancelled — never retry an aborted request.
       if (error?.name === 'AbortError') throw error;
@@ -900,32 +898,33 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
         const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
         const reason = isNetworkError ? 'network' : `HTTP ${status}`;
         logger.info(`[AICategorizationService] Retryable error (${reason}), waiting ${waitTime}ms (retry ${retryCount + 1}/${MAX_API_RETRIES})`);
-        await this.delay(waitTime);
-        return this.callAPIWithRetry(systemPrompt, userMessage, retryCount + 1);
+        await this.delay(waitTime, run.controller.signal);
+        return this.callAPIWithRetry(systemPrompt, userMessage, run, retryCount + 1);
       }
 
       throw error;
     }
   }
 
-  private async callAPIOnce(systemPrompt: string, userMessage: string): Promise<string> {
-    if (!this.config) throw new Error('No AI config');
-
-    if (this.config.type === 'gemini') {
-      return this.callGeminiAPI(systemPrompt, userMessage);
+  private async callAPIOnce(systemPrompt: string, userMessage: string, run: CategorizationRun): Promise<string> {
+    this.assertRun(run);
+    if (run.config.type === 'gemini') {
+      return this.callGeminiAPI(systemPrompt, userMessage, run);
     } else {
-      return this.callOpenAICompatibleAPI(systemPrompt, userMessage);
+      return this.callOpenAICompatibleAPI(systemPrompt, userMessage, run);
     }
   }
 
-  private async callOpenAICompatibleAPI(systemPrompt: string, userMessage: string): Promise<string> {
-    const config = this.config!;
+  private async callOpenAICompatibleAPI(systemPrompt: string, userMessage: string, run: CategorizationRun): Promise<string> {
+    this.assertRun(run);
+    const config = run.config;
     const baseUrl = config.baseUrl || AI_DEFAULT_BASE_URLS[config.type] || AI_DEFAULT_BASE_URLS.openai;
     const endpoint = `${baseUrl}/chat/completions`;
     // One HTTP attempt with a resolved bearer. `forceRefresh` forces a fresh
     // OAuth token (used on the 401 retry below). Other providers use apiKey.
     const attempt = async (forceRefresh: boolean) => {
       const bearer = config.resolveBearer ? await config.resolveBearer(forceRefresh) : config.apiKey;
+      this.assertRun(run);
       // Guard against an empty bearer — we'd otherwise ship
       // `Authorization: Bearer ` which the gateway logs as
       // "Illegal header value" and returns 502.
@@ -946,7 +945,7 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
           // Keep background requests consistent with onboarding model tests.
           ...buildAIChatRequestOptions(config),
         }),
-        signal: this.abortController?.signal,
+        signal: run.controller.signal,
       });
     };
 
@@ -985,8 +984,9 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
     return data.choices?.[0]?.message?.content?.trim() || '';
   }
 
-  private async callGeminiAPI(systemPrompt: string, userMessage: string): Promise<string> {
-    const config = this.config!;
+  private async callGeminiAPI(systemPrompt: string, userMessage: string, run: CategorizationRun): Promise<string> {
+    this.assertRun(run);
+    const config = run.config;
     const baseUrl = effectiveAIBaseUrl(config);
     const endpoint = `${baseUrl}/models/${config.model}:generateContent`;
 
@@ -1006,7 +1006,7 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
           thinkingConfig: { thinkingBudget: 0 },
         },
       }),
-      signal: this.abortController?.signal,
+      signal: run.controller.signal,
     });
 
     if (!response.ok) {
@@ -1143,8 +1143,9 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
 
   // ========== Save ==========
 
-  private async saveBatch(results: CategorizationResult[], originalEmails: EmailForCategorization[]): Promise<void> {
-    const storage = requireStorage();
+  private async saveBatch(results: CategorizationResult[], originalEmails: EmailForCategorization[], run: CategorizationRun): Promise<void> {
+    this.assertRun(run);
+    const storage = run.storage;
     // A provider refresh/manual edit received mid-request must win at save time.
     const eligibleResults: CategorizationResult[] = [];
     for (const result of results) {
@@ -1152,6 +1153,7 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
       if (current && !existingCategoryClassification(current) && !automaticCategorizationDeferred(current) &&
           !isSpamProtectedEmail(current, await storage.getFolder?.(current.folderId), await storage.getFolders?.())) eligibleResults.push(result);
     }
+    this.assertRun(run);
     results = eligibleResults;
     if (results.length === 0) return;
     const processedAt = Math.floor(Date.now() / 1000);
@@ -1294,12 +1296,12 @@ Return format (categories is an array of matching slugs from: ${categorySlugs}):
 
   // ========== Utility ==========
 
-  private delay(ms: number): Promise<void> {
+  private delay(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
-      const signal = this.abortController?.signal;
+      if (signal?.aborted) { const error = new Error('Aborted'); error.name = 'AbortError'; reject(error); return; }
       const onAbort = () => {
         clearTimeout(timer);
-        reject(new Error('Aborted'));
+        const error = new Error('Aborted'); error.name = 'AbortError'; reject(error);
       };
       const timer = setTimeout(() => {
         // Detach the abort listener on normal resolution — otherwise long

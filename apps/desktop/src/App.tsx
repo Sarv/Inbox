@@ -10,6 +10,7 @@ import { AssistantSourcePane } from './components/assistant/AssistantSourcePane'
 import { AssistantWorkspace } from './components/assistant/AssistantWorkspace';
 import { InboxAssistant } from './components/assistant/InboxAssistant';
 import { AttachmentViewer } from './components/attachment-viewer/AttachmentViewer';
+import { useAttachmentActions } from './components/attachment-viewer/useAttachmentActions';
 import { Calendar } from './components/calendar/Calendar';
 import { ComposeEmail } from './components/ComposeEmail';
 import { ConnectionDialog } from './components/ConnectionDialog';
@@ -65,6 +66,7 @@ import { openInboxAssistantDraft } from './utils/inbox-assistant-draft';
 import { setImageTrustAccount } from './utils/remote-images';
 
 function App() {
+  const attachmentActions = useAttachmentActions();
   // An extension asking for a message to be opened can arrive in any view.
   useExtensionOpenMessage();
 
@@ -1042,7 +1044,11 @@ function App() {
             onNavigateToSource={openAssistantSource}
             onReplyToSource={replyToAssistantSource}
             onCloseSourcePane={closeAssistantSource}
-            sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} replyAllRequestId={assistantReplyRequestId} autoMarkRead={false} onClose={closeAssistantSource} onOpenAttachment={target => setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename })} /> : undefined}
+            sourcePane={assistantSource ? <AssistantSourcePane source={assistantSource} replyAllRequestId={assistantReplyRequestId} autoMarkRead={false} onClose={closeAssistantSource} onOpenAttachment={target => {
+              if (attachmentActions.requestPreview) attachmentActions.requestPreview({ accountId: target.accountId, emailId: target.emailId,
+                attachments: [{ name: target.filename }], initialIndex: 0 });
+              else setAssistantAttachment({ accountId: target.accountId, emailId: target.emailId, filename: target.filename });
+            }} /> : undefined}
           />}
         >
           {/* No account + on the mail view → show the empty state. Only overrides

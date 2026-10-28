@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AssistantWorkspace } from '../../../../../src/components/assistant/AssistantWorkspace';
 import { InboxAssistant } from '../../../../../src/components/assistant/InboxAssistant';
 import type { InboxAssistantChat, InboxAssistantChatSummary, InboxAssistantDashboard, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult } from '../../../../../src/types/inbox-assistant';
 import { act, cleanup, fire, render, settle, toggle, typeInto } from '../../../../helpers/render';
@@ -50,6 +51,7 @@ function button(view: ReturnType<typeof render>, label: string) {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   vi.clearAllMocks();
   api.accounts.mockImplementation(async () => ok(accounts));
   api.chats.mockImplementation(async () => ok({ chats: [summary()], activeChatId: 'chat-1' }));
@@ -159,13 +161,39 @@ describe('Inbox Agent overview integration', () => {
     expect(api.applyReview).not.toHaveBeenCalled();
   });
 
-  it('defaults compact embeds to the conversation and preserves an explicit initial view', async () => {
+  it('defaults compact layouts to the overview and preserves an explicit conversation entry', async () => {
     const view = render(<InboxAssistant compact />); await settle();
-    expect(view.find('#inbox-assistant-question')).not.toBeNull();
-    expect(api.dashboard).not.toHaveBeenCalled();
-    view.unmount();
-    const overview = render(<InboxAssistant compact initialView="overview" />); await settle();
-    expect(overview.byLabel('Inbox overview')).not.toBeNull();
+    expect(view.byLabel('Inbox overview')).not.toBeNull();
+    expect(view.find('#inbox-assistant-question')).toBeNull();
     expect(api.dashboard).toHaveBeenCalledOnce();
+    view.unmount();
+    const conversation = render(<InboxAssistant compact initialView="conversation" />); await settle();
+    expect(conversation.find('#inbox-assistant-question')).not.toBeNull();
+    expect(conversation.byLabel('Inbox overview')).toBeNull();
+    expect(api.dashboard).toHaveBeenCalledOnce();
+  });
+
+  it('opens the dashboard after startup in a saved split layout while retaining explicitly selected chats and their drafts', async () => {
+    localStorage.setItem('sarvinbox-assistant-workspace', 'split');
+    const workspace = (section: string) => <AssistantWorkspace section={section} onOpenInbox={() => {}} onOpenAssistant={() => {}}
+      renderAssistant={props => <InboxAssistant {...props} />}><p>Inbox</p></AssistantWorkspace>;
+    const view = render(workspace('mail')); await settle();
+    expect(view.byLabel('Inbox overview')).not.toBeNull();
+    expect(view.find('#inbox-assistant-question')).toBeNull();
+    expect(api.createChat).not.toHaveBeenCalled();
+    view.rerender(workspace('assistant')); await settle();
+    expect(view.find('h1')?.textContent).toBe('Inbox overview');
+    expect(view.find('#inbox-assistant-question')).toBeNull();
+    fire(view.byLabel('Open conversation: Existing delegated conversation'), 'click'); await settle();
+    expect(view.find('h1')?.textContent).toBe('Existing delegated conversation');
+    expect(view.container.textContent).toContain('Previously saved answer.');
+    typeInto(view.find('#inbox-assistant-question'), 'Keep my unsent request.');
+    view.rerender(workspace('mail')); await settle();
+    view.rerender(workspace('assistant')); await settle();
+    expect(view.find('h1')?.textContent).toBe('Existing delegated conversation');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep my unsent request.');
+    expect(api.chat).toHaveBeenCalledOnce();
+    expect(api.ask).not.toHaveBeenCalled();
+    expect(api.applyReview).not.toHaveBeenCalled();
   });
 });

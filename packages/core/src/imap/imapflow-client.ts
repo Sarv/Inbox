@@ -1303,7 +1303,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
    * collected stream IS the raw file — no base64/QP handling here. The folder
    * must already be selected by the caller. Returns null if the part is missing.
    */
-  async downloadPart(uid: number, part: string, options?: { maxBytes?: number; signal?: AbortSignal; timeoutMs?: number }): Promise<Buffer | null> {
+  async downloadPart(uid: number, part: string, options?: { maxBytes?: number; signal?: AbortSignal; timeoutMs?: number; onProgress?: (transferredBytes: number) => void }): Promise<Buffer | null> {
     this.ensureConnected();
     const bounded = options?.maxBytes !== undefined || options?.signal !== undefined || options?.timeoutMs !== undefined;
     const maxBytes = options?.maxBytes ?? DEFAULT_ATTACHMENT_MAX_BYTES;
@@ -1377,6 +1377,7 @@ export class ImapFlowClient extends EventEmitter implements IIMAPClient {
           throw new Error('Attachment exceeds the scan byte limit');
         }
         chunks.push(buffer);
+        options?.onProgress?.(bytes);
       }
       return Buffer.concat(chunks);
     } catch (error) {

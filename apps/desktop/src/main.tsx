@@ -12,8 +12,10 @@ import { createRoot } from 'react-dom/client';
 
 import App from './App';
 import { initAppearance } from './appearance';
+import { AttachmentTransferProvider } from './components/attachment-viewer/AttachmentTransferProvider';
 import { SentryErrorBoundary } from './components/SentryErrorBoundary';
 import { initSentryRenderer } from './sentry';
+import { useEmailStore } from './store/email-store';
 import './index.css';
 // The chat view's own stylesheet, then the bridge that repoints its `--sec-*`
 // tokens at this app's theme. Order matters: the bridge must win over the
@@ -32,7 +34,10 @@ initAppearance();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <SentryErrorBoundary>
-      <App />
+      <AttachmentTransferProvider resolveAccountId={emailId => {
+        const store = useEmailStore.getState();
+        return store._accountIdFor(emailId) ?? store.activeAccountId ?? undefined;
+      }}><App /></AttachmentTransferProvider>
     </SentryErrorBoundary>
   </StrictMode>
 );

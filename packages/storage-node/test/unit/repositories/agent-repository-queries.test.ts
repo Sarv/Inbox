@@ -256,7 +256,7 @@ describe('AgentRepository — unread-review behavior evidence', () => {
       ['reply', 'reply', 'first'], ['reply-all', 'reply_all', 'first'], ['reply-other', 'reply_all', 'second'],
       ['open', 'open', 'first'], ['keep', 'unread', 'second'], ['star', 'star', 'second'], ['important', 'important', 'first'],
     ] as const) seedAction(db, { id, emailId, actionType, sender: sender.toUpperCase(), timestamp: FIXED_NOW_SEC - 500 });
-    for (const source of ['agent_auto', 'agent_approved', 'agent_rejected', 'rule', 'system']) {
+    for (const source of ['agent_auto', 'agent_approved', 'agent_rejected', 'rule', 'system', 'history']) {
       seedAction(db, { id: source, emailId: 'second', actionType: 'delete', sender, source, timestamp: FIXED_NOW_SEC - 500 });
     }
     seedAction(db, { id: 'too-old', emailId: 'old', actionType: 'delete', sender, timestamp: FIXED_NOW_SEC - 91 * DAY });
@@ -264,7 +264,88 @@ describe('AgentRepository — unread-review behavior evidence', () => {
     expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toEqual({
       received90d: 2, opened90d: 1, markedRead90d: 1, deleted90d: 0, archived90d: 0,
       replied90d: 2, keptUnread90d: 1, starred90d: 1, important90d: 1,
+      readThenDeleted90d: 0, readThenDeletedFast90d: 0, readAndKept90d: 0,
+      deletedWithoutRead90d: 0, recentDeleted30d: 0, recentReceived30d: 2,
+      lastUserActionAt: FIXED_NOW_SEC - 500, lastUserAction: 'star',
       sentLifetime: 0, lastSentAt: null, isVip: false, isBlocked: false,
+    });
+  });
+
+  it('preserves human delete evidence and receipt counts after permanent purge without retaining content', async () => {
+    const sender = 'discarded@example.test';
+    seedEmail(db, { id: 'purged', from: sender, date: FIXED_NOW_SEC - DAY, subject: 'Private subject', cleanBody: 'Private body' });
+    await repo.logActionBatch([
+      { id: 'opened-purge', emailId: 'purged', actionType: 'open', senderAddress: 'wrong@example.test', source: 'user', timestamp: FIXED_NOW_SEC - 20 },
+      { id: 'deleted-purge', emailId: 'purged', actionType: 'delete', senderAddress: sender, source: 'user', timestamp: FIXED_NOW_SEC - 15 },
+    ]);
+    const before = repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender];
+    db.prepare('DELETE FROM emails WHERE id = ?').run('purged');
+    expect((db.prepare('SELECT COUNT(*) AS n FROM user_action_log').get() as { n: number }).n).toBe(0);
+    expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toEqual(before);
+    expect(before).toMatchObject({ received90d: 1, opened90d: 1, deleted90d: 1,
+      readThenDeleted90d: 1, readThenDeletedFast90d: 1, readAndKept90d: 0,
+      recentDeleted30d: 1, lastUserAction: 'delete', lastUserActionAt: FIXED_NOW_SEC - 15 });
+    const columns = (db.prepare('PRAGMA table_info(sender_behavior_events)').all() as Array<{ name: string }>).map(row => row.name);
+    expect(columns).toEqual(['id', 'sender_address', 'message_key', 'received_at', 'action_type', 'timestamp']);
+    expect(JSON.stringify(db.prepare('SELECT * FROM sender_behavior_events').all())).not.toContain('Private');
+    const other = newRepo();
+    try {
+      expect(other.repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toMatchObject({ received90d: 0, deleted90d: 0 });
+    } finally { other.db.close(); }
+  });
+
+  it('distinguishes quick deletion, retained reading, deletion without reading and explicit keep-unread', () => {
+    const sender = 'patterns@example.test';
+    for (const id of ['fast', 'slow', 'kept', 'never-read', 'manual-unread', 'archived', 'recent-read']) {
+      seedEmail(db, { id, from: sender, date: FIXED_NOW_SEC - 5 * DAY });
+    }
+    const add = (id: string, emailId: string, actionType: UserActionType, offset: number): void => {
+      seedAction(db, { id, emailId, actionType, sender, timestamp: FIXED_NOW_SEC - offset });
+    };
+    add('fast-open', 'fast', 'open', 100); add('fast-delete', 'fast', 'delete', 95);
+    add('slow-read', 'slow', 'read', 2 * DAY); add('slow-delete', 'slow', 'delete', DAY);
+    add('kept-read', 'kept', 'read', 4 * DAY); add('kept-again', 'kept', 'read', 4 * DAY - 5);
+    add('never-delete', 'never-read', 'delete', 10); add('never-delete-repeat', 'never-read', 'delete', 9);
+    add('unread-read', 'manual-unread', 'read', 4 * DAY); add('unread-keep', 'manual-unread', 'unread', 3 * DAY);
+    add('archived-read', 'archived', 'read', 4 * DAY); add('archived-archive', 'archived', 'archive', 3 * DAY);
+    add('recent-read', 'recent-read', 'read', DAY);
+    expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toMatchObject({
+      received90d: 7, deleted90d: 3, readThenDeleted90d: 2, readThenDeletedFast90d: 1,
+      readAndKept90d: 1, deletedWithoutRead90d: 1, keptUnread90d: 1,
+      recentDeleted30d: 3, recentReceived30d: 7, lastUserAction: 'delete', lastUserActionAt: FIXED_NOW_SEC - 9,
+    });
+  });
+
+  it('deduplicates canonical message identities across folder copies and repeat clicks', () => {
+    const sender = 'copies@example.test';
+    seedEmail(db, { id: 'copy-one', from: sender, date: FIXED_NOW_SEC - DAY });
+    seedEmail(db, { id: 'copy-two', from: sender, date: FIXED_NOW_SEC - DAY });
+    db.prepare('UPDATE emails SET message_id = ? WHERE id = ?').run('<Shared@Example.Test>', 'copy-one');
+    db.prepare('UPDATE emails SET message_id = ? WHERE id = ?').run('shared@example.test', 'copy-two');
+    for (const emailId of ['copy-one', 'copy-two']) {
+      seedAction(db, { id: `read-${emailId}`, emailId, actionType: 'read', sender, timestamp: FIXED_NOW_SEC - 100 });
+      seedAction(db, { id: `delete-${emailId}`, emailId, actionType: 'delete', sender, timestamp: FIXED_NOW_SEC - 95 });
+    }
+    expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toMatchObject({
+      received90d: 1, markedRead90d: 1, deleted90d: 1, readThenDeleted90d: 1, readThenDeletedFast90d: 1,
+    });
+  });
+
+  it('bounds the durable stream to ninety days on writes and the query to its requested time', () => {
+    const sender = 'bounded@example.test';
+    seedEmail(db, { id: 'ancient', from: sender, date: FIXED_NOW_SEC - 91 * DAY });
+    seedEmail(db, { id: 'old-receipt', from: sender, date: FIXED_NOW_SEC - 40 * DAY });
+    seedEmail(db, { id: 'recent', from: sender, date: FIXED_NOW_SEC - DAY });
+    seedAction(db, { id: 'ancient-delete', emailId: 'ancient', actionType: 'delete', sender, timestamp: FIXED_NOW_SEC - 91 * DAY });
+    seedAction(db, { id: 'old-delete', emailId: 'old-receipt', actionType: 'delete', sender, timestamp: FIXED_NOW_SEC - 40 * DAY });
+    seedAction(db, { id: 'recent-delete', emailId: 'recent', actionType: 'delete', sender, timestamp: FIXED_NOW_SEC - 1 });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM sender_behavior_events WHERE id = ?').get('ancient-delete') as { n: number }).n).toBe(0);
+    db.prepare('DELETE FROM emails').run();
+    expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC)[sender]).toMatchObject({
+      received90d: 2, deleted90d: 2, deletedWithoutRead90d: 2, recentReceived30d: 1, recentDeleted30d: 1,
+    });
+    expect(repo.getUnreadReviewSenderContextBatch([sender], FIXED_NOW_SEC + 91 * DAY)[sender]).toMatchObject({
+      received90d: 0, deleted90d: 0, lastUserActionAt: null, lastUserAction: null,
     });
   });
 

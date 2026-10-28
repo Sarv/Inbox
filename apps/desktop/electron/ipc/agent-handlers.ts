@@ -137,16 +137,18 @@ export async function logUserAction(
       createdAt: Math.floor(Date.now() / 1000),
     });
 
-    // Also update existing sender_stats aggregates (reuses existing system, no duplication)
+    // The timeline retains every source for activity/undo. Engagement must
+    // describe the human's choices, not feed an agent's own decisions back
+    // into categorization as if the user had read or discarded that mail.
     const sender = options.senderAddress;
-    if (sender) {
+    if (sender && (!options.source || options.source === 'user')) {
       const statsUpdate: Record<string, number> = {};
       if (actionType === 'read') statsUpdate.readCount = 1;
       else if (actionType === 'delete') statsUpdate.deletedCount = 1;
       else if (actionType === 'reply' || actionType === 'reply_all') statsUpdate.repliedCount = 1;
 
       if (Object.keys(statsUpdate).length > 0) {
-        (storage as any).upsertSenderStats({ email: sender, ...statsUpdate }).catch(() => {});
+        await (storage as any).upsertSenderStats({ email: sender, ...statsUpdate });
       }
     }
   } catch (error) {
@@ -158,9 +160,8 @@ export async function logUserAction(
 /**
  * Helper: resolve sender address from email ID
  */
-async function getSenderForEmail(emailId: string): Promise<string | null> {
+async function getSenderForEmail(emailId: string, storage = requireStorage()): Promise<string | null> {
   try {
-    const storage = requireStorage();
     const email = await storage.getEmail(emailId);
     return email?.fromAddress?.toLowerCase() || null;
   } catch {
@@ -181,16 +182,17 @@ export function registerAgentHandlers(): void {
     senderAddress?: string;
   }) => {
     try {
+      const storage = requireStorage();
       // Auto-resolve sender if not provided
       let senderAddress = options?.senderAddress;
       if (!senderAddress) {
-        senderAddress = await getSenderForEmail(emailId) || undefined;
+        senderAddress = await getSenderForEmail(emailId, storage) || undefined;
       }
 
       await logUserAction(emailId, actionType, {
         ...options,
         senderAddress,
-      });
+      }, storage);
       return { success: true };
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -620,12 +622,12 @@ export function registerAgentHandlers(): void {
       };
       const undoType = inverseAction[action.actionType];
       if (undoType) {
-        logUserAction(action.emailId, undoType, {
+        await logUserAction(action.emailId, undoType, {
           threadId: action.threadId,
           senderAddress: action.senderAddress,
           source: 'user',
           actionValue: JSON.stringify({ undoOf: actionId }),
-        });
+        }, storage);
       }
 
       logger.info(`[Agent] Undo: reversed ${action.actionType} on ${action.emailId}`);
@@ -1022,11 +1024,11 @@ export function registerAgentHandlers(): void {
       }
 
       // Log the agent action
-      logUserAction(emailId, action as any, {
+      await logUserAction(emailId, action as any, {
         threadId: email.threadId,
         senderAddress: email.fromAddress,
         source: 'agent_auto',
-      });
+      }, storage);
 
       if (testMode) {
         logger.info(`[Agent] TestMode: ${action} on ${emailId} (local only, no IMAP sync)`);

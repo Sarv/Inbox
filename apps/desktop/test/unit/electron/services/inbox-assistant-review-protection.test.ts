@@ -98,8 +98,47 @@ describe('unread review content protection', () => {
     ['Considering a CRM migration?', 'We connect legacy systems. If it makes sense to talk, I am happy to work to your schedule.'],
     ['Evaluating ERP systems for New Company?', 'Do you still rely on disconnected systems? We offer system integration.'],
     ['Re: Migrating legacy systems?', 'Does Other Company still rely on manual processes? Our system integration team can help.'],
-  ])('protects targeted invitations and business discussion requests: %s', (subject, body) => {
+  ])('lets AI distinguish unrequested sales-style invitations using sender history: %s', (subject, body) => {
+    expect(protections(subject, body)).toEqual([]);
+  });
+
+  it.each([
+    ['Your requested nomination', 'Following your nomination, please confirm attendance at the awards discussion.'],
+    ['Implementation discussion', 'As we discussed, the migration invitation and schedule are ready.'],
+    ['RSVP confirmation', 'Thank you for your registration. Please confirm attendance.'],
+  ])('retains genuinely requested personal correspondence: %s', (subject, body) => {
     expect(protections(subject, body)).toContain('Personal invitations, recognition or business discussion requests require your review.');
+  });
+
+  it.each([
+    ['Invoice payment due', 'Please settle invoice INV-2026-109 by Friday.'],
+    ['Your quotation for the requested service', 'Please review the quotation.'],
+    ['Payment confirmation', 'Your payment was received.'],
+    ['Your cloud platform invoice is ready', 'Please visit the billing portal.'],
+    ['Invoice # INV-2026 for cloud software', 'Your billing record is available.'],
+    ['Contract renewal', 'Please sign the contract.'],
+    ['Legal notice', 'You have been served.'],
+    ['Meeting invitation: Infrastructure review', 'Meeting tomorrow.'],
+    ['Your verification code', 'Your code is 123456.'],
+    ['Your password has been changed', 'If you did not do this, contact support.'],
+    ['A message for you', 'Your verification code is 123456'],
+    ['Requested proposal', 'Please approve the attached proposal by Friday.'],
+    ['Update', 'Your invoice is attached and the amount due is listed.'],
+  ])('protects actual records, requests and security events: %s', (subject, body) => {
+    expect(protections(subject, body)).toContain('Business, financial, meeting or security content requires your review.');
+  });
+
+  it.each([
+    ['A seasonal sale', 'Enjoy 50% off. Legal | Payment methods | Password help | Privacy policy.'],
+    ['Invoice software offer', 'Discover our invoice processing software and payment services.'],
+    ['Contract management webinar', 'Learn how to manage contract templates. Register today.'],
+    ['Payment platform newsletter', 'Our platform simplifies payment processing for your business.'],
+    ['New services', 'Please review our invoice processing software. Get a free demo.'],
+    ['Business proposal', 'We offer ERP services. Would you like a demo?'],
+    ['New offer: sales summary platform', 'Explore our marketing product today.'],
+    ['Security software offer', 'Our password manager helps your team. Book a demo.'],
+  ])('does not treat advertising vocabulary or footers as records: %s', (subject, body) => {
+    expect(protections(subject, body)).toEqual([]);
   });
 
   it.each([
@@ -150,6 +189,8 @@ describe('unread review explanation contradiction protection', () => {
     'The message lacks important investment information.',
     'A general promotion, with no account notifications.',
     'Unsolicited marketing offer without a personal request.',
+    'Unsolicited award nomination marketing pitch.',
+    'Promotional invitation-only event with a sales RSVP.',
   ])('does not convert generic advertising or explicit negative claims into source facts: %s', reason => {
     expect(unreadReviewRecommendationProtection(reason)).toBeUndefined();
   });

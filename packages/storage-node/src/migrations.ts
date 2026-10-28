@@ -4287,6 +4287,73 @@ export const businessConversationCategories: Migration = {
   down: () => {},
 };
 
+/**
+ * v105: durable, content-free human behavior evidence for unread review.
+ *
+ * The timeline deliberately cascades with an email. Learning evidence must not:
+ * permanently deleting a message must not erase the user's rejection of it.
+ * Keep only mailbox-local sender/message identity, dates and real user actions.
+ * Imported flags and agent/rule decisions are never human learning evidence.
+ */
+export const durableSenderBehavior: Migration = {
+  version: 105,
+  name: 'durable_sender_behavior',
+  up: (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sender_behavior_events (
+        id TEXT PRIMARY KEY,
+        sender_address TEXT NOT NULL,
+        message_key TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        action_type TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sender_behavior_sender_time
+        ON sender_behavior_events(sender_address, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_sender_behavior_timestamp
+        ON sender_behavior_events(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_sender_behavior_message
+        ON sender_behavior_events(sender_address, message_key, timestamp);
+
+      INSERT OR IGNORE INTO sender_behavior_events
+        (id, sender_address, message_key, received_at, action_type, timestamp)
+      SELECT a.id, LOWER(TRIM(e.from_address)),
+        CASE WHEN TRIM(REPLACE(REPLACE(e.message_id, '<', ''), '>', '')) != ''
+          THEN 'mid:' || LOWER(TRIM(REPLACE(REPLACE(e.message_id, '<', ''), '>', '')))
+          ELSE 'id:' || e.id END,
+        e.date, a.action_type, a.timestamp
+      FROM user_action_log a JOIN emails e ON e.id = a.email_id
+      WHERE a.source = 'user'
+        AND a.action_type IN ('open','read','delete','archive','reply','reply_all','unread','star','important')
+        AND a.timestamp BETWEEN unixepoch() - 90 * 86400 AND unixepoch();
+
+      CREATE TRIGGER IF NOT EXISTS sender_behavior_capture_user_action
+      AFTER INSERT ON user_action_log
+      WHEN NEW.source = 'user'
+        AND NEW.action_type IN ('open','read','delete','archive','reply','reply_all','unread','star','important')
+      BEGIN
+        INSERT OR IGNORE INTO sender_behavior_events
+          (id, sender_address, message_key, received_at, action_type, timestamp)
+        SELECT NEW.id, LOWER(TRIM(e.from_address)),
+          CASE WHEN TRIM(REPLACE(REPLACE(e.message_id, '<', ''), '>', '')) != ''
+            THEN 'mid:' || LOWER(TRIM(REPLACE(REPLACE(e.message_id, '<', ''), '>', '')))
+            ELSE 'id:' || e.id END,
+          e.date, NEW.action_type, NEW.timestamp
+        FROM emails e WHERE e.id = NEW.email_id;
+        -- Use the event stream's latest timestamp, so an out-of-order write
+        -- cannot resurrect evidence outside its bounded 90-day horizon.
+        DELETE FROM sender_behavior_events
+          WHERE timestamp < (SELECT MAX(timestamp) - 90 * 86400 FROM sender_behavior_events);
+      END;
+      DELETE FROM sender_behavior_events WHERE timestamp < unixepoch() - 90 * 86400;
+    `);
+  },
+  down: (db) => {
+    db.exec(`DROP TRIGGER IF EXISTS sender_behavior_capture_user_action;
+      DROP TABLE IF EXISTS sender_behavior_events;`);
+  },
+};
+
 export function createMigrationManager(
   db: Database.Database,
   context: MigrationContext = {},
@@ -4373,5 +4440,6 @@ export function createMigrationManager(
   manager.register(serverCategoryAuthority);
   manager.register(gmailPromotionsOnly);
   manager.register(businessConversationCategories);
+  manager.register(durableSenderBehavior);
   return manager;
 }

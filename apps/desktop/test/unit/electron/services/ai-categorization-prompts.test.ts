@@ -1,4 +1,4 @@
-import { buildCategorizationPrompt } from '@sarvinbox/core';
+import { buildCategorizationPrompt, formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE } from '@sarvinbox/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AICategorizationService } from '../../../../electron/services/ai-categorization-service';
@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   save: vi.fn((batch: unknown[]) => batch.length),
   send: vi.fn(),
   getTemplate: vi.fn<() => string | null>(() => null),
+  humanHistory: vi.fn<(...args: unknown[]) => Record<string, unknown>>(() => ({})),
   seedTemplate: undefined as undefined | ((row: { id: string; content: string }) => void),
   repositories: 'present' as 'present' | 'missing-api' | 'missing-repository' | 'missing-prompts',
 }));
@@ -31,8 +32,8 @@ vi.mock('../../../../electron/shared', () => ({
     getEnabledCategoryDefinitions: () => categories,
     getSenderContextBatch: () => ({
       'vendor@example.com': {
-        tier: 'first-time', receivedCount: 1, sentToCount: 2, repliedCount: 0,
-        readCount: 0, deletedCount: 0, isVip: false, isFavorite: false, isBlocked: false,
+        tier: 'first-time', receivedCount: 1, sentToCount: 2, repliedCount: 700,
+        readCount: 900, deletedCount: 800, isVip: false, isFavorite: false, isBlocked: false,
       },
     }),
     getSenderRepetitionStats: () => ({ sameSubject: {}, totalEmails: 1 }),
@@ -40,6 +41,7 @@ vi.mock('../../../../electron/shared', () => ({
     saveEmailCategoriesBatch: h.save,
     getRepositories: h.repositories === 'missing-api' ? undefined : () =>
       h.repositories === 'missing-repository' ? undefined : {
+        agent: { getUnreadReviewSenderContextBatch: (...args: unknown[]) => h.humanHistory(...args) },
         prompts: h.repositories === 'missing-prompts' ? undefined : { getContent: h.getTemplate, seedDefault: h.seedTemplate },
       },
   }),
@@ -56,8 +58,16 @@ const requestMessages = () => JSON.parse(h.fetch.mock.calls[0][1].body as string
 const run = (mode: 'bulk' | 'realtime' = 'realtime', userEmail = 'buyer@sarv.com') =>
   new AICategorizationService().start(config, mode, { emailIds: ['quote'], userEmail });
 
+const humanSignals = () => ({
+  received90d: 8, opened90d: 3, markedRead90d: 3, deleted90d: 5, archived90d: 1, replied90d: 0,
+  keptUnread90d: 0, starred90d: 0, important90d: 0, sentLifetime: 2, lastSentAt: Math.floor(Date.now() / 1000) - 400 * 86400,
+  isVip: false, isBlocked: false, readThenDeleted90d: 3, readThenDeletedFast90d: 2, readAndKept90d: 0,
+  deletedWithoutRead90d: 2, recentDeleted30d: 4, recentReceived30d: 6,
+});
+
 beforeEach(() => {
   h.repositories = 'present';
+  h.humanHistory.mockReset().mockImplementation(() => ({ 'vendor@example.com': humanSignals() }));
   h.getTemplate.mockReset().mockReturnValue(null);
   h.seedTemplate = undefined;
   h.save.mockClear();
@@ -75,13 +85,45 @@ describe('standalone categorizer shares classification guidance', () => {
     const messages = requestMessages();
     expect(messages[0].content).toBe(buildCategorizationPrompt(categories, 'buyer@sarv.com'));
     expect(messages[0].content).toContain("CLASSIFY THE CURRENT MESSAGE'S PRIMARY PURPOSE");
-    expect(messages[0].content).toContain("No recorded reply does not negate a requested quote or new customer's request");
+    expect(messages[0].content).toContain("A genuine new customer's question qualifies without prior history");
+    expect(messages[0].content).toContain('Missing history means unknown, not proof of cold outreach');
     expect(messages[0].content).not.toContain('NEVER replying to a sender');
     // Keep the existing transport facts/recipient role and cleaned message body.
-    expect(messages[1].content).toContain('Sent-to: 2');
+    expect(messages[1].content).toContain('outboundLifetime=2');
+    expect(messages[1].content).toContain('replied=0');
+    expect(messages[1].content).not.toContain('replied=700');
+    expect(messages[1].content).not.toContain('Replied: 700');
+    expect(h.humanHistory).toHaveBeenCalledExactlyOnceWith(['vendor@example.com']);
+    expect(messages[1].content).toContain(formatSenderBehaviorFacts('vendor@example.com', humanSignals(), Math.floor(Date.now() / 1000))!);
+    expect(messages.map(message => message.content).join('\n').split(SENDER_BEHAVIOR_GUIDANCE)).toHaveLength(2);
+    expect(messages[1].content).not.toMatch(/(?:Read|Keep):\s*\d+%/u);
     expect(messages[1].content).toContain('User-Role: TO (direct recipient)');
     expect(messages[1].content).toContain('Here are the prices you asked for');
     expect(h.save).toHaveBeenCalledOnce();
+  });
+
+  it.each(['missing', 'failed', 'invalid'] as const)('describes %s human history as unavailable without reviving legacy mixed-source rates', async failure => {
+    if (failure === 'missing') h.humanHistory.mockReturnValue({});
+    if (failure === 'failed') h.humanHistory.mockImplementation(() => { throw new Error('History temporarily unavailable'); });
+    if (failure === 'invalid') h.humanHistory.mockReturnValue({ 'vendor@example.com': { ...humanSignals(), deleted90d: -1 } });
+    await run();
+    const messages = requestMessages();
+    expect(messages[1].content).toContain(SENDER_BEHAVIOR_UNAVAILABLE);
+    expect(messages[1].content).not.toMatch(/(?:Read|Keep):\s*\d+%/u);
+    expect(messages[1].content).not.toContain('No prior relationship');
+    expect(messages[1].content).not.toContain('Replied:');
+    expect(messages[1].content).toContain('Here are the prices you asked for');
+    expect(h.save).toHaveBeenCalledOnce();
+  });
+
+  it('uses recorded human deletion outcomes rather than drawing user interest from a read flag', async () => {
+    await run();
+    const messages = requestMessages();
+    expect(messages[1].content).toContain('readThenDeletedFast90d=2');
+    expect(messages[1].content).toContain('deletedWithoutRead90d=2');
+    expect(messages[0].content).toContain(SENDER_BEHAVIOR_GUIDANCE);
+    expect(messages[1].content).not.toContain(SENDER_BEHAVIOR_GUIDANCE);
+    expect(messages[1].content).not.toMatch(/(?:Read|Keep):\s*\d+%/u);
   });
 
   // Regression: consolidating defaults must not overwrite a user's custom
@@ -110,7 +152,7 @@ describe('standalone categorizer shares classification guidance', () => {
 
     expect(seed).toHaveBeenCalledTimes(3);
     expect(seed.mock.invocationCallOrder[0]).toBeLessThan(h.getTemplate.mock.invocationCallOrder[0]);
-    expect(requestMessages()[0].content).toBe(customized ? 'MY OWN POLICY for buyer@sarv.com' : buildCategorizationPrompt(categories, 'buyer@sarv.com'));
+    expect(requestMessages()[0].content).toBe(buildCategorizationPrompt(categories, 'buyer@sarv.com', customized ? 'MY OWN POLICY for {{userEmail}}' : undefined));
   });
 
   it('sends no mail to a provider when upgrading the selected account\'s prompt fails', async () => {

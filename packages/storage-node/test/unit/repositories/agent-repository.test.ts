@@ -305,6 +305,7 @@ describe('AgentRepository — action batch writes', () => {
 
     expect(countRows(db, 'user_action_log')).toBe(0);
     expect(countRows(db, 'sender_daily_metrics')).toBe(0);
+    expect(countRows(db, 'sender_behavior_events')).toBe(0);
   });
 
   // An empty batch must be a no-op — callers hand it whatever the selection

@@ -49,7 +49,7 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
         {attachments.map((attachment, index) => {
           // A save in flight, not a load: opening is instant here because the
           // viewer draws its own progress.
-          const busy = isBusy(emailId, attachment.name);
+          const busy = isBusy(emailId, attachment.name, accountId);
           const size = formatSize(attachment.size);
           return (
             <div className="inline-flex min-w-0 max-w-full flex-col" key={`${attachment.name}:${index}`}>
@@ -63,7 +63,10 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
                     type="button"
                     className="sarv-chip__open"
                     aria-label={`Open ${attachment.name}`}
-                    onClick={() => setViewerIndex(index)}
+                    onClick={() => {
+                      if (actions.requestPreview) actions.requestPreview({ emailId, accountId, attachments, initialIndex: index });
+                      else setViewerIndex(index);
+                    }}
                   >
                     {busy ? (
                       <Loader2 className="sec-chip__clip h-3.5 w-3.5 animate-spin" />
@@ -86,7 +89,7 @@ export function AttachmentPills({ emailId, accountId, attachments }: AttachmentP
                   </button>
                 </Tooltip>
               </span>
-              <AttachmentDownloadStatus status={getStatus(emailId, attachment.name)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name); }} />
+              <AttachmentDownloadStatus status={getStatus(emailId, attachment.name, accountId)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name, accountId); }} />
             </div>
           );
         })}

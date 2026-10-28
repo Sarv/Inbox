@@ -50,6 +50,11 @@ interface AttachmentViewerProps {
   initialIndex: number;
   /** Shares attachment scan progress with the message strip that opened it. */
   actions?: AttachmentActions;
+  /** Lease retained by the app-level transfer host; it owns release. */
+  preparedUrl?: string;
+  onMinimize?: () => void;
+  onNavigate?: (index: number) => void;
+  onRetryPreview?: () => void;
   onClose: () => void;
 }
 
@@ -79,12 +84,17 @@ export function AttachmentViewer({
   attachments,
   initialIndex,
   actions,
+  preparedUrl,
+  onMinimize,
+  onNavigate,
+  onRetryPreview,
   onClose,
 }: AttachmentViewerProps) {
   const { index, goTo } = useGalleryNavigation({
     count: attachments.length,
     initialIndex,
     onClose,
+    onNavigate,
   });
   const localActions = useAttachmentActions();
   const { isBusy, getStatus, saveCopy, openInSystemApp, preparePreview, cancelDownload } = actions ?? localActions;
@@ -96,12 +106,12 @@ export function AttachmentViewer({
   const [preview, setPreview] = useState<{ identity: string; url: string }>();
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
-  const url = preview?.identity === identity ? preview.url : '';
+  const url = preparedUrl || (preview?.identity === identity ? preview.url : '');
 
   useEffect(() => {
     setFailed(false);
     setPreview(undefined);
-    if (!filename || kind === 'unsupported') return;
+    if (!filename || kind === 'unsupported' || preparedUrl) return;
     const controller = new AbortController();
     let releasedUrl: string | undefined;
     const release = (value: string) => {
@@ -121,12 +131,20 @@ export function AttachmentViewer({
       controller.abort();
       if (releasedUrl) release(releasedUrl);
     };
-  }, [preparePreview, emailId, filename, accountId, identity, kind, attempt]);
+  }, [preparePreview, emailId, filename, accountId, identity, kind, attempt, preparedUrl]);
 
   if (!current) return null;
 
-  const busy = isBusy(emailId, filename);
+  const busy = isBusy(emailId, filename, accountId);
   const canOpenExternally = isPreviewableAttachment(filename);
+  const saveCurrent = () => {
+    onMinimize?.();
+    void saveCopy({ emailId, filename, accountId });
+  };
+  const openCurrent = () => {
+    onMinimize?.();
+    void openInSystemApp({ emailId, filename, accountId });
+  };
 
   // Portalled to <body>, out of whatever opened it. Drawn inline, a viewer
   // opened from a chat bubble's attachment pill sat INSIDE the bubble in the
@@ -157,7 +175,7 @@ export function AttachmentViewer({
               {[getFileType(filename), formatSize(current.size)].filter(Boolean).join(' · ')}
               {attachments.length > 1 ? ` · ${index + 1} of ${attachments.length}` : ''}
             </div>
-            <AttachmentDownloadStatus status={getStatus(emailId, filename)} filename={filename} onCancel={() => { void cancelDownload(emailId, filename); }} />
+            <AttachmentDownloadStatus status={getStatus(emailId, filename, accountId)} filename={filename} onCancel={() => { void cancelDownload(emailId, filename, accountId); }} />
           </div>
 
           {attachments.length > 1 && (
@@ -185,7 +203,7 @@ export function AttachmentViewer({
 
           <Tooltip content="Save a copy" delayMs={40}>
             <button
-              onClick={() => saveCopy({ emailId, filename, accountId })}
+              onClick={saveCurrent}
               disabled={busy}
               aria-label="Save a copy"
               className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
@@ -201,7 +219,7 @@ export function AttachmentViewer({
           {canOpenExternally && (
             <Tooltip content="Open in system app" delayMs={40}>
               <button
-                onClick={() => openInSystemApp({ emailId, filename, accountId })}
+                onClick={openCurrent}
                 disabled={busy}
                 aria-label="Open in system app"
                 className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
@@ -211,6 +229,7 @@ export function AttachmentViewer({
             </Tooltip>
           )}
 
+          {onMinimize && <Tooltip content="Keep reading email" delayMs={40}><button type="button" onClick={onMinimize} aria-label="Minimize attachment viewer" className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"><Minimize2 className="h-4 w-4" /></button></Tooltip>}
           <Tooltip content="Close" shortcut="Esc" delayMs={40}>
             <button
               onClick={onClose}
@@ -234,9 +253,9 @@ export function AttachmentViewer({
               failed={failed}
               canOpenExternally={canOpenExternally}
               busy={busy}
-              onSave={() => saveCopy({ emailId, filename, accountId })}
-              onOpenExternally={() => openInSystemApp({ emailId, filename, accountId })}
-              onRetry={failed ? () => setAttempt((value) => value + 1) : undefined}
+              onSave={saveCurrent}
+              onOpenExternally={openCurrent}
+              onRetry={failed ? onRetryPreview ?? (() => setAttempt((value) => value + 1)) : undefined}
             />
           ) : (
             <AttachmentBody

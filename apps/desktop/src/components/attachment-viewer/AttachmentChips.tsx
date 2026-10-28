@@ -81,7 +81,7 @@ export function AttachmentChips({
               void saveAll(emailId, attachments.map((a) => a.name), accountId);
             }}
             aria-label="Save all attachments"
-            disabled={attachments.some((attachment) => isBusy(emailId, attachment.name))}
+            disabled={attachments.some((attachment) => isBusy(emailId, attachment.name, accountId))}
             className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
           >
             <Download className="h-3.5 w-3.5" />
@@ -92,13 +92,14 @@ export function AttachmentChips({
 
       <div className={style.wrap}>
         {attachments.map((attachment, index) => {
-          const busy = isBusy(emailId, attachment.name);
+          const busy = isBusy(emailId, attachment.name, accountId);
           return (
             <div
               key={`${attachment.name}:${index}`}
               onClick={(event) => {
                 halt(event);
-                setViewerIndex(index);
+                if (actions.requestPreview) actions.requestPreview({ emailId, accountId, attachments, initialIndex: index });
+                else setViewerIndex(index);
               }}
               className={`group relative flex cursor-pointer flex-col items-center rounded-lg border border-border bg-background transition-all hover:border-primary/30 hover:bg-accent/50 ${style.chip}`}
             >
@@ -131,7 +132,7 @@ export function AttachmentChips({
                 <div className="text-[10px] text-muted-foreground mt-0.5">
                   {!busy && getFileType(attachment.name)}
                 </div>
-                <AttachmentDownloadStatus status={getStatus(emailId, attachment.name)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name); }} />
+                <AttachmentDownloadStatus status={getStatus(emailId, attachment.name, accountId)} filename={attachment.name} onCancel={() => { void cancelDownload(emailId, attachment.name, accountId); }} />
               </div>
             </div>
           );

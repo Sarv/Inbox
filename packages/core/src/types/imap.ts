@@ -109,7 +109,7 @@ export interface IIMAPClient {
    * message. Requires the folder to be selected first. Optional (impls/fakes that
    * omit it fall back to the whole-message path). Null when the part can't be read.
    */
-  downloadPart?(uid: number, part: string, options?: { maxBytes?: number; signal?: AbortSignal; timeoutMs?: number }): Promise<Buffer | null>;
+  downloadPart?(uid: number, part: string, options?: { maxBytes?: number; signal?: AbortSignal; timeoutMs?: number; onProgress?: (transferredBytes: number) => void }): Promise<Buffer | null>;
 
   /**
    * The same part, WITHOUT reversing its transfer encoding — the escape hatch for

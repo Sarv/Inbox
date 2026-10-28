@@ -15,8 +15,10 @@ function connected(content: Readable) {
 describe('bounded antivirus MIME download', () => {
   it('returns decoded bytes within the cap', async () => {
     const { client, download } = connected(Readable.from([Buffer.from('syn'), Buffer.from('thetic')]));
-    expect((await client.downloadPart(42, '3', { maxBytes: 9 }))?.toString()).toBe('synthetic');
+    const onProgress = vi.fn();
+    expect((await client.downloadPart(42, '3', { maxBytes: 9, onProgress }))?.toString()).toBe('synthetic');
     expect(download).toHaveBeenCalledWith('42', '3', { uid: true, maxBytes: 10, chunkSize: 1025 });
+    expect(onProgress.mock.calls).toEqual([[3], [9]]);
   });
 
   it('destroys the MIME stream when actual decoded bytes exceed the cap', async () => {

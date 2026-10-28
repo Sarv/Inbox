@@ -20,6 +20,7 @@ import {
   type EmailSecurityContext,
   type EnrichedEmail,
 } from '../../../src/agent/categorization-utils';
+import { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from '../../../src/agent/sender-behavior-context';
 
 // This module is the whole contract with the LLM: what we SEND (prompt +
 // per-email facts) and what we accept BACK. The response side is the fragile
@@ -45,6 +46,14 @@ const email = (over: Partial<EnrichedEmail> = {}): EnrichedEmail => ({
   date: Math.floor(Date.parse('2026-08-18T10:00:00Z') / 1000),
   isRead: false,
   ...over,
+});
+
+it('keeps descriptive categorization separate from importance for low-value mail in the user payload too', () => {
+  const prompt = buildEmailText([email({ subject: 'Seasonal offers', body: 'An unsolicited product newsletter.' })], 'me@sarv.com', ['promotions', 'important']);
+  expect(prompt).toContain('Assign every fitting descriptive category from the supplied list');
+  expect(prompt).toContain('low value does not mean uncategorized');
+  expect(prompt).toContain('none of the supplied categories fits');
+  expect(prompt).not.toContain('only assign categories when clearly relevant to the user');
 });
 
 describe('buildCategorizationPrompt', () => {
@@ -79,12 +88,12 @@ describe('buildCategorizationPrompt', () => {
   // an empty spot in the prompt is far harder to notice than a literal token.
   it('leaves unknown placeholders literal so a broken template is visible', () => {
     expect(buildCategorizationPrompt([], 'me@sarv.com', 'hi {{notAThing}} {{userName}}'))
-      .toBe('hi {{notAThing}} me');
+      .toBe(`hi {{notAThing}} me\n\n${SENDER_BEHAVIOR_GUIDANCE}`);
   });
 
   it('tolerates an address with no domain and an empty category list', () => {
     const prompt = buildCategorizationPrompt([], 'weird-address', '{{userName}}|{{userDomain}}|{{categorySection}}|');
-    expect(prompt).toBe('weird-address||' + '|');
+    expect(prompt).toBe(`weird-address|||\n\n${SENDER_BEHAVIOR_GUIDANCE}`);
   });
 
   // Regression: pricing/product language and Sales signatures caused genuine
@@ -149,6 +158,36 @@ describe('buildEmailText — the facts handed to the model', () => {
 
   it('says "first-time sender" when there is no sender history', () => {
     expect(buildEmailText([email()], 'me@sarv.com', [])).toContain('Behavior: First-time sender, no history');
+  });
+
+  it('uses identical validated human facts as unread review rather than legacy read/keep percentages', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const humanBehavior: SenderBehaviorSignals = {
+      received90d: 10, opened90d: 2, markedRead90d: 2, deleted90d: 8, archived90d: 0,
+      replied90d: 0, keptUnread90d: 0, starred90d: 0, important90d: 0,
+      sentLifetime: 1, lastSentAt: nowSec - 86400, isVip: false, isBlocked: false,
+      readThenDeleted90d: 2, readThenDeletedFast90d: 2, readAndKept90d: 0,
+      deletedWithoutRead90d: 6, recentDeleted30d: 8, recentReceived30d: 10,
+    };
+    const text = buildEmailText([email({ senderContext: {
+      tier: 'known', receivedCount: 100, sentToCount: 500, repliedCount: 999,
+      readCount: 99, deletedCount: 1, isVip: false, isFavorite: false, isBlocked: false,
+      humanBehavior,
+    } })], 'me@sarv.com', []);
+    expect(text).toContain(`Behavior: ${formatSenderBehaviorFacts('billing@vendor.com', humanBehavior, nowSec)}`);
+    expect(text).toContain('deleted=8,replied=0');
+    expect(text).not.toMatch(/Read \d+%|Keep \d+%|999|500/);
+    expect(text).not.toContain(SENDER_BEHAVIOR_GUIDANCE);
+  });
+
+  it.each([null, undefined, { deleted90d: -1 }])('never falls back to unsafe inferred counters when explicit human evidence is unavailable: %s', humanBehavior => {
+    const text = buildEmailText([email({ senderContext: {
+      tier: 'known', receivedCount: 100, sentToCount: 500, repliedCount: 999,
+      readCount: 99, deletedCount: 1, isVip: false, isFavorite: false, isBlocked: false,
+      humanBehavior: humanBehavior as SenderBehaviorSignals | null | undefined,
+    } })], 'me@sarv.com', []);
+    expect(text).toContain(SENDER_BEHAVIOR_UNAVAILABLE);
+    expect(text).not.toMatch(/Read \d+%|Keep \d+%|999|500|First-time sender/);
   });
 
   // Regression: the first answer to a user-initiated quotation was represented

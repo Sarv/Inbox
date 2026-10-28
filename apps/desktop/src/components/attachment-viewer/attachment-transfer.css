@@ -1,0 +1,83 @@
+.attachment-transfers {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 190;
+  width: 386px;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: 15px;
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+  box-shadow: 0 12px 40px rgb(0 0 0 / 14%), 0 2px 6px rgb(0 0 0 / 5%);
+  animation: attachment-transfer-enter 180ms ease-out;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dark .attachment-transfers { box-shadow: 0 12px 40px rgb(0 0 0 / 38%), 0 2px 6px rgb(0 0 0 / 15%); }
+.attachment-transfers__header { display: flex; align-items: center; gap: 9px; padding: 11px 13px; }
+.attachment-transfers__header-icon { color: hsl(var(--muted-foreground)); }
+.attachment-transfers__header-icon > svg { width: 16px; height: 16px; }
+.attachment-transfers__heading { flex: 1; min-width: 0; }
+.attachment-transfers__heading h2 { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; }
+.attachment-transfers__heading p { overflow: hidden; margin-top: 2px; color: hsl(var(--muted-foreground)); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-transfers__count { display: inline-flex; min-width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: 5px; background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); font-size: 10px; font-variant-numeric: tabular-nums; }
+.attachment-transfers__icon-button { display: inline-flex; width: 27px; height: 27px; flex-shrink: 0; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: hsl(var(--muted-foreground)); cursor: pointer; }
+.attachment-transfers__icon-button:hover { background: hsl(var(--accent)); color: hsl(var(--foreground)); }
+.attachment-transfers__icon-button svg { width: 15px; height: 15px; }
+.attachment-transfers button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.attachment-transfers__list { max-height: min(480px, 56vh); overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid hsl(var(--border)); }
+.attachment-transfer { padding: 14px; }
+.attachment-transfer + .attachment-transfer { border-top: 1px solid hsl(var(--border)); }
+.attachment-transfer__file-row { display: flex; align-items: flex-start; gap: 10px; }
+.attachment-transfer__file-icon { display: flex; width: 34px; height: 36px; flex-shrink: 0; align-items: center; justify-content: center; border: 1px solid hsl(var(--border)); border-radius: 9px; background: hsl(var(--muted) / 45%); color: hsl(var(--muted-foreground)); }
+.attachment-transfer__file-icon svg { width: 18px; height: 18px; }
+.attachment-transfer__file { flex: 1; min-width: 0; padding-top: 1px; }
+.attachment-transfer__file h3 { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-transfer__phase { margin-top: 3px; color: hsl(var(--muted-foreground)); font-size: 11px; }
+.attachment-transfer__progress-area { margin-top: 15px; }
+.attachment-transfer__stages { display: flex; gap: 18px; margin: 0 0 12px; padding: 0; list-style: none; }
+.attachment-transfer__stages li { display: flex; align-items: center; gap: 5px; color: hsl(var(--muted-foreground)); font-size: 10px; }
+.attachment-transfer__stages li > span { display: flex; width: 15px; height: 15px; align-items: center; justify-content: center; border: 1px solid hsl(var(--border)); border-radius: 50%; font-size: 9px; }
+.attachment-transfer__stages li svg { width: 10px; height: 10px; }
+.attachment-transfer__stages li[data-state="current"] { color: hsl(var(--foreground)); font-weight: 600; }
+.attachment-transfer__stages li[data-state="current"] > span { border-color: hsl(var(--primary)); background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.attachment-transfer__stages li[data-state="complete"] > span { border-color: transparent; background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.attachment-transfer__progress-row { display: flex; align-items: center; gap: 10px; }
+.attachment-transfer__progress { height: 4px; flex: 1; overflow: hidden; border-radius: 9px; background: hsl(var(--muted)); }
+.attachment-transfer__progress > span { display: block; height: 100%; border-radius: inherit; background: hsl(var(--primary)); transition: width 180ms ease-out; }
+.attachment-transfer__progress[data-indeterminate="true"] > span { width: 34%; animation: attachment-transfer-progress 1.5s ease-in-out infinite; }
+.attachment-transfer__percent { width: 29px; color: hsl(var(--muted-foreground)); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+.attachment-transfer__progress-meta { display: flex; min-height: 21px; align-items: flex-end; justify-content: space-between; gap: 8px; color: hsl(var(--muted-foreground)); font-size: 10px; }
+.attachment-transfer__cancel { border: 0; border-radius: 4px; background: transparent; color: hsl(var(--foreground)); font: inherit; cursor: pointer; }
+.attachment-transfer__cancel:hover { text-decoration: underline; text-underline-offset: 3px; }
+.attachment-transfer__cancel:disabled { opacity: .55; cursor: default; }
+.attachment-transfer__error { margin-top: 12px; color: hsl(var(--destructive)); overflow-wrap: anywhere; font-size: 11px; }
+.attachment-transfer__warning { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: #a15c07; font-size: 11px; }
+.attachment-transfer__warning svg { width: 13px; height: 13px; flex-shrink: 0; }
+.dark .attachment-transfer__warning { color: #f5bd6a; }
+.attachment-transfer[data-status="failed"] .attachment-transfer__file-icon { color: hsl(var(--destructive)); }
+.attachment-transfer[data-unscanned="true"] .attachment-transfer__file-icon { color: #a15c07; }
+.dark .attachment-transfer[data-unscanned="true"] .attachment-transfer__file-icon { color: #f5bd6a; }
+.attachment-transfer__path { max-height: 62px; overflow: auto; margin-top: 12px; padding: 7px 9px; border: 1px solid hsl(var(--border)); border-radius: 7px; background: hsl(var(--muted) / 35%); color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; font-size: 10px; user-select: text; }
+.attachment-transfer__actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.attachment-transfer__actions button { display: inline-flex; min-height: 30px; align-items: center; justify-content: center; gap: 6px; padding: 5px 9px; border: 1px solid hsl(var(--border)); border-radius: 7px; background: hsl(var(--background)); color: hsl(var(--foreground)); font-size: 11px; font-weight: 500; cursor: pointer; }
+.attachment-transfer__actions button:hover { background: hsl(var(--accent)); }
+.attachment-transfer__actions button svg { width: 13px; height: 13px; }
+.attachment-transfer__actions .attachment-transfer__primary { border-color: hsl(var(--primary)); background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.attachment-transfer__actions .attachment-transfer__primary:hover { background: hsl(var(--primary) / 88%); }
+.attachment-transfers__spinner { animation: attachment-transfer-spin 1s linear infinite; }
+.attachment-transfers__sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+
+@keyframes attachment-transfer-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes attachment-transfer-progress { 0% { transform: translateX(-100%); } 100% { transform: translateX(395%); } }
+@keyframes attachment-transfer-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 600px) { .attachment-transfers { right: 12px; bottom: 12px; max-width: calc(100vw - 24px); } }
+@media (prefers-reduced-motion: reduce) {
+  .attachment-transfers, .attachment-transfers__spinner, .attachment-transfer__progress[data-indeterminate="true"] > span { animation: none; }
+  .attachment-transfer__progress > span { transition: none; }
+  .attachment-transfer__progress[data-indeterminate="true"] > span { width: 100%; opacity: .45; }
+}

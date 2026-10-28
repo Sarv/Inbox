@@ -193,7 +193,7 @@ describe('Inbox Agent conversation approval orchestration', () => {
     const questionUpdatedAt = exchange.updatedAt!;
     vi.spyOn(Date, 'now').mockReturnValue(questionUpdatedAt);
     const applied = await service.applyReview(applyRequest(exchange, { itemIds: [item.id], action, manualSelection: true }));
-    expect(deps.moveMail).toHaveBeenCalledExactlyOnceWith('primary', ['important'], action);
+    expect(deps.moveMail).toHaveBeenCalledExactlyOnceWith('primary', ['important'], action, { source: 'user' });
     expect(deps.setRead).not.toHaveBeenCalled();
     expect(applied.reviewResult).toMatchObject({ appliedCount: 1, items: [{ action, status: 'applied' }] });
     expect(applied.updatedAt).toBeGreaterThan(questionUpdatedAt);
@@ -223,7 +223,7 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(item).toMatchObject({ appliedAction: 'mark_read', mailActionsAllowed: true });
     const moved = await service.applyReview(applyRequest(exchange, { itemIds: [item.id], action: 'archive', manualSelection: true }));
     expect(moved.reviewResult).toMatchObject({ appliedCount: 1, items: [{ action: 'archive' }] });
-    expect(deps.moveMail).toHaveBeenCalledExactlyOnceWith('primary', ['safe-a'], 'archive');
+    expect(deps.moveMail).toHaveBeenCalledExactlyOnceWith('primary', ['safe-a'], 'archive', { source: 'user' });
     expect(moved.review!.items.find(value => value.id === item.id)).toMatchObject({ appliedAction: 'archive', undoAvailable: false });
   });
 
@@ -331,7 +331,7 @@ describe('Inbox Agent conversation approval orchestration', () => {
     service.updateChat({ chatId, actionMode: 'approve_for_me' });
     const result = await service.ask({ ...request(), question: 'Mark all BigBlueButton emails unread' });
     expect(result.reviewResult).toMatchObject({ appliedCount: 1 });
-    expect(deps.setRead).toHaveBeenCalledWith('primary', ['bbb'], false);
+    expect(deps.setRead).toHaveBeenCalledWith('primary', ['bbb'], false, { source: 'user' });
     expect(history.load(chatId).actionMode).toBe('approve_for_me');
   });
 
@@ -460,10 +460,10 @@ describe('Inbox Agent conversation approval orchestration', () => {
     const action = applyRequest(review, { itemIds: [important.id], manualSelection: true });
     const applied = await service.applyReview(action);
     expect(applied.reviewResult?.appliedCount).toBe(1);
-    expect(deps.setRead).toHaveBeenCalledExactlyOnceWith('primary', ['important'], true);
+    expect(deps.setRead).toHaveBeenCalledExactlyOnceWith('primary', ['important'], true, { source: 'user' });
     expect(history.load(chatId).exchanges[0]?.review?.items.find(item => item.id === important.id)?.undoAvailable).toBe(true);
     await service.applyReview({ ...action, requestId: 'manual-undo', undo: true, manualSelection: undefined });
-    expect(deps.setRead).toHaveBeenLastCalledWith('primary', ['important'], false);
+    expect(deps.setRead).toHaveBeenLastCalledWith('primary', ['important'], false, { source: 'user' });
     expect(history.load(chatId).actionMode).toBe('approve_for_me');
   });
 

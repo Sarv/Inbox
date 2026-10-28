@@ -5,6 +5,7 @@ import { waitForAbortableOperation } from '@sarvinbox/core';
 
 import { consentFingerprint, hasControlCharacters, object, opaqueId, ScannerTransport, scannerOrigin, timestamp, validateCapabilities, validateEngine,
   type ScannerCapabilities } from './antivirus-transport';
+import type { AttachmentTransferBytes } from './attachment-download-protection';
 
 export interface ScanSource {
   accountId: string;
@@ -37,7 +38,7 @@ export interface AntivirusDependencies {
   savedCredentialsLocked?(extensionId: string): boolean;
   accounts(): Array<{ id: string; name: string; email: string }>;
   sources(messageId: string, accountId: string, signal?: AbortSignal): Promise<ScanSource[]>;
-  read(source: ScanSource, maxBytes: number, signal?: AbortSignal): Promise<Buffer>;
+  read(source: ScanSource, maxBytes: number, signal?: AbortSignal, onProgress?: (transferredBytes: number) => void): Promise<Buffer>;
   openSetup(extensionId: string): void;
   allowDevelopmentLoopback: boolean;
   requestFetch?: typeof fetch;
@@ -56,7 +57,7 @@ interface Work {
   transport: ScannerTransport;
   ticketId?: string;
   finishedAt?: number;
-  download?: { content?: Buffer; onProgress?: (phase: 'downloading' | 'scanning') => void };
+  download?: { content?: Buffer; onProgress?: (phase: 'downloading' | 'uploading' | 'scanning', bytes?: AttachmentTransferBytes) => void };
 }
 export interface VerifiedAttachmentDownload {
   content: Buffer;
@@ -285,7 +286,7 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
 
   /** Trusted download entry: scan once, then save the exact bytes that earned the verdict. */
   async scanAttachmentForDownload(extensionId: string, messageId: string, accountId: string, filename: string,
-    options: { signal?: AbortSignal; onProgress?: (phase: 'downloading' | 'scanning') => void } = {}): Promise<VerifiedAttachmentDownload> {
+    options: { signal?: AbortSignal; onProgress?: (phase: 'downloading' | 'uploading' | 'scanning', bytes?: AttachmentTransferBytes) => void } = {}): Promise<VerifiedAttachmentDownload> {
     const generation = this.generation(extensionId);
     const accountGeneration = this.accountGenerations.get(accountId) ?? 0;
     const assertLookupCurrent = () => {
@@ -382,10 +383,21 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
       let total = 0;
       for (const target of work.targets) {
         await this.assertCurrent(work);
-        const content = await this.deps.read(target, cap.maxItemBytes, work.abort.signal);
+        let lastProgress = 0;
+        const content = await (work.download
+          ? this.deps.read(target, cap.maxItemBytes, work.abort.signal, transferredBytes => {
+            if (!work.abort.signal.aborted && Date.now() - lastProgress >= 100) {
+              lastProgress = Date.now();
+              work.download?.onProgress?.('downloading', { transferredBytes });
+            }
+          })
+          : this.deps.read(target, cap.maxItemBytes, work.abort.signal));
         held.push(content);
         if (!content.length || content.length > cap.maxItemBytes || (total += content.length) > cap.maxTotalBytes) throw new Error('Selected content exceeds the scanner limits.');
-        if (work.download) work.download.content = Buffer.from(content);
+        if (work.download) {
+          work.download.content = Buffer.from(content);
+          work.download.onProgress?.('downloading', { transferredBytes: content.length, totalBytes: content.length });
+        }
         items.push({ clientItemId: randomUUID(), kind: target.kind, byteLength: content.length,
           sha256: createHash('sha256').update(content).digest('hex'), content });
       }
@@ -405,18 +417,22 @@ export class AntivirusScanService implements ExtensionSecurityBackend {
         return { ...item, itemId, path };
       });
       if (new Set(bindings.map(b => b.itemId)).size !== bindings.length) throw new Error('The scanner returned duplicate item identifiers.');
-      work.download?.onProgress?.('scanning');
+      work.download?.onProgress?.('uploading', { transferredBytes: 0, totalBytes: total });
       this.touch(work, 'uploading');
+      let uploadedBytes = 0;
       for (const item of bindings) {
         await this.assertCurrent(work);
         if (this.now() >= deadline) throw new Error('The scan ticket expired before upload.');
         await work.transport.request(item.path, 'PUT', item.content, work.abort.signal, [200, 204], deadline - this.now());
+        uploadedBytes += item.content.length;
+        work.download?.onProgress?.('uploading', { transferredBytes: uploadedBytes, totalBytes: total });
         item.content.fill(0);
       }
       await this.assertCurrent(work);
       const submitted = object(await work.transport.request(`/v1/scan-tickets/${ticketId}/submit`, 'POST', undefined, work.abort.signal, [202]));
       if (submitted.ticketId !== ticketId || submitted.status !== 'queued' || submitted.resultExpiresAt !== null || timestamp(submitted.contentDeadlineAt) !== deadline) throw new Error('The scanner returned an invalid submission.');
       this.touch(work, 'queued');
+      work.download?.onProgress?.('scanning');
       for (;;) {
         await this.assertCurrent(work);
         if (this.now() >= deadline) throw new Error('The scan ticket deadline expired.');

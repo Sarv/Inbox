@@ -2477,7 +2477,7 @@ export class SyncEngine {
     finally { await this.reselectMonitoredFolder(); }
   }
 
-  async fetchAttachmentScanPart(folderPath: string, uid: number, partId: string, expectedName: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer> {
+  async fetchAttachmentScanPart(folderPath: string, uid: number, partId: string, expectedName: string, maxBytes: number, signal?: AbortSignal, onProgress?: (transferredBytes: number) => void): Promise<Buffer> {
     if (!this.isConnected() || !uid || !/^\d+(\.\d+)*$/.test(partId) || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
       throw new Error('This attachment cannot be scanned');
     }
@@ -2488,7 +2488,7 @@ export class SyncEngine {
       const node = (await attachmentScanNodes(client, uid, rows[0]?.bodyStructure, signal)).find(n => n.part === partId);
       const name = node?.disposition?.params?.filename || node?.params?.name || `Attachment ${partId}`;
       if (!node || name !== expectedName || !client.downloadPart) throw new Error('The selected MIME attachment changed or is unavailable');
-      const content = await client.downloadPart(uid, partId, { maxBytes, signal, timeoutMs: 90_000 });
+      const content = await client.downloadPart(uid, partId, { maxBytes, signal, timeoutMs: 90_000, ...(onProgress ? { onProgress } : {}) });
       if (signal?.aborted) { content?.fill(0); throw new Error('Attachment scan cancelled'); }
       if (!content?.length || content.length > maxBytes) throw new Error('Attachment is empty or exceeds the scan limit');
       // A short decode may be text mislabelled base64, which the open path then

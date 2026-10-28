@@ -6,7 +6,7 @@
 
 import path from 'path';
 
-import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery } from '@sarvinbox/core';
+import { createDeferredFetchError, fetchBodyQueued, withFolderSelected, sanitizeIcsText, createLogger, setEmailReadFlag, applyReadFlagCountDelta, hasCidRefs, isTrashFolder, findFolderByType, resolveStandardFolder, withFiledCounts, buildImapSearchCriteria, hasServerSearchableCriteria, addTag, removeTag, hasTag, isLocalSentMirror, needsAttachmentMetadata, type ParsedSearchQuery, type UserActionType } from '@sarvinbox/core';
 import { app, ipcMain, dialog, shell, type IpcMainInvokeEvent } from 'electron';
 import ICAL from 'ical.js';
 
@@ -15,6 +15,7 @@ import { getAntivirusScanService } from '../services/antivirus-scan-service';
 import { attachmentErrorMessage, MAX_ATTACHMENT_BYTES, readCachedAttachment, resolveAttachmentFile } from '../services/attachment-cache';
 import { AttachmentDownloadProtection, downloadScanners, setAttachmentOperationProtection, writeProtectedAttachment } from '../services/attachment-download-protection';
 import { AttachmentPreviewProtection, setAttachmentPreviewProtection } from '../services/attachment-preview-protection';
+import { AttachmentSavedFiles } from '../services/attachment-saved-files';
 import { confirmUnscannedAttachment } from '../services/attachment-unscanned-warning';
 import {
   deferBodyPrefetch,
@@ -524,7 +525,12 @@ export function registerEmailHandlers(): void {
       throw new Error('Attachment downloads must be requested from Sarv Inbox.');
     }
   };
-  const downloads = new AttachmentDownloadProtection({
+  const savedFiles = new AttachmentSavedFiles({
+    downloadsDirectory: () => app.getPath('downloads'),
+    openPath: filePath => shell.openPath(filePath),
+    revealPath: filePath => shell.showItemInFolder(filePath),
+  });
+  const downloadDependencies = {
     scanners: () => downloadScanners(getExtensionManager()),
     checkSetup: (extensionId, accountId) => getAntivirusScanService().getAttachmentSetupRequirement(extensionId, accountId),
     confirmUnscanned: confirmUnscannedAttachment,
@@ -554,8 +560,20 @@ export function registerEmailHandlers(): void {
         content.fill(0);
       }
     },
-    progress: (requestId, phase) => getMainWindow()?.webContents.send('emails:attachmentDownloadProgress', { requestId, phase }),
-  });
+    progress: (requestId, phase, bytes) => getMainWindow()?.webContents.send('emails:attachmentDownloadProgress', { requestId, phase, ...bytes }),
+  } satisfies import('../services/attachment-download-protection').AttachmentDownloadDependencies;
+  const downloads = new AttachmentDownloadProtection(downloadDependencies);
+  const automaticDownloads = new AttachmentDownloadProtection({
+    ...downloadDependencies,
+    chooseSavePath: filename => savedFiles.chooseDownloadPath(filename),
+    releaseSavePath: filePath => savedFiles.releaseDownloadPath(filePath),
+    writeContent: (destination, content, signal, beforeCommit) => writeProtectedAttachment(destination, content, signal, beforeCommit, true),
+    copyLegacy: async (source, destination) => {
+      const content = await readCachedAttachment(source);
+      try { await writeProtectedAttachment(destination, content, new AbortController().signal, async () => {}, true); }
+      finally { content.fill(0); }
+    },
+  }, downloads.operations);
   setAttachmentOperationProtection(downloads.operations);
   const previews = new AttachmentPreviewProtection({
     operations: downloads.operations,
@@ -1301,13 +1319,8 @@ export function registerEmailHandlers(): void {
       // thread-scoped) instead of a full-table recount — and only when the flag
       // actually flipped. Awaited so the renderer's follow-up loadFolders()
       // reads the fresh counts. The full recount on sync stays the backstop.
-      await setEmailReadFlag(storage, emailId, read, 'markRead IPC');
-
-      // Log action for agent learning
-      logUserAction(emailId, read ? 'read' : 'unread', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
-      });
+      const changed = await setEmailReadFlag(storage, emailId, read, 'markRead IPC');
+      let accepted = true;
 
       // Sync to IMAP via the operation queue. Enqueue REGARDLESS of connection
       // state — the queue persists the op (savePendingOperation) and executes it
@@ -1319,15 +1332,20 @@ export function registerEmailHandlers(): void {
           const folder = await storage.getFolder(email.folderId);
           if (folder && email.uid) {
             if (read) {
-              syncEngine.markAsRead(folder.path, email.uid).catch(console.error);
+              accepted = await syncEngine.markAsRead(folder.path, email.uid) !== 'failed';
             } else {
-              syncEngine.markAsUnread(folder.path, email.uid).catch(console.error);
+              accepted = await syncEngine.markAsUnread(folder.path, email.uid) !== 'failed';
             }
           }
         } catch (syncError) {
+          accepted = false;
           logger.error('[Main] Failed to queue read state:', syncError);
         }
       }
+
+      if (changed && accepted) await logUserAction(emailId, read ? 'read' : 'unread', {
+        threadId: email.threadId, senderAddress: email.fromAddress,
+      }, storage);
 
       return { success: true };
     } catch (error) {
@@ -1360,27 +1378,27 @@ export function registerEmailHandlers(): void {
         await storage.updateEmail(emailId, { tags: tagList.length > 0 ? '|' + tagList.join('|') + '|' : '||' });
       }
 
-      // Log action for agent learning
-      logUserAction(emailId, starred ? 'star' : 'unstar', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
-      });
-
       // Sync to IMAP via the operation queue. NOTE: enqueue REGARDLESS of
       // connection state — the queue persists the op (savePendingOperation)
       // and executes it on reconnect. Gating on isConnected() silently
       // dropped star/unstar changes made while offline (or during the brief
       // reconnect windows), so the flag never reached the server.
+      let accepted = true;
       if (syncEngine) {
         try {
           const folder = await storage.getFolder(email.folderId);
           if (folder && email.uid) {
-            syncEngine.markAsStarred(folder.path, email.uid, starred).catch(console.error);
+            accepted = await syncEngine.markAsStarred(folder.path, email.uid, starred) !== 'failed';
           }
         } catch (syncError) {
+          accepted = false;
           logger.error('[Main] Failed to queue starred state:', syncError);
         }
       }
+
+      if (starred !== isCurrentlyStarred && accepted) await logUserAction(emailId, starred ? 'star' : 'unstar', {
+        threadId: email.threadId, senderAddress: email.fromAddress,
+      }, storage);
 
       return { success: true };
     } catch (error) {
@@ -1393,9 +1411,11 @@ export function registerEmailHandlers(): void {
   ipcMain.handle('emails:markImportant', async (_event, emailId: string, important: boolean, accountId?: string) => {
     try {
       const { storage, syncEngine } = await resolveNamedOrActiveAccountTarget(accountId);
+      const previous = await storage.getEmail(emailId);
+      const wasImportant = previous ? hasTag(previous.tags || '||', 'important') : important;
       const result = await changeEmailCategory(storage, syncEngine, emailId, 'important', important);
       const email = await storage.getEmail(emailId);
-      logUserAction(emailId, important ? 'important' : 'unimportant', {
+      if (previous && wasImportant !== important) await logUserAction(emailId, important ? 'important' : 'unimportant', {
         threadId: email?.threadId,
         senderAddress: email?.fromAddress,
       }, storage);
@@ -1410,8 +1430,13 @@ export function registerEmailHandlers(): void {
   ipcMain.handle('emails:setCategory', async (_event, emailId: string, slug: string, on: boolean, accountId?: string) => {
     try {
       const { storage, syncEngine } = await resolveNamedOrActiveAccountTarget(accountId);
+      const previous = slug === 'important' ? await storage.getEmail(emailId) : null;
+      const wasImportant = previous ? hasTag(previous.tags || '||', 'important') : on;
       const result = await changeEmailCategory(storage, syncEngine, emailId, slug, on);
       const email = await storage.getEmail(emailId);
+      if (previous && wasImportant !== on) await logUserAction(emailId, on ? 'important' : 'unimportant', {
+        threadId: email?.threadId, senderAddress: email?.fromAddress,
+      }, storage);
       if (email) getMainWindow()?.webContents.send('emails:tags-updated', { emailId, tags: email.tags, accountId: getAccountIdForStorage(storage) });
       return { success: true, data: result.categories, syncStatus: result.syncStatus };
     } catch (error) {
@@ -1600,6 +1625,7 @@ export function registerEmailHandlers(): void {
       if (!trashFolder) {
         return { success: false, error: 'Trash folder not found' };
       }
+      if (email.folderId === trashFolder.id) return { success: true };
 
       // 1. Update local DB immediately (instant UI feedback)
       const sourceFolder = await storage.getFolder(email.folderId);
@@ -1626,29 +1652,22 @@ export function registerEmailHandlers(): void {
         logger.error('[email-handlers] recalculateFolderCounts failed:', err);
       }
 
-      // Track deletion in sender stats for engagement metrics
-      if (email.fromAddress) {
-        storage.upsertSenderStats({ email: email.fromAddress, deletedCount: 1 }).catch(() => { });
-      }
-
-      // Log action for agent learning
-      logUserAction(emailId, 'delete', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
-        actionValue: JSON.stringify({ destination: trashFolder.path }),
-      });
-
       // 2. Queue IMAP operation in background (fire-and-forget). Enqueue
       // REGARDLESS of connection state — the operationQueue persists the op and
       // replays it on reconnect (gating on isConnected() dropped offline
       // actions). Source folder + source uid are captured above, before the
       // updateEmail() that changed folderId.
+      let accepted = true;
       if (email.uid && sourceFolder) {
         const opQueue = (syncEngine as any)?.operationQueue;
-        opQueue?.moveToTrash(sourceFolder.path, email.uid).catch((err: any) => {
-          logger.error('[Main] IMAP trash move failed:', err);
-        });
+        try { accepted = await opQueue?.moveToTrash(sourceFolder.path, email.uid) !== 'failed'; }
+        catch (error) { accepted = false; logger.error('[Main] IMAP trash move failed:', error); }
       }
+
+      if (accepted) await logUserAction(emailId, 'delete', {
+        threadId: email.threadId, senderAddress: email.fromAddress,
+        actionValue: JSON.stringify({ destination: trashFolder.path }),
+      }, storage);
 
       return { success: true };
     } catch (error) {
@@ -1673,10 +1692,10 @@ export function registerEmailHandlers(): void {
       if (!outcome.success || !outcome.email) return { success: false, error: outcome.error ?? 'Email not found' };
 
       // Log action for agent learning
-      logUserAction(emailId, 'spam', {
+      await logUserAction(emailId, 'spam', {
         threadId: outcome.email.threadId,
         senderAddress: outcome.email.fromAddress,
-      });
+      }, storage);
       return { success: true };
     } catch (error) {
       logger.error('Move to spam error:', error);
@@ -1720,6 +1739,7 @@ export function registerEmailHandlers(): void {
       if (!archiveFolder) {
         return { success: false, error: 'Archive folder not found' };
       }
+      if (email.folderId === archiveFolder.id) return { success: true };
 
       // 1. Update local DB immediately (instant UI feedback)
       const srcFolder = await storage.getFolder(email.folderId);
@@ -1746,23 +1766,21 @@ export function registerEmailHandlers(): void {
         logger.error('[email-handlers] recalculateFolderCounts failed:', err);
       }
 
-      // Log action for agent learning
-      logUserAction(emailId, 'archive', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
-      });
-
       // 2. Queue IMAP operation in background (fire-and-forget). Enqueue
       // REGARDLESS of connection state — the operationQueue persists the op and
       // replays it on reconnect (gating on isConnected() dropped offline
       // actions). Source folder + source uid are captured above, before the
       // updateEmail() that changed folderId.
+      let accepted = true;
       if (email.uid && srcFolder) {
         const opQueue = (syncEngine as any)?.operationQueue;
-        opQueue?.archive(srcFolder.path, email.uid).catch((err: any) => {
-          logger.error('[Main] IMAP archive move failed:', err);
-        });
+        try { accepted = await opQueue?.archive(srcFolder.path, email.uid) !== 'failed'; }
+        catch (error) { accepted = false; logger.error('[Main] IMAP archive move failed:', error); }
       }
+
+      if (accepted) await logUserAction(emailId, 'archive', {
+        threadId: email.threadId, senderAddress: email.fromAddress,
+      }, storage);
 
       return { success: true };
     } catch (error) {
@@ -1783,16 +1801,19 @@ export function registerEmailHandlers(): void {
         return { success: false, error: 'Email not found' };
       }
 
-      // Track deletion in sender stats for engagement metrics
-      if (email.fromAddress) {
-        storage.upsertSenderStats({ email: email.fromAddress, deletedCount: 1 }).catch(() => { });
+      // Preserve the source identity for learning, but do not teach from an
+      // expunge the server/durable queue rejected. Capture the named storage
+      // before either asynchronous operation can change the active mailbox.
+      if (email.uid) {
+        const folder = await storage.getFolder(email.folderId);
+        const opQueue = (syncEngine as any)?.operationQueue;
+        if (!folder || !opQueue) return { success: false, error: 'This account is not ready to queue deletion. Try again.' };
+        if (await opQueue.delete(folder.path, email.uid) === 'failed') return { success: false, error: 'The email could not be deleted.' };
       }
-
-      // Log action for agent learning (before deletion removes the record)
-      logUserAction(emailId, 'delete', {
-        threadId: email.threadId,
-        senderAddress: email.fromAddress,
-      });
+      await logUserAction(emailId, 'delete', {
+        threadId: email.threadId, senderAddress: email.fromAddress,
+        actionValue: JSON.stringify({ permanent: true }),
+      }, storage);
 
       // 1. Delete from local storage immediately (instant UI feedback)
       await storage.deleteEmail(emailId);
@@ -1806,22 +1827,6 @@ export function registerEmailHandlers(): void {
         await storage.recalculateFolderCounts();
       } catch (err) {
         logger.error('[email-handlers] recalculateFolderCounts failed:', err);
-      }
-
-      // 2. Queue IMAP delete in background (fire-and-forget). Enqueue REGARDLESS
-      // of connection state — the operationQueue persists the expunge and
-      // replays it on reconnect. Gating on isConnected() destroyed the local row
-      // offline while never queuing the server-side delete, so a full resync
-      // re-created the message. `email` was read before deleteEmail(), so
-      // email.folderId + email.uid are the source location.
-      if (email.uid) {
-        const folder = await storage.getFolder(email.folderId);
-        if (folder) {
-          const opQueue = (syncEngine as any)?.operationQueue;
-          opQueue?.delete(folder.path, email.uid).catch((err: any) => {
-            logger.error('[Main] IMAP delete failed:', err);
-          });
-        }
       }
 
       return { success: true };
@@ -1852,21 +1857,34 @@ export function registerEmailHandlers(): void {
   /**
    * Download an attachment. An enabled scanner gates the destination write.
    */
-  ipcMain.handle(
-    'emails:downloadAttachment',
-    async (event, emailId: string, filename: string, accountId?: string, requestId?: string) => {
+  const handleAttachmentDownload = (automatic: boolean) =>
+    async (event: IpcMainInvokeEvent, emailId: string, filename: string, accountId?: string, requestId?: string) => {
       try {
         requireDownloadCaller(event);
         const targetAccountId = requireTargetAccountId(accountId);
         let notScanned = false;
-        const filePath = await downloads.download(emailId, targetAccountId, filename, requestId, () => { notScanned = true; });
-        return filePath ? { success: true, filePath, ...(notScanned ? { notScanned: true } : {}) } : { success: false, error: 'Save cancelled' };
+        const filePath = await (automatic ? automaticDownloads : downloads).download(emailId, targetAccountId, filename, requestId, () => { notScanned = true; });
+        return filePath ? { success: true, filePath, ...await savedFiles.remember(filePath, filename), ...(notScanned ? { notScanned: true } : {}) } : { success: false, error: 'Save cancelled' };
       } catch (error) {
         logger.error('[Main] Download attachment error:', error);
         return { success: false, error: attachmentErrorMessage(error) };
       }
-    },
-  );
+    };
+  ipcMain.handle('emails:downloadAttachment', handleAttachmentDownload(false));
+  ipcMain.handle('emails:downloadAttachmentToDownloads', handleAttachmentDownload(true));
+
+  for (const [channel, action] of [
+    ['emails:openSavedAttachment', (id: string) => savedFiles.open(id)],
+    ['emails:revealSavedAttachment', (id: string) => savedFiles.reveal(id)],
+  ] as const) {
+    ipcMain.handle(channel, async (event, savedFileId: string) => {
+      try {
+        requireDownloadCaller(event);
+        await action(savedFileId);
+        return { success: true };
+      } catch (error) { return { success: false, error: attachmentErrorMessage(error) }; }
+    });
+  }
 
   ipcMain.handle('emails:cancelAttachmentDownload', async (event, requestId: string) => {
     try {
@@ -2082,6 +2100,29 @@ export function registerEmailHandlers(): void {
 
       const emails = await storage.getEmailsByIds(emailIds);
       const emailById = new Map(emails.map((e) => [e.id, e]));
+      const uidsFor = (ids: string[]) => ids.map(id => emailById.get(id)?.uid).filter((uid): uid is number => typeof uid === 'number' && uid > 0);
+      // Learn only from accepted, changed rows of this captured mailbox. A
+      // single bulk click must teach the same facts as individual actions.
+      // Agent/system callers use their own action services and provenance.
+      const learn = async (ids: string[], actionType: UserActionType, details?: Record<string, string | boolean>) => {
+        for (const id of new Set(ids)) {
+          const email = emailById.get(id);
+          if (!email) continue;
+          await logUserAction(id, actionType, {
+            source: 'user', threadId: email.threadId, senderAddress: email.fromAddress,
+            ...(details ? { actionValue: JSON.stringify(details) } : {}),
+          }, storage);
+        }
+      };
+      const queueAndLearn = async (ids: string[], actionType: UserActionType, enqueue?: () => Promise<unknown>, details?: Record<string, string | boolean>) => {
+        if (!ids.length) return;
+        let accepted = true;
+        try { if (enqueue) accepted = await enqueue() !== 'failed'; }
+        catch (error) { accepted = false; logger.error(`[Main] Bulk IMAP ${action} failed:`, error); }
+        // UID-less rows were changed locally and have no server operation to
+        // reject. A rejected enqueue must not become human preference evidence.
+        await learn(accepted ? ids : ids.filter(id => !emailById.get(id)?.uid), actionType, details);
+      };
 
       // A selected row may have vanished during sync. Report it as unprocessed
       // rather than acknowledging a successful operation on another mailbox.
@@ -2173,6 +2214,7 @@ export function registerEmailHandlers(): void {
               }
               processedIds.push(...deletable.map((i) => i.id));
               if (outcome === 'queued') queuedIds.push(...deletable.map((i) => i.id));
+              await learn(deletable.map(item => item.id), 'delete', { permanent: true, destination: folderPath });
               try { await storage.deleteEmails(deletable.map((i) => i.id)); }
               catch (error) { logger.error('[Main] Accepted bulk delete local cleanup failed:', error); }
             } else {
@@ -2186,6 +2228,7 @@ export function registerEmailHandlers(): void {
                 break;
               }
               const placed: typeof deletable = [];
+              const changedIds = deletable.filter(item => item.folderId !== trashFolder.id).map(item => item.id);
               let outcome: string;
               try {
                 for (const item of deletable) {
@@ -2227,19 +2270,17 @@ export function registerEmailHandlers(): void {
               }
               processedIds.push(...deletable.map((i) => i.id));
               if (outcome === 'queued') queuedIds.push(...deletable.map((i) => i.id));
-              for (const item of deletable) {
-                if (item.email.fromAddress) {
-                  void storage.upsertSenderStats({ email: item.email.fromAddress, deletedCount: 1 }).catch(() => { });
-                }
-              }
+              await learn(changedIds, 'delete', { destination: trashFolder.path });
             }
             break;
           }
 
           case 'archive': {
             const archiveFolder = findFolderByType(allFolders as any, 'archive') as any;
+            if (!archiveFolder) break;
+            const changed = items.filter(item => item.folderId !== archiveFolder.id);
             if (archiveFolder) {
-              for (const item of items) {
+              for (const item of changed) {
                 let tags = item.email.tags || '';
                 if (tags.includes('|' + folderPath + '|')) {
                   tags = tags.replace('|' + folderPath + '|', '|');
@@ -2256,18 +2297,17 @@ export function registerEmailHandlers(): void {
             // persists the op and replays it on reconnect (gating on
             // isConnected() dropped offline actions). folderPath + uids are the
             // source location, captured before the mutations above.
-            if (syncEngine) {
-              syncEngine.bulkArchive(folderPath, uids).catch((err: any) => {
-                logger.error('[Main] Bulk IMAP archive failed:', err);
-              });
-            }
+            const changedUids = changed.map(item => item.uid).filter((uid): uid is number => typeof uid === 'number' && uid > 0);
+            await queueAndLearn(changed.map(item => item.id), 'archive', syncEngine && changedUids.length
+              ? () => syncEngine.bulkArchive(folderPath, changedUids) : undefined, { destination: archiveFolder.path });
             break;
           }
 
           case 'spam': {
             const spamFolder = findFolderByType(allFolders as any, 'spam') as any;
+            const changed = spamFolder ? items.filter(item => item.folderId !== spamFolder.id) : [];
             if (spamFolder) {
-              for (const item of items) {
+              for (const item of changed) {
                 let tags = item.email.tags || '';
                 if (tags.includes('|' + folderPath + '|')) {
                   tags = tags.replace('|' + folderPath + '|', '|');
@@ -2289,17 +2329,15 @@ export function registerEmailHandlers(): void {
                   }).catch(() => { });
                 }
               }
-              reportVerdictsOnce(items.map((i) => i.email), 'spam');
+              reportVerdictsOnce(changed.map((i) => i.email), 'spam');
             }
             // Enqueue REGARDLESS of connection state — the operationQueue
             // persists the op and replays it on reconnect (gating on
             // isConnected() dropped offline actions). folderPath + uids are the
             // source location, captured before the mutations above.
-            if (syncEngine) {
-              syncEngine.bulkMoveToSpam(folderPath, uids).catch((err: any) => {
-                logger.error('[Main] Bulk IMAP spam move failed:', err);
-              });
-            }
+            const changedUids = changed.map(item => item.uid).filter((uid): uid is number => typeof uid === 'number' && uid > 0);
+            await queueAndLearn(changed.map(item => item.id), 'spam', syncEngine && changedUids.length
+              ? () => syncEngine.bulkMoveToSpam(folderPath, changedUids) : undefined, { destination: spamFolder?.path ?? '' });
             break;
           }
 
@@ -2364,11 +2402,9 @@ export function registerEmailHandlers(): void {
             // never covers them, so the next server-wins reconcile flips every
             // one of them back to unread. Matches the single-email markRead
             // handler, which is already unconditional.
-            if (syncEngine) {
-              syncEngine.bulkMarkAsRead(folderPath, uids).catch((err: any) => {
-                logger.error('[Main] Bulk IMAP markRead failed:', err);
-              });
-            }
+            const changedUids = uidsFor(updates.map(update => update.id));
+            await queueAndLearn(updates.map(update => update.id), 'read', syncEngine && changedUids.length
+              ? () => syncEngine.bulkMarkAsRead(folderPath, changedUids) : undefined);
             break;
           }
 
@@ -2382,11 +2418,9 @@ export function registerEmailHandlers(): void {
             await storage.bulkUpdateTags(updates);
             for (const u of updates) flippedReadIds.push(u.id);
             // Enqueue REGARDLESS of connection state — see the markRead case.
-            if (syncEngine) {
-              syncEngine.bulkMarkAsUnread(folderPath, uids).catch((err: any) => {
-                logger.error('[Main] Bulk IMAP markUnread failed:', err);
-              });
-            }
+            const changedUids = uidsFor(updates.map(update => update.id));
+            await queueAndLearn(updates.map(update => update.id), 'unread', syncEngine && changedUids.length
+              ? () => syncEngine.bulkMarkAsUnread(folderPath, changedUids) : undefined);
             break;
           }
 
@@ -2401,11 +2435,9 @@ export function registerEmailHandlers(): void {
             await storage.bulkUpdateTags(updates);
             // Enqueue REGARDLESS of connection state — see the markRead case.
             // A dropped star reverts the same way a dropped read does.
-            if (syncEngine) {
-              syncEngine.bulkStar(folderPath, uids).catch((err: any) => {
-                logger.error('[Main] Bulk IMAP star failed:', err);
-              });
-            }
+            const changedUids = uidsFor(updates.map(update => update.id));
+            await queueAndLearn(updates.map(update => update.id), 'star', syncEngine && changedUids.length
+              ? () => syncEngine.bulkStar(folderPath, changedUids) : undefined);
             break;
           }
 
@@ -2418,11 +2450,9 @@ export function registerEmailHandlers(): void {
               });
             await storage.bulkUpdateTags(updates);
             // Enqueue REGARDLESS of connection state — see the markRead case.
-            if (syncEngine) {
-              syncEngine.bulkUnstar(folderPath, uids).catch((err: any) => {
-                logger.error('[Main] Bulk IMAP unstar failed:', err);
-              });
-            }
+            const changedUids = uidsFor(updates.map(update => update.id));
+            await queueAndLearn(updates.map(update => update.id), 'unstar', syncEngine && changedUids.length
+              ? () => syncEngine.bulkUnstar(folderPath, changedUids) : undefined);
             break;
           }
         }

@@ -364,7 +364,7 @@ describe('header actions', () => {
     fire(mounted.byLabel('Save a copy'), 'click');
     const requestId = downloadAttachment.mock.calls[0][3];
     act(() => { progress({ requestId, phase: 'scanning' }); });
-    expect(viewerText()).toContain('Scanning…');
+    expect(viewerText()).toContain('Scanning on server…');
     expect((mounted.byLabel('Open in system app') as HTMLButtonElement).disabled).toBe(true);
     fire(mounted.byLabel('Cancel download of photo.png'), 'click');
     await settle();
@@ -514,7 +514,7 @@ describe('scan before viewing', () => {
     await settle();
     expect(mounted.find('iframe')?.getAttribute('src')).toContain('lease=unscanned');
     expect(viewerText()).toContain('Not scanned for viruses.');
-    expect(viewerText()).not.toContain('Scanning…');
+    expect(viewerText()).not.toContain('Scanning on server…');
     expect(mounted.byLabel('Save a copy')).not.toBeNull();
     expect(mounted.byLabel('Cancel preview of report.pdf')).toBeNull();
   });
@@ -535,7 +535,7 @@ describe('scan before viewing', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(viewerText()).toContain('Downloading…');
     act(() => progress({ requestId, phase: 'scanning' }));
-    expect(viewerText()).toContain('Scanning…');
+    expect(viewerText()).toContain('Scanning on server…');
     expect(mounted.find(tag)).toBeNull();
     release({ success: true, url: `sarv-attachment://attachment/email-1/${name}?account=acct-2&lease=verified` });
     await settle();

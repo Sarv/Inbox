@@ -65,7 +65,7 @@ const service = new InboxAssistantService({
     };
   },
   readAttachment: readAssistantAttachment,
-  moveMail: async (accountId, emailIds, action) => {
+  moveMail: async (accountId, emailIds, action, context) => {
     const assertRegistered = () => {
       if (!readRegistryAccounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
     };
@@ -81,17 +81,14 @@ const service = new InboxAssistantService({
       },
       onChanged: async (emailId, appliedAction, destination) => {
         const email = await storage.getEmail(emailId);
-        if (appliedAction === 'trash' && email?.fromAddress) {
-          await storage.upsertSenderStats({ email: email.fromAddress, deletedCount: 1 }).catch(() => {});
-        }
         await logUserAction(emailId, appliedAction === 'trash' ? 'delete' : 'archive', {
-          source: 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
+          source: context?.source === 'user' ? 'user' : 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
           actionValue: JSON.stringify({ destination }),
         }, storage);
       },
     }, emailIds, action);
   },
-  setRead: async (accountId, emailIds, read) => {
+  setRead: async (accountId, emailIds, read, context) => {
     const assertRegistered = () => {
       if (!readRegistryAccounts().some(account => account.id === accountId)) throw new Error('The review account is no longer connected.');
     };
@@ -108,7 +105,7 @@ const service = new InboxAssistantService({
       onChanged: async (emailId, nowRead) => {
         const email = await storage.getEmail(emailId);
         await logUserAction(emailId, nowRead ? 'read' : 'unread', {
-          source: 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
+          source: context?.source === 'user' ? 'user' : 'agent_approved', threadId: email?.threadId, senderAddress: email?.fromAddress,
         }, storage);
       },
     }, emailIds, read);

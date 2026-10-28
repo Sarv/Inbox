@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, (...a: any[]) => any>(),
+  logUserAction: vi.fn(),
   storage: {
     getEmail: vi.fn(),
     getFolder: vi.fn(),
@@ -22,6 +23,7 @@ const h = vi.hoisted(() => ({
     searchEmails: vi.fn(),
     upsertSenderStats: vi.fn(),
     deleteEmails: vi.fn(),
+    deleteEmail: vi.fn(),
   },
   syncEngine: {
     isConnected: vi.fn(() => true),
@@ -34,7 +36,14 @@ const h = vi.hoisted(() => ({
     move: vi.fn(),
     bulkMoveToTrash: vi.fn(),
     bulkDelete: vi.fn(),
+    bulkArchive: vi.fn(),
+    markAsRead: vi.fn(),
+    markAsUnread: vi.fn(),
+    markAsStarred: vi.fn(),
+    operationQueue: { moveToTrash: vi.fn(), archive: vi.fn(), delete: vi.fn() },
   },
+  activeStorage: null as unknown,
+  namedStorage: null as unknown,
   /** false ⇒ getSyncEngine() returns null (account still initialising). */
   engineAvailable: true,
   mainWindow: { webContents: { send: vi.fn() } } as any,
@@ -45,17 +54,18 @@ vi.mock('electron', () => ({
   dialog: {}, shell: {}, app: { getPath: () => '/tmp' },
 }));
 vi.mock('../../../../electron/shared', () => ({
-  requireStorage: () => h.storage,
+  requireStorage: () => h.activeStorage ?? h.storage,
   requireSyncEngine: () => h.syncEngine,
   getMainWindow: () => h.mainWindow,
   getSyncEngine: () => (h.engineAvailable ? h.syncEngine : null),
-  getStorageFor: vi.fn(),
-  getSyncEngineFor: vi.fn(),
-  getCurrentAccountId: vi.fn(),
+  getStorageFor: () => h.namedStorage,
+  getSyncEngineFor: () => h.syncEngine,
+  getCurrentAccountId: () => 'active-account',
 }));
 vi.mock('../../../../electron/services/body-prefetch-scheduler', () => ({ deferBodyPrefetch: vi.fn() }));
 vi.mock('../../../../electron/services/accounts-runtime', () => ({ ensureAccountRuntime: vi.fn() }));
-vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: vi.fn() }));
+vi.mock('../../../../electron/ipc/agent-handlers', () => ({ logUserAction: h.logUserAction }));
+vi.mock('../../../../electron/services/accounts-registry', () => ({ readRegistryAccounts: () => [{ id: 'active-account' }, { id: 'other-account' }] }));
 
 import {
   CID_REPAIR_MEMORY,
@@ -74,6 +84,9 @@ const batchWarns = () =>
 
 beforeEach(() => {
   h.handlers.clear();
+  h.activeStorage = null;
+  h.namedStorage = null;
+  h.logUserAction.mockReset().mockResolvedValue(undefined);
   h.storage.getEmail.mockReset();
   h.storage.getFolder.mockReset().mockResolvedValue({ path: 'INBOX' });
   h.storage.getFolders.mockReset().mockResolvedValue([]);
@@ -84,15 +97,17 @@ beforeEach(() => {
   h.storage.searchEmails.mockReset().mockResolvedValue([]);
   h.storage.upsertSenderStats.mockReset().mockResolvedValue(undefined);
   h.storage.deleteEmails.mockReset().mockResolvedValue(undefined);
+  h.storage.deleteEmail.mockReset().mockResolvedValue(undefined);
   h.syncEngine.isConnected.mockReset().mockReturnValue(true);
   h.syncEngine.fetchBody.mockReset();
   h.syncEngine.fetchUidByMessageId.mockReset().mockResolvedValue(null);
   h.syncEngine.move.mockReset().mockResolvedValue('success');
   h.syncEngine.bulkMoveToTrash.mockReset().mockResolvedValue('success');
   h.syncEngine.bulkDelete.mockReset().mockResolvedValue('success');
-  for (const method of ['bulkMarkAsRead', 'bulkMarkAsUnread', 'bulkStar', 'bulkUnstar'] as const) {
+  for (const method of ['bulkMarkAsRead', 'bulkMarkAsUnread', 'bulkStar', 'bulkUnstar', 'bulkArchive', 'markAsRead', 'markAsUnread', 'markAsStarred'] as const) {
     h.syncEngine[method].mockReset().mockResolvedValue(undefined);
   }
+  for (const method of ['moveToTrash', 'archive', 'delete'] as const) h.syncEngine.operationQueue[method].mockReset().mockResolvedValue('success');
   h.engineAvailable = true;
   h.mainWindow.webContents.send.mockReset();
   warnSpy = spyConsoleWarn();
@@ -593,6 +608,148 @@ describe('emails:bulkAction — flag ops must reach the operation queue', () => 
 
     expect(res.success).toBe(true);
     expect(h.storage.bulkUpdateTags).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('manual mail actions teach from the captured mailbox and successful changes', () => {
+  const bulk = () => h.handlers.get('emails:bulkAction')!;
+  const folders = [
+    { id: 'inbox', path: 'INBOX' }, { id: 'other', path: 'Other' },
+    { id: 'archive', path: 'Archive', specialUse: '\\Archive' },
+    { id: 'trash', path: 'Trash', specialUse: '\\Trash' },
+  ];
+  const row = (id: string, overrides: Record<string, unknown> = {}) => ({
+    id, uid: 11, folderId: 'inbox', tags: '|INBOX|', threadId: `thread-${id}`, fromAddress: 'offers@example.test', ...overrides,
+  });
+  const seed = (rows: ReturnType<typeof row>[]) => {
+    h.storage.getFolders.mockResolvedValue(folders);
+    h.storage.getFolder.mockImplementation(async (id: string) => folders.find(folder => folder.id === id));
+    h.storage.getEmailsByIds.mockResolvedValue(rows);
+    h.storage.getEmail.mockImplementation(async (id: string) => rows.find(email => email.id === id));
+  };
+
+  it('logs each accepted bulk trash row once and skips missing, UID-less and failed groups', async () => {
+    seed([row('ok'), row('queued', { folderId: 'other', tags: '|Other|' }), row('failed', { folderId: 'archive' }), row('no-uid', { uid: null })]);
+    h.syncEngine.bulkMoveToTrash.mockImplementation(async (folder: string) => folder === 'Archive' ? 'failed' : folder === 'Other' ? 'queued' : 'success');
+    await bulk()(null, ['ok', 'ok', 'queued', 'failed', 'no-uid', 'missing'], 'delete');
+    expect(h.logUserAction.mock.calls.map(call => call.slice(0, 2))).toEqual([['ok', 'delete'], ['queued', 'delete']]);
+    for (const call of h.logUserAction.mock.calls) {
+      expect(call[2]).toMatchObject({ source: 'user', senderAddress: 'offers@example.test', actionValue: JSON.stringify({ destination: 'Trash' }) });
+      expect(call[3]).toBe(h.storage);
+    }
+    // The central logger owns this aggregate. Updating it again here doubles
+    // deletion counts and makes categorization learn from inflated evidence.
+    expect(h.storage.upsertSenderStats).not.toHaveBeenCalled();
+  });
+
+  it('does not record a bulk delete before the server or durable queue accepts it', async () => {
+    seed([row('e1')]);
+    let accept!: (outcome: string) => void;
+    h.syncEngine.bulkMoveToTrash.mockReturnValue(new Promise(resolve => { accept = resolve; }));
+    const pending = bulk()(null, ['e1'], 'delete');
+    await vi.waitFor(() => expect(h.syncEngine.bulkMoveToTrash).toHaveBeenCalled());
+    expect(h.logUserAction).not.toHaveBeenCalled();
+    accept('queued');
+    await pending;
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith('e1', 'delete', expect.objectContaining({ source: 'user' }), h.storage);
+  });
+
+  it('records an accepted permanent deletion before removing its source metadata', async () => {
+    seed([row('e1', { folderId: 'trash', tags: '|Trash|' })]);
+    await bulk()(null, ['e1', 'e1'], 'delete', undefined, true);
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith('e1', 'delete', expect.objectContaining({ actionValue: JSON.stringify({ permanent: true, destination: 'Trash' }) }), h.storage);
+    expect(h.logUserAction.mock.invocationCallOrder[0]).toBeLessThan(h.storage.deleteEmails.mock.invocationCallOrder[0]);
+    expect(h.storage.upsertSenderStats).not.toHaveBeenCalled();
+  });
+
+  it('does not record a permanent deletion whose enqueue failed', async () => {
+    seed([row('e1', { folderId: 'trash', tags: '|Trash|' })]);
+    h.syncEngine.bulkDelete.mockRejectedValue(new Error('queue unavailable'));
+    await bulk()(null, ['e1'], 'delete', undefined, true);
+    expect(h.logUserAction).not.toHaveBeenCalled();
+    expect(h.storage.deleteEmails).not.toHaveBeenCalled();
+  });
+
+  it('logs a real bulk archive in its named account even if the user switches during the queue request', async () => {
+    seed([row('changed'), row('already-archived', { folderId: 'archive', tags: '|Archive|' })]);
+    h.namedStorage = h.storage;
+    let accept!: (outcome: string) => void;
+    h.syncEngine.bulkArchive.mockReturnValue(new Promise(resolve => { accept = resolve; }));
+    const pending = bulk()(null, ['changed', 'already-archived'], 'archive', 'other-account');
+    await vi.waitFor(() => expect(h.syncEngine.bulkArchive).toHaveBeenCalled());
+    h.activeStorage = { wrongMailbox: true };
+    accept('queued');
+    await pending;
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith('changed', 'archive', expect.objectContaining({ source: 'user', actionValue: JSON.stringify({ destination: 'Archive' }) }), h.storage);
+    expect(h.syncEngine.bulkArchive).toHaveBeenCalledOnce();
+  });
+
+  it.each(['failed enqueue', 'failed local update', 'missing destination'])('does not learn an archive with %s', async cause => {
+    seed([row('e1')]);
+    if (cause === 'failed enqueue') h.syncEngine.bulkArchive.mockResolvedValue('failed');
+    if (cause === 'failed local update') h.storage.updateEmail.mockRejectedValue(new Error('write failed'));
+    if (cause === 'missing destination') h.storage.getFolders.mockResolvedValue(folders.filter(folder => folder.id !== 'archive'));
+    await bulk()(null, ['e1'], 'archive');
+    expect(h.logUserAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { action: 'markRead', type: 'read', changed: '|INBOX|', unchanged: '|INBOX|read|', queue: 'bulkMarkAsRead' as const },
+    { action: 'markUnread', type: 'unread', changed: '|INBOX|read|', unchanged: '|INBOX|', queue: 'bulkMarkAsUnread' as const },
+    { action: 'star', type: 'star', changed: '|INBOX|', unchanged: '|INBOX|starred|', queue: 'bulkStar' as const },
+    { action: 'unstar', type: 'unstar', changed: '|INBOX|starred|', unchanged: '|INBOX|', queue: 'bulkUnstar' as const },
+  ])('logs only changed bulk $action rows and sends only their UIDs', async ({ action, type, changed, unchanged, queue }) => {
+    seed([row('changed', { uid: 12, tags: changed }), row('unchanged', { uid: 13, tags: unchanged })]);
+    await bulk()(null, ['changed', 'changed', 'unchanged'], action);
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith('changed', type, expect.objectContaining({ source: 'user' }), h.storage);
+    expect(h.syncEngine[queue]).toHaveBeenCalledExactlyOnceWith('INBOX', [12]);
+  });
+
+  it.each(['local update', 'queue rejection', 'failed queue receipt'])('does not learn a read action after a failed %s', async cause => {
+    seed([row('e1')]);
+    if (cause === 'local update') h.storage.bulkUpdateTags.mockRejectedValue(new Error('write failed'));
+    if (cause === 'queue rejection') h.syncEngine.bulkMarkAsRead.mockRejectedValue(new Error('queue failed'));
+    if (cause === 'failed queue receipt') h.syncEngine.bulkMarkAsRead.mockResolvedValue('failed');
+    await bulk()(null, ['e1'], 'markRead');
+    expect(h.logUserAction).not.toHaveBeenCalled();
+  });
+
+  it('captures the correct mailbox for individual read actions while the active account changes', async () => {
+    seed([row('e1')]);
+    h.namedStorage = h.storage;
+    let accept!: (outcome: string) => void;
+    h.syncEngine.markAsRead.mockReturnValue(new Promise(resolve => { accept = resolve; }));
+    const pending = h.handlers.get('emails:markRead')!(null, 'e1', true, 'other-account');
+    await vi.waitFor(() => expect(h.syncEngine.markAsRead).toHaveBeenCalled());
+    h.activeStorage = { wrongMailbox: true };
+    accept('queued');
+    await pending;
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith('e1', 'read', expect.objectContaining({ senderAddress: 'offers@example.test' }), h.storage);
+  });
+
+  it.each([
+    { channel: 'emails:markRead', tags: '|INBOX|read|' },
+    { channel: 'emails:markStarred', tags: '|INBOX|starred|' },
+  ])('does not learn a no-op from $channel', async ({ channel, tags }) => {
+    seed([row('e1', { tags })]);
+    await h.handlers.get(channel)!(null, 'e1', true);
+    expect(h.logUserAction).not.toHaveBeenCalled();
+  });
+
+  it('logs a direct Trash action once without a separate aggregate increment', async () => {
+    seed([row('e1')]);
+    await h.handlers.get('emails:moveToTrash')!(null, 'e1');
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith('e1', 'delete', expect.objectContaining({ actionValue: JSON.stringify({ destination: 'Trash' }) }), h.storage);
+    expect(h.storage.upsertSenderStats).not.toHaveBeenCalled();
+  });
+
+  it('refuses to teach or remove a directly deleted message when its queue request is rejected', async () => {
+    seed([row('e1', { folderId: 'trash', tags: '|Trash|' })]);
+    h.syncEngine.operationQueue.delete.mockResolvedValue('failed');
+    const result = await h.handlers.get('emails:delete')!(null, 'e1');
+    expect(result.success).toBe(false);
+    expect(h.logUserAction).not.toHaveBeenCalled();
+    expect(h.storage.deleteEmail).not.toHaveBeenCalled();
   });
 });
 

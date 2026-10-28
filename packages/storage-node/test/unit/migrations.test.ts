@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   MigrationManager,
   createMigrationManager,
+  durableSenderBehavior,
   emailLabelStatus,
   financeCategory,
   fts5SearchIndex,
@@ -125,7 +126,8 @@ describe('fresh install reaches the current production schema', () => {
     // 101 with the authentication re-check queue (v101).
     // v102 tracks provider/manual authority separately from AI.
     // v104 improves built-in business/reply prompts without overwriting user edits.
-    expect(CURRENT_VERSION).toBe(104);
+    // v105 preserves bounded human sender behavior after permanent deletion.
+    expect(CURRENT_VERSION).toBe(105);
     expect(createMigrationManager(db).getCurrentVersion()).toBe(CURRENT_VERSION);
     // v24 is stamped by schema.sql itself; the chain stamps 25..101 contiguously.
     expect(appliedVersions(db)).toEqual(CHAIN.map((m) => m.version).sort((a, b) => a - b));
@@ -167,6 +169,7 @@ describe('fresh install reaches the current production schema', () => {
       'agent_prompt_templates',
       'user_categorization_rules',
       'user_action_log',
+      'sender_behavior_events',
       'agent_decisions',
       'pipeline_event_log',
       'emails_fts',
@@ -817,6 +820,35 @@ describe('guarded / conditional migrations run BOTH sides of their guard', () =>
 });
 
 describe('data-mutating migrations', () => {
+  it('v105 backfills only recent human evidence and survives email cascade deletion', () => {
+    const db = openTestDb();
+    managerUpTo(db, 104).migrate();
+    const now = Math.floor(Date.now() / 1000);
+    const emailId = insertEmail(db, { id: 'human-behavior', date: now - 86400 });
+    const insert = db.prepare(`INSERT INTO user_action_log (id, email_id, action_type, source, sender_address, timestamp)
+      VALUES (?, ?, 'delete', ?, 'untrusted@example.test', ?)`);
+    insert.run('human', emailId, 'user', now - 1);
+    insert.run('old-human', emailId, 'user', now - 91 * 86400);
+    insert.run('future-human', emailId, 'user', now + 86400);
+    for (const source of ['history', 'agent_auto', 'agent_approved', 'agent_rejected', 'rule', 'system']) {
+      insert.run(source, emailId, source, now - 1);
+    }
+    createMigrationManager(db).migrate();
+    durableSenderBehavior.up(db);
+    expect(db.prepare('SELECT id FROM sender_behavior_events ORDER BY id').all()).toEqual([{ id: 'human' }]);
+    expect(scalar(db, 'SELECT sender_address FROM sender_behavior_events')).toBe(
+      scalar(db, 'SELECT LOWER(TRIM(from_address)) FROM emails WHERE id = \'human-behavior\''),
+    );
+    expect(db.prepare('PRAGMA foreign_key_list(sender_behavior_events)').all()).toEqual([]);
+    db.prepare('DELETE FROM emails WHERE id = ?').run(emailId);
+    expect(scalar(db, 'SELECT COUNT(*) FROM user_action_log')).toBe(0);
+    expect(scalar(db, 'SELECT COUNT(*) FROM sender_behavior_events')).toBe(1);
+    durableSenderBehavior.down?.(db, {});
+    expect(objectExists(db, 'table', 'sender_behavior_events')).toBe(false);
+    expect(objectExists(db, 'trigger', 'sender_behavior_capture_user_action')).toBe(false);
+    db.close();
+  });
+
   // v62 re-marks the most recent categorized window 'pending' so the label drain
   // repairs drifted server labels ONCE. It must stay bounded (Gmail rate limits)
   // and must not touch mail the pipeline has not categorized yet.

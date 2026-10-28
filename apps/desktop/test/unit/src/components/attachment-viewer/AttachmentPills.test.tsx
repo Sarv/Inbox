@@ -25,7 +25,7 @@ describe('chat attachment download progress', () => {
     const requestId = (downloadAttachment.mock.calls[0] as unknown[])[3] as string;
     expect(downloadAttachment).toHaveBeenCalledWith('chat-email', 'invoice.pdf', 'outlook-account', requestId);
     act(() => { progress({ requestId, phase: 'scanning' }); });
-    expect(mounted.container.textContent).toContain('Scanning…');
+    expect(mounted.container.textContent).toContain('Scanning on server…');
     fire(mounted.byLabel('Cancel download of invoice.pdf'), 'click');
     await settle();
     expect(cancelAttachmentDownload).toHaveBeenCalledWith(requestId);
@@ -33,6 +33,6 @@ describe('chat attachment download progress', () => {
     release({ success: false, error: 'Download blocked: the attachment could not be fully scanned.' });
     await settle();
     expect(mounted.find('[role="alert"]')?.textContent).toContain('could not be fully scanned');
-    expect(mounted.container.textContent).not.toContain('Scanning…');
+    expect(mounted.container.textContent).not.toContain('Scanning on server…');
   });
 });

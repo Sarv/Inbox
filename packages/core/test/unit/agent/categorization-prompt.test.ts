@@ -4,6 +4,7 @@ import {
   DEFAULT_CATEGORIZATION_TEMPLATE,
   buildCategorizationPrompt,
 } from '../../../src/agent/categorization-utils';
+import { SENDER_BEHAVIOR_GUIDANCE } from '../../../src/agent/sender-behavior-context';
 
 /**
  * The categorization system prompt.
@@ -120,7 +121,15 @@ describe('buildCategorizationPrompt', () => {
   // still get its placeholders filled.
   it('renders a user override instead of the default', () => {
     const out = buildCategorizationPrompt(cats, 'rc@example.com', 'Mine for {{userEmail}}: {{categorySection}}');
-    expect(out).toBe('Mine for rc@example.com: 1. promotions:\nMarketing and newsletters\n\n2. invoice:\nBills from vendors');
+    expect(out).toBe(`Mine for rc@example.com: 1. promotions:\nMarketing and newsletters\n\n2. invoice:\nBills from vendors\n\n${SENDER_BEHAVIOR_GUIDANCE}`);
+  });
+
+  it.each([undefined, 'My custom categories for {{userEmail}}', '{{senderBehaviorGuidance}}'])('includes shared human-evidence semantics exactly once with template %s', override => {
+    const out = buildCategorizationPrompt(cats, 'rc@example.com', override);
+    expect(out.split(SENDER_BEHAVIOR_GUIDANCE)).toHaveLength(2);
+    expect(out).toContain('3 distinct human deletions');
+    expect(out).toContain('no observed replies');
+    expect(out).not.toMatch(/\{\{\s*senderBehaviorGuidance\s*\}\}/);
   });
 
   // A blank or whitespace override means "no override" — otherwise clearing the

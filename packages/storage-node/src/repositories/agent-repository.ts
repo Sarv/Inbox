@@ -66,6 +66,18 @@ export interface UnreadReviewSenderContext {
   keptUnread90d: number;
   starred90d: number;
   important90d: number;
+  /** Latest read/open followed by a delete, counted once per message. */
+  readThenDeleted90d?: number;
+  /** The latest read/open was at most ten seconds before the delete. */
+  readThenDeletedFast90d?: number;
+  /** Read/open at least three days ago; no later delete, archive or mark-unread. */
+  readAndKept90d?: number;
+  /** Delete with no preceding user read/open in the tracked 90-day window. */
+  deletedWithoutRead90d?: number;
+  recentDeleted30d?: number;
+  recentReceived30d?: number;
+  lastUserActionAt?: number | null;
+  lastUserAction?: string | null;
   sentLifetime: number;
   lastSentAt: number | null;
   isVip: boolean;
@@ -1452,11 +1464,14 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
   }
 
   /**
-   * Reuses categorization's underlying behavior records without its shared
+   * Uses durable human action evidence without categorization's shared
    * directory counters or automatic actions. Otherwise an agent's previous
    * mark-read decision would become evidence that the user values that mail
    * less. Read/keep/reply counts describe distinct messages, not repeated clicks.
    * This connection is the named mailbox's DB; no shared tables are consulted.
+   * Receipt windows use message dates; action windows use user-action dates.
+   * Deleting older mail can therefore exceed the recent received-message count.
+   * Missing read evidence is not proof the user never read it in another client.
    */
   getUnreadReviewSenderContextBatch(senderEmails: string[], nowSec = Math.floor(Date.now() / 1000)): Record<string, UnreadReviewSenderContext> {
     if (!Array.isArray(senderEmails) || senderEmails.length > 100 || !Number.isSafeInteger(nowSec) || nowSec <= 0
@@ -1468,20 +1483,60 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     const placeholders = senders.map(() => '?').join(',');
     const since = nowSec - 90 * 86400;
     const received = this.db.prepare(`
-      SELECT LOWER(from_address) AS sender,
-        COUNT(DISTINCT COALESCE(NULLIF(TRIM(message_id), ''), id)) AS count
-      FROM emails WHERE LOWER(from_address) IN (${placeholders}) AND date >= ? AND date <= ?
-      GROUP BY LOWER(from_address)
-    `).all(...senders, since, nowSec) as Array<{ sender: string; count: number }>;
+      WITH receipts AS (
+        SELECT LOWER(TRIM(from_address)) AS sender,
+          CASE WHEN TRIM(REPLACE(REPLACE(message_id, '<', ''), '>', '')) != ''
+            THEN 'mid:' || LOWER(TRIM(REPLACE(REPLACE(message_id, '<', ''), '>', '')))
+            ELSE 'id:' || id END AS message_key, date AS received_at
+        FROM emails WHERE LOWER(from_address) IN (${placeholders}) AND date BETWEEN ? AND ?
+        UNION
+        SELECT sender_address AS sender, message_key, received_at
+        FROM sender_behavior_events WHERE sender_address IN (${placeholders})
+          AND received_at BETWEEN ? AND ? AND timestamp BETWEEN ? AND ?
+      )
+      SELECT sender, COUNT(DISTINCT message_key) AS count,
+        COUNT(DISTINCT CASE WHEN received_at >= ? THEN message_key END) AS recentCount
+      FROM receipts GROUP BY sender
+    `).all(...senders, since, nowSec, ...senders, since, nowSec, since, nowSec, nowSec - 30 * 86400) as Array<{ sender: string; count: number; recentCount: number }>;
     const actions = this.db.prepare(`
-      SELECT LOWER(a.sender_address) AS sender, CASE WHEN a.action_type = 'reply_all' THEN 'reply' ELSE a.action_type END AS action,
-        COUNT(DISTINCT COALESCE(NULLIF(TRIM(e.message_id), ''), a.email_id)) AS count
-      FROM user_action_log a JOIN emails e ON e.id = a.email_id
-      WHERE LOWER(a.sender_address) IN (${placeholders})
-        AND a.source = 'user' AND a.timestamp >= ? AND a.timestamp <= ?
-        AND a.action_type IN ('open','read','delete','archive','reply','reply_all','unread','star','important')
-      GROUP BY LOWER(a.sender_address), CASE WHEN a.action_type = 'reply_all' THEN 'reply' ELSE a.action_type END
-    `).all(...senders, since, nowSec) as Array<{ sender: string; action: string; count: number }>;
+      WITH scoped AS (
+        SELECT * FROM sender_behavior_events WHERE sender_address IN (${placeholders})
+          AND timestamp BETWEEN ? AND ?
+      ), messages AS (
+        SELECT sender_address AS sender, message_key,
+          MAX(CASE WHEN action_type = 'open' THEN 1 ELSE 0 END) AS opened,
+          MAX(CASE WHEN action_type = 'read' THEN 1 ELSE 0 END) AS markedRead,
+          MAX(CASE WHEN action_type IN ('reply','reply_all') THEN 1 ELSE 0 END) AS replied,
+          MAX(CASE WHEN action_type = 'unread' THEN 1 ELSE 0 END) AS keptUnread,
+          MAX(CASE WHEN action_type = 'star' THEN 1 ELSE 0 END) AS starred,
+          MAX(CASE WHEN action_type = 'important' THEN 1 ELSE 0 END) AS important,
+          MIN(CASE WHEN action_type IN ('open','read') THEN timestamp END) AS firstReadAt,
+          MAX(CASE WHEN action_type IN ('open','read') THEN timestamp END) AS readAt,
+          MAX(CASE WHEN action_type = 'delete' THEN timestamp END) AS deleteAt,
+          MAX(CASE WHEN action_type = 'archive' THEN timestamp END) AS archiveAt,
+          MAX(CASE WHEN action_type = 'unread' THEN timestamp END) AS unreadAt
+        FROM scoped GROUP BY sender_address, message_key
+      ), latest AS (
+        SELECT sender_address AS sender, action_type, timestamp,
+          ROW_NUMBER() OVER (PARTITION BY sender_address ORDER BY timestamp DESC, id DESC) AS rank
+        FROM scoped
+      )
+      SELECT m.sender,
+        SUM(opened) AS opened90d, SUM(markedRead) AS markedRead90d,
+        SUM(deleteAt IS NOT NULL) AS deleted90d, SUM(archiveAt IS NOT NULL) AS archived90d,
+        SUM(replied) AS replied90d, SUM(keptUnread) AS keptUnread90d,
+        SUM(starred) AS starred90d, SUM(important) AS important90d,
+        SUM(CASE WHEN deleteAt >= readAt THEN 1 ELSE 0 END) AS readThenDeleted90d,
+        SUM(CASE WHEN deleteAt >= readAt AND deleteAt - readAt <= 10 THEN 1 ELSE 0 END) AS readThenDeletedFast90d,
+        SUM(CASE WHEN readAt <= ? AND COALESCE(deleteAt, 0) < readAt
+          AND COALESCE(archiveAt, 0) < readAt AND COALESCE(unreadAt, 0) < readAt
+          THEN 1 ELSE 0 END) AS readAndKept90d,
+        SUM(CASE WHEN deleteAt IS NOT NULL AND (firstReadAt IS NULL OR firstReadAt > deleteAt)
+          THEN 1 ELSE 0 END) AS deletedWithoutRead90d,
+        SUM(CASE WHEN deleteAt >= ? THEN 1 ELSE 0 END) AS recentDeleted30d,
+        l.timestamp AS lastUserActionAt, l.action_type AS lastUserAction
+      FROM messages m JOIN latest l ON l.sender = m.sender AND l.rank = 1 GROUP BY m.sender
+    `).all(...senders, since, nowSec, nowSec - 3 * 86400, nowSec - 30 * 86400) as Array<Partial<UnreadReviewSenderContext> & { sender: string }>;
     const stats = this.db.prepare(`
       SELECT LOWER(email) AS sender, sent_to_count AS sentLifetime, last_sent_to AS lastSentAt,
         is_vip AS isVip, is_blocked AS isBlocked
@@ -1490,16 +1545,16 @@ export class AgentRepository extends BaseRepository implements IAgentStorage {
     const result: Record<string, UnreadReviewSenderContext> = Object.fromEntries(senders.map(sender => [sender, {
       received90d: 0, opened90d: 0, markedRead90d: 0, deleted90d: 0, archived90d: 0,
       replied90d: 0, keptUnread90d: 0, starred90d: 0, important90d: 0,
+      readThenDeleted90d: 0, readThenDeletedFast90d: 0, readAndKept90d: 0,
+      deletedWithoutRead90d: 0, recentDeleted30d: 0, recentReceived30d: 0,
+      lastUserActionAt: null, lastUserAction: null,
       sentLifetime: 0, lastSentAt: null, isVip: false, isBlocked: false,
     }]));
-    for (const row of received) result[row.sender]!.received90d = row.count;
-    const fields: Record<string, keyof UnreadReviewSenderContext> = {
-      open: 'opened90d', read: 'markedRead90d', delete: 'deleted90d', archive: 'archived90d',
-      reply: 'replied90d', reply_all: 'replied90d', unread: 'keptUnread90d', star: 'starred90d', important: 'important90d',
-    };
-    for (const row of actions) {
-      const target = result[row.sender];
-      if (target && fields[row.action]) Object.assign(target, { [fields[row.action]!]: row.count });
+    for (const row of received) {
+      Object.assign(result[row.sender]!, { received90d: row.count, recentReceived30d: row.recentCount });
+    }
+    for (const { sender, ...counts } of actions) {
+      if (result[sender]) Object.assign(result[sender]!, counts);
     }
     for (const row of stats) {
       const target = result[row.sender];

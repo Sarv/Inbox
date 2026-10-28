@@ -20,6 +20,7 @@ import { logger } from '../utils/logger';
 import { SarvApiError, parseSarvApiError, type SarvErrorCode } from '../utils/sarv-api-error';
 
 import { cleanLLMJsonResponse, tryParseLLMJson, salvageJsonArrayWithDiagnostics, extractBalancedJsonArray } from './llm-response-utils';
+import { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from './sender-behavior-context';
 
 // ========== Types ==========
 
@@ -118,6 +119,8 @@ export interface EnrichedEmail {
 }
 
 export interface SenderSignals {
+  /** Present on current mailbox-backed callers. Null means unavailable; never fall back to inferred legacy rates. */
+  humanBehavior?: SenderBehaviorSignals | null;
   tier: string;
   receivedCount: number;
   sentToCount: number;
@@ -470,27 +473,26 @@ Examples (assess recipient and urgency separately):
 - A supplier asks to confirm a disputed invoice: invoice + needs_response can both apply.
 
 RELATIONSHIP SIGNALS:
-Read/Keep percentages, replies, recent-vs-lifetime history, sent-to/outbound requests, sender memory, contact type, thread depth and static priority score are supporting evidence, not overrides. Low engagement supports low importance; high replies/customer relationships support relevance, not automatic urgency. No recorded reply does not negate a requested quote or new customer's request. Colleagues still must address the user. Automated/newsletter contacts still need fitting descriptive categories. A high static score never makes another person's CC task the user's.
+{{senderBehaviorGuidance}}
 
 SHOULD_AUTO_DRAFT:
-Return true only when the user is primary/sole TO or explicitly named, a human reply is expected in an appropriate exchange, the sender can receive replies, and a draft could save time. Missing private numbers/approval context does not forbid a first draft the user can edit. Calendar invitations are accepted rather than automatically replied to. Spam, automation, FYI and unsolicited sales pitches never qualify.
-CONSISTENCY RULE: If should_auto_draft=true, categories MUST contain "needs_response". Consider drafting whenever needs_response applies; otherwise should_auto_draft=false. This decision controls the draft pipeline. Always include auto_draft_reason.
+True only for primary/sole TO or explicitly named users, a genuine expected human reply and a reply-capable sender. Missing private details does not forbid an editable first draft. Calendar invites are accepted, not automatically replied to. Spam, automation, FYI and unsolicited sales pitches never qualify.
+CONSISTENCY RULE: If should_auto_draft=true, categories MUST contain "needs_response". Consider drafting when needs_response applies; otherwise should_auto_draft=false. Always include auto_draft_reason.
 
 SECURITY (takes precedence over priority and drafting):
 {{spamPrompt}}
 {{phishingPrompt}}
 
 CONTACT KNOWLEDGE (optional):
-Extract only new, explicit sender facts, one fact per note; do not repeat existing notes or speculate. Capture role/title, products, amounts, commitments/deadlines, complaints/appreciation, decisions, personal preferences and communication style when stated. Note category: role|product|financial|complaint|appreciation|deadline|personal|style|preference|general.
-sender_memory may contain greeting, tone (formal/casual/brief), and key_context if evidenced.
+Extract explicit new sender facts, one per note; do not repeat existing notes or speculate. Categories: role|product|financial|complaint|appreciation|deadline|personal|style|preference|general. sender_memory: evidenced greeting, tone (formal/casual/brief), key_context.
 
 RETURN FORMAT: JSON array, one object per input email in the same order, exact emailId.
 Required fields: emailId, categories (supplied slugs only), is_spam (boolean), confidence (0..1), reasoning (brief factual reason), should_auto_draft (boolean), auto_draft_reason (brief reason).
-Optional: notes:[{"note":"one new fact","category":"role"}], sender_memory:{"greeting":"Hi","tone":"brief","key_context":"topic"}. Omit absent facts.
-Examples (each object represents a different input; [] only when no definition fits):
-[{"emailId":"marketing-id","categories":["promotions"],"is_spam":false,"confidence":0.95,"reasoning":"Subscribed marketing newsletter","should_auto_draft":false,"auto_draft_reason":"No human reply expected"},
-{"emailId":"customer-id","categories":["needs_response"],"is_spam":false,"confidence":0.9,"reasoning":"Customer directly requests revised pricing","should_auto_draft":true,"auto_draft_reason":"Human awaits user's reply"},
-{"emailId":"fyi-id","categories":[],"is_spam":false,"confidence":0.85,"reasoning":"CC FYI addressed to somebody else, no descriptive definition fits","should_auto_draft":false,"auto_draft_reason":"Not the user's task"}].`;
+Optional: notes:[{"note":"fact","category":"role"}], sender_memory:{"greeting":"Hi","tone":"brief","key_context":"topic"}. Omit absent facts.
+Examples (separate inputs):
+[{"emailId":"ad","categories":["promotions"],"is_spam":false,"confidence":0.95,"reasoning":"Marketing newsletter","should_auto_draft":false,"auto_draft_reason":"No reply expected"},
+{"emailId":"customer","categories":["needs_response"],"is_spam":false,"confidence":0.9,"reasoning":"Customer requests revised pricing","should_auto_draft":true,"auto_draft_reason":"Human awaits reply"},
+{"emailId":"fyi","categories":[],"is_spam":false,"confidence":0.85,"reasoning":"CC FYI for another person; no descriptive fit","should_auto_draft":false,"auto_draft_reason":"Not the user's task"}].`;
 
 /**
  * Naive {{placeholder}} substitution — replaces every occurrence of {{key}}
@@ -522,14 +524,16 @@ export function buildCategorizationPrompt(
   ).join('\n\n');
 
   const template = override?.trim() || DEFAULT_CATEGORIZATION_TEMPLATE;
-  return renderTemplate(template, {
+  const rendered = renderTemplate(template, {
     userEmail,
     userName,
     userDomain,
     categorySection,
     spamPrompt: SPAM_PROMPT,
     phishingPrompt: PHISHING_PROMPT,
+    senderBehaviorGuidance: SENDER_BEHAVIOR_GUIDANCE,
   });
+  return rendered.includes(SENDER_BEHAVIOR_GUIDANCE) ? rendered : `${rendered}\n\n${SENDER_BEHAVIOR_GUIDANCE}`;
 }
 
 
@@ -539,14 +543,15 @@ export function buildEmailText(emails: EnrichedEmail[], userEmail: string, categ
   const nowSec = Math.floor(Date.now() / 1000);
 
   const emailsText = emails.map((email, index) => {
-    // Build behavioral context. Prefer the windowed (recent) stats when
-    // there's enough signal — a sender you exchanged 50 emails with two
-    // years ago but zero in the last 90 days should not read as "high
-    // engagement". Falls back to lifetime counters when the window is
-    // sparse. Minimum 3 received emails in-window to avoid flipping the
-    // prompt based on a single outlier.
+    // Prefer the named mailbox's human facts whenever the caller opts in.
+    // Legacy callers without that property retain their prior representation.
     let behaviorBlock = '';
-    if (email.senderContext) {
+    if (email.senderContext && Object.prototype.hasOwnProperty.call(email.senderContext, 'humanBehavior')) {
+      const facts = formatSenderBehaviorFacts(email.fromAddress, email.senderContext.humanBehavior, nowSec);
+      behaviorBlock = `Behavior: ${facts ?? SENDER_BEHAVIOR_UNAVAILABLE}`;
+    } else if (email.senderContext) {
+      // Compatibility for external callers that have not supplied the named
+      // mailbox's human evidence yet. Current desktop paths always opt in.
       const ctx = email.senderContext;
       const useRecent = !!(ctx.recent && ctx.recent.receivedCount >= 3);
       const src = useRecent && ctx.recent ? ctx.recent : {
@@ -636,7 +641,7 @@ ${email.body}`;
   const slugList = categorySlugs.map(s => `"${s}"`).join(', ');
 
   return `Classify these ${emails.length} emails for user ${userEmail}.
-Be STRICT — only assign categories when clearly relevant to the user. Empty categories [] is fine.
+Assign every fitting descriptive category from the supplied list. Evaluate importance and reply obligation separately; low value does not mean uncategorized. Use [] only when none of the supplied categories fits.
 
 ${emailsText}
 

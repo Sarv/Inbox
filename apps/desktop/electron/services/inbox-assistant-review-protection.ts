@@ -33,6 +33,24 @@ function financialContent(subject: string, body: string): boolean {
     || /\b(?:portfolio|holdings?|watch\s?list)\b.{0,80}\b(?:stocks?|shares?|investments?|returns?|prices?|earnings|dividends?)\b/iu.test(line));
 }
 
+/** A financial/security record or an actual request, not a word in a sales footer. */
+function sensitiveActionContent(subject: string, body: string): boolean {
+  const marketingSubject = /\b(?:offers?|discounts?|sale|webinar|newsletter|software|platform|guide|demo|training|course|promotions?)\b/iu.test(subject);
+  const record = /\b(?:invoice|purchase\s+order|quotation|contract\s+(?:renewal|signature|approval|expiry|expiration|amendment)|payment\s+(?:due|overdue|received|confirmation|receipt|reminder)|legal\s+(?:notice|demand)|meeting\s+invitation)\b/iu;
+  const recordEvent = /\b(?:invoice|purchase\s+order|quotation|contract)\b.{0,50}\b(?:due|overdue|attached|ready|issued|paid|received|confirmation|receipt|reminder|signature|approval|renewal)\b/iu.test(subject);
+  const recordReference = /\b(?:invoice|purchase\s+order|contract)\s*(?:(?:no\.?|number|ref(?:erence)?)\s*[:#.]?\s*|#\s*|(?=[A-Z]{1,8}[-/]?\d))[A-Z\d/-]*\d\b/iu.test(subject);
+  if (record.test(subject) && (!marketingSubject || recordEvent || recordReference)) return true;
+  if (!marketingSubject && /\b(?:one[- ]time\s+password|otp|verification\s+code|security\s+alert|password\s+(?:reset|(?:was\s+|has\s+been\s+)?changed)|reset\s+your\s+password|unusual\s+(?:sign[- ]?in|login)|suspicious\s+(?:activity|login))\b/iu.test(subject)) return true;
+  return body.split(/\r?\n/u).some(line =>
+    /\b(?:otp|one[- ]time\s+password|(?:verification|security|authentication)\s+code)\b.{0,35}\b\d{4,8}\b/iu.test(line)
+    || /\b(?:unusual|unauthori[sz]ed|suspicious)\s+(?:login|sign[- ]?in|account\s+activity)\b/iu.test(line)
+    || /\byour\s+password\s+(?:was\s+|has\s+been\s+)?(?:changed|reset)\b|\bnew\s+(?:login|sign[- ]?in)\b.{0,50}\b(?:detected|your\s+account)\b/iu.test(line)
+    || /\b(?:invoice|purchase\s+order|quotation|contract)\s*(?:no\.?|number|#|reference|ref\.?)?\s*[:#-]?\s*[A-Z]{0,8}[-/]?\d{2,}(?:[-/]\d+)*\b/iu.test(line)
+    || /\b(?:your|the|our|attached|enclosed)\s+(?:invoice|purchase\s+order|quotation|proposal|contract)\b.{0,80}\b(?:attached|enclosed|due|overdue|awaiting\s+(?:approval|signature)|ready\s+for\s+(?:approval|signature)|amount\s*(?:due|:))\b/iu.test(line)
+    || /\b(?:please|kindly|could\s+you|can\s+you)\b.{0,65}\b(?:pay|settle|approve|sign|execute|renew|review|confirm)\b.{0,70}\b(?:(?:the|your|our|attached|this)\s+)?(?:invoice|purchase\s+order|quotation|proposal|contract|payment|legal\s+notice)\b(?!\s+(?:software|platform|solutions?|tools?|processing|services?|management))\b/iu.test(line)
+    || /\b(?:you\s+(?:have\s+been|are)\s+(?:served|summoned)|legal\s+(?:notice|demand)\s+(?:served|received)|(?:court|hearing)\s+(?:date|summons))\b/iu.test(line));
+}
+
 /** Deterministic keep-unread gates run on complete originals before AI/cache. */
 export function unreadReviewContentProtections(email: Pick<EmailRecord, 'subject' | 'fromAddress'>, body: string): string[] {
   const subject = email.subject ?? '';
@@ -41,7 +59,10 @@ export function unreadReviewContentProtections(email: Pick<EmailRecord, 'subject
 
   const subjectReport = REPORT.test(subject);
   const actualMetrics = METRIC_VALUE.test(body);
-  const promotional = MARKETING_REPORT.test(subject);
+  const promotional = MARKETING_REPORT.test(subject) || (
+    /\b(?:offer|discount|sale|demo|buy|try|free)\b/iu.test(subject)
+    && /\b(?:software|platform|tools?)\b/iu.test(subject)
+  );
   const businessReport = subjectReport && !promotional && (
     BUSINESS_CONTEXT.test(subject)
     || (PERIODIC.test(subject) && (actualMetrics || /\bbusiness\b/iu.test(subject) || reportingSender(email.fromAddress)))
@@ -58,23 +79,13 @@ export function unreadReviewContentProtections(email: Pick<EmailRecord, 'subject
     && /\b\d[\d,.]*\s*(?:urls?|pages?|ms|milliseconds?|s|seconds?|requests?|queries)\b/iu.test(subject);
   if (businessReport || operationalNotice || processingNotice || measuredPerformanceIssue) reasons.push(BUSINESS_REASON);
 
+  // An advertiser can imitate an invitation, nomination or business question.
+  // Retain a requested personal exchange deterministically, but let the model
+  // use sender history to distinguish unrequested campaigns from real requests.
   const original = `${subject}\n${body}`;
-  const invitationOnly = /\b(?:invitation\s*[-–—]?\s*only|by\s+invitation\s+only)\b/iu.test(original)
-    && /\b(?:rsvp\s+(?:by|before|deadline)|confirm\s+(?:(?:your|the)\s+)?attendance)\b/iu.test(original);
-  const personalRecognition = /\b(?:awards?|recognition)\b/iu.test(original)
-    && /\b(?:you(?:['’]ve|\s+have|\s+are)|your\s+(?:profile|name|nomination))\b.{0,100}\b(?:shortlisted|nominated|nominee)|\byour\s+nomination\b/isu.test(original)
-    && /\b(?:discuss|discussion|eligibility|book\s+(?:a\s+)?meeting|schedule\s+(?:a\s+)?(?:call|meeting))\b/iu.test(original);
-  const targetedBusinessDiscussion = /\b(?:sponsorship|partnership)\s+opportunities\b/iu.test(original)
-    && /\b(?:(?:quick|brief|short)\s+(?:chat|call|discussion)|(?:can|could|would)\s+discuss)\b/iu.test(original)
-    && /\b(?:your|[\p{L}\d&.-]+['’]s)\s+(?:(?:regional|business|commercial|strategic)\s+){0,3}(?:objectives|goals|needs|priorities)\b/iu.test(original);
-  const systemsPlanningQuestion = /^\s*(?:re:\s*|fw[d]?:\s*)*(?:planning|evaluating|considering|implementing|migrating|integrating|upgrading)\b[^?]{0,180}\?/iu.test(subject)
-    && /\b(?:erp|crm|implementation|migration|integration|systems?|database|data\s+(?:platform|warehouse)|analytics)\b/iu.test(subject)
-    && /\b(?:erp|crm|legacy\s+systems?|system\s+integration|manual\s+reporting|disconnected\s+data|spreadsheet[-\s]*heavy)\b/iu.test(body)
-    && (
-      /\b(?:does|do|is|are|has|have|would|could)\b[^?\n]{0,160}\b(?:manual\s+(?:reporting|work|processes)|disconnected\s+(?:data|systems)|spreadsheet[-\s]*(?:heavy|based|processes)|legacy\s+systems?)\b[^?\n]{0,80}\?/iu.test(body)
-      || /\b(?:happy|available|glad)\s+to\s+(?:work|meet|talk|speak)\b[^.!?\n]{0,60}\byour\s+schedule\b/iu.test(body)
-    );
-  if (invitationOnly || personalRecognition || targetedBusinessDiscussion || systemsPlanningQuestion) reasons.push(PERSONAL_REASON);
+  const requestedContext = /\b(?:as\s+(?:you\s+requested|we\s+discussed|agreed)|following\s+(?:our\s+(?:call|discussion|meeting)|your\s+(?:request|application|registration|nomination))|thank(?:s|\s+you)\s+for\s+(?:your\s+)?(?:request|application|registration|nomination|confirmation)|you\s+(?:requested|registered|applied))\b/iu.test(original);
+  if (requestedContext && /\b(?:invitation|rsvp|attendance|nomination|awards?|discussion|implementation|migration|proposal)\b/iu.test(original)) reasons.push(PERSONAL_REASON);
+  if (sensitiveActionContent(subject, body)) reasons.push('Business, financial, meeting or security content requires your review.');
   return reasons;
 }
 
@@ -94,6 +105,7 @@ export function unreadReviewRecommendationProtection(reason: string): string | u
     || /\b(?:reports?|summar(?:y|ies))\s+(?:(?:of|on|for|about|the|your|website)\s+){1,4}(?:sales|analytics|performance|operations?|visitors?|customers?|support|service|system)\b/iu.test(affirmative)
     || /\b(?:account|system|operational|service)\s+(?:status\s+)?notifications?\b/iu.test(affirmative)
   )) return BUSINESS_REASON;
-  if (/\b(?:personal|targeted|invitation[- ]only)\s+(?:awards?\s+)?invitations?|\b(?:award|recognition)\s+(?:nomination|shortlist)|\b(?:personal|your)\s+nomination\b/iu.test(affirmative)) return PERSONAL_REASON;
+  const personalAdvertisement = /\b(?:unsolicited|marketing|promotional|advertising|cold\s+(?:sales|pitch)|sales\s+pitch)\b/iu.test(affirmative);
+  if (!personalAdvertisement && /\b(?:personal|targeted|invitation[- ]only)\s+(?:awards?\s+)?invitations?|\b(?:award|recognition)\s+(?:nomination|shortlist)|\b(?:personal|your)\s+nomination\b/iu.test(affirmative)) return PERSONAL_REASON;
   return undefined;
 }

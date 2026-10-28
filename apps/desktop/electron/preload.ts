@@ -87,10 +87,12 @@ export interface UnscannedWarningResponse {
 }
 
 /** Progress for a trusted, host-owned attachment save or preview. Contains no file bytes. */
-export type AttachmentDownloadPhase = 'downloading' | 'scanning' | 'saving';
+export type AttachmentDownloadPhase = 'downloading' | 'uploading' | 'scanning' | 'saving';
 export interface AttachmentDownloadProgress {
   requestId: string;
   phase: AttachmentDownloadPhase;
+  transferredBytes?: number;
+  totalBytes?: number;
 }
 
 /** Local rows have changed while the bulk action is still awaiting its server result. */
@@ -412,6 +414,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     downloadAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) =>
       ipcRenderer.invoke('emails:downloadAttachment', emailId, filename, accountId, requestId),
+    downloadAttachmentToDownloads: (emailId: string, filename: string, accountId?: string, requestId?: string) =>
+      ipcRenderer.invoke('emails:downloadAttachmentToDownloads', emailId, filename, accountId, requestId),
+    openSavedAttachment: (savedFileId: string) => ipcRenderer.invoke('emails:openSavedAttachment', savedFileId),
+    revealSavedAttachment: (savedFileId: string) => ipcRenderer.invoke('emails:revealSavedAttachment', savedFileId),
     onAttachmentDownloadProgress: (callback: (progress: AttachmentDownloadProgress) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, progress: AttachmentDownloadProgress) => callback(progress);
       ipcRenderer.on('emails:attachmentDownloadProgress', listener);
@@ -1486,7 +1492,10 @@ export interface ElectronAPI {
     downloadBodies: (limit?: number) => Promise<{ success: boolean; data?: { downloaded: number }; error?: string }>;
     onBodyFetched: (callback: (email: any) => void) => () => void;
     removeBodyFetchedListener: () => void;
-    downloadAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) => Promise<{ success: boolean; filePath?: string; notScanned?: boolean; error?: string }>;
+    downloadAttachment: (emailId: string, filename: string, accountId?: string, requestId?: string) => Promise<{ success: boolean; filePath?: string; savedFileId?: string; canOpenSavedFile?: boolean; notScanned?: boolean; error?: string }>;
+    downloadAttachmentToDownloads: (emailId: string, filename: string, accountId?: string, requestId?: string) => Promise<{ success: boolean; filePath?: string; savedFileId?: string; canOpenSavedFile?: boolean; notScanned?: boolean; error?: string }>;
+    openSavedAttachment: (savedFileId: string) => Promise<{ success: boolean; error?: string }>;
+    revealSavedAttachment: (savedFileId: string) => Promise<{ success: boolean; error?: string }>;
     onAttachmentDownloadProgress: (callback: (progress: AttachmentDownloadProgress) => void) => () => void;
     cancelAttachmentDownload: (requestId: string) => Promise<{ success: boolean; error?: string }>;
     getAttachmentBase64: (emailId: string, filename: string, accountId?: string) => Promise<{ success: boolean; base64?: string; error?: string }>;

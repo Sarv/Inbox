@@ -121,7 +121,7 @@ async function sources(messageId: string, accountId: string, signal?: AbortSigna
     ...(!email.rawBody ? { unavailableReason: 'Open this message and download its text before scanning.' } : {}) }];
 }
 
-async function read(source: ScanSource, maxBytes: number, signal?: AbortSignal): Promise<Buffer> {
+async function read(source: ScanSource, maxBytes: number, signal?: AbortSignal, onProgress?: (transferredBytes: number) => void): Promise<Buffer> {
   if (signal?.aborted) throw new Error('Attachment scan cancelled.');
   if (!readRegistryAccounts().some(a => a.id === source.accountId)) throw new Error('This mailbox is no longer available.');
   const storage = await requireAccountStorage(source.accountId);
@@ -136,8 +136,10 @@ async function read(source: ScanSource, maxBytes: number, signal?: AbortSignal):
   if (!folder || folder.path !== source.folderPath || email.uid !== source.uid || !source.partId || !sync?.isConnected()) {
     throw new Error('The attachment location changed or this account is offline. Select the message again.');
   }
-  return sync.fetchAttachmentScanPart(folder.path, email.uid, source.partId, source.partFilename ?? source.displayName, maxBytes, signal)
-    .catch(() => { throw new Error('The exact attachment could not be downloaded within the scan limit.'); });
+  const content = onProgress
+    ? sync.fetchAttachmentScanPart(folder.path, email.uid, source.partId, source.partFilename ?? source.displayName, maxBytes, signal, onProgress)
+    : sync.fetchAttachmentScanPart(folder.path, email.uid, source.partId, source.partFilename ?? source.displayName, maxBytes, signal);
+  return content.catch(() => { throw new Error('The exact attachment could not be downloaded within the scan limit.'); });
 }
 
 export function createAntivirusDesktopBackend(): ExtensionSecurityBackend {

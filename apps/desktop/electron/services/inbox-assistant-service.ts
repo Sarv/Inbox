@@ -461,15 +461,15 @@ export class InboxAssistantService {
         expectedAccounts?.forEach(account => assertAccount(account.id));
         return this.callRunAI(run, prompt, effective, 4_000, workload);
       },
-      setRead: async (accountId, ids, read) => {
+      setRead: async (accountId, ids, read, context) => {
         assertAccount(accountId);
         if (!this.deps.setRead) throw new Error('Mail actions are unavailable. Restart the app after updating.');
-        return this.deps.setRead(accountId, ids, read);
+        return context ? this.deps.setRead(accountId, ids, read, context) : this.deps.setRead(accountId, ids, read);
       },
-      moveMail: async (accountId, ids, action) => {
+      moveMail: async (accountId, ids, action, context) => {
         assertAccount(accountId);
         if (!this.deps.moveMail) throw new Error('Folder actions are unavailable. Restart the app after updating.');
-        return this.deps.moveMail(accountId, ids, action);
+        return context ? this.deps.moveMail(accountId, ids, action, context) : this.deps.moveMail(accountId, ids, action);
       },
     };
   }

@@ -70,6 +70,7 @@ import { getValidAccessToken } from './oauth-service';
 import { getAccount as getOAuthAccount, listAccounts } from './oauth-token-store';
 import { savePipelineAIConfig, loadPipelineAIConfigSync, clearPipelineAIConfig } from './pipeline-ai-config-store';
 import { isAIAssistOn, resolveDeferredPipelineConfig } from './pipeline-init-config';
+import { readCategorizationSenderHistory } from './sender-history-context';
 import { SiblingCategoryCache } from './sibling-category-cache';
 import { buildThreadMessages } from './thread-context';
 
@@ -696,7 +697,13 @@ export function initializeUnifiedPipeline(
       getEmail: (id: string) => pStorage().getEmail(id),
       getFolder: (id: string) => pStorage().getFolder(id),
       getFolders: () => pStorage().getFolders(),
-      getSenderContextBatch: (emails: string[]) => { try { return (pStorage() as any).getSenderContextBatch(emails); } catch { return {}; } },
+      getSenderContextBatch: (emails: string[]) => {
+        const storage = pStorage();
+        return readCategorizationSenderHistory(emails, {
+          legacy: senders => storage.getSenderContextBatch(senders),
+          human: senders => storage.getRepositories().agent.getUnreadReviewSenderContextBatch(senders),
+        });
+      },
       getThreadDepths: (ids: string[]) => { try { return (pStorage() as any).getThreadDepths(ids); } catch { return {}; } },
       getSenderRepetitionStats: (emails: string[]) => { try { return (pStorage() as any).getSenderRepetitionStats(emails); } catch { return { sameSubject: {}, totalEmails: 0 }; } },
       getEnabledCategoryDefinitions: () => { try { return (pStorage() as any).getEnabledCategoryDefinitions(); } catch { return []; } },
@@ -2003,7 +2010,7 @@ async function tryAutoSendReply(params: {
   }
 
   try {
-    const result = await sendEmailFromMain(sendOptions);
+    const result = await sendEmailFromMain(sendOptions, { source: 'agent_auto' });
     if (!result?.success) {
       logger.warn(`[Pipeline] Auto-send FAILED for ${emailId} (${result?.error || 'unknown error'}) — falling back to Drafts`);
       return false;

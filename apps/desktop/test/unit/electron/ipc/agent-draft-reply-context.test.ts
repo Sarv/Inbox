@@ -101,6 +101,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await a.close();
   await b.close();
   rmSync(dir, { recursive: true, force: true });
@@ -160,6 +161,38 @@ describe('importance action account ownership', () => {
   it('keeps active-account logging for an unscoped action', async () => {
     await logUserAction('a-only', 'unimportant');
     expect(await a.storage.getRepositories().agent.getActionsByEmail('a-only')).toHaveLength(1);
+    expect(await b.storage.getRepositories().agent.getActionsByEmail('a-only')).toEqual([]);
+  });
+
+  it('keeps automated actions in the timeline without adding human sender-engagement counts', async () => {
+    const update = vi.spyOn(a.storage, 'upsertSenderStats');
+    await logUserAction('a-only', 'read', { source: 'agent_auto', senderAddress: 'offers@example.test' }, a.storage);
+    expect(await a.storage.getRepositories().agent.getActionsByEmail('a-only')).toEqual([
+      expect.objectContaining({ actionType: 'read', source: 'agent_auto', senderAddress: 'offers@example.test' }),
+    ]);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('updates the explicitly named sender aggregate once for a manual action and awaits it', async () => {
+    const update = vi.spyOn(b.storage, 'upsertSenderStats');
+    await logUserAction('b3', 'delete', { senderAddress: 'boss@x.test' }, b.storage);
+    expect(update).toHaveBeenCalledExactlyOnceWith({ email: 'boss@x.test', deletedCount: 1 });
+    expect((await b.storage.getSenderStats('boss@x.test'))?.deletedCount).toBe(1);
+    expect(await a.storage.getRepositories().agent.getActionsByEmail('b3')).toEqual([]);
+  });
+
+  it('keeps renderer action logging in its starting mailbox if the active account changes during lookup', async () => {
+    let finish!: () => void;
+    const waiting = new Promise<void>(resolve => { finish = resolve; });
+    const original = a.storage.getEmail.bind(a.storage);
+    vi.spyOn(a.storage, 'getEmail').mockImplementation(async id => { await waiting; return original(id); });
+    const pending = h.handlers.get('agent:logAction')!({}, 'a-only', 'unread') as Promise<unknown>;
+    h.current = 'acct-b';
+    finish();
+    expect(await pending).toEqual({ success: true });
+    expect(await a.storage.getRepositories().agent.getActionsByEmail('a-only')).toEqual([
+      expect.objectContaining({ actionType: 'unread', source: 'user' }),
+    ]);
     expect(await b.storage.getRepositories().agent.getActionsByEmail('a-only')).toEqual([]);
   });
 });

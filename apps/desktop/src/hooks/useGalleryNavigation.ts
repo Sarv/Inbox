@@ -17,10 +17,12 @@ export function useGalleryNavigation({
   count,
   initialIndex = 0,
   onClose,
+  onNavigate,
 }: {
   count: number;
   initialIndex?: number;
   onClose: () => void;
+  onNavigate?: (index: number) => void;
 }): { index: number; goTo: (next: number) => void } {
   const [index, setIndex] = useState(() =>
     Math.min(Math.max(initialIndex, 0), Math.max(count - 1, 0))
@@ -29,9 +31,11 @@ export function useGalleryNavigation({
   const goTo = useCallback(
     (next: number) => {
       if (count === 0) return;
-      setIndex(((next % count) + count) % count);
+      const normalized = ((next % count) + count) % count;
+      if (onNavigate) onNavigate(normalized);
+      else setIndex(normalized);
     },
-    [count]
+    [count, onNavigate]
   );
 
   useEffect(() => {

@@ -5,7 +5,13 @@ import path from 'node:path';
 
 import { waitForAbortableOperation, type ExtensionManager } from '@sarvinbox/core';
 
-export type AttachmentDownloadPhase = 'downloading' | 'scanning' | 'saving';
+export type AttachmentDownloadPhase = 'downloading' | 'uploading' | 'scanning' | 'saving';
+
+/** Bytes observed for this stage; absent totals stay indeterminate. */
+export interface AttachmentTransferBytes {
+  transferredBytes: number;
+  totalBytes?: number;
+}
 
 export interface DownloadScanner {
   id: string;
@@ -81,11 +87,11 @@ export interface AttachmentOperationDependencies {
     filename: string,
     options: {
       signal: AbortSignal;
-      onProgress(phase: 'downloading' | 'scanning'): void;
+      onProgress(phase: 'downloading' | 'uploading' | 'scanning', bytes?: AttachmentTransferBytes): void;
     }
   ): Promise<ProtectedDownloadContent>;
   openSetup(extensionId: string): Promise<void> | void;
-  progress(requestId: string, phase: AttachmentDownloadPhase): void;
+  progress(requestId: string, phase: AttachmentDownloadPhase, bytes?: AttachmentTransferBytes): void;
   timeoutMs?: number;
 }
 
@@ -97,7 +103,7 @@ export interface ProtectedAttachmentOperation {
   notScanned: boolean;
   assertCurrent(): Promise<void>;
   assertNotCancelled(): void;
-  progress(phase: AttachmentDownloadPhase): void;
+  progress(phase: AttachmentDownloadPhase, bytes?: AttachmentTransferBytes): void;
   /** Transfer the verified receipt only if the operation completes successfully. */
   retainContent(): void;
 }
@@ -191,9 +197,10 @@ export class AttachmentOperationProtection {
       if (signal.aborted)
         throw signal.reason instanceof Error ? signal.reason : new Error('Download cancelled.');
     };
-    const progress = (phase: AttachmentDownloadPhase) => {
+    const progress = (phase: AttachmentDownloadPhase, bytes?: AttachmentTransferBytes) => {
       assertNotCancelled();
-      this.deps.progress(requestId, phase);
+      if (bytes) this.deps.progress(requestId, phase, bytes);
+      else this.deps.progress(requestId, phase);
     };
     try {
       const scanners = this.deps.scanners().filter((item) => item.enabled && item.scanner);
@@ -310,6 +317,7 @@ export interface AttachmentDownloadDependencies extends AttachmentOperationDepen
   resolveLegacy(messageId: string, filename: string, accountId: string): Promise<string>;
   readLegacy?(sourcePath: string, signal: AbortSignal): Promise<Buffer>;
   chooseSavePath(filename: string): Promise<string | null>;
+  releaseSavePath?(filePath: string): void;
   writeContent(
     filePath: string,
     content: Buffer,
@@ -352,6 +360,7 @@ export class AttachmentDownloadProtection {
           ? undefined
           : await this.deps.resolveLegacy(messageId, filename, accountId);
         let unscanned: Buffer | undefined;
+        let destination: string | null = null;
         try {
           assertNotCancelled();
           if (operation.notScanned) {
@@ -362,10 +371,13 @@ export class AttachmentDownloadProtection {
             await assertCurrent();
           }
           // A destination is chosen only after scanning or explicit warning acceptance.
-          const destination = await waitForAbortableOperation(
-            this.deps.chooseSavePath(filename),
-            signal
-          );
+          const selectedPath = this.deps.chooseSavePath(filename);
+          // A cancelled native dialog or async Downloads lookup can finish later.
+          // Release its reservation even when cancellation won the await race.
+          void selectedPath.then(selected => {
+            if (signal.aborted && selected) this.deps.releaseSavePath?.(selected);
+          }, () => {});
+          destination = await waitForAbortableOperation(selectedPath, signal);
           assertNotCancelled();
           if (!destination) return null;
           await assertCurrent();
@@ -380,6 +392,7 @@ export class AttachmentDownloadProtection {
           else if (legacyPath) await this.deps.copyLegacy(legacyPath, destination);
           return destination;
         } finally {
+          if (destination) this.deps.releaseSavePath?.(destination);
           unscanned?.fill(0);
         }
       },
@@ -429,14 +442,16 @@ export async function writeProtectedAttachment(
   destination: string,
   content: Buffer,
   signal: AbortSignal,
-  beforeCommit: () => Promise<void>
+  beforeCommit: () => Promise<void>,
+  exclusive = false
 ): Promise<void> {
   const temporary = path.join(path.dirname(destination), `.inbox-download-${randomUUID()}.partial`);
   try {
     await fs.writeFile(temporary, content, { mode: 0o600, flag: 'wx', signal });
     await beforeCommit();
     signal.throwIfAborted();
-    await fs.rename(temporary, destination);
+    if (exclusive) await fs.link(temporary, destination); // Atomic no-overwrite commit for automatic Downloads.
+    else await fs.rename(temporary, destination);
   } finally {
     await fs.unlink(temporary).catch((error) => {
       if (error?.code !== 'ENOENT') throw error;

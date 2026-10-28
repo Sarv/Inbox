@@ -12,8 +12,8 @@ const h = vi.hoisted(() => ({
   registered: [{ id: 'active-account', email: 'rc@sarv.example' }, { id: 'sales-account', email: 'sales@sarv.example' }],
   registryError: false,
   storages: new Map<string, unknown>(),
-  activeStorage: { getEmail: vi.fn(), getAttachments: vi.fn(), getFolder: vi.fn() },
-  salesStorage: { getEmail: vi.fn(), getAttachments: vi.fn(), getFolder: vi.fn() },
+  activeStorage: { getEmail: vi.fn(), getAttachments: vi.fn(), getFolder: vi.fn(), getRepositories: vi.fn() },
+  salesStorage: { getEmail: vi.fn(), getAttachments: vi.fn(), getFolder: vi.fn(), getRepositories: vi.fn() },
   activeEngine: { bulkMarkAsRead: vi.fn(), bulkMarkAsUnread: vi.fn() },
   salesEngine: { bulkMarkAsRead: vi.fn(), bulkMarkAsUnread: vi.fn() },
   setReadFlag: vi.fn(), logUserAction: vi.fn(),
@@ -215,6 +215,35 @@ describe('Inbox Agent trusted IPC and source ownership', () => {
     expect(h.logUserAction).not.toHaveBeenCalled();
     expect(h.activeEngine.bulkMarkAsRead).not.toHaveBeenCalled();
     expect(h.activeStorage.getEmail).not.toHaveBeenCalled();
+  });
+
+  it('records an explicit human override as user feedback instead of teaching from an AI decision', async () => {
+    h.salesStorage.getEmail.mockResolvedValue({ id: ref.emailId, threadId: 'sales-thread', fromAddress: 'news@offers.example', folderId: 'sent', uid: 42, tags: '|Sent|' });
+    await h.serviceDeps.setRead!('sales-account', [ref.emailId], true, { source: 'user' });
+    expect(h.logUserAction).toHaveBeenCalledExactlyOnceWith(ref.emailId, 'read', expect.objectContaining({ source: 'user' }), h.salesStorage);
+    expect(h.activeStorage.getEmail).not.toHaveBeenCalled();
+  });
+
+  it('reads the named account sender dispositions even after the active account switches', async () => {
+    const sender = 'news@offers.example';
+    const salesQuery = vi.fn(() => ({ [sender]: {
+      received90d: 30, opened90d: 0, markedRead90d: 10, deleted90d: 28, archived90d: 0,
+      replied90d: 0, keptUnread90d: 0, starred90d: 0, important90d: 0,
+      sentLifetime: 0, lastSentAt: null, isVip: false, isBlocked: false,
+      readThenDeleted90d: 10, readThenDeletedFast90d: 9, readAndKept90d: 0,
+      deletedWithoutRead90d: 18, recentDeleted30d: 12, recentReceived30d: 13,
+    } }));
+    const activeQuery = vi.fn();
+    h.salesStorage.getRepositories.mockReturnValue({ agent: { getUnreadReviewSenderContextBatch: salesQuery } });
+    h.activeStorage.getRepositories.mockReturnValue({ agent: { getUnreadReviewSenderContextBatch: activeQuery } });
+    const mailbox = await h.serviceDeps.openMailbox('sales-account');
+    h.current = 'another-account';
+    const context = await mailbox.getUnreadReviewBehaviorContext!([sender]);
+    expect(salesQuery).toHaveBeenCalledExactlyOnceWith([sender], expect.any(Number));
+    expect(activeQuery).not.toHaveBeenCalled();
+    expect(context.text).toContain('deleted=28');
+    expect(context.text).toContain('readThenDeleted90d=10,readThenDeletedFast90d=9,readAndKept90d=0');
+    expect(context.text).toContain('automatic/system actions excluded');
   });
 
   it('rejects removed or unavailable mutation owners and refuses runtime replacement without using the active mailbox', async () => {

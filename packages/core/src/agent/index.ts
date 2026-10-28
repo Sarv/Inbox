@@ -60,3 +60,5 @@ export {
   type CategorizationOutcome,
   type CategorizationAction,
 } from './categorization-outcome';
+
+export { formatSenderBehaviorFacts, SENDER_BEHAVIOR_GUIDANCE, SENDER_BEHAVIOR_UNAVAILABLE, type SenderBehaviorSignals } from './sender-behavior-context';

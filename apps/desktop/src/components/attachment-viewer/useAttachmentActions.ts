@@ -1,13 +1,17 @@
 import { createLogger } from '@sarvinbox/core/logger';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { AttachmentDownloadPhase } from '../../../electron/preload';
+
+import { AttachmentActionsContext } from './attachment-actions-context';
+import type { AttachmentTransfer } from './attachment-transfer-types';
+import type { ViewerAttachment } from './AttachmentViewer';
 
 const log = createLogger('Attachment');
 
 /** Per-message identity: attachments with the same name spin independently. */
-export function attachmentKey(emailId: string, filename: string): string {
-  return `${emailId}:${filename}`;
+export function attachmentKey(emailId: string, filename: string, accountId?: string): string {
+  return accountId ? JSON.stringify([accountId, emailId, filename]) : `${emailId}:${filename}`;
 }
 
 export interface AttachmentTarget {
@@ -26,18 +30,29 @@ export interface AttachmentDownloadState {
   canCancel?: boolean;
   /** The user explicitly accepted the host's missing-setup warning. */
   notScanned?: boolean;
+  transferredBytes?: number;
+  totalBytes?: number;
+}
+
+export interface AttachmentPreviewRequest {
+  emailId: string;
+  accountId?: string;
+  attachments: ViewerAttachment[];
+  initialIndex: number;
 }
 
 export interface AttachmentActions {
-  isBusy: (emailId: string, filename: string) => boolean;
-  getStatus: (emailId: string, filename: string) => AttachmentDownloadState | undefined;
+  isBusy: (emailId: string, filename: string, accountId?: string) => boolean;
+  getStatus: (emailId: string, filename: string, accountId?: string) => AttachmentDownloadState | undefined;
   saveCopy: (target: AttachmentTarget) => Promise<void>;
   openInSystemApp: (target: AttachmentTarget) => Promise<void>;
   /** Host-owned URL; no element may read an attachment before this resolves. */
   preparePreview: (target: AttachmentTarget, signal?: AbortSignal) => Promise<string | undefined>;
-  /** Sequential dialogs; a blocked or cancelled attachment stops the batch. */
+  /** Sequential saves; a blocked or cancelled attachment stops the batch. */
   saveAll: (emailId: string, filenames: string[], accountId?: string) => Promise<void>;
-  cancelDownload: (emailId: string, filename: string) => Promise<void>;
+  cancelDownload: (emailId: string, filename: string, accountId?: string) => Promise<void>;
+  /** App-level preview preparation survives leaving the email that opened it. */
+  requestPreview?: (request: AttachmentPreviewRequest) => void;
 }
 
 // Main returns these host-owned messages. Arbitrary IPC/server errors must never
@@ -89,9 +104,11 @@ function stopListening(operation: ActiveAction) {
 }
 
 /** The shared scan gate for saves, system opens and in-app attachment viewing. */
-export function useAttachmentActions(): AttachmentActions {
+export function useAttachmentController(resolveTarget?: (target: AttachmentTarget) => AttachmentTarget) {
   const [statuses, setStatuses] = useState<Map<string, AttachmentDownloadState>>(new Map());
+  const [transferMap, setTransferMap] = useState<Map<string, AttachmentTransfer>>(new Map());
   const active = useRef(new Map<string, ActiveAction>());
+  const identities = useRef(new Map<string, AttachmentTarget>());
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -105,8 +122,20 @@ export function useAttachmentActions(): AttachmentActions {
     };
   }, []);
 
+  const updateTransfer = useCallback((id: string, patch: Partial<AttachmentTransfer>) => {
+    if (!mounted.current) return;
+    setTransferMap(previous => {
+      const held = previous.get(id);
+      if (!held) return previous;
+      const next = new Map(previous);
+      next.set(id, { ...held, ...patch, updatedAt: Date.now() });
+      return next;
+    });
+  }, []);
+
   const putStatus = useCallback((key: string, state?: AttachmentDownloadState) => {
     if (!mounted.current) return;
+    if (!state) identities.current.delete(key);
     setStatuses((previous) => {
       const next = new Map(previous);
       if (state) next.set(key, state);
@@ -115,12 +144,30 @@ export function useAttachmentActions(): AttachmentActions {
     });
   }, []);
 
+  const requestCancellation = useCallback(async (key: string, operation: ActiveAction) => {
+    if (!operation.requestId || operation.state.cancelling) return;
+    operation.state = { ...operation.state, cancelling: true, error: undefined };
+    putStatus(key, operation.state);
+    updateTransfer(operation.requestId, { cancelling: true, error: undefined });
+    try {
+      const result = await window.electronAPI.emails.cancelAttachmentDownload(operation.requestId);
+      if (!result.success) throw new Error('Cancellation unavailable');
+    } catch {
+      if (active.current.get(key) === operation) {
+        operation.state = { ...operation.state, cancelling: false, error: 'Could not cancel the download. Try again.' };
+        putStatus(key, operation.state);
+        updateTransfer(operation.requestId, { cancelling: false, error: operation.state.error });
+      }
+    }
+  }, [putStatus, updateTransfer]);
+
   const run = useCallback(async (
-    { emailId, filename, accountId }: AttachmentTarget,
+    target: AttachmentTarget,
     action: 'save' | 'open' | 'preview',
     signal?: AbortSignal,
   ): Promise<boolean | string> => {
-    const key = attachmentKey(emailId, filename);
+    const { emailId, filename, accountId } = resolveTarget?.(target) ?? target;
+    const key = attachmentKey(emailId, filename, accountId);
     // Ref guard works before React paints the disabled control, preventing a
     // double click from creating two scanner requests/native save dialogs.
     if (active.current.has(key) || signal?.aborted) return false;
@@ -132,13 +179,23 @@ export function useAttachmentActions(): AttachmentActions {
     };
     const abort = () => {
       if (active.current.get(key) !== operation) return;
-      operation.state = { ...operation.state, cancelling: true };
-      putStatus(key, operation.state);
       // A viewer closing may cancel only its preview, never a save it waited for.
-      void window.electronAPI.emails.cancelAttachmentDownload(operation.requestId!).catch(() => {});
+      void requestCancellation(key, operation);
     };
     signal?.addEventListener('abort', abort, { once: true });
     active.current.set(key, operation);
+    identities.current.set(key, { emailId, filename, accountId });
+    setTransferMap(previous => {
+      const next = new Map(previous);
+      next.set(operation.requestId!, { id: operation.requestId!, key, emailId, filename, accountId, operation: action,
+        status: 'active', phase: 'downloading', canCancel: true, startedAt: Date.now(), updatedAt: Date.now() });
+      // Bound notification history without evicting ongoing work.
+      for (const [id, item] of next) {
+        if (next.size <= 20) break;
+        if (item.status !== 'active') next.delete(id);
+      }
+      return next;
+    });
     putStatus(key, operation.state);
 
     try {
@@ -146,31 +203,52 @@ export function useAttachmentActions(): AttachmentActions {
         // Subscribe before invoking: a cache hit can enter scanning immediately.
         operation.unsubscribe = window.electronAPI.emails.onAttachmentDownloadProgress?.((progress) => {
           if (progress?.requestId !== operation.requestId || active.current.get(key) !== operation ||
-            !['downloading', 'scanning', 'saving'].includes(progress.phase)) return;
-          operation.state = { ...operation.state, phase: progress.phase };
+            !['downloading', 'uploading', 'scanning', 'saving'].includes(progress.phase)) return;
+          const counts = {
+            transferredBytes: Number.isFinite(progress.transferredBytes) && progress.transferredBytes! >= 0 ? progress.transferredBytes : undefined,
+            totalBytes: Number.isFinite(progress.totalBytes) && progress.totalBytes! > 0 ? progress.totalBytes : undefined,
+          };
+          operation.state = { ...operation.state, phase: progress.phase,
+            ...(counts.transferredBytes !== undefined || counts.totalBytes !== undefined ? counts : {}) };
           putStatus(key, operation.state);
+          updateTransfer(operation.requestId!, { phase: progress.phase, ...counts });
         });
       }
       const result = action === 'save'
-        ? await window.electronAPI.emails.downloadAttachment(emailId, filename, accountId, operation.requestId)
+        ? await (window.electronAPI.emails.downloadAttachmentToDownloads ?? window.electronAPI.emails.downloadAttachment)(emailId, filename, accountId, operation.requestId)
         : action === 'open'
           ? await window.electronAPI.emails.previewAttachment(emailId, filename, accountId, operation.requestId)
           : await window.electronAPI.emails.prepareAttachmentPreview(emailId, filename, accountId, operation.requestId);
       if (result.success && (action !== 'preview' || ('url' in result && typeof result.url === 'string' && result.url))) {
+        // Cancellation can race a cache hit. Do not display stale prepared bytes.
+        if (signal?.aborted && action === 'preview' && 'url' in result && typeof result.url === 'string') {
+          void window.electronAPI.emails.releaseAttachmentPreview(result.url).catch(() => {});
+          updateTransfer(operation.requestId!, { status: 'cancelled', phase: undefined, canCancel: false, cancelling: false });
+          putStatus(key, { cancelled: true, operation: action });
+          return false;
+        }
         putStatus(key, result.notScanned === true ? { notScanned: true, operation: action } : undefined);
+        updateTransfer(operation.requestId!, { status: action === 'save' ? 'saved' : action === 'preview' ? 'ready' : 'opened',
+          phase: undefined, canCancel: false, cancelling: false, notScanned: result.notScanned === true,
+          ...('filePath' in result && typeof result.filePath === 'string' ? { filePath: result.filePath } : {}),
+          ...('savedFileId' in result && typeof result.savedFileId === 'string' ? { savedFileId: result.savedFileId } : {}),
+          ...('canOpenSavedFile' in result ? { canOpenSavedFile: result.canOpenSavedFile === true } : {}) });
         return action === 'preview' && 'url' in result ? result.url as string : true;
       }
       if (result.error === 'Save cancelled' || result.error === 'Download cancelled.') {
         putStatus(key, { cancelled: true, operation: action });
+        updateTransfer(operation.requestId!, { status: 'cancelled', phase: undefined, canCancel: false, cancelling: false });
       } else {
         const error = attachmentError(result.error, action);
         putStatus(key, { error, operation: action });
+        updateTransfer(operation.requestId!, { status: 'failed', phase: undefined, error, canCancel: false, cancelling: false });
         log.error(`${action} failed: ${error}`);
       }
       return false;
     } catch {
       const error = attachmentError(undefined, action);
       putStatus(key, { error, operation: action });
+      updateTransfer(operation.requestId!, { status: 'failed', phase: undefined, error, canCancel: false, cancelling: false });
       log.error(`${action} failed: ${error}`);
       return false;
     } finally {
@@ -179,50 +257,55 @@ export function useAttachmentActions(): AttachmentActions {
       active.current.delete(key);
       finish();
     }
-  }, [putStatus]);
+  }, [putStatus, updateTransfer, requestCancellation, resolveTarget]);
 
   const saveCopy = useCallback(async (target: AttachmentTarget) => { await run(target, 'save'); }, [run]);
   const openInSystemApp = useCallback(async (target: AttachmentTarget) => { await run(target, 'open'); }, [run]);
 
   const preparePreview = useCallback(async (target: AttachmentTarget, signal?: AbortSignal) => {
+    const bound = resolveTarget?.(target) ?? target;
     // Entering the viewer while Save is running shares its progress and waits.
     // A new preview cannot race that save or cancel it when the viewer closes.
-    const key = attachmentKey(target.emailId, target.filename);
+    const key = attachmentKey(bound.emailId, bound.filename, bound.accountId);
     while (active.current.has(key)) {
       await active.current.get(key)!.done;
       if (signal?.aborted) return undefined;
     }
-    const result = await run(target, 'preview', signal);
+    const result = await run(bound, 'preview', signal);
     return typeof result === 'string' ? result : undefined;
-  }, [run]);
+  }, [run, resolveTarget]);
 
   const saveAll = useCallback(async (emailId: string, filenames: string[], accountId?: string) => {
+    const owner = (resolveTarget?.({ emailId, filename: filenames[0] ?? '', accountId }) ?? { accountId }).accountId;
     for (const filename of filenames) {
-      if (!await run({ emailId, filename, accountId }, 'save')) break;
+      if (!await run({ emailId, filename, accountId: owner }, 'save')) break;
     }
-  }, [run]);
+  }, [run, resolveTarget]);
 
-  const cancelDownload = useCallback(async (emailId: string, filename: string) => {
-    const key = attachmentKey(emailId, filename);
+  const cancelDownload = useCallback(async (emailId: string, filename: string, accountId?: string) => {
+    const target = resolveTarget?.({ emailId, filename, accountId }) ?? { emailId, filename, accountId };
+    const key = attachmentKey(target.emailId, target.filename, target.accountId);
     const operation = active.current.get(key);
-    if (!operation?.requestId || operation.state.cancelling) return;
-    operation.state = { ...operation.state, cancelling: true, error: undefined };
-    putStatus(key, operation.state);
-    try {
-      const result = await window.electronAPI.emails.cancelAttachmentDownload(operation.requestId);
-      if (!result.success) throw new Error('Cancellation unavailable');
-    } catch {
-      if (active.current.get(key) === operation) {
-        operation.state = { ...operation.state, cancelling: false, error: 'Could not cancel the download. Try again.' };
-        putStatus(key, operation.state);
-      }
-    }
-  }, [putStatus]);
+    if (operation) await requestCancellation(key, operation);
+  }, [requestCancellation, resolveTarget]);
 
-  const isBusy = useCallback((emailId: string, filename: string) =>
-    Boolean(statuses.get(attachmentKey(emailId, filename))?.phase), [statuses]);
-  const getStatus = useCallback((emailId: string, filename: string) =>
-    statuses.get(attachmentKey(emailId, filename)), [statuses]);
+  const getStatus = useCallback((emailId: string, filename: string, accountId?: string) => {
+    const direct = statuses.get(attachmentKey(emailId, filename, accountId));
+    if (direct || accountId) return direct;
+    const matching = [...identities.current].filter(([key, target]) => target.emailId === emailId && target.filename === filename && statuses.has(key));
+    return matching.length === 1 ? statuses.get(matching[0][0]) : undefined;
+  }, [statuses]);
+  const isBusy = useCallback((emailId: string, filename: string, accountId?: string) =>
+    Boolean(getStatus(emailId, filename, accountId)?.phase), [getStatus]);
 
-  return { isBusy, getStatus, saveCopy, openInSystemApp, preparePreview, saveAll, cancelDownload };
+  const transfers = useMemo(() => [...transferMap.values()].reverse(), [transferMap]);
+
+  return { isBusy, getStatus, saveCopy, openInSystemApp, preparePreview, saveAll, cancelDownload, transfers, updateTransfer };
+}
+
+/** A single app-owned controller in production; isolated embeds retain a local fallback. */
+export function useAttachmentActions(): AttachmentActions {
+  const shared = useContext(AttachmentActionsContext);
+  const local = useAttachmentController();
+  return shared ?? local;
 }
