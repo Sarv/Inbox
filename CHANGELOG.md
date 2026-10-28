@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-10-28
+
+### Added
+- A compact attachment progress popup lets you keep reading mail while a file
+  downloads and uploads for remote scanning. Completed downloads show where the
+  file was saved, with actions to open it or reveal its folder.
+
+### Changed
+- Categorization and unread review share account-local sender history. Repeated
+  manual deletions, reading habits and replies help the assistant distinguish
+  disposable marketing from useful mail. Automatic actions do not train these
+  preferences.
+- Inbox Agent opens its dashboard by default.
+
+### Fixed
+- Sender history survives local message removal, and manual bulk actions and
+  successful replies contribute to future recommendations.
+- Unread review recognizes more unsolicited sales pitches while retaining
+  protections for financial records, business reports, team conversations and
+  incomplete or uncertain mail.
+- Attachment progress survives navigation, cancellation releases pending work,
+  and saved files use unique names to avoid overwriting existing downloads.
+- Attachment size checks follow the scanner's configured limits while keeping
+  bounded downloads and scan approval checks in place.
+- Categorization retains the original account and provider when accounts are
+  switched during a running request.
+
 ## [1.4.6] - 2026-10-27
 
 ### Added
@@ -1191,7 +1218,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.6...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.7...HEAD
+[1.4.7]: https://github.com/Sarv/Inbox/releases/tag/v1.4.7
 [1.4.6]: https://github.com/Sarv/Inbox/releases/tag/v1.4.6
 [1.4.5]: https://github.com/Sarv/Inbox/releases/tag/v1.4.5
 [1.4.4]: https://github.com/Sarv/Inbox/releases/tag/v1.4.4
