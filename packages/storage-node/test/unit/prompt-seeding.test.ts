@@ -1,4 +1,4 @@
-import { DEFAULT_CATEGORIZATION_TEMPLATE, buildCategorizationPrompt } from '@sarvinbox/core';
+import { DEFAULT_CATEGORIZATION_TEMPLATE, SENDER_BEHAVIOR_GUIDANCE, buildCategorizationPrompt } from '@sarvinbox/core';
 import { describe, it, expect } from 'vitest';
 
 import { PromptRepository } from '../../src/repositories/prompt-repository';
@@ -45,7 +45,8 @@ describe('seedDefault', () => {
     prompts.update('categorization_system', 'My custom policy for {{userEmail}}');
     seed(prompts, DEFAULT_CATEGORIZATION_TEMPLATE);
     expect(buildCategorizationPrompt([], 'me@example.com', prompts.getContent('categorization_system')!))
-      .toBe('My custom policy for me@example.com');
+      .toBe(`My custom policy for me@example.com\n\n${SENDER_BEHAVIOR_GUIDANCE}`);
+    expect(row(db).content).toBe('My custom policy for {{userEmail}}');
     expect(row(db).default_content).toBe(DEFAULT_CATEGORIZATION_TEMPLATE);
   });
 
