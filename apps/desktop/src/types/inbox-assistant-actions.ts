@@ -7,6 +7,11 @@ export interface InboxAssistantReviewScope {
   query: string;
   field: 'any' | 'sender' | 'subject' | 'body';
 }
+/** Message-age scope resolved once by the host; before is exclusive Unix seconds. */
+export interface InboxAssistantReviewDateFilter {
+  olderThanDays: number;
+  before: number;
+}
 export interface InboxAssistantReadCommand {
   kind: 'mark_read' | 'mark_unread';
   scope: InboxAssistantReviewScope;
@@ -87,6 +92,7 @@ export interface InboxAssistantReview {
   id: string;
   kind: InboxAssistantReviewKind;
   scope?: InboxAssistantReviewScope;
+  dateFilter?: InboxAssistantReviewDateFilter;
   createdAt: number;
   expiresAt: number;
   status: 'ready' | 'partial' | 'completed' | 'expired';

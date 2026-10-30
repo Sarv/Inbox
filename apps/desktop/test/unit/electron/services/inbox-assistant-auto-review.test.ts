@@ -42,6 +42,7 @@ function fixture(records: EmailRecord[]) {
     getFolders: vi.fn(async () => [{ id: 'inbox', path: 'INBOX', name: 'Inbox', specialUse: null }]),
     searchEmails: vi.fn(async (query: SearchQuery) => {
       const unread = [...rows.values()].filter(row => (query.isUnread === undefined || !row.tags.includes('|read|') === query.isUnread)
+        && (query.dateTo === undefined || row.date <= query.dateTo)
         && (!query.query || `${row.fromAddress} ${row.subject} ${row.rawBody}`.toLowerCase().includes(query.query.toLowerCase())));
       const threads = [...new Set(unread.map(row => row.threadId || row.id))];
       const chosen = new Set(threads.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 25)));
@@ -80,6 +81,69 @@ function fixture(records: EmailRecord[]) {
 afterEach(() => { vi.restoreAllMocks(); for (const db of databases.splice(0)) db.close(); });
 
 describe('bounded automatic unread review', () => {
+  it('retains the original age cutoff and personal preferences across more than 200 conversations despite clock advancement', async () => {
+    let now = 1_800_000_000_000;
+    const f = fixture([
+      { ...newsletter('first'), date: 1_798_703_999 },
+      ...Array.from({ length: 199 }, (_, index) => newsletter(`kept-${index}`, true)),
+      { ...newsletter('last'), date: 1_798_703_998 },
+      { ...newsletter('boundary'), date: 1_798_704_000 },
+      { ...newsletter('recent'), date: 1_799_000_000 },
+    ]);
+    f.deps.now = () => now;
+    const question = 'Review my unread emails older than 15 days. Keep personal emails sent directly to me and ongoing conversations unread.';
+    const initial = await f.prepare(question);
+    expect(initial.review!.items).toHaveLength(200);
+    expect(initial.review!.dateFilter).toEqual({ olderThanDays: 15, before: 1_798_704_000 });
+    expect(f.deps.setRead).not.toHaveBeenCalled();
+    now += 30 * 86_400_000;
+    vi.mocked(f.deps.callAI).mockClear();
+
+    const result = await f.auto(initial);
+    expect(result.review!.automation).toMatchObject({ status: 'completed', batchesReviewed: 2,
+      reviewedConversations: 201, markedConversations: 2, markedEmails: 2 });
+    expect(result.review!.automation!.reason).toContain('older than 15 days');
+    const saved = f.history.load(f.chatId, { select: false });
+    expect(saved.exchanges.map(exchange => exchange.review!.items.map(item => item.emailId))).toEqual([
+      ['first', ...Array.from({ length: 199 }, (_, index) => `kept-${index}`)], ['last'],
+    ]);
+    expect(saved.exchanges.map(exchange => exchange.review!.dateFilter)).toEqual([
+      { olderThanDays: 15, before: 1_798_704_000 }, { olderThanDays: 15, before: 1_798_704_000 },
+    ]);
+    expect([...f.rows.values()].filter(row => row.tags.includes('|read|')).map(row => row.id)).toEqual(['first', 'last']);
+    expect(f.storage.searchEmails.mock.calls.every(([query]) => query.dateTo === 1_798_703_999)).toBe(true);
+    expect(vi.mocked(f.deps.callAI).mock.calls[0]![0]).toContain('USER_RETENTION_PREFERENCES_JSON: "Keep personal emails sent directly to me and ongoing conversations unread."');
+  });
+
+  it('keeps the original date boundary when resuming an unfinished automatic batch after the clock advances', async () => {
+    let now = 1_800_000_000_000;
+    const f = fixture([
+      newsletter('first'), ...Array.from({ length: 199 }, (_, index) => newsletter(`kept-${index}`, true)), newsletter('retry'),
+      { ...newsletter('newly-old'), date: 1_798_704_000 },
+    ]);
+    f.deps.now = () => now;
+    const initial = await f.prepare('Review my unread emails older than 15 days. Keep personal emails sent directly to me and ongoing conversations unread.');
+    f.deps.callAI = vi.fn(async () => { throw new Error('Synthetic provider outage'); });
+    const stopped = await f.auto(initial);
+    expect(stopped.review!.automation).toMatchObject({ status: 'stopped', batchesReviewed: 2, markedEmails: 1 });
+    const beforeResume = f.history.load(f.chatId, { select: false });
+    expect(beforeResume.exchanges[1]!.review!.items.map(item => item.emailId)).toEqual(['retry']);
+    expect(f.rows.get('retry')!.tags).not.toContain('|read|');
+    now += 30 * 86_400_000;
+    f.deps.callAI = vi.fn(async prompt => recommendations(prompt));
+
+    const resumed = await f.auto(initial, { requestId: 'auto-date-resume' });
+    expect(resumed.review!.automation).toMatchObject({ status: 'completed', batchesReviewed: 1, reviewedConversations: 1, markedEmails: 1 });
+    const saved = f.history.load(f.chatId, { select: false });
+    expect(saved.exchanges.at(-1)!.review!.items.map(item => item.emailId)).toEqual(['retry']);
+    expect(saved.exchanges.every(exchange => exchange.review!.dateFilter?.before === 1_798_704_000)).toBe(true);
+    expect(saved.exchanges[0]!.reviewResult).toEqual(beforeResume.exchanges[0]!.reviewResult);
+    expect(saved.exchanges[1]!.reviewResult).toEqual(beforeResume.exchanges[1]!.reviewResult);
+    expect([...f.rows.values()].filter(row => row.tags.includes('|read|')).map(row => row.id)).toEqual(['first', 'retry']);
+    expect(f.storage.searchEmails.mock.calls.every(([query]) => query.dateTo === 1_798_703_999)).toBe(true);
+    expect(vi.mocked(f.deps.callAI).mock.calls[0]![0]).toContain('USER_RETENTION_PREFERENCES_JSON: "Keep personal emails sent directly to me and ongoing conversations unread."');
+  });
+
   it('retains the original keep-only preferences in automatic child classification', async () => {
     const f = fixture([newsletter('first'), ...Array.from({ length: 199 }, (_, index) => newsletter(`kept-${index}`, true)), newsletter('last')]);
     const question = 'Review my unread emails and mark low-value conversations as read. Keep personal emails sent directly to me and ongoing conversations unread.';

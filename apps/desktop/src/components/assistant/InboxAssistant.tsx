@@ -278,6 +278,8 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
   const unavailableAccounts = exchange.answer.coverage.filter(account => account.status === 'unavailable').length;
   const searchLimited = exchange.answer.coverage.some(account => account.truncated);
   const omittedStatements = exchange.answer.warnings.some(warning => warning.includes('AI statements were omitted'));
+  const failureMessage = exchange.status === 'failed'
+    ? exchange.error?.trim() || exchange.answer.text.trim() || 'Request failed. Your question and activity have been saved.' : null;
   const reviewCard = exchange.review && <AssistantReviewCard review={exchange.review} busy={actionBusy} onApply={onApply} onUndo={onUndo} onRefresh={onRefresh} onContinue={onContinue} onStartAutoReview={onStartAutoReview} automation={automation} onOpen={source => onNavigateToSource?.(source)} />;
   if (exchange.reviewBatch && exchange.review) return <article aria-label={`Automatic review batch ${exchange.reviewBatch.number}`} className="assistant-surface rounded-xl border border-border">
     <button type="button" aria-expanded={batchExpanded} onClick={() => setBatchExpanded(value => !value)} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl p-3 text-left text-xs hover:bg-accent">
@@ -295,7 +297,8 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
             <button type="button" onClick={event => onViewActivity(exchange.id, event.currentTarget)} aria-label={`View activity for ${exchange.question}`} aria-expanded={activityExpanded} aria-controls="assistant-activity-panel" className="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-accent hover:text-foreground"><Activity className="h-3 w-3" />View activity</button>
           </div>
       {/* Mail and model output are untrusted text. Never interpret HTML here. */}
-      <div role={exchange.status === 'failed' ? 'alert' : undefined} className={`whitespace-pre-wrap break-words text-sm ${compact ? 'leading-6' : 'leading-7'} ${exchange.status === 'failed' ? 'rounded-lg border border-destructive/20 bg-destructive/5 p-3' : ''}`}><AnswerText text={exchange.answer.text} sources={exchange.answer.sources} onNavigate={onNavigateToSource} /></div>
+      {(!failureMessage || (exchange.answer.text.trim() && exchange.answer.text.trim() !== failureMessage)) && <div className={`whitespace-pre-wrap break-words text-sm ${compact ? 'leading-6' : 'leading-7'}`}><AnswerText text={exchange.answer.text} sources={exchange.answer.sources} onNavigate={onNavigateToSource} /></div>}
+      {failureMessage && <p role="alert" className={`whitespace-pre-wrap break-words rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm ${compact ? 'leading-6' : 'leading-7'}`}>{failureMessage}</p>}
       {(relatedSources || missingBodies > 0 || skippedAttachments > 0 || unavailableAccounts > 0 || searchLimited || omittedStatements) && <div role="status" aria-label="Answer reading status" className="rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
         {relatedSources && <p className="font-medium text-foreground">Needs verification</p>}
         {unavailableAccounts > 0 && <p>{unavailableAccounts} selected {unavailableAccounts === 1 ? 'account could' : 'accounts could'} not be searched.</p>}
@@ -305,7 +308,7 @@ function Answer({ exchange, onNavigateToSource, onViewActivity, activityExpanded
         {omittedStatements && <p>Statements that could not be verified were left out.</p>}
         <button type="button" onClick={event => onViewActivity(exchange.id, event.currentTarget)} className="font-medium text-primary hover:underline">View reading details</button>
       </div>}
-      {exchange.status && exchange.status !== 'completed' && !(exchange.status === 'failed' && exchange.error === exchange.answer.text) && <p className="text-xs text-muted-foreground">{exchange.status === 'failed' ? exchange.error || 'Request failed. Your question and activity have been saved.' : exchange.status === 'stopped' ? 'Stopped. Your question and activity have been saved.' : 'In progress…'}</p>}
+      {exchange.status && exchange.status !== 'completed' && exchange.status !== 'failed' && <p className="text-xs text-muted-foreground">{exchange.status === 'stopped' ? 'Stopped. Your question and activity have been saved.' : 'In progress…'}</p>}
       {!!exchange.usage?.calls.length && <AssistantUsage usage={exchange.usage} compact={compact} />}
       {reviewCard}
       {exchange.answer.sources.length > 0 && (
@@ -357,7 +360,9 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
   const [loading, setLoading] = useState(true);
   const [chatLoading, setChatLoading] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<{ message: string; requestId?: string } | null>(null);
+  const error = errorState?.message ?? null;
+  const setError = (message: string | null, requestId?: string) => setErrorState(message === null ? null : { message, requestId });
   const [loadError, setLoadError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [accountPickerOpen, setAccountPickerOpen] = useState(false);
@@ -402,6 +407,8 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
   const activitySequence = useRef(0);
   const liveActivities = useRef<InboxAssistantActivity[]>([]);
   const drafts = useRef(new Map<string, { question: string; accountIds: string[] }>());
+  const composerRevisions = useRef(new Map<string, number>());
+  const submittedQuestions = useRef(new Map<string, { requestId: string; question: string; revision: number; chatRevision: number }>());
   const activityTrigger = useRef<HTMLButtonElement | null>(null);
   const questionInput = useRef<HTMLTextAreaElement>(null);
   const accountPicker = useRef<HTMLDivElement>(null);
@@ -438,6 +445,23 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
     setStopFailed(run?.stopFailed ?? false);
   }, []);
 
+  const acknowledgeQuestion = useCallback((chatId: string, requestId: string) => {
+    const submitted = submittedQuestions.current.get(chatId);
+    if (!mounted.current || !submitted || submitted.requestId !== requestId) return;
+    submittedQuestions.current.delete(chatId);
+    if ((composerRevisions.current.get(chatId) ?? 0) !== submitted.revision
+      || (chatRevisions.current.get(chatId) ?? 0) !== submitted.chatRevision) return;
+    const draft = drafts.current.get(chatId);
+    if (draft?.question === submitted.question) drafts.current.set(chatId, { ...draft, question: '' });
+    if (activeChatRef.current === chatId) setQuestion(current => current === submitted.question ? '' : current);
+  }, []);
+
+  const acknowledgeSavedQuestions = useCallback((chat: InboxAssistantChat) => {
+    for (const exchange of chat.exchanges) {
+      if (exchange.requestId) acknowledgeQuestion(chat.id, exchange.requestId);
+    }
+  }, [acknowledgeQuestion]);
+
   const restoreExternalRuns = useCallback((summaries: InboxAssistantChatSummary[]) => {
     let changed = false;
     for (const chat of summaries) {
@@ -465,12 +489,13 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
       setWorkRevision(value => value + 1);
     }
     showWork(run);
+    acknowledgeSavedQuestions(chat);
     const draft = drafts.current.get(chat.id);
     const last = chat.exchanges[chat.exchanges.length - 1];
     const knownIds = new Set(knownAccounts.map(account => account.id));
     setQuestion(draft?.question ?? '');
     setSelectedAccountIds((draft?.accountIds ?? last?.accountIds ?? knownAccounts.map(account => account.id)).filter(id => knownIds.has(id)));
-  }, [showWork]);
+  }, [acknowledgeSavedQuestions, showWork]);
 
   const load = useCallback(async () => {
     const version = ++generation.current;
@@ -517,6 +542,8 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
         || (activity.chatId !== undefined && activity.chatId !== run.chatId)
         || !Number.isInteger(activity.sequence) || activity.sequence <= run.sequence) return;
       run.sequence = activity.sequence;
+      // Main persists each activity and its question before sending this event.
+      acknowledgeQuestion(run.chatId, run.requestId);
       run.work = { ...run.work, activities: [...run.work.activities, activity].slice(-400) };
       if (activity.reviewAutomation) {
         const previous = mailReceiptProgress.current.get(run.requestId) ?? { marked: 0, queued: 0 };
@@ -537,7 +564,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
       unsubscribe?.();
       // Main-process runs belong to their chat and survive renderer navigation.
     };
-  }, [load, showWork]);
+  }, [acknowledgeQuestion, load, showWork]);
 
   useEffect(() => { if (sourcePane) setActivityOpen(false); }, [sourcePane]);
   useEffect(() => {
@@ -561,6 +588,11 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
 
   const saveDraft = () => {
     if (activeChatId && !chatLoading) drafts.current.set(activeChatId, { question, accountIds: [...selectedAccountIds] });
+  };
+  const changeQuestion = (text: string) => {
+    const chatId = activeChatRef.current;
+    if (chatId) composerRevisions.current.set(chatId, (composerRevisions.current.get(chatId) ?? 0) + 1);
+    setQuestion(text);
   };
   const startWork = (chatId: string, requestId: string, work: WorkInspection) => {
     const run: ChatWork = { chatId, requestId, work: { ...work, requestId }, sequence: 0, stopping: false, stopFailed: false };
@@ -733,6 +765,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
     try {
       const result = await window.electronAPI.inboxAssistant.chat(chatId);
       if (!mounted.current || activeChatRef.current !== chatId || (chatRevisions.current.get(chatId) ?? 0) !== revision || !result.success) return;
+      acknowledgeSavedQuestions(result.data);
       setActiveChat(result.data);
       setExchanges(mergeChatExchanges(result.data.exchanges, completedExchanges.current.get(chatId)));
       setLiveWork(current => current?.kind === 'question' && result.data.exchanges.some(exchange => exchange.requestId === current.requestId && exchange.status !== 'pending' && exchange.status !== 'running') ? null : current);
@@ -810,6 +843,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
     const requestId = globalThis.crypto.randomUUID();
     const chatRevision = chatRevisions.current.get(chatId) ?? 0;
     const run = startWork(chatId, requestId, { kind: 'question', question: text, activities: [], status: 'running', coverage: [], warnings: [] });
+    if (!override) submittedQuestions.current.set(chatId, { requestId, question, revision: composerRevisions.current.get(chatId) ?? 0, chatRevision });
     setActivitySelection('live');
     setPendingQuestion(text);
     setAccountPickerOpen(false);
@@ -835,18 +869,17 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
       if (!result.success) throw new Error(result.error);
       if (result.data.chatId && result.data.chatId !== chatId) throw new Error('The answer belongs to a different conversation.');
       if (cancelledRequests.current.has(requestId)) return;
+      acknowledgeQuestion(chatId, requestId);
       const completed = { ...result.data, requestId: result.data.requestId ?? requestId, status: result.data.status ?? 'completed' as const, updatedAt: result.data.updatedAt ?? Date.now(), activities: result.data.activities ?? run.work.activities };
       cacheExchange(chatId, completed, chatRevision);
-      drafts.current.set(chatId, { question: '', accountIds: [...accountIds] });
       if (!isVisibleRequest(chatId, requestId)) return;
       setLiveWork(null);
       setActivitySelection(current => current === 'live' ? completed.id : current);
-      setQuestion('');
     } catch (cause) {
       if (isVisibleRequest(chatId, requestId) && !cancelledRequests.current.has(requestId)) {
         const message = cause instanceof Error ? cause.message : 'Could not answer this question. Please try again.';
         run.work = { ...run.work, status: 'error', error: message };
-        setError(message);
+        setError(message, requestId);
         setLiveWork(current => current ? { ...current, status: 'error', error: message } : current);
       }
     } finally {
@@ -1021,6 +1054,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
       metadataGeneration.current++;
       setChats(result.data.chats);
       drafts.current.delete(chat.id);
+      submittedQuestions.current.delete(chat.id);
       completedExchanges.current.delete(chat.id);
       chatWork.current.delete(chat.id);
       chatRevisions.current.set(chat.id, (chatRevisions.current.get(chat.id) ?? 0) + 1);
@@ -1039,11 +1073,10 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
   };
 
   // A failed question already has one accessible error in its saved answer.
-  // Keep action/connection failures visible without repeating the same message
-  // as a second banner below the conversation.
-  const lastSavedAnswer = exchanges.at(-1);
-  const errorInSavedAnswer = !!error && lastSavedAnswer?.status === 'failed'
-    && (lastSavedAnswer.error === error || lastSavedAnswer.answer.text === error);
+  // Match the request because IPC and saved-history fallbacks can differ.
+  // Other action/connection errors retain their own banner.
+  const errorInSavedAnswer = !!errorState?.requestId && exchanges.some(exchange => exchange.status === 'failed'
+    && exchange.requestId === errorState.requestId);
   const overview = view === 'overview';
   const scopeAccountIds = overview ? overviewAccountIds : selectedAccountIds;
   const setScopeAccountIds = overview ? setOverviewAccountIds : setSelectedAccountIds;
@@ -1106,6 +1139,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
         if (disposed || activeChatRef.current !== chatId || !result.success) return;
         const local = chatWork.current.get(chatId);
         if (!local) return;
+        acknowledgeSavedQuestions(result.data);
         setActiveChat(result.data);
         setExchanges(mergeChatExchanges(result.data.exchanges, completedExchanges.current.get(chatId)));
         if (!local.external) return;
@@ -1123,7 +1157,7 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
     };
     const timer = setInterval(() => void poll(), 1_500);
     return () => { disposed = true; clearInterval(timer); };
-  }, [activeChatId, workRevision, showWork]);
+  }, [acknowledgeSavedQuestions, activeChatId, workRevision, showWork]);
 
   useEffect(() => {
     if (![...chatWork.current.values()].some(run => run.external)) return;
@@ -1213,17 +1247,17 @@ export function InboxAssistant({ onNavigateToSource, onReplyToSource, sourcePane
         </div> : <div ref={messages} aria-label="Conversation messages" className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${compact ? 'space-y-6 px-4 py-5' : 'space-y-8 px-5 py-6'}`} aria-live="polite" aria-busy={busy || !!pendingQuestion}>
           {loading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading conversations…</p> : loadError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{loadError}</p><button onClick={() => void load()} className="mt-3 font-medium underline">Try again</button></div> : chatLoading ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{creating ? 'Creating conversation…' : 'Loading conversation…'}</p> : chatError ? <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm"><p>{chatError}</p><button type="button" onClick={() => activeChatId ? void selectChat(activeChatId, true) : void newChat()} className="mt-3 font-medium underline">Try again</button></div> : <>
             {accounts.length === 0 && <p role="status" className="text-sm text-muted-foreground">Connect an email account to ask Inbox Agent about your mail.</p>}
-            {exchanges.length === 0 && !liveWork && <div className={`mx-auto flex w-full max-w-3xl flex-col justify-center ${compact ? 'space-y-5 py-3' : 'space-y-6 py-10'}`}><div className="space-y-3"><span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Bot className="h-6 w-6" /></span><h2 className={`${compact ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight`}>Work on your inbox</h2><p className="text-sm text-muted-foreground">Search your mail, review unread conversations, and catch messages that missed categorization.</p></div><div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'sm:grid-cols-2'}`}>{starterActions.map(({ title, description, question: text, Icon }) => <button key={title} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className={`assistant-surface flex items-start gap-3 rounded-lg border border-border text-left hover:bg-accent disabled:opacity-50 ${compact ? 'p-3' : 'p-4'}`}><Icon className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><span className="space-y-1"><span className="block text-sm font-medium">{title}</span><span className="block text-xs leading-5 text-muted-foreground">{description}</span></span></button>)}</div><div className="flex flex-wrap gap-2">{starterQuestions.map(text => <button key={text} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { setQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className="rounded-full border border-border px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">{text}</button>)}</div></div>}
+            {exchanges.length === 0 && !liveWork && <div className={`mx-auto flex w-full max-w-3xl flex-col justify-center ${compact ? 'space-y-5 py-3' : 'space-y-6 py-10'}`}><div className="space-y-3"><span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Bot className="h-6 w-6" /></span><h2 className={`${compact ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight`}>Work on your inbox</h2><p className="text-sm text-muted-foreground">Search your mail, review unread conversations, and catch messages that missed categorization.</p></div><div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'sm:grid-cols-2'}`}>{starterActions.map(({ title, description, question: text, Icon }) => <button key={title} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { changeQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className={`assistant-surface flex items-start gap-3 rounded-lg border border-border text-left hover:bg-accent disabled:opacity-50 ${compact ? 'p-3' : 'p-4'}`}><Icon className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><span className="space-y-1"><span className="block text-sm font-medium">{title}</span><span className="block text-xs leading-5 text-muted-foreground">{description}</span></span></button>)}</div><div className="flex flex-wrap gap-2">{starterQuestions.map(text => <button key={text} type="button" disabled={!accounts.length || !activeChatId} onClick={() => { changeQuestion(text); if (visibleRef.current) questionInput.current?.focus(); }} className="rounded-full border border-border px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50">{text}</button>)}</div></div>}
             {displayedExchanges.map(exchange => <Answer key={exchange.id} compact={compact} exchange={exchange} onNavigateToSource={onNavigateToSource} onViewActivity={viewActivity} activityExpanded={activityOpen && activitySelection === exchange.id} userMessage={{ visible, onEdit: () => { setEditingExchangeId(exchange.id); setEditQuestion(exchange.question); }, disabled: busy || !!pendingQuestion, ...(editingExchangeId === exchange.id ? { editValue: editQuestion, onEditChange: setEditQuestion, onCancelEdit: () => setEditingExchangeId(null), onSaveEdit: () => void rewindChat(exchange) } : {}) }} actionBusy={busy || !!pendingQuestion || !!editingExchangeId} automation={liveReviewAutomation?.reviewId === exchange.review?.id ? liveReviewAutomation : undefined} onStartAutoReview={() => void applyReview(exchange, [], false, false, undefined, true)} onApply={(ids, manualSelection, action) => void applyReview(exchange, ids, false, manualSelection, action)} onUndo={ids => void applyReview(exchange, ids, true)} onRefresh={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} onContinue={() => void ask(undefined, { question: exchange.question, reviewKind: exchange.review?.kind, continueReviewId: exchange.review?.id, accountIds: exchange.review?.accounts.map(account => account.id), reviewOnly: true })} />)}
             {!!activeChat?.runs?.some(run => run.kind !== 'question' && run.requestId !== runningRequest) && <details aria-label="Drafts and mail actions" className="assistant-surface rounded-xl border border-border p-3"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">Drafts and mail actions</summary><div className="mt-3 space-y-4">{activeChat.runs.filter(run => run.kind !== 'question' && run.requestId !== runningRequest).map(run => <article key={run.requestId} aria-label={`Work record: ${run.question}`} className="space-y-2 border-t border-border pt-3"><p className="text-sm font-medium">{run.question}</p><p className="text-xs text-muted-foreground">{run.status === 'completed' ? 'Completed' : run.status === 'stopped' ? 'Stopped' : run.status === 'failed' ? 'Failed' : 'In progress'}</p>{run.error && <p className="text-xs text-destructive">{run.error}</p>}<div className="flex flex-wrap gap-3"><button type="button" onClick={event => viewActivity(`run:${run.requestId}`, event.currentTarget)} className="text-xs text-primary hover:underline">View activity</button>{run.draft && onOpenDraft && <button type="button" onClick={() => onOpenDraft(run.draft!)} className="text-xs text-primary hover:underline">Open draft</button>}</div><AssistantUsage usage={run.usage} compact={compact} /></article>)}</div></details>}
-            {liveWork && <div className="space-y-5" role={workRunning ? 'status' : undefined}>{liveWork.kind !== 'draft' && liveWork.kind !== 'action' && <UserMessage question={liveWork.question} visible={visible} onEdit={!workRunning && !stoppingRequestId ? () => { setQuestion(liveWork.question); if (visibleRef.current) questionInput.current?.focus(); } : undefined} />}{!workActive && <button type="button" onClick={event => viewActivity('live', event.currentTarget)} aria-label={workRunning ? 'View current activity' : liveWork.status === 'stopping' ? 'View stopping activity' : liveWork.status === 'done' ? 'View draft activity' : liveWork.status === 'error' ? 'View failed activity' : 'View stopped activity'} aria-expanded={activityOpen && activitySelection === 'live'} aria-controls="assistant-activity-panel" className="flex max-w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground">{workRunning ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Activity className="h-3.5 w-3.5 shrink-0" />}<span className="truncate">{liveWork.status === 'running' ? liveWork.activities[liveWork.activities.length - 1]?.message || (liveWork.kind === 'draft' ? 'Preparing draft from conversation' : 'Preparing email search') : liveWork.status === 'done' ? 'Draft ready · View activity' : liveWork.status === 'stopping' ? 'Stopping… · View activity' : liveWork.status === 'cancelled' ? 'Stopped · View activity' : 'Failed · View activity'}</span><ChevronDown className="h-3.5 w-3.5 shrink-0 -rotate-90" /></button>}</div>}
+            {liveWork && <div className="space-y-5" role={workRunning ? 'status' : undefined}>{liveWork.kind !== 'draft' && liveWork.kind !== 'action' && <UserMessage question={liveWork.question} visible={visible} onEdit={!workRunning && !stoppingRequestId ? () => { changeQuestion(liveWork.question); if (visibleRef.current) questionInput.current?.focus(); } : undefined} />}{!workActive && <button type="button" onClick={event => viewActivity('live', event.currentTarget)} aria-label={workRunning ? 'View current activity' : liveWork.status === 'stopping' ? 'View stopping activity' : liveWork.status === 'done' ? 'View draft activity' : liveWork.status === 'error' ? 'View failed activity' : 'View stopped activity'} aria-expanded={activityOpen && activitySelection === 'live'} aria-controls="assistant-activity-panel" className="flex max-w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground">{workRunning ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Activity className="h-3.5 w-3.5 shrink-0" />}<span className="truncate">{liveWork.status === 'running' ? liveWork.activities[liveWork.activities.length - 1]?.message || (liveWork.kind === 'draft' ? 'Preparing draft from conversation' : 'Preparing email search') : liveWork.status === 'done' ? 'Draft ready · View activity' : liveWork.status === 'stopping' ? 'Stopping… · View activity' : liveWork.status === 'cancelled' ? 'Stopped · View activity' : 'Failed · View activity'}</span><ChevronDown className="h-3.5 w-3.5 shrink-0 -rotate-90" /></button>}</div>}
           </>}
         </div>}
         {!overview && error && !errorInSavedAnswer && <p role="alert" className="mx-5 mb-3 shrink-0 rounded-lg bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
         {!overview && <form onSubmit={event => void ask(event)} className={`assistant-composer ${compact ? 'assistant-composer-compact' : ''}`}>
           <label htmlFor="inbox-assistant-question" className="sr-only">Message Inbox Agent</label>
           <div className="assistant-raised assistant-composer-input">
-            <textarea ref={questionInput} id="inbox-assistant-question" value={question} maxLength={4000} disabled={!!pendingQuestion || busy || !!editingExchangeId || !!loadError || !!chatError || !accounts.length || !activeChatId} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} placeholder="Message Inbox Agent…" className="assistant-composer-textarea" />
+            <textarea ref={questionInput} id="inbox-assistant-question" value={question} maxLength={4000} disabled={!!pendingQuestion || busy || !!editingExchangeId || !!loadError || !!chatError || !accounts.length || !activeChatId} onChange={event => changeQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} placeholder="Message Inbox Agent…" className="assistant-composer-textarea" />
             {workActive ? renderStopButton(stoppingRequestId ? stopFailed ? 'Retry stop' : 'Stopping request' : draftCreating ? 'Stop drafting' : 'Stop answering', true) : <button type="submit" disabled={!question.trim() || selectedAccountIds.length === 0 || busy || !!editingExchangeId || !!loadError || !!chatError || !activeChatId} aria-label="Ask Inbox Agent" title="Send message" className="assistant-primary-action assistant-composer-action assistant-composer-send"><ArrowUp aria-hidden="true" className="h-4 w-4" /></button>}
           </div>
           {compact && <div className="assistant-composer-options">{renderAccountPicker()}{modeControl}</div>}

@@ -58,6 +58,7 @@ beforeEach(() => {
     getFolders: vi.fn(async () => [{ id: 'inbox', path: 'INBOX', name: 'Inbox', specialUse: null }]),
     searchEmails: vi.fn(async (query: SearchQuery) => [...rows.values()].filter(row =>
       (query.isUnread === undefined || !row.tags.includes('|read|') === query.isUnread)
+      && (query.dateTo === undefined || row.date <= query.dateTo)
       && (!query.query || `${row.fromAddress} ${row.fromName ?? ''} ${row.subject} ${row.rawBody} ${row.cleanBody}`.toLowerCase().includes(query.query.toLowerCase())))
       .slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 25))),
     getEmail: vi.fn(async (id: string) => rows.get(id) ?? null),
@@ -258,6 +259,84 @@ describe('Inbox Agent conversation approval orchestration', () => {
     expect(prompt).toContain('Use To/Cc and the complete original conversation plus account-local history');
     expect(deps.setRead).not.toHaveBeenCalled();
     expect(deps.moveMail).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Review my unread emails and mark low-value conversations as read. mark olf email more then 115 days READ', 115],
+    ['Review my unread emails older then15days and mark low-value conversations as read.', 15],
+    ['Review my unread emails older than 15 days. Keep personal emails sent directly to me and ongoing conversations unread.', 15],
+    [PERSONAL_REVIEW + '. mark old email more than 15 days READ', 15],
+  ])('prepares the bounded older-than request without changing mail: %s', async (question, olderThanDays) => {
+    const now = 1_800_000_000_000;
+    deps.now = () => now;
+    expect(inboxAssistantGenericReviewRequest(question)).toBe(true);
+    const result = await service.ask({ ...request(), question });
+    const dateFilter = { olderThanDays, before: now / 1000 - olderThanDays * 86400 };
+    expect(result.review).toMatchObject({ kind: 'unread', dateFilter });
+    expect(result.answer.text).toContain(`older than ${olderThanDays} days`);
+    expect(vi.mocked(deps.callAI).mock.calls[0]![0]).toContain(`USER_REVIEW_DATE_FILTER_JSON: ${JSON.stringify(dateFilter)}`);
+    if (question.includes('Keep personal')) expect(vi.mocked(deps.callAI).mock.calls[0]![0]).toContain('USER_RETENTION_PREFERENCES_JSON: "Keep personal emails sent directly to me and ongoing conversations unread."');
+    if (question.includes('only keep')) expect(vi.mocked(deps.callAI).mock.calls[0]![0]).toContain('USER_RETENTION_PREFERENCES_JSON: "only keep unread email that send to me and not pormotinal and i have old histry of conversation them with"');
+    expect(deps.setRead).not.toHaveBeenCalled();
+    expect(deps.moveMail).not.toHaveBeenCalled();
+    expect(history.load(chatId).actionMode ?? 'review').toBe('review');
+  });
+
+  it('anchors the date and retention scope through a manual continuation even when the clock advances', async () => {
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const cutoff = now / 1000 - 15 * 86400;
+    rows.clear();
+    for (const row of [...Array.from({ length: 201 }, (_, index) => newsletter(`old-${index}`, { date: cutoff - 1, tags: '|INBOX|important|' })),
+      newsletter('boundary', { date: cutoff }), newsletter('last', { date: cutoff - 2 })]) rows.set(row.id, row);
+    const question = 'Review unread emails older than 15 days. Keep personal emails and ongoing conversations unread.';
+    const initial = await service.ask({ ...request(), question });
+    expect(initial.review!.items).toHaveLength(200);
+    now += 2 * 86400 * 1000;
+    vi.mocked(deps.callAI).mockClear();
+    const next = await service.ask({ ...request('next-aged'), continueReviewId: initial.review!.id, reviewOnly: true });
+    expect(next.review!.dateFilter).toEqual(initial.review!.dateFilter);
+    expect(next.review!.items.map(item => item.emailId)).toEqual(['old-200', 'last']);
+    expect(vi.mocked(deps.callAI).mock.calls[0]![0]).toContain('USER_RETENTION_PREFERENCES_JSON: "Keep personal emails and ongoing conversations unread."');
+    expect(vi.mocked(deps.callAI).mock.calls[0]![0]).toContain(`USER_REVIEW_DATE_FILTER_JSON: ${JSON.stringify(initial.review!.dateFilter)}`);
+    expect(deps.setRead).not.toHaveBeenCalled();
+  });
+
+  it('rejects a continuation that supplies a different age condition', async () => {
+    deps.now = () => 1_800_000_000_000;
+    const initial = await service.ask({ ...request(), question: 'Review unread emails older than 15 days' });
+    await expect(service.ask({ ...request('changed-age'), question: 'Review unread emails older than 16 days', continueReviewId: initial.review!.id })).rejects.toThrow(/scope changed|fresh review/);
+    expect(deps.setRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Review unread emails older than 15 days from news@offers.example',
+    'Review unread emails older than 15 days in promotions',
+    'Review unread emails older than 15 days before October',
+    'Review unread emails older than 0 days',
+    'Review unread emails older than -15 days',
+    'Review unread emails older than 1.5 days',
+    'Review unread emails older than 999999999 days',
+    'Review unread emails older than 15 days and older than 16 days',
+    'Review unread emails. Do not mark old emails more than 15 days read',
+    'Review unread emails except those older than 15 days',
+    'Review unread emails not older than 15 days',
+    'Review unread emails no older than 15 days',
+    'Review unread emails not those which are older than 15 days',
+    'Review unread emails not conversations that are older than 15 days',
+    'Review unread emails that are not at all older than 15 days',
+    'Review unread emails (not older than 15 days)',
+    'Review unread emails not (older than 15 days)',
+    'Review unread emails. Only keep emails older than 15 days unread',
+    'Review unread emails. Keep personal conversations unread older than 15 days',
+    'Review unread emails. Keep messages from news@offers.example unread. mark old email more than 15 days read',
+  ])('rejects unsupported or ambiguous age criteria before delegated actions: %s', async question => {
+    service.updateChat({ chatId, actionMode: 'approve_for_me' });
+    expect(inboxAssistantGenericReviewRequest(question)).toBe(false);
+    await expect(service.ask({ ...request(), question })).rejects.toThrow(/restrictions are not supported/);
+    expect(deps.openMailbox).not.toHaveBeenCalled();
+    expect(deps.callAI).not.toHaveBeenCalled();
+    expect(deps.setRead).not.toHaveBeenCalled();
   });
 
   it('keeps the original personal retention preferences when the next-batch request uses a generic label', async () => {

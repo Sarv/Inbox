@@ -21,7 +21,8 @@ function fixture(records: EmailRecord[] = [email('one')], second: EmailRecord[] 
       getEmail: vi.fn(async (id: string) => byId.get(id) ?? null),
       getEmailsByThread: vi.fn(async (threadId: string) => [...byId.values()].filter(row => row.threadId === threadId)),
       searchEmails: vi.fn(async (query: SearchQuery) => {
-        const unread = [...byId.values()].filter(row => query.isUnread === undefined || row.tags.includes('|read|') !== query.isUnread);
+        const unread = [...byId.values()].filter(row => (query.isUnread === undefined || row.tags.includes('|read|') !== query.isUnread)
+          && (query.dateTo === undefined || row.date <= query.dateTo));
         const threads = [...new Set(unread.map(row => row.threadId || row.id))];
         const selected = threads.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 25));
         return unread.filter(row => selected.includes(row.threadId || row.id));
@@ -54,6 +55,118 @@ function fixture(records: EmailRecord[] = [email('one')], second: EmailRecord[] 
   const deps: InboxAssistantActionDeps = { openMailbox: vi.fn(async id => { const mailbox = mailboxes.get(id); if (!mailbox) throw new Error('Account removed'); return mailbox; }), callAI, setRead, moveMail };
   return { deps, mailboxes, data, callAI, setRead, moveMail };
 }
+
+describe('older-than unread review', () => {
+  const dateFilter = { olderThanDays: 15, before: 1_791_600_000 };
+
+  it('queries the strict cutoff and changes only aged unread members while reviewing the complete conversation', async () => {
+    const f = fixture([
+      email('old', { threadId: 'mixed', date: dateFilter.before - 1 }),
+      email('boundary', { threadId: 'mixed', date: dateFilter.before }),
+      email('new', { threadId: 'mixed', date: dateFilter.before + 1 }),
+      email('already-read', { threadId: 'mixed', date: dateFilter.before - 2, tags: '|INBOX|read|' }),
+      email('only-new', { date: dateFilter.before + 10 }),
+    ]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter });
+    expect(review.dateFilter).toEqual(dateFilter);
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]).toMatchObject({ unreadEmailIds: ['old'], unreadCount: 1, messageCount: 4, recommendation: 'mark_read' });
+    expect(f.mailboxes.get('a')!.storage.searchEmails).toHaveBeenCalledWith(expect.objectContaining({ dateTo: dateFilter.before - 1 }));
+    expect(f.callAI.mock.calls[0]![0]).toContain('Subject: A seasonal sale');
+    expect(f.callAI.mock.calls[0]![0]).toContain(`USER_REVIEW_DATE_FILTER_JSON: ${JSON.stringify(dateFilter)}`);
+    expect(f.callAI.mock.calls[0]![0]).toContain('Age alone never establishes low value');
+    await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['old'], true);
+    expect(f.data.get('a')!.get('boundary')!.tags).not.toContain('|read|');
+    expect(f.data.get('a')!.get('new')!.tags).not.toContain('|read|');
+  });
+
+  it('retains full-thread important protections despite an aged target', async () => {
+    const f = fixture([email('old', { threadId: 'mixed', date: dateFilter.before - 1 }),
+      email('important-new', { threadId: 'mixed', date: dateFilter.before + 1, tags: '|INBOX|important|' })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter });
+    expect(review.items[0]).toMatchObject({ recommendation: 'keep_unread', unreadEmailIds: ['old'] });
+    expect(review.items[0]!.protectedReasons.join()).toContain('Important');
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps an active conversation unread when its current sent member is newer than the date scope', async () => {
+    const recent = Math.floor(Date.now() / 1000);
+    const f = fixture([email('old', { threadId: 'mixed', date: dateFilter.before - 1 }),
+      email('recent-reply', { threadId: 'mixed', date: recent, tags: '|INBOX|read|', fromAddress: accounts[0]!.email })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter });
+    expect(review.items[0]).toMatchObject({ recommendation: 'keep_unread', unreadEmailIds: ['old'] });
+    expect(review.items[0]!.protectedReasons.join()).toContain('ongoing business conversation');
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the age predicate after downloading a previously missing body', async () => {
+    const f = fixture([email('old', { date: dateFilter.before - 1, rawBody: '', cleanBody: '', hasBody: false })]);
+    const mailbox = f.mailboxes.get('a')!;
+    Object.assign(mailbox, { fetchBody: vi.fn(async () => {
+      const row = f.data.get('a')!.get('old')!;
+      row.date = dateFilter.before;
+      row.rawBody = '<p>A public seasonal promotion.</p>';
+      row.hasBody = true;
+      return row;
+    }) });
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter });
+    expect(review.items).toEqual([]);
+    expect(f.callAI).not.toHaveBeenCalled();
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('excludes unknown and invalid message timestamps from the age scope', async () => {
+    const f = fixture([email('valid', { date: dateFilter.before - 1 }), email('undated', { date: 0 }),
+      email('negative', { date: -1 }), email('fractional', { date: dateFilter.before - 1.5 })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter });
+    expect(review.items.map(item => item.emailId)).toEqual(['valid']);
+    await applyInboxAssistantReview(review, review.items.map(item => item.id), f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['valid'], true);
+  });
+
+  it('does not trust a forged display cutoff, target IDs or a subsequently mutated options object', async () => {
+    const filter = { ...dateFilter };
+    const f = fixture([email('old', { threadId: 'mixed', date: filter.before - 1 }), email('new', { threadId: 'mixed', date: filter.before + 1 })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter: filter });
+    filter.before += 100;
+    review.dateFilter!.before += 100;
+    review.items[0]!.unreadEmailIds.push('new');
+    await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps);
+    expect(f.setRead).toHaveBeenCalledExactlyOnceWith('a', ['old'], true);
+  });
+
+  it('rejects a changed date at apply and leaves the conversation unread', async () => {
+    const f = fixture([email('old', { date: dateFilter.before - 1 })]);
+    const review = await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter });
+    f.data.get('a')!.get('old')!.date = dateFilter.before + 1;
+    expect((await applyInboxAssistantReview(review, [review.items[0]!.id], f.deps)).skippedCount).toBe(1);
+    expect(f.setRead).not.toHaveBeenCalled();
+  });
+
+  it('uses the date context in the recommendation cache identity', async () => {
+    const f = fixture([email('old', { date: dateFilter.before - 100 })]);
+    const cache = new InboxAssistantRecommendationCache();
+    const options = { recommendationCache: cache, reviewCacheIdentity: 'provider-model', dateFilter };
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, options);
+    expect(f.callAI).toHaveBeenCalledTimes(1);
+    await prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined,
+      { ...options, dateFilter: { olderThanDays: 16, before: dateFilter.before - 1 } });
+    expect(f.callAI).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([{ olderThanDays: 0, before: 1 }, { olderThanDays: 1.5, before: 1 }, { olderThanDays: 15, before: NaN },
+    { olderThanDays: 15, before: 0 }, { olderThanDays: 15, before: 1, query: 'ignored' }])('rejects invalid host date filters before mailbox access: %j', async dateFilter => {
+    const f = fixture();
+    await expect(prepareInboxAssistantReview([accounts[0]!], 'unread', f.deps, undefined, undefined, { dateFilter })).rejects.toThrow(/date|cutoff/i);
+    expect(f.deps.openMailbox).not.toHaveBeenCalled();
+  });
+});
 
 describe('financial and business-report action protection', () => {
   it.each([
@@ -1111,6 +1224,7 @@ describe('explicit scoped read-flag commands', () => {
     'mark all bigbluebutton emails before yesterday unread', 'mark all emails except bigbluebutton unread',
     'mark all bigbluebutton emails unread and delete them', 'mark all emails unread', 'mark all inbox unread',
     'Review my unread emails', 'mark all bigbluebutton emails unread\nthen forward them',
+    'mark old emails more than 15 days read', 'mark old emails more then 115 days unread',
   ])('does not reinterpret unsupported or uncertain commands into a broader action: %s', question => {
     expect(parseInboxAssistantReadCommand(question)).toBeUndefined();
   });

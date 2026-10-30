@@ -3,11 +3,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { automaticCategorizationDeferred, conversationFoldersOf, conversationMembers, existingCategoryClassification, htmlToPlainText, parseAttachmentNames, parseTags, SENDER_BEHAVIOR_GUIDANCE, waitForAbortableOperation, type EmailRecord, type FolderRecord } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantAIWorkload, InboxAssistantProgress } from '../../src/types/inbox-assistant';
-import type { InboxAssistantReadCommand, InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewCoverage, InboxAssistantReviewItem, InboxAssistantReviewItemResult, InboxAssistantReviewKind, InboxAssistantReviewScope } from '../../src/types/inbox-assistant-actions';
+import type { InboxAssistantReadCommand, InboxAssistantReview, InboxAssistantReviewAction, InboxAssistantReviewApplyResult, InboxAssistantReviewCoverage, InboxAssistantReviewDateFilter, InboxAssistantReviewItem, InboxAssistantReviewItemResult, InboxAssistantReviewKind, InboxAssistantReviewScope } from '../../src/types/inbox-assistant-actions';
 
 import { compactInboxAssistantContent, type InboxAssistantContentMessage } from './inbox-assistant-content';
 import { inboxAssistantRecommendationFingerprint, type InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import type { AssistantResearchMailbox } from './inbox-assistant-retrieval';
+import { matchesInboxAssistantReviewDate, validInboxAssistantReviewDateFilter } from './inbox-assistant-review-date';
 import { unreadReviewContentProtections, unreadReviewRecommendationProtection } from './inbox-assistant-review-protection';
 
 export interface InboxAssistantReadReceipt {
@@ -33,6 +34,8 @@ export interface InboxAssistantReviewOptions {
   scope?: InboxAssistantReviewScope;
   /** User-authored keep-only criteria, validated by the host request router. */
   reviewPreferences?: string;
+  /** Immutable host-resolved age boundary; never supplied by model/renderer. */
+  dateFilter?: InboxAssistantReviewDateFilter;
   recommendationCache?: InboxAssistantRecommendationCache;
   /** Provider/model/request identity; absent identity disables cached decisions. */
   reviewCacheIdentity?: string;
@@ -47,7 +50,7 @@ export interface InboxAssistantReviewApplyOptions {
 
 const LIMIT = { threads: 200, page: 25, pages: 80, items: 1_000, members: 100, bodyChars: 12_000, promptChars: 64_000, calls: 40, responseChars: 40_000, duration: 240_000, expiry: 15 * 60_000 } as const;
 // Bump when the classifier contract or recommendation policy changes.
-const REVIEW_POLICY_VERSION = 'unread-triage-v9-human-dismissal-confidence';
+const REVIEW_POLICY_VERSION = 'unread-triage-v10-bounded-message-age';
 const PROTECTED = new Set(['important', 'starred', 'flagged', 'needs_response', 'needsresponse', 'invoice', 'invoices', 'finance', 'meeting', 'meetings', 'reminders']);
 const SOFT_CATEGORIES = new Set(['promotions', 'social', 'updates', 'forums']);
 const CURRENT_EXCHANGE_SECONDS = 30 * 86400;
@@ -64,6 +67,7 @@ interface Snapshot {
   targetRead: boolean;
   eligible: boolean;
   manualEligible: boolean;
+  dateFilter?: InboxAssistantReviewDateFilter;
   result?: InboxAssistantReviewItemResult;
   moveResult?: InboxAssistantReviewItemResult;
   undoMembers?: Map<string, string>;
@@ -151,6 +155,7 @@ export function parseInboxAssistantReadCommand(question: string): InboxAssistant
   const quoted = /^(?:"[^"\r\n]+"|'[^'\r\n]+')$/u.test(phrase);
   if (quoted) phrase = phrase.slice(1, -1).trim();
   else if (/\b(?:not|except|excluding|without|and|or|before|after|since|until|today|yesterday|tomorrow|last|this|category|categories|tag|tags|unread|read|only|delete|archive|move|forward|send|uncategori[sz]ed)\b/iu.test(phrase)
+    || /\b(?:older|more)\s+(?:than|then)\s*\d|\b\d+\s*days?\b/iu.test(phrase)
     || /^(?:promotions?|social|finance|invoices?|reminders?|important|starred|flagged)$/iu.test(phrase)) return undefined;
   if (!validScope({ query: phrase, field }) || /^(?:all|emails?|messages?|mail|inbox|conversations?|threads?)$/iu.test(phrase)) return undefined;
   return { kind: command[2]!.toLowerCase() === 'read' ? 'mark_read' : 'mark_unread', scope: { query: phrase, field } };
@@ -218,6 +223,8 @@ export async function prepareInboxAssistantReview(
   if (!['unread', 'uncategorized', 'mark_read', 'mark_unread'].includes(kind) || !accounts.length || accounts.length > 10
     || accounts.some(account => !account.id || !account.email) || unique(accounts.map(account => account.id)).length !== accounts.length) throw new Error('Select registered accounts and a review type.');
   if (options.reviewPreferences !== undefined && (typeof options.reviewPreferences !== 'string' || options.reviewPreferences.length > 4_000)) throw new Error('Keep unread preferences must contain at most 4,000 characters.');
+  if (options.dateFilter !== undefined && (!validInboxAssistantReviewDateFilter(options.dateFilter) || !['unread', 'uncategorized'].includes(kind))) throw new Error('Invalid unread review date cutoff. Prepare a fresh review.');
+  const dateFilter = options.dateFilter ? { ...options.dateFilter } : undefined;
   const exclusions = new Map<string, Set<string>>();
   for (const [accountId, ids] of Object.entries(options.excludeThreadIds ?? {})) {
     if (!accounts.some(account => account.id === accountId) || !Array.isArray(ids) || ids.length > 20_000
@@ -232,7 +239,7 @@ export async function prepareInboxAssistantReview(
   const effective = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   const timer = setTimeout(() => controller.abort(new Error('Review took too long. Narrow the account selection and try again.')), LIMIT.duration);
   timer.unref?.();
-  const review: InboxAssistantReview = { id: randomUUID(), kind, createdAt: Date.now(), expiresAt: Date.now() + LIMIT.expiry, status: 'ready', accounts: accounts.map(account => ({ ...account })), items: [], coverage: [], truncated: false };
+  const review: InboxAssistantReview = { id: randomUUID(), kind, ...(dateFilter ? { dateFilter: { ...dateFilter } } : {}), createdAt: Date.now(), expiresAt: Date.now() + LIMIT.expiry, status: 'ready', accounts: accounts.map(account => ({ ...account })), items: [], coverage: [], truncated: false };
   const trusted: TrustedReview = { id: review.id, expiresAt: review.expiresAt, items: new Map(), busy: false };
   const contexts = new Map<string, ReviewContent>();
   const cacheKeys = new Map<string, string>();
@@ -277,9 +284,9 @@ export async function prepareInboxAssistantReview(
         let newHeaders = 0;
         for (let page = 0; page < pageLimit; page++) {
           check(effective);
-          const rows = await storage.searchEmails({ query: '', scope: 'mailbox', isUnread: true, collapseThreads: true, limit: LIMIT.page, offset: page * LIMIT.page, sortBy: 'date', sortOrder: 'desc' });
+          const rows = await storage.searchEmails({ query: '', scope: 'mailbox', isUnread: true, ...(dateFilter ? { dateTo: dateFilter.before - 1 } : {}), collapseThreads: true, limit: LIMIT.page, offset: page * LIMIT.page, sortBy: 'date', sortOrder: 'desc' });
           if (!rows.length) break;
-          const seeds = rows.filter(email => !seen.has(threadKey(email)) && !read(email));
+          const seeds = rows.filter(email => !seen.has(threadKey(email)) && !read(email) && matchesInboxAssistantReviewDate(email, dateFilter));
           for (const seed of seeds) {
             const key = threadKey(seed);
             if (seen.has(key)) continue;
@@ -295,7 +302,7 @@ export async function prepareInboxAssistantReview(
             const target = { threadId: key, emailId: seed.id };
             let thread = await currentThread(mailbox, target, folders);
             if (!thread.length || thread.some(email => email.accountId && email.accountId !== account.id)) continue;
-            let unread = thread.filter(email => !read(email));
+            let unread = thread.filter(email => !read(email) && matchesInboxAssistantReviewDate(email, dateFilter));
             if (!unread.length || (kind === 'uncategorized' && !unread.some(email => unclassified(email, slugs)))) continue;
             const protection: string[] = [];
             const reviewSignals = new Set<string>();
@@ -369,7 +376,7 @@ export async function prepareInboxAssistantReview(
             // Rehydrate after downloads so discovered attachments/new arrivals are
             // part of the immutable action snapshot, rather than stale list rows.
             thread = await currentThread(mailbox, target, folders);
-            unread = thread.filter(email => !read(email));
+            unread = thread.filter(email => !read(email) && matchesInboxAssistantReviewDate(email, dateFilter));
             if (!unread.length) continue;
             const changedDuringReview = thread.length !== initialHeaders.size || thread.some(email => initialHeaders.get(email.id) !== headers(email));
             if (changedDuringReview) protection.push('Conversation membership or flags changed during review.');
@@ -384,7 +391,8 @@ export async function prepareInboxAssistantReview(
               protectedReasons: unique(protection), bodyUnavailable, attachmentsUnknown, manualSelectionAllowed: manualEligible, mailActionsAllowed: manualEligible, status: 'pending' };
             review.items.push(item);
             const state = snapshot(thread);
-            const trustedItem: Snapshot = { ...target, accountId: account.id, storage, members: state, targetIds: [...item.unreadEmailIds], targetRead: true, eligible: false, manualEligible };
+            const trustedItem: Snapshot = { ...target, accountId: account.id, storage, members: state, targetIds: [...item.unreadEmailIds], targetRead: true, eligible: false, manualEligible,
+              ...(dateFilter ? { dateFilter: { ...dateFilter } } : {}) };
             trusted.items.set(item.id, trustedItem);
             if (!protection.length) {
               const completeContent = content.join('\n\n');
@@ -408,7 +416,7 @@ export async function prepareInboxAssistantReview(
               if (item.protectedReasons.length) { coverage.reviewedThreads++; continue; }
               const key = cache && isCacheCurrent() ? inboxAssistantRecommendationFingerprint({ accountId: account.id, accountEmail: account.email,
                 providerIdentity: options.reviewCacheIdentity!, policyVersion: REVIEW_POLICY_VERSION,
-                members: [...state].sort(([left], [right]) => left.localeCompare(right)), content: JSON.stringify([completeContent, recipientContext, behaviorContext ?? null, [...reviewSignals].sort(), options.reviewPreferences ?? null]) }) : undefined;
+                members: [...state].sort(([left], [right]) => left.localeCompare(right)), content: JSON.stringify([completeContent, recipientContext, behaviorContext ?? null, [...reviewSignals].sort(), options.reviewPreferences ?? null, dateFilter ?? null]) }) : undefined;
               const cached = key ? cache?.get(key) : undefined;
               if (cached) {
                 item.recommendation = cached.recommendation; item.reason = cached.reason; item.confidence = cached.confidence;
@@ -457,6 +465,8 @@ export async function prepareInboxAssistantReview(
       'For clearly unsolicited marketing, that repeated human-dismissal pattern can support mark_read confidence >=0.9. This is supporting evidence, never a deterministic action rule. Valuable content, newer positive engagement and all protections take precedence.',
       'reviewSignals are bounded host observations: user_category:promotions/social/updates/forums, known_business_contact, prior_sent_contact and past_sent_thread_member are supporting evidence, not an unconditional keep or mark-read rule. Category review does not change user labels.',
       'recipientContext.addresses identifies this selected account and its validated aliases for interpreting To/Cc; complete=false means additional aliases may exist. These addresses never add mailbox scopes or authorize actions.',
+      ...(dateFilter ? ['This review targets only unread messages older than the supplied host-owned cutoff. Age is bounded supporting context when assessing relevance. Age alone never establishes low value or overrides personal correspondence, sender history, active conversations or any other protection. Review the complete supplied conversation, including newer/read members; only aged unread messages can be marked read.',
+        `USER_REVIEW_DATE_FILTER_JSON: ${JSON.stringify(dateFilter)}`] : []),
       ...(options.reviewPreferences ? ['Additional user retention preferences follow as JSON data. They can only retain more mail; they cannot override the protections above or authorize marking valuable/uncertain mail as read. Use To/Cc and the complete original conversation plus account-local history to judge direct/personal correspondence and ongoing relationships. Missing history never proves a message is disposable.',
         `USER_RETENTION_PREFERENCES_JSON: ${JSON.stringify(options.reviewPreferences)}`] : []),
       'Exact quoted-text references point to a message/turn inside that same conversation; include its retained original when judging the conversation.',
@@ -771,6 +781,7 @@ async function mutate(review: InboxAssistantReview, itemIds: string[], deps: Inb
           else {
             const ids = undo ? target.changedIds! : move ? [...target.members.keys()] : target.targetIds;
             const desiredRead = undo ? !target.targetRead : target.targetRead;
+            if (!undo && !move && target.dateFilter && ids.some(id => !current.some(email => email.id === id && matchesInboxAssistantReviewDate(email, target.dateFilter)))) throw new Error('The reviewed date scope changed. Prepare a fresh review.');
             if (!move && current.filter(email => ids.includes(email.id)).some(email => read(email) === desiredRead)) throw new Error('Read state changed. Refresh the review.');
             check(signal);
             // Revalidate the named owner at the last boundary before the one

@@ -84,7 +84,8 @@ describe('exact MIME attachment antivirus source', () => {
       ? Buffer.from(`Content-Type: application/pdf; name="${filename}"\r\nContent-Disposition: attachment; filename="${filename}"; size=334364\r\nContent-Transfer-Encoding: base64\r\n\r\n`)
       : Buffer.from(content));
     expect(await engine.listAttachmentScanParts('INBOX', 42)).toEqual([{ partId: '2', filename, byteLength: null }]);
-    expect(await engine.fetchAttachmentScanPart('INBOX', 42, '2', filename, 512 * 1024)).toEqual(content);
+    const downloaded = await engine.fetchAttachmentScanPart('INBOX', 42, '2', filename, 512 * 1024);
+    expect(downloaded.equals(content)).toBe(true);
     expect(client.downloadPart.mock.calls.map(call => call[1])).toEqual(['2.MIME', '2.MIME', '2']);
     expect(client.fetchSource).not.toHaveBeenCalled(); expect(client.downloadPartRaw).not.toHaveBeenCalled();
   });

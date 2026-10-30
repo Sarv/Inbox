@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InboxAssistant, type InboxAssistantProps } from '../../../../../src/components/assistant/InboxAssistant';
-import type { InboxAssistantActivity, InboxAssistantChat, InboxAssistantDraft, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult, InboxAssistantRunRecord, InboxAssistantUsage } from '../../../../../src/types/inbox-assistant';
+import type { InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantChat, InboxAssistantDraft, InboxAssistantExchange, InboxAssistantRequest, InboxAssistantResult, InboxAssistantRunRecord, InboxAssistantUsage } from '../../../../../src/types/inbox-assistant';
 import { act, cleanup, fire, render, settle, typeInto } from '../../../../helpers/render';
 
 const NOW = Date.UTC(2026, 9, 19, 10);
@@ -38,6 +38,7 @@ const api = {
   chats: vi.fn(async () => ok({ chats: [...stored.values()].map(({ exchanges: _exchanges, runs: _runs, usage: _usage, ...summary }) => summary), activeChatId: 'chat-a' })),
   chat: vi.fn(async (id: string) => ok(stored.get(id)!)),
   createChat: vi.fn(async () => { const value = chat('chat-b'); stored.set(value.id, value); return ok(value); }),
+  updateChat: vi.fn(async ({ chatId, actionMode }: { chatId: string; actionMode: InboxAssistantActionMode }): Promise<InboxAssistantResult<InboxAssistantChat>> => ok({ ...chat(chatId), actionMode })),
   ask: vi.fn(async (request: InboxAssistantRequest): Promise<InboxAssistantResult<InboxAssistantExchange>> => ok(answer(request, 'Completed answer'))),
   cancel: vi.fn(async (requestId: string) => ok({ requestId, cancelled: true })),
   draftEmail: vi.fn(async (): Promise<InboxAssistantResult<InboxAssistantDraft>> => ok({ chatId: 'chat-a', accountId: 'account-a', to: [], cc: [], subject: 'Saved draft', body: 'Saved draft body' })),
@@ -51,6 +52,7 @@ beforeEach(() => {
   stored.set('chat-a', chat('chat-a'));
   api.ask.mockReset().mockImplementation(async request => ok(answer(request, 'Completed answer')));
   api.chat.mockReset().mockImplementation(async id => ok(stored.get(id)!));
+  api.updateChat.mockReset().mockImplementation(async ({ chatId, actionMode }) => ok({ ...chat(chatId), actionMode }));
   api.draftEmail.mockReset().mockImplementation(async () => ok({ chatId: 'chat-a', accountId: 'account-a', to: [], cc: [], subject: 'Saved draft', body: 'Saved draft body' }));
   api.cancel.mockReset().mockImplementation(async requestId => ok({ requestId, cancelled: true }));
   Object.assign(window, { electronAPI: { inboxAssistant: api } });
@@ -64,6 +66,164 @@ function progress(requestId: string, chatId: string, message: string, sequence =
 }
 
 describe('Inbox Agent independent chat runs', () => {
+  it('clears an accepted question before completion and shows a saved failure in one readable alert', async () => {
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    ask(view, '  Review my unread emails and mark low-value conversations as read. mark olf email more then115days READ  ');
+    const request = api.ask.mock.calls[0]![0];
+    progress(request.requestId, request.chatId, 'Preparing email search');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    const message = 'The provider could not finish the review. Please try again.';
+    const failed: InboxAssistantExchange = { ...answer(request, ''), status: 'failed', error: message };
+    stored.set(request.chatId, { ...chat(request.chatId), exchanges: [failed], exchangeCount: 1 });
+    await act(async () => pending.resolve({ success: false, error: message })); await settle();
+    const article = view.byLabel(`Answer to ${request.question}`)!;
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    expect(article.querySelector('[role="alert"]')?.textContent).toBe(message);
+    expect(article.textContent?.split(message)).toHaveLength(2);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    expect(view.all('.assistant-user-message')).toHaveLength(1);
+  });
+
+  it('clears a question acknowledged by saved history when no progress event was received', async () => {
+    const message = 'The provider is unavailable. Please try again.';
+    api.ask.mockImplementationOnce(async request => {
+      stored.set(request.chatId, { ...chat(request.chatId), exchanges: [{ ...answer(request, ''), status: 'failed', error: message }], exchangeCount: 1 });
+      return { success: false, error: message };
+    });
+    const view = await mount();
+    ask(view, 'Review unread emails.'); await settle();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    expect(view.find('[role="alert"]')?.textContent).toBe(message);
+  });
+
+  it('acknowledges a saved background failure after returning without a progress event', async () => {
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    ask(view, 'Review unread emails.');
+    const request = api.ask.mock.calls[0]![0];
+    fire(button(view, 'New conversation'), 'click'); await settle();
+    typeInto(view.find('#inbox-assistant-question'), 'Keep this other draft.');
+    const message = 'The provider is unavailable. Please try again.';
+    stored.set(request.chatId, { ...chat(request.chatId), exchanges: [{ ...answer(request, ''), status: 'failed', error: message }], exchangeCount: 1 });
+    await act(async () => pending.resolve({ success: false, error: message })); await settle();
+    expect(api.chat).toHaveBeenCalledTimes(1);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep this other draft.');
+    fire(view.byLabel('Open conversation: First conversation'), 'click'); await settle();
+    expect(view.all('.assistant-user-message')).toHaveLength(1);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    fire(view.byLabel('Open conversation: Second conversation'), 'click'); await settle();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep this other draft.');
+  });
+
+  it('acknowledges a persisted running question through polling without a progress event', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    ask(view, 'Review unread emails.');
+    const request = api.ask.mock.calls[0]![0];
+    const saved: InboxAssistantExchange = { ...answer(request, ''), status: 'running' };
+    stored.set(request.chatId, { ...chat(request.chatId), exchanges: [saved], exchangeCount: 1 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_500); }); await settle();
+    expect(api.chat).toHaveBeenCalledTimes(2);
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    expect(view.byLabel('Stop answering')).not.toBeNull();
+    await act(async () => pending.resolve(ok(answer(request, 'Completed review.')))); await settle();
+  });
+
+  it('shows one alert when the failed request has an empty saved error and an IPC fallback', async () => {
+    const message = 'Inbox Agent could not complete the request.';
+    api.ask.mockImplementationOnce(async request => {
+      stored.set(request.chatId, { ...chat(request.chatId), exchanges: [{ ...answer(request, ''), status: 'failed', error: '' }], exchangeCount: 1 });
+      return { success: false, error: message };
+    });
+    const view = await mount();
+    ask(view, 'Review unread emails.'); await settle();
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    expect(view.find('[role="alert"]')?.textContent?.trim()).not.toBe('');
+  });
+
+  it('keeps a later action error visible after suppressing the failed question banner', async () => {
+    const message = 'Inbox Agent could not complete the request.';
+    api.ask.mockImplementationOnce(async request => {
+      stored.set(request.chatId, { ...chat(request.chatId), exchanges: [{ ...answer(request, ''), status: 'failed', error: '' }], exchangeCount: 1 });
+      return { success: false, error: message };
+    });
+    const view = await mount();
+    ask(view, 'Review unread emails.'); await settle();
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    api.updateChat.mockResolvedValueOnce({ success: false, error: message });
+    const mode = view.byLabel('Action mode') as HTMLSelectElement;
+    act(() => { mode.value = 'approve_for_me'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
+    await settle();
+    expect(view.all('[role="alert"]')).toHaveLength(2);
+    expect(view.all('[role="alert"]').map(alert => alert.textContent)).toEqual([
+      'Request failed. Your question and activity have been saved.', message,
+    ]);
+  });
+
+  it('preserves an unaccepted question and ignores progress for another request or chat', async () => {
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    const question = '  Keep this question until it is saved.  ';
+    ask(view, question);
+    const request = api.ask.mock.calls[0]![0];
+    progress('unrelated-request', request.chatId, 'Unrelated work');
+    progress(request.requestId, 'chat-b', 'Wrong conversation');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe(question);
+    const message = 'A selected account is no longer connected.';
+    await act(async () => pending.resolve({ success: false, error: message })); await settle();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe(question);
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    expect(view.find('[role="alert"]')?.textContent).toBe(message);
+  });
+
+  it('acknowledges a background question without clearing the current conversation draft', async () => {
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    ask(view, 'Review the first conversation.');
+    const request = api.ask.mock.calls[0]![0];
+    fire(button(view, 'New conversation'), 'click'); await settle();
+    typeInto(view.find('#inbox-assistant-question'), 'Keep my second conversation draft.');
+    progress(request.requestId, request.chatId, 'Preparing email search');
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep my second conversation draft.');
+    fire(view.byLabel('Open conversation: First conversation'), 'click'); await settle();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('');
+    await act(async () => pending.resolve(ok(answer(request, 'First answer.')))); await settle();
+    fire(view.byLabel('Open conversation: Second conversation'), 'click'); await settle();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe('Keep my second conversation draft.');
+  });
+
+  it('shows a fallback inside the alert for a saved failure with no error text', async () => {
+    const request = { requestId: 'failed-request', chatId: 'chat-a', question: 'Failed question', accountIds: ['account-a'] };
+    stored.set('chat-a', { ...chat('chat-a'), exchanges: [{ ...answer(request, ''), status: 'failed' }], exchangeCount: 1 });
+    const view = await mount();
+    expect(view.all('[role="alert"]')).toHaveLength(1);
+    expect(view.find('[role="alert"]')?.textContent).toBe('Request failed. Your question and activity have been saved.');
+  });
+
+  it('preserves a newly typed copy of a stopped question when its saved result arrives late', async () => {
+    const pending = deferred<InboxAssistantExchange>();
+    api.ask.mockImplementationOnce(() => pending.promise);
+    const view = await mount();
+    const question = 'Try this question again.';
+    ask(view, question);
+    const request = api.ask.mock.calls[0]![0];
+    fire(view.byLabel('Stop answering'), 'click'); await settle();
+    typeInto(view.find('#inbox-assistant-question'), '');
+    typeInto(view.find('#inbox-assistant-question'), question);
+    const stopped: InboxAssistantExchange = { ...answer(request, ''), status: 'stopped' };
+    stored.set(request.chatId, { ...chat(request.chatId), exchanges: [stopped], exchangeCount: 1 });
+    await act(async () => pending.resolve(ok(stopped))); await settle();
+    expect((view.find('#inbox-assistant-question') as HTMLTextAreaElement).value).toBe(question);
+  });
+
   it.each(['first', 'second'] as const)('starts a new conversation while another works and keeps answers separate when the %s chat finishes first', async finishesFirst => {
     const first = deferred<ReturnType<typeof answer>>();
     const second = deferred<ReturnType<typeof answer>>();

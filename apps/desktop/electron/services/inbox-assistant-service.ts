@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { waitForAbortableOperation } from '@sarvinbox/core';
 
 import type { InboxAssistantAccount, InboxAssistantActionMode, InboxAssistantActivity, InboxAssistantAIUsage, InboxAssistantAIWorkload, InboxAssistantCancellation, InboxAssistantChat, InboxAssistantChatList, InboxAssistantChatSummary, InboxAssistantDraft, InboxAssistantDraftRequest, InboxAssistantExchange, InboxAssistantProgress, InboxAssistantRequest, InboxAssistantReviewActionRequest, InboxAssistantRewind, InboxAssistantRunRecord } from '../../src/types/inbox-assistant';
-import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
+import type { InboxAssistantReview, InboxAssistantReviewAutomation, InboxAssistantReviewDateFilter, InboxAssistantReviewKind } from '../../src/types/inbox-assistant-actions';
 import type { LocalCalendarAvailability, LocalCalendarAvailabilityRequest, LocalCalendarPreferences } from '../../src/types/local-calendar';
 import { readInboxAssistantAIWorkload } from '../../src/utils/inbox-assistant-workload';
 
@@ -16,6 +16,7 @@ import { generateInboxAssistantDraft } from './inbox-assistant-draft';
 import type { InboxAssistantHistoryStore } from './inbox-assistant-history';
 import { InboxAssistantRecommendationCache } from './inbox-assistant-recommendation-cache';
 import { researchInboxAssistant, type AssistantResearchDeps } from './inbox-assistant-retrieval';
+import { inboxAssistantReviewDateLabel, parseInboxAssistantReviewDate } from './inbox-assistant-review-date';
 import { aggregateInboxAssistantUsage } from './inbox-assistant-usage';
 
 export interface InboxAssistantServiceDeps extends AssistantResearchDeps {
@@ -72,6 +73,8 @@ interface HeldReview {
   automaticExhausted?: boolean;
   /** Validated retention preferences from the original user review request. */
   reviewPreferences?: string;
+  /** Original host-owned cutoff, retained unchanged by every continuation. */
+  dateFilter?: InboxAssistantReviewDateFilter;
 }
 
 function validateRequest(value: unknown): InboxAssistantRequest {
@@ -111,6 +114,9 @@ function genericReviewWords(question: string): boolean {
 
 /** Retention criteria can keep more mail, never silently narrow the mailbox query. */
 export function inboxAssistantReviewPreferences(question: string): string | undefined {
+  const dated = parseInboxAssistantReviewDate(question, Date.now());
+  if (dated.invalid) return undefined;
+  question = dated.question;
   const clause = /\b(?:(?:only|please)\s+)?(?:keep|leave|retain|preserve|protect)\b/iu.exec(question);
   if (!clause || !genericReviewWords(question.slice(0, clause.index))
     || !/\b(?:review|triage|check|look|process)\b/iu.test(question.slice(0, clause.index))) return undefined;
@@ -126,7 +132,8 @@ export function inboxAssistantReviewPreferences(question: string): string | unde
 }
 
 export function inboxAssistantGenericReviewRequest(question: string): boolean {
-  return genericReviewWords(question) || inboxAssistantReviewPreferences(question) !== undefined;
+  const dated = parseInboxAssistantReviewDate(question, Date.now());
+  return !dated.invalid && (genericReviewWords(dated.question) || inboxAssistantReviewPreferences(dated.question) !== undefined);
 }
 
 function reviewText(review: InboxAssistantReview): string {
@@ -142,7 +149,7 @@ function reviewText(review: InboxAssistantReview): string {
   const applied = review.items.filter(item => item.status === 'applied' || item.status === 'queued').length;
   const uncategorized = review.items.filter(item => item.uncategorized).length;
   const unverified = review.items.filter(item => item.needsRetry).length;
-  return `Reviewed ${unverified ? `${review.items.length - unverified} of ` : ''}${review.items.length} unread conversations across ${accountText}. ${uncategorized} conversations include uncategorized mail.\n\n${applied ? `${applied} conversations marked as read. Review the results below or undo the changes.` : `${suggested} conversations are recommended for marking as read. Important, incomplete and uncertain conversations stay unread.`}${unverified ? `\n\nThe AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stays' : 'conversations. They stay'} unread. Continue to retry; verified recommendations are saved.` : review.truncated ? '\n\nMore unread mail remains. Continue with another review after this batch.' : ''}`;
+  return `Reviewed ${unverified ? `${review.items.length - unverified} of ` : ''}${review.items.length} unread conversations across ${accountText}.${review.dateFilter ? ` Scope: unread emails ${inboxAssistantReviewDateLabel(review.dateFilter)}.` : ''} ${uncategorized} conversations include uncategorized mail.\n\n${applied ? `${applied} conversations marked as read. Review the results below or undo the changes.` : `${suggested} conversations are recommended for marking as read. Important, incomplete and uncertain conversations stay unread.`}${unverified ? `\n\nThe AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stays' : 'conversations. They stay'} unread. Continue to retry; verified recommendations are saved.` : review.truncated ? '\n\nMore unread mail remains. Continue with another review after this batch.' : ''}`;
 }
 
 function validateDraftRequest(value: unknown): InboxAssistantDraftRequest {
@@ -474,10 +481,10 @@ export class InboxAssistantService {
     };
   }
 
-  private rememberReview(chatId: string, exchangeId: string, review: InboxAssistantReview, excludedThreads: Record<string, string[]>, reviewPreferences?: string): void {
+  private rememberReview(chatId: string, exchangeId: string, review: InboxAssistantReview, excludedThreads: Record<string, string[]>, reviewPreferences?: string, dateFilter?: InboxAssistantReviewDateFilter): void {
     for (const [id, held] of this.actionReviews) if (held.review.expiresAt <= Date.now()) this.actionReviews.delete(id);
     while (this.actionReviews.size >= 20) this.actionReviews.delete(this.actionReviews.keys().next().value!);
-    this.actionReviews.set(review.id, { chatId, exchangeId, review, excludedThreads, ...(reviewPreferences ? { reviewPreferences } : {}) });
+    this.actionReviews.set(review.id, { chatId, exchangeId, review, excludedThreads, ...(reviewPreferences ? { reviewPreferences } : {}), ...(dateFilter ? { dateFilter: { ...dateFilter } } : {}) });
   }
 
   /** Each batch keeps its own trusted snapshot and durable, independently undoable receipt. */
@@ -513,12 +520,13 @@ export class InboxAssistantService {
     const prepareNext = async (excludedThreads: Record<string, string[]>) => {
       const next = await waitForAbortableOperation(prepareInboxAssistantReview(selected, held.review.kind, deps, signal,
         activity => this.reportRun(run, activity, onActivity), { excludeThreadIds: excludedThreads, recommendationCache: this.recommendationCache, reviewCacheIdentity: identity,
-          isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === identity, ...(held.reviewPreferences ? { reviewPreferences: held.reviewPreferences } : {}) }), signal);
+          isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === identity, ...(held.reviewPreferences ? { reviewPreferences: held.reviewPreferences } : {}),
+          ...(held.dateFilter ? { dateFilter: { ...held.dateFilter } } : {}) }), signal);
       assertCurrent();
       batch = { id: randomUUID(), chatId: run.chatId, question: initial.question, reviewBatch: { runId: run.id, number: progress.batchesReviewed + 1 },
         accountIds: selected.map(account => account.id), createdAt: Date.now(), status: 'completed', review: next,
         answer: { text: reviewText(next), sources: [], coverage: [], warnings: next.coverage.flatMap(account => account.warnings) } };
-      this.rememberReview(run.chatId, batch.id, next, excludedThreads, held.reviewPreferences);
+      this.rememberReview(run.chatId, batch.id, next, excludedThreads, held.reviewPreferences, held.dateFilter);
       current = this.actionReviews.get(next.id)!;
       // Every expanded batch card can continue independently. Its checkpoint
       // starts before this batch, so a changed/skipped/failed source is freshly
@@ -588,7 +596,7 @@ export class InboxAssistantService {
         if (unverified) {
           progress.status = 'stopped'; progress.reason = `The AI review did not finish for ${unverified} ${unverified === 1 ? 'conversation. It stayed' : 'conversations. They stayed'} unread. Continue to retry; verified results are saved.`; break;
         }
-        if (!review.coverage.some(account => account.hasMore)) { held.automaticExhausted = true; current.automaticExhausted = true; progress.status = 'completed'; progress.reason = 'All available unread conversations in the selected accounts were reviewed. Important and uncertain mail stayed unread.'; break; }
+        if (!review.coverage.some(account => account.hasMore)) { held.automaticExhausted = true; current.automaticExhausted = true; progress.status = 'completed'; progress.reason = `All available unread conversations${held.dateFilter ? ` with emails ${inboxAssistantReviewDateLabel(held.dateFilter)}` : ''} in the selected accounts were reviewed. Important and uncertain mail stayed unread.`; break; }
         if (!review.items.length) { progress.status = 'stopped'; progress.reason = 'No new conversations were found within the scan limit. More mail may remain; narrow the account scope or refresh later.'; break; }
         if (progress.batchesReviewed >= AUTOMATIC_REVIEW_LIMITS.batches) {
           progress.status = 'stopped'; progress.reason = 'Reached the 10-batch limit. Start another automatic run to continue.'; break;
@@ -782,7 +790,13 @@ export class InboxAssistantService {
       report({ stage: 'search', status: 'running', message: 'Preparing email search', detail: `Searching ${selected.length} selected ${selected.length === 1 ? 'account' : 'accounts'}, including Sent and Archive.` });
       const callAI = (prompt: string) => { assertCurrent(); return this.callRunAI(run, prompt, controller.signal, 8_000); };
       const command = parseInboxAssistantReadCommand(request.question);
+      const datedReview = parseInboxAssistantReviewDate(request.question, this.deps.now?.() ?? Date.now());
       const requestedReviewKind = request.reviewKind ?? inboxAssistantReviewIntent(request.question);
+      if (!command && (datedReview.invalid || datedReview.dateFilter) && /\bunread\b/iu.test(request.question)
+        && /\b(?:review|triage|check|look|process)\b/iu.test(request.question)
+        && (datedReview.invalid || !inboxAssistantGenericReviewRequest(request.question))) {
+        throw new Error('These review restrictions are not supported. Use one older-than-days condition with a general unread review. No mail was changed.');
+      }
       const broadReview = !command && (requestedReviewKind === 'unread' || requestedReviewKind === 'uncategorized')
         && /\b(?:review|triage|check|look|process)\b/iu.test(request.question) && inboxAssistantGenericReviewRequest(request.question);
       // Inspect the first flag word after each actual mark clause. A later
@@ -801,15 +815,17 @@ export class InboxAssistantService {
       const reviewKind = command?.kind ?? requestedReviewKind;
       if (reviewKind) {
         if (!command && !inboxAssistantGenericReviewRequest(request.question)) {
-          throw new Error('This unread review uses the selected accounts. Sender, date and category restrictions are not supported yet, so no mail was changed. Use “Review my unread emails” or choose fewer accounts.');
+          throw new Error('This unread review uses the selected accounts. Sender, category and other date restrictions are not supported yet, so no mail was changed. Use “Review my unread emails older than 15 days” or choose fewer accounts.');
         }
         if (/\ball\s+accounts\b/i.test(request.question) && selected.length !== known.length) throw new Error('Select all accounts before reviewing mail across all accounts. No mail was changed.');
         const excludedThreads: Record<string, string[]> = {};
-        let reviewPreferences = command ? undefined : inboxAssistantReviewPreferences(request.question);
+        let reviewPreferences = command ? undefined : inboxAssistantReviewPreferences(datedReview.question);
+        let dateFilter = command ? undefined : datedReview.dateFilter;
         if (request.continueReviewId) {
           const prior = this.actionReviews.get(request.continueReviewId);
           if (!prior || prior.chatId !== request.chatId || prior.review.kind !== reviewKind || prior.review.expiresAt <= Date.now()
             || JSON.stringify(prior.review.scope) !== JSON.stringify(command?.scope)
+            || (dateFilter && dateFilter.olderThanDays !== prior.dateFilter?.olderThanDays)
             || prior.review.accounts.length !== selected.length || prior.review.accounts.some(account => !request.accountIds.includes(account.id))) {
             throw new Error('This review continuation expired or its account scope changed. Start a fresh review.');
           }
@@ -817,19 +833,21 @@ export class InboxAssistantService {
             ?? [...(prior.excludedThreads[account.id] ?? []), ...(prior.review.automation ? []
               : prior.review.items.filter(item => item.accountId === account.id && !item.needsRetry).map(item => item.threadId))])];
           reviewPreferences = prior.reviewPreferences;
+          dateFilter = prior.dateFilter ? { ...prior.dateFilter } : undefined;
         }
-        report({ stage: 'search', status: 'running', message: command ? 'Finding matching emails' : 'Reviewing unread conversations', detail: command ? `Matching “${command.scope.query}” in ${command.scope.field === 'any' ? 'sender, subject and original body' : command.scope.field}. Preparing mark as ${command.kind === 'mark_unread' ? 'unread' : 'read'}.` : 'Including uncategorized mail and checking every unread member of each conversation.' });
+        report({ stage: 'search', status: 'running', message: command ? 'Finding matching emails' : 'Reviewing unread conversations', detail: command ? `Matching “${command.scope.query}” in ${command.scope.field === 'any' ? 'sender, subject and original body' : command.scope.field}. Preparing mark as ${command.kind === 'mark_unread' ? 'unread' : 'read'}.` : `${dateFilter ? `Unread emails ${inboxAssistantReviewDateLabel(dateFilter)}. ` : ''}Including uncategorized mail and checking complete conversations.` });
         const reviewCacheIdentity = this.deps.reviewCacheIdentity?.();
         const review = await waitForAbortableOperation(prepareInboxAssistantReview(selected, reviewKind, this.reviewDeps(controller.signal), controller.signal, report, { excludeThreadIds: excludedThreads,
           recommendationCache: this.recommendationCache, reviewCacheIdentity, isCacheCurrent: () => this.deps.reviewCacheIdentity?.() === reviewCacheIdentity,
           ...(reviewPreferences ? { reviewPreferences } : {}),
+          ...(dateFilter ? { dateFilter } : {}),
           ...(command ? { scope: command.scope } : {}) }), controller.signal);
         assertCurrent();
         const exchange: InboxAssistantExchange = {
           id: run.record.exchangeId!, chatId: request.chatId, question: request.question, accountIds: request.accountIds, createdAt: run.record.startedAt, review,
           answer: { text: reviewText(review), sources: [], coverage: [], warnings: review.coverage.flatMap(account => account.warnings) },
         };
-        this.rememberReview(request.chatId, exchange.id, review, excludedThreads, reviewPreferences);
+        this.rememberReview(request.chatId, exchange.id, review, excludedThreads, reviewPreferences, dateFilter);
         // Approval is a saved choice for user requests in this conversation.
         // Changing it never starts work by itself or enables a mail daemon.
         const mode = this.deps.history.load(request.chatId, { select: false }).actionMode ?? 'review';
