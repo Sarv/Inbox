@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.10] - 2026-10-30
+
+### Added
+- Unread review supports requests such as “Review my unread emails older than
+  15 days.” Age provides context for assessing value; important mail and active
+  conversations stay protected, and the current approval mode is respected.
+
+### Fixed
+- Attachment downloads and previews resolve the correct filename when a mail
+  server reports malformed metadata, while retaining antivirus checks.
+- Dismissed attachment notifications stay hidden when another file is opened.
+  Retrying a preview no longer brings back earlier failed attempts.
+- Sent Inbox Agent messages clear from the input once saved, including failed
+  requests and background chats. Newer drafts remain intact.
+- Failed agent requests show one readable error instead of an empty red alert
+  and a duplicate message.
+- Date-scoped review changes only matching older unread messages in a thread,
+  retains its cutoff between batches, and rejects invalid or ambiguous dates.
+
 ## [1.4.9] - 2026-10-28
 
 ### Added
@@ -1218,7 +1237,8 @@ built. Its changes ship in 1.3.7.
   `allowInsecureTLS`.
 - `openExternal` restricted to an allowlist of URL schemes.
 
-[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.9...HEAD
+[Unreleased]: https://github.com/Sarv/Inbox/compare/v1.4.10...HEAD
+[1.4.10]: https://github.com/Sarv/Inbox/releases/tag/v1.4.10
 [1.4.9]: https://github.com/Sarv/Inbox/releases/tag/v1.4.9
 [1.4.6]: https://github.com/Sarv/Inbox/releases/tag/v1.4.6
 [1.4.5]: https://github.com/Sarv/Inbox/releases/tag/v1.4.5
