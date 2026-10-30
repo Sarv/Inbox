@@ -15,9 +15,10 @@ function decodedName(value: string | undefined): string {
 }
 
 /**
- * Some servers omit BODYSTRUCTURE parameter values. Recover only the MIME
- * headers, never the message or attachment bodies, while retaining the server's
- * exact numeric part handles. The same resolution is repeated before a scan.
+ * Some servers omit BODYSTRUCTURE parameter values or shift the next key into
+ * a filename (for example "SIZE"). Resolve names from the bounded MIME headers,
+ * even when BODYSTRUCTURE supplies a name, retaining exact numeric part handles.
+ * Never fetch message/attachment bodies here. Repeat this resolution before a scan.
  */
 export async function attachmentScanNodes(
   client: IIMAPClient,
@@ -52,11 +53,6 @@ export async function attachmentScanNodes(
   let totalBytes = 0;
   for (const node of candidates) {
     if (signal?.aborted) throw new Error('Attachment scan cancelled');
-    const name = decodedName(node.disposition?.params?.filename || node.params?.name);
-    if (name) {
-      result.push({ ...node, disposition: { type: node.disposition?.type || 'attachment', params: { ...node.disposition?.params, filename: name } } });
-      continue;
-    }
     // An unnamed text node may still contain an attachment name that the server
     // stripped. Inspect its MIME header too, so an incomplete structure cannot
     // silently hide a second attachment with the same filename.
@@ -80,7 +76,9 @@ export async function attachmentScanNodes(
       const kind = (disposition.value || '').trim().toLowerCase();
       if (recovered || kind === 'attachment') {
         result.push({ ...node,
-          encoding: libmime.parseHeaderValue(headers.getFirst('content-transfer-encoding')).value.trim().toLowerCase(),
+          // Match ImapFlow's transfer decoder, including legal MIME comments,
+          // so the short-base64 refusal examines the encoding actually decoded.
+          encoding: libmime.parseHeaderValue(headers.getFirst('content-transfer-encoding')).value.replace(/\(.*\)/g, '').trim().toLowerCase(),
           disposition: { type: kind || 'attachment', params: { filename: recovered || `Attachment ${node.part}` } },
         });
       }

@@ -442,3 +442,71 @@ describe('App-owned saved downloads', () => {
     expect(mounted.byLabel('Attachment: report.pdf')).not.toBeNull();
   });
 });
+
+describe('Dismissed attachment transfers', () => {
+  it('keeps dismissed failed and saved notifications hidden when another attachment opens', async () => {
+    prepareAttachmentPreview.mockResolvedValueOnce({ success: false, error: 'Download blocked: scanning failed. Try again when the scanner is available.' });
+    const mounted = render(screen(<Mail filenames={['blocked.pdf', 'saved.pdf', 'new.pdf']} />));
+    fire(mounted.byLabel('Open blocked.pdf'), 'click');
+    await settle();
+    fire(mounted.byLabel('Save a copy of saved.pdf'), 'click');
+    await settle();
+    expect(mounted.all('.attachment-transfer')).toHaveLength(2);
+    fire(mounted.byLabel('Dismiss blocked.pdf notification'), 'click');
+    fire(mounted.byLabel('Dismiss saved.pdf notification'), 'click');
+    expect(mounted.byLabel('Attachment transfers')).toBeNull();
+
+    fire(mounted.byLabel('Open new.pdf'), 'click');
+    await settle();
+    expect(mounted.byLabel('Attachment: new.pdf')).not.toBeNull();
+    expect(mounted.all('.attachment-transfer').map(row => row.getAttribute('aria-label'))).toEqual(['new.pdf']);
+  });
+
+  it.each(['active', 'ready'] as const)('restores only the selected %s preview notification when reopening it', async (status) => {
+    const pending = deferred<HostResult>();
+    prepareAttachmentPreview.mockReturnValueOnce(pending.promise);
+    const mounted = render(screen(<Mail filenames={['cached.pdf', 'saved.pdf']} />));
+    fire(mounted.byLabel('Save a copy of saved.pdf'), 'click');
+    await settle();
+    fire(mounted.byLabel('Open cached.pdf'), 'click');
+    fire(mounted.byLabel('Dismiss saved.pdf notification'), 'click');
+    fire(mounted.byLabel('Dismiss cached.pdf notification'), 'click');
+    if (status === 'ready') await resolve(pending, { success: true, url: previewUrl('cached.pdf') });
+    expect(mounted.byLabel('Attachment transfers')).toBeNull();
+
+    fire(mounted.byLabel('Open cached.pdf'), 'click');
+    expect(mounted.all('.attachment-transfer').map(row => row.getAttribute('aria-label'))).toEqual(['cached.pdf']);
+    if (status === 'active') await resolve(pending, { success: true, url: previewUrl('cached.pdf') });
+    expect(mounted.byLabel('Attachment: cached.pdf')).not.toBeNull();
+    expect(prepareAttachmentPreview).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the failed attempt hidden when retrying its preview', async () => {
+    prepareAttachmentPreview.mockResolvedValueOnce({ success: false, error: 'Download blocked: scanning failed. Try again when the scanner is available.' });
+    const mounted = render(screen());
+    fire(mounted.byLabel('Open report.pdf'), 'click');
+    await settle();
+    expect(mounted.find('.attachment-transfer')?.getAttribute('data-status')).toBe('failed');
+
+    fire(openButton('Try again'), 'click');
+    await settle();
+    expect(mounted.byLabel('Attachment: report.pdf')).not.toBeNull();
+    expect(mounted.all('.attachment-transfer').map(row => row.getAttribute('data-status'))).toEqual(['ready']);
+  });
+
+  it('does not restore an older failed attempt when reopening a cached retry', async () => {
+    const pending = deferred<HostResult>();
+    prepareAttachmentPreview.mockResolvedValueOnce({ success: false, error: 'Download blocked: scanning failed. Try again when the scanner is available.' })
+      .mockReturnValueOnce(pending.promise);
+    const mounted = render(screen());
+    fire(mounted.byLabel('Open report.pdf'), 'click');
+    await settle();
+    fire(openButton('Try again'), 'click');
+    fire(mounted.byLabel('Dismiss report.pdf notification'), 'click');
+    await resolve(pending, { success: true, url: previewUrl('report.pdf') });
+
+    fire(mounted.byLabel('Open report.pdf'), 'click');
+    expect(mounted.byLabel('Attachment: report.pdf')).not.toBeNull();
+    expect(mounted.all('.attachment-transfer').map(row => row.getAttribute('data-status'))).toEqual(['ready']);
+  });
+});

@@ -62,7 +62,14 @@ export function AttachmentTransferProvider({ children, resolveAccountId }: { chi
     if (previous?.key === key && !previous.controller.signal.aborted && (!previous.url || leaseCurrent)) {
       previous.autoOpen = true;
       if (previous.url || attachmentViewerKind(attachment.name) === 'unsupported') setExpanded(true);
-      setDismissed(new Set());
+      // Restore this request's notification without reviving dismissed history.
+      const transfer = controller.transfers.find(item => item.key === key && item.operation === 'preview' &&
+        item.status === (previous.url ? 'ready' : 'active'));
+      if (transfer) setDismissed(dismissed => {
+        const next = new Set(dismissed);
+        next.delete(transfer.id);
+        return next;
+      });
       return;
     }
     previous?.controller.abort();
@@ -72,8 +79,6 @@ export function AttachmentTransferProvider({ children, resolveAccountId }: { chi
     pending.current = current;
     setPreview(current);
     setExpanded(false);
-    // An explicitly re-opened file should be visible in the progress panel.
-    setDismissed(new Set());
     if (attachmentViewerKind(attachment.name) === 'unsupported') {
       setExpanded(true);
       return;
@@ -89,7 +94,7 @@ export function AttachmentTransferProvider({ children, resolveAccountId }: { chi
       setPreview({ ...current });
       setExpanded(current.autoOpen);
     });
-  }, [preparePreview, release, resolveTarget]);
+  }, [controller.transfers, preparePreview, release, resolveTarget]);
 
   const actions = useMemo(() => ({ ...controller, requestPreview }), [controller, requestPreview]);
   const minimize = useCallback(() => {

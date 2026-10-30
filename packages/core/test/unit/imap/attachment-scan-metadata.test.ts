@@ -24,6 +24,23 @@ describe('bounded exact MIME header recovery for scanning', () => {
     expect(downloadPart).toHaveBeenCalledWith(42, '2.MIME', { maxBytes: 65536, signal: undefined, timeoutMs: expect.any(Number) });
   });
 
+  it('uses MIME headers when stripped BODYSTRUCTURE values shift SIZE into the filename', async () => {
+    const filename = '51_Letter_to_MSP_Akamai_Services_dt-27.10.2026.pdf';
+    const { client, structure, downloadPart } = fixture({ '2.MIME': `Content-Type: application/pdf; name="${filename}"\r\nContent-Disposition: attachment; filename="${filename}"; size=334364\r\nContent-Transfer-Encoding: base64\r\n\r\n` });
+    structure.parts![0].disposition = { type: 'attachment', params: { filename: 'SIZE', 'creation-date': 'MODIFICATION-DATE' } };
+    const [node] = await attachmentScanNodes(client, 42, structure);
+    expect(node.part).toBe('2');
+    expect(node.disposition?.params?.filename).toBe(filename);
+    expect(node.encoding).toBe('base64');
+    expect(downloadPart.mock.calls.map(call => call[1])).toEqual(['2.MIME']);
+  });
+
+  it('does not mistake a real file named SIZE for malformed server metadata', async () => {
+    const { client, structure } = fixture({ '2.MIME': 'Content-Disposition: attachment; filename="SIZE"\r\n\r\n' });
+    structure.parts![0].disposition = { type: 'attachment', params: { filename: 'SIZE' } };
+    expect((await attachmentScanNodes(client, 42, structure))[0].disposition?.params?.filename).toBe('SIZE');
+  });
+
   it.each([
     ['filename="=?UTF-8?B?UsOpc3Vtw6kucGRm?="', 'Résumé.pdf'],
     ["filename*=UTF-8''R%C3%A9sum%C3%A9.pdf", 'Résumé.pdf'],
@@ -57,6 +74,16 @@ describe('bounded exact MIME header recovery for scanning', () => {
       '2.MIME': 'Content-Disposition: attachment; filename="same.pdf"\r\n\r\n',
       '3.MIME': 'Content-Disposition: attachment; filename="same.pdf"\r\n\r\n',
     });
+    expect((await attachmentScanNodes(client, 42, structure)).map(n => [n.part, n.disposition?.params?.filename])).toEqual([['2', 'same.pdf'], ['3', 'same.pdf']]);
+  });
+
+  it('cannot hide duplicate MIME filenames behind different fabricated BODYSTRUCTURE names', async () => {
+    const { client, structure } = fixture({
+      '2.MIME': 'Content-Disposition: attachment; filename="same.pdf"\r\n\r\n',
+      '3.MIME': 'Content-Disposition: attachment; filename="same.pdf"\r\n\r\n',
+    });
+    structure.parts![0].disposition!.params = { filename: 'same.pdf' };
+    structure.parts![1].disposition!.params = { filename: 'SIZE' };
     expect((await attachmentScanNodes(client, 42, structure)).map(n => [n.part, n.disposition?.params?.filename])).toEqual([['2', 'same.pdf'], ['3', 'same.pdf']]);
   });
 
