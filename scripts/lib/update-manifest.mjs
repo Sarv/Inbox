@@ -5,7 +5,8 @@
  *
  * Why it exists (CASA M-3): electron-updater trusts the sha512 in a release's
  * latest*.yml, and that file sits in the SAME GitHub release as the binaries it
- * vouches for. Windows and Linux builds aren't OS-signed, so anyone able to
+ * vouches for. Linux builds (and Windows builds until Authenticode signing is
+ * switched on) aren't OS-signed, so anyone able to
  * alter a release could ship every installed copy a binary of their choosing.
  * Each release now also carries update-manifest.json — every artifact's sha512
  * — with an Ed25519 signature from a key that exists only in the

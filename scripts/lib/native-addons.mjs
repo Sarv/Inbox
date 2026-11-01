@@ -74,7 +74,7 @@ export function findNativeAddons(root) {
  * @param {string} root
  * @returns {fs.Dirent[]}
  */
-function readTreeOnDisk(root) {
+export function readTreeOnDisk(root) {
   const asarWas = process.noAsar;
   process.noAsar = true;
   try {
