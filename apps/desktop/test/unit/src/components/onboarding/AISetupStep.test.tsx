@@ -6,7 +6,7 @@ import { AISetupStep, type AISetupStage, type AISetupStepProps } from '../../../
 import { setAiConsent } from '../../../../../src/services/ai-consent';
 import { addValidatedProvider, loadAISettings, testProvider } from '../../../../../src/services/ai-service';
 import { checkAIConnection, loadSarvAIConnection, makeAIConnection, type OnboardingAIConnection } from '../../../../../src/services/onboarding-ai-connection';
-import { cleanup, fire, render, settle, toggle, typeInto, type Mounted } from '../../../../helpers/render';
+import { act, cleanup, fire, render, settle, toggle, typeInto, type Mounted } from '../../../../helpers/render';
 
 vi.mock('../../../../../src/services/ai-consent', () => ({ setAiConsent: vi.fn(), SARV_AI_DISCLOSURE: 'Sarv processes new mail from every connected account.' }));
 vi.mock('../../../../../src/services/ai-service', async (importOriginal) => {
@@ -219,6 +219,25 @@ describe('AI onboarding', () => {
     expect(onComplete).toHaveBeenCalledOnce();
   });
 
+  it.each(['back', 'hidden', 'unmounted'] as const)('cancels a browser sign-in when %s after 61 seconds', async (action) => {
+    vi.useFakeTimers();
+    vi.mocked(loadSarvAIConnection).mockRejectedValueOnce(new Error('Sign in required'));
+    let resolveFlow!: (value: unknown) => void;
+    startFlow.mockReturnValueOnce(new Promise((resolve) => { resolveFlow = resolve; }));
+    const view = render(<Harness />);
+    fire(button(view, 'Sarv AI'), 'click'); await settle();
+    fire(button(view, 'Sign in with Sarv'), 'click');
+    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+    expect(cancel).not.toHaveBeenCalled();
+    if (action === 'back') fire(button(view, 'Back'), 'click');
+    else if (action === 'hidden') view.rerender(<Harness active={false} />);
+    else view.unmount();
+    expect(cancel).toHaveBeenCalled();
+    resolveFlow({ success: true, data: { email: 'demo@sarv.example' } }); await settle();
+    expect(loadSarvAIConnection).toHaveBeenCalledOnce();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   // Native provider metadata plus a key saved in the vault skips config.
   // (Changed shape: the renderer learns only that a key is saved — CASA H-1.)
   it('opens models immediately for a previously stored provider', () => {
@@ -352,8 +371,9 @@ describe('AI onboarding', () => {
     expect(view.byLabel('Model')).toHaveProperty('value', 'demo-model');
   });
 
-  // A hung OAuth operation must stop its spinner and offer retry/skip after timeout.
-  it('times out a pending OAuth sign-in and rejects late completion', async () => {
+  // Interactive sign-in may include first-time setup in the browser. Its
+  // native five-minute deadline must outlive the API connection deadline.
+  it('accepts a Sarv OAuth callback after 61 seconds', async () => {
     vi.useFakeTimers();
     vi.mocked(loadSarvAIConnection).mockRejectedValueOnce(new Error('Sign in required'));
     let resolveFlow!: (value: unknown) => void;
@@ -361,12 +381,71 @@ describe('AI onboarding', () => {
     const view = render(<Harness />);
     fire(button(view, 'Sarv AI'), 'click'); await settle();
     fire(button(view, 'Sign in with Sarv'), 'click');
-    await vi.advanceTimersByTimeAsync(60_000); await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+    expect(view.find('[role="alert"]')).toBeNull();
+    expect(button(view, 'Sign in with Sarv')).toHaveProperty('disabled', true);
+    expect(cancel).not.toHaveBeenCalled();
+    resolveFlow({ success: true, data: { email: 'demo@sarv.example' } }); await settle();
+    expect(view.container.textContent).toContain('Choose your model');
+    expect(view.container.textContent).toContain('demo@sarv.example');
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it('waits for the native OAuth timeout and lets the user retry', async () => {
+    vi.useFakeTimers();
+    vi.mocked(loadSarvAIConnection).mockRejectedValueOnce(new Error('Sign in required'));
+    startFlow.mockImplementationOnce(() => new Promise((resolve) => {
+      setTimeout(() => resolve({ success: false, error: 'OAuth flow timed out (5 minutes)' }), 300_000);
+    }));
+    const view = render(<Harness />);
+    fire(button(view, 'Sarv AI'), 'click'); await settle();
+    fire(button(view, 'Sign in with Sarv'), 'click');
+    await act(async () => { await vi.advanceTimersByTimeAsync(299_000); });
+    expect(view.find('[role="alert"]')).toBeNull();
+    expect(button(view, 'Sign in with Sarv')).toHaveProperty('disabled', true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(view.find('[role="alert"]')?.textContent).toContain('could not complete');
+    expect(button(view, 'Sign in with Sarv')).toHaveProperty('disabled', false);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('starts a fresh API deadline after the browser sign-in completes', async () => {
+    vi.useFakeTimers();
+    let resolveCatalog!: (value: OnboardingAIConnection) => void;
+    vi.mocked(loadSarvAIConnection)
+      .mockRejectedValueOnce(new Error('Sign in required'))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveCatalog = resolve; }));
+    let resolveFlow!: (value: unknown) => void;
+    startFlow.mockReturnValueOnce(new Promise((resolve) => { resolveFlow = resolve; }));
+    const view = render(<Harness />);
+    fire(button(view, 'Sarv AI'), 'click'); await settle();
+    fire(button(view, 'Sign in with Sarv'), 'click');
+    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+    resolveFlow({ success: true, data: { email: 'demo@sarv.example' } }); await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_000); });
+    expect(view.find('[role="alert"]')).toBeNull();
+    expect(button(view, 'Sign in with Sarv')).toHaveProperty('disabled', true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(view.find('[role="alert"]')?.textContent).toContain('timed out');
     expect(button(view, 'Sign in with Sarv')).toHaveProperty('disabled', false);
-    expect(cancel).toHaveBeenCalledOnce();
-    resolveFlow({ success: true, data: { email: 'late@example.com' } }); await settle();
-    expect(loadSarvAIConnection).toHaveBeenCalledOnce();
+    expect(cancel).not.toHaveBeenCalled();
+    resolveCatalog(sarvConnected()); await settle();
+    expect(view.container.textContent).not.toContain('Choose your model');
+  });
+
+  // Network-only checks still need a bounded wait and must ignore late results.
+  it('times out an API connection check and ignores its late result', async () => {
+    vi.useFakeTimers();
+    let resolveCheck!: (value: OnboardingAIConnection) => void;
+    vi.mocked(checkAIConnection).mockReturnValueOnce(new Promise((resolve) => { resolveCheck = resolve; }));
+    const view = render(<Harness />);
+    await configureOpenAI(view);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(view.find('[role="alert"]')?.textContent).toContain('timed out');
+    expect(button(view, 'Check connection')).toHaveProperty('disabled', false);
+    resolveCheck(verified()); await settle();
+    expect(view.container.textContent).toContain('Connect OpenAI');
+    expect(view.container.textContent).not.toContain('Choose your model');
     expect(onComplete).not.toHaveBeenCalled();
   });
 

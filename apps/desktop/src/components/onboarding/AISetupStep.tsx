@@ -99,7 +99,8 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
   }, [active]);
 
   const run = async (
-    action: (signal: AbortSignal, isCurrent: () => boolean) => Promise<void>,
+    action: (signal: AbortSignal, isCurrent: () => boolean, startConnectionTimeout: () => void) => Promise<void>,
+    interactiveSignIn = false,
   ) => {
     invalidate();
     const id = request.current;
@@ -108,18 +109,19 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
     const isCurrent = () => activeRef.current && request.current === id && !abort.signal.aborted;
     setBusy(true);
     setError('');
-    timeout.current = setTimeout(() => {
-      if (!activeRef.current || request.current !== id) return;
-      abort.abort();
-      if (signingIn.current) {
-        signingIn.current = false;
-        void window.electronAPI.oauth.cancel().catch(() => {});
-      }
-      setBusy(false);
-      setError('The connection timed out. Please try again.');
-    }, 60_000);
+    const startConnectionTimeout = () => {
+      timeout.current = setTimeout(() => {
+        if (!activeRef.current || request.current !== id) return;
+        abort.abort();
+        setBusy(false);
+        setError('The connection timed out. Please try again.');
+      }, 60_000);
+    };
+    // The native OAuth flow owns its five-minute browser deadline. Start the
+    // shorter API deadline only after the user returns from interactive sign-in.
+    if (!interactiveSignIn) startConnectionTimeout();
     try {
-      await action(abort.signal, isCurrent);
+      await action(abort.signal, isCurrent, startConnectionTimeout);
     } catch (cause) {
       if (activeRef.current && request.current === id) {
         setError(abort.signal.aborted ? 'The connection timed out. Please try again.'
@@ -143,20 +145,22 @@ export function AISetupStep({ context = 'onboarding', editingProvider, onSavingC
     previous: OnboardingAIConnection,
     selection?: { email?: string; zoneCode?: string; providerCode?: string },
     signIn = false,
-  ) => run(async (signal, isCurrent) => {
+  ) => run(async (signal, isCurrent, startConnectionTimeout) => {
     if (signIn) {
       signingIn.current = true;
       const result = await window.electronAPI.oauth.startFlow('sarv');
       if (!isCurrent()) return;
+      signingIn.current = false;
       if (!result.success || !result.data) throw new Error('Sarv sign-in was cancelled or could not complete. Try again, or set up AI later.');
       selection = { email: result.data.email };
+      startConnectionTimeout();
     }
     const connected = await loadSarvAIConnection(previous, signal, selection);
     if (!isCurrent()) return;
     if (connected.model !== previous.model) setConsent(false);
     saveConnection(connected);
     onStageChange('model');
-  });
+  }, signIn);
 
   const choose = (type: AIProviderType) => {
     invalidate();
