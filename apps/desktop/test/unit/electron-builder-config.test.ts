@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -395,5 +396,163 @@ describe('electron-builder configuration', () => {
   it('leaves out the formats that only duplicate another download', () => {
     expect(targetsOf('win')).not.toContain('portable');
     expect(targetsOf('linux')).not.toContain('tar.gz');
+  });
+
+  /*
+   * Windows Authenticode signing (docs/WINDOWS_SIGNING.md). The package.json
+   * half of a design whose other halves are build/windowsSign.js,
+   * scripts/lib/windows-signing.mjs and release.yml. What these guard is
+   * auto-update: the first signed release pins a publisher in every installed
+   * copy, after which an unsigned or wrongly signed update is refused.
+   */
+  const win = () =>
+    buildConfig['win'] as {
+      signtoolOptions?: {
+        sign?: string;
+        signingHashAlgorithms?: string[];
+        publisherName?: unknown;
+      };
+      azureSignOptions?: unknown;
+      signExts?: string[];
+      forceCodeSigning?: unknown;
+      verifyUpdateCodeSignature?: unknown;
+    };
+  const signHookPath = fileURLToPath(new URL('../../build/windowsSign.js', import.meta.url));
+
+  // The hook must be wired and TRACKED: .gitignore excludes apps/desktop/build/*
+  // (afterPack.js was lost to that rule once), and a clone without it fails
+  // every Windows build on the missing hook.
+  it('wires the Windows sign hook and keeps it out of .gitignore', () => {
+    expect(win().signtoolOptions?.sign).toBe('./build/windowsSign.js');
+    expect(existsSync(signHookPath)).toBe(true);
+    for (const file of [
+      'build/windowsSign.js',
+      'build/windows-signing.json',
+      'build/windows-signing-chain.pem',
+    ]) {
+      // `git check-ignore` exits 1 when the path is NOT ignored -- which is the pass.
+      let ignored = true;
+      try {
+        execFileSync('git', ['check-ignore', '-q', file], {
+          cwd: fileURLToPath(new URL('../../', import.meta.url)),
+        });
+      } catch (error) {
+        ignored = (error as { status?: number }).status !== 1;
+      }
+      expect(ignored, `${file} must not be gitignored`).toBe(false);
+    }
+  });
+
+  // electron-builder defaults to sha1 THEN sha256: two hook calls per file,
+  // the second a nested signature the KMS key (sha256 only) cannot make.
+  it('signs with sha256 only', () => {
+    expect(win().signtoolOptions?.signingHashAlgorithms).toEqual(['sha256']);
+  });
+
+  // By default only .exe files are signed. Smart App Control blocks unsigned
+  // DLLs and native addons, so both are offered to the hook, which leaves any
+  // already-signed one (Microsoft's d3dcompiler_47.dll) alone. A per-name DLL
+  // list would go stale with every Electron upgrade.
+  it('offers every DLL and native addon to the hook', () => {
+    expect(win().signExts).toEqual(expect.arrayContaining(['.dll', '.node']));
+  });
+
+  // THE brick guard. A publisherName (or forceCodeSigning) committed here would
+  // ship in UNSIGNED builds too: publisherName lands in app-update.yml, and
+  // every install would then refuse all later unsigned updates. release.yml
+  // adds both on the command line only when signing is enabled.
+  it('commits no publisherName or forceCodeSigning: release.yml adds them only when signing', () => {
+    expect(win().signtoolOptions?.publisherName).toBeUndefined();
+    expect(win().forceCodeSigning).toBeUndefined();
+    expect(buildConfig['forceCodeSigning']).toBeUndefined();
+    for (const publish of buildConfig['publish'] as Array<Record<string, unknown>>) {
+      expect(publish['publisherName']).toBeUndefined();
+    }
+    // Turning the check off is never the fix: it silently drops it everywhere.
+    expect(win().verifyUpdateCodeSignature).not.toBe(false);
+    // azureSignOptions would take precedence over the hook and ignore it.
+    expect(win().azureSignOptions).toBeUndefined();
+  });
+
+  // What release.yml passes when signing is on must still validate: the
+  // schema rejects unknown keys, and a rename in an electron-builder upgrade
+  // would otherwise first fail on the release that switches signing on.
+  it('accepts the signing overrides release.yml adds', () => {
+    const signed = {
+      ...buildConfig,
+      win: {
+        ...win(),
+        forceCodeSigning: 'true',
+        signtoolOptions: { ...win().signtoolOptions, publisherName: 'SARV WEBS PRIVATE LIMITED' },
+      },
+    };
+    expect(() => validateSchema(schema, signed, { name: 'electron-builder' })).not.toThrow();
+    // A CN change passes two names, which reach electron-builder as a list:
+    // the schema must take that too, or the transition release fails to build.
+    const transition = {
+      ...buildConfig,
+      win: {
+        ...win(),
+        forceCodeSigning: 'true',
+        signtoolOptions: {
+          ...win().signtoolOptions,
+          publisherName: ['SARV WEBS PRIVATE LIMITED', 'Sarv Webs Old Name Ltd.'],
+        },
+      },
+    };
+    expect(() => validateSchema(schema, transition, { name: 'electron-builder' })).not.toThrow();
+  });
+
+  // Tripwires on the installed electron-builder / electron-updater. The
+  // design above leans on each of these behaviours; failing here means "go
+  // re-read that file", not "the config is wrong".
+  it('still has the electron-builder signing behaviour the hook relies on', () => {
+    const signTool = readFileSync(
+      require.resolve('app-builder-lib/out/codeSign/windowsSignToolManager.js'),
+      'utf8'
+    );
+    // One hook call per hash, and the default is sha1 + sha256.
+    expect(signTool).toContain('hashes = ["sha1", "sha256"]');
+    expect(signTool).toContain('for (const hash of hashes)');
+    // With a hook, the "no certificate, signing is skipped" path is not taken --
+    // so forceCodeSigning cannot tell whether the hook signed, and CI must check.
+    expect(signTool).toContain('else if (!customSign)');
+    // No certificate configured: the publisher comes only from signtoolOptions.
+    expect(signTool).toContain(
+      'signtoolOptions) === null || _a === void 0 ? void 0 : _a.publisherName'
+    );
+
+    const publishManager = readFileSync(
+      require.resolve('app-builder-lib/out/publish/PublishManager.js'),
+      'utf8'
+    );
+    // app-update.yml gets the signing manager's publisher only when none is set
+    // and verifyUpdateCodeSignature is on.
+    expect(publishManager).toContain('publishConfig.publisherName == null');
+    expect(publishManager).toContain('winPackager.isForceCodeSigningVerification');
+
+    const winPackager = readFileSync(require.resolve('app-builder-lib/out/winPackager.js'), 'utf8');
+    // signExts matches with endsWith, positive patterns first.
+    expect(winPackager).toContain('signExts.some(ext => file.endsWith(ext))');
+    expect(winPackager).toContain(
+      'this.walkSignableFiles(packContext.appOutDir, "resources", "app.asar.unpacked")'
+    );
+  });
+
+  // electron-updater skips the Authenticode check entirely when app-update.yml
+  // has no publisherName (why an unsigned build must not pin one, and a signed
+  // build must), and matches a plain name against the subject CN only.
+  it('still has the electron-updater check the publisher name feeds', () => {
+    const require_ = createRequire(require.resolve('electron-updater/package.json'));
+    const nsis = readFileSync(require_.resolve('./out/NsisUpdater.js'), 'utf8');
+    expect(nsis).toContain('publisherName = (await this.configOnDisk.value).publisherName;');
+    expect(nsis).toMatch(/if \(publisherName == null\) \{\s*return null;/);
+    const verifier = readFileSync(
+      require_.resolve('./out/windowsExecutableCodeSignatureVerifier.js'),
+      'utf8'
+    );
+    expect(verifier).toContain('Get-AuthenticodeSignature -LiteralPath');
+    expect(verifier).toContain('data.Status === 0');
+    expect(verifier).toContain('name === subject.get("CN")');
   });
 });

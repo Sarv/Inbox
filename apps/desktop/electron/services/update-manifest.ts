@@ -2,8 +2,9 @@
  * Verify an update before a single byte of it is downloaded (CASA M-3).
  *
  * electron-updater trusts the sha512 in a release's latest*.yml — a file that
- * sits in the SAME GitHub release as the binaries it vouches for, and Windows
- * and Linux builds are not OS-signed. So whoever could alter a release could
+ * sits in the SAME GitHub release as the binaries it vouches for, and Linux
+ * builds (and Windows builds until Authenticode signing is switched on, see
+ * docs/WINDOWS_SIGNING.md) are not OS-signed. So whoever could alter a release could
  * ship every installed copy a binary of their choosing within the hour.
  *
  * Each release now carries update-manifest.json (every artifact's sha512) and

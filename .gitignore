@@ -175,3 +175,14 @@ apps/desktop/build/*
 !apps/desktop/build/default-apps.nsh
 # PUBLIC keys the app trusts for signed update manifests (update-manifest.ts).
 !apps/desktop/build/update-signing-keys.json
+# Windows Authenticode signing (docs/WINDOWS_SIGNING.md). The hook is wired in
+# as win.signtoolOptions.sign, so losing it from a clone fails every Windows
+# build; the config and the certificate chain are PUBLIC (no key material ever
+# leaves Cloud KMS). The chain file is what switches signing on: committing it
+# is the one deliberate act that enables signing, so it must not be swallowed
+# by the *.pem rule above either.
+!apps/desktop/build/windowsSign.js
+!apps/desktop/build/windows-signing.json
+!apps/desktop/build/windows-signing-chain.pem
+# Throwaway TEST certificates (no private keys) for the signing config tests.
+!apps/desktop/test/unit/scripts/fixtures/windows-signing/*.pem

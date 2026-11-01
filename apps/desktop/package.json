@@ -242,6 +242,16 @@
     },
     "win": {
       "icon": "build/icon.png",
+      "signtoolOptions": {
+        "sign": "./build/windowsSign.js",
+        "signingHashAlgorithms": [
+          "sha256"
+        ]
+      },
+      "signExts": [
+        ".dll",
+        ".node"
+      ],
       "target": [
         {
           "target": "nsis",

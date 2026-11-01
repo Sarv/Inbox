@@ -1,0 +1,19 @@
+{
+  "kms": {
+    "keyRing": "projects/sarv-inbox-signing/locations/asia-south1/keyRings/codesign",
+    "keyVersion": "sarv-inbox-authenticode/cryptoKeyVersions/1"
+  },
+  "publicKeySha256": "9b55c5a8db46d2b30c0ee69af9099442342b0cf913de775edbb84dfa78b600a8",
+  "certificateChain": "windows-signing-chain.pem",
+  "publisherNames": [],
+  "workloadIdentityProvider": "",
+  "serviceAccount": "gha-authenticode@sarv-inbox-signing.iam.gserviceaccount.com",
+  "timestampUrls": ["http://timestamp.digicert.com", "http://timestamp.sectigo.com"],
+  "programName": "Sarv Inbox",
+  "programUrl": "https://inbox.sarv.com",
+  "jsign": {
+    "version": "7.5",
+    "url": "https://github.com/ebourg/jsign/releases/download/7.5/jsign-7.5.jar",
+    "sha256": "602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c"
+  }
+}

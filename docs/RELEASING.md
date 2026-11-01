@@ -51,7 +51,7 @@ both slices actually survived.
 | `macos-latest` | one universal `.dmg` (arm64 + x64) for downloads, plus an arm64 `.zip` and an x64 `.zip` for auto-update, all signed and notarized |
 | `ubuntu-latest` | `.deb`, `.rpm`, `.AppImage` — x64 |
 | `ubuntu-24.04-arm` | the same three — arm64 |
-| `windows-latest` | one NSIS installer `.exe` carrying x64 + arm64 |
+| `windows-latest` | one NSIS installer `.exe` carrying x64 + arm64 — Authenticode-signed once Windows signing is switched on (see below) |
 
 `.deb` covers Debian, Ubuntu, Mint and Pop!\_OS; `.rpm` covers Fedora, RHEL and
 openSUSE; the AppImage runs on anything else without installing.
@@ -66,6 +66,24 @@ openSUSE; the AppImage runs on anything else without installing.
 ### 1. Repository secrets
 
 **Settings → Secrets and variables → Actions → New repository secret.**
+
+#### Windows code signing (no secrets)
+
+Windows signing needs **no GitHub secret**. The key lives in Google Cloud KMS
+and the release job reaches it with a one-hour token from Workload Identity
+Federation; what it needs to know is committed in
+`apps/desktop/build/windows-signing.json`. It is **dormant until the
+certificate chain `apps/desktop/build/windows-signing-chain.pem` is committed**
+(together with `publisherNames`, the certificate's CN):
+until then the Windows build is unsigned, exactly as before, and the release log
+says so with a warning. From the moment the chain is committed it is
+**fail-closed** — a release that cannot sign every Windows binary, or whose
+signatures do not verify, fails rather than ships. And once a signed release
+is published, every later release is checked against what that release pins
+(the `windows-signing.json` of the release marked Latest), so reverting the
+switch-on cannot ship an unsigned build either. Setup, the switch-on
+checklist and the Google Cloud runbook are in
+[WINDOWS_SIGNING.md](./WINDOWS_SIGNING.md).
 
 #### macOS signing and notarization
 
@@ -203,6 +221,7 @@ What each secret is worth if it leaks, and what to do:
 | `SENTRY_AUTH_TOKEN` | Can write releases/sourcemaps to the Sentry org | Rotate; scope it to this project only |
 | `SARVINBOX_GOOGLE_CLIENT_SECRET` | **Already public** once shipped — it is inlined into the app | Nothing to do, by design; just never reuse a web client here |
 | `SARVINBOX_SENTRY_DSN` | Public by design (client-side) | Nothing |
+| *(no secret)* Windows signing: the one-hour Google token minted in the Windows job | Can sign anything with the Authenticode key for up to an hour; nothing else. Those signatures are timestamped, so they **stay valid indefinitely**: the token expiring, the certificate expiring and disabling the key do not end them | Disable the key version in Cloud KMS (stops all signing at once); **cut GitHub's path in** (disable the Workload Identity provider, or remove the service account's `workloadIdentityUser` binding) until the cause is found; find the first signing call in the KMS audit log you cannot account for; **ask Sectigo to revoke the certificate with a revocation date before that first bad signature**; **re-key** (a new KMS key version or key, attestation and CSR; for a new key, move the signer binding to it) and update `kms.keyVersion` and `publicKeySha256` to match; **get a new certificate** for the new key with the same CN. Details: "If the key or a token is compromised" in WINDOWS_SIGNING.md |
 
 ### 2. Allow the release to push
 
@@ -269,7 +288,7 @@ seconds after launch, downloads a newer version in the background, and applies
 it on the next ordinary quit. **File → Check for Updates...** (Help on Windows
 and Linux) runs the same check on demand and offers *Install and Relaunch*.
 
-Three things make that work, and each is a way to break it:
+These things make that work, and each is a way to break it:
 
 1. **The `publish` block in `apps/desktop/package.json`.** It is what makes
    electron-builder write `latest.yml`, `latest-mac.yml` and `latest-linux.yml`
@@ -291,12 +310,35 @@ Three things make that work, and each is a way to break it:
    never update itself again.
 4. **Every update is checked against the signed manifest before it downloads.**
    `latest*.yml` lives in the same release as the binaries it vouches for, and
-   Windows/Linux builds aren't OS-signed, so the app also fetches
+   Linux builds (and Windows builds until Authenticode signing is switched on)
+   aren't OS-signed, so the app also fetches
    `update-manifest.json` + `.sig` from the release and refuses the update unless
    every file it would download matches a hash signed by `UPDATE_SIGNING_KEY`
    (`electron/services/update-manifest.ts`). A release without them is refused
    by every copy that has this check — which is why the publish job won't create
    one.
+
+5. **Once Windows signing is on, every later Windows release must be signed by
+   the same publisher.** The first signed release writes `publisherNames` from
+   `windows-signing.json` (the certificate's CN) into each install's
+   `app-update.yml` as `publisherName`, and electron-updater then refuses any
+   update that `Get-AuthenticodeSignature` does not report as Valid and signed
+   by one of those names. An unsigned Windows release after that point
+   would strand every user. The pipeline enforces both directions. A signed
+   build: the signing hook refuses to sign unless electron-builder was handed
+   exactly `publisherNames`, and the "Verify Windows Authenticode signatures"
+   step (`scripts/verify-win-signatures.mjs`) checks that `app-update.yml`
+   pins exactly that list. An unsigned build: the hook does nothing at all
+   while signing is disabled, so it is the verify step that fails the build
+   if `app-update.yml` carries any `publisherName` (even an empty list). Once
+   `publisherNames` is set, a missing certificate chain fails the release
+   instead of producing an unsigned one. And because a revert of the
+   switch-on empties `publisherNames` too, the release also asks GitHub what
+   the release marked Latest pins: if it pins any name, this release must be
+   signed under one of them, checked in the Windows job and again just before
+   `gh release create`. See
+   [WINDOWS_SIGNING.md](./WINDOWS_SIGNING.md) before changing the certificate's
+   subject.
 
 ### What each platform gets
 

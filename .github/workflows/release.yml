@@ -62,6 +62,22 @@ jobs:
     # notarization alone can take 20+ minutes, and macOS notarizes three apps
     # (universal, arm64, x64)
     timeout-minutes: 150
+    # A job-level block REPLACES the workflow default above, so contents: read
+    # is restated. id-token: write lets the job ask GitHub for an OIDC token,
+    # which Google Cloud exchanges (Workload Identity Federation) for a
+    # one-hour access token that can sign with the Windows code-signing key and
+    # do nothing else. Only the Windows leg asks for it -- the auth step is
+    # gated on it -- but a permission cannot be scoped to one matrix leg. The
+    # Google side admits only a pushed v* tag running release.yml in this
+    # repository on a GitHub-hosted runner (docs/WINDOWS_SIGNING.md), so the
+    # grant is worthless to any other workflow, branch or fork. It does NOT
+    # limit which STEP asks: any step of this job, on any leg, including a
+    # dependency's install script, could mint the token. That is an accepted
+    # risk, held down by pinned dependencies and the KMS audit log
+    # ("Accepted risk" in docs/WINDOWS_SIGNING.md).
+    permissions:
+      contents: read
+      id-token: write
     env:
       # Evaluated once at job level: a step cannot read env it sets on itself,
       # and this gates both signing and the verification step below.
@@ -155,15 +171,19 @@ jobs:
             # '|'-separated: both arches come out of this one job.
             fuses: apps/desktop/release/win-unpacked/Sarv Inbox.exe|apps/desktop/release/win-arm64-unpacked/Sarv Inbox.exe
 
+    # Every action in this job is pinned by full commit SHA (a tag can be
+    # moved; a SHA cannot): the job holds id-token: write, so any step in it
+    # could mint the signing token. Dependabot's github-actions entry keeps
+    # the SHAs and their version comments current.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 8.15.0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: pnpm
@@ -181,7 +201,7 @@ jobs:
       # directories live outside it. Paths that do not exist on a given OS are
       # skipped, so one step serves all three.
       - name: Cache Electron binaries
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/electron
@@ -275,6 +295,49 @@ jobs:
         if: runner.os == 'Windows'
         run: node scripts/win-pwd-shim.mjs
 
+      # Windows Authenticode signing is DORMANT until the certificate chain
+      # (apps/desktop/build/windows-signing-chain.pem) is committed, and
+      # FAIL-CLOSED from then on: this step exits non-zero if the chain exists
+      # but the config is incomplete, does not match the KMS key, or the
+      # certificate has expired, or if the certificate's CN is not
+      # publisherNames[0]; and, once publisherNames is set, if the chain has
+      # gone missing. Its outputs drive every signing step below.
+      #
+      # First of all it asks GitHub what the release marked Latest pins
+      # (--previous-release): installed copies hold THAT publisherNames, not
+      # this tree's. If it pins any name, this build must be signed and its CN
+      # must be one of those names, so a revert of the switch-on, or a tag cut
+      # from a branch older than it, fails here instead of stranding every
+      # install. No release, or a Latest that predates signing, is no
+      # constraint; any other answer (network, 5xx, a bad file) fails closed.
+      # The publish job asks again just before publishing. See
+      # docs/WINDOWS_SIGNING.md.
+      - name: Windows code-signing status
+        id: winsign
+        if: matrix.platform == 'win'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/windows-signing.mjs status --previous-release "$GITHUB_REPOSITORY" --github-output
+
+      # jsign runs on Java; Temurin 17 pinned rather than whatever the image
+      # happens to put on PATH this month.
+      - name: Set up Java for jsign
+        if: matrix.platform == 'win' && steps.winsign.outputs.enabled == 'true'
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The signing tool sees the HSM token, so it is pinned by sha256
+      # (apps/desktop/build/windows-signing.json) and refused on mismatch. The
+      # hook re-checks the digest before its first use.
+      - name: Fetch the pinned jsign
+        id: jsign
+        if: matrix.platform == 'win' && steps.winsign.outputs.enabled == 'true'
+        shell: bash
+        run: node scripts/windows-signing.mjs fetch-jsign --dest "$RUNNER_TEMP/jsign" --github-output
+
       - name: Build libraries
         run: |
           pnpm --filter @sarvinbox/core build
@@ -304,6 +367,25 @@ jobs:
         working-directory: apps/desktop
         run: pnpm prefetch:extensions
 
+      # Placed immediately before packaging: the access token lives one hour
+      # and the Windows package step takes 3-6 minutes. No credentials file is
+      # written and nothing is exported to the environment; the token reaches
+      # jsign only through SARV_WINDOWS_SIGNING_TOKEN on the Package step, and
+      # jsign reads it from there (`--storepass env:…`), never from argv. The
+      # action masks it in the log.
+      - name: Authenticate to Google Cloud for Windows signing
+        id: gcp
+        if: matrix.platform == 'win' && steps.winsign.outputs.enabled == 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ steps.winsign.outputs.provider }}
+          service_account: ${{ steps.winsign.outputs.service_account }}
+          token_format: access_token
+          access_token_lifetime: 3600s
+          access_token_scopes: https://www.googleapis.com/auth/cloudkms
+          create_credentials_file: false
+          export_environment_variables: false
+
       - name: Package ${{ matrix.platform }}
         working-directory: apps/desktop
         shell: bash
@@ -319,6 +401,29 @@ jobs:
             # user's Mac. Nothing unsigned reaches a release.
             echo "::error::APPLE_CERTIFICATE_P12 is not set — refusing to build an unsigned macOS release. See docs/RELEASING.md."
             exit 1
+          elif [[ "${{ matrix.platform }}" == "win" && "${WIN_SIGNING_ENABLED}" == "true" ]]; then
+            # forceCodeSigning makes electron-builder fail if the hook is ever
+            # not wired. publisherName goes into app-update.yml, after which
+            # every installed copy accepts only updates signed by one of these
+            # names -- which is why it is passed HERE, only when signing, and
+            # never committed to package.json: an unsigned build carrying it
+            # would make every install refuse all later unsigned updates. The
+            # hook (build/windowsSign.js) refuses to sign unless both arrive
+            # and the names are exactly publisherNames (windows-signing.json).
+            #
+            # The WHOLE list, one -c flag per name, so a CN change can carry
+            # the old and the new name: electron-builder's CLI (yargs) turns a
+            # repeated flag into an array, in order -- an indexed .0/.1 form
+            # would arrive as an object instead. Each flag is ONE array
+            # element, so a name with spaces stays one argument.
+            EXTRA+=(-c.win.forceCodeSigning=true)
+            WIN_PUBLISHER_LINES="$(node -e 'for (const name of JSON.parse(process.env.WIN_PUBLISHER_NAMES)) console.log(name)')"
+            while IFS= read -r NAME; do
+              if [[ -n "${NAME}" ]]; then EXTRA+=("-c.win.signtoolOptions.publisherName=${NAME}"); fi
+            done <<< "${WIN_PUBLISHER_LINES}"
+            echo "Signing Windows binaries as \"${WIN_PUBLISHER}\" with the Cloud KMS key; app-update.yml will pin ${WIN_PUBLISHER_NAMES}."
+          elif [[ "${{ matrix.platform }}" == "win" ]]; then
+            echo "::warning::Windows code signing is not switched on yet: this Windows build is NOT code-signed. See docs/WINDOWS_SIGNING.md."
           fi
           pnpm exec electron-builder ${{ matrix.args }} "${EXTRA[@]}" --publish never
         env:
@@ -327,6 +432,14 @@ jobs:
           # file is ever written to the runner's disk.
           CSC_LINK: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_P12 || '' }}
           CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          # --- Windows signing (Cloud KMS via jsign; empty unless enabled) ---
+          # Windows-only, like CSC_LINK is mac-only: the Google token never
+          # reaches the macOS or Linux packaging.
+          WIN_SIGNING_ENABLED: ${{ matrix.platform == 'win' && steps.winsign.outputs.enabled || '' }}
+          WIN_PUBLISHER: ${{ matrix.platform == 'win' && steps.winsign.outputs.publisher || '' }}
+          WIN_PUBLISHER_NAMES: ${{ matrix.platform == 'win' && steps.winsign.outputs.publisher_names || '' }}
+          SARV_WINDOWS_SIGNING_TOKEN: ${{ matrix.platform == 'win' && steps.gcp.outputs.access_token || '' }}
+          JSIGN_JAR: ${{ matrix.platform == 'win' && steps.jsign.outputs.path || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -362,6 +475,21 @@ jobs:
           node scripts/verify-win-arch.mjs \
             apps/desktop/release/win-unpacked=x64 \
             apps/desktop/release/win-arm64-unpacked=arm64
+
+      # electron-builder's forceCodeSigning cannot tell whether the hook
+      # actually signed anything, so this reads every signature back with
+      # Get-AuthenticodeSignature -- the call electron-updater makes on each
+      # update. Signed: every PE file (.exe/.dll/.node, both arches, and the
+      # installer) Valid and timestamped; the app executables, the addons and
+      # the installer signed by a pinned publisher; anything else by one, or
+      # by whoever signed it before the build (logged); and app-update.yml
+      # pinning exactly publisherNames. Not signed yet: the brick guard --
+      # app-update.yml must carry NO publisherName (not even []), or every
+      # install would refuse all later unsigned updates -- plus a warning.
+      - name: Verify Windows Authenticode signatures
+        if: matrix.platform == 'win'
+        shell: bash
+        run: node scripts/verify-win-signatures.mjs apps/desktop/release
 
       # The universal merge is the step that can silently halve the app: if
       # lipo ever keeps one slice, the dmg still builds, signs, notarizes and
@@ -470,7 +598,7 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.id }}
           path: |
@@ -518,9 +646,20 @@ jobs:
       # themselves were built and verified in the `build` jobs.
       - uses: ./.github/actions/setup-workspace
 
+      # The last look before the installer's hash is vouched for by the signed
+      # manifest: with Windows signing enabled, each installer must carry an
+      # Authenticode certificate table. Runs on Linux, so it checks presence,
+      # not validity (the Windows job did that); it catches an unsigned
+      # installer reaching the release that every signed install would then
+      # reject. Disabled: a warning only.
+      - name: Check the Windows installer carries a signature
+        shell: bash
+        run: node scripts/verify-pe-signed.mjs artifacts/*.exe
+
       # The update feed (latest*.yml) sits in the SAME release as the binaries
-      # it vouches for, and Windows/Linux builds aren't OS-signed — so anyone
-      # who could alter a release could ship every installed copy anything.
+      # it vouches for, and Linux builds (and Windows builds until Authenticode
+      # signing is switched on) aren't OS-signed — so anyone who could alter a
+      # release could ship every installed copy anything.
       # The app now refuses any update whose files aren't in a manifest signed
       # by UPDATE_SIGNING_KEY (CASA M-3). The script fails — nothing is
       # published — if the key is missing, isn't the key the app trusts, or the
@@ -564,6 +703,18 @@ jobs:
       # it gets here. Publishing hands the update to every installed copy via
       # electron-updater within the hour; the latest*.yml files in the upload
       # glob above are what drive it.
+      # The cross-release latch, asked again at the last moment: tags build in
+      # parallel (the concurrency group is per tag), so a release may have
+      # been published since this tag's build job checked. If the release now
+      # marked Latest pins a publisher, this tag must be signed under one of
+      # those names -- or every install that release updated refuses it.
+      # Uses this tag's windows-signing.json and certificate chain.
+      - name: Check this release against the last published one
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/windows-signing.mjs status --previous-release "$GITHUB_REPOSITORY"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

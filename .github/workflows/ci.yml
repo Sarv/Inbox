@@ -91,6 +91,78 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The release signs Windows binaries with an HSM key that only a pushed v*
+  # tag can reach, so without this the signing code would run for the first
+  # time on the very release that switches signing on. This runs the SAME
+  # code -- scripts/lib/windows-signing.mjs's signPeFile, the real jsign at
+  # its pinned digest, real RFC 3161 timestamps, and the release verifier on
+  # Windows' own Get-AuthenticodeSignature -- with a throwaway self-signed
+  # certificate trusted only on this runner. Only the signer differs (PKCS12
+  # here, Cloud KMS in the release). It proves: files get signed, timestamped
+  # and attributed to the right subject; a second sign call is a no-op; an
+  # unsigned file fails verification; a file already signed by someone else
+  # keeps that signature (accepted on a DLL or helper, refused on our own
+  # executables).
+  windows-signing-selftest:
+    name: Windows signing self-test (jsign + Authenticode)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      SELFTEST_PUBLISHER: Sarv Inbox CI Self-Test Publisher
+      SELFTEST_UPSTREAM: Sarv Inbox CI Upstream Signer
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
+
+      - name: Set up Java for jsign
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch the pinned jsign
+        id: jsign
+        shell: bash
+        run: node scripts/windows-signing.mjs fetch-jsign --dest "$RUNNER_TEMP/jsign" --github-output
+
+      # Two throwaway certificates: ours, and an "upstream" one standing in
+      # for Microsoft's signature on d3dcompiler_47.dll (and for a helper such
+      # as elevate.exe that arrives already signed). Trusted in the
+      # machine Root and TrustedPublisher stores of THIS ephemeral runner only,
+      # so Get-AuthenticodeSignature reports them Valid. Windows PowerShell
+      # (not pwsh): its Add-Type can still compile a console executable,
+      # which is the unsigned PE every test file is copied from.
+      - name: Create throwaway code-signing certificates and an unsigned binary
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'winsign-selftest'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $password = [guid]::NewGuid().ToString('N')
+          Write-Output "::add-mask::$password"
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "SARV_WINDOWS_SIGNING_SELFTEST_PASSWORD=$password`n")
+          $secure = ConvertTo-SecureString -String $password -Force -AsPlainText
+          foreach ($name in 'self', 'other') {
+            $subject = if ($name -eq 'self') { $env:SELFTEST_PUBLISHER } else { $env:SELFTEST_UPSTREAM }
+            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=$subject" `
+              -KeyAlgorithm RSA -KeyLength 3072 -HashAlgorithm SHA256 -KeyExportPolicy Exportable `
+              -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays(2)
+            Export-PfxCertificate -Cert $cert -FilePath (Join-Path $dir "$name.p12") -Password $secure | Out-Null
+            $cer = Join-Path $dir "$name.cer"
+            Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+            Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+            Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          }
+          Add-Type -OutputAssembly (Join-Path $dir 'unsigned.exe') -OutputType ConsoleApplication -TypeDefinition @'
+          public static class Program { public static int Main() { return 0; } }
+          '@
+
+      - name: Sign and verify with the release signing code
+        shell: bash
+        env:
+          JSIGN_JAR: ${{ steps.jsign.outputs.path }}
+        run: node scripts/windows-signing-selftest.mjs "$RUNNER_TEMP/winsign-selftest"
+
   audit:
     name: Dependency vulnerability scan
     runs-on: ubuntu-latest
