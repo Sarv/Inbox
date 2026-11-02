@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Windows downloads are signed by Sarv.** The installer, the app and its
+  components are now digitally signed by SARV WEBS PRIVATE LIMITED, so Windows
+  names the company as the publisher instead of "Unknown publisher". From this
+  version on, the app installs an update only if it carries that same
+  signature. Windows SmartScreen may still ask about new downloads for a while,
+  until the signature has built up reputation.
+
 ## [1.4.10] - 2026-10-30
 
 ### Added
