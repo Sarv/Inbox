@@ -138,8 +138,9 @@ afterEach(() => {
 
 /**
  * A config directory in the scratch area; `chain` undefined = no chain file
- * (disabled). With a chain, publisherNames defaults to the test leaf's CN, as
- * the switch-on change sets it; overrides win.
+ * (disabled). publisherNames is set for both states rather than inherited from
+ * the committed file, which carries the real name once signing is switched on:
+ * [] without a chain, the test leaf's CN with one; overrides win.
  */
 const writeConfig = (overrides: Record<string, unknown> = {}, chain?: string): string => {
   const dir = mkdtempSync(join(scratch, 'config-'));
@@ -147,7 +148,7 @@ const writeConfig = (overrides: Record<string, unknown> = {}, chain?: string): s
     ...committedConfig(),
     publicKeySha256: LEAF_KEY_SHA256,
     workloadIdentityProvider: PROVIDER,
-    ...(chain === undefined ? {} : { publisherNames: [PUBLISHER] }),
+    publisherNames: chain === undefined ? [] : [PUBLISHER],
     ...overrides,
   };
   writeFileSync(join(dir, 'windows-signing.json'), JSON.stringify(config));
