@@ -336,7 +336,7 @@ export class InlineImageBackfill {
     // The reason is that the partial index covers `email_id` and nothing else. A
     // `LENGTH(raw_body)` in the select list therefore cannot be answered from the
     // index: SQLite has to fetch each candidate's row and read the body in full,
-    // decrypting every overflow page through SQLCipher on the way. These rows are
+    // decrypting every overflow page through the page cipher on the way. These rows are
     // precisely the big ones — the mailbox scan found 87% of all body bytes in
     // 13.5% of rows, averaging ~2.4 MB each — so measuring 100 candidates reads
     // and decrypts ~240 MB to authorize 2 MB of work. A 120x read amplification

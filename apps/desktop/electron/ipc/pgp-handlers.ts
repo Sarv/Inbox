@@ -18,6 +18,8 @@ import { dialog, ipcMain } from 'electron';
 
 import { requireTargetAccountId, resolveAccountTarget } from '../services/account-target';
 import { attachmentScanRequired, getAttachmentOperationProtection, writeProtectedAttachment, type ProtectedAttachmentOperation } from '../services/attachment-download-protection';
+import { markDownloadedFromInternet } from '../services/mark-downloaded';
+import { pgpUserMessage } from '../services/pgp-failure';
 import { PgpKeyringError, type PgpKeyring } from '../services/pgp-keyring';
 import { PgpReader, type StoredSource } from '../services/pgp-reader';
 import { getPgpKeyring, readPgpPrefsFromSettings } from '../services/pgp-service';
@@ -47,30 +49,77 @@ export interface PgpHandlerDeps {
   protectAttachmentSave?<T>(target: { emailId: string; accountId?: string; filename: string },
     consume: (operation: ProtectedAttachmentOperation) => Promise<T>): Promise<T>;
   writeProtectedAttachment?: typeof writeProtectedAttachment;
+  /**
+   * Marks a saved ATTACHMENT as downloaded from the internet (Gatekeeper /
+   * SmartScreen). writeProtectedAttachment marks its own writes; this covers the
+   * plain-writeFile fallbacks. Never used for key exports — those are the
+   * user's own keys, not mail.
+   */
+  markDownloaded?: (filePath: string) => Promise<void>;
 }
 
 const ok = <T>(data: T): PgpIpcResult<T> => ({ success: true, data });
 
-const failure = (error: unknown): PgpIpcResult<never> => {
-  if (error instanceof PgpKeyringError || error instanceof PgpKeyError) {
-    return { success: false, error: error.message, code: error.code };
+/**
+ * A refusal of this layer's own — a missing argument, a file that would not
+ * write — whose sentence the user reads as written. Everything else a key
+ * operation throws that is not one of our typed OpenPGP errors is the
+ * library's (or the platform's) own account, and the renderer never sees it.
+ */
+class PgpRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PgpRequestError';
   }
+}
+
+/**
+ * What the renderer reads when a key operation fails for a reason that is not
+ * ours: openpgp.js refusing a key the user imported, generating one, or
+ * re-protecting one for a backup. The library's reason is logged (CASA 4.1.4).
+ */
+export const PGP_REQUEST_FAILED_MESSAGE = 'The OpenPGP operation could not be completed.';
+
+/** What a key backup or public-key export says when the chosen file cannot be written. */
+export const PGP_FILE_WRITE_FAILED_MESSAGE = 'The file could not be saved. Choose another location and try again.';
+
+/**
+ * A key operation's failure, for the renderer. Our own sentences keep their
+ * words — a keyring or key refusal its code too, so the UI can ask for the
+ * passphrase, and a keychain refusal (SealError) its guidance; anything else
+ * is logged and answered with {@link PGP_REQUEST_FAILED_MESSAGE}.
+ */
+const failure = (error: unknown): PgpIpcResult<never> => {
+  if (error instanceof PgpRequestError) return { success: false, error: error.message };
+  const message = pgpUserMessage(error, PGP_REQUEST_FAILED_MESSAGE, logger, 'OpenPGP request failed');
+  return error instanceof PgpKeyringError || error instanceof PgpKeyError
+    ? { success: false, error: message, code: error.code }
+    : { success: false, error: message };
+};
+
+/**
+ * An attachment save's failure, worded as the attachment-protection pipeline
+ * worded it ("Download blocked: …", "Download cancelled."). Those sentences
+ * are the user's guidance, and no OpenPGP operation runs in a save: the
+ * plaintext was decrypted, and its errors mapped, when the message was opened.
+ */
+const saveFailure = (error: unknown): PgpIpcResult<never> => {
   logger.warn(`OpenPGP request failed: ${(error as Error)?.message ?? String(error)}`);
   return { success: false, error: (error as Error)?.message ?? String(error) };
 };
 
 const guarded =
-  <A extends unknown[], T>(run: (...args: A) => T | Promise<T>) =>
+  <A extends unknown[], T>(run: (...args: A) => T | Promise<T>, onFailure: (error: unknown) => PgpIpcResult<never> = failure) =>
   async (...args: A): Promise<PgpIpcResult<T>> => {
     try {
       return ok(await run(...args));
     } catch (error) {
-      return failure(error);
+      return onFailure(error);
     }
   };
 
 const requireText = (value: unknown, what: string): string => {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${what} is required`);
+  if (typeof value !== 'string' || !value.trim()) throw new PgpRequestError(`${what} is required`);
   return value;
 };
 
@@ -94,7 +143,14 @@ export function createPgpHandlers(deps: PgpHandlerDeps) {
   const saveTo = async (defaultName: string, content: string | Buffer, filters?: typeof ASC_FILTER) => {
     const filePath = await deps.chooseSavePath(defaultName, filters);
     if (!filePath) return { saved: false as const };
-    await deps.writeFile(filePath, content);
+    try {
+      await deps.writeFile(filePath, content);
+    } catch (error) {
+      // Not an OpenPGP failure, so not the vague OpenPGP sentence: the user can
+      // pick another folder. The code only — fs messages carry the path.
+      logger.warn(`Could not write an OpenPGP key file (${(error as NodeJS.ErrnoException)?.code ?? 'error'})`);
+      throw new PgpRequestError(PGP_FILE_WRITE_FAILED_MESSAGE);
+    }
     return { saved: true as const, filePath };
   };
 
@@ -177,6 +233,7 @@ export function createPgpHandlers(deps: PgpHandlerDeps) {
           } else {
             if (operation.notScanned) throw new Error('Attachment protection is unavailable. Try again.');
             await deps.writeFile(filePath, attachment.content);
+            await deps.markDownloaded?.(filePath);
           }
           await operation.assertCurrent();
           return { saved: true as const, filePath, ...(operation.notScanned ? { notScanned: true } : {}) };
@@ -186,8 +243,9 @@ export function createPgpHandlers(deps: PgpHandlerDeps) {
       if (!filePath) return { saved: false as const };
       requireUnprotectedSave();
       await deps.writeFile(filePath, attachment.content);
+      await deps.markDownloaded?.(filePath);
       return { saved: true as const, filePath };
-    }),
+    }, saveFailure),
   };
 }
 
@@ -245,13 +303,14 @@ export function registerPgpHandlers(): void {
         'Download blocked: encrypted OpenPGP attachments cannot be scanned.', 'download');
     },
     writeProtectedAttachment,
+    markDownloaded: markDownloadedFromInternet,
   });
   for (const [channel, handler] of Object.entries(handlers)) {
     ipcMain.handle(channel, (event, ...args: unknown[]) => {
       if (channel === 'pgp:saveAttachment') {
         const window = getMainWindow();
         if (!window || event?.sender !== window.webContents || event?.senderFrame !== window.webContents.mainFrame) {
-          return failure(new Error('Attachment downloads must be requested from Sarv Inbox.'));
+          return saveFailure(new Error('Attachment downloads must be requested from Sarv Inbox.'));
         }
       }
       return (handler as (...a: unknown[]) => unknown)(...args);

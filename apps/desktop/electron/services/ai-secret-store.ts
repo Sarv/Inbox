@@ -12,7 +12,7 @@
  * Storage moved from a standalone `ai-secrets.json` file INTO the core DB
  * (`core_blobs` row, key `ai-secrets`) — same safeStorage envelope, only the
  * container changed, so the whole vault is double-protected (safeStorage +
- * SQLCipher). The legacy file is migrated on first read (write-to-DB FIRST) and
+ * the core DB's own ChaCha20-Poly1305 encryption). The legacy file is migrated on first read (write-to-DB FIRST) and
  * removed later by the startup cleanup.
  *
  * Envelope: `ENC1:<safeStorage ciphertext of {"<providerId>":{"key","origin"},…}>`,

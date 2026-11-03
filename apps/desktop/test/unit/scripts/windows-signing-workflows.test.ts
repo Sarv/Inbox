@@ -454,6 +454,37 @@ describe('ci.yml: the Windows signing self-test', () => {
   });
 });
 
+describe('ci.yml: the Windows unit tests', () => {
+  const job = ci.jobs['windows-unit-tests'];
+  const run = () => job.steps[byRun(job.steps, 'vitest run')];
+  const files = () => (run().run ?? '').split(/\s+/).filter((word) => word.endsWith('.test.ts'));
+
+  // Breaks: the Mark-of-the-Web stream, its survival across the save's
+  // rename / hard link, and the loopback listener's close-and-rebind run on
+  // Linux only again — the Windows-only paths go back to never being tested.
+  it('runs on windows-latest, on the shared workspace setup, after building the libraries', () => {
+    expect(job).toBeDefined();
+    expect(job['runs-on']).toBe('windows-latest');
+    const setup = indexOf(job.steps, (step) => step.uses === './.github/actions/setup-workspace', 'the setup-workspace step');
+    const libraries = byRun(job.steps, "turbo run build --filter='@sarvinbox/desktop^...'");
+    expect(setup).toBeLessThan(libraries);
+    expect(libraries).toBeLessThan(job.steps.indexOf(run()));
+    expect(run()).toMatchObject({ shell: 'bash', 'working-directory': 'apps/desktop' });
+  });
+
+  // Breaks: a suite renamed or moved silently drops out of the Windows run —
+  // vitest runs the files it can find and passes.
+  it('names only test files that exist, including the Windows-specific ones', () => {
+    expect(files()).toEqual(expect.arrayContaining([
+      'test/unit/electron/services/mark-downloaded.test.ts',
+      'test/unit/electron/services/oauth-loopback.test.ts',
+    ]));
+    for (const file of files()) {
+      expect(() => readFileSync(fileURLToPath(new URL(`../../../${file}`, import.meta.url))), file).not.toThrow();
+    }
+  });
+});
+
 describe('third-party actions in the signing path', () => {
   // A tag can be moved; a commit SHA cannot. The two actions that only the
   // signing path uses are pinned wherever they appear (release and the CI

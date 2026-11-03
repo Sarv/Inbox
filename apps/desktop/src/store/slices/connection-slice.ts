@@ -6,7 +6,7 @@ import { EMAIL_PROVIDERS } from '../../config/email-providers';
 import { removeOAuthProvidersForAccount, syncAIProviderToMain } from '../../services/ai-service';
 import { isOnboardingPending } from '../../services/onboarding-progress';
 import { forgetImageTrustAccount, setImageTrustAccount } from '../../utils/remote-images';
-import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, vaultEntryFor, vaultHasPassword, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
+import { loadSavedCredentials, loadSavedSmtpCredentials, saveCredentials, clearCredentials, saveSmtpCredentials, clearSmtpCredentials, deriveSmtpFromImap, forgetLegacySecretsFor, loadSmtpConfigured, saveSmtpConfigured, migrateAccounts, upsertAccount, removeAccount, saveAccounts, saveActiveAccountId, accountIdFor, normalizeAccount, findAccountByEmailHost, vaultEntryFor, vaultHasPassword, effectiveSmtpConfig, loadQuotaCache, saveQuotaCache } from '../helpers';
 import type { ConnectionSlice, EmailStore, SliceCreator, StoredAccount } from '../types';
 
 // Concurrent connects to the SAME account join one run.
@@ -925,7 +925,6 @@ const connectionSlice = (
     });
 
     const removedAccount = accounts.find((a) => a.id === accountId);
-    const remaining = removeAccount(accounts, accountId);
     try {
       if (accountId === activeAccountId) {
         // Tear down BOTH sessions for the removed account — previously only IMAP
@@ -948,6 +947,12 @@ const connectionSlice = (
       } else {
         await window.electronAPI.secureCreds.delete(accountId);
       }
+
+      // Persisted only now that the durable wipe succeeded: a failed removal
+      // keeps the account, so its stored row (possibly its only copy of its
+      // password) must still be there for the retry. Remaining rows are written
+      // back as stored, secrets and all — see removeAccount.
+      const remaining = removeAccount(accounts, accountId);
 
       // If this account also backed an OAuth AI provider (Sarv is mailbox AND
       // LLM), prune that provider now. Otherwise getDefaultProvider() keeps
@@ -974,6 +979,12 @@ const connectionSlice = (
       // same address (the same id) never starts from the old lists.
       forgetImageTrustAccount(accountId);
 
+      // And the plaintext secrets an older build left in localStorage for it —
+      // all of them once no account remains (CASA 6.6.1). Only after the
+      // durable wipe: a failed removal keeps the account, and with it what may
+      // be its only copy of its password.
+      forgetLegacySecretsFor(removedAccount, remaining);
+
       // Only now that the durable wipe succeeded do we drop the row and move the
       // active account away.
       if (accountId === activeAccountId) {
@@ -986,10 +997,7 @@ const connectionSlice = (
           await get().selectAccount(next.id);
         } else {
           saveActiveAccountId(null);
-          clearCredentials();
-          // Clear the saved SMTP creds too (not just the configured flag), so a
-          // later account can't inherit a stale sending config.
-          clearSmtpCredentials();
+          // The saved IMAP/SMTP creds went with forgetLegacySecretsFor above.
           saveSmtpConfigured(false);
           set({
             activeAccountId: null,

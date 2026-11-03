@@ -16,8 +16,8 @@
  * This module is DEPENDENCY-FREE (imports nothing from the other stores) so it
  * can be the shared foundation every store builds on without import cycles.
  *
- * Irreducible companion file: `db-key.bin` — the SQLCipher key that unlocks THIS
- * DB. It can't live inside the DB it encrypts, so it stays a separate file
+ * Irreducible companion file: `db-key.bin` — the database key (ChaCha20-Poly1305
+ * passphrase, see db-key-store.ts) that unlocks THIS DB. It can't live inside the DB it encrypts, so it stays a separate file
  * (itself safeStorage-encrypted). Losing `db-key.bin` makes every DB unreadable;
  * losing `core.db` loses accounts/settings/secrets but NOT the per-account mail
  * DBs (those are re-adopted on re-add via the deterministic id hash).

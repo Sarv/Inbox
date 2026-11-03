@@ -14,6 +14,7 @@
  * before. Callers keep their own failure semantics (some throw on an
  * unreadable blob, some degrade) and their own error wording, passed in here.
  */
+import { errorClassName } from '@sarvinbox/core';
 import { safeStorage } from 'electron';
 
 import { isOsBackedEncryption, storedEncryptionProtection } from './os-encryption';
@@ -77,9 +78,25 @@ export function sealJson(value: unknown): Buffer {
   return sealString(JSON.stringify(value));
 }
 
-/** {@link openString}, parsed as JSON. */
+/**
+ * What opening throws when the envelope decrypts but is not JSON. Nothing of
+ * the decrypted text: callers log what this throws (CASA 6.5.1).
+ */
+export const SEALED_NOT_JSON = 'Sealed data is not valid JSON';
+
+/**
+ * {@link openString}, parsed as JSON. A payload that is not JSON throws
+ * {@link SEALED_NOT_JSON} — never the parser's own error, whose message V8
+ * writes by quoting the text it choked on: here, the decrypted secret.
+ */
 export function openJson<T>(buf: Buffer, errors: EnvelopeErrors): T {
-  return JSON.parse(openString(buf, errors)) as T;
+  const text = openString(buf, errors);
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    // Only the error's class name (SyntaxError) travels; not its message, and not the error as a cause.
+    throw new Error(`${SEALED_NOT_JSON} (${errorClassName(error)})`);
+  }
 }
 
 /** Whether a sealed buffer is the marked-plaintext form (for a caller's warning). */

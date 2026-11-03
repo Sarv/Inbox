@@ -2360,7 +2360,7 @@ export const inlineImageBlobTable: Migration = {
  * That looks like an integer aggregate over a thousand rows, and it is not:
  * `byte_length` sits AFTER the `bytes` BLOB in the record, so reaching it means
  * walking every row's overflow pages — the whole image store, decrypted through
- * SQLCipher on the way. Measured in the running app as one 2613 ms main-thread
+ * the page cipher on the way. Measured in the running app as one 2613 ms main-thread
  * block, logged by the event-loop monitor at the exact moment the extraction pass
  * finished and logged its summary; measured again on plain SQLite with 1024
  * blobs of 640 KB at 70.7 ms, against 0.0 ms with this index.

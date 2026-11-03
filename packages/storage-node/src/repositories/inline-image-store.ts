@@ -31,7 +31,7 @@
  *
  * A directory of blobs under `userData` would be simpler, and wrong here:
  *
- *  - **At-rest encryption.** The mail DB is SQLCipher-encrypted precisely so a
+ *  - **At-rest encryption.** The mail DB is encrypted (ChaCha20-Poly1305) precisely so a
  *    stolen laptop does not yield the user's mail. Inline images ARE mail
  *    content — scanned documents, screenshots, photos. Writing them to a plain
  *    directory would quietly move the bulk of the mailbox outside the
@@ -378,7 +378,7 @@ export function markInlineImagesExtracted(db: Database.Database): void {
  * a 2613 ms main-thread block in the running app. `byte_length` sits after the
  * `bytes` BLOB in the record, so without `idx_inline_images_byte_length` (v75)
  * SQLite reaches it by walking every image's overflow pages — the entire image
- * store, decrypted through SQLCipher, to add up a thousand integers.
+ * store, decrypted through the page cipher, to add up a thousand integers.
  */
 export const INLINE_IMAGE_SIZE_SQL = `SELECT COUNT(*) AS images,
          COALESCE(SUM(byte_length), 0) AS bytes

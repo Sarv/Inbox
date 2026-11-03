@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { devServerUrlFor, isDevBuild, isDevRun, isReleaseBundle } from '../../../../electron/utils/dev-mode';
+import { buildDefines } from '../../../../vite/build-defines';
 
 vi.mock('electron', () => ({ app: { isPackaged: true } }));
 
@@ -77,8 +78,8 @@ describe('isReleaseBundle', () => {
   it('reads the mode in the form vite inlines, and the build defines it', () => {
     const devMode = readFileSync(new URL('../../../../electron/utils/dev-mode.ts', import.meta.url), 'utf8');
     expect(devMode).toContain("return process.env.SARVINBOX_BUILD_MODE === 'production';");
+    expect(buildDefines('production', {}, '0.0.0')['process.env.SARVINBOX_BUILD_MODE']).toBe('"production"');
     const viteConfig = readFileSync(new URL('../../../../vite.config.ts', import.meta.url), 'utf8');
-    expect(viteConfig).toContain("defines['process.env.SARVINBOX_BUILD_MODE'] = JSON.stringify(mode);");
     expect(viteConfig.match(/define: buildDefines\(mode\)/g)!.length).toBeGreaterThanOrEqual(3);
   });
 });

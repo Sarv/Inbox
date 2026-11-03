@@ -75,7 +75,8 @@ const MICROSOFT: OAuthProviderConfig = {
 };
 
 // Sarv OAuth 2.1 + PKCE. The base URL can be swapped for the dev server
-// (http://localhost:<port>) via setSarvBaseUrl() or SARVINBOX_SARV_OAUTH_BASE_URL.
+// (http://localhost:<port>) via setSarvBaseUrl() or, in a dev build only,
+// SARVINBOX_SARV_OAUTH_BASE_URL.
 // Register the app in your Sarv admin dashboard to obtain client_id and
 // (optionally) client_secret. See SARV_OAUTH_SETUP.md at the repo root.
 
@@ -87,8 +88,9 @@ const MICROSOFT: OAuthProviderConfig = {
  *
  * This is the ONE place the value lives: the registry default below is built
  * from it and the desktop's `initializeOAuth()` imports it from here instead of
- * re-declaring it, so rotating it here rotates it everywhere. A runtime
- * override is still available via SARVINBOX_SARV_CLIENT_ID.
+ * re-declaring it, so rotating it here rotates it everywhere. A dev build can
+ * still override it at runtime via SARVINBOX_SARV_CLIENT_ID; a release build
+ * ignores that variable (desktop `initializeOAuth`), so this IS its client.
  */
 export const SARV_PRODUCTION_CLIENT_ID = 'client_Z6sjVFkr4cOdgfGXsGGCXg';
 
@@ -113,8 +115,8 @@ function buildSarvProvider(urls: SarvUrls = {}): OAuthProviderConfig {
     purpose: 'both',
     // Public client "Sarv Inbox" registered in the Sarv OAuth admin dashboard
     // (grant types: authorization_code + refresh_token; PKCE, no client_secret
-    // per RFC 8252). Override at runtime via SARVINBOX_SARV_CLIENT_ID to rotate
-    // without touching source.
+    // per RFC 8252). A dev build can override it at runtime via
+    // SARVINBOX_SARV_CLIENT_ID; a release build cannot.
     clientId: SARV_PRODUCTION_CLIENT_ID,
     clientSecret: undefined,
     authEndpoint: `${oauthBase}/api/oauth/authorize`,

@@ -29,12 +29,18 @@ import {
   isPlaintextEnvelope,
   openJson,
   openString,
+  SEALED_NOT_JSON,
   sealJson,
   sealString,
 } from '../../../../electron/services/safe-storage-envelope';
 import { asPlatform } from '../../../helpers/as-platform';
 
 const errors = { locked: 'Store is encrypted but locked', unknownFormat: 'Unknown store format' };
+
+/** Short enough that V8's JSON SyntaxError quotes it whole. */
+const FAKE_SECRET = 'S3CRET-42';
+/** Decrypted payloads that are not JSON, each of which V8 would quote the secret from. */
+const NOT_JSON_PAYLOADS = [FAKE_SECRET, `${FAKE_SECRET} and more`, `{"apiKey": ${FAKE_SECRET}}`];
 
 beforeEach(() => { h.available = true; h.backend = 'gnome_libsecret'; h.encryptsWeakly = false; });
 
@@ -103,6 +109,32 @@ describe('failures throw — never read as empty', () => {
 
   it('surfaces a decrypt failure rather than returning garbage', () => {
     expect(() => openString(Buffer.from('ENC1:not-ciphertext', 'utf8'), errors)).toThrow('cannot decrypt');
+  });
+
+  // Breaks (CASA 6.5.1): V8's SyntaxError quotes the text it could not parse
+  // ('Unexpected token 'S', "S3CRET-42" is not valid JSON'), and every store
+  // logs what opening throws — so a decrypted secret lands in app.log and in
+  // Sentry breadcrumbs. Nothing of the payload may be in the error at all.
+  it.each([
+    ['an encrypted', (payload: string) => sealString(payload)],
+    ['a legacy plaintext', (payload: string) => Buffer.from(`PLAIN1:${payload}`, 'utf8')],
+  ])('throws a fixed message, carrying none of the payload, for %s envelope that is not JSON', (_kind, seal) => {
+    for (const payload of NOT_JSON_PAYLOADS) {
+      // The leak this guards against is real: the parser's own message quotes the secret.
+      expect(() => JSON.parse(payload)).toThrow(FAKE_SECRET);
+      let thrown: unknown;
+      try {
+        openJson(seal(payload), errors);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      const error = thrown as Error & { cause?: unknown };
+      expect(error.message).toBe(`${SEALED_NOT_JSON} (SyntaxError)`);
+      // Not in the stack (which loggers print), and the parser's error is not kept as a cause.
+      expect(error.stack ?? '').not.toContain(FAKE_SECRET);
+      expect(error.cause).toBeUndefined();
+    }
   });
 });
 

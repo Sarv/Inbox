@@ -14,6 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version on, the app installs an update only if it carries that same
   signature. Windows SmartScreen may still ask about new downloads for a while,
   until the signature has built up reputation.
+- **Saved attachments are marked as downloaded.** Files saved from an email,
+  and the copies opened in another app, now carry the same "downloaded from the
+  internet" mark a browser adds, so Windows and macOS warn before running them
+  and Office opens documents in Protected View.
+- **Sign-in is tighter.** The local address the browser returns to after you
+  sign in is open only while a sign-in is in progress, and release builds no
+  longer take sign-in server addresses or app registrations from the
+  environment they are started in.
+- **Removing an account leaves less behind.** It now also clears cookies set by
+  remote images in emails, and any old saved credentials left in the app's
+  browser storage from earlier versions.
+- **Decryption errors give nothing away.** A PGP message that cannot be
+  decrypted now always shows the same message, whatever went wrong, and so
+  does importing, creating or backing up a PGP key that the encryption library
+  refuses. Stored secrets that fail to open no longer echo any of their
+  contents into the log. A PGP key the system keychain will not open now says
+  so, and asks you to unlock the keychain or allow Sarv Inbox to use it.
 
 ## [1.4.10] - 2026-10-30
 

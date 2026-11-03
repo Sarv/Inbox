@@ -19,6 +19,7 @@ import {
   type ProtectedAttachmentOperation,
   type ProtectedDownloadContent,
 } from './attachment-download-protection';
+import { markDownloadedFromInternet } from './mark-downloaded';
 
 const MAX_PREVIEWS = 4;
 // Private copies handed to other apps, each kept for the TTL below. Every open
@@ -45,6 +46,8 @@ export interface AttachmentPreviewDependencies {
   readLegacy(filePath: string, signal: AbortSignal, maxBytes?: number): Promise<Buffer>;
   openPath(filePath: string): Promise<string>;
   temporaryRoot(): string;
+  /** Marks the private copy as downloaded from the internet before another app opens it. */
+  markDownloaded?(filePath: string): Promise<void>;
   now?: () => number;
   ttlMs?: number;
 }
@@ -336,6 +339,9 @@ export class AttachmentPreviewProtection {
       const filePath = path.join(directory, safeFilename(filename));
       await operation.assertCurrent();
       await fs.writeFile(filePath, content, { mode: 0o600, flag: 'wx', signal: operation.signal });
+      // The other app is the one that must see the mark (Gatekeeper, Office
+      // Protected View), so it is written before openPath hands the copy over.
+      await (this.deps.markDownloaded ?? markDownloadedFromInternet)(filePath);
       await operation.assertCurrent();
       const error = await waitForAbortableOperation(this.deps.openPath(filePath), operation.signal);
       await operation.assertCurrent();

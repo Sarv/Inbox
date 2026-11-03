@@ -28,6 +28,7 @@ import {
   vaultEntryFor,
   vaultHasPassword,
   findAccountByEmailHost,
+  forgetLegacySecretsFor,
   getBodyDownloadLimit,
   getEmailsPerPage,
   getMaxAIProcessingEmails,
@@ -838,6 +839,100 @@ describe('legacy credential localStorage helpers', () => {
   });
 });
 
+// CASA 6.6.1. migrateCredentialsToVault LEAVES plaintext in localStorage when a
+// vault write fails, so removal must take the removed account's copy — and
+// only its: a remaining account's entry may be its only copy of its password.
+describe('forgetLegacySecretsFor', () => {
+  const LEGACY_IMAP = 'sarvinbox-credentials';
+  const LEGACY_SMTP = 'sarvinbox-smtp-credentials';
+  const a = account();
+  const b = account({ id: 'acct-b-y-com--imap-y-com', email: 'b@y.com', imapConfig: { host: 'imap.y.com', username: 'b@y.com' } });
+  const seedLegacy = (imap: Record<string, unknown> | null, smtp: Record<string, unknown> | null) => {
+    if (imap) localStorage.setItem(LEGACY_IMAP, JSON.stringify(imap));
+    if (smtp) localStorage.setItem(LEGACY_SMTP, JSON.stringify(smtp));
+  };
+
+  // Breaks: a removed account's plaintext IMAP/SMTP passwords stay on disk.
+  it('removes the legacy pair when it is the removed account\'s', () => {
+    seedLegacy({ host: 'imap.x.com', username: 'a@x.com', password: 'a-imap-pw' },
+      { host: 'smtp.x.com', username: 'a@x.com', password: 'a-smtp-pw' });
+    forgetLegacySecretsFor(a, [b]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+    expect(localStorage.getItem(LEGACY_SMTP)).toBeNull();
+  });
+
+  // Breaks (credential loss): removing B wipes A's legacy entry, which after a
+  // failed vault migration is A's ONLY copy of its password.
+  it('never touches a remaining account\'s legacy entries', () => {
+    seedLegacy({ host: 'imap.x.com', username: 'a@x.com', password: 'a-imap-pw' },
+      { host: 'smtp.x.com', username: 'a@x.com', password: 'a-smtp-pw' });
+    forgetLegacySecretsFor(b, [a]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toContain('a-imap-pw');
+    expect(localStorage.getItem(LEGACY_SMTP)).toContain('a-smtp-pw');
+  });
+
+  // Same rule when the entry fits BOTH: a stale duplicate under the old
+  // host-less id is removed while the canonical row for the same login stays.
+  it('keeps an entry that also belongs to a remaining account', () => {
+    seedLegacy({ host: 'imap.x.com', username: 'a@x.com', password: 'a-imap-pw' }, null);
+    forgetLegacySecretsFor(account({ id: 'acct-a-x-com' }), [a]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toContain('a-imap-pw');
+  });
+
+  // Older builds minted host-less ids; logins compare case-insensitively.
+  it('matches the host-less legacy id and a differently-cased login', () => {
+    seedLegacy({ host: 'imap.x.com', username: 'a@x.com', password: 'pw' }, null);
+    forgetLegacySecretsFor(account({ id: 'acct-a-x-com', imapConfig: null as never }), [b]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+
+    seedLegacy({ host: 'IMAP.X.COM', username: 'A@X.com', password: 'pw' }, null);
+    forgetLegacySecretsFor(account({ id: 'renamed-id' }), [b]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+  });
+
+  // The SMTP entry also goes on its own login when the IMAP entry is someone
+  // else's (or gone), but not when a remaining account sends with that login.
+  it('matches the SMTP entry by its own login, and keeps one a remaining account shares', () => {
+    const withSmtp = account({ smtpConfig: { host: 'smtp.x.com', port: 465, secure: true, username: 'a@x.com', password: '' } });
+    seedLegacy(null, { host: 'smtp.x.com', username: 'a@x.com', password: 'pw' });
+    forgetLegacySecretsFor(withSmtp, [b]);
+    expect(localStorage.getItem(LEGACY_SMTP)).toBeNull();
+
+    seedLegacy({ host: 'imap.x.com', username: 'a@x.com', password: 'pw' }, { host: 'smtp.x.com', username: 'a@x.com', password: 'pw' });
+    forgetLegacySecretsFor(withSmtp, [account({ ...b, smtpConfig: withSmtp.smtpConfig })]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+    expect(localStorage.getItem(LEGACY_SMTP)).toContain('pw');
+  });
+
+  // Breaks: removing the last account leaves the legacy keys, and the next
+  // launch's migrateAccounts resurrects them as "Account 1" — whoever's they are.
+  it('clears both keys when no account remains, whatever they look like', () => {
+    seedLegacy({ host: 'imap.other.com', username: 'z@other.com', password: 'pw' },
+      { host: 'smtp.other.com', username: 'z@other.com', password: 'pw' });
+    forgetLegacySecretsFor(a, []);
+    expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+    expect(localStorage.getItem(LEGACY_SMTP)).toBeNull();
+    // Also with no record of what was removed (an idempotent re-run).
+    seedLegacy({ host: 'h', username: 'u', password: 'pw' }, null);
+    forgetLegacySecretsFor(undefined, []);
+    expect(localStorage.getItem(LEGACY_IMAP)).toBeNull();
+  });
+
+  it('is a no-op with nothing stored, an unknown removed account, or a broken localStorage', () => {
+    expect(() => forgetLegacySecretsFor(a, [b])).not.toThrow();
+    seedLegacy({ host: 'imap.x.com', username: 'a@x.com', password: 'pw' }, null);
+    forgetLegacySecretsFor(undefined, [b]);
+    expect(localStorage.getItem(LEGACY_IMAP)).toContain('pw');
+    (globalThis as any).localStorage = {
+      getItem: () => { throw new Error('blocked'); },
+      setItem: () => { throw new Error('blocked'); },
+      removeItem: () => { throw new Error('blocked'); },
+    };
+    expect(() => forgetLegacySecretsFor(a, [b])).not.toThrow();
+    expect(() => forgetLegacySecretsFor(a, [])).not.toThrow();
+  });
+});
+
 // ────────────────────────────── SMTP derivation ────────────────────────────
 
 describe('deriveSmtpFromImap', () => {
@@ -1088,6 +1183,27 @@ describe('upsertAccount / removeAccount', () => {
     expect(removeAccount(list, 'a1').map((a) => a.id)).toEqual(['a2']);
     expect(removeAccount(list, 'nope')).toHaveLength(2);
     expect(loadAccounts().map((a) => a.id)).toEqual(['a1', 'a2']);
+  });
+
+  // Breaks (credential loss, multi-account): removing one account strips the
+  // secrets from every OTHER stored row — after a failed vault migration, that
+  // account's only copy of its password — or writes a not-yet-stored row's
+  // password to disk in the clear.
+  it('writes the remaining stored rows back exactly as stored, and an unstored one stripped', () => {
+    const storedA1 = account({ id: 'a1', imapConfig: { host: 'imap.x.com', username: 'a@x.com', password: 'a1-pw' } as never });
+    localStorage.setItem('sarvinbox-accounts', JSON.stringify([storedA1, account({ id: 'a2' })]));
+    const inMemory = [
+      account({ id: 'a1' }),
+      account({ id: 'a2' }),
+      account({ id: 'a3', imapConfig: { host: 'imap.y.com', username: 'c@y.com', password: 'a3-pw' } as never }),
+    ];
+
+    expect(removeAccount(inMemory, 'a2').map((a) => a.id)).toEqual(['a1', 'a3']);
+
+    const stored = loadAccounts();
+    expect(stored.map((a) => a.id)).toEqual(['a1', 'a3']);
+    expect(stored[0]).toEqual(storedA1);
+    expect(stored[1].imapConfig).toEqual({ host: 'imap.y.com', username: 'c@y.com' });
   });
 });
 

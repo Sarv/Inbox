@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { format } from 'util';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,6 +16,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 const h = vi.hoisted(() => ({
   userData: '',
   encAvailable: true,
+  /** Every logger call's arguments, as the console would receive them. */
+  logs: [] as unknown[][],
 }));
 
 vi.mock('electron', () => ({
@@ -34,11 +37,14 @@ vi.mock('electron', () => ({
 
 vi.mock('../../../../electron/services/core-db', async () => await import('../../../../electron/services/__testing__/fake-core-db'));
 
-vi.mock('@sarvinbox/core', () => ({
-  createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
-  }),
-}));
+// The real core (the envelope names a parse failure through its errorClassName), with a recording logger.
+vi.mock('@sarvinbox/core', async (importOriginal) => {
+  const record = (...args: unknown[]) => { h.logs.push(args); };
+  return {
+    ...(await importOriginal<typeof import('@sarvinbox/core')>()),
+    createLogger: () => ({ info: record, warn: record, error: record, debug: record, trace: record }),
+  };
+});
 
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {
@@ -63,6 +69,7 @@ beforeAll(() => { h.userData = mkdtempSync(join(tmpdir(), 'sarvinbox-imapstore-'
 beforeEach(() => {
   resetFakeCoreDb();
   h.encAvailable = true;
+  h.logs = [];
   rmSync(h.userData, { recursive: true, force: true });
   mkdirSync(h.userData, { recursive: true });
 });
@@ -122,6 +129,21 @@ describe('loadImapAccount', () => {
     await expect(loadImapAccount()).resolves.toBeNull();
     dbState.blobs.set(BLOB_KEY, Buffer.from('PLAIN1:{not json', 'utf8'));
     await expect(loadImapAccount()).resolves.toBeNull();
+  });
+
+  // Breaks (CASA 6.5.1): a blob that decrypts to something other than JSON is
+  // logged with V8's SyntaxError, which quotes the decrypted text — the saved
+  // IMAP password lands in app.log (and in Sentry breadcrumbs).
+  it('logs an undecodable blob or legacy file without any of its decrypted content', async () => {
+    const secret = 'S3CRET-42';
+    dbState.blobs.set(BLOB_KEY, Buffer.from(`ENC1:enc(${secret} "password":"x")`, 'utf8'));
+    await expect(loadImapAccount()).resolves.toBeNull();
+    dbState.blobs.delete(BLOB_KEY);
+    writeFileSync(join(h.userData, LEGACY), Buffer.from(`PLAIN1:${secret} "password":"x"`, 'utf8'));
+    await expect(loadImapAccount()).resolves.toBeNull();
+    const lines = h.logs.map((args) => format(...args));
+    expect(lines).toEqual([expect.stringContaining('blob decode failed'), expect.stringContaining('load failed')]);
+    lines.forEach((line) => expect(line).not.toContain(secret));
   });
 });
 

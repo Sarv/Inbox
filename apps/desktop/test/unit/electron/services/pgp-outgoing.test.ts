@@ -10,10 +10,16 @@ import {
   type GeneratedKey,
 } from '@sarvinbox/core/pgp';
 import MailComposer from 'nodemailer/lib/mail-composer';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import * as openpgp from 'openpgp';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { PgpKeyringError } from '../../../../electron/services/pgp-keyring';
-import { pgpOutgoingTransform, type OutgoingKeyring } from '../../../../electron/services/pgp-outgoing';
+import {
+  encryptDraftMime,
+  PGP_OPERATION_FAILED_REASON,
+  pgpOutgoingTransform,
+  type OutgoingKeyring,
+} from '../../../../electron/services/pgp-outgoing';
 
 vi.mock('electron', () => ({ safeStorage: {} }));
 
@@ -152,11 +158,51 @@ describe('pgpOutgoingTransform', () => {
   });
 
   // Breaks: an openpgp failure mid-wrap (bad key material) escaped as a transient error and was retried.
+  // Changed deliberately (CASA 4.1.4): the reason no longer quotes the thrown text; it is logged instead.
   it('wraps unexpected failures as permanent', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const transform = pgpOutgoingTransform(
       fakeKeyring({ encryptionKeysFor: async () => { throw 'boom'; } }),
       { request: { encrypt: true, sign: false }, preferEncrypt: false },
     );
-    await expect(transform(raw, context())).rejects.toMatchObject({ transient: false, message: expect.stringContaining('boom') });
+    await expect(transform(raw, context())).rejects.toMatchObject({
+      transient: false,
+      message: `Could not encrypt the message: ${PGP_OPERATION_FAILED_REASON}`,
+    });
+    expect(warn.mock.calls.map((call) => call.join(' '))).toEqual([expect.stringContaining('boom')]);
+  });
+});
+
+describe('OpenPGP library failures (CASA 4.1.4)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** A key openpgp.js refuses to encrypt to: it has no encryption subkey. */
+  const signOnlyKey = async () =>
+    (await openpgp.generateKey({ type: 'ecc', curve: 'curve25519Legacy', userIDs: [{ email: 'bob@example.org' }], subkeys: [], format: 'object' })).publicKey;
+
+  // Breaks: a send fails with openpgp.js's own text ("Could not find valid
+  // encryption key packet in key …"), which varies with the failure — the
+  // user reads one sentence, the log keeps the library's reason.
+  it('shows our reason for an OpenPGP failure on send, and logs the library one', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const bobSignOnly = await signOnlyKey();
+    const transform = pgpOutgoingTransform(
+      fakeKeyring({ encryptionKeysFor: async () => ({ keys: [bobSignOnly], missing: [] }) }),
+      { request: { encrypt: true, sign: false }, preferEncrypt: false },
+    );
+    const error = await transform(raw, context()).catch((e) => e);
+    expect(error).toBeInstanceOf(OutgoingMimeError);
+    expect(error).toMatchObject({ transient: false, message: `Could not encrypt the message: ${PGP_OPERATION_FAILED_REASON}` });
+    expect(warn.mock.calls.map((call) => call.join(' '))).toEqual([expect.stringMatching(/Could not encrypt an outgoing message: .*encryption key/i)]);
+  });
+
+  // Breaks: a draft that cannot be encrypted shows openpgp.js's text in the composer, or loses its reason from the log.
+  it('shows our reason when a draft cannot be encrypted, and logs the library one', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const ownSignOnly = await signOnlyKey();
+    const error = await encryptDraftMime(raw, 'me@example.org', { ownPublicKeyFor: async () => ownSignOnly } as never).catch((e) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe(PGP_OPERATION_FAILED_REASON);
+    expect(warn.mock.calls.map((call) => call.join(' '))).toEqual([expect.stringMatching(/Could not encrypt a draft: .*encryption key/i)]);
   });
 });

@@ -37,6 +37,7 @@ import { ensureAccountRuntime, loadPrimaryAccountId, savePrimaryAccountId, accou
 import { peekAntivirusScanService } from '../services/antivirus-scan-service';
 import { cleanupOrphanedAttachmentStores, removeAllCachedAttachments } from '../services/attachment-cache';
 import { clearUnscannedWarningPreference } from '../services/attachment-warning-preferences';
+import { clearEmailContentCookies } from '../services/email-content-cookies';
 import { signOutOAuthAccount } from '../services/oauth-refresh-scheduler';
 import { rebindOutboxStorage } from '../services/outbox-service';
 import { noteAppSettingChanged } from '../services/reputation-service';
@@ -212,6 +213,11 @@ export function registerAccountsHandlers(): void {
           logger.warn('[Accounts] attachment cleanup after removal failed:', (e as Error).message);
         }
       }
+
+      // Cookies that remote images in its mail set (CASA 6.6.1). One jar serves
+      // every account, so it is cleared whole; nothing in the app relies on it
+      // (see email-content-cookies.ts). Best-effort, never fails the removal.
+      await clearEmailContentCookies();
 
       // The removed account may have been the OAuth session powering the AI/LLM
       // (Sarv is both mailbox AND LLM). If so, its token is gone and every

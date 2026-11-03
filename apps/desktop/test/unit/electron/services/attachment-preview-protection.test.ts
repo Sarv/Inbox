@@ -89,11 +89,14 @@ async function fixture(options: { enabled?: boolean; ttlMs?: number; now?: () =>
     return plaintext;
   });
   const openPath = vi.fn(async (_file: string) => '');
+  // A spy, so no test here spawns xattr or writes an NTFS stream.
+  const markDownloaded = vi.fn(async (_file: string) => {});
   const preview = new AttachmentPreviewProtection({
     operations,
     resolveLegacy,
     readLegacy,
     openPath,
+    markDownloaded,
     temporaryRoot: () => root,
     ttlMs: options.ttlMs,
     now: options.now,
@@ -116,6 +119,7 @@ async function fixture(options: { enabled?: boolean; ttlMs?: number; now?: () =>
     resolveLegacy,
     readLegacy,
     openPath,
+    markDownloaded,
     preview,
     receipts,
     ref,
@@ -555,6 +559,20 @@ describe('protected OS attachment previews', () => {
     await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  // Breaks (CASA 5.2.1): "Open in app" hands Word/Excel/Preview a copy with no
+  // "downloaded from the internet" mark, so Gatekeeper and Office Protected
+  // View treat a mailed document as one the user made.
+  it('marks the private copy as downloaded, with its bytes written, before the OS opens it', async () => {
+    const f = await fixture();
+    f.markDownloaded.mockImplementation(async (value) => {
+      expect(await fs.readFile(value, 'utf8')).toBe('%PDF exact synthetic clean document');
+      expect(f.openPath).not.toHaveBeenCalled();
+    });
+    await f.open('os-preview-mark');
+    expect(f.markDownloaded).toHaveBeenCalledExactlyOnceWith(f.openPath.mock.calls[0][0]);
+    await f.preview.dispose();
+  });
+
   it('cleans expired private files and old interrupted-process entries without removing unrelated files', async () => {
     const f = await fixture({ ttlMs: 10 });
     await fs.mkdir(path.join(f.root, 'preview-stale'));
@@ -763,6 +781,16 @@ describe('openTemporaryCopy', () => {
     await f.preview.dispose();
     await expect(fs.access(opened)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await fs.readdir(f.root)).toEqual([]);
+  });
+
+  // Breaks (CASA 5.2.1): the invite reaches the calendar app with no
+  // "downloaded from the internet" mark, so the OS opens it unwarned.
+  it('marks the copy as downloaded before the other app opens it', async () => {
+    const f = await fixture();
+    await f.preview.openTemporaryCopy('calendar-event.ics', Buffer.from(INVITE), operation());
+    expect(f.markDownloaded).toHaveBeenCalledExactlyOnceWith(f.openPath.mock.calls[0][0]);
+    expect(f.markDownloaded.mock.invocationCallOrder[0]).toBeLessThan(f.openPath.mock.invocationCallOrder[0]);
+    await f.preview.dispose();
   });
 
   // Breaks: the invite copy outlives the TTL the other opened copies get.

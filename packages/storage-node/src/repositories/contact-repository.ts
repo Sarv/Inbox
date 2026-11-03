@@ -47,6 +47,27 @@ const INCOMPLETE_PROFILE = `(${profileField('fullName')} = '' OR ${profileField(
 /** Provenance account id used when a storage was opened with no account. */
 const UNKNOWN_ACCOUNT = 'unknown-account';
 
+/**
+ * The ONLY fields {@link ContactRepository.update} may write (CASA 3.1.4).
+ * `contacts:update` hands this repository a renderer-built object whose keys
+ * become column names, so the set is fixed here, in code.
+ *
+ * Deliberately absent: `id` (the key the WHERE matches), `email` (the UNIQUE
+ * directory key that `contact_accounts` provenance is joined on — rewriting it
+ * orphans every account's counts), `createdAt`, and `enrichment` (an object
+ * this builder does not serialise; the enrichment writers own it).
+ */
+export const CONTACT_UPDATE_FIELDS: ReadonlySet<string> = new Set<keyof ContactRecord>([
+  'name', 'displayName', 'avatarUrl', 'avatarStatus', 'avatarCheckedAt',
+  'organization', 'title', 'phone',
+  'firstSeen', 'lastSeen', 'emailCount', 'sentCount', 'receivedCount',
+  'isFavorite', 'notes', 'tags', 'metadata',
+  'contactType', 'contactTypeConfidence', 'contactTypeSource',
+  'kind', 'personId', 'companyContactId', 'mobileE164',
+  'enrichedThroughEmailAt', 'enrichmentSource',
+  'updatedAt',
+]);
+
 /** Best-effort platform label for a social URL (for the otherSocials blob). */
 function socialPlatformOf(url: string): string {
   try {
@@ -489,6 +510,7 @@ export class ContactRepository extends BaseRepository {
   /** Synchronous core of {@link update} — callable inside a transaction. */
   updateSync(id: string, updates: Partial<ContactRecord>): void {
     const { setClauses, params } = this.buildUpdateClauses(updates, {
+      allowedFields: CONTACT_UPDATE_FIELDS,
       boolFields: ['isFavorite'],
       jsonFields: ['tags', 'metadata'],
     });

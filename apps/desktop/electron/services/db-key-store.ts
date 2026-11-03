@@ -3,8 +3,10 @@
  *
  * Mints a random 256-bit key once, stores it encrypted via Electron `safeStorage`
  * (OS keychain), and returns the same key for the app's lifetime. That key is
- * handed to SQLiteStorage (better-sqlite3-multiple-ciphers) as the SQLCipher
- * passphrase, so the mail-cache DBs are encrypted at rest.
+ * handed to SQLiteStorage (better-sqlite3-multiple-ciphers) as the database
+ * passphrase, so the mail-cache DBs are encrypted at rest — by SQLite3 Multiple
+ * Ciphers' default cipher, ChaCha20-Poly1305, NOT SQLCipher (see the `key`
+ * option of SQLiteStorage in storage-node for the parameters).
  *
  * SYNCHRONOUS on purpose: storage is constructed synchronously at startup, and
  * this runs after app-ready (safeStorage + userData both available by then).
@@ -65,7 +67,7 @@ function writeKeyAtomically(path: string, sealed: Buffer): void {
   }
 }
 
-/** Rewrap the SAME key; no SQLCipher rekey and no unreadable ciphertext replacement. */
+/** Rewrap the SAME key; no database rekey and no unreadable ciphertext replacement. */
 function protectExistingKey(path: string, key: string): boolean {
   if (!isOsBackedEncryption()) return false;
   try {

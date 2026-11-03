@@ -96,8 +96,12 @@ export interface SQLiteStorageConfig {
   readonly?: boolean;
   verbose?: boolean;
   /**
-   * At-rest encryption key (passphrase) for the SQLCipher-compatible engine
-   * (better-sqlite3-multiple-ciphers). When set, the DB is opened with this key;
+   * At-rest encryption key (passphrase) for SQLite3 Multiple Ciphers (bundled by
+   * better-sqlite3-multiple-ciphers). No `cipher=` is configured, so its DEFAULT
+   * cipher applies: ChaCha20-Poly1305 — NOT SQLCipher — with the page key
+   * derived from this passphrase by PBKDF2-HMAC-SHA256 (64,007 iterations, a
+   * random 16-byte salt per file) and a random 16-byte nonce plus a 16-byte
+   * Poly1305 tag on every page. When set, the DB is opened with this key;
    * a legacy PLAINTEXT DB is transparently migrated in place (PRAGMA rekey) on
    * first open, and a new DB is created encrypted. Omit for no encryption.
    */
@@ -303,8 +307,8 @@ export class SQLiteStorage implements IEmailStorage {
     // transaction on OS crash, never corrupts the DB) and skips an fsync per
     // commit — a standard 2-5x write win on sync-heavy workloads.
     this.db.pragma('synchronous = NORMAL');
-    // Page cache. On an ENCRYPTED (SQLCipher) DB every page read is decrypted +
-    // HMAC-verified, so the default ~2 MB cache means hot pages get re-decrypted
+    // Page cache. On an ENCRYPTED (ChaCha20-Poly1305) DB every page read is
+    // decrypted + tag-verified, so the default ~2 MB cache means hot pages get re-decrypted
     // on every list scan / folder recount. A larger cache keeps the working set
     // decrypted in memory. This is PER connection and every account keeps its DB
     // open all session, so the total is (accounts × cacheSizeKb) — the caller

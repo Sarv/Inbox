@@ -11,6 +11,18 @@ const THREAD_SORT_COLUMNS = new Set([
 ]);
 
 /**
+ * The ONLY fields {@link ThreadRepository.update} may write — the keys become
+ * SQL column names (CASA 3.1.4; see `buildUpdateClauses`). Every ThreadRecord
+ * field except `id`; the read-model columns (has_important, live_message_count,
+ * …) are owned by the read-model maintainer, not by this patch path.
+ */
+export const THREAD_UPDATE_FIELDS: ReadonlySet<string> = new Set<keyof ThreadRecord>([
+  'subject', 'firstMessageId', 'lastMessageId', 'lastMessageDate', 'messageCount',
+  'participants', 'hasUnread', 'hasFlagged', 'labels',
+  'createdAt', 'updatedAt',
+]);
+
+/**
  * Repository for thread and attachment operations
  */
 export class ThreadRepository extends BaseRepository {
@@ -90,6 +102,7 @@ export class ThreadRepository extends BaseRepository {
    */
   async update(id: string, updates: Partial<ThreadRecord>): Promise<void> {
     const { setClauses, params } = this.buildUpdateClauses(updates, {
+      allowedFields: THREAD_UPDATE_FIELDS,
       jsonFields: ['labels'],
       boolFields: ['hasUnread', 'hasFlagged'],
     });

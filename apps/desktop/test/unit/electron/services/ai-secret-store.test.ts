@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { format } from 'util';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,7 +13,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * than persisting a blank string.
  */
 
-const h = vi.hoisted(() => ({ userData: '', encAvailable: true, backend: 'gnome_libsecret' }));
+const h = vi.hoisted(() => ({
+  userData: '',
+  encAvailable: true,
+  backend: 'gnome_libsecret',
+  /** Every logger call's arguments, as the console would receive them. */
+  logs: [] as unknown[][],
+}));
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, getName: () => 'Sarv Inbox Test', isPackaged: false },
@@ -31,12 +38,13 @@ vi.mock('electron', () => ({
 
 vi.mock('../../../../electron/services/core-db', async () => await import('../../../../electron/services/__testing__/fake-core-db'));
 
-vi.mock('@sarvinbox/core', async (orig) => ({
-  ...(await orig<typeof import('@sarvinbox/core')>()),
-  createLogger: () => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, trace: () => {},
-  }),
-}));
+vi.mock('@sarvinbox/core', async (orig) => {
+  const record = (...args: unknown[]) => { h.logs.push(args); };
+  return {
+    ...(await orig<typeof import('@sarvinbox/core')>()),
+    createLogger: () => ({ info: record, warn: record, error: record, debug: record, trace: record }),
+  };
+});
 
 import { resetFakeCoreDb, state as dbState } from '../../../../electron/services/__testing__/fake-core-db';
 import {
@@ -61,6 +69,7 @@ beforeEach(() => {
   resetFakeCoreDb();
   h.encAvailable = true;
   h.backend = 'gnome_libsecret';
+  h.logs = [];
   rmSync(h.userData, { recursive: true, force: true });
   mkdirSync(h.userData, { recursive: true });
 });
@@ -255,6 +264,22 @@ describe('writes while the keychain is unavailable', () => {
     expect(dbState.blobs.get(BLOB_KEY)).toEqual(before);
     h.encAvailable = true;
     await expect(getAllAiSecrets()).resolves.toEqual({ p1: 'sk-1' });
+  });
+
+  // Breaks (CASA 6.5.1): a vault that decrypts to something other than JSON
+  // is logged with V8's SyntaxError, which quotes the decrypted text — an API
+  // key in app.log — or the refusal to write carries it to the renderer.
+  it('never puts decrypted content in a log line or a refusal', async () => {
+    const secret = 'S3CRET-42';
+    dbState.blobs.set(BLOB_KEY, Buffer.from(`ENC1:enc(${secret} {"openai":"sk"})`, 'utf8'));
+    await expect(getAllAiSecrets()).resolves.toEqual({});
+    const refusal = await setAiSecret('p2', 'sk-2').catch((error: Error) => error);
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toMatch(/cannot be read right now/);
+    expect(`${(refusal as Error).message}\n${(refusal as Error).stack}`).not.toContain(secret);
+    const lines = h.logs.map((args) => format(...args));
+    expect(lines).toEqual([expect.stringContaining('blob decode failed')]);
+    lines.forEach((line) => expect(line).not.toContain(secret));
   });
 
   // An unknown format is corrupt for good; keys are re-enterable.

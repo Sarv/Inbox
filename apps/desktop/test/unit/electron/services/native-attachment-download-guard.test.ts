@@ -9,20 +9,22 @@ import {
 } from '../../../../electron/services/native-attachment-download-guard';
 
 const contents = (host: WebContents | null = null) => ({ hostWebContents: host }) as WebContents;
-const download = (url: string, chain: string[] = []) => ({ getURL: () => url, getURLChain: () => chain }) as DownloadItem;
+const download = (url: string, chain: string[] = [], savePath = '/Users/me/Downloads/report.pdf') =>
+  Object.assign(new EventEmitter(), { getURL: () => url, getURLChain: () => chain, getSavePath: () => savePath }) as unknown as DownloadItem;
 
 function fixture(options: { scanning?: boolean } = {}) {
   const session = new EventEmitter();
   const inbox = contents();
   const notifyBlocked = vi.fn();
+  const markDownloaded = vi.fn(async (_file: string) => {});
   const scanningRequired = vi.fn(() => options.scanning ?? true);
-  const remove = installNativeAttachmentDownloadGuard(session as unknown as Session, { inboxWebContents: () => inbox, scanningRequired, notifyBlocked });
+  const remove = installNativeAttachmentDownloadGuard(session as unknown as Session, { inboxWebContents: () => inbox, scanningRequired, notifyBlocked, markDownloaded });
   const attempt = (item = download('blob:chrome-extension://pdf-viewer/pdf'), source = inbox) => {
     const event = { preventDefault: vi.fn() };
     session.emit('will-download', event, item, source);
     return event;
   };
-  return { session, inbox, notifyBlocked, scanningRequired, remove, attempt };
+  return { session, inbox, notifyBlocked, scanningRequired, markDownloaded, remove, attempt };
 }
 
 // Breaks: PDF toolbar, native media menu or blob downloads write attachments without the AV gate.
@@ -76,6 +78,43 @@ describe('native attachment download protection', () => {
     expect(f.attempt().preventDefault).toHaveBeenCalledOnce();
     await Promise.resolve(); await Promise.resolve();
     expect(f.attempt().preventDefault).toHaveBeenCalledOnce(); expect(f.notifyBlocked).toHaveBeenCalledTimes(2);
+  });
+
+  // Breaks (CASA 5.2.1): Electron's download manager applies no quarantine /
+  // Mark of the Web, so a PDF saved from the viewer's own toolbar would open
+  // with no "downloaded from the internet" warning.
+  it('marks a native save it lets through once Chromium has finished writing it', () => {
+    const f = fixture({ scanning: false });
+    const item = download('blob:chrome-extension://pdf-viewer/pdf');
+    f.attempt(item);
+    expect(f.markDownloaded).not.toHaveBeenCalled(); // not before the bytes exist
+    item.emit('done', {}, 'completed');
+    expect(f.markDownloaded).toHaveBeenCalledExactlyOnceWith('/Users/me/Downloads/report.pdf');
+  });
+
+  it('marks an unrelated window\'s completed download too, and nothing that did not complete', () => {
+    const f = fixture();
+    const unrelated = download('https://unrelated.example/file.zip');
+    f.attempt(unrelated, contents());
+    unrelated.emit('done', {}, 'completed');
+    expect(f.markDownloaded).toHaveBeenCalledOnce();
+    for (const state of ['cancelled', 'interrupted']) {
+      const item = download('https://unrelated.example/other.zip');
+      f.attempt(item, contents());
+      item.emit('done', {}, state);
+    }
+    const noPath = download('https://unrelated.example/x.zip', [], '');
+    f.attempt(noPath, contents());
+    noPath.emit('done', {}, 'completed');
+    expect(f.markDownloaded).toHaveBeenCalledOnce();
+  });
+
+  // A blocked download never writes, so there is nothing to mark.
+  it('does not wait to mark a download it blocked', () => {
+    const f = fixture();
+    const item = download('blob:chrome-extension://pdf-viewer/pdf');
+    f.attempt(item);
+    expect((item as unknown as EventEmitter).listenerCount('done')).toBe(0);
   });
 
   it('removes its session listener when the Inbox window closes', () => {
